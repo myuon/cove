@@ -1,0 +1,270 @@
+# ADR 0001: MVP language design
+
+- Status: Proposed
+- Date: 2026-08-23
+
+## Context
+
+Cove explores whether a new language can combine three properties that are
+usually separated:
+
+1. a productive general-purpose language for CLIs and servers;
+2. a small, safely embeddable language whose external authority is controlled
+   by its host;
+3. a text-first program structure that humans and coding agents can understand
+   from architecture down to implementation.
+
+Embedding and capability control alone are not novel. Languages such as Lua,
+Luau, Wren, Rhai, and Mog already demonstrate much of that design space. Cove
+must therefore justify itself through the integration of ordinary application
+development, host-controlled execution, structural readability, predictable
+performance, and observability.
+
+## Decision
+
+Build an MVP of a statically typed, native-first, host-controlled language with
+familiar syntax and deliberately small semantics.
+
+The MVP is a hypothesis test, not a commitment to a stable language. Features
+that do not validate the core experience should be removed rather than
+preserved for compatibility.
+
+## Product boundary
+
+Cove should support the same source language in several execution profiles:
+
+- **Native:** standalone CLI and server binaries;
+- **Embedded:** loaded in-process by a host application;
+- **Sandboxed:** executed with resource limits and restricted host APIs;
+- **Wasm:** a portable sandbox target where the runtime trade-offs are
+  acceptable.
+
+Browser replacement is not a goal. Wasm is an optional deployment target, not
+the semantic center of the language.
+
+## Familiar core, explicit delta
+
+Cove should reuse syntax and semantics already familiar from TypeScript, Go,
+Swift, and Rust where doing so does not compromise the execution model.
+
+The language-specific delta must fit in a one-page **Language Card**. This is a
+design budget: adding a rule should require demonstrating that the language is
+still predictable from existing knowledge plus that card.
+
+Initial semantic preferences:
+
+- left-to-right evaluation;
+- explicit and consistent overflow, floating-point, equality, and panic rules;
+- `Option` and `Result` instead of hidden null/error behavior;
+- defined collection iteration order;
+- minimal implicit conversion;
+- no side effects caused merely by importing a module;
+- structured lifetimes for concurrent tasks.
+
+Compiler diagnostics are part of the learning interface. Errors should explain
+the relevant Cove rule and show a corrected textual example.
+
+## Host-controlled authority
+
+Cove code has no ambient authority in embedded or sandboxed execution. External
+operations are supplied by the host.
+
+The language-level capability model is intentionally coarse:
+
+```cove
+module booking.creation {
+  allow { database network clock }
+}
+```
+
+Capabilities describe broad Host API modules such as network and filesystem.
+They are not intended to become a general effect system or a fine-grained proof
+of authority.
+
+The host decides which implementations are available and may replace them with
+filtered, virtual, remote, test, or denied implementations. Strong isolation
+is enforced by the runtime and, where appropriate, process, syscall, Wasm, or
+microVM boundaries.
+
+## Runtime resource control
+
+Termination, CPU usage, and memory usage are runtime concerns in the MVP rather
+than properties proved by the type system.
+
+The runtime should be able to impose:
+
+- CPU or instruction/fuel budgets;
+- memory and allocation limits;
+- wall-clock deadlines;
+- cancellation;
+- concurrency limits;
+- host-call limits and timeouts.
+
+Totality, determinism, and absence of loops are explicitly not MVP guarantees.
+
+## Progressive disclosure
+
+Source code should be understandable from the outside in:
+
+```text
+repository -> component -> module -> declaration -> implementation
+```
+
+The first roughly 50 lines of a significant file should reveal its purpose,
+public boundary, dependencies, owned data, authority, and entrypoints.
+
+Illustrative module contract:
+
+```cove
+module booking.creation {
+  purpose "Validate and create a booking"
+
+  provides { createBooking validateBookingRequest }
+  uses { inventory.reserve pricing.quote payment.authorize }
+  owns { BookingDraft }
+  allow { database clock network }
+  entrypoints { http.createBooking }
+}
+
+// implementation follows
+```
+
+The compiler should understand these declarations rather than treating them as
+comments:
+
+- `provides` defines the public boundary;
+- `uses` defines explicit dependencies;
+- `owns` records responsibility for data and concepts;
+- `allow` is the capability manifest;
+- `entrypoints` identifies externally invoked operations;
+- `purpose` preserves intent in ordinary text.
+
+Obvious information may be inferred to avoid duplication. Small programs may
+omit upper structural layers. Imports must not perform hidden initialization;
+initialization is an explicit entrypoint or function call.
+
+## Intent and performance annotations
+
+Decorators provide an extensible but visible place for non-core declarations:
+
+```cove
+@intent("Reserve inventory and authorize payment")
+@hot
+@performance(latency = 20ms)
+fn createBooking(request: BookingRequest) -> Result<Booking, BookingError> {
+  // ...
+}
+```
+
+The MVP may parse and preserve `@intent` and `@hot` before it implements
+optimization based on them. An annotation must have documented semantics;
+unknown annotations must not silently change behavior.
+
+## Observability
+
+Complete, low-friction tracing is part of the runtime contract rather than an
+optional framework convention.
+
+Traces should distinguish at least:
+
+- CPU execution;
+- I/O wait;
+- allocation and memory pressure;
+- host calls and capability use;
+- task spawn, suspension, cancellation, and completion;
+- cache hits and misses.
+
+Trace identities should correspond to the same modules, functions, and
+entrypoints visible in source. The host must be able to inspect and control a
+running program from outside without language-specific application hooks.
+
+## Performance and implementation direction
+
+Both compilation speed and execution speed are product requirements. They
+affect iteration time, operational cost, and predictability.
+
+The initial implementation should favor a simple compiler pipeline and a small
+runtime over a sophisticated JIT. Native AOT execution is the primary target.
+The exact backend remains an MVP implementation decision; QBE, Cranelift, LLVM,
+and C generation should be compared by implementation cost, compile latency,
+runtime performance, debug information, and portability.
+
+The language must avoid backend-dependent semantics so that native and Wasm
+programs behave consistently.
+
+## Ordinary application DX
+
+Cove will not be adopted merely because it embeds safely. Writing a CLI or
+server must be at least as pleasant as in Go or TypeScript.
+
+The MVP should demonstrate:
+
+- a single tool for format, check, run, test, build, and trace;
+- fast startup and incremental iteration;
+- straightforward HTTP, JSON, filesystem, process, and database APIs;
+- typed configuration and argument parsing;
+- explicit error handling without excessive ceremony;
+- reproducible, inspectable builds;
+- compiler explanations that make performance and generated behavior visible.
+
+AI integration remains text-first. Cove will not introduce a language-level
+query protocol for models. Its AI experience comes from predictable syntax,
+small semantics, explicit architecture, strong diagnostics, and the ability to
+navigate between abstraction levels using ordinary source text.
+
+## MVP scope
+
+The first usable slice should include:
+
+1. lexer, parser, formatter, and diagnostic framework;
+2. functions, structs, enums, pattern matching, generics, `Option`, and
+   `Result`;
+3. modules with `purpose`, `provides`, `uses`, `owns`, `allow`, and
+   `entrypoints`;
+4. a native executable backend;
+5. a minimal Host API and embedding interface;
+6. memory, time, cancellation, and execution-budget controls;
+7. structured traces separating CPU work from I/O wait;
+8. one CLI example, one HTTP server, and one embedded sandbox example;
+9. a one-page Language Card.
+
+The MVP does not include a JIT, package registry, browser UI framework, effect
+system, totality checker, distributed actor runtime, durable workflows, or
+microVM orchestrator. Those are possible consequences of a successful runtime,
+not prerequisites for validating the language.
+
+## Success criteria
+
+The experiment is promising if:
+
+- a new developer can write a useful program using prior language knowledge
+  plus the Language Card;
+- a coding agent can understand the public structure of an unfamiliar project
+  from file headers before opening implementations;
+- the same nontrivial module runs standalone and under restricted embedding;
+- CPU time and I/O wait are accurately attributable in traces;
+- compile and execution performance are competitive enough that developers do
+  not avoid Cove for ordinary tools and services.
+
+## Consequences
+
+This decision intentionally makes the runtime and Host API as important as the
+compiler. It also creates tension between a tiny embeddable core and the
+batteries expected from a general-purpose language.
+
+The project should resist solving that tension through hidden runtime behavior
+or a large magical standard library. Host APIs, execution profiles, and
+generated behavior must remain inspectable.
+
+## Open questions
+
+- Which implementation language and code-generation backend minimize time to a
+  credible MVP?
+- GC, reference counting, ownership, arenas, or a hybrid memory model?
+- Which module-contract fields are mandatory, inferred, or advisory?
+- How are dependency cycles represented and diagnosed?
+- Which annotations belong in the Language Card?
+- What Host API boundary remains stable across native, embedded, and Wasm
+  execution?
+- Which license should the project use?
+
