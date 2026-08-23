@@ -2,7 +2,6 @@
 module examples.config {
   provides { Config loadConfig }
   uses { env.get }
-  allow { environment }
 }
 
 struct Config {

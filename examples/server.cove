@@ -2,8 +2,6 @@
 module examples.server {
   provides { HealthResponse health }
   uses { http.serve console.println }
-  allow { network console }
-  entrypoints { main http.health }
 }
 
 struct HealthResponse {

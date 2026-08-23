@@ -67,24 +67,25 @@ the relevant Cove rule and show a corrected textual example.
 ## Host-controlled authority
 
 Cove code has no ambient authority in embedded or sandboxed execution. External
-operations are supplied by the host.
+operations are typed Host APIs supplied by the host.
 
-The language-level capability model is intentionally coarse:
+The compiler derives required capabilities per function from resolved Host API
+calls and their call graph. This analysis is useful for inspection and
+diagnostics but is not exposed as a user-written effect system.
 
-```cove
-module booking.creation {
-  allow { database network clock }
-}
+The host chooses the entry function and grants coarse capabilities at the
+execution boundary:
+
+```toml
+[run.booking_server]
+entry = "booking.main"
+allow = ["database", "network", "clock"]
 ```
 
-Capabilities describe broad Host API modules such as network and filesystem.
-They are not intended to become a general effect system or a fine-grained proof
-of authority.
-
 The host decides which implementations are available and may replace them with
-filtered, virtual, remote, test, or denied implementations. Strong isolation
-is enforced by the runtime and, where appropriate, process, syscall, Wasm, or
-microVM boundaries.
+filtered, virtual, remote, test, or denied implementations. The runtime rejects
+ungranted Host API calls. Stronger isolation may additionally use process,
+syscall, Wasm, or microVM boundaries.
 
 ## Runtime resource control
 
@@ -111,7 +112,9 @@ repository -> component -> module -> declaration -> implementation
 ```
 
 The first roughly 50 lines of a significant file should reveal its purpose,
-public boundary, dependencies, owned data, authority, and entrypoints.
+public boundary, dependencies, and owned data. Required capabilities can be
+derived and displayed by tooling; granted authority and entry selection belong
+to the host execution configuration.
 
 Illustrative module contract:
 
@@ -121,8 +124,6 @@ module booking.creation {
   provides { createBooking validateBookingRequest }
   uses { inventory.reserve pricing.quote payment.authorize }
   owns { BookingDraft }
-  allow { database clock network }
-  entrypoints { http.createBooking }
 }
 
 // implementation follows
@@ -134,8 +135,6 @@ comments:
 - `provides` defines the public boundary;
 - `uses` defines explicit dependencies;
 - `owns` records responsibility for data and concepts;
-- `allow` is the capability manifest;
-- `entrypoints` identifies externally invoked operations;
 
 Ordinary purpose and intent are written as `///` doc comments attached to
 declarations. The compiler preserves them for outlines, generated
@@ -177,8 +176,8 @@ Traces should distinguish at least:
 - task spawn, suspension, cancellation, and completion;
 - cache hits and misses.
 
-Trace identities should correspond to the same modules, functions, and
-entrypoints visible in source. The host must be able to inspect and control a
+Trace identities should correspond to the same modules and functions visible
+in source, plus host-selected entry calls. The host must be able to inspect and control a
 running program from outside without language-specific application hooks.
 
 ## Performance and implementation direction
@@ -222,10 +221,10 @@ The first usable slice should include:
 1. lexer, parser, formatter, and diagnostic framework;
 2. functions, structs, enums, pattern matching, generics, `Option`, and
    `Result`;
-3. modules with doc comments, `provides`, `uses`, `owns`, `allow`, and
-   `entrypoints`;
+3. modules with doc comments, `provides`, `uses`, and `owns`;
 4. a native executable backend;
-5. a minimal Host API and embedding interface;
+5. a minimal Host API, embedding interface, execution configuration, and
+   per-function capability analysis;
 6. memory, time, cancellation, and execution-budget controls;
 7. structured traces separating CPU work from I/O wait;
 8. one CLI example, one HTTP server, and one embedded sandbox example;

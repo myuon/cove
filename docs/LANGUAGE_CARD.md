@@ -12,8 +12,6 @@ records the parts you should not have to guess.
 module greeting {
   provides { greet }
   uses { console.println }
-  allow { console }
-  entrypoints { main }
 }
 
 struct Person {
@@ -69,16 +67,12 @@ module booking.creation {
   provides { createBooking }
   uses { inventory.reserve payment.authorize }
   owns { BookingDraft }
-  allow { database network clock }
-  entrypoints { http.createBooking }
 }
 ```
 
 - `provides`: public declarations exported by the module.
 - `uses`: dependencies visible from this module.
 - `owns`: data or concepts for which the module is responsible.
-- `allow`: coarse Host API capabilities the module may use.
-- `entrypoints`: declarations invoked from outside the module.
 
 `///` doc comments attach ordinary prose to the following declaration. The
 compiler preserves them for `outline`, documentation, and inspection tools.
@@ -88,11 +82,20 @@ language semantics.
 ## Authority comes from the host
 
 Cove code has no ambient I/O authority when embedded. File, network, clock,
-process, database, and similar operations are typed Host APIs. A host can
-provide real, fake, filtered, remote, or denied implementations.
+process, database, and similar operations are typed Host APIs. The compiler
+reports which capabilities each function requires from its call graph.
 
-`allow` declares a maximum authority; it does not create authority. The host
-must still grant and implement the capability.
+The host chooses the entry function and grants authority at the execution
+boundary:
+
+```toml
+[run.server]
+entry = "server.main"
+allow = ["network", "clock"]
+```
+
+A host may provide real, fake, filtered, remote, or denied implementations.
+The runtime rejects Host API calls that were not granted.
 
 ## Tasks and resource control
 

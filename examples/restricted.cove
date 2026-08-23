@@ -2,8 +2,6 @@
 module examples.restricted {
   provides { wordCount }
   uses { documents.read console.println }
-  allow { documents console }
-  entrypoints { main }
 }
 
 fn wordCount(text: String) -> Int {
@@ -17,5 +15,5 @@ fn main() -> Result<Unit, Error> {
   Ok(())
 }
 
-// `filesystem.open(...)` must fail during checking: this module neither
-// declares nor receives a filesystem capability.
+// A host that grants only `documents` and `console` rejects any attempted
+// `filesystem.open(...)` call at the Host API boundary.

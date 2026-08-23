@@ -2,8 +2,6 @@
 module examples.hello {
   provides { greeting }
   uses { console.println }
-  allow { console }
-  entrypoints { main }
 }
 
 fn greeting(name: String) -> String {

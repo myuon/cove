@@ -1,0 +1,15 @@
+[run.hello]
+entry = "examples.hello.main"
+allow = ["console"]
+
+[run.server]
+entry = "examples.server.main"
+allow = ["network", "console"]
+
+[run.restricted]
+entry = "examples.restricted.main"
+allow = ["documents", "console"]
+
+[run.tasks]
+entry = "examples.tasks.loadDashboard"
+allow = ["network", "clock"]

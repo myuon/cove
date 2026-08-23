@@ -22,13 +22,14 @@ changes the available authority and resources, not the language's meaning.
 
 Embedded code can use only Host APIs it receives. Files, network, clocks,
 processes, and databases are explicit capabilities with replaceable real,
-fake, filtered, or denied implementations.
+fake, filtered, or denied implementations. Code requirements are analyzed per
+function; the host grants authority at the execution boundary.
 
 ## Architecture should be visible
 
-A module should reveal its public API, dependencies, owned concepts,
-capabilities, and entrypoints before its implementation. Humans and coding
-agents should be able to understand a project from the outside in.
+A module should reveal its public API, dependencies, and owned concepts before
+its implementation. Humans and coding agents should be able to understand a
+project from the outside in.
 
 ## Text is the interface
 
