@@ -1,8 +1,5 @@
-/// Fetches independent values within one observable task scope.
-module examples.tasks {
-  provides { loadDashboard }
-  uses { api.fetch clock.timeout }
-}
+use api.fetch
+use clock.timeout
 
 struct Dashboard {
   bookings: List<Booking>

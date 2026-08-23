@@ -42,9 +42,9 @@ function; the host grants authority at the execution boundary.
 
 ## Architecture should be visible
 
-A module should reveal its public API, dependencies, and owned concepts before
-its implementation. Humans and coding agents should be able to understand a
-project from the outside in.
+A directory module exposes a typed contract in `module.cove`; implementation
+lives in sibling files. Module names follow paths. Humans and coding agents can
+read contracts from the outside in before opening implementations.
 
 ## Text is the interface
 

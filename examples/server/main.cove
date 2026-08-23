@@ -1,12 +1,5 @@
-/// Serves a small typed JSON API.
-module examples.server {
-  provides { HealthResponse health }
-  uses { http.serve console.println }
-}
-
-struct HealthResponse {
-  status: String
-}
+use http
+use console.println
 
 /// Returns a stable health response without external I/O.
 fn health(request: http.Request) -> http.Response<HealthResponse> {

@@ -7,25 +7,28 @@ records the parts you should not have to guess.
 
 ## Program shape
 
+`module.cove` contains the typed contract for a directory module:
+
 ```cove
 /// Prints a greeting for a command-line user.
-module greeting {
-  provides { greet }
-  uses { console.println }
+export {
+  fn greet(name: String) -> String
+  fn main(args: List<String>) -> Result<Unit, Error>
+}
+```
+
+Other `.cove` files in the directory implement the contract:
+
+```cove
+use console.println
+
+fn greet(name: String) -> String {
+  "Hello, {name}!"
 }
 
-struct Person {
-  name: String
-}
-
-fn greet(person: Person) -> String {
-  "Hello, {person.name}!"
-}
-
-/// Greets the user passed on the command line.
 fn main(args: List<String>) -> Result<Unit, Error> {
   let name = args.get(0).unwrapOr("world")
-  console.println(greet(Person { name }))?
+  console.println(greet(name))?
   Ok(())
 }
 ```
@@ -61,16 +64,23 @@ fn main(args: List<String>) -> Result<Unit, Error> {
 
 ## Modules describe their boundary first
 
-```cove
-/// Validates a booking request and creates a confirmed booking.
-module booking.creation {
-  provides { createBooking }
-  uses { inventory.reserve payment.authorize }
-}
+```text
+src/
+  booking/
+    module.cove   # typed public contract
+    create.cove   # implementation
+    validate.cove # implementation
 ```
 
-- `provides`: public declarations exported by the module.
-- `uses`: dependencies visible from this module.
+`src/booking` is module `booking`; module names cannot be declared independently
+of their paths. A directory becomes an externally visible module when it has a
+`module.cove`. Contract declarations are its entire public API; other
+declarations are private to the module.
+
+Contracts contain complete signatures, transparent or opaque public types, and
+doc comments. The compiler checks every contract against the collected
+implementation files. Implementation-only dependencies stay in those files.
+
 `///` doc comments attach ordinary prose to the following declaration. The
 compiler preserves them for `outline`, documentation, and inspection tools.
 Missing doc comments on public modules and declarations produce a warning by

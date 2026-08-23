@@ -1,25 +1,4 @@
-/// Loads and validates typed application configuration.
-module examples.config {
-  provides { Config loadConfig }
-  uses { env.get }
-}
-
-struct Config {
-  port: Int
-  logLevel: LogLevel
-}
-
-enum LogLevel {
-  Debug
-  Info
-  Warn
-  Error
-}
-
-enum ConfigError {
-  InvalidPort(String)
-  InvalidLogLevel(String)
-}
+use env.get
 
 fn loadConfig() -> Result<Config, ConfigError> {
   let rawPort = env.get("PORT").unwrapOr("8080")

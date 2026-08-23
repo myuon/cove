@@ -1,15 +1,15 @@
 [run.hello]
-entry = "examples.hello.main"
+entry = "hello.main"
 allow = ["console"]
 
 [run.server]
-entry = "examples.server.main"
+entry = "server.main"
 allow = ["network", "console"]
 
 [run.restricted]
-entry = "examples.restricted.main"
+entry = "restricted.main"
 allow = ["documents", "console"]
 
 [run.tasks]
-entry = "examples.tasks.loadDashboard"
+entry = "tasks.loadDashboard"
 allow = ["network", "clock"]

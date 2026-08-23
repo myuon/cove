@@ -1,8 +1,4 @@
-/// Greets the user from a command-line program.
-module examples.hello {
-  provides { greeting }
-  uses { console.println }
-}
+use console.println
 
 fn greeting(name: String) -> String {
   "Hello, {name}!"

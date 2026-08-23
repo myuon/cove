@@ -1,0 +1,8 @@
+/// Fetches independent values within one observable task scope.
+export {
+  /// Data needed to render the dashboard.
+  opaque type Dashboard
+
+  /// Loads independent dashboard inputs concurrently.
+  async fn loadDashboard() -> Result<Dashboard, Error>
+}

@@ -1,0 +1,25 @@
+/// Loads and validates typed application configuration.
+export {
+  /// Validated application configuration.
+  struct Config {
+    port: Int
+    logLevel: LogLevel
+  }
+
+  /// Supported logging levels.
+  enum LogLevel {
+    Debug
+    Info
+    Warn
+    Error
+  }
+
+  /// Configuration validation failures.
+  enum ConfigError {
+    InvalidPort(String)
+    InvalidLogLevel(String)
+  }
+
+  /// Loads configuration from the host environment.
+  fn loadConfig() -> Result<Config, ConfigError>
+}

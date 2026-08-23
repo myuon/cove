@@ -1,0 +1,16 @@
+/// Serves a small typed JSON API.
+use http.Request
+use http.Response
+
+export {
+  /// JSON body returned by the health endpoint.
+  struct HealthResponse {
+    status: String
+  }
+
+  /// Returns the current health status.
+  fn health(request: Request) -> Response<HealthResponse>
+
+  /// Runs the HTTP server.
+  fn main() -> Result<Unit, Error>
+}

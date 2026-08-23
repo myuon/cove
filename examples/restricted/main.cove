@@ -1,8 +1,5 @@
-/// Reads an allowed document without ambient filesystem access.
-module examples.restricted {
-  provides { wordCount }
-  uses { documents.read console.println }
-}
+use documents.read
+use console.println
 
 fn wordCount(text: String) -> Int {
   text.words().count()

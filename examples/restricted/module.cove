@@ -1,0 +1,8 @@
+/// Reads an allowed document without ambient filesystem access.
+export {
+  /// Counts words in `text`.
+  fn wordCount(text: String) -> Int
+
+  /// Reads a host-provided document and prints its word count.
+  fn main() -> Result<Unit, Error>
+}

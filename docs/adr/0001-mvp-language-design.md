@@ -116,28 +116,38 @@ Source code should be understandable from the outside in:
 repository -> component -> module -> declaration -> implementation
 ```
 
-The first roughly 50 lines of a significant file should reveal its purpose,
-public boundary, dependencies, and owned data. Required capabilities can be
-derived and displayed by tooling; granted authority and entry selection belong
-to the host execution configuration.
+Each module is a directory. Its name is derived from its path and cannot be
+overridden in source. A `module.cove` file contains the typed public contract;
+sibling `.cove` files collectively implement it.
 
 Illustrative module contract:
 
 ```cove
 /// Validates and creates a booking.
-module booking.creation {
-  provides { createBooking validateBookingRequest }
-  uses { inventory.reserve pricing.quote payment.authorize }
-}
+export {
+  opaque type Booking
 
-// implementation follows
+  enum BookingError {
+    InvalidRequest
+    InventoryUnavailable
+    PaymentRejected
+  }
+
+  fn createBooking(
+    request: BookingRequest
+  ) -> Result<Booking, BookingError>
+}
 ```
 
-The compiler should understand these declarations rather than treating them as
-comments:
+The contract is the complete external interface, not a summary. The compiler
+checks that implementations exist and match, that private types do not leak,
+and that contract-external declarations remain private. Transparent types
+expose their representation; `opaque type` hides it.
 
-- `provides` defines the public boundary;
-- `uses` defines explicit dependencies;
+Dependencies used only by implementations are declared in implementation
+files. Required capabilities are derived from implementation call graphs and
+displayed by tooling; granted authority and entry selection belong to the host
+execution configuration.
 
 Ordinary purpose and intent are written as `///` doc comments attached to
 declarations. The compiler preserves them for outlines, generated
@@ -145,9 +155,9 @@ documentation, and inspection, but does not pretend to verify their prose.
 Public modules and declarations without doc comments produce a warning by
 default; CI may promote warnings to errors.
 
-Obvious information may be inferred to avoid duplication. Small programs may
-omit upper structural layers. Imports must not perform hidden initialization;
-initialization is an explicit entrypoint or function call.
+Directories without `module.cove` are implementation organization inside their
+nearest parent module. Imports must not perform hidden initialization;
+initialization is an explicit function call.
 
 ## Documentation and performance annotations
 
@@ -226,7 +236,7 @@ The first usable slice should include:
 1. lexer, parser, formatter, and diagnostic framework;
 2. functions, structs, enums, pattern matching, generics, `Option`, and
    `Result`;
-3. modules with doc comments, `provides`, and `uses`;
+3. path-derived directory modules with typed `module.cove` contracts;
 4. a native executable backend;
 5. a minimal Host API, embedding interface, execution configuration, and
    per-function capability analysis;
@@ -268,7 +278,8 @@ generated behavior must remain inspectable.
 - Which implementation language and code-generation backend minimize time to a
   credible MVP?
 - GC, reference counting, ownership, arenas, or a hybrid memory model?
-- Which module-contract fields are mandatory, inferred, or advisory?
+- How much signature duplication between `module.cove` and implementations is
+  acceptable, and can tooling remove the friction without weakening contracts?
 - How are dependency cycles represented and diagnosed?
 - Which annotations belong in the Language Card?
 - What Host API boundary remains stable across native, embedded, and Wasm
