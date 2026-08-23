@@ -222,22 +222,67 @@ query protocol for models. Its AI experience comes from predictable syntax,
 small semantics, explicit architecture, strong diagnostics, and the ability to
 navigate between abstraction levels using ordinary source text.
 
+## Change experience and responsibility boundaries
+
+If implementation becomes cheap, producing code is no longer the main
+bottleneck. Understanding a change, validating it, observing it in production,
+and reversing it safely become the expensive work. Cove should optimize this
+**change experience**, not add model-specific syntax.
+
+Each layer has a distinct responsibility:
+
+- **Language and compiler:** define types, modules, exports, errors, structured
+  concurrency, and typed Host API calls. Build the semantic graph from which
+  public interfaces, capability requirements, and affected dependents can be
+  derived.
+- **Host API definitions:** describe each external operation's capability,
+  types, serialization, resource ownership, cancellation, recordability, and
+  whether it is a read, reversible write, or irreversible write.
+- **Runtime:** enforce grants and resource budgets; dispatch replaceable Host
+  API implementations; record tasks, CPU work, I/O wait, allocations, and Host
+  calls; support replay at the Host API boundary.
+- **Cove CLI:** present compiler and runtime facts through `outline`, API and
+  operational diffs, change-impact reports, traces, replay, and implementation
+  comparisons. It also owns ordinary workflows such as format, check, run,
+  test, and build.
+- **Project configuration:** select entries, granted capabilities, resource
+  budgets, Host API implementations, tracing policy, build target, and profile.
+- **Hosting systems:** own deployment, routing, canaries, traffic shadowing,
+  and rollback. These may use Cove metadata but are not language semantics.
+
+The CLI must not invent semantics known only to the CLI. The compiler derives
+facts, the runtime enforces and records them, and the CLI explains them and
+composes workflows around them.
+
+This boundary should enable a change review to answer, before deployment:
+
+- which exported types and behaviors changed;
+- which modules and entries may be affected;
+- which capabilities, resources, or irreversible operations were added;
+- whether recorded traffic can reproduce the relevant behavior;
+- how two implementations differ in result, trace, and performance.
+
+Replay is deliberately limited to replaceable Host API interactions. Cove does
+not require whole-language determinism to make failures reproducible enough for
+testing and comparison.
+
 ## MVP scope
 
-The first usable slice should include:
+The first usable slice should be built in this order:
 
-1. lexer, parser, formatter, and diagnostic framework;
-2. functions, structs, enums, pattern matching, generics, `Option`, and
-   `Result`;
-3. path-derived directory modules, declaration-level exports, and generated
-   outlines/API snapshots;
-4. a native executable backend;
-5. a minimal Host API, embedding interface, execution configuration, and
-   per-function capability analysis;
-6. memory, time, cancellation, and execution-budget controls;
-7. structured traces separating CPU work from I/O wait;
-8. one CLI example, one HTTP server, and one embedded sandbox example;
-9. a one-page Language Card.
+1. **Language and compiler:** lexer, parser, formatter, diagnostics, core types,
+   directory modules, exports, semantic graph, native backend, and derived Host
+   API capability requirements.
+2. **Runtime:** Host API dispatch, grant enforcement, cancellation, deadlines,
+   CPU and memory budgets, and minimal trace events separating CPU from I/O
+   wait.
+3. **CLI:** `fmt`, `check`, `run`, `test`, `build`, `outline`, API snapshots and
+   diffs, traces, and change-impact reports.
+4. **Validation:** one CLI, one HTTP server, and one embedded sandbox program,
+   documented by the one-page Language Card.
+
+Host-boundary replay and side-by-side implementation comparison follow once
+Host API dispatch and trace identity are stable enough to support them.
 
 The MVP does not include a JIT, package registry, browser UI framework, effect
 system, totality checker, distributed actor runtime, durable workflows, or
@@ -254,6 +299,8 @@ The experiment is promising if:
   from file headers before opening implementations;
 - the same nontrivial module runs standalone and under restricted embedding;
 - CPU time and I/O wait are accurately attributable in traces;
+- API and impact reports explain the source and operational consequences of a
+  change without requiring a reviewer to reconstruct them from a code diff;
 - compile and execution performance are competitive enough that developers do
   not avoid Cove for ordinary tools and services.
 
