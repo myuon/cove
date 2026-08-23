@@ -31,6 +31,8 @@ export fn main(args: List<String>) -> Result<Unit, Error> {
 - Structs are product types; enums are tagged unions.
 - `match` must cover every enum case.
 - Generics use angle brackets: `List<T>`, `Result<T, E>`.
+- Traits are nominal and explicitly implemented; dynamic dispatch is distinct
+  from generic static dispatch.
 - The last expression in a block is its value; `return` exits early.
 - Comments use `//` and `/* ... */`.
 
@@ -49,7 +51,8 @@ export fn main(args: List<String>) -> Result<Unit, Error> {
 - Integer overflow behavior is defined and consistent across backends.
 - Collection iteration order is defined by each collection type.
 - There are no implicit numeric, string, or boolean conversions.
-- Imports do not execute initialization code.
+- Imports do not execute initialization code; fallible or asynchronous setup is
+  an ordinary function called explicitly.
 - Native and Wasm targets must preserve source-level semantics.
 
 ## Modules describe their boundary first
@@ -96,9 +99,11 @@ The runtime rejects Host API calls that were not granted.
 ## Tasks and resource control
 
 Concurrent work belongs to a task scope. Leaving the scope waits for or cancels
-its child tasks; work does not silently outlive its owner.
+its child tasks; work does not silently outlive its owner. Immutable values may
+cross task boundaries. Mutable values require an explicit shared
+synchronization type; unsafe mutable captures are compile errors.
 
-CPU, memory, time, concurrency, and host-call limits are runtime controls, not
+Memory is managed by a precise, non-moving mark-and-sweep collector. CPU, memory, time, concurrency, and host-call limits are runtime controls, not
 termination proofs. Exceeding a limit cancels execution with a structured
 runtime error.
 
@@ -130,6 +135,7 @@ cove api diff  compare source and operational interfaces
 cove impact    explain what a proposed change can affect
 cove trace     record and inspect source-level execution
 cove replay    reproduce recorded Host API interactions
+cove generate  run explicit, capability-controlled code generation
 ```
 
 Compiler errors should state the Cove rule, point to the relevant source, and
