@@ -1,0 +1,18 @@
+module examples.hello {
+  purpose "Greet the user from a command-line program"
+  provides { greeting }
+  uses { console.println }
+  allow { console }
+  entrypoints { main }
+}
+
+fn greeting(name: String) -> String {
+  "Hello, {name}!"
+}
+
+fn main(args: List<String>) -> Result<Unit, Error> {
+  let name = args.get(0).unwrapOr("world")
+  console.println(greeting(name))?
+  Ok(())
+}
+

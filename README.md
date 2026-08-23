@@ -13,6 +13,10 @@ It aims to be:
 The project is currently in the design and MVP exploration stage. The initial
 design is recorded in [ADR 0001](docs/adr/0001-mvp-language-design.md).
 
+- [Philosophy](docs/PHILOSOPHY.md)
+- [Language Card](docs/LANGUAGE_CARD.md)
+- [Representative programs](examples/README.md)
+
 ## Status
 
 No compiler or runtime has been implemented yet. Syntax shown in the ADR is
@@ -23,4 +27,3 @@ illustrative and may change.
 A cove is a small, sheltered inlet. The name reflects code that can run inside
 a host-provided boundary without making the language feel limited to sandboxed
 scripting.
-

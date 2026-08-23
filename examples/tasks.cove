@@ -1,0 +1,30 @@
+module examples.tasks {
+  purpose "Fetch two values concurrently within one observable task scope"
+  provides { loadDashboard }
+  uses { api.fetch clock.timeout }
+  allow { network clock }
+}
+
+struct Dashboard {
+  bookings: List<Booking>
+  prices: List<Price>
+}
+
+@intent("Load independent dashboard inputs concurrently")
+@hot
+async fn loadDashboard() -> Result<Dashboard, Error> {
+  scope tasks {
+    let bookings = tasks.spawn { api.fetch<List<Booking>>("/bookings") }
+    let prices = tasks.spawn { api.fetch<List<Price>>("/prices") }
+
+    let result = clock.timeout(500ms) {
+      Dashboard {
+        bookings: bookings.await()?,
+        prices: prices.await()?
+      }
+    }?
+
+    Ok(result)
+  }
+}
+

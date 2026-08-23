@@ -1,0 +1,40 @@
+module examples.config {
+  purpose "Load and validate typed application configuration"
+  provides { Config loadConfig }
+  uses { env.get }
+  allow { environment }
+}
+
+struct Config {
+  port: Int
+  logLevel: LogLevel
+}
+
+enum LogLevel {
+  Debug
+  Info
+  Warn
+  Error
+}
+
+enum ConfigError {
+  InvalidPort(String)
+  InvalidLogLevel(String)
+}
+
+fn loadConfig() -> Result<Config, ConfigError> {
+  let rawPort = env.get("PORT").unwrapOr("8080")
+  let port = Int.parse(rawPort).mapError { ConfigError.InvalidPort(rawPort) }?
+
+  let rawLevel = env.get("LOG_LEVEL").unwrapOr("info")
+  let logLevel = match rawLevel {
+    "debug" => LogLevel.Debug
+    "info" => LogLevel.Info
+    "warn" => LogLevel.Warn
+    "error" => LogLevel.Error
+    other => return Err(ConfigError.InvalidLogLevel(other))
+  }
+
+  Ok(Config { port, logLevel })
+}
+
