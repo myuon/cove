@@ -1,6 +1,27 @@
 use env.get
 
-fn loadConfig() -> Result<Config, ConfigError> {
+/// Validated application configuration.
+export struct Config {
+  port: Int
+  logLevel: LogLevel
+}
+
+/// Supported logging levels.
+export enum LogLevel {
+  Debug
+  Info
+  Warn
+  Error
+}
+
+/// Configuration validation failures.
+export enum ConfigError {
+  InvalidPort(String)
+  InvalidLogLevel(String)
+}
+
+/// Loads configuration from the host environment.
+export fn loadConfig() -> Result<Config, ConfigError> {
   let rawPort = env.get("PORT").unwrapOr("8080")
   let port = Int.parse(rawPort).mapError { ConfigError.InvalidPort(rawPort) }?
 

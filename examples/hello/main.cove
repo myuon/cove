@@ -1,10 +1,12 @@
 use console.println
 
-fn greeting(name: String) -> String {
+/// Returns a greeting for `name`.
+export fn greeting(name: String) -> String {
   "Hello, {name}!"
 }
 
-fn main(args: List<String>) -> Result<Unit, Error> {
+/// Runs the command-line program.
+export fn main(args: List<String>) -> Result<Unit, Error> {
   let name = args.get(0).unwrapOr("world")
   console.println(greeting(name))?
   Ok(())

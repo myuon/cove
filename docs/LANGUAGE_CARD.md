@@ -7,26 +7,16 @@ records the parts you should not have to guess.
 
 ## Program shape
 
-`module.cove` contains the typed contract for a directory module:
-
-```cove
-/// Prints a greeting for a command-line user.
-export {
-  fn greet(name: String) -> String
-  fn main(args: List<String>) -> Result<Unit, Error>
-}
-```
-
-Other `.cove` files in the directory implement the contract:
-
 ```cove
 use console.println
 
-fn greet(name: String) -> String {
+/// Returns a greeting for `name`.
+export fn greet(name: String) -> String {
   "Hello, {name}!"
 }
 
-fn main(args: List<String>) -> Result<Unit, Error> {
+/// Runs the command-line program.
+export fn main(args: List<String>) -> Result<Unit, Error> {
   let name = args.get(0).unwrapOr("world")
   console.println(greet(name))?
   Ok(())
@@ -67,19 +57,17 @@ fn main(args: List<String>) -> Result<Unit, Error> {
 ```text
 src/
   booking/
-    module.cove   # typed public contract
-    create.cove   # implementation
-    validate.cove # implementation
+    create.cove
+    validate.cove
 ```
 
-`src/booking` is module `booking`; module names cannot be declared independently
-of their paths. A directory becomes an externally visible module when it has a
-`module.cove`. Contract declarations are its entire public API; other
-declarations are private to the module.
+Each directory is one module, and its name is derived from its path. All Cove
+files in that directory are implementation units of the same module. An
+`export` declaration is public; other declarations are module-private.
 
-Contracts contain complete signatures, transparent or opaque public types, and
-doc comments. The compiler checks every contract against the collected
-implementation files. Implementation-only dependencies stay in those files.
+`cove outline` derives the typed public interface, definition locations, and
+required capabilities directly from source. `cove api snapshot` records that
+derived interface for compatibility checks without duplicating it by hand.
 
 `///` doc comments attach ordinary prose to the following declaration. The
 compiler preserves them for `outline`, documentation, and inspection tools.

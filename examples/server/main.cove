@@ -1,12 +1,18 @@
 use http
 use console.println
 
+/// JSON body returned by the health endpoint.
+export struct HealthResponse {
+  status: String
+}
+
 /// Returns a stable health response without external I/O.
-fn health(request: http.Request) -> http.Response<HealthResponse> {
+export fn health(request: http.Request) -> http.Response<HealthResponse> {
   http.json(200, HealthResponse { status: "ok" })
 }
 
-fn main() -> Result<Unit, Error> {
+/// Runs the HTTP server.
+export fn main() -> Result<Unit, Error> {
   console.println("listening on :8080")?
   http.serve(8080, routes {
     GET "/health" => health

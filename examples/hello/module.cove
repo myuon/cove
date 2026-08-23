@@ -1,8 +1,0 @@
-/// Greets the user from a command-line program.
-export {
-  /// Returns a greeting for `name`.
-  fn greeting(name: String) -> String
-
-  /// Runs the command-line program.
-  fn main(args: List<String>) -> Result<Unit, Error>
-}

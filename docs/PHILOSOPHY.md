@@ -42,9 +42,9 @@ function; the host grants authority at the execution boundary.
 
 ## Architecture should be visible
 
-A directory module exposes a typed contract in `module.cove`; implementation
-lives in sibling files. Module names follow paths. Humans and coding agents can
-read contracts from the outside in before opening implementations.
+A directory is a module and its name follows its path. Exported declarations
+are the single source of truth; tooling derives typed outlines and API
+snapshots instead of requiring duplicate interface files.
 
 ## Text is the interface
 

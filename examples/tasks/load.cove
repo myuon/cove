@@ -1,14 +1,15 @@
 use api.fetch
 use clock.timeout
 
-struct Dashboard {
+/// Data needed to render the dashboard.
+export struct Dashboard {
   bookings: List<Booking>
   prices: List<Price>
 }
 
 /// Loads independent dashboard inputs concurrently.
 @hot
-async fn loadDashboard() -> Result<Dashboard, Error> {
+export async fn loadDashboard() -> Result<Dashboard, Error> {
   scope tasks {
     let bookings = tasks.spawn { api.fetch<List<Booking>>("/bookings") }
     let prices = tasks.spawn { api.fetch<List<Price>>("/prices") }

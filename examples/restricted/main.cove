@@ -1,12 +1,13 @@
 use documents.read
 use console.println
 
-fn wordCount(text: String) -> Int {
+/// Counts words in `text`.
+export fn wordCount(text: String) -> Int {
   text.words().count()
 }
 
 /// Reads only through the document capability supplied by the host.
-fn main() -> Result<Unit, Error> {
+export fn main() -> Result<Unit, Error> {
   let text = documents.read("input")?
   console.println("{wordCount(text)} words")?
   Ok(())

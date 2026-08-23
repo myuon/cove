@@ -14,7 +14,7 @@ Together they test the core product hypotheses:
 | `tasks/` | Structured concurrency, cancellation, and trace boundaries |
 | `cove.toml` | Host-selected entry functions and granted capabilities |
 
-Each directory has a typed `module.cove` contract and separate implementation
-files. The first implementation milestone should make `hello/` run. The MVP is
+Each directory is a module; declarations marked `export` form its public API.
+The first implementation milestone should make `hello/` run. The MVP is
 not complete until all five programs have defined behavior in both diagnostics
 and execution.
