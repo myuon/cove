@@ -1,114 +1,57 @@
 # Cove philosophy
 
-Cove is a small, fast, host-controlled general-purpose language designed to be
-understood from the outside in.
+Cove is a familiar general-purpose language that can also run safely inside a
+host application.
 
-## One language, multiple degrees of trust
+## Familiar by default
 
-A language should not force a choice between a productive standalone program
-and safely embedded code. The same Cove module should be able to become a CLI,
-a server component, or a restricted guest. What changes is the authority and
-resources supplied by the host, not the meaning of the source language.
+Reuse syntax and semantics programmers already know. Cove-specific rules must
+stay small enough to explain on one Language Card.
+
+## Syntax must earn its place
+
+Syntax is for behavior the compiler or runtime can enforce. Human intent and
+background belong in doc comments, not special keywords disguised as prose.
+
+## One language, different trust levels
+
+The same source should work as a CLI, a server, or an embedded guest. The host
+changes the available authority and resources, not the language's meaning.
 
 ## No ambient authority
 
-External operations enter through typed Host APIs. Code cannot reach the
-filesystem, network, clock, process, or database merely because the operating
-system can. Authority is declared coarsely in source and granted concretely by
-the host.
+Embedded code can use only Host APIs it receives. Files, network, clocks,
+processes, and databases are explicit capabilities with replaceable real,
+fake, filtered, or denied implementations.
 
-Cove deliberately stops short of a general effect system. The goal is a
-practical, inspectable boundary, with stronger isolation enforced by the
-runtime and operating environment.
+## Architecture should be visible
 
-## A normal language before a sandbox DSL
+A module should reveal its public API, dependencies, owned concepts,
+capabilities, and entrypoints before its implementation. Humans and coding
+agents should be able to understand a project from the outside in.
 
-Capability control is not enough to earn adoption. Cove must be pleasant for
-ordinary CLIs, servers, and tools: familiar syntax, strong types, fast builds,
-fast startup, predictable execution, useful libraries, and excellent errors.
+## Text is the interface
 
-Embedded execution is a profile of the language, not its ceiling.
+Cove does not add model-specific query syntax. Predictable source, doc
+comments, compiler errors, and structural outlines are the durable interface
+between programmers, coding agents, and tools.
 
-## Familiar core, explicit delta
+## Prefer runtime control to heroic proofs
 
-Novel syntax and semantics consume a limited comprehension budget. Cove reuses
-what programmers and coding agents already know wherever possible. The
-language-specific delta should remain explainable by a one-page Language Card.
+Cove does not prove that programs terminate. Hosts control CPU, memory,
+deadlines, concurrency, cancellation, and external calls at runtime.
 
-If a feature makes that card substantially harder to understand, its value
-must exceed the permanent cost it adds to every program and every reader.
+## Observability is built in
 
-## Text first
+The runtime should trace modules, functions, tasks, capabilities, allocation,
+CPU work, and I/O wait without requiring application instrumentation.
 
-Coding agents evolve faster than language-specific AI protocols. Cove does not
-put model queries or prompts in the language core. Its AI experience comes
-from ordinary text that is predictable, compact, explicit, and easy to
-navigate.
+## Performance is developer experience
 
-Text remains the durable interface between programmers, agents, compilers, and
-version control.
-
-## Understand programs from the outside in
-
-Readers should be able to start at the repository, descend through components
-and modules, and open function bodies only when necessary. A significant file
-should reveal its purpose, public API, dependencies, ownership, authority, and
-entrypoints near the top.
-
-These declarations are compiler-visible contracts, not comments maintained by
-convention. The source tree doubles as an architectural index.
-
-## Prose belongs beside implementation
-
-Names and types describe mechanics but do not always preserve why code exists.
-Doc comments keep durable purpose and intent beside declarations without
-pretending prose has formally verified semantics. The compiler preserves doc
-comments for outlines, generated documentation, and inspection tools.
-
-Dedicated syntax is reserved for information the implementation can enforce.
-If text does not affect checking, compilation, or execution, making it a
-keyword or annotation adds ceremony without adding a guarantee.
-
-## Predictability is a feature
-
-Evaluation order, equality, numeric behavior, errors, collection order,
-concurrency lifetime, and backend differences should not be surprises.
-Generated behavior must be inspectable, and native and Wasm backends should
-not quietly assign different meanings to the same program.
-
-## Runtime control over heroic proofs
-
-Cove does not require totality, determinism, or termination proofs. Hosts need
-practical control over CPU, memory, deadlines, concurrency, cancellation, and
-external calls. Runtime limits should be cheap, composable, and observable.
-
-Static guarantees are valuable when they remain understandable and improve
-ordinary programming. They are not goals in isolation.
-
-## Observability is part of execution
-
-Tracing should not depend on every application adopting the right framework.
-The runtime already knows when code computes, waits, allocates, spawns work, or
-crosses into a Host API. Cove should expose that knowledge using the same
-module, function, task, capability, and entrypoint identities visible in
-source.
-
-In particular, traces must distinguish CPU work from I/O wait. Performance is
-part of developer experience and operational cost, not a late optimization.
-
-## The compiler teaches the language
-
-Clear diagnostics are a primary interface. An error should explain the rule
-that was violated and, when possible, show the smallest correct rewrite. A
-small language with excellent errors can be learned while building real
-software.
+Fast compilation, startup, and execution matter for iteration speed and
+operating cost. Generated behavior should remain predictable and inspectable.
 
 ## Earn complexity through use
 
-Cove begins as an experiment. The MVP excludes attractive but unproven ideas
-such as a JIT, durable workflows, distributed actors, microVM orchestration,
-totality checking, and a package registry.
-
-Features should be added when representative programs demonstrate that they
-remove recurring friction. Compatibility with an unvalidated design is less
-important than finding a coherent language worth keeping.
+Cove begins as an experiment. Add features only when representative programs
+show recurring friction that simpler language or library designs cannot solve.
