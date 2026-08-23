@@ -8,10 +8,25 @@ host application.
 Reuse syntax and semantics programmers already know. Cove-specific rules must
 stay small enough to explain on one Language Card.
 
+## Explicit over implicit
+
+Dependencies, authority, conversions, errors, and task lifetimes should be
+visible. Explicit does not mean duplicated: facts the compiler can derive from
+source should not be declared twice.
+
+## Strong defaults
+
+Common choices should have one safe, predictable default. Configuration and
+escape hatches are for meaningful differences, not decisions every project
+must repeat.
+
 ## Syntax must earn its place
 
 Syntax is for behavior the compiler or runtime can enforce. Human intent and
 background belong in doc comments, not special keywords disguised as prose.
+
+Public modules and APIs should have doc comments by default. Tooling warns when
+they are missing and uses their first sentence in outlines and generated docs.
 
 ## One language, different trust levels
 

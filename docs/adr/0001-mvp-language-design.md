@@ -51,6 +51,11 @@ The language-specific delta must fit in a one-page **Language Card**. This is a
 design budget: adding a rule should require demonstrating that the language is
 still predictable from existing knowledge plus that card.
 
+Cove prefers explicit behavior over hidden behavior, but does not require
+facts the compiler can derive to be declared twice. Common choices receive one
+safe, predictable default; configuration is reserved for meaningful
+differences.
+
 Initial semantic preferences:
 
 - left-to-right evaluation;
@@ -123,7 +128,6 @@ Illustrative module contract:
 module booking.creation {
   provides { createBooking validateBookingRequest }
   uses { inventory.reserve pricing.quote payment.authorize }
-  owns { BookingDraft }
 }
 
 // implementation follows
@@ -134,11 +138,12 @@ comments:
 
 - `provides` defines the public boundary;
 - `uses` defines explicit dependencies;
-- `owns` records responsibility for data and concepts;
 
 Ordinary purpose and intent are written as `///` doc comments attached to
 declarations. The compiler preserves them for outlines, generated
 documentation, and inspection, but does not pretend to verify their prose.
+Public modules and declarations without doc comments produce a warning by
+default; CI may promote warnings to errors.
 
 Obvious information may be inferred to avoid duplication. Small programs may
 omit upper structural layers. Imports must not perform hidden initialization;
@@ -221,7 +226,7 @@ The first usable slice should include:
 1. lexer, parser, formatter, and diagnostic framework;
 2. functions, structs, enums, pattern matching, generics, `Option`, and
    `Result`;
-3. modules with doc comments, `provides`, `uses`, and `owns`;
+3. modules with doc comments, `provides`, and `uses`;
 4. a native executable backend;
 5. a minimal Host API, embedding interface, execution configuration, and
    per-function capability analysis;

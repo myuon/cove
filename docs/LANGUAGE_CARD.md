@@ -66,18 +66,16 @@ fn main(args: List<String>) -> Result<Unit, Error> {
 module booking.creation {
   provides { createBooking }
   uses { inventory.reserve payment.authorize }
-  owns { BookingDraft }
 }
 ```
 
 - `provides`: public declarations exported by the module.
 - `uses`: dependencies visible from this module.
-- `owns`: data or concepts for which the module is responsible.
-
 `///` doc comments attach ordinary prose to the following declaration. The
 compiler preserves them for `outline`, documentation, and inspection tools.
-Projects may lint for missing documentation without turning prose into
-language semantics.
+Missing doc comments on public modules and declarations produce a warning by
+default. Projects can deny warnings in CI. Private declarations need comments
+only when their intent is not clear from code.
 
 ## Authority comes from the host
 
