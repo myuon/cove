@@ -66,6 +66,17 @@ Initial semantic preferences:
 - no side effects caused merely by importing a module;
 - structured lifetimes for concurrent tasks.
 
+The MVP type system includes nominal structs and enums, exhaustive matching,
+generics, traits, `Option`, `Result`, and local type inference. Function and
+public API boundaries remain explicitly typed. Higher-kinded types, implicit
+instance search, dependent types, and user-written effect polymorphism are out
+of scope.
+
+Trait conformance is explicit. Static and dynamic dispatch are distinct in the
+semantic model and generated code. The exact surface syntax remains open; one
+candidate is `T: Trait` for static dispatch and `dyn Trait` for dynamic
+dispatch.
+
 Compiler diagnostics are part of the learning interface. Errors should explain
 the relevant Cove rule and show a corrected textual example.
 
@@ -92,6 +103,11 @@ filtered, virtual, remote, test, or denied implementations. The runtime rejects
 ungranted Host API calls. Stronger isolation may additionally use process,
 syscall, Wasm, or microVM boundaries.
 
+A machine-readable Host API schema is shared by the compiler, runtime, and CLI.
+Each operation describes its argument, result, and error types; capability;
+serialization and resource ownership; cancellation and recordability; and
+whether it is a read, reversible write, or irreversible write.
+
 ## Runtime resource control
 
 Termination, CPU usage, and memory usage are runtime concerns in the MVP rather
@@ -107,6 +123,32 @@ The runtime should be able to impose:
 - host-call limits and timeouts.
 
 Totality, determinism, and absence of loops are explicitly not MVP guarantees.
+
+## Memory management
+
+The MVP uses a precise, non-moving, stop-the-world mark-and-sweep garbage
+collector. The compiler emits stack maps so the collector does not conservatively
+treat arbitrary integers as pointers. Non-moving objects simplify embedding,
+FFI, stable trace identity, and the initial runtime implementation.
+
+The MVP has no finalizers, compacting collector, generational collector, or
+concurrent collector. Heap fragmentation, pause time, allocation, retained
+memory, and GC work must be visible in traces. The allocator, object layout,
+root enumeration, stack maps, mark queue, sweep, and heap budget remain
+separate runtime components so the collector can evolve later.
+
+## Tasks and shared mutation
+
+Cove tasks are lightweight runtime tasks with structured lifetimes, explicit
+asynchronous functions, cancellation, and deadlines. I/O wait suspends a task;
+CPU work runs on runtime workers.
+
+Immutable values may cross task boundaries. An ordinary mutable value may not
+be captured by another task. Shared mutation requires an explicit synchronization
+type such as `Mutex<T>`, `RwLock<T>`, `Atomic<T>`, or `Channel<T>`, held
+through a shared handle. The compiler rejects mutable captures that do not use
+such a type. This protects task boundaries without introducing a whole-language
+borrow checker.
 
 ## Progressive disclosure
 
@@ -149,8 +191,17 @@ documentation, and inspection, but does not pretend to verify their prose.
 Public modules and declarations without doc comments produce a warning by
 default; CI may promote warnings to errors.
 
-Imports must not perform hidden initialization; initialization is an explicit
-function call.
+Imports must not perform hidden initialization. Compile-time constants are
+allowed, but external, fallible, or asynchronous initialization is an explicit
+ordinary function called from an entry or host. Module-level mutable variables
+are not part of the MVP. A one-time shared value, if needed, uses an explicit
+primitive such as `Once<T>` rather than an implicit module initializer.
+
+A package is rooted at the nearest `cove.toml`; module paths are relative to
+that root. The normal build never executes arbitrary project code. Build
+scripts are excluded from the MVP. Code generation is an explicit
+`cove generate` workflow whose generator runs as an ordinary capability-
+controlled Cove entry and whose output is inspectable source.
 
 ## Documentation and performance annotations
 
@@ -193,14 +244,22 @@ running program from outside without language-specific application hooks.
 Both compilation speed and execution speed are product requirements. They
 affect iteration time, operational cost, and predictability.
 
-The initial implementation should favor a simple compiler pipeline and a small
-runtime over a sophisticated JIT. Native AOT execution is the primary target.
+The initial target is approximately Go-class compilation speed and execution
+performance: predictable, sufficiently fast native programs without maximizing
+peak optimization at the expense of iteration speed.
+
+The implementation should favor a simple compiler pipeline, local inference,
+parallel package compilation, cached semantic graphs, and a small runtime over
+a sophisticated JIT. Native AOT execution is primary. Development builds use
+limited optimization; release builds may spend more time on inlining, escape
+analysis, bounds-check elimination, and profile-guided work. An enforceable
+`@hot` annotation may concentrate optimization and tracing budget on selected
+functions.
+
 The exact backend remains an MVP implementation decision; QBE, Cranelift, LLVM,
 and C generation should be compared by implementation cost, compile latency,
-runtime performance, debug information, and portability.
-
-The language must avoid backend-dependent semantics so that native and Wasm
-programs behave consistently.
+runtime performance, debug information, and portability. The language avoids
+backend-dependent semantics so native and Wasm programs behave consistently.
 
 ## Ordinary application DX
 
@@ -318,7 +377,8 @@ generated behavior must remain inspectable.
 
 - Which implementation language and code-generation backend minimize time to a
   credible MVP?
-- GC, reference counting, ownership, arenas, or a hybrid memory model?
+- Which object representation, stack-map format, and allocator best support the
+  initial non-moving collector?
 - What compatibility guarantees should generated API snapshots cover beyond
   source types, such as capability requirements and host bindings?
 - How are dependency cycles represented and diagnosed?
