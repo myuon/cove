@@ -1,5 +1,5 @@
+/// Reads an allowed document without ambient filesystem access.
 module examples.restricted {
-  purpose "Read an allowed document without ambient filesystem access"
   provides { wordCount }
   uses { documents.read console.println }
   allow { documents console }
@@ -10,7 +10,7 @@ fn wordCount(text: String) -> Int {
   text.words().count()
 }
 
-@intent("Read only through the document capability supplied by the host")
+/// Reads only through the document capability supplied by the host.
 fn main() -> Result<Unit, Error> {
   let text = documents.read("input")?
   console.println("{wordCount(text)} words")?
@@ -19,4 +19,3 @@ fn main() -> Result<Unit, Error> {
 
 // `filesystem.open(...)` must fail during checking: this module neither
 // declares nor receives a filesystem capability.
-

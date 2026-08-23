@@ -1,5 +1,5 @@
+/// Serves a small typed JSON API.
 module examples.server {
-  purpose "Serve a small typed JSON API"
   provides { HealthResponse health }
   uses { http.serve console.println }
   allow { network console }
@@ -10,7 +10,7 @@ struct HealthResponse {
   status: String
 }
 
-@intent("Return a stable health response without external I/O")
+/// Returns a stable health response without external I/O.
 fn health(request: http.Request) -> http.Response<HealthResponse> {
   http.json(200, HealthResponse { status: "ok" })
 }
@@ -22,4 +22,3 @@ fn main() -> Result<Unit, Error> {
   })?
   Ok(())
 }
-

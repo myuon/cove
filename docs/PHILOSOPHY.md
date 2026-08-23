@@ -58,15 +58,16 @@ entrypoints near the top.
 These declarations are compiler-visible contracts, not comments maintained by
 convention. The source tree doubles as an architectural index.
 
-## Intent belongs beside implementation
+## Prose belongs beside implementation
 
 Names and types describe mechanics but do not always preserve why code exists.
-Small textual declarations such as `purpose` and `@intent` keep durable intent
-close to the code without creating a separate AI interface or specification
-language.
+Doc comments keep durable purpose and intent beside declarations without
+pretending prose has formally verified semantics. The compiler preserves doc
+comments for outlines, generated documentation, and inspection tools.
 
-Intent is informative unless a feature explicitly defines enforceable
-semantics. Cove should never pretend prose has been formally verified.
+Dedicated syntax is reserved for information the implementation can enforce.
+If text does not affect checking, compilation, or execution, making it a
+keyword or annotation adds ceremony without adding a guarantee.
 
 ## Predictability is a feature
 
@@ -111,4 +112,3 @@ totality checking, and a package registry.
 Features should be added when representative programs demonstrate that they
 remove recurring friction. Compatibility with an unvalidated design is less
 important than finding a coherent language worth keeping.
-

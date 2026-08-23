@@ -8,8 +8,8 @@ records the parts you should not have to guess.
 ## Program shape
 
 ```cove
+/// Prints a greeting for a command-line user.
 module greeting {
-  purpose "Print a greeting"
   provides { greet }
   uses { console.println }
   allow { console }
@@ -24,7 +24,7 @@ fn greet(person: Person) -> String {
   "Hello, {person.name}!"
 }
 
-@intent("Greet the user passed on the command line")
+/// Greets the user passed on the command line.
 fn main(args: List<String>) -> Result<Unit, Error> {
   let name = args.get(0).unwrapOr("world")
   console.println(greet(Person { name }))?
@@ -64,8 +64,8 @@ fn main(args: List<String>) -> Result<Unit, Error> {
 ## Modules describe their boundary first
 
 ```cove
+/// Validates a booking request and creates a confirmed booking.
 module booking.creation {
-  purpose "Validate and create a booking"
   provides { createBooking }
   uses { inventory.reserve payment.authorize }
   owns { BookingDraft }
@@ -79,7 +79,11 @@ module booking.creation {
 - `owns`: data or concepts for which the module is responsible.
 - `allow`: coarse Host API capabilities the module may use.
 - `entrypoints`: declarations invoked from outside the module.
-- `purpose`: durable intent for readers, tools, and coding agents.
+
+`///` doc comments attach ordinary prose to the following declaration. The
+compiler preserves them for `outline`, documentation, and inspection tools.
+Projects may lint for missing documentation without turning prose into
+language semantics.
 
 ## Authority comes from the host
 
@@ -102,15 +106,17 @@ runtime error.
 ## Annotations
 
 ```cove
-@intent("Reserve inventory and authorize payment")
+/// Reserves inventory and then authorizes payment.
 @hot
 fn createBooking(request: BookingRequest) -> Result<Booking, BookingError> {
   // ...
 }
 ```
 
-Annotations are explicit metadata understood by the compiler or tooling.
-Unknown annotations are errors; they never silently change behavior.
+Syntax is reserved for enforceable semantics; prose belongs in doc comments.
+Annotations are explicit metadata that changes checking, compilation, or
+runtime behavior. Unknown annotations are errors; they never silently change
+behavior.
 
 ## Tooling contract
 
@@ -126,4 +132,3 @@ cove test      run tests
 
 Compiler errors should state the Cove rule, point to the relevant source, and
 show a textual correction when one is unambiguous.
-

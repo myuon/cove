@@ -1,5 +1,5 @@
+/// Greets the user from a command-line program.
 module examples.hello {
-  purpose "Greet the user from a command-line program"
   provides { greeting }
   uses { console.println }
   allow { console }
@@ -15,4 +15,3 @@ fn main(args: List<String>) -> Result<Unit, Error> {
   console.println(greeting(name))?
   Ok(())
 }
-

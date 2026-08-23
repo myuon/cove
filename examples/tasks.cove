@@ -1,5 +1,5 @@
+/// Fetches independent values within one observable task scope.
 module examples.tasks {
-  purpose "Fetch two values concurrently within one observable task scope"
   provides { loadDashboard }
   uses { api.fetch clock.timeout }
   allow { network clock }
@@ -10,7 +10,7 @@ struct Dashboard {
   prices: List<Price>
 }
 
-@intent("Load independent dashboard inputs concurrently")
+/// Loads independent dashboard inputs concurrently.
 @hot
 async fn loadDashboard() -> Result<Dashboard, Error> {
   scope tasks {
@@ -27,4 +27,3 @@ async fn loadDashboard() -> Result<Dashboard, Error> {
     Ok(result)
   }
 }
-

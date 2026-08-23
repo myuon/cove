@@ -116,9 +116,8 @@ public boundary, dependencies, owned data, authority, and entrypoints.
 Illustrative module contract:
 
 ```cove
+/// Validates and creates a booking.
 module booking.creation {
-  purpose "Validate and create a booking"
-
   provides { createBooking validateBookingRequest }
   uses { inventory.reserve pricing.quote payment.authorize }
   owns { BookingDraft }
@@ -137,18 +136,21 @@ comments:
 - `owns` records responsibility for data and concepts;
 - `allow` is the capability manifest;
 - `entrypoints` identifies externally invoked operations;
-- `purpose` preserves intent in ordinary text.
+
+Ordinary purpose and intent are written as `///` doc comments attached to
+declarations. The compiler preserves them for outlines, generated
+documentation, and inspection, but does not pretend to verify their prose.
 
 Obvious information may be inferred to avoid duplication. Small programs may
 omit upper structural layers. Imports must not perform hidden initialization;
 initialization is an explicit entrypoint or function call.
 
-## Intent and performance annotations
+## Documentation and performance annotations
 
 Decorators provide an extensible but visible place for non-core declarations:
 
 ```cove
-@intent("Reserve inventory and authorize payment")
+/// Reserves inventory and then authorizes payment.
 @hot
 @performance(latency = 20ms)
 fn createBooking(request: BookingRequest) -> Result<Booking, BookingError> {
@@ -156,9 +158,10 @@ fn createBooking(request: BookingRequest) -> Result<Booking, BookingError> {
 }
 ```
 
-The MVP may parse and preserve `@intent` and `@hot` before it implements
-optimization based on them. An annotation must have documented semantics;
-unknown annotations must not silently change behavior.
+Syntax is reserved for enforceable semantics; prose belongs in doc comments.
+The MVP preserves doc comments in its semantic model. An annotation such as
+`@hot` must have documented compiler or runtime semantics before it is
+accepted; unknown annotations must not silently change behavior.
 
 ## Observability
 
@@ -219,7 +222,7 @@ The first usable slice should include:
 1. lexer, parser, formatter, and diagnostic framework;
 2. functions, structs, enums, pattern matching, generics, `Option`, and
    `Result`;
-3. modules with `purpose`, `provides`, `uses`, `owns`, `allow`, and
+3. modules with doc comments, `provides`, `uses`, `owns`, `allow`, and
    `entrypoints`;
 4. a native executable backend;
 5. a minimal Host API and embedding interface;
@@ -267,4 +270,3 @@ generated behavior must remain inspectable.
 - What Host API boundary remains stable across native, embedded, and Wasm
   execution?
 - Which license should the project use?
-

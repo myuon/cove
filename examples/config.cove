@@ -1,5 +1,5 @@
+/// Loads and validates typed application configuration.
 module examples.config {
-  purpose "Load and validate typed application configuration"
   provides { Config loadConfig }
   uses { env.get }
   allow { environment }
@@ -37,4 +37,3 @@ fn loadConfig() -> Result<Config, ConfigError> {
 
   Ok(Config { port, logLevel })
 }
-
