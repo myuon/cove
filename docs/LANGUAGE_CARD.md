@@ -125,8 +125,11 @@ cove check     parse, resolve, and type-check
 cove run       run a program
 cove build     produce a native executable
 cove outline   show modules and architectural boundaries
-cove trace     run with source-level execution tracing
 cove test      run tests
+cove api diff  compare source and operational interfaces
+cove impact    explain what a proposed change can affect
+cove trace     record and inspect source-level execution
+cove replay    reproduce recorded Host API interactions
 ```
 
 Compiler errors should state the Cove rule, point to the relevant source, and
