@@ -67,9 +67,33 @@ checker gains an import environment; nothing else changes.
 
 `Unit`, `Bool`, `Int`, `Float`, `String`, `Duration`, `Error`, `Range`,
 `Array<T>`, `Vector<T>`, `Map<K, V>`, `Set<T>`, `Option<T>`, `Result<T, E>`,
-`Task<T>`, and function types. Their method signatures live in one table that
-the checker and the interpreter's builtins both read, so a method cannot exist
-at run time without a type, or have a type it does not honour.
+`Task<T>`, function types, and the type a `scope` binds, which is where
+`spawn` lives.
+
+Calling an `async fn` yields `Task<T>`, matching what the interpreter does;
+`await` settles it to `T`.
+
+An `if` without an `else` has type `Unit` and its branch's value is discarded.
+The interpreter returns the taken branch's value, so this rule is stricter
+than execution rather than in conflict with it.
+
+Builtin method signatures should live in one table that the checker and the
+interpreter's builtins both read, so a method cannot exist at run time without
+a type. They cannot literally share one today: `cove-sema` does not depend on
+`cove-runtime` and must not, so the checker mirrors the table and says so.
+Unifying them needs a crate both can depend on.
+
+### Two types no program can write
+
+`Unknown` is what the checker does not know: a Host API call, or a capitalized
+name no module declares. It is equal to every type and every operation on it
+yields `Unknown`, so an unknown never produces a cascade of errors about
+itself. A *lowercase* unresolved name is an error rather than an unknown,
+because locals, parameters, module functions, and `use`d host items exhaust
+the ways one could be in scope.
+
+`Never` is what `return`, `break`, and `continue` have. It is equal to
+everything, so a control-flow arm never disagrees with a value arm.
 
 ### Diagnostics carry the rule
 
