@@ -54,12 +54,14 @@ implicitly aliased.
 ```cove
 var values = [1, 2, 3]
 
-let snapshot = values.copy() // independent outer storage
+let snapshot = values.copy() // independent ordinary value graph
 let alias = values.ref()     // reference to the same mutable place
 ```
 
-`.ref()` leaves the original variable usable; mutations through either name
-are visible through the other. It is task-local. Cross-task mutable sharing
+`.copy()` recursively copies ordinary value storage, but preserves explicit
+identity such as `Ref<T>`; custom and shallow copies must say so. `.ref()`
+leaves the original variable usable, and mutations through either name are
+visible through the other. It is task-local. Cross-task mutable sharing
 requires a synchronized type such as `Shared<T>`. Trivially copyable values do
 not require an explicit choice.
 
