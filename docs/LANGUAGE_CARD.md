@@ -41,6 +41,8 @@ export fn main(args: Array<String>) -> Result<Unit, Error> {
 - Traits are nominal and explicitly implemented; dynamic dispatch is distinct
   from generic static dispatch.
 - The last expression in a block is its value; `return` exits early.
+- A `for` or `while` loop is an expression: it evaluates to `Unit`, or to
+  `break expr`'s value; `continue` skips to the next iteration.
 - Comments use `//` and `/* ... */`.
 
 ## Statements end at the end of a line

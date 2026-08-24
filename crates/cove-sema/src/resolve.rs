@@ -446,6 +446,7 @@ fn analyze_body(
         calls: Vec::new(),
         errors: Vec::new(),
         warnings: Vec::new(),
+        loop_depth: 0,
     };
     walk_block(body, &mut walk);
     (walk.capabilities, walk.calls)
@@ -453,7 +454,10 @@ fn analyze_body(
 
 /// Checks every `match` expression in every function and method body of
 /// `resolved` for the exhaustiveness and case-name facts derivable without a
-/// type checker, now that every enum the module declares is known.
+/// type checker, now that every enum the module declares is known. This walk
+/// also reports `break` and `continue` outside a loop, which does not depend
+/// on `enums` and so already ran once (harmlessly, since [`analyze_body`]
+/// discards its walk's errors) during pass 2.
 ///
 /// This reuses [`walk_block`] rather than a second traversal: the only
 /// difference from the walk [`analyze_body`] already did is that `enums` is
@@ -485,6 +489,7 @@ fn check_body_matches(
         calls: Vec::new(),
         errors: Vec::new(),
         warnings: Vec::new(),
+        loop_depth: 0,
     };
     walk_block(body, &mut walk);
     errors.extend(walk.errors);
@@ -508,6 +513,12 @@ struct BodyWalk<'a> {
     calls: Vec<CallShape>,
     errors: Vec<Diagnostic>,
     warnings: Vec<Diagnostic>,
+    /// How many enclosing `for`/`while` loops the walk is currently inside,
+    /// reset to `0` while walking a lambda body. `break` and `continue` only
+    /// make sense inside a loop of the same function or closure; they cannot
+    /// reach a loop outside a closure boundary, matching how `return` already
+    /// only unwinds to the nearest enclosing call.
+    loop_depth: u32,
 }
 
 /// The shape of one call site's callee, kept just precise enough to resolve
@@ -624,23 +635,60 @@ fn walk_expr(expr: &Expr, walk: &mut BodyWalk) {
         }
         ExprKind::For { iterable, body, .. } => {
             walk_expr(iterable, walk);
+            walk.loop_depth += 1;
             walk_block(body, walk);
+            walk.loop_depth -= 1;
         }
         ExprKind::While { condition, body } => {
             walk_expr(condition, walk);
+            walk.loop_depth += 1;
             walk_block(body, walk);
+            walk.loop_depth -= 1;
         }
         ExprKind::Return(inner) => {
             if let Some(inner) = inner {
                 walk_expr(inner, walk);
             }
         }
-        ExprKind::Lambda { body, .. } => walk_block(body, walk),
+        ExprKind::Break(inner) => {
+            if let Some(inner) = inner {
+                walk_expr(inner, walk);
+            }
+            check_in_loop(expr, "break", walk);
+        }
+        ExprKind::Continue => check_in_loop(expr, "continue", walk),
+        // A lambda is a separate closure boundary: `break` and `continue`
+        // cannot reach a loop outside it, exactly as `return` inside a
+        // lambda returns from the lambda, not the enclosing function.
+        ExprKind::Lambda { body, .. } => {
+            let outer_depth = std::mem::replace(&mut walk.loop_depth, 0);
+            walk_block(body, walk);
+            walk.loop_depth = outer_depth;
+        }
         ExprKind::Scope { body, .. } => walk_block(body, walk),
         ExprKind::Range { start, end, .. } => {
             walk_expr(start, walk);
             walk_expr(end, walk);
         }
+    }
+}
+
+/// Reports `keyword` (`break` or `continue`) used outside any loop this walk
+/// has entered. A lambda body resets [`BodyWalk::loop_depth`] to `0`, so this
+/// also rejects reaching for a loop across a closure boundary.
+fn check_in_loop(expr: &Expr, keyword: &str, walk: &mut BodyWalk) {
+    if walk.loop_depth == 0 {
+        walk.errors.push(
+            Diagnostic::error(
+                format!("cove::resolve::{keyword}_outside_loop"),
+                format!("`{keyword}` outside a loop"),
+            )
+            .at(expr.span)
+            .rule(format!(
+                "`{keyword}` only makes sense inside a `for` or `while` loop, and cannot reach one outside a closure."
+            ))
+            .help(format!("move this `{keyword}` inside an enclosing loop, or remove it")),
+        );
     }
 }
 
@@ -1876,5 +1924,54 @@ mod tests {
             .warnings
             .iter()
             .any(|d| d.code.starts_with("cove::resolve::") && d.code.contains("match")));
+    }
+
+    #[test]
+    fn break_and_continue_inside_a_loop_resolve_cleanly() {
+        let module = module_from_sources(
+            "loop_ok",
+            &["fn firstEven(items: Int...) -> Int {\n  \
+               for item in items {\n    \
+               if item % 2 != 0 {\n      continue\n    }\n    \
+               break item\n  \
+               }\n}\n"],
+        );
+        let package = package_of(module);
+        resolve(&package).expect("resolves");
+    }
+
+    #[test]
+    fn break_outside_a_loop_is_rejected() {
+        let module = module_from_sources("break_bare", &["fn go() {\n  break\n}\n"]);
+        let package = package_of(module);
+        let errs = resolve(&package).unwrap_err();
+        assert!(errs
+            .iter()
+            .any(|d| d.code == "cove::resolve::break_outside_loop"));
+    }
+
+    #[test]
+    fn continue_outside_a_loop_is_rejected() {
+        let module = module_from_sources("continue_bare", &["fn go() {\n  continue\n}\n"]);
+        let package = package_of(module);
+        let errs = resolve(&package).unwrap_err();
+        assert!(errs
+            .iter()
+            .any(|d| d.code == "cove::resolve::continue_outside_loop"));
+    }
+
+    #[test]
+    fn break_inside_a_lambda_cannot_reach_an_outer_loop() {
+        let module = module_from_sources(
+            "break_in_lambda",
+            &["fn go() {\n  for item in [1, 2] {\n    \
+               let f = fn() {\n      break\n    }\n  \
+               }\n}\n"],
+        );
+        let package = package_of(module);
+        let errs = resolve(&package).unwrap_err();
+        assert!(errs
+            .iter()
+            .any(|d| d.code == "cove::resolve::break_outside_loop"));
     }
 }

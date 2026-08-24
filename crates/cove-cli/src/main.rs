@@ -33,7 +33,9 @@ writes nothing, prints the path of every file that would change, and exits
 non-zero when there is one, which is the form to run in CI. A file that does
 not parse is reported and never rewritten.
 
-`--deny-warnings` fails `cove check` when the package has any warnings.
+`--deny-warnings` fails `cove check` when the package has any warnings, as
+does setting `deny_warnings = true` in `cove.toml`'s `[check]` table; either
+one is enough to deny.
 
 `cove run` flags (may appear in any position after <name>; everything after a
 literal `--` is a program argument, even if it looks like a flag):
@@ -272,11 +274,11 @@ fn collect_cove_files(dir: &Path, found: &mut Vec<PathBuf>) {
 }
 
 fn cmd_check(args: &[String]) -> Result<(), CliError> {
-    let mut deny_warnings = false;
+    let mut deny_warnings_flag = false;
     let mut path: Option<&Path> = None;
     for arg in args {
         if arg == "--deny-warnings" {
-            deny_warnings = true;
+            deny_warnings_flag = true;
         } else {
             path = Some(Path::new(arg.as_str()));
         }
@@ -290,6 +292,10 @@ fn cmd_check(args: &[String]) -> Result<(), CliError> {
     }
     println!("{}", check_summary(modules, files, program.warnings.len()));
 
+    // `--deny-warnings` and `cove.toml`'s `[check]` table only ever add
+    // strictness, never relax it, so a run that asks for either denies
+    // warnings: a CI invocation requesting stricter behavior always wins.
+    let deny_warnings = deny_warnings_flag || package.config.check.deny_warnings;
     if deny_warnings && !program.warnings.is_empty() {
         return Err(CliError::WarningsDenied);
     }
@@ -1268,5 +1274,50 @@ export fn main() -> Result<Unit, Error> {
             check_summary(1, 1, program.warnings.len()),
             "checked 1 module(s), 1 file(s), 3 warning(s)"
         );
+    }
+
+    #[test]
+    fn check_deny_warnings_flag_denies_even_with_no_config_key() {
+        let dir = TempDir::new("deny-flag");
+        write(dir.path(), "cove.toml", "");
+        write(
+            dir.path(),
+            "bare/main.cove",
+            "export fn a() -> Int {\n  1\n}\n",
+        );
+
+        let path = dir.path().display().to_string();
+        let result = cmd_check(&[path, "--deny-warnings".to_string()]);
+        assert!(matches!(result, Err(CliError::WarningsDenied)));
+    }
+
+    #[test]
+    fn check_config_deny_warnings_denies_without_the_flag() {
+        let dir = TempDir::new("deny-config");
+        write(dir.path(), "cove.toml", "[check]\ndeny_warnings = true\n");
+        write(
+            dir.path(),
+            "bare/main.cove",
+            "export fn a() -> Int {\n  1\n}\n",
+        );
+
+        let path = dir.path().display().to_string();
+        let result = cmd_check(&[path]);
+        assert!(matches!(result, Err(CliError::WarningsDenied)));
+    }
+
+    #[test]
+    fn check_without_flag_or_config_key_does_not_deny() {
+        let dir = TempDir::new("deny-neither");
+        write(dir.path(), "cove.toml", "");
+        write(
+            dir.path(),
+            "bare/main.cove",
+            "export fn a() -> Int {\n  1\n}\n",
+        );
+
+        let path = dir.path().display().to_string();
+        let result = cmd_check(&[path]);
+        assert!(result.is_ok());
     }
 }

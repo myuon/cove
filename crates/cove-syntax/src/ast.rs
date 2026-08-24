@@ -319,6 +319,8 @@ pub enum ExprKind {
         scrutinee: Box<Expr>,
         arms: Vec<MatchArm>,
     },
+    /// A loop is an expression: it evaluates to `Unit` unless a `break expr`
+    /// inside it says otherwise.
     For {
         binding: Ident,
         iterable: Box<Expr>,
@@ -329,6 +331,12 @@ pub enum ExprKind {
         body: Block,
     },
     Return(Option<Box<Expr>>),
+    /// `break` / `break expr`. Exits the nearest enclosing loop, which then
+    /// evaluates to `Unit` or to `expr`. Resolve rejects this outside a loop.
+    Break(Option<Box<Expr>>),
+    /// `continue`. Skips to the next iteration of the nearest enclosing loop.
+    /// Resolve rejects this outside a loop.
+    Continue,
     /// `fn(x) { ... }` / `async fn(x) { ... }`
     Lambda {
         is_async: bool,

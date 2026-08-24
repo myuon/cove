@@ -1,0 +1,3 @@
+[run.fail_break_outside_loop]
+entry = "main.main"
+allow = ["console"]

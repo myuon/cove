@@ -1,0 +1,16 @@
+use console.println
+
+/// `break` only makes sense inside a `for` or `while` loop. This function
+/// has no enclosing loop, so resolving the package fails before this program
+/// ever runs; this case lives in its own package so that failure cannot take
+/// down every other case.
+fn stopEarly() {
+  break
+}
+
+/// Never reached.
+export fn main() -> Result<Unit, Error> {
+  stopEarly()
+  println("never reached")?
+  Ok(())
+}

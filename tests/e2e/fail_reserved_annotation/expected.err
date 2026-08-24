@@ -1,0 +1,8 @@
+error[cove::parse::reserved_annotation]: `@` is reserved decorator syntax
+ --> <e2e>/fail_reserved_annotation/main/main.cove:7:1
+  |
+7 | @unknownDecorator
+  | ^
+  rule: Decorator syntax is reserved for behavior with specified compiler or runtime semantics; the MVP defines no annotations, so an unknown annotation is an error.
+  help: remove the `@...`; there is no annotation the MVP recognizes yet
+1 error(s)

@@ -346,7 +346,7 @@ fn binary_prec(op: BinaryOp) -> u8 {
 
 fn expr_prec(expr: &Expr) -> u8 {
     match &expr.kind {
-        ExprKind::Return(_) => prec::RETURN,
+        ExprKind::Return(_) | ExprKind::Break(_) => prec::RETURN,
         ExprKind::Assign { .. } => prec::ASSIGN,
         ExprKind::Binary { op, .. } => binary_prec(*op),
         ExprKind::Range { .. } => prec::RANGE,
@@ -401,7 +401,7 @@ fn ends_with_brace(expr: &Expr) -> bool {
         ExprKind::Range { end, .. } => ends_with_brace(end),
         ExprKind::Unary { operand, .. } => ends_with_brace(operand),
         ExprKind::Await(operand) => ends_with_brace(operand),
-        ExprKind::Return(Some(value)) => ends_with_brace(value),
+        ExprKind::Return(Some(value)) | ExprKind::Break(Some(value)) => ends_with_brace(value),
         _ => false,
     }
 }
@@ -1076,7 +1076,10 @@ impl Formatter<'_> {
             | ExprKind::For { .. }
             | ExprKind::While { .. }
             | ExprKind::Scope { .. } => true,
-            ExprKind::Return(value) => value.as_deref().is_some_and(|v| self.breaks(v)),
+            ExprKind::Return(value) | ExprKind::Break(value) => {
+                value.as_deref().is_some_and(|v| self.breaks(v))
+            }
+            ExprKind::Continue => false,
             ExprKind::Lambda { body, .. } => !block_is_empty(body),
             ExprKind::Range { start, end, .. } => self.breaks(start) || self.breaks(end),
         }
@@ -1206,6 +1209,14 @@ impl Formatter<'_> {
                     self.expr(value, prec::RETURN, indent);
                 }
             }
+            ExprKind::Break(value) => {
+                self.out.write("break");
+                if let Some(value) = value {
+                    self.out.write(" ");
+                    self.expr(value, prec::RETURN, indent);
+                }
+            }
+            ExprKind::Continue => self.out.write("continue"),
             ExprKind::Lambda {
                 is_async,
                 params,
@@ -1809,6 +1820,11 @@ impl Formatter<'_> {
                 Some(value) => format!("return {}", self.flat(value, prec::RETURN)),
                 None => "return".to_string(),
             },
+            ExprKind::Break(value) => match value {
+                Some(value) => format!("break {}", self.flat(value, prec::RETURN)),
+                None => "break".to_string(),
+            },
+            ExprKind::Continue => "continue".to_string(),
             ExprKind::Lambda {
                 is_async,
                 params,
@@ -2891,7 +2907,31 @@ fn a(/* four */ x: Int) { // five
         let mut found = Vec::new();
         walk(&repo_root(), &mut found);
         assert!(!found.is_empty(), "the repository has `.cove` files");
-        found
+
+        // The end-to-end suite deliberately contains sources that do not
+        // parse, because it pins the diagnostics they produce. `cove fmt`
+        // never rewrites a file it cannot parse, so neither do these tests.
+        let mut formattable = Vec::new();
+        let mut unparsable = Vec::new();
+        for path in found {
+            let Ok(source) = std::fs::read_to_string(&path) else {
+                continue;
+            };
+            let mut sources = SourceMap::new();
+            let file = sources.add(path.clone(), source);
+            if crate::parse_file(&sources, file).is_ok() {
+                formattable.push(path);
+            } else {
+                unparsable.push(path);
+            }
+        }
+        assert!(
+            formattable.len() > unparsable.len() * 4,
+            "most of the repository should parse; {} of {} did not",
+            unparsable.len(),
+            formattable.len() + unparsable.len()
+        );
+        formattable
     }
 
     #[test]

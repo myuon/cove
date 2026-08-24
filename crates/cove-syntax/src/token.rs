@@ -21,6 +21,8 @@ pub struct Token {
 pub enum Keyword {
     Async,
     Await,
+    Break,
+    Continue,
     Else,
     Enum,
     Export,
@@ -47,6 +49,8 @@ impl Keyword {
         Some(match text {
             "async" => Keyword::Async,
             "await" => Keyword::Await,
+            "break" => Keyword::Break,
+            "continue" => Keyword::Continue,
             "else" => Keyword::Else,
             "enum" => Keyword::Enum,
             "export" => Keyword::Export,
@@ -74,6 +78,8 @@ impl Keyword {
         match self {
             Keyword::Async => "async",
             Keyword::Await => "await",
+            Keyword::Break => "break",
+            Keyword::Continue => "continue",
             Keyword::Else => "else",
             Keyword::Enum => "enum",
             Keyword::Export => "export",
