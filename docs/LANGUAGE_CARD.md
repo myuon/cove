@@ -74,6 +74,11 @@ A `self` method is callable through `let` or `var`. A `var self` method
 requires a mutable place or explicit reference. Calls use ordinary method
 syntax; Cove has no borrow or lifetime syntax.
 
+Arguments are temporary read-only views by default; `var` arguments may
+temporarily update a caller's mutable place. A read-only value may be retained
+by O(1) sharing. Retaining a mutable place requires an explicit `.copy()` or
+`.ref()`. The compiler reports retention in outlines and API diffs.
+
 ## Evaluation
 
 - Evaluation order is left to right.
