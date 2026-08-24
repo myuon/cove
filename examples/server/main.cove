@@ -8,7 +8,7 @@ export struct HealthResponse {
 
 /// Returns a stable health response without external I/O.
 export fn health(request: http.Request) -> http.Response<HealthResponse> {
-  http.json(200, HealthResponse { status: "ok" })
+  http.json(200, HealthResponse(status: "ok"))
 }
 
 /// Runs the HTTP server.
