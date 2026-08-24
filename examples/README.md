@@ -13,11 +13,12 @@ Together they test the core product hypotheses:
 | `restricted/` | Host-provided capabilities and denied ambient authority |
 | `tasks/` | Structured concurrency, cancellation, and trace boundaries |
 | `places/` | Read-only retention, mutable places, snapshots, and explicit identity |
+| `callbacks/` | Routers, middleware, events, timers, retries, and task-safe captures |
 | `cove.toml` | Host-selected entry functions and granted capabilities |
 
 Each directory is a module; declarations marked `export` form its public API.
 The first implementation milestone should make `hello/` run. The MVP is
-not complete until all six programs have defined behavior in both diagnostics
+not complete until all seven programs have defined behavior in both diagnostics
 and execution.
 
 ## Place-model diagnostics
@@ -54,3 +55,31 @@ fn invalid(var self, booking: Booking) {
 
 These checks deliberately make temporary reads easy while making copies and
 mutable aliasing visible.
+
+## Callback-model findings
+
+The `callbacks/` program distinguishes two independent facts:
+
+- a callback value may escape because a router, event bus, or timer retains it;
+- arguments passed to that callback may themselves be borrowed or retained.
+
+A function type prefixed with `retain` is a candidate surface contract for the
+first fact:
+
+```cove
+type Handler = retain async fn(Request) -> Result<Response, Error>
+```
+
+Fresh closures can transfer directly into such a slot. Captured read-only
+values remain cheap to share; mutable captures require `.copy()`, `.ref()`,
+or `.shared()` according to their lifetime and task boundary.
+
+The first draft captured `Ref<EventBus>` in an HTTP handler. That is correctly
+invalid because a task-local reference would cross into request tasks. Building
+subscriptions locally and returning a fresh read-only `EventBus` produced
+simpler code. Truly mutable cross-task state, such as metrics, uses
+`Shared<T>`.
+
+Retry callbacks are non-escaping even though execution spans `await`: the
+caller remains suspended for the dynamic extent of the call. Router, event, and
+timer callbacks escape and therefore use the retained function type.
