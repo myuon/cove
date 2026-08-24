@@ -17,3 +17,7 @@ allow = ["network", "clock"]
 [run.places]
 entry = "places.main"
 allow = ["console"]
+
+[run.callbacks]
+entry = "callbacks.main"
+allow = ["network", "database", "clock", "console"]
