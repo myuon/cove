@@ -25,10 +25,10 @@ impl BookingDraft {
 
   /// Finishes this locally unique draft as immutable task-safe data.
   fn finish(var self) -> Booking {
-    Booking {
+    Booking(
       status: self.status,
       guests: self.guests.freeze()
-    }
+    )
   }
 }
 
@@ -40,10 +40,10 @@ export struct Booking {
 
 /// Exercises Cove's value copies, Vector aliases, and freeze transition.
 export fn main() -> Result<Unit, Error> {
-  var original = BookingDraft {
+  var original = BookingDraft(
     status: BookingStatus.Pending,
-    guests: Vector["Alice"]
-  }
+    guests: Vector.of("Alice")
+  )
 
   var alias = original
   alias.confirm()
@@ -62,10 +62,10 @@ export fn main() -> Result<Unit, Error> {
   console.println("{snapshot.length()}")? // 2
 
   // A fresh, unique draft can finish with an O(1) freeze.
-  var fresh = BookingDraft {
+  var fresh = BookingDraft(
     status: BookingStatus.Pending,
-    guests: Vector["Carol"]
-  }
+    guests: Vector.of("Carol")
+  )
   let booking = fresh.finish()
   console.println("{booking.guests.length()}")? // 1
 
