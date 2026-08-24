@@ -16,9 +16,9 @@ source should not be declared twice.
 
 ## Make undesirable code harder
 
-The shortest path should preserve locality. Reading is easy; copying, retaining,
-sharing mutable identity, crossing task or trust boundaries, and irreversible
-operations require visible intent.
+The shortest path should preserve locality. Ordinary value and handle copies
+are predictable; independent snapshots, cross-task mutable sharing, trust
+boundaries, and irreversible operations require visible intent.
 
 ## Strong defaults
 
