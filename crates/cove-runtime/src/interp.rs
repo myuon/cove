@@ -3776,7 +3776,7 @@ export fn main() -> Result<Int, Error> {{
     /// spelling that works.
     #[test]
     fn a_question_mark_on_a_task_points_at_await() {
-        let error = run_task_body("  let value = await load(true)?").error();
+        let error = run_task_body("  let task = load(true)\n  let value = task?").error();
         assert_eq!(
             error.message,
             "`?` needs a `Result` or an `Option`, but found `Task`"
@@ -3785,6 +3785,24 @@ export fn main() -> Result<Int, Error> {{
             error.help.unwrap().contains("task.await()?"),
             "the diagnostic shows the correction"
         );
+    }
+
+    /// `await` binds tighter than `?`, so `await task()?` awaits and then
+    /// propagates. The `?` applies to the `Result` the task produced, never
+    /// to the task handle itself.
+    #[test]
+    fn a_question_mark_after_await_propagates_the_awaited_error() {
+        let run = run_task_body("  let value = await load(true)?\n  println(\"{value}\")?");
+        assert_eq!(run.output, "1\n");
+
+        let error = run_task_body("  let value = await load(false)?").value;
+        match error {
+            Ok(Value::Enum(result)) => {
+                assert_eq!(&*result.case, "Err");
+                assert_eq!(result.payload[0].to_string(), "boom");
+            }
+            other => panic!("expected the awaited `Err` to propagate, found {other:?}"),
+        }
     }
 
     #[test]
