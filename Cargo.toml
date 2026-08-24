@@ -1,0 +1,21 @@
+[workspace]
+resolver = "2"
+members = [
+  "crates/cove-diag",
+  "crates/cove-syntax",
+  "crates/cove-sema",
+  "crates/cove-runtime",
+  "crates/cove-cli",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+repository = "https://github.com/myuon/cove"
+
+[workspace.dependencies]
+cove-diag = { path = "crates/cove-diag" }
+cove-syntax = { path = "crates/cove-syntax" }
+cove-sema = { path = "crates/cove-sema" }
+cove-runtime = { path = "crates/cove-runtime" }
