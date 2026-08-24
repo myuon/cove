@@ -28,7 +28,7 @@ growable form and may be bound through either `let` or `var`.
 
 ```cove
 let finished = [1, 2]
-var building = Vector[1, 2]
+var building = Vector.of(1, 2)
 building.push(3)
 ```
 
@@ -39,6 +39,11 @@ when their elements are task-safe.
 
 Ordinary parameters receive shallow copies. A `var` parameter is a
 non-escaping inout alias and is marked at both declaration and call site.
+
+Calls and struct initialization use static argument labels. A homogeneous
+variadic parameter `items: T...` is an immutable Array inside the function, so
+`Vector.of(1, 2)` is an ordinary user-definable associated function rather
+than a special literal.
 Independent mutable graph copies exist only for types implementing
 `Snapshot`.
 
