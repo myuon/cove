@@ -34,5 +34,5 @@ export fn loadConfig() -> Result<Config, ConfigError> {
     other => return Err(ConfigError.InvalidLogLevel(other))
   }
 
-  Ok(Config { port, logLevel })
+  Ok(Config(port: port, logLevel: logLevel))
 }
