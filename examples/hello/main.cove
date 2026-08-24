@@ -6,7 +6,7 @@ export fn greeting(name: String) -> String {
 }
 
 /// Runs the command-line program.
-export fn main(args: List<String>) -> Result<Unit, Error> {
+export fn main(args: Array<String>) -> Result<Unit, Error> {
   let name = args.get(0).unwrapOr("world")
   console.println(greeting(name))?
   Ok(())
