@@ -203,7 +203,7 @@ let fixed = [1, 2]
 var first = Vector.of(1, 2)
 var second = first
 second.push(3)
-// first and second both observe Vector[1, 2, 3]
+// first and second both observe [1, 2, 3]
 ```
 
 A vector's length, capacity, and element buffer belong to its shared storage, so
