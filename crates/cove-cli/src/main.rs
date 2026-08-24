@@ -10,6 +10,7 @@ use std::rc::Rc;
 use std::time::Duration;
 
 use cove_diag::{render, Diagnostic, SourceMap, Span};
+use cove_runtime::clock::Clock;
 use cove_runtime::host::{Console, Documents, Env, Grants, HostRegistry};
 use cove_runtime::interp::Interpreter;
 use cove_runtime::{Budget, Cancellation, JsonlSink, Limits, NullSink, TraceEvent, TraceSink};
@@ -658,6 +659,9 @@ fn cmd_run(args: &[String]) -> Result<(), CliError> {
     hosts.register(Box::new(Console::new(std::io::stdout())));
     hosts.register(Box::new(Env::from_process()));
     hosts.register(Box::new(Documents::rooted(package.root.join("documents"))));
+    // Registering a module does not grant it: `HostRegistry::call` rejects
+    // every call whose capability is missing from `[run.<name>] allow`.
+    hosts.register(Box::new(Clock::real()));
 
     let limits = Limits {
         fuel: flags.fuel.or(run.fuel),

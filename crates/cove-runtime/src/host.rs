@@ -14,6 +14,7 @@ use cove_sema::Capability;
 
 use crate::budget::Budget;
 use crate::error::RuntimeError;
+use crate::schema::{Effect, HostType, OperationSchema};
 use crate::trace::{NullSink, TraceEvent, TraceSink};
 use crate::value::Value;
 
@@ -25,8 +26,14 @@ pub trait HostApi {
     /// The capability a host must grant for this module.
     fn capability(&self) -> Capability;
 
-    /// The operations this module exposes.
-    fn operations(&self) -> &[&str];
+    /// The operations this module exposes, and everything the runtime needs
+    /// to know about each of them.
+    ///
+    /// The schema is the module's declaration of itself: a host cannot expose
+    /// an operation without saying what it takes, what it produces, what it
+    /// costs the outside world, and whether its result may cross a task
+    /// boundary.
+    fn schema(&self) -> &[OperationSchema];
 
     /// Invokes one operation.
     fn call(&mut self, op: &str, args: Vec<Value>) -> Result<Value, RuntimeError>;
@@ -122,12 +129,32 @@ impl HostRegistry {
     pub fn module_for_operation(&self, op: &str) -> Option<&str> {
         self.modules
             .iter()
-            .find(|m| m.operations().contains(&op))
+            .find(|m| m.schema().iter().any(|entry| entry.name == op))
             .map(|m| m.name())
     }
 
-    /// Dispatches a Host API call after checking the grant and the budget,
-    /// tracing the outcome either way.
+    /// The schema of one operation, if the module and the operation both
+    /// exist.
+    pub fn schema_for(&self, module: &str, op: &str) -> Option<&OperationSchema> {
+        self.modules
+            .iter()
+            .find(|m| m.name() == module)?
+            .schema()
+            .iter()
+            .find(|entry| entry.name == op)
+    }
+
+    /// Whether the value `module.op` produces may cross a task boundary, or
+    /// `None` when no such operation exists.
+    ///
+    /// The Language Card puts this decision in the schema rather than in the
+    /// value: "Host resources declare task-safety in their Host API schema."
+    pub fn result_is_task_safe(&self, module: &str, op: &str) -> Option<bool> {
+        Some(self.schema_for(module, op)?.result_is_task_safe)
+    }
+
+    /// Dispatches a Host API call after checking the grant, the schema, and
+    /// the budget, tracing the outcome either way.
     pub fn call(
         &mut self,
         module: &str,
@@ -137,7 +164,19 @@ impl HostRegistry {
         let Some(entry) = self.modules.iter_mut().find(|m| m.name() == module) else {
             return Err(RuntimeError::new(format!("unknown host module `{module}`")));
         };
-        let capability = entry.capability();
+        let declared = entry
+            .schema()
+            .iter()
+            .find(|entry| entry.name == op)
+            .copied();
+        // An operation declares the capability it needs; the module's own
+        // capability stands in for an operation that does not exist, so a
+        // call into an ungranted module is still reported as ungranted rather
+        // than as a misspelling.
+        let capability = match &declared {
+            Some(schema) => Capability::new(schema.capability),
+            None => entry.capability(),
+        };
         if !self.grants.allows(&capability) {
             self.trace.record(TraceEvent::HostCall {
                 module: module.to_string(),
@@ -154,9 +193,33 @@ impl HostRegistry {
                 "add `{capability}` to `allow` in the run's `cove.toml` table"
             )));
         }
-        if !entry.operations().contains(&op) {
+        let Some(schema) = declared else {
+            let known = entry
+                .schema()
+                .iter()
+                .map(|entry| format!("`{}`", entry.name))
+                .collect::<Vec<_>>();
             return Err(RuntimeError::new(format!(
                 "host module `{module}` has no operation `{op}`"
+            ))
+            .with_help(format!(
+                "`{module}` exposes {}",
+                if known.is_empty() {
+                    "no operations".to_string()
+                } else {
+                    known.join(", ")
+                }
+            )));
+        };
+        if !schema.accepts(args.len()) {
+            return Err(RuntimeError::new(format!(
+                "`{module}.{op}` takes {}, but {} were given",
+                schema.expected_arity(),
+                args.len()
+            ))
+            .with_help(format!(
+                "the Host API schema declares `{module}.{}`",
+                schema.signature()
             )));
         }
 
@@ -188,6 +251,36 @@ impl HostRegistry {
     }
 }
 
+/// The operations `console` exposes.
+///
+/// Both take a variadic `String`, which is why `console.println("a", "b")`
+/// prints one line of two space-separated parts. Bytes already handed to the
+/// terminal cannot be taken back, so both are irreversible writes.
+static CONSOLE_SCHEMA: &[OperationSchema] = &[
+    OperationSchema {
+        name: "println",
+        params: &[HostType::String],
+        variadic: true,
+        result: HostType::Result(&HostType::Unit, &HostType::Error),
+        capability: "console",
+        effect: Effect::IrreversibleWrite,
+        cancellable: false,
+        recordable: true,
+        result_is_task_safe: true,
+    },
+    OperationSchema {
+        name: "print",
+        params: &[HostType::String],
+        variadic: true,
+        result: HostType::Result(&HostType::Unit, &HostType::Error),
+        capability: "console",
+        effect: Effect::IrreversibleWrite,
+        cancellable: false,
+        recordable: true,
+        result_is_task_safe: true,
+    },
+];
+
 /// `console`: line-oriented output.
 pub struct Console<W: Write> {
     out: W,
@@ -208,8 +301,8 @@ impl<W: Write> HostApi for Console<W> {
         Capability::new("console")
     }
 
-    fn operations(&self) -> &[&str] {
-        &["println", "print"]
+    fn schema(&self) -> &[OperationSchema] {
+        CONSOLE_SCHEMA
     }
 
     fn call(&mut self, op: &str, args: Vec<Value>) -> Result<Value, RuntimeError> {
@@ -229,6 +322,19 @@ impl<W: Write> HostApi for Console<W> {
         }
     }
 }
+
+/// The operations `env` exposes.
+static ENV_SCHEMA: &[OperationSchema] = &[OperationSchema {
+    name: "get",
+    params: &[HostType::String],
+    variadic: false,
+    result: HostType::Option(&HostType::String),
+    capability: "env",
+    effect: Effect::Read,
+    cancellable: false,
+    recordable: true,
+    result_is_task_safe: true,
+}];
 
 /// `env`: read-only access to the environment the host supplies.
 ///
@@ -262,8 +368,8 @@ impl HostApi for Env {
         Capability::new("env")
     }
 
-    fn operations(&self) -> &[&str] {
-        &["get"]
+    fn schema(&self) -> &[OperationSchema] {
+        ENV_SCHEMA
     }
 
     fn call(&mut self, op: &str, args: Vec<Value>) -> Result<Value, RuntimeError> {
@@ -281,6 +387,19 @@ impl HostApi for Env {
         }
     }
 }
+
+/// The operations `documents` exposes.
+static DOCUMENTS_SCHEMA: &[OperationSchema] = &[OperationSchema {
+    name: "read",
+    params: &[HostType::String],
+    variadic: false,
+    result: HostType::Result(&HostType::String, &HostType::Error),
+    capability: "documents",
+    effect: Effect::Read,
+    cancellable: false,
+    recordable: true,
+    result_is_task_safe: true,
+}];
 
 /// `documents`: a filtered, read-only view over a fixed set of named text
 /// documents.
@@ -355,8 +474,8 @@ impl HostApi for Documents {
         Capability::new("documents")
     }
 
-    fn operations(&self) -> &[&str] {
-        &["read"]
+    fn schema(&self) -> &[OperationSchema] {
+        DOCUMENTS_SCHEMA
     }
 
     fn call(&mut self, op: &str, args: Vec<Value>) -> Result<Value, RuntimeError> {
@@ -610,6 +729,102 @@ mod tests {
                 assert!(*wait < std::time::Duration::from_secs(1), "{wait:?}");
             }
             other => panic!("expected a HostCall event, found {other:?}"),
+        }
+    }
+
+    #[test]
+    fn an_unknown_operation_lists_the_operations_that_exist() {
+        let mut hosts = registry_with_documents();
+
+        let error = hosts
+            .call("documents", "write", Vec::new())
+            .expect_err("`documents` has no `write`");
+        assert_eq!(
+            error.message,
+            "host module `documents` has no operation `write`"
+        );
+        assert_eq!(error.help.as_deref(), Some("`documents` exposes `read`"));
+    }
+
+    #[test]
+    fn too_many_arguments_are_rejected_before_the_host_sees_them() {
+        let mut hosts = registry_with_documents();
+
+        let error = hosts
+            .call(
+                "documents",
+                "read",
+                vec![Value::Str("input".into()), Value::Str("extra".into())],
+            )
+            .expect_err("`documents.read` takes one argument");
+        assert_eq!(
+            error.message,
+            "`documents.read` takes 1 argument, but 2 were given"
+        );
+        assert_eq!(
+            error.help.as_deref(),
+            Some("the Host API schema declares `documents.read(String) -> Result<String, Error>`")
+        );
+    }
+
+    #[test]
+    fn too_few_arguments_are_rejected_too() {
+        let mut hosts = registry_with_documents();
+
+        let error = hosts
+            .call("documents", "read", Vec::new())
+            .expect_err("`documents.read` takes one argument");
+        assert_eq!(
+            error.message,
+            "`documents.read` takes 1 argument, but 0 were given"
+        );
+    }
+
+    /// `console.println("a", "b")` is one line of two parts, so the arity
+    /// check must not reject it.
+    #[test]
+    fn a_variadic_operation_accepts_any_number_of_arguments() {
+        let mut hosts = HostRegistry::new(Grants::new(["console"]));
+        hosts.register(Box::new(Console::new(Vec::new())));
+
+        for arity in 0..3 {
+            hosts
+                .call("console", "println", vec![Value::Str("part".into()); arity])
+                .unwrap_or_else(|e| panic!("arity {arity} should be accepted: {}", e.message));
+        }
+    }
+
+    #[test]
+    fn task_safety_of_a_host_result_comes_from_the_schema() {
+        let hosts = registry_with_documents();
+
+        assert_eq!(hosts.result_is_task_safe("documents", "read"), Some(true));
+        assert_eq!(hosts.result_is_task_safe("documents", "write"), None);
+        assert_eq!(hosts.result_is_task_safe("network", "read"), None);
+    }
+
+    /// The registry gates on the module's capability, and each operation
+    /// declares the capability it needs. Nothing today mixes capabilities
+    /// inside one module, and a module whose operations disagreed with it
+    /// would make the grant check and the schema tell different stories.
+    #[test]
+    fn every_operation_declares_its_module_capability() {
+        let modules: Vec<Box<dyn HostApi>> = vec![
+            Box::new(Console::new(Vec::new())),
+            Box::new(Env::new(BTreeMap::new())),
+            Box::new(Documents::in_memory(BTreeMap::new())),
+            Box::new(crate::clock::Clock::real()),
+        ];
+        for module in &modules {
+            for entry in module.schema() {
+                assert_eq!(
+                    entry.capability,
+                    module.capability().as_str(),
+                    "`{}.{}`",
+                    module.name(),
+                    entry.name
+                );
+            }
         }
     }
 

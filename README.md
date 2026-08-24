@@ -37,7 +37,7 @@ outlines and capability requirements, a deterministic formatter, a
 tree-walking interpreter, Host API dispatch with grant enforcement, task
 scopes, and runtime budgets for fuel, deadlines, and host calls with tracing.
 Not yet implemented: static type checking, concurrent task execution, the
-`http`, `database`, and `clock` hosts, `cove build`, `cove test`, and the
+`http`, `database`, and `process` hosts, `cove build`, `cove test`, and the
 garbage collector.
 
 The implementation direction is recorded in
