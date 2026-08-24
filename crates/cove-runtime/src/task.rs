@@ -19,7 +19,7 @@ use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 use crate::error::RuntimeError;
-use crate::value::{MapKey, Value};
+use crate::value::Value;
 
 /// What a spawned task has done so far.
 #[derive(Clone, Debug)]
@@ -209,19 +209,18 @@ fn violation(path: &str, value: &Value) -> Option<NotTaskSafe> {
             path: path.to_string(),
             type_name: value.type_name(),
         }),
-        // `Array`, `Map`, and `Set` are immutable, so they cross exactly when
+        // `Array` and `Map` are immutable, so they cross exactly when
         // everything they contain does.
         Value::Array(items) => items
             .iter()
             .enumerate()
             .find_map(|(i, item)| violation(&format!("{path}[{i}]"), item)),
-        Value::Set(items) => items
-            .iter()
-            .enumerate()
-            .find_map(|(i, item)| violation(&format!("{path}[{i}]"), item)),
+        // A `Set` element is a `MapKey`: always `Bool`, `Int`, `Str`, or a
+        // payload-free enum case, all of which are unconditionally task-safe.
+        Value::Set(_) => None,
         Value::Map(entries) => entries
             .iter()
-            .find_map(|(key, item)| violation(&format!("{path}[{}]", key_text(key)), item)),
+            .find_map(|(key, item)| violation(&format!("{path}[{key}]"), item)),
         Value::Struct(structure) => structure
             .fields
             .iter()
@@ -252,16 +251,6 @@ fn violation(path: &str, value: &Value) -> Option<NotTaskSafe> {
             path: path.to_string(),
             type_name: value.type_name(),
         }),
-    }
-}
-
-/// How a map key appears inside a capture path.
-fn key_text(key: &MapKey) -> String {
-    match key {
-        MapKey::Bool(value) => value.to_string(),
-        MapKey::Int(value) => value.to_string(),
-        MapKey::Str(value) => value.clone(),
-        MapKey::EnumCase(type_name, case) => format!("{type_name}.{case}"),
     }
 }
 

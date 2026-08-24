@@ -5,12 +5,13 @@
 //! so an arity or type mismatch is an ordinary [`RuntimeError`] that names the
 //! method it came from.
 
+use std::collections::{BTreeMap, BTreeSet};
 use std::rc::Rc;
 
 use cove_diag::Span;
 
 use crate::error::RuntimeError;
-use crate::value::{RangeBounds, Value, VectorStorage};
+use crate::value::{InvalidKey, MapKey, RangeBounds, Value, VectorStorage};
 
 /// How the builtins call back into the evaluator.
 ///
@@ -85,6 +86,44 @@ pub fn call_associated(
 ) -> Result<Value, RuntimeError> {
     match (type_name, name) {
         ("Vector", "of") => Ok(Value::Vector(VectorStorage::new(args))),
+        // `Map.of` takes the `MapEntry` values `MapEntry(key:, value:)`
+        // builds. A literal with two identical keys is a mistake, not an
+        // intent, so a duplicate key is rejected rather than resolved by
+        // silently keeping the first or last entry.
+        ("Map", "of") => {
+            let mut map: BTreeMap<MapKey, Value> = BTreeMap::new();
+            for arg in args {
+                let Value::Struct(entry) = &arg else {
+                    return Err(expects_map_entry(&arg, span));
+                };
+                if &*entry.type_name != "MapEntry" {
+                    return Err(expects_map_entry(&arg, span));
+                }
+                let key_value = entry.get("key").expect("MapEntry always has a `key` field");
+                let key = to_map_key("Map.of", "map key", key_value, span)?;
+                if map.contains_key(&key) {
+                    return Err(duplicate_key_error("Map.of", "key", &key, span));
+                }
+                let value = entry
+                    .get("value")
+                    .expect("MapEntry always has a `value` field")
+                    .clone();
+                map.insert(key, value);
+            }
+            Ok(Value::Map(Rc::new(map)))
+        }
+        // `Set.of` rejects a duplicate element for the same reason `Map.of`
+        // rejects a duplicate key.
+        ("Set", "of") => {
+            let mut set: BTreeSet<MapKey> = BTreeSet::new();
+            for item in args {
+                let key = to_map_key("Set.of", "set element", &item, span)?;
+                if !set.insert(key.clone()) {
+                    return Err(duplicate_key_error("Set.of", "element", &key, span));
+                }
+            }
+            Ok(Value::Set(Rc::new(set)))
+        }
         ("Int", "parse") => {
             let args = expect_args("Int.parse", args, 1, span)?;
             let Value::Str(text) = &args[0] else {
@@ -162,6 +201,93 @@ pub fn call_method(
                 _ => Err(no_method("Vector", name, span)),
             }
         }
+        Value::Map(entries) => match name {
+            "get" => {
+                let args = expect_args("Map.get", args, 1, span)?;
+                let key = to_map_key("Map.get", "map key", &args[0], span)?;
+                Ok(entries
+                    .get(&key)
+                    .cloned()
+                    .map(Value::some)
+                    .unwrap_or_else(Value::none))
+            }
+            "contains" => {
+                let args = expect_args("Map.contains", args, 1, span)?;
+                let key = to_map_key("Map.contains", "map key", &args[0], span)?;
+                Ok(Value::Bool(entries.contains_key(&key)))
+            }
+            "length" => {
+                expect_args(name, args, 0, span)?;
+                Ok(Value::Int(entries.len() as i64))
+            }
+            "isEmpty" => {
+                expect_args(name, args, 0, span)?;
+                Ok(Value::Bool(entries.is_empty()))
+            }
+            // Ascending key order, matching the `BTreeMap` storage and the
+            // order `for` iterates.
+            "keys" => {
+                expect_args(name, args, 0, span)?;
+                Ok(Value::Array(entries.keys().map(MapKey::to_value).collect()))
+            }
+            "values" => {
+                expect_args(name, args, 0, span)?;
+                Ok(Value::Array(entries.values().cloned().collect()))
+            }
+            // `Map` is immutable, so `inserted`/`removed` return a new map
+            // rather than write through `entries`; the past-participle names
+            // say so, unlike `Vector`'s mutating `push`.
+            "inserted" => {
+                let mut args = expect_args("Map.inserted", args, 2, span)?;
+                let value = args.remove(1);
+                let key = to_map_key("Map.inserted", "map key", &args[0], span)?;
+                let mut next = (**entries).clone();
+                next.insert(key, value);
+                Ok(Value::Map(Rc::new(next)))
+            }
+            "removed" => {
+                let args = expect_args("Map.removed", args, 1, span)?;
+                let key = to_map_key("Map.removed", "map key", &args[0], span)?;
+                let mut next = (**entries).clone();
+                next.remove(&key);
+                Ok(Value::Map(Rc::new(next)))
+            }
+            _ => Err(no_method("Map", name, span)),
+        },
+        Value::Set(items) => match name {
+            "contains" => {
+                let args = expect_args("Set.contains", args, 1, span)?;
+                let key = to_map_key("Set.contains", "set element", &args[0], span)?;
+                Ok(Value::Bool(items.contains(&key)))
+            }
+            "length" => {
+                expect_args(name, args, 0, span)?;
+                Ok(Value::Int(items.len() as i64))
+            }
+            "isEmpty" => {
+                expect_args(name, args, 0, span)?;
+                Ok(Value::Bool(items.is_empty()))
+            }
+            "toArray" => {
+                expect_args(name, args, 0, span)?;
+                Ok(Value::Array(items.iter().map(MapKey::to_value).collect()))
+            }
+            "inserted" => {
+                let args = expect_args("Set.inserted", args, 1, span)?;
+                let key = to_map_key("Set.inserted", "set element", &args[0], span)?;
+                let mut next = (**items).clone();
+                next.insert(key);
+                Ok(Value::Set(Rc::new(next)))
+            }
+            "removed" => {
+                let args = expect_args("Set.removed", args, 1, span)?;
+                let key = to_map_key("Set.removed", "set element", &args[0], span)?;
+                let mut next = (**items).clone();
+                next.remove(&key);
+                Ok(Value::Set(Rc::new(next)))
+            }
+            _ => Err(no_method("Set", name, span)),
+        },
         Value::Str(text) => match name {
             "length" => {
                 expect_args(name, args, 0, span)?;
@@ -349,11 +475,67 @@ fn no_method(type_name: &str, method: &str, span: Span) -> RuntimeError {
     RuntimeError::new(format!("`{type_name}` has no method `{method}`")).at(span)
 }
 
+/// Converts `value` to a [`MapKey`], or reports why it cannot be a map key or
+/// set element.
+fn to_map_key(method: &str, role: &str, value: &Value, span: Span) -> Result<MapKey, RuntimeError> {
+    MapKey::from_value(value).map_err(|invalid| invalid_key_error(method, role, &invalid, span))
+}
+
+/// Names the specific offending part when the invalid value is nested, such
+/// as `` a `Vector` inside `Point.tags` ``, rather than blaming the whole
+/// struct: the Language Card promises errors that teach the rule they name.
+fn invalid_key_error(method: &str, role: &str, invalid: &InvalidKey, span: Span) -> RuntimeError {
+    let message = if invalid.path.is_empty() {
+        format!(
+            "`{method}` cannot use a `{}` as a {role}",
+            invalid.type_name
+        )
+    } else {
+        format!(
+            "`{method}` cannot use a `{}` inside `{}` as a {role}",
+            invalid.type_name, invalid.path
+        )
+    };
+    RuntimeError::new(message)
+        .at(span)
+        .with_rule(invalid.rule())
+        .with_help(invalid.help())
+}
+
+/// `Map.of` and `Set.of` reject a duplicate key or element rather than
+/// silently keeping one entry, because a literal with two identical keys is a
+/// mistake, not an intent.
+fn duplicate_key_error(method: &str, role: &str, key: &MapKey, span: Span) -> RuntimeError {
+    RuntimeError::new(format!("`{method}` was given the {role} `{key}` more than once"))
+        .at(span)
+        .with_rule(
+            "A literal with two identical keys is a mistake, not an intent; duplicate keys are rejected rather than silently resolved by keeping the last one.",
+        )
+        .with_help(format!("remove the duplicate, or give it a different {role}"))
+}
+
+/// `Map.of` takes `MapEntry` values, built with `MapEntry(key:, value:)`.
+fn expects_map_entry(found: &Value, span: Span) -> RuntimeError {
+    RuntimeError::new(format!(
+        "`Map.of` expects `MapEntry` values, but found `{}`",
+        found.type_name()
+    ))
+    .at(span)
+    .with_rule(
+        "`Map.of(entries: MapEntry<K, V>...)` takes values built with `MapEntry(key:, value:)`.",
+    )
+}
+
 /// The builtin sequences, which all report their element count the same way.
 fn is_sequence(receiver: &Value) -> bool {
     matches!(
         receiver,
-        Value::Array(_) | Value::Vector(_) | Value::Str(_) | Value::Range { .. }
+        Value::Array(_)
+            | Value::Vector(_)
+            | Value::Str(_)
+            | Value::Range { .. }
+            | Value::Map(_)
+            | Value::Set(_)
     )
 }
 

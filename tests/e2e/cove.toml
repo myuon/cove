@@ -10,6 +10,14 @@ allow = ["console"]
 entry = "coll_freeze.main"
 allow = ["console"]
 
+[run.coll_map]
+entry = "coll_map.main"
+allow = ["console"]
+
+[run.coll_set]
+entry = "coll_set.main"
+allow = ["console"]
+
 [run.coll_vector]
 entry = "coll_vector.main"
 allow = ["console"]
@@ -32,6 +40,10 @@ allow = ["console"]
 
 [run.fail_freeze_aliased]
 entry = "fail_freeze_aliased.main"
+allow = ["console"]
+
+[run.fail_invalid_map_key]
+entry = "fail_invalid_map_key.main"
 allow = ["console"]
 
 [run.fail_int_overflow]

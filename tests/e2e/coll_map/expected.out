@@ -1,0 +1,11 @@
+literal {Alice: 30, Bob: 25}
+length 2 isEmpty false
+get Some(30) None
+contains true false
+keys [Alice, Bob] values [30, 25]
+inserted {Alice: 30, Bob: 25, Zoe: 19}
+removed {Bob: 25, Zoe: 19}
+original is unchanged {Alice: 30, Bob: 25}
+iterated total 55
+empty {} true 0
+equality true false

@@ -1,0 +1,9 @@
+use console.println
+
+/// Uses a `Vector`, a mutable handle, as a map key.
+export fn main() -> Result<Unit, Error> {
+  println("about to build a map with an invalid key")?
+  let bad = Map.of(MapEntry(key: Vector.of(1), value: "nope"))
+  println("never printed {bad}")?
+  Ok(())
+}

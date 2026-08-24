@@ -1,0 +1,29 @@
+use console.println
+
+/// Prints `Set` construction, membership, pure updates, and iteration.
+export fn main() -> Result<Unit, Error> {
+  let letters = Set.of("b", "a", "c")
+  println("literal {letters}")?
+  println("length {letters.length()} isEmpty {letters.isEmpty()}")?
+  println("contains {letters.contains("a")} {letters.contains("z")}")?
+  println("toArray {letters.toArray()}")?
+
+  let inserted = letters.inserted("d")
+  let removed = inserted.removed("b")
+  println("inserted {inserted}")?
+  println("removed {removed}")?
+  println("original is unchanged {letters}")?
+
+  var joined = ""
+  for item in letters {
+    joined = "{joined}{item}"
+  }
+  println("iterated {joined}")?
+
+  let empty = Set.of()
+  println("empty {empty} {empty.isEmpty()} {empty.length()}")?
+
+  let same = Set.of("c", "b", "a")
+  println("equality {letters == same} {letters == inserted}")?
+  Ok(())
+}
