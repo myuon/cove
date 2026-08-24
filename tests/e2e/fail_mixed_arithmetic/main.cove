@@ -1,0 +1,8 @@
+use console.println
+
+/// Adds an `Int` to a `Float`, which Cove never converts implicitly.
+export fn main() -> Result<Unit, Error> {
+  println("about to mix an Int and a Float")?
+  println("never printed {1 + 1.0}")?
+  Ok(())
+}

@@ -1,0 +1,6 @@
+bound 8
+passed 10
+inline 105
+returned 7
+the closure still sees captured 1
+the original is now 99

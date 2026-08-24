@@ -1,0 +1,26 @@
+use console.println
+
+/// A value with a field and a method worth interpolating.
+export struct Reading { label: String, celsius: Int }
+
+impl Reading {
+  /// Returns this reading in tenths of a degree.
+  fn tenths(self) -> Int {
+    self.celsius * 10
+  }
+}
+
+/// Prints every form of string interpolation.
+export fn main() -> Result<Unit, Error> {
+  let name = "cove"
+  let reading = Reading(label: "outside", celsius: 21)
+
+  println("bare name {name}")?
+  println("field access {reading.label}")?
+  println("method call {reading.tenths()}")?
+  println("arithmetic {reading.celsius * 2 + 1}")?
+  println("nested {"inner {name} and {1 + 1}"} outer")?
+  println("escaped braces \{name\} stay literal")?
+  println("whole value {reading}")?
+  Ok(())
+}

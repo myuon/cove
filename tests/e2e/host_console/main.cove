@@ -1,0 +1,14 @@
+use console.println
+use console
+
+/// Prints through both the imported name and the qualified host module.
+export fn main() -> Result<Unit, Error> {
+  println("unqualified println")?
+  console.println("qualified println")?
+  console.print("print emits ")?
+  console.print("no newline")?
+  console.println("")?
+  console.println("two", "arguments")?
+  println("done")?
+  Ok(())
+}

@@ -25,6 +25,17 @@ pub struct FnEntry {
     pub receiver_type: Option<String>,
     /// Capabilities used directly in this function's body.
     pub direct_capabilities: BTreeSet<Capability>,
+    /// Capabilities this function requires, including those reached through
+    /// calls to other declarations in the same module.
+    ///
+    /// A call through a field access (`receiver.method(...)`) whose receiver
+    /// is not a bare reference to a struct or enum this module declares is
+    /// resolved to *every* method in the module sharing that name. There is
+    /// no static type checker yet to narrow the receiver's actual type, so
+    /// this is a deliberate over-approximation: it can report a capability a
+    /// function does not really need, but never omits one it does. Static
+    /// type checking would let this be exact.
+    pub required_capabilities: BTreeSet<Capability>,
 }
 
 #[derive(Debug)]
@@ -177,6 +188,9 @@ fn resolve_module(
     let mut enum_spans: BTreeMap<String, Span> = BTreeMap::new();
     let mut alias_spans: BTreeMap<String, Span> = BTreeMap::new();
     let mut pending_impls: Vec<(&cove_syntax::ast::ImplBlock, Span)> = Vec::new();
+    // Raw call sites found in each declaration's body, resolved to call-graph
+    // edges once every declaration in the module is known (pass 4).
+    let mut call_sites: BTreeMap<FnKey, Vec<CallShape>> = BTreeMap::new();
 
     for unit in &module.units {
         for item in &unit.ast.items {
@@ -194,8 +208,9 @@ fn resolve_module(
                         continue;
                     }
                     missing_doc(warnings, item, &decl.name.node, decl.name.span);
-                    let capabilities =
-                        capabilities_in(&decl.body, &resolved.host_uses, &resolved.host_items);
+                    let (capabilities, calls) =
+                        analyze_body(&decl.body, &resolved.host_uses, &resolved.host_items);
+                    call_sites.insert(FnKey::Fn(decl.name.node.clone()), calls);
                     resolved.functions.insert(
                         decl.name.node.clone(),
                         FnEntry {
@@ -204,6 +219,7 @@ fn resolve_module(
                             doc: item.doc.clone(),
                             receiver_type: None,
                             direct_capabilities: capabilities,
+                            required_capabilities: BTreeSet::new(),
                         },
                     );
                 }
@@ -325,8 +341,12 @@ fn resolve_module(
                     }
                     method_spans.insert(key.clone(), decl.name.span);
                     missing_doc(warnings, inner, &decl.name.node, decl.name.span);
-                    let capabilities =
-                        capabilities_in(&decl.body, &resolved.host_uses, &resolved.host_items);
+                    let (capabilities, calls) =
+                        analyze_body(&decl.body, &resolved.host_uses, &resolved.host_items);
+                    call_sites.insert(
+                        FnKey::Method(type_name.clone(), decl.name.node.clone()),
+                        calls,
+                    );
                     resolved.methods.insert(
                         key,
                         FnEntry {
@@ -335,6 +355,7 @@ fn resolve_module(
                             doc: inner.doc.clone(),
                             receiver_type: Some(type_name.clone()),
                             direct_capabilities: capabilities,
+                            required_capabilities: BTreeSet::new(),
                         },
                     );
                 }
@@ -351,6 +372,15 @@ fn resolve_module(
             }
         }
     }
+
+    // Pass 4: derive `required_capabilities` as the least fixed point of the
+    // module's call graph, now that every function, method, struct, and enum
+    // is known.
+    let call_graph: BTreeMap<FnKey, BTreeSet<FnKey>> = call_sites
+        .into_iter()
+        .map(|(key, calls)| (key, resolve_calls(&calls, &resolved)))
+        .collect();
+    propagate_capabilities(&mut resolved, &call_graph);
 
     resolved
 }
@@ -390,20 +420,44 @@ fn missing_doc(warnings: &mut Vec<Diagnostic>, item: &Item, name: &str, span: Sp
     }
 }
 
-/// Derives the Host API capabilities a function body calls directly.
+/// Derives the Host API capabilities a function body calls directly, plus
+/// the raw call sites found in it (used to build the module's call graph in
+/// a later pass).
 ///
 /// This only looks at calls textually inside `body` (including nested
-/// blocks, lambdas, match arms, and loops). Capabilities required by a
-/// function this one calls are not propagated here; call-graph propagation
-/// across function boundaries is future work.
-fn capabilities_in(
+/// blocks, lambdas, match arms, and loops).
+fn analyze_body(
     body: &Block,
     host_uses: &BTreeSet<String>,
     host_items: &BTreeMap<String, String>,
-) -> BTreeSet<Capability> {
+) -> (BTreeSet<Capability>, Vec<CallShape>) {
     let mut capabilities = BTreeSet::new();
-    walk_block(body, host_uses, host_items, &mut capabilities);
-    capabilities
+    let mut calls = Vec::new();
+    walk_block(body, host_uses, host_items, &mut capabilities, &mut calls);
+    (capabilities, calls)
+}
+
+/// The shape of one call site's callee, kept just precise enough to resolve
+/// which declarations of the module it may reach. Resolution happens later,
+/// once every declaration in the module is known; see [`resolve_calls`].
+#[derive(Clone, Debug)]
+enum CallShape {
+    /// `f(...)`.
+    Ident(String),
+    /// `receiver.method(...)`. `receiver_ident` is the receiver's name when
+    /// it is a bare identifier (such as `self` or a struct/enum name used as
+    /// a namespace), and `None` for any other receiver expression.
+    Field {
+        receiver_ident: Option<String>,
+        method: String,
+    },
+}
+
+/// A node in a module's call graph: a free function or an `impl` method.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+enum FnKey {
+    Fn(String),
+    Method(String, String),
 }
 
 fn walk_block(
@@ -411,12 +465,13 @@ fn walk_block(
     host_uses: &BTreeSet<String>,
     host_items: &BTreeMap<String, String>,
     out: &mut BTreeSet<Capability>,
+    out_calls: &mut Vec<CallShape>,
 ) {
     for stmt in &block.statements {
-        walk_stmt(stmt, host_uses, host_items, out);
+        walk_stmt(stmt, host_uses, host_items, out, out_calls);
     }
     if let Some(tail) = &block.tail {
-        walk_expr(tail, host_uses, host_items, out);
+        walk_expr(tail, host_uses, host_items, out, out_calls);
     }
 }
 
@@ -425,12 +480,13 @@ fn walk_stmt(
     host_uses: &BTreeSet<String>,
     host_items: &BTreeMap<String, String>,
     out: &mut BTreeSet<Capability>,
+    out_calls: &mut Vec<CallShape>,
 ) {
     match &stmt.kind {
-        StmtKind::Let { value, .. } => walk_expr(value, host_uses, host_items, out),
-        StmtKind::Expr(expr) => walk_expr(expr, host_uses, host_items, out),
-        // A nested declaration (such as a local `fn`) is its own scope; call
-        // graph propagation into it is future work, matching capabilities_in.
+        StmtKind::Let { value, .. } => walk_expr(value, host_uses, host_items, out, out_calls),
+        StmtKind::Expr(expr) => walk_expr(expr, host_uses, host_items, out, out_calls),
+        // A nested declaration (such as a local `fn`) is its own scope; it is
+        // resolved and walked on its own, not as part of the enclosing body.
         StmtKind::Item(_) => {}
     }
 }
@@ -440,6 +496,7 @@ fn walk_expr(
     host_uses: &BTreeSet<String>,
     host_items: &BTreeMap<String, String>,
     out: &mut BTreeSet<Capability>,
+    out_calls: &mut Vec<CallShape>,
 ) {
     match &expr.kind {
         ExprKind::Int(_)
@@ -451,16 +508,16 @@ fn walk_expr(
         ExprKind::Str(parts) => {
             for part in parts {
                 if let StrPart::Interpolation(inner) = part {
-                    walk_expr(inner, host_uses, host_items, out);
+                    walk_expr(inner, host_uses, host_items, out, out_calls);
                 }
             }
         }
         ExprKind::ArrayLit(items) => {
             for item in items {
-                walk_expr(item, host_uses, host_items, out);
+                walk_expr(item, host_uses, host_items, out, out_calls);
             }
         }
-        ExprKind::Field { base, .. } => walk_expr(base, host_uses, host_items, out),
+        ExprKind::Field { base, .. } => walk_expr(base, host_uses, host_items, out, out_calls),
         ExprKind::Call {
             callee,
             args,
@@ -470,63 +527,200 @@ fn walk_expr(
             if let Some(capability) = call_capability(callee, host_uses, host_items) {
                 out.insert(capability);
             }
-            walk_expr(callee, host_uses, host_items, out);
+            if let Some(shape) = call_shape(callee) {
+                out_calls.push(shape);
+            }
+            walk_expr(callee, host_uses, host_items, out, out_calls);
             for arg in args {
-                walk_expr(&arg.value, host_uses, host_items, out);
+                walk_expr(&arg.value, host_uses, host_items, out, out_calls);
             }
             if let Some(trailing) = trailing {
-                walk_expr(trailing, host_uses, host_items, out);
+                walk_expr(trailing, host_uses, host_items, out, out_calls);
             }
         }
-        ExprKind::Unary { operand, .. } => walk_expr(operand, host_uses, host_items, out),
+        ExprKind::Unary { operand, .. } => {
+            walk_expr(operand, host_uses, host_items, out, out_calls)
+        }
         ExprKind::Binary { lhs, rhs, .. } => {
-            walk_expr(lhs, host_uses, host_items, out);
-            walk_expr(rhs, host_uses, host_items, out);
+            walk_expr(lhs, host_uses, host_items, out, out_calls);
+            walk_expr(rhs, host_uses, host_items, out, out_calls);
         }
         ExprKind::Assign { target, value, .. } => {
-            walk_expr(target, host_uses, host_items, out);
-            walk_expr(value, host_uses, host_items, out);
+            walk_expr(target, host_uses, host_items, out, out_calls);
+            walk_expr(value, host_uses, host_items, out, out_calls);
         }
         ExprKind::Try(inner) | ExprKind::Await(inner) => {
-            walk_expr(inner, host_uses, host_items, out)
+            walk_expr(inner, host_uses, host_items, out, out_calls)
         }
-        ExprKind::Block(block) => walk_block(block, host_uses, host_items, out),
+        ExprKind::Block(block) => walk_block(block, host_uses, host_items, out, out_calls),
         ExprKind::If {
             condition,
             then_branch,
             else_branch,
         } => {
-            walk_expr(condition, host_uses, host_items, out);
-            walk_block(then_branch, host_uses, host_items, out);
+            walk_expr(condition, host_uses, host_items, out, out_calls);
+            walk_block(then_branch, host_uses, host_items, out, out_calls);
             if let Some(else_branch) = else_branch {
-                walk_expr(else_branch, host_uses, host_items, out);
+                walk_expr(else_branch, host_uses, host_items, out, out_calls);
             }
         }
         ExprKind::Match { scrutinee, arms } => {
-            walk_expr(scrutinee, host_uses, host_items, out);
+            walk_expr(scrutinee, host_uses, host_items, out, out_calls);
             for MatchArm { body, .. } in arms {
-                walk_expr(body, host_uses, host_items, out);
+                walk_expr(body, host_uses, host_items, out, out_calls);
             }
         }
         ExprKind::For { iterable, body, .. } => {
-            walk_expr(iterable, host_uses, host_items, out);
-            walk_block(body, host_uses, host_items, out);
+            walk_expr(iterable, host_uses, host_items, out, out_calls);
+            walk_block(body, host_uses, host_items, out, out_calls);
         }
         ExprKind::While { condition, body } => {
-            walk_expr(condition, host_uses, host_items, out);
-            walk_block(body, host_uses, host_items, out);
+            walk_expr(condition, host_uses, host_items, out, out_calls);
+            walk_block(body, host_uses, host_items, out, out_calls);
         }
         ExprKind::Return(inner) => {
             if let Some(inner) = inner {
-                walk_expr(inner, host_uses, host_items, out);
+                walk_expr(inner, host_uses, host_items, out, out_calls);
             }
         }
-        ExprKind::Lambda { body, .. } => walk_block(body, host_uses, host_items, out),
-        ExprKind::Scope { body, .. } => walk_block(body, host_uses, host_items, out),
+        ExprKind::Lambda { body, .. } => walk_block(body, host_uses, host_items, out, out_calls),
+        ExprKind::Scope { body, .. } => walk_block(body, host_uses, host_items, out, out_calls),
         ExprKind::Range { start, end, .. } => {
-            walk_expr(start, host_uses, host_items, out);
-            walk_expr(end, host_uses, host_items, out);
+            walk_expr(start, host_uses, host_items, out, out_calls);
+            walk_expr(end, host_uses, host_items, out, out_calls);
         }
+    }
+}
+
+/// The call-graph shape of `callee`, when it is a form the call graph can
+/// resolve (a bare name or a field access). Any other callee, such as an
+/// immediately-called lambda, contributes no call-graph edge.
+fn call_shape(callee: &Expr) -> Option<CallShape> {
+    match &callee.kind {
+        ExprKind::Ident(name) => Some(CallShape::Ident(name.clone())),
+        ExprKind::Field { base, name } => {
+            let receiver_ident = match &base.kind {
+                ExprKind::Ident(base_name) => Some(base_name.clone()),
+                _ => None,
+            };
+            Some(CallShape::Field {
+                receiver_ident,
+                method: name.node.clone(),
+            })
+        }
+        _ => None,
+    }
+}
+
+/// Resolves the raw call sites found in one declaration's body to the
+/// declarations of `resolved` they may call.
+///
+/// A bare-name call resolves to the module's free function of that name, if
+/// any. A field-access call whose receiver is a bare identifier naming a
+/// struct or enum this module declares resolves precisely to that type's
+/// method. Every other field-access call — a receiver that is `self`, a
+/// local variable, or any other expression whose type is unknown without a
+/// type checker — resolves to *every* method in the module sharing that
+/// name. That is a deliberate over-approximation: it can name a capability a
+/// call site does not really reach, but never misses one.
+fn resolve_calls(calls: &[CallShape], resolved: &ResolvedModule) -> BTreeSet<FnKey> {
+    let mut targets = BTreeSet::new();
+    for call in calls {
+        match call {
+            CallShape::Ident(name) => {
+                if resolved.functions.contains_key(name) {
+                    targets.insert(FnKey::Fn(name.clone()));
+                }
+            }
+            CallShape::Field {
+                receiver_ident,
+                method,
+            } => {
+                let known_type = receiver_ident.as_ref().filter(|type_name| {
+                    resolved.structs.contains_key(type_name.as_str())
+                        || resolved.enums.contains_key(type_name.as_str())
+                });
+                if let Some(type_name) = known_type {
+                    if resolved
+                        .methods
+                        .contains_key(&(type_name.clone(), method.clone()))
+                    {
+                        targets.insert(FnKey::Method(type_name.clone(), method.clone()));
+                    }
+                } else {
+                    for (type_name, method_name) in resolved.methods.keys() {
+                        if method_name == method {
+                            targets.insert(FnKey::Method(type_name.clone(), method_name.clone()));
+                        }
+                    }
+                }
+            }
+        }
+    }
+    targets
+}
+
+/// Fills in `required_capabilities` on every function and method of
+/// `resolved` as the least fixed point of "start from what a declaration
+/// calls directly, then union in whatever every declaration it (transitively)
+/// calls requires."
+///
+/// A fixed point rather than a recursive walk is required because the call
+/// graph can be cyclic: direct and mutual recursion must not recurse forever.
+/// Each round only ever adds capabilities to a finite set, so the loop is
+/// guaranteed to terminate.
+fn propagate_capabilities(
+    resolved: &mut ResolvedModule,
+    call_graph: &BTreeMap<FnKey, BTreeSet<FnKey>>,
+) {
+    let mut required: BTreeMap<FnKey, BTreeSet<Capability>> = BTreeMap::new();
+    for (name, entry) in &resolved.functions {
+        required.insert(FnKey::Fn(name.clone()), entry.direct_capabilities.clone());
+    }
+    for ((type_name, method_name), entry) in &resolved.methods {
+        required.insert(
+            FnKey::Method(type_name.clone(), method_name.clone()),
+            entry.direct_capabilities.clone(),
+        );
+    }
+
+    let keys: Vec<FnKey> = required.keys().cloned().collect();
+    loop {
+        let mut changed = false;
+        for key in &keys {
+            let Some(callees) = call_graph.get(key) else {
+                continue;
+            };
+            let mut additions = BTreeSet::new();
+            for callee in callees {
+                let Some(callee_caps) = required.get(callee) else {
+                    continue;
+                };
+                for cap in callee_caps {
+                    if !required[key].contains(cap) {
+                        additions.insert(cap.clone());
+                    }
+                }
+            }
+            if !additions.is_empty() {
+                required.get_mut(key).unwrap().extend(additions);
+                changed = true;
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+
+    for (name, entry) in resolved.functions.iter_mut() {
+        entry.required_capabilities = required
+            .remove(&FnKey::Fn(name.clone()))
+            .unwrap_or_default();
+    }
+    for ((type_name, method_name), entry) in resolved.methods.iter_mut() {
+        entry.required_capabilities = required
+            .remove(&FnKey::Method(type_name.clone(), method_name.clone()))
+            .unwrap_or_default();
     }
 }
 
@@ -781,5 +975,132 @@ mod tests {
         let package = crate::package::load(&root, &mut sources).expect("examples package loads");
         let program = resolve(&package);
         assert!(program.is_ok(), "examples package should resolve cleanly");
+    }
+
+    #[test]
+    fn required_capabilities_reach_through_a_helper_chain() {
+        let module = module_from_sources(
+            "chain",
+            &["use console.println\n\n\
+                 /// Logs a message.\n\
+                 fn log(msg: String) {\n  console.println(msg)\n}\n\n\
+                 /// Entry point; never calls a Host API directly.\n\
+                 export fn main() {\n  log(\"hi\")\n}\n"],
+        );
+        let package = package_of(module);
+        let program = resolve(&package).expect("resolves");
+        let main = &program.modules["chain"].functions["main"];
+        assert!(main.direct_capabilities.is_empty());
+        assert!(main
+            .required_capabilities
+            .contains(&Capability::new("console")));
+    }
+
+    #[test]
+    fn required_capabilities_reach_through_a_method_call() {
+        let module = module_from_sources(
+            "methodprop",
+            &["use console.println\n\n\
+                 /// A thing with an id.\n\
+                 export struct Thing {\n  id: String\n}\n\n\
+                 impl Thing {\n  \
+                 /// Prints the id.\n  \
+                 fn touch(self) {\n    console.println(self.id)\n  }\n}\n\n\
+                 /// Entry point that reaches the Host API only through `Thing.touch`.\n\
+                 export fn main() {\n  Thing.touch()\n}\n"],
+        );
+        let package = package_of(module);
+        let program = resolve(&package).expect("resolves");
+        let touch =
+            &program.modules["methodprop"].methods[&("Thing".to_string(), "touch".to_string())];
+        assert!(touch
+            .direct_capabilities
+            .contains(&Capability::new("console")));
+        let main = &program.modules["methodprop"].functions["main"];
+        assert!(main.direct_capabilities.is_empty());
+        assert!(main
+            .required_capabilities
+            .contains(&Capability::new("console")));
+    }
+
+    #[test]
+    fn required_capabilities_propagate_through_mutual_recursion() {
+        let module = module_from_sources(
+            "mutual",
+            &["use console.println\n\n\
+                 /// True when `n` is even; recurses through `isOdd`.\n\
+                 fn isEven(n: Int) -> Bool {\n  \
+                 if n == 0 {\n    true\n  } else {\n    isOdd(n - 1)\n  }\n}\n\n\
+                 /// True when `n` is odd; logs, then recurses through `isEven`.\n\
+                 fn isOdd(n: Int) -> Bool {\n  \
+                 console.println(\"checking\")\n  \
+                 if n == 0 {\n    false\n  } else {\n    isEven(n - 1)\n  }\n}\n\n\
+                 /// Entry point.\n\
+                 export fn main() -> Bool {\n  isEven(4)\n}\n"],
+        );
+        let package = package_of(module);
+        let program = resolve(&package).expect("resolves");
+        let resolved = &program.modules["mutual"];
+
+        assert!(resolved.functions["isOdd"]
+            .direct_capabilities
+            .contains(&Capability::new("console")));
+        assert!(resolved.functions["isEven"].direct_capabilities.is_empty());
+
+        // Neither function calls the other's host capability directly, but
+        // the fixpoint must reach it through the recursive cycle without
+        // looping forever.
+        assert!(resolved.functions["isEven"]
+            .required_capabilities
+            .contains(&Capability::new("console")));
+        assert!(resolved.functions["main"]
+            .required_capabilities
+            .contains(&Capability::new("console")));
+    }
+
+    #[test]
+    fn a_function_requiring_nothing_stays_empty() {
+        let module = module_from_sources(
+            "pure",
+            &[
+                "/// Adds two numbers.\nfn add(a: Int, b: Int) -> Int {\n  a + b\n}\n\n\
+                 /// Entry point; calls only a pure helper.\n\
+                 export fn main() -> Int {\n  add(1, 2)\n}\n",
+            ],
+        );
+        let package = package_of(module);
+        let program = resolve(&package).expect("resolves");
+        let resolved = &program.modules["pure"];
+        assert!(resolved.functions["add"].required_capabilities.is_empty());
+        assert!(resolved.functions["main"].required_capabilities.is_empty());
+    }
+
+    #[test]
+    fn derives_required_capabilities_for_the_real_examples_package() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples");
+        let mut sources = SourceMap::new();
+        let package = crate::package::load(&root, &mut sources).expect("examples package loads");
+        let program = resolve(&package).expect("examples package resolves");
+
+        let hello_main = &program.modules["hello"].functions["main"];
+        assert!(hello_main
+            .required_capabilities
+            .contains(&Capability::new("console")));
+
+        let hello_greeting = &program.modules["hello"].functions["greeting"];
+        assert!(hello_greeting.required_capabilities.is_empty());
+
+        let restricted_main = &program.modules["restricted"].functions["main"];
+        assert!(restricted_main
+            .required_capabilities
+            .contains(&Capability::new("documents")));
+        assert!(restricted_main
+            .required_capabilities
+            .contains(&Capability::new("console")));
+
+        let config_load_config = &program.modules["config"].functions["loadConfig"];
+        assert!(config_load_config
+            .required_capabilities
+            .contains(&Capability::new("env")));
     }
 }

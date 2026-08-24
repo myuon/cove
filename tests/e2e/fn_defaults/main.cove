@@ -1,0 +1,22 @@
+use console.println
+
+/// Formats `value` with an optional unit and an optional prefix.
+fn measure(value: Int, unit: String = "m", prefix: String = "length") -> String {
+  "{prefix}: {value}{unit}"
+}
+
+/// Computes its default from an expression the callee evaluates.
+fn report(n: Int, budget: Int = 2 * 21) -> String {
+  "{n} of {budget}"
+}
+
+/// Prints calls that omit and supply default parameters.
+export fn main() -> Result<Unit, Error> {
+  println("both defaults {measure(3)}")?
+  println("one supplied {measure(3, "km")}")?
+  println("one supplied by label {measure(3, prefix: "distance")}")?
+  println("none defaulted {measure(3, "km", "distance")}")?
+  println("computed default {report(1)}")?
+  println("computed default supplied {report(1, 7)}")?
+  Ok(())
+}

@@ -1,0 +1,5 @@
+unqualified println
+qualified println
+print emits no newline
+two arguments
+done

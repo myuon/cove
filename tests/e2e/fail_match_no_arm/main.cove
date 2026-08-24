@@ -1,0 +1,21 @@
+use console.println
+
+/// Signal colour.
+export enum Signal {
+  Red
+  Green
+}
+
+/// Covers only one of the two cases.
+fn name(signal: Signal) -> String {
+  match signal {
+    Signal.Red => "red"
+  }
+}
+
+/// Reaches a `match` with no arm for the value it is given.
+export fn main() -> Result<Unit, Error> {
+  println(name(Signal.Red))?
+  println(name(Signal.Green))?
+  Ok(())
+}

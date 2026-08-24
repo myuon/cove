@@ -1,0 +1,13 @@
+use console.println
+use documents.read
+
+/// Prints a document the host exposes and names it refuses.
+export fn main() -> Result<Unit, Error> {
+  let text = read("note")?
+  println("words {text.words()}")?
+  println("count {text.words().count()}")?
+  println("missing {documents.read("absent")}")?
+  println("traversal {documents.read("../cove")}")?
+  println("nested path {documents.read("sub/note")}")?
+  Ok(())
+}

@@ -1,0 +1,80 @@
+use console.println
+
+/// Suit of a card.
+export enum Suit {
+  Hearts
+  Spades
+}
+
+/// A card that may carry a number or a name.
+export enum Card {
+  Blank
+  Numbered(Int)
+  Named(String)
+}
+
+/// Matches integer literals, a binding, and a negative literal.
+fn number(n: Int) -> String {
+  match n {
+    -1 => "literal minus one"
+    0 => "literal zero"
+    1 => "literal one"
+    other => "bound {other}"
+  }
+}
+
+/// Matches string literals and a wildcard.
+fn word(text: String) -> String {
+  match text {
+    "yes" => "literal yes"
+    "" => "literal empty"
+    _ => "wildcard"
+  }
+}
+
+/// Matches `Bool` literals.
+fn flag(on: Bool) -> String {
+  match on {
+    true => "literal true"
+    false => "literal false"
+  }
+}
+
+/// Matches qualified variants, a payload binding, and a block arm.
+fn describeCard(value: Card) -> String {
+  match value {
+    Card.Blank => "blank"
+    Card.Numbered(count) => {
+      let doubled = count * 2
+      "numbered {count} doubled {doubled}"
+    }
+    Card.Named(name) => "named {name}"
+  }
+}
+
+/// Names a suit through qualified variant patterns.
+fn suitName(suit: Suit) -> String {
+  match suit {
+    Suit.Hearts => "hearts"
+    Suit.Spades => "spades"
+  }
+}
+
+/// Prints every pattern form.
+export fn main() -> Result<Unit, Error> {
+  println(number(0))?
+  println(number(1))?
+  println(number(-1))?
+  println(number(42))?
+  println(word("yes"))?
+  println(word(""))?
+  println(word("no"))?
+  println(flag(true))?
+  println(flag(false))?
+  println(describeCard(Card.Blank))?
+  println(describeCard(Card.Numbered(21)))?
+  println(describeCard(Card.Named("ace")))?
+  println(suitName(Suit.Hearts))?
+  println(suitName(Suit.Spades))?
+  Ok(())
+}

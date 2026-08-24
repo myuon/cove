@@ -1,0 +1,5 @@
+associated function clicks=0
+after `var self` hit clicks=1
+hitMany returned 4
+the caller observes the mutation Counter(hits: 4, label: clicks)
+a `let` receiver still reads frozen=0

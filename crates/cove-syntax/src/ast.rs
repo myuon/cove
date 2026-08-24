@@ -146,6 +146,76 @@ pub enum TypeKind {
     Unit,
 }
 
+/// Renders a type back to the Cove source form it would be written in, so
+/// tooling such as `cove outline` can show a typed interface without the
+/// user writing it twice.
+impl std::fmt::Display for Type {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match &self.kind {
+            TypeKind::Unit => write!(f, "()"),
+            TypeKind::Named { path, args } => {
+                let path = path
+                    .iter()
+                    .map(|segment| segment.node.as_str())
+                    .collect::<Vec<_>>()
+                    .join(".");
+                write!(f, "{path}")?;
+                if !args.is_empty() {
+                    let args = args
+                        .iter()
+                        .map(|arg| arg.to_string())
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    write!(f, "<{args}>")?;
+                }
+                Ok(())
+            }
+            TypeKind::Fn {
+                is_async,
+                params,
+                return_type,
+            } => {
+                if *is_async {
+                    write!(f, "async ")?;
+                }
+                let params = params
+                    .iter()
+                    .map(|param| param.to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                write!(f, "fn({params})")?;
+                if let Some(return_type) = return_type {
+                    write!(f, " -> {return_type}")?;
+                }
+                Ok(())
+            }
+        }
+    }
+}
+
+/// Renders a parameter back to declaration syntax: `[var ]name: Type[...]`.
+/// A parameter with no type (a lambda parameter) prints just its name, and a
+/// function-type parameter with no name (the parser's convention for a bare
+/// type in a `fn(...)` type) prints just its type.
+impl std::fmt::Display for Param {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let Some(ty) = &self.ty else {
+            return write!(f, "{}", self.name.node);
+        };
+        if self.is_var {
+            write!(f, "var ")?;
+        }
+        if !self.name.node.is_empty() {
+            write!(f, "{}: ", self.name.node)?;
+        }
+        write!(f, "{ty}")?;
+        if self.variadic {
+            write!(f, "...")?;
+        }
+        Ok(())
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct Block {
     pub statements: Vec<Stmt>,
@@ -334,4 +404,171 @@ pub enum PatternKind {
         path: Vec<Ident>,
         payload: Vec<Pattern>,
     },
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn span() -> Span {
+        Span::new(cove_diag::FileId(0), 0, 0)
+    }
+
+    fn ident(name: &str) -> Ident {
+        Spanned::new(name.to_string(), span())
+    }
+
+    fn named(path: &[&str], args: Vec<Type>) -> Type {
+        Type {
+            kind: TypeKind::Named {
+                path: path.iter().map(|s| ident(s)).collect(),
+                args,
+            },
+            span: span(),
+        }
+    }
+
+    fn unit() -> Type {
+        Type {
+            kind: TypeKind::Unit,
+            span: span(),
+        }
+    }
+
+    fn param(name: &str, ty: Option<Type>) -> Param {
+        Param {
+            is_var: false,
+            name: ident(name),
+            ty,
+            variadic: false,
+            default: None,
+            span: span(),
+        }
+    }
+
+    #[test]
+    fn displays_a_plain_named_type() {
+        assert_eq!(named(&["Int"], vec![]).to_string(), "Int");
+    }
+
+    #[test]
+    fn displays_a_named_type_with_one_argument() {
+        assert_eq!(
+            named(&["Array"], vec![named(&["String"], vec![])]).to_string(),
+            "Array<String>"
+        );
+    }
+
+    #[test]
+    fn displays_a_dotted_path() {
+        assert_eq!(
+            named(&["http", "Request"], vec![]).to_string(),
+            "http.Request"
+        );
+    }
+
+    #[test]
+    fn displays_a_named_type_with_two_arguments() {
+        assert_eq!(
+            named(
+                &["Result"],
+                vec![named(&["Unit"], vec![]), named(&["Error"], vec![])]
+            )
+            .to_string(),
+            "Result<Unit, Error>"
+        );
+    }
+
+    #[test]
+    fn displays_nested_generics() {
+        let ty = named(
+            &["Map"],
+            vec![
+                named(&["String"], vec![]),
+                named(&["Array"], vec![named(&["EventHandler"], vec![])]),
+            ],
+        );
+        assert_eq!(ty.to_string(), "Map<String, Array<EventHandler>>");
+    }
+
+    #[test]
+    fn displays_unit() {
+        assert_eq!(unit().to_string(), "()");
+    }
+
+    #[test]
+    fn displays_a_fn_type_with_named_params_and_return_type() {
+        let ty = Type {
+            kind: TypeKind::Fn {
+                is_async: false,
+                params: vec![
+                    param("name", Some(named(&["Type"], vec![]))),
+                    param("other", Some(named(&["Type"], vec![]))),
+                ],
+                return_type: Some(Box::new(named(&["Ret"], vec![]))),
+            },
+            span: span(),
+        };
+        assert_eq!(ty.to_string(), "fn(name: Type, other: Type) -> Ret");
+    }
+
+    #[test]
+    fn displays_an_async_fn_type() {
+        let ty = Type {
+            kind: TypeKind::Fn {
+                is_async: true,
+                params: vec![],
+                return_type: None,
+            },
+            span: span(),
+        };
+        assert_eq!(ty.to_string(), "async fn()");
+    }
+
+    #[test]
+    fn displays_a_fn_type_with_no_return_type() {
+        let ty = Type {
+            kind: TypeKind::Fn {
+                is_async: false,
+                params: vec![param("x", Some(named(&["Int"], vec![])))],
+                return_type: None,
+            },
+            span: span(),
+        };
+        assert_eq!(ty.to_string(), "fn(x: Int)");
+    }
+
+    #[test]
+    fn displays_an_unnamed_fn_type_param() {
+        let ty = Type {
+            kind: TypeKind::Fn {
+                is_async: false,
+                params: vec![param("", Some(named(&["String"], vec![])))],
+                return_type: None,
+            },
+            span: span(),
+        };
+        assert_eq!(ty.to_string(), "fn(String)");
+    }
+
+    #[test]
+    fn displays_a_var_and_variadic_fn_type_param() {
+        let mut p = param("items", Some(named(&["Int"], vec![])));
+        p.is_var = true;
+        p.variadic = true;
+        let ty = Type {
+            kind: TypeKind::Fn {
+                is_async: false,
+                params: vec![p],
+                return_type: None,
+            },
+            span: span(),
+        };
+        assert_eq!(ty.to_string(), "fn(var items: Int...)");
+    }
+
+    #[test]
+    fn displays_a_lambda_param_with_no_type() {
+        assert_eq!(param("x", None).to_string(), "x");
+    }
 }

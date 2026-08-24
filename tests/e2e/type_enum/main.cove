@@ -1,0 +1,31 @@
+use console.println
+
+/// Lifecycle state, with and without payloads.
+export enum Status {
+  Pending
+  Active(Int)
+  Failed(String, Int)
+}
+
+/// Describes every case of `Status`.
+fn describe(status: Status) -> String {
+  match status {
+    Status.Pending => "pending"
+    Status.Active(since) => "active since {since}"
+    Status.Failed(reason, code) => "failed: {reason} ({code})"
+  }
+}
+
+/// Prints enum construction and a `match` over every case.
+export fn main() -> Result<Unit, Error> {
+  let pending = Status.Pending
+  let active = Status.Active(7)
+  let failed = Status.Failed("timeout", 504)
+  println("values {pending} {active} {failed}")?
+  println(describe(pending))?
+  println(describe(active))?
+  println(describe(failed))?
+  println("equality {pending == Status.Pending} {active == Status.Active(7)}")?
+  println("inequality {active == Status.Active(8)} {pending == active}")?
+  Ok(())
+}

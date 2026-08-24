@@ -1,0 +1,24 @@
+use console.println
+
+/// Prints `Array` construction, access, and iteration.
+export fn main(args: Array<String>) -> Result<Unit, Error> {
+  let items = [10, 20, 30]
+  println("literal {items}")?
+  println("length {items.length()} count {items.count()} isEmpty {items.isEmpty()}")?
+  println("in range {items.get(0)} {items.get(2)}")?
+  println("out of range {items.get(3)} {items.get(-1)}")?
+  println("unwrapOr {items.get(9).unwrapOr(0)}")?
+
+  var total = 0
+  for item in items {
+    total += item
+  }
+  println("iterated total {total}")?
+
+  let empty = []
+  println("empty {empty} {empty.isEmpty()} {empty.length()}")?
+
+  println("process arguments {args} {args.length()}")?
+  println("first argument {args.get(0).unwrapOr("<none>")}")?
+  Ok(())
+}

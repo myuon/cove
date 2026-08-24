@@ -1,0 +1,16 @@
+use console.println
+
+/// Prints one duration literal per unit, rendered through interpolation.
+export fn main() -> Result<Unit, Error> {
+  println("nanoseconds {1ns}")?
+  println("microseconds {1us}")?
+  println("milliseconds {1ms}")?
+  println("seconds {1s}")?
+  println("minutes {1m}")?
+  println("hours {1h}")?
+  println("separators {1_500ms}")?
+  println("sum {1s + 500ms}")?
+  println("difference {1s - 500ms}")?
+  println("comparison {1s > 999ms} {1000ms == 1s}")?
+  Ok(())
+}

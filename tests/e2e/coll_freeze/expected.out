@@ -1,0 +1,3 @@
+frozen [1, 2, 3, 4] length 4
+the result is an immutable array Some(1) false
+freeze consumed uniquely owned storage [a, b]

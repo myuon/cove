@@ -1,0 +1,7 @@
+use console.println
+
+/// Reports a domain failure to the host by returning `Err`.
+export fn main() -> Result<Unit, Error> {
+  println("the entry is about to fail")?
+  Err(Error("the requested report is not available"))
+}

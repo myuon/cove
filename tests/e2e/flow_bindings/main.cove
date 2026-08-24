@@ -1,0 +1,27 @@
+use console.println
+
+/// Prints `let`, `var`, assignment, and every compound assignment.
+export fn main() -> Result<Unit, Error> {
+  let fixed = 10
+  var total = fixed
+  println("start {fixed} {total}")?
+
+  total = 7
+  println("assign {total}")?
+  total += 5
+  println("add {total}")?
+  total -= 2
+  println("subtract {total}")?
+  total *= 4
+  println("multiply {total}")?
+  total /= 8
+  println("divide {total}")?
+  total %= 3
+  println("remainder {total}")?
+
+  var text = "a"
+  text = "{text}b"
+  println("strings {text}")?
+  println("the `let` binding never changed {fixed}")?
+  Ok(())
+}

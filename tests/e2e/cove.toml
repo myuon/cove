@@ -1,0 +1,159 @@
+[run.closures]
+entry = "closures.main"
+allow = ["console"]
+
+[run.coll_array]
+entry = "coll_array.main"
+allow = ["console"]
+
+[run.coll_freeze]
+entry = "coll_freeze.main"
+allow = ["console"]
+
+[run.coll_vector]
+entry = "coll_vector.main"
+allow = ["console"]
+
+[run.fail_assign_let]
+entry = "fail_assign_let.main"
+allow = ["console"]
+
+[run.fail_divide_by_zero]
+entry = "fail_divide_by_zero.main"
+allow = ["console"]
+
+[run.fail_entry_error]
+entry = "fail_entry_error.main"
+allow = ["console"]
+
+[run.fail_freeze_aliased]
+entry = "fail_freeze_aliased.main"
+allow = ["console"]
+
+[run.fail_int_overflow]
+entry = "fail_int_overflow.main"
+allow = ["console"]
+
+[run.fail_match_no_arm]
+entry = "fail_match_no_arm.main"
+allow = ["console"]
+
+[run.fail_mixed_arithmetic]
+entry = "fail_mixed_arithmetic.main"
+allow = ["console"]
+
+[run.fail_mixed_equality]
+entry = "fail_mixed_equality.main"
+allow = ["console"]
+
+[run.fail_no_capability]
+entry = "fail_no_capability.main"
+allow = []
+
+[run.flow_bindings]
+entry = "flow_bindings.main"
+allow = ["console"]
+
+[run.flow_block]
+entry = "flow_block.main"
+allow = ["console"]
+
+[run.flow_if]
+entry = "flow_if.main"
+allow = ["console"]
+
+[run.flow_loops]
+entry = "flow_loops.main"
+allow = ["console"]
+
+[run.flow_return]
+entry = "flow_return.main"
+allow = ["console"]
+
+[run.fn_defaults]
+entry = "fn_defaults.main"
+allow = ["console"]
+
+[run.fn_labels]
+entry = "fn_labels.main"
+allow = ["console"]
+
+[run.fn_recursion]
+entry = "fn_recursion.main"
+allow = ["console"]
+
+[run.fn_var_param]
+entry = "fn_var_param.main"
+allow = ["console"]
+
+[run.fn_variadic]
+entry = "fn_variadic.main"
+allow = ["console"]
+
+[run.host_console]
+entry = "host_console.main"
+allow = ["console"]
+
+[run.host_documents]
+entry = "host_documents.main"
+allow = ["console", "documents"]
+
+[run.host_env]
+entry = "host_env.main"
+allow = ["console", "env"]
+
+[run.type_enum]
+entry = "type_enum.main"
+allow = ["console"]
+
+[run.type_impl]
+entry = "type_impl.main"
+allow = ["console"]
+
+[run.type_match]
+entry = "type_match.main"
+allow = ["console"]
+
+[run.type_option]
+entry = "type_option.main"
+allow = ["console"]
+
+[run.type_result]
+entry = "type_result.main"
+allow = ["console"]
+
+[run.type_struct]
+entry = "type_struct.main"
+allow = ["console"]
+
+[run.type_struct_copy]
+entry = "type_struct_copy.main"
+allow = ["console"]
+
+[run.values_bool]
+entry = "values_bool.main"
+allow = ["console"]
+
+[run.values_duration]
+entry = "values_duration.main"
+allow = ["console"]
+
+[run.values_float]
+entry = "values_float.main"
+allow = ["console"]
+
+[run.values_int]
+entry = "values_int.main"
+allow = ["console"]
+
+[run.values_interpolation]
+entry = "values_interpolation.main"
+allow = ["console"]
+
+[run.values_string]
+entry = "values_string.main"
+allow = ["console"]
+
+[run.values_unit]
+entry = "values_unit.main"
+allow = ["console"]

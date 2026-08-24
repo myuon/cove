@@ -1,0 +1,4 @@
+original Document(title: first, meta: Meta(version: 1))
+copy Document(title: second, meta: Meta(version: 2))
+a nested struct copies too Meta(version: 7) Meta(version: 8)
+a `let` binding is a copy as well first

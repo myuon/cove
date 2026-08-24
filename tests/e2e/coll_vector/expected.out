@@ -1,0 +1,10 @@
+of [1, 2] length 2
+push [1, 2, 3] length 3
+an alias observes the push [1, 2, 3, 4] [1, 2, 3, 4]
+both handles report 4 4
+a `let` handle is a read-only view of shared storage [1, 2, 3, 4]
+toArray produced an independent array [1, 2, 3, 4]
+the vector kept growing [1, 2, 3, 4, 5]
+get Some(1) None
+count 5 isEmpty false
+empty [] true

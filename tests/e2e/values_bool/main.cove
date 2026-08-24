@@ -1,0 +1,24 @@
+use console.println
+
+/// Records that it ran, then reports `value`.
+fn watch(var log: Vector<String>, name: String, value: Bool) -> Bool {
+  log.push(name)
+  value
+}
+
+/// Prints how `Bool` literals and the logical operators combine.
+export fn main() -> Result<Unit, Error> {
+  println("literals {true} {false}")?
+  println("not {!true} {!false}")?
+  println("and {true && true} {true && false} {false && false}")?
+  println("or {true || true} {true || false} {false || false}")?
+  println("nested {!(true && false) || (false && true)}")?
+  println("`&&` binds tighter than `||` {true || false && false}")?
+  println("grouped {(true || false) && false}")?
+
+  var log = Vector.of()
+  let conjunction = watch(var log, "a", false) && watch(var log, "b", true)
+  let disjunction = watch(var log, "c", true) || watch(var log, "d", false)
+  println("short circuit {conjunction} {disjunction} evaluated {log}")?
+  Ok(())
+}

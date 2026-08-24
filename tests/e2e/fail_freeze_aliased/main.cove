@@ -1,0 +1,12 @@
+use console.println
+
+/// Calls `freeze()` while a second handle observes the same storage.
+export fn main() -> Result<Unit, Error> {
+  var building = Vector.of(1, 2)
+  var alias = building
+  alias.push(3)
+  println("both handles observe {building} {alias}")?
+  let frozen = building.freeze()
+  println("never printed {frozen}")?
+  Ok(())
+}

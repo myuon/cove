@@ -1,0 +1,8 @@
+error[cove::runtime]: `console.println` requires the `console` capability, which this run was not granted
+ --> <e2e>/fail_no_capability/main.cove:5:3
+  |
+5 |   println("this never reaches the console")?
+  |   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  rule: Cove code has no ambient authority; the host grants capabilities at the execution boundary.
+  help: add `console` to `allow` in the run's `cove.toml` table
+1 error(s)

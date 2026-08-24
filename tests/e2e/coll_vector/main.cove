@@ -1,0 +1,30 @@
+use console.println
+
+/// Prints `Vector` construction, mutation, aliasing, and `toArray`.
+export fn main() -> Result<Unit, Error> {
+  var first = Vector.of(1, 2)
+  println("of {first} length {first.length()}")?
+
+  first.push(3)
+  println("push {first} length {first.length()}")?
+
+  var second = first
+  second.push(4)
+  println("an alias observes the push {first} {second}")?
+  println("both handles report {first.length()} {second.length()}")?
+
+  let view = first
+  println("a `let` handle is a read-only view of shared storage {view}")?
+
+  let copied = first.toArray()
+  second.push(5)
+  println("toArray produced an independent array {copied}")?
+  println("the vector kept growing {second}")?
+
+  println("get {first.get(0)} {first.get(99)}")?
+  println("count {first.count()} isEmpty {first.isEmpty()}")?
+
+  var empty = Vector.of()
+  println("empty {empty} {empty.isEmpty()}")?
+  Ok(())
+}

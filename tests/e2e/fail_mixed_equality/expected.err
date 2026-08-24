@@ -1,0 +1,7 @@
+error[cove::runtime]: cannot compare `Int` with `String`
+ --> <e2e>/fail_mixed_equality/main.cove:6:27
+  |
+6 |   println("never printed {1 == "1"}")?
+  |                           ^^^^^^^^
+  rule: `==` means value equality between values of the same type.
+1 error(s)

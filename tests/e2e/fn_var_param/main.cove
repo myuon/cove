@@ -1,0 +1,43 @@
+use console.println
+
+/// A counter mutated through a `var` parameter.
+export struct Counter { hits: Int }
+
+/// Adds `by` to the caller's own place.
+fn bump(var total: Int, by: Int) {
+  total += by
+}
+
+/// Mutates a struct field the caller owns.
+fn record(var counter: Counter) {
+  counter.hits += 1
+}
+
+/// Fills a vector the caller owns.
+fn fill(var output: Vector<Int>, upTo: Int) {
+  for n in 1..upTo {
+    output.push(n)
+  }
+}
+
+/// Prints values the callee mutated through `var` parameters.
+export fn main() -> Result<Unit, Error> {
+  var total = 10
+  bump(var total, by: 5)
+  bump(var total, by: 5)
+  println("total {total}")?
+
+  var counter = Counter(hits: 0)
+  record(var counter)
+  record(var counter)
+  println("counter {counter}")?
+
+  var output = Vector.of()
+  fill(var output, upTo: 3)
+  println("output {output}")?
+
+  var copied = total
+  bump(var copied, by: 1)
+  println("a copy is independent {total} {copied}")?
+  Ok(())
+}

@@ -1,0 +1,17 @@
+use console.println
+
+/// Prints how `Int` literals, arithmetic, and precedence evaluate.
+export fn main() -> Result<Unit, Error> {
+  println("decimal {1000000}")?
+  println("separators {1_000_000}")?
+  println("hexadecimal {0xff} {0xFF_FF}")?
+  println("binary {0b1010} {0b1111_0000}")?
+  println("negative {-42} {0 - 42}")?
+  println("precedence {2 + 3 * 4}")?
+  println("grouped {(2 + 3) * 4}")?
+  println("division {7 / 2} remainder {7 % 2}")?
+  println("negative division {-7 / 2} remainder {-7 % 2}")?
+  println("comparison {1 < 2} {2 <= 2} {3 > 4} {3 >= 4}")?
+  println("equality {1 == 1} {1 != 1}")?
+  Ok(())
+}

@@ -1,0 +1,14 @@
+use console.println
+
+/// Prints how `Float` literals and arithmetic evaluate.
+export fn main() -> Result<Unit, Error> {
+  println("plain {1.5} {0.25}")?
+  println("separators {1_000.5}")?
+  println("exponent {1.5e3} {1.5E3} {2e-2} {2e+2}")?
+  println("addition {1.5 + 2.25} subtraction {1.5 - 2.25}")?
+  println("multiplication {1.5 * 2.0} division {3.0 / 2.0}")?
+  println("remainder {3.5 % 2.0}")?
+  println("a whole float prints without a point {4.0} {2.0 * 2.0}")?
+  println("comparison {1.5 < 2.5} {1.5 == 1.5}")?
+  Ok(())
+}

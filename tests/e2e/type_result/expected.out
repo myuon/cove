@@ -1,0 +1,7 @@
+values Ok(1) Err(broken)
+isOk true false
+isError false true
+`?` on Ok Ok(42)
+`?` on Err Err(`x` is not an Int)
+mapError leaves Ok alone Ok(7)
+mapError replaces Err Err(NotANumber(x))

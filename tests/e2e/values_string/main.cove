@@ -1,0 +1,18 @@
+use console.println
+
+/// Prints every escape the lexer supports and the `String` methods.
+export fn main() -> Result<Unit, Error> {
+  println("backslash \\ quote \" open brace \{ close brace \}")?
+  println("tab [\t] carriage return [\r] nul [\0] end")?
+  println("newline [\n] spans two lines")?
+
+  let escapes = "\\\"\n\t\r\0\{\}"
+  println("one string of eight escapes has length {escapes.length()}")?
+
+  let sentence = "  the quick  brown fox  "
+  println("length {sentence.length()}")?
+  println("words {sentence.words()}")?
+  println("count {sentence.words().count()}")?
+  println("isEmpty {sentence.isEmpty()} {"".isEmpty()}")?
+  Ok(())
+}

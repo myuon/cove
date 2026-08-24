@@ -1,0 +1,14 @@
+literal zero
+literal one
+literal minus one
+bound 42
+literal yes
+literal empty
+wildcard
+literal true
+literal false
+blank
+numbered 21 doubled 42
+named ace
+hearts
+spades

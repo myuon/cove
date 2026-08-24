@@ -1,0 +1,25 @@
+use console.println
+
+/// Returns the unit value.
+fn nothing() -> Unit {
+  ()
+}
+
+/// Declares no return type and falls off the end of its body.
+fn record(var log: Vector<String>, entry: String) {
+  log.push(entry)
+}
+
+/// Prints the unit value and the results of functions that produce it.
+export fn main() -> Result<Unit, Error> {
+  let unit = ()
+  println("literal {unit}")?
+  println("returned {nothing()}")?
+
+  var log = Vector.of()
+  println("no declared return type {record(var log, "first")}")?
+  println("the call still had its effect {log}")?
+  println("a mutating method {log.push("second")}")?
+  println("the log now holds {log}")?
+  Ok(())
+}

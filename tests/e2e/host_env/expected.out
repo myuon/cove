@@ -1,0 +1,5 @@
+set Some(hello from the host)
+set unwrapOr hello from the host
+unset None
+unset isNone true
+unset unwrapOr <missing>

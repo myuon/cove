@@ -1,0 +1,6 @@
+values Pending Active(7) Failed(timeout, 504)
+pending
+active since 7
+failed: timeout (504)
+equality true true
+inequality false false

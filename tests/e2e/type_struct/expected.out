@@ -1,0 +1,6 @@
+point Point(x: 1, y: 2)
+fields 1 2
+segment Segment(start: Point(x: 1, y: 2), end: Point(x: 3, y: 4))
+nested fields 1 4
+parenthesised form Tag(name: north, weight: 5) north
+initializer labels may be reordered Point(x: 10, y: 20)

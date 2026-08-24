@@ -1,0 +1,22 @@
+use console.println
+
+/// Builds a vector nobody else observes and freezes it in O(1).
+fn build(upTo: Int) -> Array<Int> {
+  var building = Vector.of()
+  for n in 1..upTo {
+    building.push(n)
+  }
+  building.freeze()
+}
+
+/// Prints the array `freeze()` returns from uniquely owned storage.
+export fn main() -> Result<Unit, Error> {
+  let frozen = build(4)
+  println("frozen {frozen} length {frozen.length()}")?
+  println("the result is an immutable array {frozen.get(0)} {frozen.isEmpty()}")?
+
+  var unique = Vector.of("a", "b")
+  let owned = unique.freeze()
+  println("freeze consumed uniquely owned storage {owned}")?
+  Ok(())
+}

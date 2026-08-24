@@ -1,0 +1,5 @@
+words [one, two, three]
+count 3
+missing Err(no document named `absent`)
+traversal Err(no document named `../cove`)
+nested path Err(no document named `sub/note`)
