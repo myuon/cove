@@ -28,11 +28,15 @@ export fn main(args: Array<String>) -> Result<Unit, Error> {
 - `let` creates a read-only place; `var` creates a mutable place.
 - Functions use `fn name(arg: Type) -> ReturnType`.
 - Calls support static argument labels: `request(url: endpoint, timeout: 5s)`.
+  Labels are parameter names, so they appear in declaration order.
 - Struct initialization uses synthesized labeled calls: `User(name: "A")`.
 - A variadic `items: T...` is an immutable `Array<T>` inside the function.
 - Blocks and control-flow forms are expressions.
-- Structs are product types; enums are tagged unions.
+- Structs are product types; enums are tagged unions. Both may have methods
+  and associated functions in an `impl` block.
 - `match` must cover every enum case.
+- `a..b` includes `b`; `a..<b` excludes it. A range is an ordinary value.
+- Every sequence reports its element count as `length()`.
 - Generics use angle brackets: `Array<T>`, `Result<T, E>`.
 - Traits are nominal and explicitly implemented; dynamic dispatch is distinct
   from generic static dispatch.
@@ -77,6 +81,7 @@ Assignment and ordinary argument passing perform field-wise shallow copies.
 - Primitive values, strings, enums, and structs have value semantics.
 - `Array<T>` is fixed-length and immutable; `[1, 2]` is an array.
 - `Vector<T>` is growable and mutable; `Vector.of(1, 2)` constructs one.
+- `Array`, `Vector`, `String`, and ranges all answer `length()`.
 - Vector assignment is O(1), and aliases share elements and length.
 - `Map` and `Set` are immutable in the MVP.
 - Cove never performs an implicit deep copy.
@@ -108,7 +113,8 @@ implementation.
 ## Evaluation
 
 - Evaluation order is left to right.
-- Integer overflow behavior is defined and consistent across backends.
+- Integer overflow is a broken invariant, not a wrapped result. Division and
+  remainder by zero are too.
 - Collection iteration order is defined by each collection type.
 - There are no implicit numeric, string, or boolean conversions.
 - Imports do not execute initialization code; fallible or asynchronous setup is
