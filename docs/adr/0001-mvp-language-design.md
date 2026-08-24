@@ -137,58 +137,82 @@ size, and GC work must be visible in traces. The allocator, object layout,
 root enumeration, stack maps, mark queue, sweep, and heap budget remain
 separate runtime components so the collector can evolve later.
 
-## Values, handles, and mutation
+## Values, collections, and mutation
 
-Assignment and argument passing use one rule: field-wise shallow copy. Cove does
-not change expression semantics according to whether the destination is
-declared with `let` or `var`.
+Assignment and ordinary argument passing use one rule: field-wise shallow copy.
+Cove does not change expression semantics according to whether the destination
+is declared with `let` or `var`.
 
 Primitive values, strings, enums, and user-defined structs have value semantics.
 Copying a struct copies each field according to that field's semantics. A
 one-field wrapper therefore naturally behaves like the value it wraps.
 
-`List<T>`, `Map<K, V>`, `Set<T>`, closures, and Host resources are small
-handle values whose mutable state lives in GC-managed storage. Copying a handle
-is O(1) and both copies observe the same storage:
+The MVP exposes two sequence types:
+
+- `Array<T>` is a fixed-length immutable sequence. Its length may be decided
+  at runtime. Array literals such as `[1, 2]` produce arrays.
+- `Vector<T>` is a growable mutable sequence backed by stable GC-managed
+  storage. Copying a vector handle is O(1), and aliases observe the same
+  elements and length.
+
+`Map<K, V>` and `Set<T>` are immutable collections in the MVP. They are
+created with literals, transformations, or scoped builders. A generally
+available mutable fixed-length array or mutable map is deferred until
+representative programs require it; `Array.build` and `Map.build` keep
+temporary mutation inside construction.
 
 ```cove
-var first = [1, 2]
-var second = first
+let fixed = [1, 2]
 
+var first = Vector[1, 2]
+var second = first
 second.push(3)
-// first and second both observe [1, 2, 3]
+// first and second both observe Vector[1, 2, 3]
 ```
 
-For lists, length, capacity, and the element buffer all belong to the shared
-storage. Cove deliberately does not use Go slice semantics in which append may
-change only one copied header or split aliases after reallocation. Maps and
-sets follow the same stable-handle rule.
+A vector's length, capacity, and element buffer belong to its shared storage, so
+growth remains visible through every alias even after reallocation. `let`
+creates a read-only place and `var` a mutable place. A `let Vector<T>` is a
+valid read-only view and may observe changes made through another mutable alias.
 
-This is an observable reference semantics even if the runtime represents the
-handle as a small struct. Internal representation never determines source
-semantics. Cove never performs an implicit deep copy. An independent, transitive
-snapshot is requested explicitly with `.copy()`; identity-bearing Host
-resources require type-specific copy behavior.
-
-`let` creates a read-only place and `var` a mutable place. A mutating method
-declares `var self` and requires a mutable place:
+A mutating receiver declares `var self`. An ordinary parameter receives a
+shallow copy. A `var` parameter is the explicit exception: it is an inout
+alias to the caller's mutable place and the call site also writes `var`.
 
 ```cove
 fn length(self) -> Int
 fn push(var self, value: T)
+fn fill(var output: Vector<Int>)
+
+fill(var output)
 ```
 
-This is a local write-permission rule, not a claim of deep immutability. A
-`let` handle cannot be used to mutate its storage, but it may observe changes
-made through another mutable alias. Similarly, a `var` parameter declares
-that a call may mutate through the supplied value. Cove does not attempt whole-program alias analysis. Parameters, fields,
-closures, and return values all use the same ordinary shallow-copy rule.
+This is local mutation syntax, not a whole-language borrow system. A `var`
+parameter cannot be stored or captured beyond the call.
 
-Value equality uses `==`; identity-capable handles use `is` for shared
-storage identity. Mutable handles and structs containing them are not valid map
-keys unless the type provides a stable key representation. Structural mutation
-during collection iteration is detected and rejected rather than depending on
-alias timing.
+`Vector.freeze()` consumes a vector with uniquely owned storage and returns an
+`Array<T>` in O(1). The compiler only performs conservative, local uniqueness
+checking for this explicit transition. If uniqueness cannot be proved,
+`toArray()` creates an independent O(n) immutable array. Ordinary code does
+not otherwise use move semantics.
+
+```cove
+var output = Vector<Int>()
+output.push(1)
+let result = output.freeze()
+// output is no longer usable
+```
+
+Cove never performs an implicit deep copy. A type may implement the
+`Snapshot<T>` contract when it can create an independent mutable graph.
+Snapshots preserve cycles and internal sharing. Immutable values return
+themselves; closures, synchronized values, and Host resources do not implement
+`Snapshot` by default.
+
+Value equality uses `==`. Identity-capable mutable handles use `is` for
+shared-storage identity. Mutable handles and structs containing them are not
+valid map keys. Structural mutation through any vector alias during iteration
+is detected and rejected.
 
 ## Tasks and shared mutation
 
@@ -196,11 +220,16 @@ Cove tasks are lightweight runtime tasks with structured lifetimes, explicit
 asynchronous functions, cancellation, and deadlines. I/O wait suspends a task;
 CPU work runs on runtime workers.
 
-Read-only values may cross task boundaries. Mutable value or collection
-aliases may not be captured by another task. Shared mutation requires an
-explicit synchronized handle such as `Shared<T>`, `Mutex<T>`, `RwLock<T>`,
-`Atomic<T>`, or `Channel<T>`. The compiler rejects mutable captures that do
-not use such a type.
+Task transfer is determined from types rather than whole-program alias analysis.
+Immutable values whose fields are task-safe may cross task boundaries.
+`Vector<T>` cannot cross a task boundary, even through a `let` place; finish
+it as an `Array<T>`, create an independent value, or use an explicit
+synchronized handle such as `Shared<T>`, `Mutex<T>`, `RwLock<T>`,
+`Atomic<T>`, or `Channel<T>`.
+
+Closures may cross a task boundary only when every capture is task-safe. Host
+resources declare task-safety in their Host API schema. The compiler rejects
+unsafe captures before execution.
 
 ## Progressive disclosure
 
@@ -255,23 +284,18 @@ scripts are excluded from the MVP. Code generation is an explicit
 `cove generate` workflow whose generator runs as an ordinary capability-
 controlled Cove entry and whose output is inspectable source.
 
-## Documentation and performance annotations
+## Documentation and annotations
 
-Decorators provide an extensible but visible place for non-core declarations:
+Ordinary purpose and intent are written as `///` doc comments attached to
+declarations. The compiler preserves them for outlines, generated
+documentation, and inspection, but does not pretend to verify their prose.
+Public modules and declarations without doc comments produce a warning by
+default; CI may promote warnings to errors.
 
-```cove
-/// Reserves inventory and then authorizes payment.
-@hot
-@performance(latency = 20ms)
-fn createBooking(request: BookingRequest) -> Result<Booking, BookingError> {
-  // ...
-}
-```
-
-Syntax is reserved for enforceable semantics; prose belongs in doc comments.
-The MVP preserves doc comments in its semantic model. An annotation such as
-`@hot` must have documented compiler or runtime semantics before it is
-accepted; unknown annotations must not silently change behavior.
+Decorator syntax is reserved for enforceable compiler or runtime behavior.
+The MVP defines no performance decorator. A candidate such as `@hot` must not
+be accepted or used in representative programs until its exact checking,
+optimization, tracing, and compatibility semantics are specified.
 
 ## Observability
 
@@ -304,10 +328,7 @@ The implementation should favor a simple compiler pipeline, local inference,
 parallel package compilation, cached semantic graphs, and a small runtime over
 a sophisticated JIT. Native AOT execution is primary. Development builds use
 limited optimization; release builds may spend more time on inlining, escape
-analysis, bounds-check elimination, and profile-guided work. An enforceable
-`@hot` annotation may concentrate optimization and tracing budget on selected
-functions.
-
+analysis, bounds-check elimination, and profile-guided work. 
 The exact backend remains an MVP implementation decision; QBE, Cranelift, LLVM,
 and C generation should be compared by implementation cost, compile latency,
 runtime performance, debug information, and portability. The language avoids
