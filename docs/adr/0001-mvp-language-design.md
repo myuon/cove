@@ -77,6 +77,42 @@ semantic model and generated code. The exact surface syntax remains open; one
 candidate is `T: Trait` for static dispatch and `dyn Trait` for dynamic
 dispatch.
 
+## Calls, initializers, and variadic arguments
+
+Function calls and value initialization use the same familiar call syntax.
+Argument labels are static parameter names and part of a public API contract.
+
+```cove
+let user = User(
+  name: "Alice",
+  age: 20
+)
+
+let response = request(
+  url: endpoint,
+  timeout: 5s
+)
+```
+
+Positional arguments may precede labeled arguments; after the first label, all
+remaining arguments are labeled. Structs receive a synthesized initializer
+whose labels match their fields. User-defined initializers use the same syntax.
+Cove does not use a separate `Type { fields }` expression form.
+
+A homogeneous variadic parameter is written `items: T...`. Inside the
+function it is an immutable `Array<T>`; the compiler may eliminate its
+allocation when that is not observable. Spread uses `...array`.
+
+```cove
+fn of(items: T...) -> Vector<T>
+let values = Vector.of(1, 2, 3)
+```
+
+This makes Vector construction an ordinary user-definable associated function,
+not a language-specific literal. Default arguments are evaluated by the callee.
+Dynamic keyword dictionaries and arbitrary keyword forwarding are not part of
+the MVP.
+
 Compiler diagnostics are part of the learning interface. Errors should explain
 the relevant Cove rule and show a corrected textual example.
 
@@ -164,7 +200,7 @@ temporary mutation inside construction.
 ```cove
 let fixed = [1, 2]
 
-var first = Vector[1, 2]
+var first = Vector.of(1, 2)
 var second = first
 second.push(3)
 // first and second both observe Vector[1, 2, 3]
@@ -197,7 +233,7 @@ checking for this explicit transition. If uniqueness cannot be proved,
 not otherwise use move semantics.
 
 ```cove
-var output = Vector<Int>()
+var output = Vector<Int>.of()
 output.push(1)
 let result = output.freeze()
 // output is no longer usable
@@ -247,10 +283,10 @@ Illustrative public declarations:
 
 ```cove
 /// A confirmed booking.
-export struct Booking {
-  id: BookingId
+export struct Booking(
+  id: BookingId,
   status: BookingStatus
-}
+)
 
 /// Creates a booking after validation.
 export fn createBooking(
