@@ -1,37 +1,62 @@
 //! The MVP tree-walking interpreter.
 //!
 //! The interpreter is an ordinary evaluator over [`cove_syntax::ast`] plus the
-//! four rules that make Cove Cove:
+//! five rules that make Cove Cove:
 //!
 //! - assignment and ordinary argument passing clone a [`Value`], and `Clone`
 //!   already encodes field-wise shallow copy, so there is no deep-copy path;
 //! - `let` binds a read-only place and `var` a mutable one, so mutation always
 //!   resolves an lvalue down to a slot the caller owns;
 //! - `var self` and `var` parameters bind the caller's place instead of a copy;
-//! - Host API calls go through [`HostRegistry::call`], which enforces grants.
+//! - Host API calls go through [`HostRegistry::call`], which enforces grants;
+//! - concurrent work belongs to a task scope, and leaving the scope waits for
+//!   or cancels the tasks spawned into it.
 //!
 //! Static checking (types, exhaustiveness, uniqueness) is future work; the
 //! interpreter enforces the same rules dynamically and says which rule it
 //! enforced.
 
 use std::cell::RefCell;
+use std::collections::{BTreeSet, HashMap};
 use std::rc::Rc;
+use std::time::Instant;
 
 use cove_diag::{SourceMap, Span};
 use cove_sema::resolve::{Program, ResolvedModule};
 use cove_syntax::ast::{
-    Arg, BinaryOp, Block, EnumDecl, Expr, ExprKind, FnDecl, ItemKind, Param, Pattern, PatternKind,
-    Receiver, StmtKind, StrPart, StructDecl, UnaryOp,
+    Arg, BinaryOp, Block, EnumDecl, Expr, ExprKind, FnDecl, Ident, ItemKind, Param, Pattern,
+    PatternKind, Receiver, StmtKind, StrPart, StructDecl, UnaryOp,
 };
 
 use crate::builtins::{self, Callable};
 use crate::error::RuntimeError;
 use crate::host::HostRegistry;
-use crate::value::{Closure, EnumValue, StructValue, Value};
+use crate::task::{self, Task, TaskScope, TaskState};
+use crate::trace::{NullSink, Timing, TraceEvent, TraceSink};
+use crate::value::{Closure, EnumValue, RangeBounds, StructValue, Value};
 
 /// How deep Cove calls may nest before the runtime reports a limit instead of
 /// exhausting the host stack.
+///
+/// This is an unconditional safety net independent of [`crate::budget::Limits`]:
+/// a `Budget`'s `max_call_depth` is optional and `Limits::default()` imposes
+/// none, but the interpreter is a recursive Rust tree walker, so unbounded
+/// recursion must still be stopped before it exhausts the native stack. A host
+/// that configures a stricter `max_call_depth` is stopped by that limit first;
+/// this constant is the fallback when it does not.
 const MAX_CALL_DEPTH: usize = 256;
+
+/// Fuel charged at every safepoint: a loop back edge, a function call, or an
+/// `await`.
+///
+/// ADR 0001 is explicit that fuel is a coarse runtime control, not a modeled
+/// instruction count — real safepoints vary enormously in the CPU work they
+/// guard, so no constant here would make fuel mean "instructions executed."
+/// A flat per-safepoint cost keeps that honest: fuel measures how many
+/// safepoints a run passed through, which is exactly what bounds a
+/// non-terminating loop or an unbounded recursion, and nothing more precise
+/// than that is claimed.
+const SAFEPOINT_FUEL: u64 = 10;
 
 /// Non-local control flow raised while evaluating an expression.
 enum Control {
@@ -169,11 +194,22 @@ impl Env {
             .map(|(_, place)| place)
     }
 
-    /// Every binding a closure body could see, read by value at creation time.
-    fn captures(&self, span: Span) -> Result<Vec<(Rc<str>, Value)>, RuntimeError> {
+    /// The bindings a closure body can read, by value at creation time.
+    ///
+    /// Only names the body mentions are captured. What a closure holds is
+    /// therefore what actually has to cross a task boundary when the closure
+    /// is spawned, rather than every binding that happened to be in scope.
+    fn captures(
+        &self,
+        mentioned: &BTreeSet<String>,
+        span: Span,
+    ) -> Result<Vec<(Rc<str>, Value)>, RuntimeError> {
         let mut captured: Vec<(Rc<str>, Value)> = Vec::new();
         for scope in &self.scopes {
             for (name, place) in scope {
+                if !mentioned.contains(&**name) {
+                    continue;
+                }
                 let value = place.read(span)?;
                 match captured.iter_mut().find(|(n, _)| n == name) {
                     Some(slot) => slot.1 = value,
@@ -211,11 +247,37 @@ struct Target<'t> {
 }
 
 /// Executes a resolved program.
+///
+/// # Ownership of the run's [`crate::budget::Budget`]
+///
+/// The `Budget` is owned by the [`HostRegistry`] this interpreter borrows,
+/// not by `Interpreter` itself: a host installs it once with
+/// `HostRegistry::set_budget`, and the interpreter reaches it through
+/// `self.hosts.budget_mut()` at every safepoint. There is exactly one
+/// `Budget` per run either way, so this is a choice of which existing owner
+/// keeps it, not a second copy — fuel, call depth, and host-call counters are
+/// each charged from exactly one place.
 pub struct Interpreter<'a> {
     pub program: &'a Program,
     pub sources: &'a SourceMap,
     pub hosts: &'a mut HostRegistry,
     depth: usize,
+    trace: Box<dyn TraceSink>,
+    /// The next id [`Interpreter::spawn`] assigns to a spawned task. Task ids
+    /// are a trace identity, unrelated to a task's spawn-order `position`.
+    next_task_id: u64,
+    /// Maps a task's address (stable for the `Rc<Task>`'s lifetime) to the id
+    /// assigned when it was spawned, so `settle` and cancellation can trace
+    /// the same id `spawn` announced.
+    task_ids: HashMap<usize, u64>,
+    /// Ids of the tasks whose bodies are currently running, innermost last,
+    /// so a nested `spawn` can name its immediate parent.
+    task_stack: Vec<u64>,
+    /// Active timing contexts, one for the entry and one more for each task
+    /// currently running its body. A host call's wait is charged against
+    /// every context on this stack, so both the task and the entry that
+    /// (directly or transitively) awaits it see the same wait.
+    timings: Vec<Timing>,
 }
 
 impl<'a> Interpreter<'a> {
@@ -225,7 +287,18 @@ impl<'a> Interpreter<'a> {
             sources,
             hosts,
             depth: 0,
+            trace: Box::new(NullSink),
+            next_task_id: 1,
+            task_ids: HashMap::new(),
+            task_stack: Vec::new(),
+            timings: Vec::new(),
         }
+    }
+
+    /// Installs where trace events go. Replaces any sink installed earlier;
+    /// the default is [`NullSink`], which discards everything.
+    pub fn set_trace(&mut self, sink: Box<dyn TraceSink>) {
+        self.trace = sink;
     }
 
     /// Calls the host-selected entry function.
@@ -266,20 +339,47 @@ impl<'a> Interpreter<'a> {
             }
         };
 
-        self.invoke(
-            &Target {
-                name,
-                params: &decl.params,
-                body: &decl.body,
-                module: module.into(),
-                receiver: decl.receiver,
-                is_async: decl.is_async,
-                captures: &[],
-            },
-            None,
-            arguments,
-            span,
-        )
+        self.trace.record(TraceEvent::EntryEnter {
+            module: module.to_string(),
+            function: name.to_string(),
+        });
+        self.timings.push(Timing::start());
+
+        let outcome = self
+            .invoke(
+                &Target {
+                    name,
+                    params: &decl.params,
+                    body: &decl.body,
+                    module: module.into(),
+                    receiver: decl.receiver,
+                    is_async: decl.is_async,
+                    captures: &[],
+                },
+                None,
+                arguments,
+                span,
+            )
+            .and_then(|value| match value {
+                // The host awaits the entry it chose, so an `async fn` entry
+                // hands back its value rather than a handle the host cannot
+                // settle.
+                Value::Task(task) => self.settle(&task, span),
+                value => Ok(value),
+            });
+
+        let timing = self
+            .timings
+            .pop()
+            .expect("run_entry pushes exactly the one timing it pops");
+        self.trace.record(TraceEvent::EntryExit {
+            module: module.to_string(),
+            function: name.to_string(),
+            cpu: timing.cpu(),
+            wait: timing.wait(),
+        });
+
+        outcome
     }
 
     fn resolved(&self, module: &str) -> Option<&'a ResolvedModule> {
@@ -324,6 +424,45 @@ impl<'a> Interpreter<'a> {
             .map(|m| m.as_str().into())
     }
 
+    // ------------------------------------------------------------- budget
+
+    /// Charges [`SAFEPOINT_FUEL`] and checks the deadline and cancellation
+    /// flag, at a loop back edge, a function call, or an `await`.
+    ///
+    /// A stop surfaces as the ordinary [`RuntimeError`] `Budget` already
+    /// produces, pointing at `span` — the loop, call, or await that hit the
+    /// limit. It is not a Cove-level `Result`: like any other `RuntimeError`
+    /// it propagates through `Control::Error` and cannot be caught by `?` or
+    /// `match` in Cove source, so it terminates the run rather than failing
+    /// one function of it.
+    fn charge_safepoint(&mut self, span: Span) -> Result<(), RuntimeError> {
+        if let Some(budget) = self.hosts.budget_mut() {
+            if let Err(stopped) = budget.safepoint(SAFEPOINT_FUEL) {
+                return Err(budget.to_runtime_error(stopped).at(span));
+            }
+        }
+        Ok(())
+    }
+
+    /// Dispatches a host call and records its wait against every active
+    /// [`Timing`] context, so `EntryExit` and `TaskCompleted` can separate
+    /// CPU work from time spent waiting on the host.
+    fn call_host(
+        &mut self,
+        module: &str,
+        op: &str,
+        values: Vec<Value>,
+        span: Span,
+    ) -> Result<Value, RuntimeError> {
+        let started = Instant::now();
+        let result = self.hosts.call(module, op, values);
+        let wait = started.elapsed();
+        for timing in &mut self.timings {
+            timing.add_wait(wait);
+        }
+        result.map_err(|e| e.at(span))
+    }
+
     // ---------------------------------------------------------------- calls
 
     fn invoke(
@@ -333,9 +472,6 @@ impl<'a> Interpreter<'a> {
         args: Vec<EvaluatedArg>,
         span: Span,
     ) -> Result<Value, RuntimeError> {
-        if target.is_async {
-            return Err(unsupported("calling an `async fn`", span));
-        }
         if self.depth >= MAX_CALL_DEPTH {
             return Err(RuntimeError::new(format!(
                 "call depth limit of {MAX_CALL_DEPTH} reached while calling `{}`",
@@ -344,9 +480,40 @@ impl<'a> Interpreter<'a> {
             .at(span)
             .with_rule("Recursion depth is a runtime control, not a proof obligation."));
         }
+
+        // Every call is a safepoint: `enter_call` bounds recursion against a
+        // host-configured `max_call_depth` (in addition to the unconditional
+        // `MAX_CALL_DEPTH` above), and the fuel charge counts the call itself.
+        // Both are undone on every path out of this call, including the error
+        // path from the fuel charge, so depth never leaks.
+        if let Some(budget) = self.hosts.budget_mut() {
+            if let Err(stopped) = budget.enter_call() {
+                return Err(budget.to_runtime_error(stopped).at(span));
+            }
+        }
+        if let Err(error) = self.charge_safepoint(span) {
+            if let Some(budget) = self.hosts.budget_mut() {
+                budget.leave_call();
+            }
+            return Err(error);
+        }
+
         self.depth += 1;
         let result = self.invoke_body(target, receiver, args, span);
         self.depth -= 1;
+        if let Some(budget) = self.hosts.budget_mut() {
+            budget.leave_call();
+        }
+        if target.is_async {
+            // An `async fn` is called like any other function and produces a
+            // task, so its value is reachable only through `await`.
+            //
+            // ADR 0003 phase 1 runs the body here, at the call, and returns a
+            // handle that is already settled. A scheduler is free to start it
+            // anywhere between the call and the `await`, so nothing may depend
+            // on when the body ran; a body that is never awaited has still run.
+            return Ok(Value::Task(Task::settled(result?)));
+        }
         result
     }
 
@@ -511,9 +678,7 @@ impl<'a> Interpreter<'a> {
             }
             Value::HostFn { module, op } => {
                 let values = plain_values(args, &format!("{module}.{op}"))?;
-                self.hosts
-                    .call(&module, &op, values)
-                    .map_err(|e| e.at(span))
+                self.call_host(&module, &op, values, span)
             }
             other => {
                 Err(RuntimeError::new(format!("`{}` is not callable", other.type_name())).at(span))
@@ -676,17 +841,31 @@ impl<'a> Interpreter<'a> {
                             Err(Control::Return(Value::none()))
                         }
                     }
-                    other => Err(RuntimeError::new(format!(
-                        "`?` needs a `Result` or an `Option`, but found `{}`",
-                        other.type_name()
-                    ))
-                    .at(span)
-                    .with_rule("`expr?` returns the error from the current function.")
-                    .into()),
+                    other => {
+                        let error = RuntimeError::new(format!(
+                            "`?` needs a `Result` or an `Option`, but found `{}`",
+                            other.type_name()
+                        ))
+                        .at(span)
+                        .with_rule("`expr?` returns the error from the current function.");
+                        // A task's value is observable only through `await`,
+                        // so `?` cannot reach the `Result` inside one.
+                        Err(match other {
+                            Value::Task(_) => {
+                                error.with_help("settle the task first, as in `task.await()?`")
+                            }
+                            _ => error,
+                        }
+                        .into())
+                    }
                 }
             }
-            ExprKind::Await(_) => Err(unsupported("`await`", span).into()),
-            ExprKind::Scope { .. } => Err(unsupported("a `scope` block", span).into()),
+            ExprKind::Await(inner) => {
+                let value = self.eval(env, inner)?;
+                self.charge_safepoint(span)?;
+                Ok(self.settle_value(value, span)?)
+            }
+            ExprKind::Scope { name, body } => self.eval_scope(env, name, body, span),
             ExprKind::Block(block) => self.eval_block(env, block),
             ExprKind::If {
                 condition,
@@ -748,6 +927,10 @@ impl<'a> Interpreter<'a> {
             } => {
                 let items = self.iterable_items(env, iterable)?;
                 for item in items {
+                    // Once per iteration, at the back edge: this is the
+                    // safepoint that bounds a `for` over an unbounded
+                    // iterable, since Cove does not prove termination.
+                    self.charge_safepoint(span)?;
                     env.push();
                     env.declare(binding.node.as_str().into(), Place::binding(item, false));
                     let result = self.eval_block(env, body);
@@ -770,6 +953,11 @@ impl<'a> Interpreter<'a> {
                     if !test {
                         break;
                     }
+                    // Once per iteration, at the back edge: this is the
+                    // safepoint that bounds a non-terminating `while`, which
+                    // is otherwise unbounded by anything the type system
+                    // proves.
+                    self.charge_safepoint(span)?;
                     self.eval_block(env, body)?;
                 }
                 Ok(Value::Unit)
@@ -788,11 +976,21 @@ impl<'a> Interpreter<'a> {
             } => self
                 .make_closure(env, *is_async, params.clone(), body.clone(), span)
                 .map_err(Control::from),
-            ExprKind::Range { .. } => Err(RuntimeError::new(
-                "a range is only usable as the iterable of a `for` loop in the MVP",
-            )
-            .at(span)
-            .into()),
+            // A range is an ordinary value, so it evaluates like any other
+            // expression and `for` simply iterates the value it produces.
+            ExprKind::Range {
+                start,
+                end,
+                inclusive_end,
+            } => {
+                let start = expect_int(self.eval(env, start)?, "a range bound", span)?;
+                let end = expect_int(self.eval(env, end)?, "a range bound", span)?;
+                Ok(Value::Range {
+                    start,
+                    end,
+                    inclusive_end: *inclusive_end,
+                })
+            }
         }
     }
 
@@ -805,7 +1003,9 @@ impl<'a> Interpreter<'a> {
         span: Span,
     ) -> Result<Value, RuntimeError> {
         // Closures capture by value at creation time, like every other copy.
-        let captures = env.captures(span)?;
+        let mut mentioned = BTreeSet::new();
+        mention_block(&body, &mut mentioned);
+        let captures = env.captures(&mentioned, span)?;
         Ok(Value::Closure(Rc::new(Closure {
             is_async,
             params,
@@ -816,25 +1016,277 @@ impl<'a> Interpreter<'a> {
         })))
     }
 
-    fn iterable_items(&mut self, env: &mut Env, expr: &Expr) -> Result<Vec<Value>, Control> {
-        if let ExprKind::Range {
-            start,
-            end,
-            inclusive_end,
-        } = &expr.kind
-        {
-            let start = expect_int(self.eval(env, start)?, "a range bound", expr.span)?;
-            let end = expect_int(self.eval(env, end)?, "a range bound", expr.span)?;
-            let end = if *inclusive_end { end + 1 } else { end };
-            return Ok((start..end).map(Value::Int).collect());
+    // ---------------------------------------------------------------- tasks
+
+    /// Evaluates `scope name { ... }`.
+    ///
+    /// The Language Card's rule is the whole of this function: leaving the
+    /// scope waits for or cancels its child tasks. The scope's value is the
+    /// value of its block, so a scope is an expression like any other block.
+    fn eval_scope(&mut self, env: &mut Env, name: &Ident, body: &Block, span: Span) -> Eval {
+        let scope = TaskScope::new(name.node.as_str().into());
+        env.push();
+        env.declare(
+            name.node.as_str().into(),
+            Place::binding(Value::TaskScope(scope.clone()), false),
+        );
+        let result = self.eval_block(env, body);
+        env.pop();
+        let left = self.leave_scope(&scope, result, span);
+        scope.close();
+        left
+    }
+
+    /// Waits for or cancels the children of a scope that is being left.
+    ///
+    /// A normal exit settles every task the body did not await, in spawn
+    /// order, and discards its value: a scope waits for its children, it does
+    /// not collect them. A task that fails is not swallowed — a `RuntimeError`
+    /// propagates as itself, and a task whose value is `Err(error)` returns
+    /// that error from the enclosing function, exactly as `?` would. Either
+    /// way the tasks that have not run are cancelled, as they are when the
+    /// body itself leaves early through `return`, `?`, or an error.
+    ///
+    /// ADR 0003: spawn order is phase 1's choice, not the language's. A
+    /// scheduler may settle unawaited children in any order, or have already
+    /// settled them before the body finished, so only the set of effects a
+    /// scope produces is defined, never their sequence.
+    fn leave_scope(&mut self, scope: &Rc<TaskScope>, result: Eval, span: Span) -> Eval {
+        let value = match result {
+            Ok(value) => value,
+            early => {
+                self.cancel_scope(scope);
+                return early;
+            }
+        };
+
+        // Settling reads the scope's children by index rather than from a
+        // snapshot, so a scope that grows while it is being left is still
+        // settled to the end.
+        let mut index = 0;
+        while let Some(task) = scope.task_at(index) {
+            index += 1;
+            if !task.is_pending() {
+                continue;
+            }
+            match self.settle(&task, span) {
+                Ok(settled) => {
+                    if let Some(error) = failure_of(&settled) {
+                        self.cancel_scope(scope);
+                        return Err(Control::Return(Value::err(error)));
+                    }
+                }
+                Err(error) => {
+                    self.cancel_scope(scope);
+                    return Err(Control::Error(error));
+                }
+            }
         }
+        Ok(value)
+    }
+
+    /// Cancels every pending child of `scope`, the hook point for
+    /// `TaskCancelled`.
+    ///
+    /// `TaskScope::cancel_pending` lives in `task.rs` and has no tracing of
+    /// its own, so this walks the same tasks first to trace exactly the ones
+    /// that were pending (and so are the ones cancellation actually stops),
+    /// then applies the real cancellation the same way `task.rs` already
+    /// does.
+    fn cancel_scope(&mut self, scope: &Rc<TaskScope>) {
+        let mut index = 0;
+        while let Some(task) = scope.task_at(index) {
+            index += 1;
+            self.trace_cancel_if_pending(&task);
+        }
+        scope.cancel_pending();
+    }
+
+    /// Traces `TaskCancelled` for `task` if it is still pending, i.e. if
+    /// cancelling it now would actually stop it rather than being a no-op.
+    fn trace_cancel_if_pending(&mut self, task: &Rc<Task>) {
+        if task.is_pending() {
+            if let Some(&id) = self.task_ids.get(&task_key(task)) {
+                self.trace.record(TraceEvent::TaskCancelled { id });
+            }
+        }
+    }
+
+    /// Runs a task's body unless it has already settled, and returns its
+    /// value.
+    ///
+    /// A task's body runs at most once, so awaiting the same handle twice
+    /// returns the same value and repeats no effect.
+    fn settle(&mut self, task: &Rc<Task>, span: Span) -> Result<Value, RuntimeError> {
+        let body = match &*task.state.borrow() {
+            TaskState::Settled(value) => return Ok(value.clone()),
+            TaskState::Failed(error) => return Err(error.clone()),
+            TaskState::Cancelled => return Err(awaiting_a_cancelled_task(task, span)),
+            TaskState::Running => return Err(awaiting_a_running_task(task, span)),
+            TaskState::Pending => task.body.clone(),
+        };
+        *task.state.borrow_mut() = TaskState::Running;
+
+        // A task reaching this point was spawned through `Interpreter::spawn`,
+        // which is the only caller of `TaskScope::spawn`, so it always has an
+        // id here.
+        let id = self.task_ids.get(&task_key(task)).copied();
+        if let Some(id) = id {
+            self.task_stack.push(id);
+        }
+        self.timings.push(Timing::start());
+
+        let result = self.call_value_slots(body, Vec::new(), span);
+
+        let timing = self
+            .timings
+            .pop()
+            .expect("settle pushes exactly the one timing it pops");
+        if let Some(id) = id {
+            self.task_stack.pop();
+            self.trace.record(TraceEvent::TaskCompleted {
+                id,
+                cpu: timing.cpu(),
+            });
+        }
+
+        *task.state.borrow_mut() = match &result {
+            Ok(value) => TaskState::Settled(value.clone()),
+            Err(error) => TaskState::Failed(error.clone()),
+        };
+        result
+    }
+
+    /// `await expr`, and the postfix `expr.await()` that means the same thing.
+    fn settle_value(&mut self, value: Value, span: Span) -> Result<Value, RuntimeError> {
+        match value {
+            Value::Task(task) => self.settle(&task, span),
+            other => Err(RuntimeError::new(format!(
+                "`await` needs a task, but found `{}`",
+                other.type_name()
+            ))
+            .at(span)
+            .with_rule(
+                "`await` settles a task. Only a task spawned into a scope, or one returned by an `async fn`, has a value to settle.",
+            )
+            .with_help("call an `async fn`, or spawn the work into a task scope, and await that handle")),
+        }
+    }
+
+    /// `scope.spawn { ... }`.
+    ///
+    /// The trailing closure is checked against the task-safety rule before the
+    /// task exists, so a value that may not cross the boundary is reported at
+    /// the `spawn` that would have carried it.
+    fn spawn(
+        &mut self,
+        scope: &Rc<TaskScope>,
+        body: Value,
+        span: Span,
+    ) -> Result<Value, RuntimeError> {
+        if scope.is_closed() {
+            return Err(RuntimeError::new(format!(
+                "scope `{}` has already been left, so it can take no more tasks",
+                scope.name
+            ))
+            .at(span)
+            .with_rule("Leaving a task scope waits for or cancels its child tasks."));
+        }
+        if !matches!(body, Value::Closure(_)) {
+            return Err(RuntimeError::new(format!(
+                "`spawn` takes the work to run as a trailing closure, but found `{}`",
+                body.type_name()
+            ))
+            .at(span)
+            .with_help(format!("write `{}.spawn {{ ... }}`", scope.name)));
+        }
+        if let Err(found) = task::task_safety("", &body) {
+            return Err(RuntimeError::new(format!(
+                "`spawn` cannot capture `{}`, which is a `{}`",
+                found.path, found.type_name
+            ))
+            .at(span)
+            .with_rule(task::TASK_SAFETY_RULE)
+            .with_help(found.help()));
+        }
+        let task = scope.spawn(body);
+        let id = self.next_task_id;
+        self.next_task_id += 1;
+        self.task_ids.insert(task_key(&task), id);
+        self.trace.record(TraceEvent::TaskSpawned {
+            id,
+            parent: self.task_stack.last().copied(),
+            scope: scope.name.to_string(),
+        });
+        Ok(Value::Task(task))
+    }
+
+    /// Dispatches the operations of a task scope and of a task handle.
+    fn call_task_method(
+        &mut self,
+        env: &mut Env,
+        receiver: Value,
+        name: &str,
+        args: &[Arg],
+        trailing: Option<&Expr>,
+        span: Span,
+    ) -> Eval {
+        let arguments = self.eval_args(env, args, trailing)?;
+        let mut values = plain_values(arguments, name)?;
+        match (&receiver, name) {
+            (Value::TaskScope(scope), "spawn") => {
+                if values.len() != 1 {
+                    return Err(RuntimeError::new(format!(
+                        "`spawn` takes one trailing closure, but {} argument(s) were given",
+                        values.len()
+                    ))
+                    .at(span)
+                    .with_help(format!("write `{}.spawn {{ ... }}`", scope.name))
+                    .into());
+                }
+                Ok(self.spawn(scope, values.remove(0), span)?)
+            }
+            (Value::Task(task), "await") => {
+                expect_no_arguments("await", &values, span)?;
+                self.charge_safepoint(span)?;
+                Ok(self.settle(task, span)?)
+            }
+            (Value::Task(task), "cancel") => {
+                expect_no_arguments("cancel", &values, span)?;
+                // Cancelling a task that already ran changes nothing:
+                // cancellation stops work that has not happened. Trace only
+                // the tasks this call actually cancels.
+                self.trace_cancel_if_pending(task);
+                task.cancel();
+                Ok(Value::Unit)
+            }
+            (_, "await") => {
+                self.charge_safepoint(span)?;
+                Ok(self.settle_value(receiver.clone(), span)?)
+            }
+            (other, _) => Err(RuntimeError::new(format!(
+                "`{}` has no method `{name}`",
+                other.type_name()
+            ))
+            .at(span)
+            .into()),
+        }
+    }
+
+    fn iterable_items(&mut self, env: &mut Env, expr: &Expr) -> Result<Vec<Value>, Control> {
         // Iteration reads a snapshot of the elements; rejecting structural
         // mutation during iteration is future work.
         match self.eval(env, expr)? {
             Value::Array(items) => Ok(items.iter().cloned().collect()),
             Value::Vector(storage) => Ok(storage.elements.borrow().clone()),
+            // An empty or reversed range such as `3..<0` iterates zero times.
+            Value::Range {
+                start,
+                end,
+                inclusive_end,
+            } => Ok(RangeBounds::of(start, end, inclusive_end).items()),
             other => Err(RuntimeError::new(format!(
-                "`for` iterates an `Array`, a `Vector`, or a range, but found `{}`",
+                "`for` iterates an `Array`, a `Vector`, or a `Range`, but found `{}`",
                 other.type_name()
             ))
             .at(expr.span)
@@ -917,6 +1369,29 @@ impl<'a> Interpreter<'a> {
         }
     }
 
+    /// The cases and associated functions `Enum.name` could have meant.
+    fn known_members(&self, module: &str, decl: &Rc<EnumDecl>) -> String {
+        let cases: Vec<&str> = decl
+            .cases
+            .iter()
+            .map(|case| case.name.node.as_str())
+            .collect();
+        let mut help = format!("known cases: {}", cases.join(", "));
+        let functions: Vec<&str> = match self.resolved(module) {
+            Some(resolved) => resolved
+                .methods
+                .keys()
+                .filter(|(type_name, _)| *type_name == decl.name.node)
+                .map(|(_, name)| name.as_str())
+                .collect(),
+            None => Vec::new(),
+        };
+        if !functions.is_empty() {
+            help.push_str(&format!("; known functions: {}", functions.join(", ")));
+        }
+        help
+    }
+
     /// Builds one case of an enum declared in `module`.
     fn enum_case(
         &mut self,
@@ -928,18 +1403,14 @@ impl<'a> Interpreter<'a> {
     ) -> Result<Value, RuntimeError> {
         let Some(found) = decl.cases.iter().find(|c| c.name.node == case) else {
             return Err(RuntimeError::new(format!(
-                "enum `{}` has no case `{case}`",
+                "enum `{}` has no case or associated function `{case}`",
                 decl.name.node
             ))
             .at(span)
-            .with_help(format!(
-                "known cases: {}",
-                decl.cases
-                    .iter()
-                    .map(|c| c.name.node.as_str())
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            )));
+            .with_rule(
+                "`Enum.name` is a case when the enum declares one, and otherwise an associated function declared in an `impl` block.",
+            )
+            .with_help(self.known_members(module, decl)));
         };
         if found.payload.len() != payload.len() {
             return Err(RuntimeError::new(format!(
@@ -1007,10 +1478,7 @@ impl<'a> Interpreter<'a> {
                 if let Some(host) = self.host_item(&module, name) {
                     let args = self.eval_args(env, args, trailing)?;
                     let values = plain_values(args, name)?;
-                    return Ok(self
-                        .hosts
-                        .call(&host, name, values)
-                        .map_err(|e| e.at(span))?);
+                    return Ok(self.call_host(&host, name, values, span)?);
                 }
                 if builtins::is_constructor(name) {
                     let args = self.eval_args(env, args, trailing)?;
@@ -1036,15 +1504,40 @@ impl<'a> Interpreter<'a> {
                         if self.is_host_module(&module, head) {
                             let args = self.eval_args(env, args, trailing)?;
                             let values = plain_values(args, &format!("{head}.{}", name.node))?;
-                            return Ok(self
-                                .hosts
-                                .call(head, &name.node, values)
-                                .map_err(|e| e.at(span))?);
+                            return Ok(self.call_host(head, &name.node, values, span)?);
                         }
-                        if let Some(decl) = self.find_enum(&module, head) {
+                        if let Some(enum_decl) = self.find_enum(&module, head) {
+                            // A case wins over an associated function of the
+                            // same name, so naming a case never changes
+                            // meaning when an `impl` block is added.
+                            let is_case = enum_decl
+                                .cases
+                                .iter()
+                                .any(|case| case.name.node == name.node);
+                            if !is_case {
+                                if let Some(decl) = self.find_method(&module, head, &name.node) {
+                                    let args = self.eval_args(env, args, trailing)?;
+                                    return Ok(self.invoke(
+                                        &Target {
+                                            name: &name.node,
+                                            params: &decl.params,
+                                            body: &decl.body,
+                                            module,
+                                            receiver: decl.receiver,
+                                            is_async: decl.is_async,
+                                            captures: &[],
+                                        },
+                                        None,
+                                        args,
+                                        span,
+                                    )?);
+                                }
+                            }
                             let args = self.eval_args(env, args, trailing)?;
                             let values = plain_values(args, &format!("{head}.{}", name.node))?;
-                            return Ok(self.enum_case(&module, &decl, &name.node, values, span)?);
+                            return Ok(
+                                self.enum_case(&module, &enum_decl, &name.node, values, span)?
+                            );
                         }
                         if self.find_struct(&module, head).is_some() {
                             if let Some(decl) = self.find_method(&module, head, &name.node) {
@@ -1141,9 +1634,17 @@ impl<'a> Interpreter<'a> {
             }
         }
 
-        // `tasks.spawn { ... }` writes the await as a postfix call.
-        if name == "await" {
-            return Err(unsupported("`await`", span).into());
+        // A task scope and a task handle are runtime values rather than
+        // declared types, so their operations are dispatched here.
+        // `examples/tasks/load.cove` writes the await as a postfix call, and
+        // `bookings.await()` means what `await bookings` means.
+        if name == "await" || matches!(type_name.as_str(), "TaskScope" | "Task") {
+            let receiver_value = match (&place, &temporary) {
+                (Some(place), _) => place.read(span)?,
+                (_, Some(value)) => value.clone(),
+                _ => unreachable!("a receiver is either a place or a temporary"),
+            };
+            return self.call_task_method(env, receiver_value, name, args, trailing, span);
         }
 
         // `push` and `freeze` take a `var self` receiver.
@@ -1582,7 +2083,23 @@ fn assign_labels(
                     ))
                     .at(arg.span));
                 }
+                // Labels are static parameter names, so left-to-right
+                // evaluation of the call must match the declaration order.
+                if index < next {
+                    return Err(RuntimeError::new(format!(
+                        "`{what}` was given the label `{label}` out of declaration order"
+                    ))
+                    .at(arg.span)
+                    .with_rule(
+                        "Labeled arguments appear in declaration order, so argument order matches parameter order.",
+                    )
+                    .with_help(format!(
+                        "write the arguments in this order: {}",
+                        names.join(", ")
+                    )));
+                }
                 slots[index] = Some(arg);
+                next = index + 1;
             }
             None => {
                 if labeled {
@@ -1634,6 +2151,208 @@ fn value_of(arg: &EvaluatedArg, what: &str, span: Span) -> Result<Value, Runtime
     }
 }
 
+// ------------------------------------------------------------- free names
+
+/// Every name a block can read from the environment around it.
+///
+/// The set over-approximates: a name the body binds for itself is listed too.
+/// Over-approximating is safe, because a closure that captures a name it never
+/// reads is only holding one value more than it needs, while missing one would
+/// leave the body unable to resolve it.
+fn mention_block(block: &Block, out: &mut BTreeSet<String>) {
+    for stmt in &block.statements {
+        match &stmt.kind {
+            StmtKind::Let { value, .. } => mention_expr(value, out),
+            StmtKind::Expr(expr) => mention_expr(expr, out),
+            StmtKind::Item(item) => match &item.kind {
+                ItemKind::Fn(decl) => mention_fn(decl, out),
+                ItemKind::Impl(block) => {
+                    for item in &block.items {
+                        if let ItemKind::Fn(decl) = &item.kind {
+                            mention_fn(decl, out);
+                        }
+                    }
+                }
+                ItemKind::Struct(_) | ItemKind::Enum(_) | ItemKind::TypeAlias(_) => {}
+            },
+        }
+    }
+    if let Some(tail) = &block.tail {
+        mention_expr(tail, out);
+    }
+}
+
+fn mention_fn(decl: &FnDecl, out: &mut BTreeSet<String>) {
+    mention_params(&decl.params, out);
+    mention_block(&decl.body, out);
+}
+
+/// A default argument is evaluated by the callee, so the names it reads belong
+/// to the body.
+fn mention_params(params: &[Param], out: &mut BTreeSet<String>) {
+    for param in params {
+        if let Some(default) = &param.default {
+            mention_expr(default, out);
+        }
+    }
+}
+
+fn mention_expr(expr: &Expr, out: &mut BTreeSet<String>) {
+    match &expr.kind {
+        ExprKind::Int(_)
+        | ExprKind::Float(_)
+        | ExprKind::Bool(_)
+        | ExprKind::Duration(_)
+        | ExprKind::Unit => {}
+        ExprKind::Str(parts) => {
+            for part in parts {
+                if let StrPart::Interpolation(inner) = part {
+                    mention_expr(inner, out);
+                }
+            }
+        }
+        ExprKind::Ident(name) => {
+            out.insert(name.clone());
+        }
+        ExprKind::ArrayLit(items) => {
+            for item in items {
+                mention_expr(item, out);
+            }
+        }
+        // A field name is not a binding; only the base can read one.
+        ExprKind::Field { base, .. } => mention_expr(base, out),
+        ExprKind::Call {
+            callee,
+            args,
+            trailing,
+            ..
+        } => {
+            mention_expr(callee, out);
+            for arg in args {
+                mention_expr(&arg.value, out);
+            }
+            if let Some(trailing) = trailing {
+                mention_expr(trailing, out);
+            }
+        }
+        ExprKind::Unary { operand, .. } => mention_expr(operand, out),
+        ExprKind::Binary { lhs, rhs, .. } => {
+            mention_expr(lhs, out);
+            mention_expr(rhs, out);
+        }
+        ExprKind::Assign { target, value, .. } => {
+            mention_expr(target, out);
+            mention_expr(value, out);
+        }
+        ExprKind::Try(inner) | ExprKind::Await(inner) => mention_expr(inner, out),
+        ExprKind::Block(block) => mention_block(block, out),
+        ExprKind::If {
+            condition,
+            then_branch,
+            else_branch,
+        } => {
+            mention_expr(condition, out);
+            mention_block(then_branch, out);
+            if let Some(branch) = else_branch {
+                mention_expr(branch, out);
+            }
+        }
+        ExprKind::Match { scrutinee, arms } => {
+            mention_expr(scrutinee, out);
+            for arm in arms {
+                mention_pattern(&arm.pattern, out);
+                mention_expr(&arm.body, out);
+            }
+        }
+        ExprKind::For { iterable, body, .. } => {
+            mention_expr(iterable, out);
+            mention_block(body, out);
+        }
+        ExprKind::While { condition, body } => {
+            mention_expr(condition, out);
+            mention_block(body, out);
+        }
+        ExprKind::Return(inner) => {
+            if let Some(inner) = inner {
+                mention_expr(inner, out);
+            }
+        }
+        ExprKind::Lambda { params, body, .. } => {
+            mention_params(params, out);
+            mention_block(body, out);
+        }
+        // The scope name is bound by the `scope`, so it shadows anything the
+        // surrounding environment holds under that name.
+        ExprKind::Scope { body, .. } => mention_block(body, out),
+        ExprKind::Range { start, end, .. } => {
+            mention_expr(start, out);
+            mention_expr(end, out);
+        }
+    }
+}
+
+/// Pattern bindings are binders, so only a literal pattern reads a name.
+fn mention_pattern(pattern: &Pattern, out: &mut BTreeSet<String>) {
+    match &pattern.kind {
+        PatternKind::Wildcard | PatternKind::Binding(_) => {}
+        PatternKind::Literal(expr) => mention_expr(expr, out),
+        PatternKind::Variant { payload, .. } => {
+            for sub in payload {
+                mention_pattern(sub, out);
+            }
+        }
+    }
+}
+
+// ------------------------------------------------------------------ tasks
+
+/// A stable key for a task's trace id, valid for as long as some `Rc<Task>`
+/// keeps the task alive — which every task the interpreter still holds a
+/// handle to does.
+fn task_key(task: &Rc<Task>) -> usize {
+    Rc::as_ptr(task) as usize
+}
+
+/// The error a `Result` carries, when the value is one and it failed.
+fn failure_of(value: &Value) -> Option<Value> {
+    match value {
+        Value::Enum(result) if &*result.type_name == "Result" && &*result.case == "Err" => {
+            Some(result.payload.first().cloned().unwrap_or(Value::Unit))
+        }
+        _ => None,
+    }
+}
+
+fn expect_no_arguments(what: &str, values: &[Value], span: Span) -> Result<(), RuntimeError> {
+    if values.is_empty() {
+        return Ok(());
+    }
+    Err(RuntimeError::new(format!(
+        "`{what}` takes no arguments, but {} were given",
+        values.len()
+    ))
+    .at(span))
+}
+
+fn awaiting_a_cancelled_task(task: &Task, span: Span) -> RuntimeError {
+    RuntimeError::new(format!(
+        "{} was cancelled, so it has no value to await",
+        task.describe()
+    ))
+    .at(span)
+    .with_rule("Leaving a task scope waits for or cancels its child tasks, and a cancelled task never runs.")
+    .with_help("await the task before cancelling it, and before leaving its scope early")
+}
+
+fn awaiting_a_running_task(task: &Task, span: Span) -> RuntimeError {
+    RuntimeError::new(format!(
+        "{} is already running, so awaiting it here cannot make progress",
+        task.describe()
+    ))
+    .at(span)
+    .with_rule("A task's value is observable only once its body has completed.")
+}
+
 // ------------------------------------------------------------ diagnostics
 
 fn unsupported(what: &str, span: Span) -> RuntimeError {
@@ -1641,8 +2360,7 @@ fn unsupported(what: &str, span: Span) -> RuntimeError {
         "{what} is not implemented yet in the MVP interpreter"
     ))
     .at(span)
-    .with_rule("The MVP interpreter runs the synchronous subset of Cove.")
-    .with_help("asynchronous functions, `await`, `scope`, and `spawn` are not available yet")
+    .with_rule("The MVP interpreter runs the subset of Cove that the MVP defines.")
 }
 
 fn overflow(operation: &str, span: Span) -> RuntimeError {
@@ -2590,7 +3308,7 @@ export fn main() -> Result<Unit, Error> {
 
     #[test]
     fn array_and_string_builtins() {
-        let body = "  let items = [10, 20]\n  console.println(\"{items.get(0).unwrapOr(0)} {items.get(5).isNone()} {items.count()} {items.isEmpty()}\")?\n  console.println(\"{\"a bc  d\".words().length()} {\"abc\".length()} {\"\".isEmpty()}\")?";
+        let body = "  let items = [10, 20]\n  console.println(\"{items.get(0).unwrapOr(0)} {items.get(5).isNone()} {items.length()} {items.isEmpty()}\")?\n  console.println(\"{\"a bc  d\".words().length()} {\"abc\".length()} {\"\".isEmpty()}\")?";
         assert_eq!(output_of(body), "10 true 2 false\n3 3 true\n");
     }
 
@@ -2639,6 +3357,206 @@ export fn main() -> Result<Unit, Error> {
         assert_eq!(error.message, "`Array` has no method `pop`");
     }
 
+    // -------------------------------------------------------- ranges
+
+    #[test]
+    fn a_range_is_an_ordinary_value() {
+        let output = output_of(
+            r#"  let exclusive = 0..<3
+  let inclusive = 0..3
+  console.println("{exclusive} {inclusive}")?"#,
+        );
+        assert_eq!(output, "0..<3 0..3\n");
+    }
+
+    #[test]
+    fn a_range_value_iterates_like_a_range_literal() {
+        let output = output_of(
+            r#"  let bounds = 0..<3
+  var total = 0
+  for value in bounds {
+    total += value
+  }
+  for value in 1..3 {
+    total += value
+  }
+  console.println("{total}")?"#,
+        );
+        assert_eq!(output, "9\n");
+    }
+
+    #[test]
+    fn a_range_has_the_sequence_methods() {
+        let output = output_of(
+            r#"  let exclusive = 0..<3
+  let inclusive = 0..3
+  console.println("{exclusive.length()} {inclusive.length()}")?
+  console.println("{exclusive.isEmpty()} {exclusive.contains(2)} {exclusive.contains(3)}")?
+  console.println("{inclusive.contains(3)} {inclusive.contains(-1)}")?"#,
+        );
+        assert_eq!(output, "3 4\nfalse true false\ntrue false\n");
+    }
+
+    #[test]
+    fn a_reversed_range_is_empty_and_iterates_zero_times() {
+        let output = output_of(
+            r#"  let reversed = 3..<0
+  var rounds = 0
+  for _value in reversed {
+    rounds += 1
+  }
+  console.println("{reversed} {reversed.length()} {reversed.isEmpty()} {rounds}")?"#,
+        );
+        assert_eq!(output, "3..<0 0 true 0\n");
+    }
+
+    #[test]
+    fn ranges_compare_by_value() {
+        let output =
+            output_of(r#"  console.println("{0..<3 == 0..<3} {0..<3 == 0..3} {0..<3 == 1..<3}")?"#);
+        assert_eq!(output, "true false false\n");
+    }
+
+    #[test]
+    fn a_range_bound_must_be_an_int() {
+        let error = error_of("  let bad = 0..<\"3\"");
+        assert!(
+            error.message.contains("a range bound must be an `Int`"),
+            "{}",
+            error.message
+        );
+    }
+
+    #[test]
+    fn a_range_has_no_method_it_does_not_declare() {
+        let error = error_of("  let bounds = 0..<3\n  let bad = bounds.reverse()");
+        assert_eq!(error.message, "`Range` has no method `reverse`");
+    }
+
+    // ---------------------------------------------- one spelling: length
+
+    #[test]
+    fn count_is_rejected_and_names_the_length_spelling() {
+        let bodies = [
+            "  let n = [1, 2].count()",
+            "  let n = Vector.of(1, 2).count()",
+            "  let n = \"a b\".count()",
+            "  let n = (0..<3).count()",
+        ];
+        for body in bodies {
+            let error = error_of(body);
+            assert!(
+                error
+                    .message
+                    .contains("Cove spells the number of elements `length()`"),
+                "{body}: {}",
+                error.message
+            );
+            assert_eq!(
+                error.help.as_deref(),
+                Some("write `length()` instead of `count()`"),
+                "{body}"
+            );
+        }
+    }
+
+    #[test]
+    fn length_is_the_one_spelling_every_sequence_answers() {
+        let output = output_of(
+            r#"  console.println("{[1, 2].length()} {Vector.of(1).length()} {"ab".length()} {(0..<4).length()}")?"#,
+        );
+        assert_eq!(output, "2 1 2 4\n");
+    }
+
+    // --------------------------------- associated functions on an enum
+
+    const COLOUR: &str = r#"
+use console.println
+
+enum Colour {
+  Red
+  Named(String)
+}
+
+impl Colour {
+  /// Returns the colour used when nothing was chosen.
+  fn fallback() -> Colour {
+    Colour.Red
+  }
+
+  /// Names this colour.
+  fn describe(self) -> String {
+    match self {
+      Colour.Red => "red"
+      Colour.Named(name) => name
+    }
+  }
+}
+"#;
+
+    fn colour_body(body: &str) -> Run {
+        run_entry_of(
+            &format!(
+                "{COLOUR}\nexport fn main() -> Result<Unit, Error> {{\n{body}\n  Ok(())\n}}\n"
+            ),
+            "main",
+            &[],
+        )
+    }
+
+    #[test]
+    fn an_enum_can_declare_an_associated_function() {
+        let run = colour_body("  console.println(\"{Colour.fallback()}\")?");
+        assert_eq!(run.output, "Red\n");
+    }
+
+    #[test]
+    fn an_enum_value_answers_its_methods() {
+        let run = colour_body(
+            "  console.println(\"{Colour.Red.describe()} {Colour.Named(\"teal\").describe()}\")?",
+        );
+        assert_eq!(run.output, "red teal\n");
+    }
+
+    #[test]
+    fn a_case_wins_over_an_associated_function_of_the_same_name() {
+        let source = r#"
+use console.println
+
+enum Signal {
+  Ready
+}
+
+impl Signal {
+  /// Shadowed by the case of the same name, which keeps naming the case.
+  fn Ready() -> String {
+    "the function"
+  }
+}
+
+export fn main() -> Result<Unit, Error> {
+  console.println("{Signal.Ready()}")?
+  Ok(())
+}
+"#;
+        assert_eq!(run_entry_of(source, "main", &[]).output, "Ready\n");
+    }
+
+    #[test]
+    fn an_unknown_enum_member_names_both_possibilities() {
+        let error = colour_body("  let missing = Colour.missing()").error();
+        assert_eq!(
+            error.message,
+            "enum `Colour` has no case or associated function `missing`"
+        );
+        let help = error.help.unwrap();
+        assert!(help.contains("known cases: Red, Named"), "{help}");
+        assert!(
+            help.contains("known functions: describe, fallback"),
+            "{help}"
+        );
+    }
+
     // --------------------------------------------- struct initialization
 
     const POINT: &str = r#"
@@ -2684,6 +3602,75 @@ struct Point {
         );
     }
 
+    #[test]
+    fn struct_initializer_labels_must_be_in_declaration_order() {
+        let error = point_body("  let p = Point(y: 2, x: 1)").error();
+        assert_eq!(
+            error.message,
+            "`Point` was given the label `x` out of declaration order"
+        );
+        assert_eq!(
+            error.help.as_deref(),
+            Some("write the arguments in this order: x, y")
+        );
+    }
+
+    #[test]
+    fn call_labels_must_be_in_declaration_order() {
+        let source = r#"
+use console.println
+
+fn between(low: Int, high: Int) -> String {
+  "[{low}, {high}]"
+}
+
+export fn main() -> Result<Unit, Error> {
+  console.println(between(high: 6, low: 5))?
+  Ok(())
+}
+"#;
+        let error = run_entry_of(source, "main", &[]).error();
+        assert_eq!(
+            error.message,
+            "`between` was given the label `low` out of declaration order"
+        );
+        assert_eq!(
+            error.rule.as_deref(),
+            Some(
+                "Labeled arguments appear in declaration order, so argument order matches parameter order."
+            )
+        );
+        assert_eq!(
+            error.help.as_deref(),
+            Some("write the arguments in this order: low, high")
+        );
+    }
+
+    #[test]
+    fn labels_in_declaration_order_are_accepted_after_positional_arguments() {
+        let source = r#"
+use console.println
+
+fn measure(value: Int, unit: String = "m", prefix: String = "length") -> String {
+  "{prefix} {value}{unit}"
+}
+
+export fn main() -> Result<Unit, Error> {
+  console.println(measure(3, unit: "cm", prefix: "width"))?
+  console.println(measure(3, prefix: "width"))?
+  console.println(measure(value: 4, unit: "cm"))?
+  Ok(())
+}
+"#;
+        assert_eq!(
+            run_entry_of(source, "main", &[]).output,
+            "width 3cm
+width 3m
+length 4cm
+"
+        );
+    }
+
     // --------------------------------------------------------- the entry
 
     #[test]
@@ -2704,34 +3691,294 @@ export fn main(first: String, second: String) -> Result<Unit, Error> {
         );
     }
 
+    // ------------------------------------------------------------- tasks
+    //
+    // ADR 0003 phase 1 settles tasks sequentially, so these tests assert what
+    // `await` and scope exit produce, and never the order in which two
+    // independent tasks happen to run. Where phase 1 makes a choice a
+    // scheduler could make differently, the test says so.
+
+    const TASKS: &str = r#"
+use console.println
+
+async fn answer() -> Int {
+  7
+}
+
+async fn load(ok: Bool) -> Result<Int, Error> {
+  if ok {
+    Ok(1)
+  } else {
+    Err(Error("boom"))
+  }
+}
+"#;
+
+    /// Runs `body` inside a `main` that returns `Result<Unit, Error>`, with
+    /// the `async fn` helpers of [`TASKS`] in scope.
+    fn run_task_body(body: &str) -> Run {
+        run_entry_of(
+            &format!("{TASKS}\nexport fn main() -> Result<Unit, Error> {{\n{body}\n  Ok(())\n}}\n"),
+            "main",
+            &[],
+        )
+    }
+
     #[test]
-    fn unsupported_constructs_say_so_plainly() {
+    fn an_async_fn_is_called_like_any_other_function_and_awaited() {
+        let run = run_task_body("  let value = await answer()\n  println(\"{value}\")?");
+        assert_eq!(run.output, "7\n");
+    }
+
+    /// ADR 0003: phase 1 runs an `async fn` body at the call site, so a call
+    /// that is never awaited has still run by the time the call returns. A
+    /// scheduler may start that body at any point up to the `await` instead,
+    /// so the assertion is that the effect happened, not when.
+    #[test]
+    fn an_async_fn_that_is_never_awaited_still_runs() {
         let source = r#"
-export async fn main() -> Result<Unit, Error> {
+use console.println
+
+async fn announce() -> Result<Unit, Error> {
+  println("announced")?
+  Ok(())
+}
+
+export fn main() -> Result<Unit, Error> {
+  let ignored = announce()
+  Ok(())
+}
+"#;
+        let run = run_entry_of(source, "main", &[]);
+        assert!(run.output.contains("announced"), "{:?}", run.output);
+    }
+
+    #[test]
+    fn awaiting_a_result_propagates_with_a_question_mark() {
+        let source = format!(
+            "{TASKS}
+export fn main() -> Result<Int, Error> {{
+  let good = load(true).await()?
+  println(\"{{good}}\")?
+  let bad = load(false).await()?
+  println(\"unreachable\")?
+  Ok(bad)
+}}
+"
+        );
+        let run = run_entry_of(&source, "main", &[]);
+        assert_eq!(run.output, "1\n");
+        assert_eq!(run.value().to_string(), "Err(boom)");
+    }
+
+    /// `await` binds looser than `?`, so `await load()?` applies `?` to the
+    /// handle rather than to the value inside it. The diagnostic names the
+    /// spelling that works.
+    #[test]
+    fn a_question_mark_on_a_task_points_at_await() {
+        let error = run_task_body("  let value = await load(true)?").error();
+        assert_eq!(
+            error.message,
+            "`?` needs a `Result` or an `Option`, but found `Task`"
+        );
+        assert!(
+            error.help.unwrap().contains("task.await()?"),
+            "the diagnostic shows the correction"
+        );
+    }
+
+    #[test]
+    fn both_await_spellings_settle_the_same_task() {
+        let run = run_task_body(
+            "  let prefix = await answer()\n  let postfix = answer().await()\n  println(\"{prefix} {postfix}\")?",
+        );
+        assert_eq!(run.output, "7 7\n");
+    }
+
+    #[test]
+    fn a_scope_awaits_the_tasks_it_spawned() {
+        let run = run_task_body(
+            "  scope tasks {\n    let first = tasks.spawn { 1 }\n    let second = tasks.spawn { 2 }\n    let a = await first\n    let b = second.await()\n    println(\"{a} {b}\")?\n  }",
+        );
+        assert_eq!(run.output, "1 2\n");
+    }
+
+    #[test]
+    fn leaving_a_scope_settles_a_task_the_body_never_awaited() {
+        let run = run_task_body(
+            "  scope tasks {\n    let ignored = tasks.spawn { println(\"the task ran\")? }\n  }\n  println(\"after the scope\")?",
+        );
+        assert_eq!(run.output, "the task ran\nafter the scope\n");
+    }
+
+    #[test]
+    fn returning_from_a_scope_cancels_a_task_that_never_ran() {
+        let source = format!(
+            "{TASKS}
+export fn main() -> Result<Unit, Error> {{
+  scope tasks {{
+    let ignored = tasks.spawn {{ println(\"this must not run\")? }}
+    return Ok(())
+  }}
+}}
+"
+        );
+        let run = run_entry_of(&source, "main", &[]);
+        assert_eq!(run.output, "");
+        assert_eq!(run.value().to_string(), "Ok(())");
+    }
+
+    #[test]
+    fn an_error_inside_a_scope_cancels_a_task_that_never_ran() {
+        let source = format!(
+            "{TASKS}
+export fn main() -> Result<Int, Error> {{
+  scope tasks {{
+    let ignored = tasks.spawn {{ println(\"this must not run\")? }}
+    let value = load(false).await()?
+    Ok(value)
+  }}
+}}
+"
+        );
+        let run = run_entry_of(&source, "main", &[]);
+        assert_eq!(run.output, "");
+        assert_eq!(run.value().to_string(), "Err(boom)");
+    }
+
+    #[test]
+    fn a_task_that_fails_propagates_its_error_out_of_the_scope() {
+        let source = format!(
+            "{TASKS}
+export fn main() -> Result<Unit, Error> {{
+  scope tasks {{
+    let failing = tasks.spawn {{ Err(Error(\"the task failed\")) }}
+    println(\"the body finished\")?
+  }}
+  println(\"unreachable\")?
+  Ok(())
+}}
+"
+        );
+        let run = run_entry_of(&source, "main", &[]);
+        assert_eq!(run.output, "the body finished\n");
+        assert_eq!(run.value().to_string(), "Err(the task failed)");
+    }
+
+    #[test]
+    fn awaiting_a_cancelled_task_is_rejected() {
+        let run = run_task_body(
+            "  scope tasks {\n    let timer = tasks.spawn { println(\"this must not run\")? }\n    timer.cancel()\n    let value = await timer\n  }",
+        );
+        assert_eq!(run.output, "");
+        let error = run.error();
+        assert!(error.message.contains("was cancelled"), "{}", error.message);
+        assert!(error.rule.unwrap().contains("waits for or cancels"));
+    }
+
+    #[test]
+    fn awaiting_the_same_handle_twice_runs_the_body_once() {
+        let run = run_task_body(
+            "  scope tasks {\n    let once = tasks.spawn {\n      println(\"the body ran\")?\n      7\n    }\n    let first = await once\n    let second = await once\n    println(\"{first} {second}\")?\n  }",
+        );
+        assert_eq!(run.output, "the body ran\n7 7\n");
+    }
+
+    #[test]
+    fn awaiting_a_value_that_is_not_a_task_is_rejected() {
+        let error = run_task_body("  let value = await 1").error();
+        assert_eq!(error.message, "`await` needs a task, but found `Int`");
+        assert!(error.rule.unwrap().contains("`await` settles a task"));
+    }
+
+    // ------------------------------------------------------- task safety
+
+    #[test]
+    fn spawning_a_closure_that_captures_a_vector_is_rejected() {
+        let source = r#"
+export fn main() -> Result<Unit, Error> {
+  var items = Vector.of(1, 2)
+  scope tasks {
+    let counting = tasks.spawn { items.length() }
+  }
   Ok(())
 }
 "#;
         let error = run_entry_of(source, "main", &[]).error();
         assert_eq!(
             error.message,
-            "calling an `async fn` is not implemented yet in the MVP interpreter"
+            "`spawn` cannot capture `items`, which is a `Vector`"
         );
+        assert!(error
+            .rule
+            .unwrap()
+            .contains("A vector cannot cross, even through `let`"));
+        let help = error.help.unwrap();
+        assert!(
+            help.contains("freeze()") && help.contains("toArray()"),
+            "{help}"
+        );
+    }
 
-        let awaiting = r#"
-fn ready() -> Int {
-  1
-}
+    #[test]
+    fn spawning_a_closure_that_captures_the_frozen_array_is_accepted() {
+        let source = r#"
+use console.println
 
 export fn main() -> Result<Unit, Error> {
-  let value = await ready()
+  var items = Vector.of(1, 2)
+  let frozen = items.freeze()
+  scope tasks {
+    let counting = tasks.spawn { frozen.length() }
+    let total = await counting
+    println("{total}")?
+  }
   Ok(())
 }
 "#;
-        let error = run_entry_of(awaiting, "main", &[]).error();
-        assert!(
-            error.message.contains("not implemented yet"),
-            "{}",
-            error.message
+        assert_eq!(run_entry_of(source, "main", &[]).output, "2\n");
+    }
+
+    #[test]
+    fn task_safety_names_the_field_that_cannot_cross() {
+        let source = r#"
+struct Draft {
+  guests: Vector<String>
+}
+
+export fn main() -> Result<Unit, Error> {
+  let draft = Draft(guests: Vector.of("Alice"))
+  scope tasks {
+    let counting = tasks.spawn { draft.guests.length() }
+  }
+  Ok(())
+}
+"#;
+        let error = run_entry_of(source, "main", &[]).error();
+        assert_eq!(
+            error.message,
+            "`spawn` cannot capture `draft.guests`, which is a `Vector`"
+        );
+    }
+
+    #[test]
+    fn a_closure_is_task_safe_only_when_every_capture_is() {
+        let source = r#"
+export fn main() -> Result<Unit, Error> {
+  var seen = Vector.of(1)
+  let count = fn() {
+    seen.length()
+  }
+  scope tasks {
+    let counting = tasks.spawn { count() }
+  }
+  Ok(())
+}
+"#;
+        let error = run_entry_of(source, "main", &[]).error();
+        assert_eq!(
+            error.message,
+            "`spawn` cannot capture `count -> seen`, which is a `Vector`"
         );
     }
 
