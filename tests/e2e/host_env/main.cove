@@ -1,0 +1,12 @@
+use console.println
+use env.get
+
+/// Prints host environment lookups for a set and an unset variable.
+export fn main() -> Result<Unit, Error> {
+  println("set {get("COVE_E2E_GREETING")}")?
+  println("set unwrapOr {get("COVE_E2E_GREETING").unwrapOr("<missing>")}")?
+  println("unset {env.get("COVE_E2E_ABSENT")}")?
+  println("unset isNone {env.get("COVE_E2E_ABSENT").isNone()}")?
+  println("unset unwrapOr {env.get("COVE_E2E_ABSENT").unwrapOr("<missing>")}")?
+  Ok(())
+}

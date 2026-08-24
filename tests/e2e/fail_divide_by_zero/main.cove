@@ -1,0 +1,9 @@
+use console.println
+
+/// Divides by zero.
+export fn main() -> Result<Unit, Error> {
+  let zero = 0
+  println("zero {zero}")?
+  println("never printed {10 / zero}")?
+  Ok(())
+}

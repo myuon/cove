@@ -1,0 +1,7 @@
+error[cove::runtime]: `Int` addition overflowed
+ --> <e2e>/fail_int_overflow/main.cove:7:27
+  |
+7 |   println("never printed {largest + 1}")?
+  |                           ^^^^^^^^^^^
+  rule: Integer overflow is a broken invariant, not a wrapped result.
+1 error(s)

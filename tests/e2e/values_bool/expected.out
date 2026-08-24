@@ -1,0 +1,8 @@
+literals true false
+not false true
+and true false false
+or true true false
+nested true
+`&&` binds tighter than `||` true
+grouped false
+short circuit false true evaluated [a, c]

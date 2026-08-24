@@ -1,0 +1,38 @@
+use console.println
+
+/// A nested value copied with its owner.
+export struct Meta { version: Int }
+
+/// A struct that contains another struct.
+export struct Document { title: String, meta: Meta }
+
+impl Document {
+  /// Renames this document through a mutable receiver.
+  fn rename(var self, title: String) {
+    self.title = title
+  }
+
+  /// Advances the nested version through a mutable receiver.
+  fn bumpVersion(var self) {
+    self.meta.version += 1
+  }
+}
+
+/// Prints that assigning a struct copies its fields.
+export fn main() -> Result<Unit, Error> {
+  var original = Document(title: "first", meta: Meta(version: 1))
+  var copy = original
+  copy.rename("second")
+  copy.bumpVersion()
+  println("original {original}")?
+  println("copy {copy}")?
+
+  var meta = Meta(version: 7)
+  var alias = meta
+  alias.version = 8
+  println("a nested struct copies too {meta} {alias}")?
+
+  let readOnly = original
+  println("a `let` binding is a copy as well {readOnly.title}")?
+  Ok(())
+}

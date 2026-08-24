@@ -1,0 +1,4 @@
+total 20
+counter Counter(hits: 2)
+output [1, 2, 3]
+a copy is independent 20 21

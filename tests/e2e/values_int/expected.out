@@ -1,0 +1,11 @@
+decimal 1000000
+separators 1000000
+hexadecimal 255 65535
+binary 10 240
+negative -42 -42
+precedence 14
+grouped 20
+division 3 remainder 1
+negative division -3 remainder -1
+comparison true true false false
+equality true false

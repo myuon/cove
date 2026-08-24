@@ -1,0 +1,6 @@
+literal ()
+returned ()
+no declared return type ()
+the call still had its effect [first]
+a mutating method ()
+the log now holds [first, second]

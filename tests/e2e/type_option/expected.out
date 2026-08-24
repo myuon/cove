@@ -1,0 +1,6 @@
+values Some(3) None
+isSome true false
+isNone false true
+unwrapOr 3 0
+firstWord Some(hello) None
+`?` propagates Some(hello!) None

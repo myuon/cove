@@ -1,0 +1,7 @@
+bare name cove
+field access outside
+method call 210
+arithmetic 43
+nested inner cove and 2 outer
+escaped braces {name} stay literal
+whole value Reading(label: outside, celsius: 21)

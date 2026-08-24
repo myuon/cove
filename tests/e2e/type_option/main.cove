@@ -1,0 +1,25 @@
+use console.println
+
+/// Returns the first word of `text`, or `None` when there is none.
+fn firstWord(text: String) -> Option<String> {
+  text.words().get(0)
+}
+
+/// Propagates `None` out of this function with `?`.
+fn shout(text: String) -> Option<String> {
+  let word = firstWord(text)?
+  Some("{word}!")
+}
+
+/// Prints `Option` construction, queries, and `?` propagation.
+export fn main() -> Result<Unit, Error> {
+  let some = Some(3)
+  let none = None
+  println("values {some} {none}")?
+  println("isSome {some.isSome()} {none.isSome()}")?
+  println("isNone {some.isNone()} {none.isNone()}")?
+  println("unwrapOr {some.unwrapOr(0)} {none.unwrapOr(0)}")?
+  println("firstWord {firstWord("hello world")} {firstWord("")}")?
+  println("`?` propagates {shout("hello world")} {shout("")}")?
+  Ok(())
+}

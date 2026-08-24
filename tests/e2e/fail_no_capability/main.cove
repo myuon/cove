@@ -1,0 +1,7 @@
+use console.println
+
+/// Calls a Host API whose capability this run was not granted.
+export fn main() -> Result<Unit, Error> {
+  println("this never reaches the console")?
+  Ok(())
+}

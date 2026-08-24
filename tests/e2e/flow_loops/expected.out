@@ -1,0 +1,13 @@
+while ran until 3
+array a
+array b
+vector c
+vector d
+exclusive 0
+exclusive 1
+exclusive 2
+inclusive 0
+inclusive 1
+inclusive 2
+inclusive 3
+`0..<3` yielded 3 values and `0..3` yielded 4

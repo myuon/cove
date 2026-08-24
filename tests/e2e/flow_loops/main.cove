@@ -1,0 +1,29 @@
+use console.println
+
+/// Prints `while` and every `for` iterable form.
+export fn main() -> Result<Unit, Error> {
+  var counter = 0
+  while counter < 3 {
+    counter += 1
+  }
+  println("while ran until {counter}")?
+
+  var seen = Vector.of()
+  for item in ["a", "b"] {
+    seen.push("array {item}")
+  }
+  for item in Vector.of("c", "d") {
+    seen.push("vector {item}")
+  }
+  for index in 0..<3 {
+    seen.push("exclusive {index}")
+  }
+  for index in 0..3 {
+    seen.push("inclusive {index}")
+  }
+  for line in seen {
+    println(line)?
+  }
+  println("`0..<3` yielded 3 values and `0..3` yielded 4")?
+  Ok(())
+}

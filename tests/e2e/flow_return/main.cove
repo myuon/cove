@@ -1,0 +1,46 @@
+use console.println
+
+/// Returns from inside a `for` loop.
+fn firstNonEmpty(items: Array<String>) -> String {
+  for item in items {
+    if !item.isEmpty() {
+      return item
+    }
+  }
+  "<none>"
+}
+
+/// Returns from inside a `match` arm.
+fn label(n: Int) -> String {
+  match n {
+    0 => return "zero, returned from the arm"
+    1 => "one"
+    _ => {
+      if n < 0 {
+        return "negative, returned from a block arm"
+      }
+      "many"
+    }
+  }
+}
+
+/// Returns before its tail expression.
+fn guard(ok: Bool) -> String {
+  if !ok {
+    return "guarded"
+  }
+  "continued"
+}
+
+/// Prints every `return` position.
+export fn main() -> Result<Unit, Error> {
+  println(firstNonEmpty(["", "second", "third"]))?
+  println(firstNonEmpty(["", ""]))?
+  println(label(0))?
+  println(label(1))?
+  println(label(5))?
+  println(label(-5))?
+  println(guard(true))?
+  println(guard(false))?
+  Ok(())
+}

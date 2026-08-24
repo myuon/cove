@@ -1,0 +1,27 @@
+use console.println
+
+/// Prints the value of a block and of a block nested inside it.
+export fn main() -> Result<Unit, Error> {
+  let outer = {
+    let base = 1
+    let inner = {
+      let doubled = 2
+      doubled * 10
+    }
+    base + inner
+  }
+  println("outer {outer}")?
+
+  let branch = {
+    if outer > 20 {
+      "big"
+    } else {
+      "small"
+    }
+  }
+  println("branch {branch}")?
+
+  let empty = { }
+  println("a block with no tail expression is {empty}")?
+  Ok(())
+}

@@ -1,0 +1,31 @@
+use console.println
+
+/// A domain error with its own payload.
+export enum ParseError {
+  NotANumber(String)
+}
+
+/// Doubles a parsed number, propagating the error with `?`.
+fn double(text: String) -> Result<Int, Error> {
+  let value = Int.parse(text)?
+  Ok(value * 2)
+}
+
+/// Replaces the builtin error with a domain error.
+fn parseOrFail(text: String) -> Result<Int, ParseError> {
+  Int.parse(text).mapError { ParseError.NotANumber(text) }
+}
+
+/// Prints `Result` construction, queries, mapping, and propagation.
+export fn main() -> Result<Unit, Error> {
+  let ok = Ok(1)
+  let failed = Err(Error("broken"))
+  println("values {ok} {failed}")?
+  println("isOk {ok.isOk()} {failed.isOk()}")?
+  println("isError {ok.isError()} {failed.isError()}")?
+  println("`?` on Ok {double("21")}")?
+  println("`?` on Err {double("x")}")?
+  println("mapError leaves Ok alone {parseOrFail("7")}")?
+  println("mapError replaces Err {parseOrFail("x")}")?
+  Ok(())
+}

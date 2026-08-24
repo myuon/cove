@@ -1,0 +1,6 @@
+both defaults length: 3m
+one supplied length: 3km
+one supplied by label distance: 3m
+none defaulted distance: 3km
+computed default 1 of 42
+computed default supplied 1 of 7

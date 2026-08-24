@@ -1,0 +1,28 @@
+use console.println
+
+/// Joins every variadic argument with `separator`.
+fn joinAll(separator: String, items: String...) -> String {
+  var text = ""
+  var first = true
+  for item in items {
+    if first {
+      text = item
+      first = false
+    } else {
+      text = "{text}{separator}{item}"
+    }
+  }
+  "[{text}] from {items.count()} item(s)"
+}
+
+/// Prints variadic calls with several arguments, none, and a spread.
+export fn main() -> Result<Unit, Error> {
+  println("several {joinAll("-", "a", "b", "c")}")?
+  println("none {joinAll("-")}")?
+
+  let ready = ["x", "y"]
+  println("spread {joinAll("-", ...ready)}")?
+  println("mixed {joinAll("-", "w", ...ready)}")?
+  println("a spread vector {joinAll("-", ...Vector.of("v"))}")?
+  Ok(())
+}

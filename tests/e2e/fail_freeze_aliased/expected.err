@@ -1,0 +1,8 @@
+error[cove::runtime]: `freeze()` needs uniquely owned vector storage, but another alias observes this vector
+ --> <e2e>/fail_freeze_aliased/main.cove:9:16
+  |
+9 |   let frozen = building.freeze()
+  |                ^^^^^^^^^^^^^^^^^
+  rule: `freeze()` consumes a locally unique vector and returns an immutable array in O(1).
+  help: call `toArray()` instead, which copies the elements in O(n), or drop the other alias before calling `freeze()`
+1 error(s)

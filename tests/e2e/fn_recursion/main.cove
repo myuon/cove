@@ -1,0 +1,46 @@
+use console.println
+
+/// Multiplies every integer from 1 to `n`.
+fn factorial(n: Int) -> Int {
+  if n <= 1 {
+    1
+  } else {
+    n * factorial(n - 1)
+  }
+}
+
+/// Sums the first `n` integers through an accumulator.
+fn sumTo(n: Int, accumulated: Int = 0) -> Int {
+  if n == 0 {
+    accumulated
+  } else {
+    sumTo(n - 1, accumulated + n)
+  }
+}
+
+/// True when `n` is even, by asking `isOdd`.
+fn isEven(n: Int) -> Bool {
+  if n == 0 {
+    true
+  } else {
+    isOdd(n - 1)
+  }
+}
+
+/// True when `n` is odd, by asking `isEven`.
+fn isOdd(n: Int) -> Bool {
+  if n == 0 {
+    false
+  } else {
+    isEven(n - 1)
+  }
+}
+
+/// Prints recursive and mutually recursive results.
+export fn main() -> Result<Unit, Error> {
+  println("factorial {factorial(6)}")?
+  println("sumTo {sumTo(10)}")?
+  println("isEven {isEven(6)} {isEven(7)}")?
+  println("isOdd {isOdd(6)} {isOdd(7)}")?
+  Ok(())
+}

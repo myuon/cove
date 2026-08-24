@@ -1,0 +1,44 @@
+use console.println
+
+/// A counter with methods that read and mutate it.
+export struct Counter { hits: Int, label: String }
+
+impl Counter {
+  /// Builds a counter that starts at zero.
+  fn named(label: String) -> Counter {
+    Counter(hits: 0, label: label)
+  }
+
+  /// Reports this counter without changing it.
+  fn describe(self) -> String {
+    "{self.label}={self.hits}"
+  }
+
+  /// Adds one hit to the caller's counter.
+  fn hit(var self) {
+    self.hits += 1
+  }
+
+  /// Adds `n` hits and returns the new total.
+  fn hitMany(var self, n: Int) -> Int {
+    for _step in 0..<n {
+      self.hits += 1
+    }
+    self.hits
+  }
+}
+
+/// Prints associated functions, `self` methods, and `var self` methods.
+export fn main() -> Result<Unit, Error> {
+  var counter = Counter.named("clicks")
+  println("associated function {counter.describe()}")?
+
+  counter.hit()
+  println("after `var self` hit {counter.describe()}")?
+  println("hitMany returned {counter.hitMany(3)}")?
+  println("the caller observes the mutation {counter}")?
+
+  let readOnly = Counter.named("frozen")
+  println("a `let` receiver still reads {readOnly.describe()}")?
+  Ok(())
+}

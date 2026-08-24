@@ -1,0 +1,5 @@
+several [a-b-c] from 3 item(s)
+none [] from 0 item(s)
+spread [x-y] from 2 item(s)
+mixed [w-x-y] from 3 item(s)
+a spread vector [v] from 1 item(s)

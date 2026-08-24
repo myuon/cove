@@ -1,0 +1,28 @@
+use console.println
+
+/// A point in the plane.
+export struct Point { x: Int, y: Int }
+
+/// A line between two points.
+export struct Segment { start: Point, end: Point }
+
+/// A struct declared with the parenthesised field list.
+export struct Tag(name: String, weight: Int)
+
+/// Prints struct initialization and field reads.
+export fn main() -> Result<Unit, Error> {
+  let point = Point(x: 1, y: 2)
+  println("point {point}")?
+  println("fields {point.x} {point.y}")?
+
+  let segment = Segment(start: point, end: Point(x: 3, y: 4))
+  println("segment {segment}")?
+  println("nested fields {segment.start.x} {segment.end.y}")?
+
+  let tag = Tag(name: "north", weight: 5)
+  println("parenthesised form {tag} {tag.name}")?
+
+  let reordered = Point(y: 20, x: 10)
+  println("initializer labels may be reordered {reordered}")?
+  Ok(())
+}

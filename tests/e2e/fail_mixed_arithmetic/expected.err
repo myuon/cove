@@ -1,0 +1,7 @@
+error[cove::runtime]: `+` is not defined for `Int` and `Float`
+ --> <e2e>/fail_mixed_arithmetic/main.cove:6:27
+  |
+6 |   println("never printed {1 + 1.0}")?
+  |                           ^^^^^^^
+  rule: There are no implicit numeric, string, or boolean conversions.
+1 error(s)

@@ -1,0 +1,8 @@
+use console.println
+
+/// Compares an `Int` with a `String`.
+export fn main() -> Result<Unit, Error> {
+  println("about to compare an Int with a String")?
+  println("never printed {1 == "1"}")?
+  Ok(())
+}

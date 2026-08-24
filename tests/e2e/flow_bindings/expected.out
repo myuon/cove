@@ -1,0 +1,9 @@
+start 10 10
+assign 7
+add 12
+subtract 10
+multiply 40
+divide 5
+remainder 2
+strings ab
+the `let` binding never changed 10

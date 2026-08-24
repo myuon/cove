@@ -1,0 +1,8 @@
+error[cove::runtime]: no `match` arm covers `Green`
+  --> <e2e>/fail_match_no_arm/main.cove:11:3
+   |
+11 |   match signal {
+   |   ^^^^^^^^^^^^^^
+  rule: `match` must cover every enum case.
+  help: add an arm for this case, or a `_` arm
+1 error(s)

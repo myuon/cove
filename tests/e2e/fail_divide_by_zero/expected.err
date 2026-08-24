@@ -1,0 +1,7 @@
+error[cove::runtime]: `Int` division by zero
+ --> <e2e>/fail_divide_by_zero/main.cove:7:27
+  |
+7 |   println("never printed {10 / zero}")?
+  |                           ^^^^^^^^^
+  rule: Division and remainder by zero are broken invariants.
+1 error(s)

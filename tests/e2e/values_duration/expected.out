@@ -1,0 +1,10 @@
+nanoseconds 1ns
+microseconds 1000ns
+milliseconds 1000000ns
+seconds 1000000000ns
+minutes 60000000000ns
+hours 3600000000000ns
+separators 1500000000ns
+sum 1500000000ns
+difference 500000000ns
+comparison true true

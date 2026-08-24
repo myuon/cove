@@ -1,0 +1,35 @@
+use console.println
+
+/// Applies `transform` to `value`.
+fn apply(value: Int, transform: fn(Int) -> Int) -> Int {
+  transform(value)
+}
+
+/// Returns a closure that adds `by` to its argument.
+fn adder(by: Int) -> fn(Int) -> Int {
+  fn(n) {
+    n + by
+  }
+}
+
+/// Prints lambdas bound, passed, returned, and capturing by value.
+export fn main() -> Result<Unit, Error> {
+  let double = fn(n) {
+    n * 2
+  }
+  println("bound {double(4)}")?
+  println("passed {apply(5, double)}")?
+  println("inline {apply(5, fn(n) { n + 100 })}")?
+
+  let addThree = adder(3)
+  println("returned {addThree(4)}")?
+
+  var captured = 1
+  let show = fn() {
+    "captured {captured}"
+  }
+  captured = 99
+  println("the closure still sees {show()}")?
+  println("the original is now {captured}")?
+  Ok(())
+}

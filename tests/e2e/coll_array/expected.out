@@ -1,0 +1,9 @@
+literal [10, 20, 30]
+length 3 count 3 isEmpty false
+in range Some(10) Some(30)
+out of range None None
+unwrapOr 0
+iterated total 60
+empty [] true 0
+process arguments [alpha, beta gamma] 2
+first argument alpha
