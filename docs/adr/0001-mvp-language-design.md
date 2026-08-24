@@ -329,9 +329,8 @@ Public modules and declarations without doc comments produce a warning by
 default; CI may promote warnings to errors.
 
 Decorator syntax is reserved for enforceable compiler or runtime behavior.
-The MVP defines no performance decorator. A candidate such as `@hot` must not
-be accepted or used in representative programs until its exact checking,
-optimization, tracing, and compatibility semantics are specified.
+The MVP defines no decorators. New decorators are accepted only after their
+checking, runtime, tracing, and compatibility semantics are specified.
 
 ## Observability
 
