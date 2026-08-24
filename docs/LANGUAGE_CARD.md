@@ -45,41 +45,41 @@ export fn main(args: List<String>) -> Result<Unit, Error> {
 - Panics are reserved for broken invariants, not ordinary errors.
 - `==` means value equality. Identity, when available, is explicit.
 
-## Values, places, and references
+## Values, handles, and mutation
 
-Values themselves are not mutable. A storage-backed value in a `let` place may
-be shallow-shared in O(1). A `var` place may be updated in place but cannot be
-implicitly aliased.
+Assignment and argument passing always perform a field-wise shallow copy.
+
+- Primitive values, strings, enums, and structs have value semantics.
+- Copying a struct copies each field according to that field's semantics.
+- `List`, `Map`, `Set`, closures, and Host resources are handle values.
+- Copying a handle is O(1); all copies observe the same underlying storage.
+- Cove has no implicit deep copy, copy-on-write, or retention analysis.
+- `.copy()` requests an independent transitive snapshot.
+- `==` compares values; `is` tests shared storage identity where available.
 
 ```cove
-var values = [1, 2, 3]
-
-let snapshot = values.copy() // independent ordinary value graph
-let alias = values.ref()     // reference to the same mutable place
+var first = [1, 2]
+var second = first
+second.push(3)
+// first and second both observe [1, 2, 3]
 ```
 
-`.copy()` recursively copies ordinary value storage, but preserves explicit
-identity such as `Ref<T>`; custom and shallow copies must say so. `.ref()`
-leaves the original variable usable, and mutations through either name are
-visible through the other. It is task-local. Cross-task mutable sharing
-requires a synchronized type such as `Shared<T>`. Trivially copyable values do
-not require an explicit choice.
+A list's length, capacity, and elements belong to the shared storage, so
+`push` remains visible through every alias even after reallocation.
 
-A method declares whether it requires a mutable receiver:
+`let` creates a read-only place; `var` creates a mutable place. A mutating
+method or parameter says `var`:
 
 ```cove
 fn length(self) -> Int
 fn push(var self, value: T)
+fn fill(var values: List<Int>)
 ```
 
-A `self` method is callable through `let` or `var`. A `var self` method
-requires a mutable place or explicit reference. Calls use ordinary method
-syntax; Cove has no borrow or lifetime syntax.
-
-Arguments are temporary read-only views by default; `var` arguments may
-temporarily update a caller's mutable place. A read-only value may be retained
-by O(1) sharing. Retaining a mutable place requires an explicit `.copy()` or
-`.ref()`. The compiler reports retention in outlines and API diffs.
+Read-only is a local access rule, not deep immutability: a `let` handle may
+observe changes made through another mutable alias. Mutable handles cannot
+cross task boundaries without an explicit synchronized type such as
+`Shared<T>`.
 
 ## Evaluation
 
