@@ -7,6 +7,13 @@ use cove_diag::Span;
 pub struct Token {
     pub kind: TokenKind,
     pub span: Span,
+    /// True when a line break separates this token from the previous one.
+    ///
+    /// Newlines are not tokens; the parser reads this flag only where a
+    /// statement could end, so most parsing routines never see line breaks.
+    /// Line breaks hidden inside a `//` or `/* */` comment count as well, so
+    /// commenting out the tail of a line cannot join two statements.
+    pub preceded_by_newline: bool,
 }
 
 /// Keywords recognised by the MVP grammar.

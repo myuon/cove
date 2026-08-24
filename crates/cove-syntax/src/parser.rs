@@ -1,9 +1,36 @@
 //! The Cove parser.
 //!
 //! Turns a token stream into an [`ast::SourceUnit`]. Cove has no statement
-//! terminators: `;` is not part of the language and newlines are not
-//! significant, so item and statement boundaries follow from the grammar
-//! alone and the last expression of a block is that block's value.
+//! terminators: `;` is not part of the language. Instead, as in Go and Swift,
+//! a newline ends a statement when the line could have ended there. The last
+//! expression of a block is still that block's value.
+//!
+//! # The newline rule
+//!
+//! A line break ends the current expression when all of the following hold:
+//!
+//! 1. the token after the break carries [`Token::preceded_by_newline`];
+//! 2. the token before the break can end an expression — an identifier,
+//!    `self`, a literal, `)`, `]`, `}`, `?`, or `...` (see
+//!    [`ends_expression`]);
+//! 3. the parser is at a point where continuing is optional: a postfix `(`,
+//!    `<` generic argument list, or `{` trailing closure, or a binary,
+//!    range, or assignment operator;
+//! 4. the parser is not inside a `(`, `[`, or `<` group (see
+//!    [`Parser::grouped`]). `{` is not such a group: the statements of a
+//!    block do end at newlines.
+//!
+//! Two exceptions keep familiar code working. A line that starts with `.`
+//! continues the previous expression, so a method chain may be split across
+//! lines; this falls out of rule 3, because `.` is never an optional
+//! continuation. And the continuation keywords `else` and `=>` are read
+//! across a line break as well, so `}` followed by a newline and `else` still
+//! attaches.
+//!
+//! Because rule 3 looks at the operator rather than the operand, an operator
+//! at the *end* of a line continues onto the next line (`a +` / `b` is one
+//! expression) while an operator at the *start* of a line does not (`a` /
+//! `+ b` is two statements).
 //!
 //! Parsing never stops at the first error. Every diagnostic is collected and
 //! the parser resynchronises at the next plausible declaration or statement,
@@ -48,6 +75,10 @@ struct Parser<'a> {
     /// `match`, or `scope`, where a following `{` opens the body instead of a
     /// trailing closure.
     no_trailing_closure: bool,
+    /// How many `(`, `[`, or `<` groups enclose the cursor. A newline inside
+    /// such a group never ends a statement, so argument lists, array
+    /// literals, and generic argument lists may span lines.
+    group_depth: u32,
 }
 
 fn expr(kind: ExprKind, span: Span) -> Expr {
@@ -69,6 +100,62 @@ fn can_take_trailing_closure(callee: &Expr) -> bool {
     matches!(
         callee.kind,
         ExprKind::Ident(_) | ExprKind::Field { .. } | ExprKind::Call { trailing: None, .. }
+    )
+}
+
+/// The rule an operator at the start of a line breaks, stated for the reader.
+const NEWLINE_OPERATOR_RULE: &str = "A newline ends a statement when the expression before it is \
+     complete, so an operator that continues an expression stays on the line it continues.";
+
+/// Whether a token can be the last token of an expression.
+///
+/// This is the first half of the newline rule: a line break only ends a
+/// statement when the line so far reads as a complete expression.
+fn ends_expression(kind: &TokenKind) -> bool {
+    matches!(
+        kind,
+        TokenKind::Ident(_)
+            | TokenKind::Keyword(Keyword::SelfValue)
+            | TokenKind::Int(_)
+            | TokenKind::Float(_)
+            | TokenKind::Bool(_)
+            | TokenKind::Duration(_)
+            | TokenKind::Str(_)
+            | TokenKind::RParen
+            | TokenKind::RBracket
+            | TokenKind::RBrace
+            | TokenKind::Question
+            | TokenKind::Ellipsis
+    )
+}
+
+/// Whether a token can only ever continue an expression, never begin one.
+///
+/// Such a token at the start of a line is always a statement that the newline
+/// rule has just cut in two, which [`Parser::expected_expression`] explains.
+fn continues_expression_only(kind: &TokenKind) -> bool {
+    matches!(
+        kind,
+        TokenKind::Plus
+            | TokenKind::Star
+            | TokenKind::Slash
+            | TokenKind::Percent
+            | TokenKind::EqEq
+            | TokenKind::BangEq
+            | TokenKind::Lt
+            | TokenKind::LtEq
+            | TokenKind::Gt
+            | TokenKind::GtEq
+            | TokenKind::AmpAmp
+            | TokenKind::PipePipe
+            | TokenKind::Eq
+            | TokenKind::PlusEq
+            | TokenKind::MinusEq
+            | TokenKind::StarEq
+            | TokenKind::SlashEq
+            | TokenKind::PercentEq
+            | TokenKind::DotDot
+            | TokenKind::DotDotLt
     )
 }
 
@@ -106,6 +193,7 @@ impl<'a> Parser<'a> {
             vec![Token {
                 kind: TokenKind::Eof,
                 span: Span::new(file, 0, 0),
+                preceded_by_newline: false,
             }]
         } else {
             tokens
@@ -117,6 +205,7 @@ impl<'a> Parser<'a> {
             pos: 0,
             diagnostics: Vec::new(),
             no_trailing_closure: false,
+            group_depth: 0,
         }
     }
 
@@ -184,12 +273,50 @@ impl<'a> Parser<'a> {
     fn unexpected(&mut self, expected: &str) -> Bail {
         let found = self.peek().describe();
         let span = self.span();
+        let mut diagnostic = Diagnostic::error(
+            "cove::parse::unexpected_token",
+            format!("expected {expected}, found {found}"),
+        )
+        .at(span);
+        diagnostic = self.note_newline_rule(diagnostic);
+        self.error(diagnostic);
+        Bail
+    }
+
+    /// Adds the newline rule to `diagnostic` when the token it reports was cut
+    /// off from the previous line, which is otherwise easy to misread as a
+    /// problem with the token itself.
+    fn note_newline_rule(&self, diagnostic: Diagnostic) -> Diagnostic {
+        if !(self.at_statement_break() && continues_expression_only(self.peek())) {
+            return diagnostic;
+        }
+        diagnostic
+            .label(self.prev_span(), "a newline ended the statement here")
+            .rule(NEWLINE_OPERATOR_RULE)
+            .help("Move this operator to the end of the previous line.")
+    }
+
+    /// Reports a token that cannot begin an expression.
+    ///
+    /// When the token could only have continued the previous line, the
+    /// diagnostic explains that the newline ended that statement instead of
+    /// repeating the generic "expected an expression".
+    fn expected_expression(&mut self) -> Bail {
+        if !(self.at_statement_break() && continues_expression_only(self.peek())) {
+            return self.unexpected("an expression");
+        }
+        let operator = self.peek().describe();
+        let span = self.span();
+        let previous = self.prev_span();
         self.error(
             Diagnostic::error(
-                "cove::parse::unexpected_token",
-                format!("expected {expected}, found {found}"),
+                "cove::parse::newline_ended_statement",
+                format!("{operator} cannot start a statement"),
             )
-            .at(span),
+            .at(span)
+            .label(previous, "the previous statement ended here")
+            .rule(NEWLINE_OPERATOR_RULE)
+            .help("Move this operator to the end of the previous line."),
         );
         Bail
     }
@@ -244,6 +371,46 @@ impl<'a> Parser<'a> {
         let result = parse(self);
         self.no_trailing_closure = saved;
         result
+    }
+
+    /// Runs `parse` inside a `(`, `[`, or `<` group, where line breaks never
+    /// end a statement.
+    fn grouped<T>(&mut self, parse: impl FnOnce(&mut Self) -> T) -> T {
+        self.group_depth += 1;
+        let result = parse(self);
+        self.group_depth -= 1;
+        result
+    }
+
+    /// Runs `parse` as the body of a `{ ... }` block, where line breaks end
+    /// statements again even when the block itself sits inside a group, as in
+    /// a lambda passed as an argument.
+    fn ungrouped<T>(&mut self, parse: impl FnOnce(&mut Self) -> T) -> T {
+        let saved = self.group_depth;
+        self.group_depth = 0;
+        let result = parse(self);
+        self.group_depth = saved;
+        result
+    }
+
+    /// Whether a line break at the cursor ends the current statement.
+    ///
+    /// Callers ask this only where continuing the expression is optional, so
+    /// the answer decides between one expression and two statements. See the
+    /// module documentation for the full rule.
+    fn at_statement_break(&self) -> bool {
+        if self.group_depth > 0 || self.pos == 0 {
+            return false;
+        }
+        let next = &self.tokens[self.pos];
+        if !next.preceded_by_newline {
+            return false;
+        }
+        // A line starting with `.` continues a method chain.
+        if matches!(next.kind, TokenKind::Dot) {
+            return false;
+        }
+        ends_expression(&self.tokens[self.pos - 1].kind)
     }
 
     fn dangling_doc(&mut self, span: Span) {
@@ -471,20 +638,26 @@ impl Parser<'_> {
         if !self.eat(&TokenKind::Lt) {
             return Ok(Vec::new());
         }
-        let mut generics = Vec::new();
-        while !self.at(&TokenKind::Gt) && !self.is_eof() {
-            generics.push(self.expect_ident()?);
-            if !self.eat(&TokenKind::Comma) {
-                break;
+        self.grouped(|parser| {
+            let mut generics = Vec::new();
+            while !parser.at(&TokenKind::Gt) && !parser.is_eof() {
+                generics.push(parser.expect_ident()?);
+                if !parser.eat(&TokenKind::Comma) {
+                    break;
+                }
             }
-        }
-        self.expect(&TokenKind::Gt, "`>`")?;
-        Ok(generics)
+            parser.expect(&TokenKind::Gt, "`>`")?;
+            Ok(generics)
+        })
     }
 
     /// Parses a parameter list up to and including its `)`. A leading `self`
     /// or `var self` is the method receiver rather than a parameter.
     fn parse_param_list(&mut self) -> PResult<(Option<Receiver>, Vec<Param>)> {
+        self.grouped(Parser::parse_param_list_inner)
+    }
+
+    fn parse_param_list_inner(&mut self) -> PResult<(Option<Receiver>, Vec<Param>)> {
         let mut receiver = None;
         let mut params = Vec::new();
         let mut first = true;
@@ -736,14 +909,17 @@ impl Parser<'_> {
         let is_async = self.eat_keyword(Keyword::Async);
         self.expect_keyword(Keyword::Fn, "`fn`")?;
         self.expect(&TokenKind::LParen, "`(`")?;
-        let mut params = Vec::new();
-        while !self.at(&TokenKind::RParen) && !self.is_eof() {
-            params.push(self.parse_fn_type_param()?);
-            if !self.eat(&TokenKind::Comma) {
-                break;
+        let params = self.grouped(|parser| {
+            let mut params = Vec::new();
+            while !parser.at(&TokenKind::RParen) && !parser.is_eof() {
+                params.push(parser.parse_fn_type_param()?);
+                if !parser.eat(&TokenKind::Comma) {
+                    break;
+                }
             }
-        }
-        self.expect(&TokenKind::RParen, "`)`")?;
+            parser.expect(&TokenKind::RParen, "`)`")?;
+            Ok(params)
+        })?;
         let return_type = if self.eat(&TokenKind::Arrow) {
             Some(Box::new(self.parse_type()?))
         } else {
@@ -792,15 +968,17 @@ impl Parser<'_> {
     /// arguments close naturally.
     fn parse_type_args(&mut self) -> PResult<Vec<Type>> {
         self.expect(&TokenKind::Lt, "`<`")?;
-        let mut args = Vec::new();
-        while !self.at(&TokenKind::Gt) && !self.is_eof() {
-            args.push(self.parse_type()?);
-            if !self.eat(&TokenKind::Comma) {
-                break;
+        self.grouped(|parser| {
+            let mut args = Vec::new();
+            while !parser.at(&TokenKind::Gt) && !parser.is_eof() {
+                args.push(parser.parse_type()?);
+                if !parser.eat(&TokenKind::Comma) {
+                    break;
+                }
             }
-        }
-        self.expect(&TokenKind::Gt, "`>`")?;
-        Ok(args)
+            parser.expect(&TokenKind::Gt, "`>`")?;
+            Ok(args)
+        })
     }
 }
 
@@ -813,13 +991,18 @@ impl Parser<'_> {
         self.expect(&TokenKind::LBrace, "`{`")?;
 
         let mut statements = Vec::new();
-        self.scoped(false, |parser| {
-            while !parser.at(&TokenKind::RBrace) && !parser.is_eof() {
-                match parser.parse_stmt() {
-                    Ok(stmt) => statements.push(stmt),
-                    Err(Bail) => parser.recover_in_block(),
+        self.ungrouped(|parser| {
+            parser.scoped(false, |parser| {
+                while !parser.at(&TokenKind::RBrace) && !parser.is_eof() {
+                    match parser.parse_stmt() {
+                        Ok(stmt) => {
+                            parser.check_detached_trailing_closure(&stmt);
+                            statements.push(stmt);
+                        }
+                        Err(Bail) => parser.recover_in_block(),
+                    }
                 }
-            }
+            })
         });
 
         let end = self.span();
@@ -847,6 +1030,40 @@ impl Parser<'_> {
             tail,
             span: start.to(end),
         })
+    }
+
+    /// Reports the one shape the newline rule silently changes the meaning
+    /// of: a statement that is only a name or a field access, followed by a
+    /// `{` on the next line. Such a statement computes nothing on its own, so
+    /// the block was meant to be its trailing closure and must start on the
+    /// same line.
+    fn check_detached_trailing_closure(&mut self, stmt: &Stmt) {
+        if !matches!(
+            &stmt.kind,
+            StmtKind::Expr(Expr {
+                kind: ExprKind::Ident(_) | ExprKind::Field { .. },
+                ..
+            })
+        ) {
+            return;
+        }
+        if !self.at(&TokenKind::LBrace) || !self.at_statement_break() {
+            return;
+        }
+        let span = self.span();
+        self.error(
+            Diagnostic::error(
+                "cove::parse::newline_before_trailing_closure",
+                "a newline ended the statement before this `{`",
+            )
+            .at(span)
+            .label(stmt.span, "this expression is already complete")
+            .rule(
+                "A newline ends a statement when the expression before it is complete, so a \
+                 trailing closure begins on the same line as the call it belongs to.",
+            )
+            .help("Move `{` up onto the previous line."),
+        );
     }
 
     fn parse_stmt(&mut self) -> PResult<Stmt> {
@@ -908,6 +1125,9 @@ impl Parser<'_> {
 
     fn parse_assign(&mut self) -> PResult<Expr> {
         let target = self.parse_or()?;
+        if self.at_statement_break() {
+            return Ok(target);
+        }
         let op = match self.peek() {
             TokenKind::Eq => None,
             TokenKind::PlusEq => Some(BinaryOp::Add),
@@ -945,7 +1165,7 @@ impl Parser<'_> {
 
     fn parse_or(&mut self) -> PResult<Expr> {
         let mut lhs = self.parse_and()?;
-        while self.at(&TokenKind::PipePipe) {
+        while self.at(&TokenKind::PipePipe) && !self.at_statement_break() {
             self.bump();
             let rhs = self.parse_and()?;
             lhs = binary(BinaryOp::Or, lhs, rhs);
@@ -955,7 +1175,7 @@ impl Parser<'_> {
 
     fn parse_and(&mut self) -> PResult<Expr> {
         let mut lhs = self.parse_comparison()?;
-        while self.at(&TokenKind::AmpAmp) {
+        while self.at(&TokenKind::AmpAmp) && !self.at_statement_break() {
             self.bump();
             let rhs = self.parse_comparison()?;
             lhs = binary(BinaryOp::And, lhs, rhs);
@@ -966,6 +1186,9 @@ impl Parser<'_> {
     fn parse_comparison(&mut self) -> PResult<Expr> {
         let mut lhs = self.parse_range()?;
         loop {
+            if self.at_statement_break() {
+                return Ok(lhs);
+            }
             let op = match self.peek() {
                 TokenKind::EqEq => BinaryOp::Eq,
                 TokenKind::BangEq => BinaryOp::Ne,
@@ -984,6 +1207,9 @@ impl Parser<'_> {
     /// `0..<attempts` excludes its end; `0..n` includes it.
     fn parse_range(&mut self) -> PResult<Expr> {
         let start = self.parse_additive()?;
+        if self.at_statement_break() {
+            return Ok(start);
+        }
         let inclusive_end = match self.peek() {
             TokenKind::DotDot => true,
             TokenKind::DotDotLt => false,
@@ -1005,6 +1231,9 @@ impl Parser<'_> {
     fn parse_additive(&mut self) -> PResult<Expr> {
         let mut lhs = self.parse_multiplicative()?;
         loop {
+            if self.at_statement_break() {
+                return Ok(lhs);
+            }
             let op = match self.peek() {
                 TokenKind::Plus => BinaryOp::Add,
                 TokenKind::Minus => BinaryOp::Sub,
@@ -1019,6 +1248,9 @@ impl Parser<'_> {
     fn parse_multiplicative(&mut self) -> PResult<Expr> {
         let mut lhs = self.parse_unary()?;
         loop {
+            if self.at_statement_break() {
+                return Ok(lhs);
+            }
             let op = match self.peek() {
                 TokenKind::Star => BinaryOp::Mul,
                 TokenKind::Slash => BinaryOp::Div,
@@ -1031,9 +1263,13 @@ impl Parser<'_> {
         }
     }
 
-    /// `await` binds tighter than any binary operator and looser than the
-    /// postfix operators, so `await handler(event)?` awaits the whole
-    /// fallible call.
+    /// `await` binds tighter than any binary operator and tighter than a
+    /// trailing `?`, so `await handler(event)?` awaits the call and then
+    /// propagates the error from the `Result` the task produced: `Try(Await(Call))`.
+    /// A `?` in the middle of the chain, followed by more postfix operators,
+    /// stays part of the operand instead: `await f()?.g()` is
+    /// `Await(Field(Try(Call), g))`, not `Try(Await(...))`, because only a `?`
+    /// that ends the whole chain escapes outside the `Await`.
     fn parse_unary(&mut self) -> PResult<Expr> {
         let start = self.span();
         let op = match self.peek() {
@@ -1057,9 +1293,16 @@ impl Parser<'_> {
             }
             None => {
                 self.bump();
-                let operand = self.parse_unary()?;
-                let span = start.to(operand.span);
-                Ok(expr(ExprKind::Await(Box::new(operand)), span))
+                let operand = self.parse_postfix()?;
+                let operand_span = operand.span;
+                Ok(match operand.kind {
+                    ExprKind::Try(inner) => {
+                        let await_span = start.to(inner.span);
+                        let awaited = expr(ExprKind::Await(inner), await_span);
+                        expr(ExprKind::Try(Box::new(awaited)), start.to(operand_span))
+                    }
+                    _ => expr(ExprKind::Await(Box::new(operand)), start.to(operand_span)),
+                })
             }
         }
     }
@@ -1067,6 +1310,10 @@ impl Parser<'_> {
     fn parse_postfix(&mut self) -> PResult<Expr> {
         let mut value = self.parse_primary()?;
         loop {
+            // `(`, `<`, and `{` continue the expression only optionally, so a
+            // line break before them ends the statement instead. `.` and `?`
+            // can never start one, so they always continue.
+            let stop = self.at_statement_break();
             match self.peek() {
                 TokenKind::Dot => {
                     self.bump();
@@ -1080,7 +1327,7 @@ impl Parser<'_> {
                         span,
                     );
                 }
-                TokenKind::LParen => {
+                TokenKind::LParen if !stop => {
                     self.bump();
                     let args = self.parse_args()?;
                     value = self.finish_call(value, Vec::new(), args)?;
@@ -1090,12 +1337,12 @@ impl Parser<'_> {
                     self.bump();
                     value = expr(ExprKind::Try(Box::new(value)), span);
                 }
-                TokenKind::Lt => match self.try_generic_call(value)? {
+                TokenKind::Lt if !stop => match self.try_generic_call(value)? {
                     Ok(call) => value = call,
                     Err(unchanged) => return Ok(unchanged),
                 },
                 TokenKind::LBrace
-                    if !self.no_trailing_closure && can_take_trailing_closure(&value) =>
+                    if !stop && !self.no_trailing_closure && can_take_trailing_closure(&value) =>
                 {
                     let closure = self.parse_trailing_closure()?;
                     let span = value.span.to(closure.span);
@@ -1117,7 +1364,10 @@ impl Parser<'_> {
     /// Builds a call, attaching `f(x) { ... }`-style trailing closures.
     fn finish_call(&mut self, callee: Expr, generics: Vec<Type>, args: Vec<Arg>) -> PResult<Expr> {
         let mut span = callee.span.to(self.prev_span());
-        let trailing = if !self.no_trailing_closure && self.at(&TokenKind::LBrace) {
+        let trailing = if !self.no_trailing_closure
+            && self.at(&TokenKind::LBrace)
+            && !self.at_statement_break()
+        {
             let closure = self.parse_trailing_closure()?;
             span = span.to(closure.span);
             Some(Box::new(closure))
@@ -1172,61 +1422,77 @@ impl Parser<'_> {
         Ok(Ok(self.finish_call(callee, generics, args)?))
     }
 
-    /// Parses arguments up to and including `)`.
+    /// Parses arguments up to and including `)`. Line breaks inside the
+    /// parentheses never end a statement, so an argument list may span lines.
     fn parse_args(&mut self) -> PResult<Vec<Arg>> {
-        self.scoped(false, |parser| {
-            let mut args: Vec<Arg> = Vec::new();
-            let mut first_label: Option<Span> = None;
+        self.grouped(|parser| parser.scoped(false, Parser::parse_arg_list))
+    }
 
-            while !parser.at(&TokenKind::RParen) && !parser.is_eof() {
-                let start = parser.span();
-                let label = if matches!(parser.peek(), TokenKind::Ident(_))
-                    && parser.peek_at(1) == &TokenKind::Colon
-                {
-                    let label = parser.expect_ident()?;
-                    parser.bump();
-                    Some(label)
-                } else {
-                    None
-                };
+    fn parse_arg_list(&mut self) -> PResult<Vec<Arg>> {
+        let mut args: Vec<Arg> = Vec::new();
+        let mut first_label: Option<Span> = None;
 
-                match (&label, first_label) {
-                    (Some(label), None) => first_label = Some(label.span),
-                    (None, Some(previous)) => parser.error(
-                        Diagnostic::error(
-                            "cove::parse::positional_after_label",
-                            "a positional argument cannot follow a labeled argument",
-                        )
-                        .at(start)
-                        .label(previous, "the first labeled argument is here")
-                        .rule(
-                            "Positional arguments may precede labeled arguments; after the first \
-                             label, every remaining argument is labeled.",
-                        )
-                        .help("Give this argument its parameter label, such as `name: value`."),
-                    ),
-                    _ => {}
-                }
+        while !self.at(&TokenKind::RParen) && !self.is_eof() {
+            let start = self.span();
+            let label = if matches!(self.peek(), TokenKind::Ident(_))
+                && self.peek_at(1) == &TokenKind::Colon
+            {
+                let label = self.expect_ident()?;
+                self.bump();
+                Some(label)
+            } else {
+                None
+            };
 
-                let is_var = parser.eat_keyword(Keyword::Var);
-                let spread = parser.eat(&TokenKind::Ellipsis);
-                let value = parser.parse_expr()?;
-                args.push(Arg {
-                    label,
-                    is_var,
-                    spread,
-                    value,
-                    span: start.to(parser.prev_span()),
-                });
-
-                if !parser.eat(&TokenKind::Comma) {
-                    break;
-                }
+            match (&label, first_label) {
+                (Some(label), None) => first_label = Some(label.span),
+                (None, Some(previous)) => self.error(
+                    Diagnostic::error(
+                        "cove::parse::positional_after_label",
+                        "a positional argument cannot follow a labeled argument",
+                    )
+                    .at(start)
+                    .label(previous, "the first labeled argument is here")
+                    .rule(
+                        "Positional arguments may precede labeled arguments; after the first \
+                         label, every remaining argument is labeled.",
+                    )
+                    .help("Give this argument its parameter label, such as `name: value`."),
+                ),
+                _ => {}
             }
 
-            parser.expect(&TokenKind::RParen, "`)`")?;
-            Ok(args)
-        })
+            let is_var = self.eat_keyword(Keyword::Var);
+            let spread = self.eat(&TokenKind::Ellipsis);
+            let value = self.parse_expr()?;
+            args.push(Arg {
+                label,
+                is_var,
+                spread,
+                value,
+                span: start.to(self.prev_span()),
+            });
+
+            if !self.eat(&TokenKind::Comma) {
+                break;
+            }
+        }
+
+        self.expect(&TokenKind::RParen, "`)`")?;
+        Ok(args)
+    }
+
+    /// Parses the elements of an array literal up to and including `]`.
+    fn parse_array_elements(&mut self) -> PResult<Vec<Expr>> {
+        let mut elements = Vec::new();
+        while !self.at(&TokenKind::RBracket) && !self.is_eof() {
+            elements.push(self.parse_expr()?);
+            if !self.eat(&TokenKind::Comma) {
+                break;
+            }
+        }
+        self.expect(&TokenKind::RBracket, "`]`")?;
+        Ok(elements)
     }
 
     fn parse_primary(&mut self) -> PResult<Expr> {
@@ -1268,23 +1534,14 @@ impl Parser<'_> {
                     self.bump();
                     return Ok(expr(ExprKind::Unit, start.to(self.prev_span())));
                 }
-                let inner = self.scoped(false, |parser| parser.parse_expr())?;
+                let inner = self.grouped(|parser| parser.scoped(false, Parser::parse_expr))?;
                 self.expect(&TokenKind::RParen, "`)`")?;
                 Ok(expr(inner.kind, start.to(self.prev_span())))
             }
             TokenKind::LBracket => {
                 self.bump();
-                let elements = self.scoped(false, |parser| {
-                    let mut elements = Vec::new();
-                    while !parser.at(&TokenKind::RBracket) && !parser.is_eof() {
-                        elements.push(parser.parse_expr()?);
-                        if !parser.eat(&TokenKind::Comma) {
-                            break;
-                        }
-                    }
-                    parser.expect(&TokenKind::RBracket, "`]`")?;
-                    Ok(elements)
-                })?;
+                let elements =
+                    self.grouped(|parser| parser.scoped(false, Parser::parse_array_elements))?;
                 Ok(expr(
                     ExprKind::ArrayLit(elements),
                     start.to(self.prev_span()),
@@ -1310,7 +1567,7 @@ impl Parser<'_> {
                 Ok(expr(ExprKind::Return(value), start.to(self.prev_span())))
             }
             TokenKind::Keyword(Keyword::Fn | Keyword::Async) => self.parse_lambda(),
-            _ => Err(self.unexpected("an expression")),
+            _ => Err(self.expected_expression()),
         }
     }
 
@@ -1533,13 +1790,15 @@ impl Parser<'_> {
                 let has_payload = self.at(&TokenKind::LParen);
                 if has_payload {
                     self.bump();
-                    while !self.at(&TokenKind::RParen) && !self.is_eof() {
-                        payload.push(self.parse_pattern()?);
-                        if !self.eat(&TokenKind::Comma) {
-                            break;
+                    self.grouped(|parser| {
+                        while !parser.at(&TokenKind::RParen) && !parser.is_eof() {
+                            payload.push(parser.parse_pattern()?);
+                            if !parser.eat(&TokenKind::Comma) {
+                                break;
+                            }
                         }
-                    }
-                    self.expect(&TokenKind::RParen, "`)`")?;
+                        parser.expect(&TokenKind::RParen, "`)`")
+                    })?;
                 }
 
                 let is_variant = path.len() > 1
@@ -2042,22 +2301,57 @@ mod tests {
     }
 
     #[test]
-    fn await_binds_tighter_than_binary_operators() {
+    fn await_binds_tighter_than_a_trailing_question_mark() {
         let value = tail_expr("await handler(event)?");
-        let ExprKind::Await(inner) = &value.kind else {
-            panic!("expected an await");
-        };
-        let ExprKind::Try(call) = &inner.kind else {
+        let ExprKind::Try(inner) = &value.kind else {
             panic!("expected a `?`");
         };
+        let ExprKind::Await(call) = &inner.kind else {
+            panic!("expected an await");
+        };
         assert!(matches!(call.kind, ExprKind::Call { .. }));
+    }
 
-        let sum = tail_expr("await a + b");
+    #[test]
+    fn await_alone_has_no_try() {
+        let value = tail_expr("await handler(event)");
+        let ExprKind::Await(call) = &value.kind else {
+            panic!("expected an await");
+        };
+        assert!(matches!(call.kind, ExprKind::Call { .. }));
+    }
+
+    #[test]
+    fn await_binds_tighter_than_binary_operators() {
+        let sum = tail_expr("await a() + b");
         let ExprKind::Binary { op, lhs, .. } = &sum.kind else {
             panic!("expected an addition");
         };
         assert_eq!(*op, BinaryOp::Add);
         assert!(matches!(lhs.kind, ExprKind::Await(_)));
+    }
+
+    /// A `?` that is followed by more of the postfix chain stays part of the
+    /// chain instead of escaping the `Await`: `await f()?.g()` awaits
+    /// `f()?.g()` as a whole, rather than awaiting `f()` and applying `?` to
+    /// the result afterwards.
+    #[test]
+    fn await_with_a_question_mark_mid_chain_keeps_it_inside_the_chain() {
+        let value = tail_expr("await f()?.g()");
+        let ExprKind::Await(inner) = &value.kind else {
+            panic!("expected an await");
+        };
+        let ExprKind::Call { callee, .. } = &inner.kind else {
+            panic!("expected a call to `g`");
+        };
+        let ExprKind::Field { base, name } = &callee.kind else {
+            panic!("expected a field access");
+        };
+        assert_eq!(name.node, "g");
+        let ExprKind::Try(call) = &base.kind else {
+            panic!("expected a `?`");
+        };
+        assert!(matches!(call.kind, ExprKind::Call { .. }));
     }
 
     #[test]
@@ -2325,6 +2619,247 @@ mod tests {
             diagnostics[0].message,
             "expected identifier, found integer literal"
         );
+    }
+
+    /// Parses `source` as the body of `fn main`, returning its statements
+    /// with the tail expression appended, so a test can count the statements
+    /// a body was split into.
+    fn body_stmts(source: &str) -> Vec<Stmt> {
+        let unit = ok(&format!("fn main() {{\n{source}\n}}"));
+        let body = fn_decl(&unit.items[0]).body.clone();
+        let mut statements = body.statements;
+        if let Some(tail) = body.tail {
+            statements.push(Stmt {
+                span: tail.span,
+                kind: StmtKind::Expr(*tail),
+            });
+        }
+        statements
+    }
+
+    fn stmt_expr(stmt: &Stmt) -> &Expr {
+        match &stmt.kind {
+            StmtKind::Expr(value) => value,
+            other => panic!("expected an expression statement, found {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_newline_ends_a_call_statement() {
+        let statements = body_stmts("println(\"x\")\n()");
+        assert_eq!(statements.len(), 2);
+        assert!(matches!(
+            stmt_expr(&statements[0]).kind,
+            ExprKind::Call { .. }
+        ));
+        assert!(matches!(stmt_expr(&statements[1]).kind, ExprKind::Unit));
+    }
+
+    #[test]
+    fn a_newline_ends_a_statement_before_a_block() {
+        let statements = body_stmts("let n = compute()\n{ n }");
+        assert_eq!(statements.len(), 2);
+        let StmtKind::Let { value, .. } = &statements[0].kind else {
+            panic!("expected a binding");
+        };
+        assert!(matches!(value.kind, ExprKind::Call { trailing: None, .. }));
+        assert!(matches!(stmt_expr(&statements[1]).kind, ExprKind::Block(_)));
+    }
+
+    #[test]
+    fn a_newline_ends_a_match_arm_body() {
+        let value = tail_expr(
+            "match x {\n  1 => \"one\"\n  -1 => \"minus one\"\n  2 => \"two\"\n  _ => \"other\"\n}",
+        );
+        let ExprKind::Match { arms, .. } = &value.kind else {
+            panic!("expected a match");
+        };
+        assert_eq!(arms.len(), 4);
+        let PatternKind::Literal(literal) = &arms[1].pattern.kind else {
+            panic!("expected a literal pattern");
+        };
+        assert!(matches!(
+            literal.kind,
+            ExprKind::Unary {
+                op: UnaryOp::Neg,
+                ..
+            }
+        ));
+        for arm in arms {
+            assert!(matches!(arm.body.kind, ExprKind::Str(_)));
+        }
+    }
+
+    /// A line that starts with `.` continues the expression before it, so a
+    /// method chain may be split across lines.
+    #[test]
+    fn a_method_chain_may_be_split_across_lines() {
+        let statements = body_stmts("let result = value\n  .map(f)\n  .unwrapOr(0)");
+        assert_eq!(statements.len(), 1);
+        let StmtKind::Let { value, .. } = &statements[0].kind else {
+            panic!("expected a binding");
+        };
+        let ExprKind::Call { callee, .. } = &value.kind else {
+            panic!("expected a call");
+        };
+        let ExprKind::Field { name, .. } = &callee.kind else {
+            panic!("expected a field");
+        };
+        assert_eq!(name.node, "unwrapOr");
+    }
+
+    #[test]
+    fn newlines_inside_parentheses_and_brackets_do_not_end_a_statement() {
+        let call = tail_expr("request(\n  url: endpoint,\n  timeout: 5s\n)");
+        let ExprKind::Call { args, .. } = &call.kind else {
+            panic!("expected a call");
+        };
+        assert_eq!(args.len(), 2);
+
+        let array = tail_expr("[\n  1,\n  2,\n  3\n]");
+        let ExprKind::ArrayLit(elements) = &array.kind else {
+            panic!("expected an array literal");
+        };
+        assert_eq!(elements.len(), 3);
+
+        let parenthesised = tail_expr("(\n  1\n  + 2\n)");
+        assert!(matches!(parenthesised.kind, ExprKind::Binary { .. }));
+
+        let generic = tail_expr("api.fetch<\n  Array<Booking>\n>(\n  \"/bookings\"\n)");
+        let ExprKind::Call { generics, args, .. } = &generic.kind else {
+            panic!("expected a call");
+        };
+        assert_eq!(generics.len(), 1);
+        assert_eq!(args.len(), 1);
+    }
+
+    #[test]
+    fn newlines_inside_declaration_headers_and_field_lists_do_not_end_a_statement() {
+        let unit = ok("fn f<\n  T\n>(\n  a: T,\n  b: Int = 1\n) -> Int {\n  b\n}");
+        let decl = fn_decl(&unit.items[0]);
+        assert_eq!(decl.generics.len(), 1);
+        assert_eq!(decl.params.len(), 2);
+
+        let braced = ok("struct S {\n  a: Int\n  b: Map<\n    String,\n    Int\n  >\n}");
+        let ItemKind::Struct(decl) = &braced.items[0].kind else {
+            panic!("expected a struct");
+        };
+        assert_eq!(decl.fields.len(), 2);
+
+        let parens = ok("struct P(\n  a: Int,\n  b: Int\n)");
+        let ItemKind::Struct(decl) = &parens.items[0].kind else {
+            panic!("expected a struct");
+        };
+        assert_eq!(decl.fields.len(), 2);
+    }
+
+    /// A block inside a group is still a block: its statements end at
+    /// newlines even though the enclosing `(` suspended the rule.
+    #[test]
+    fn a_block_inside_a_group_still_ends_statements_at_newlines() {
+        let call = tail_expr("spawn(fn() {\n  a()\n  b()\n})");
+        let ExprKind::Call { args, .. } = &call.kind else {
+            panic!("expected a call");
+        };
+        let ExprKind::Lambda { body, .. } = &args[0].value.kind else {
+            panic!("expected a lambda");
+        };
+        assert_eq!(body.statements.len(), 1);
+        assert!(body.tail.is_some());
+    }
+
+    #[test]
+    fn else_attaches_across_a_line_break() {
+        let plain = tail_expr("if cond {\n}\nelse {\n}");
+        let ExprKind::If { else_branch, .. } = &plain.kind else {
+            panic!("expected an if");
+        };
+        assert!(matches!(
+            else_branch.as_deref().map(|value| &value.kind),
+            Some(ExprKind::Block(_))
+        ));
+
+        let chained = tail_expr("if a {\n}\nelse if b {\n}\nelse {\n}");
+        let ExprKind::If { else_branch, .. } = &chained.kind else {
+            panic!("expected an if");
+        };
+        assert!(matches!(
+            else_branch.as_deref().map(|value| &value.kind),
+            Some(ExprKind::If { .. })
+        ));
+    }
+
+    #[test]
+    fn a_match_arm_may_put_its_pattern_body_and_arrow_on_separate_lines() {
+        let value = tail_expr("match x {\n  Ok(v)\n  =>\n    v\n  Err(e) => 0\n}");
+        let ExprKind::Match { arms, .. } = &value.kind else {
+            panic!("expected a match");
+        };
+        assert_eq!(arms.len(), 2);
+        assert!(matches!(arms[0].body.kind, ExprKind::Ident(_)));
+    }
+
+    /// A binary operator continues an expression only from the line it ends:
+    /// `a +` / `b` is one expression, while `a` / `+ b` is two statements.
+    /// The operand, not the operator, decides where the line may end.
+    #[test]
+    fn a_binary_operator_continues_only_from_the_end_of_a_line() {
+        let continued = tail_expr("a +\n  b");
+        assert!(matches!(continued.kind, ExprKind::Binary { .. }));
+
+        let split = errors("fn main() {\n  a\n+ b\n}");
+        assert_eq!(codes(&split), ["cove::parse::newline_ended_statement"]);
+        assert!(split[0].rule.is_some());
+        assert!(split[0].help.is_some());
+
+        // Even where an expression was not what was expected, the reason the
+        // operator is stranded is explained.
+        let header = errors("fn main() {\n  if a\n  && b {\n  }\n}");
+        assert!(header[0].rule.is_some());
+        assert!(header[0].help.is_some());
+
+        let assignment = body_stmts("total =\n  1");
+        assert_eq!(assignment.len(), 1);
+        assert!(matches!(
+            stmt_expr(&assignment[0]).kind,
+            ExprKind::Assign { .. }
+        ));
+    }
+
+    /// `-` and `!` can begin an expression, so a line starting with one is a
+    /// new statement rather than a continuation.
+    #[test]
+    fn a_leading_minus_starts_a_new_statement() {
+        let statements = body_stmts("a\n- b");
+        assert_eq!(statements.len(), 2);
+        assert!(matches!(
+            stmt_expr(&statements[1]).kind,
+            ExprKind::Unary {
+                op: UnaryOp::Neg,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn a_detached_trailing_closure_explains_the_newline_rule() {
+        let diagnostics = errors("fn main() {\n  tasks.spawn\n  { work() }\n}");
+        assert_eq!(
+            codes(&diagnostics),
+            ["cove::parse::newline_before_trailing_closure"]
+        );
+        assert!(diagnostics[0].rule.is_some());
+        assert!(diagnostics[0].help.is_some());
+
+        // On one line it is still a trailing closure.
+        let attached = tail_expr("tasks.spawn { work() }");
+        assert!(matches!(
+            attached.kind,
+            ExprKind::Call {
+                trailing: Some(_),
+                ..
+            }
+        ));
     }
 
     fn collect_cove_files(dir: &Path, out: &mut Vec<PathBuf>) {
