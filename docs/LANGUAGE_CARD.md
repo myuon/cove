@@ -25,7 +25,7 @@ export fn main(args: List<String>) -> Result<Unit, Error> {
 
 ## Familiar core
 
-- `let` creates an immutable binding; `var` creates a mutable one.
+- `let` creates a read-only place; `var` creates a mutable place.
 - Functions use `fn name(arg: Type) -> ReturnType`.
 - Blocks and control-flow forms are expressions.
 - Structs are product types; enums are tagged unions.
@@ -44,6 +44,35 @@ export fn main(args: List<String>) -> Result<Unit, Error> {
 - `expr?` returns the error from the current function.
 - Panics are reserved for broken invariants, not ordinary errors.
 - `==` means value equality. Identity, when available, is explicit.
+
+## Values, places, and references
+
+Values themselves are not mutable. A storage-backed value in a `let` place may
+be shallow-shared in O(1). A `var` place may be updated in place but cannot be
+implicitly aliased.
+
+```cove
+var values = [1, 2, 3]
+
+let snapshot = values.copy() // independent outer storage
+let alias = values.ref()     // reference to the same mutable place
+```
+
+`.ref()` leaves the original variable usable; mutations through either name
+are visible through the other. It is task-local. Cross-task mutable sharing
+requires a synchronized type such as `Shared<T>`. Trivially copyable values do
+not require an explicit choice.
+
+A method declares whether it requires a mutable receiver:
+
+```cove
+fn length(self) -> Int
+fn push(var self, value: T)
+```
+
+A `self` method is callable through `let` or `var`. A `var self` method
+requires a mutable place or explicit reference. Calls use ordinary method
+syntax; Cove has no borrow or lifetime syntax.
 
 ## Evaluation
 
@@ -100,8 +129,9 @@ The runtime rejects Host API calls that were not granted.
 
 Concurrent work belongs to a task scope. Leaving the scope waits for or cancels
 its child tasks; work does not silently outlive its owner. Immutable values may
-cross task boundaries. Mutable values require an explicit shared
-synchronization type; unsafe mutable captures are compile errors.
+cross task boundaries. Mutable places and task-local references cannot.
+Cross-task mutation requires an explicit synchronized type; unsafe captures are
+compile errors.
 
 Memory is managed by a precise, non-moving mark-and-sweep collector. CPU, memory, time, concurrency, and host-call limits are runtime controls, not
 termination proofs. Exceeding a limit cancels execution with a structured
