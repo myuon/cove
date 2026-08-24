@@ -1,0 +1,99 @@
+use console.println
+
+/// Lifecycle state of a booking.
+export enum BookingStatus {
+  Pending
+  Confirmed
+}
+
+/// A booking value with storage-backed guest data.
+export struct Booking {
+  id: String
+  status: BookingStatus
+  guests: List<String>
+}
+
+impl Booking {
+  /// Returns the number of guests without changing the booking.
+  fn guestCount(self) -> Int {
+    self.guests.length()
+  }
+
+  /// Changes this booking through a mutable place.
+  fn confirm(var self) {
+    self.status = BookingStatus.Confirmed
+  }
+
+  /// Adds a guest through a mutable place.
+  fn addGuest(var self, name: String) {
+    self.guests.push(name)
+  }
+}
+
+/// Stores independent historical snapshots.
+export struct BookingHistory {
+  snapshots: List<Booking>
+}
+
+impl BookingHistory {
+  /// Copies a temporary parameter before retaining it.
+  fn record(var self, booking: Booking) {
+    self.snapshots.push(booking.copy())
+  }
+}
+
+/// Retains a read-only value without copying its storage.
+export struct BookingView {
+  booking: Booking
+}
+
+impl BookingView {
+  /// Retains a read-only argument.
+  fn new(booking: Booking) -> BookingView {
+    BookingView { booking }
+  }
+}
+
+/// Explicitly observes the same mutable booking place.
+export struct BookingWatch {
+  booking: Ref<Booking>
+}
+
+impl BookingWatch {
+  /// Retains an explicit mutable reference.
+  fn new(booking: Ref<Booking>) -> BookingWatch {
+    BookingWatch { booking }
+  }
+
+  /// Reads the current state through the shared identity.
+  fn status(self) -> BookingStatus {
+    self.booking.status
+  }
+}
+
+/// Exercises Cove's place, copy, retain, and reference rules.
+export fn main() -> Result<Unit, Error> {
+  var booking = Booking {
+    id: "booking-1",
+    status: BookingStatus.Pending,
+    guests: []
+  }
+
+  booking.addGuest("Alice")
+
+  var history = BookingHistory { snapshots: [] }
+  history.record(booking)
+
+  let snapshot = booking.copy()
+  let view = BookingView.new(snapshot)
+  let watch = BookingWatch.new(booking.ref())
+
+  booking.addGuest("Bob")
+  booking.confirm()
+
+  console.println("{view.booking.guestCount()} guest in snapshot")?
+  console.println("{booking.guestCount()} guests in current booking")?
+  console.println("watch status: {watch.status()}")?
+
+  Ok(())
+}
