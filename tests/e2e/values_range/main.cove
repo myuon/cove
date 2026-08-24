@@ -1,0 +1,16 @@
+use console.println
+
+/// Prints a `Range` bound to a `let`, and its `length()`, `isEmpty()`, and
+/// `contains()`. A range is an ordinary value: it needs no `for` loop.
+export fn main() -> Result<Unit, Error> {
+  let exclusive = 0..<3
+  println("exclusive {exclusive}")?
+  println("length {exclusive.length()}")?
+  println("isEmpty {exclusive.isEmpty()} {(3..<3).isEmpty()}")?
+  println("contains {exclusive.contains(0)} {exclusive.contains(3)} {exclusive.contains(-1)}")?
+
+  let inclusive = 0..3
+  println("inclusive {inclusive} length {inclusive.length()}")?
+  println("equality {exclusive == 0..<3} {exclusive == inclusive}")?
+  Ok(())
+}

@@ -1,0 +1,8 @@
+error[cove::runtime]: `Point` was given the label `x` out of declaration order
+  --> <e2e>/type_struct/main.cove:27:32
+   |
+27 |   let reordered = Point(y: 20, x: 10)
+   |                                ^^^^^
+  rule: Labeled arguments appear in declaration order, so argument order matches parameter order.
+  help: write the arguments in this order: x, y
+1 error(s)

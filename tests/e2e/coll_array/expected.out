@@ -1,5 +1,5 @@
 literal [10, 20, 30]
-length 3 count 3 isEmpty false
+length 3 isEmpty false
 in range Some(10) Some(30)
 out of range None None
 unwrapOr 0

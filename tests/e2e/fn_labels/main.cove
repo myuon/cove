@@ -5,7 +5,9 @@ fn between(low: Int, high: Int) -> String {
   "[{low}, {high}]"
 }
 
-/// Prints positional, labeled, and mixed call forms.
+/// Prints positional, labeled, and mixed call forms, then fails: labeled
+/// arguments out of declaration order are rejected, even though every other
+/// form above is accepted.
 export fn main() -> Result<Unit, Error> {
   println("positional {between(1, 2)}")?
   println("labeled {between(low: 1, high: 2)}")?

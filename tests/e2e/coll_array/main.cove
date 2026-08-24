@@ -4,7 +4,7 @@ use console.println
 export fn main(args: Array<String>) -> Result<Unit, Error> {
   let items = [10, 20, 30]
   println("literal {items}")?
-  println("length {items.length()} count {items.count()} isEmpty {items.isEmpty()}")?
+  println("length {items.length()} isEmpty {items.isEmpty()}")?
   println("in range {items.get(0)} {items.get(2)}")?
   println("out of range {items.get(3)} {items.get(-1)}")?
   println("unwrapOr {items.get(9).unwrapOr(0)}")?

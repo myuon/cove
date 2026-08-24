@@ -7,12 +7,27 @@
 //! `tests/e2e/cove.toml`; a case without one fails the suite rather than being
 //! skipped.
 //!
+//! A case directory may instead hold its own `cove.toml`. When it does, that
+//! directory is its own package: the binary runs with its working directory
+//! set there instead of `tests/e2e/`, and `[run.<case>]` is looked up in that
+//! file. Because `.cove` files may not live directly in a package root, such
+//! a case nests its program one level down, typically as `main/main.cove`.
+//! This is how a case pins a check-time diagnostic (a parse or resolve
+//! error): resolving the shared `tests/e2e` package touches every case's
+//! source at once, so a check-time failure anywhere would fail everything
+//! else too. Giving the offending case its own package isolates the failure
+//! to that one case. Runtime-failure cases do not need this: they resolve
+//! cleanly and only fail once the program runs, so they can stay in the
+//! shared package.
+//!
 //! Each case pins its observable behaviour with golden files:
 //!
 //! ```text
 //! tests/e2e/
-//!   cove.toml                 one [run.<name>] table per case
-//!   <case>/main.cove          the program
+//!   cove.toml                 one [run.<name>] table per shared-package case
+//!   <case>/main.cove          the program, for a shared-package case
+//!   <case>/cove.toml          present only when <case> is its own package
+//!   <case>/main/main.cove     the program, for an own-package case
 //!   <case>/expected.out       exact expected stdout
 //!   <case>/expected.err       present only when the case must fail
 //!   <case>/args               optional: one program argument per line
@@ -57,11 +72,26 @@ use std::process::Command;
 /// The placeholder that replaces the absolute path of `tests/e2e`.
 const E2E: &str = "<e2e>";
 
-/// One discovered case.
+/// One case directory discovered under `tests/e2e`.
+struct Discovered {
+    /// The dotted path from `tests/e2e`, which is also the `[run.<name>]`
+    /// table name.
+    name: String,
+    /// Whether this case directory holds its own `cove.toml`, making it its
+    /// own package rather than part of the shared `tests/e2e` package.
+    own_package: bool,
+}
+
+/// One case ready to run.
 struct Case {
     /// The directory name, which is also the `[run.<name>]` table name.
     name: String,
+    /// Where `expected.out`, `expected.err`, `args`, and `env` live, and
+    /// where an own-package case's `cove.toml` lives.
     dir: PathBuf,
+    /// The working directory for the `cove` invocation: `dir` for an
+    /// own-package case, the shared `tests/e2e` root otherwise.
+    run_dir: PathBuf,
     /// Extra arguments passed after `cove run <name>`.
     args: Vec<String>,
     /// Variables to set, or to remove when the value is `None`.
@@ -81,25 +111,41 @@ fn every_case_matches_its_golden_files() {
     let root = e2e_root();
     let update = matches!(std::env::var("UPDATE_EXPECT"), Ok(value) if !value.is_empty());
 
-    let names = discover(&root);
-    let declared = declared_runs(&root);
+    let discovered = discover(&root);
     assert!(
-        !names.is_empty(),
+        !discovered.is_empty(),
         "no case directories found under `{}`",
         root.display()
     );
 
+    let shared_declared = declared_runs(&root);
+    let shared_names: BTreeSet<String> = discovered
+        .iter()
+        .filter(|d| !d.own_package)
+        .map(|d| d.name.clone())
+        .collect();
+
     let mut failures: Vec<String> = Vec::new();
 
-    for name in &names {
-        if !declared.contains(name) {
+    for entry in &discovered {
+        let name = &entry.name;
+        if entry.own_package {
+            let case_dir = root.join(name.replace('.', std::path::MAIN_SEPARATOR_STR));
+            if !declared_runs(&case_dir).contains(name) {
+                failures.push(format!(
+                    "case `{name}`: `{name}/cove.toml` has no `[run.{name}]` table\n  \
+                     add one so the case actually runs"
+                ));
+                continue;
+            }
+        } else if !shared_declared.contains(name) {
             failures.push(format!(
                 "case `{name}`: `tests/e2e/cove.toml` has no `[run.{name}]` table\n  \
                  add one so the case actually runs"
             ));
             continue;
         }
-        let case = Case::load(&root, name);
+        let case = Case::load(&root, name, entry.own_package);
         let actual = case.run(&root);
         if update {
             case.write_goldens(&actual);
@@ -107,8 +153,8 @@ fn every_case_matches_its_golden_files() {
         case.check(&actual, &mut failures);
     }
 
-    for name in &declared {
-        if !names.contains(name) {
+    for name in &shared_declared {
+        if !shared_names.contains(name) {
             failures.push(format!(
                 "run `{name}`: `tests/e2e/cove.toml` declares `[run.{name}]`, but \
                  `tests/e2e/{name}/main.cove` does not exist"
@@ -121,16 +167,22 @@ fn every_case_matches_its_golden_files() {
             "{} of {} end-to-end case(s) did not match their golden files:\n\n{}\n\
              re-run with `UPDATE_EXPECT=1 cargo test -p cove-cli --test e2e` to rewrite them.\n",
             failures.len(),
-            names.len(),
+            discovered.len(),
             failures.join("\n")
         );
     }
 }
 
 impl Case {
-    /// Reads the optional `args` and `env` files of one case.
-    fn load(root: &Path, name: &str) -> Case {
+    /// Reads the optional `args` and `env` files of one case, and resolves
+    /// its working directory.
+    fn load(root: &Path, name: &str, own_package: bool) -> Case {
         let dir = root.join(name.replace('.', std::path::MAIN_SEPARATOR_STR));
+        let run_dir = if own_package {
+            dir.clone()
+        } else {
+            root.to_path_buf()
+        };
         let args = read_optional(&dir.join("args"))
             .map(|text| text.lines().map(str::to_string).collect())
             .unwrap_or_default();
@@ -148,15 +200,21 @@ impl Case {
         Case {
             name: name.to_string(),
             dir,
+            run_dir,
             args,
             env,
         }
     }
 
-    /// Runs the real `cove` binary from the `tests/e2e` directory.
+    /// Runs the real `cove` binary, from `run_dir`. `root` is the shared
+    /// `tests/e2e` directory, whose absolute path is normalised out of
+    /// stderr even for an own-package case nested below it.
     fn run(&self, root: &Path) -> Actual {
         let mut command = Command::new(env!("CARGO_BIN_EXE_cove"));
-        command.current_dir(root).arg("run").arg(&self.name);
+        command
+            .current_dir(&self.run_dir)
+            .arg("run")
+            .arg(&self.name);
         command.args(&self.args);
         for (key, value) in &self.env {
             match value {
@@ -244,15 +302,21 @@ fn e2e_root() -> PathBuf {
         .unwrap_or_else(|e| panic!("cannot resolve `{}`: {e}", path.display()))
 }
 
-/// Every directory below `root` that holds a `main.cove`, in sorted order.
-fn discover(root: &Path) -> Vec<String> {
-    let mut names = Vec::new();
-    walk(root, root, &mut names);
-    names.sort();
-    names
+/// Every case directory below `root`, in sorted order.
+///
+/// A directory that holds its own `cove.toml` is one case, named by its
+/// dotted path from `root`; the walk does not recurse into it, since
+/// whatever lives below belongs to that package, not to the shared one.
+/// Otherwise, a directory that holds a `main.cove` directly is one case, and
+/// the walk keeps recursing below it.
+fn discover(root: &Path) -> Vec<Discovered> {
+    let mut found = Vec::new();
+    walk(root, root, &mut found);
+    found.sort_by(|a, b| a.name.cmp(&b.name));
+    found
 }
 
-fn walk(root: &Path, dir: &Path, names: &mut Vec<String>) {
+fn walk(root: &Path, dir: &Path, found: &mut Vec<Discovered>) {
     let entries = fs::read_dir(dir)
         .unwrap_or_else(|e| panic!("cannot read `{}`: {e}", dir.display()))
         .filter_map(Result::ok);
@@ -267,22 +331,37 @@ fn walk(root: &Path, dir: &Path, names: &mut Vec<String>) {
         if name.starts_with('.') || name == "target" {
             continue;
         }
-        if path.join("main.cove").is_file() {
-            let rel = path.strip_prefix(root).expect("walk stays below the root");
-            names.push(
-                rel.components()
-                    .map(|c| c.as_os_str().to_string_lossy().into_owned())
-                    .collect::<Vec<_>>()
-                    .join("."),
-            );
+
+        if path.join("cove.toml").is_file() {
+            found.push(Discovered {
+                name: dotted(root, &path),
+                own_package: true,
+            });
+            continue;
         }
-        walk(root, &path, names);
+
+        if path.join("main.cove").is_file() {
+            found.push(Discovered {
+                name: dotted(root, &path),
+                own_package: false,
+            });
+        }
+        walk(root, &path, found);
     }
 }
 
-/// The `[run.<name>]` tables declared in `tests/e2e/cove.toml`.
-fn declared_runs(root: &Path) -> BTreeSet<String> {
-    let path = root.join("cove.toml");
+/// The dotted case name for `path`, relative to `root`.
+fn dotted(root: &Path, path: &Path) -> String {
+    let rel = path.strip_prefix(root).expect("walk stays below the root");
+    rel.components()
+        .map(|c| c.as_os_str().to_string_lossy().into_owned())
+        .collect::<Vec<_>>()
+        .join(".")
+}
+
+/// The `[run.<name>]` tables declared in `dir/cove.toml`.
+fn declared_runs(dir: &Path) -> BTreeSet<String> {
+    let path = dir.join("cove.toml");
     let text = fs::read_to_string(&path)
         .unwrap_or_else(|e| panic!("cannot read `{}`: {e}", path.display()));
     text.lines()

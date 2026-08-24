@@ -1,0 +1,8 @@
+error[cove::runtime]: `between` was given the label `low` out of declaration order
+  --> <e2e>/fn_labels/main.cove:16:62
+   |
+16 |   println("labels out of declaration order {between(high: 6, low: 5)}")?
+   |                                                              ^^^^^^
+  rule: Labeled arguments appear in declaration order, so argument order matches parameter order.
+  help: write the arguments in this order: low, high
+1 error(s)
