@@ -48,25 +48,25 @@ struct RouterBuilder {
 impl RouterBuilder {
   /// Adds a route during construction.
   fn get(var self, path: String, handler: Handler) {
-    self.routes.push(Route {
+    self.routes.push(Route(
       method: http.Method.Get,
-      path,
-      handler
-    })
+      path: path,
+      handler: handler
+    ))
   }
 
   /// Adds a route during construction.
   fn post(var self, path: String, handler: Handler) {
-    self.routes.push(Route {
+    self.routes.push(Route(
       method: http.Method.Post,
-      path,
-      handler
-    })
+      path: path,
+      handler: handler
+    ))
   }
 
   /// Consumes unique route storage into an immutable router.
   fn finish(var self) -> Router {
-    Router { routes: self.routes.freeze() }
+    Router(routes: self.routes.freeze())
   }
 }
 
@@ -136,11 +136,14 @@ fn buildEvents() -> EventBus {
     }
   ]
 
-  EventBus {
-    subscribers: Map {
-      "booking.created": handlers
-    }
-  }
+  EventBus(
+    subscribers: Map.of(
+      MapEntry(
+        key: "booking.created",
+        value: handlers
+      )
+    )
+  )
 }
 
 /// Builds routes locally and freezes them before request tasks begin.
@@ -148,10 +151,10 @@ fn buildRouter(
   app: App,
   events: EventBus
 ) -> Router {
-  var builder = RouterBuilder { routes: Vector[] }
+  var builder = RouterBuilder(routes: Vector.of())
 
   builder.get("/health", withObservability(app, async fn(request) {
-    Ok(http.json(200, { status: "ok" }))
+    Ok(http.json(200, HealthStatus(status: "ok")))
   }))
 
   builder.post("/bookings", withObservability(app, async fn(request) {
@@ -176,11 +179,11 @@ fn buildRouter(
 export async fn main() -> Result<Unit, Error> {
   // The Host API schema declares BookingRepository task-safe.
   let repository = await BookingRepository.connect()?
-  let metrics = Shared(Metrics {
+  let metrics = Shared(Metrics(
     requests: 0,
     failures: 0
-  })
-  let app = App { repository, metrics }
+  ))
+  let app = App(repository: repository, metrics: metrics)
 
   let events = buildEvents()
   let router = buildRouter(app, events)
