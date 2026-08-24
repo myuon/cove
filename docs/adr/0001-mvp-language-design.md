@@ -137,92 +137,59 @@ memory, and GC work must be visible in traces. The allocator, object layout,
 root enumeration, stack maps, mark queue, sweep, and heap budget remain
 separate runtime components so the collector can evolve later.
 
-## Values, places, and receiver mutation
+## Values, handles, and mutation
 
-Values do not carry mutability. `let` and `var` describe the place that holds
-a value:
+Assignment and argument passing use one rule: field-wise shallow copy. Cove does
+not change expression semantics according to whether the destination is
+declared with `let` or `var`.
 
-- `let x = value` creates a read-only place. Read-only storage-backed values
-  may be shallow-shared in O(1).
-- `var x = value` creates a mutable place. A storage-backed mutable place may
-  be updated in place but may not be implicitly aliased.
+Primitive values, strings, enums, and user-defined structs have value semantics.
+Copying a struct copies each field according to that field's semantics. A
+one-field wrapper therefore naturally behaves like the value it wraps.
 
-A fresh value may initialize either place without changing the expression's
-source-level meaning. Copying from a mutable storage-backed place requires an
-explicit choice:
-
-```cove
-var values = [1, 2, 3]
-
-let snapshot = values.copy() // independent value graph
-let alias = values.ref()     // the same mutable place
-```
-
-`.copy()` recursively copies ordinary storage-backed value fields. Immutable
-storage may remain shared, and explicit identity such as `Ref<T>` is preserved
-rather than followed. Cycles therefore stop at explicit references. A type may
-implement its own `copy()`; a deliberately one-level copy should use a name
-such as `shallowCopy()` so the cheaper semantics remain visible. `.ref()` does
-not consume the original variable.
-It creates a `Ref<T>` to the same mutable place; an escaping reference may
-promote that place to a GC-managed heap cell. Mutations through either name are
-then visible through the other. Trivially copyable values such as numbers and
-value-only structs do not require either operation.
-
-Cove does not use copy-on-write to define mutation semantics. Read-only values
-may share storage, mutable places update stable storage, and transitions that
-would introduce mutable aliasing are explicit. Initializing a mutable place
-from an existing storage-backed read-only value therefore requires an explicit
-copy; a fresh rvalue can be taken directly.
-
-Receiver mutation is part of a method's source-level contract:
+`List<T>`, `Map<K, V>`, `Set<T>`, closures, and Host resources are small
+handle values whose mutable state lives in GC-managed storage. Copying a handle
+is O(1) and both copies observe the same storage:
 
 ```cove
-impl List<T> {
-  fn length(self) -> Int {
-    self.count
-  }
+var first = [1, 2]
+var second = first
 
-  fn push(var self, value: T) {
-    // ...
-  }
-}
+second.push(3)
+// first and second both observe [1, 2, 3]
 ```
 
-`self` is read-only and may be called through either a `let` or `var`
-place. `var self` may update the receiver and requires a mutable place or an
-explicit `Ref<T>`. It introduces no reference syntax, lifetime parameters, or
-whole-language borrow checker. Receiver mutability is written explicitly,
-appears in outlines, trait contracts, and API snapshots, and changing it is an
-API compatibility event.
+For lists, length, capacity, and the element buffer all belong to the shared
+storage. Cove deliberately does not use Go slice semantics in which append may
+change only one copied header or split aliases after reallocation. Maps and
+sets follow the same stable-handle rule.
 
-## Parameters and retention
+This is an observable reference semantics even if the runtime represents the
+handle as a small struct. Internal representation never determines source
+semantics. Cove does not use copy-on-write or implicit deep copies. An
+independent, transitive snapshot is requested explicitly with `.copy()`;
+explicit identities and Host resources require type-specific copy behavior.
 
-Passing a value for the duration of a call creates a temporary view and needs no
-copy or reference syntax. A normal parameter is read-only; a `var` parameter
-may update the caller's mutable place during the call. Neither permission alone
-creates a retained alias.
+`let` creates a read-only place and `var` a mutable place. A mutating method
+declares `var self` and requires a mutable place:
 
-The compiler derives whether a function retains each parameter by storing,
-returning, capturing, spawning, or passing it to another retaining operation.
-That fact is part of outlines and API snapshots.
+```cove
+fn length(self) -> Int
+fn push(var self, value: T)
+```
 
-- Retaining a read-only argument shallow-shares its immutable storage in O(1).
-- Retaining a fresh result transfers its storage without a user-visible move.
-- Retaining a mutable place is rejected unless the program chooses an
-  independent `.copy()` or passes an explicit `Ref<T>` created by `.ref()`.
-- A temporary parameter copied inside the callee may be retained as an
-  independent snapshot.
-- A `var` parameter may not escape the call without the same explicit choice.
+This is a local write-permission rule, not a claim of deep immutability. A
+`let` handle cannot be used to mutate its storage, but it may observe changes
+made through another mutable alias. Similarly, a `var` parameter declares
+that a call may mutate through the supplied value. Cove does not attempt a
+whole-program retention or alias analysis: parameters and returned values may
+be retained through ordinary shallow copying.
 
-Changing a public parameter from borrowed to retained is an operational
-compatibility event because mutable callers may need to choose a retention
-mode. Traits, dynamic calls, extern declarations, and Host APIs must expose the
-retention contract when it cannot be derived from an implementation.
-Higher-order calls may initially be analyzed conservatively.
-
-This makes ordinary reads and immutable constructors concise while ensuring
-that copying and mutable identity sharing remain visible where they occur.
+Value equality uses `==`; identity-capable handles use `is` for shared
+storage identity. Mutable handles and structs containing them are not valid map
+keys unless the type provides a stable key representation. Structural mutation
+during collection iteration is detected and rejected rather than depending on
+alias timing.
 
 ## Tasks and shared mutation
 
