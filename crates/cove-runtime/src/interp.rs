@@ -3075,6 +3075,12 @@ export fn main() -> Result<Unit, Error> {
 
     // ------------------------------------------------------------- rule 8
 
+    /// Static exhaustiveness abstains when the scrutinee's enum cannot be
+    /// determined from the patterns, so every match it abstains on still
+    /// needs this runtime guard. The fixture is deliberately opaque to that
+    /// analysis: two enums declare a case named `Red`, so a bare `Red`
+    /// pattern names neither of them unambiguously. Do not make it
+    /// analysable -- that would delete the coverage this test exists for.
     #[test]
     fn a_match_with_no_matching_arm_is_a_runtime_error() {
         let source = r#"
@@ -3083,10 +3089,15 @@ enum Color {
   Green
 }
 
+enum Wine {
+  Red
+  White
+}
+
 export fn main() -> Result<Unit, Error> {
   let color = Color.Green
   let name = match color {
-    Color.Red => "red"
+    Red => "red"
   }
   Ok(())
 }
