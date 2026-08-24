@@ -53,7 +53,7 @@ Assignment and argument passing always perform a field-wise shallow copy.
 - Copying a struct copies each field according to that field's semantics.
 - `List`, `Map`, `Set`, closures, and Host resources are handle values.
 - Copying a handle is O(1); all copies observe the same underlying storage.
-- Cove has no implicit deep copy, copy-on-write, or retention analysis.
+- Cove never performs an implicit deep copy.
 - `.copy()` requests an independent transitive snapshot.
 - `==` compares values; `is` tests shared storage identity where available.
 
