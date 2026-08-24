@@ -6,36 +6,43 @@ export enum BookingStatus {
   Confirmed
 }
 
-/// A value whose scalar fields copy independently and whose List field is a handle.
-export struct Booking {
-  id: String
+/// A value whose scalar field copies and whose Vector field shares storage.
+export struct BookingDraft {
   status: BookingStatus
-  guests: List<String>
+  guests: Vector<String>
 }
 
-impl Booking {
-  /// Returns the number of guests.
-  fn guestCount(self) -> Int {
-    self.guests.length()
-  }
-
-  /// Changes a value field through a mutable place.
+impl BookingDraft {
+  /// Changes a value field through a mutable receiver.
   fn confirm(var self) {
     self.status = BookingStatus.Confirmed
   }
 
-  /// Changes the shared List storage through a mutable place.
+  /// Adds a guest to shared Vector storage.
   fn addGuest(var self, name: String) {
     self.guests.push(name)
   }
+
+  /// Finishes this locally unique draft as immutable task-safe data.
+  fn finish(var self) -> Booking {
+    Booking {
+      status: self.status,
+      guests: self.guests.freeze()
+    }
+  }
 }
 
-/// Exercises Cove's shallow value copy and stable collection handles.
+/// Completed immutable booking data.
+export struct Booking {
+  status: BookingStatus
+  guests: Array<String>
+}
+
+/// Exercises Cove's value copies, Vector aliases, and freeze transition.
 export fn main() -> Result<Unit, Error> {
-  var original = Booking {
-    id: "booking-1",
+  var original = BookingDraft {
     status: BookingStatus.Pending,
-    guests: ["Alice"]
+    guests: Vector["Alice"]
   }
 
   var alias = original
@@ -46,16 +53,21 @@ export fn main() -> Result<Unit, Error> {
   console.println("{original.status}")? // Pending
   console.println("{alias.status}")?    // Confirmed
 
-  // The List handle was copied, so both values observe the same storage.
-  console.println("{original.guestCount()}")? // 2
-  console.println("{alias.guestCount()}")?    // 2
+  // The Vector handle was copied, so both drafts observe the same storage.
+  console.println("{original.guests.length()}")? // 2
+  console.println("{alias.guests.length()}")?    // 2
 
-  // An independent graph is always explicit.
-  var snapshot = original.copy()
-  snapshot.addGuest("Carol")
+  // Because an alias exists, an independent O(n) array is explicit.
+  let snapshot = original.guests.toArray()
+  console.println("{snapshot.length()}")? // 2
 
-  console.println("{original.guestCount()}")? // 2
-  console.println("{snapshot.guestCount()}")? // 3
+  // A fresh, unique draft can finish with an O(1) freeze.
+  var fresh = BookingDraft {
+    status: BookingStatus.Pending,
+    guests: Vector["Carol"]
+  }
+  let booking = fresh.finish()
+  console.println("{booking.guests.length()}")? // 1
 
   Ok(())
 }
