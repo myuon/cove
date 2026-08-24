@@ -1,0 +1,195 @@
+use http
+use console.println
+use clock.every
+use database
+
+/// A callback retained by the router and invoked for each request.
+export type Handler = retain async fn(
+  request: http.Request
+) -> Result<http.Response, Error>
+
+/// A callback retained by the event bus.
+export type EventHandler = retain async fn(
+  event: Event
+) -> Result<Unit, Error>
+
+/// Application dependencies are read-only and cheap to retain in handlers.
+export struct App {
+  repository: BookingRepository
+  metrics: Shared<Metrics>
+}
+
+/// Mutable counters shared across request tasks.
+export struct Metrics {
+  requests: Int
+  failures: Int
+}
+
+impl Metrics {
+  /// Records one completed request.
+  fn record(var self, failed: Bool) {
+    self.requests += 1
+
+    if failed {
+      self.failures += 1
+    }
+  }
+}
+
+/// Minimal router that retains registered handlers.
+export struct Router {
+  routes: List<Route>
+}
+
+impl Router {
+  /// Retains a handler for future requests.
+  fn get(var self, path: String, handler: Handler) {
+    self.routes.push(Route {
+      method: http.Method.Get,
+      path,
+      handler
+    })
+  }
+
+  /// Retains a handler for future requests.
+  fn post(var self, path: String, handler: Handler) {
+    self.routes.push(Route {
+      method: http.Method.Post,
+      path,
+      handler
+    })
+  }
+}
+
+/// Event dispatcher that retains its subscribers.
+export struct EventBus {
+  subscribers: Map<String, List<EventHandler>>
+}
+
+impl EventBus {
+  /// Retains a callback until the bus is released.
+  fn on(var self, name: String, handler: EventHandler) {
+    self.subscribers[name].push(handler)
+  }
+
+  /// Invokes current subscribers without retaining the event argument.
+  async fn emit(
+    self,
+    name: String,
+    event: Event
+  ) -> Result<Unit, Error> {
+    for handler in self.subscribers.get(name).unwrapOr([]) {
+      await handler(event)?
+    }
+
+    Ok(())
+  }
+}
+
+/// Adds logging and metrics around a retained handler.
+fn withObservability(
+  app: App,
+  next: Handler
+) -> Handler {
+  async fn(request) {
+    let startedAt = clock.now()
+    let result = await next(request)
+
+    app.metrics.lock(fn(var metrics) {
+      metrics.record(result.isError())
+    })
+
+    console.println(
+      "{request.method} {request.path} {clock.now() - startedAt}"
+    )?
+
+    result
+  }
+}
+
+/// Retries an operation only during this call; it does not retain the callback.
+async fn retry<T>(
+  attempts: Int,
+  operation: async fn(attempt: Int) -> Result<T, Error>
+) -> Result<T, Error> {
+  var lastError = Error("retry did not run")
+
+  for attempt in 0..<attempts {
+    match await operation(attempt) {
+      Ok(value) => return Ok(value)
+      Err(error) => lastError = error
+    }
+  }
+
+  Err(lastError)
+}
+
+/// Builds routes whose callbacks retain only read-only App data and Shared state.
+fn buildRouter(
+  app: App,
+  events: Ref<EventBus>
+) -> Router {
+  var router = Router { routes: [] }
+
+  router.get("/health", withObservability(app, async fn(request) {
+    Ok(http.json(200, { status: "ok" }))
+  }))
+
+  router.post("/bookings", withObservability(app, async fn(request) {
+    let input = request.json<CreateBookingRequest>()?
+
+    let booking = await retry(3, async fn(attempt) {
+      app.repository.create(input, attempt)
+    })?
+
+    await events.emit(
+      "booking.created",
+      Event.BookingCreated(booking.id)
+    )?
+
+    Ok(http.json(201, booking))
+  }))
+
+  router
+}
+
+/// Runs a server with retained callbacks and structured background work.
+export async fn main() -> Result<Unit, Error> {
+  let repository = await BookingRepository.connect()?
+  let metrics = Shared(Metrics {
+    requests: 0,
+    failures: 0
+  })
+  let app = App { repository, metrics }
+
+  var events = EventBus { subscribers: Map() }
+  events.on("booking.created", async fn(event) {
+    console.println("event: {event}")?
+    Ok(())
+  })
+
+  let router = buildRouter(app, events.ref())
+
+  scope services {
+    let reportTimer = services.spawn {
+      clock.every(60s, async fn {
+        app.metrics.lock(fn(metrics) {
+          console.println(
+            "requests={metrics.requests} failures={metrics.failures}"
+          )
+        })?
+
+        Ok(())
+      })
+    }
+
+    let server = services.spawn {
+      http.serve(8080, router)
+    }
+
+    await server?
+    reportTimer.cancel()
+  }
+
+  Ok(())
+}
