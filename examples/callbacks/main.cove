@@ -127,7 +127,7 @@ async fn retry<T>(
 /// Builds routes whose callbacks retain only read-only App data and Shared state.
 fn buildRouter(
   app: App,
-  events: Ref<EventBus>
+  events: EventBus
 ) -> Router {
   var router = Router { routes: [] }
 
@@ -153,6 +153,18 @@ fn buildRouter(
   router
 }
 
+/// Builds mutable subscriptions locally, then returns a fresh read-only value.
+fn buildEvents() -> EventBus {
+  var events = EventBus { subscribers: Map() }
+
+  events.on("booking.created", async fn(event) {
+    console.println("event: {event}")?
+    Ok(())
+  })
+
+  events
+}
+
 /// Runs a server with retained callbacks and structured background work.
 export async fn main() -> Result<Unit, Error> {
   let repository = await BookingRepository.connect()?
@@ -162,13 +174,8 @@ export async fn main() -> Result<Unit, Error> {
   })
   let app = App { repository, metrics }
 
-  var events = EventBus { subscribers: Map() }
-  events.on("booking.created", async fn(event) {
-    console.println("event: {event}")?
-    Ok(())
-  })
-
-  let router = buildRouter(app, events.ref())
+  let events = buildEvents()
+  let router = buildRouter(app, events)
 
   scope services {
     let reportTimer = services.spawn {
