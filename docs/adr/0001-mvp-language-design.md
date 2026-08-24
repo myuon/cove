@@ -132,8 +132,8 @@ treat arbitrary integers as pointers. Non-moving objects simplify embedding,
 FFI, stable trace identity, and the initial runtime implementation.
 
 The MVP has no finalizers, compacting collector, generational collector, or
-concurrent collector. Heap fragmentation, pause time, allocation, retained
-memory, and GC work must be visible in traces. The allocator, object layout,
+concurrent collector. Heap fragmentation, pause time, allocation, live heap
+size, and GC work must be visible in traces. The allocator, object layout,
 root enumeration, stack maps, mark queue, sweep, and heap budget remain
 separate runtime components so the collector can evolve later.
 
@@ -166,9 +166,9 @@ sets follow the same stable-handle rule.
 
 This is an observable reference semantics even if the runtime represents the
 handle as a small struct. Internal representation never determines source
-semantics. Cove does not use copy-on-write or implicit deep copies. An
-independent, transitive snapshot is requested explicitly with `.copy()`;
-explicit identities and Host resources require type-specific copy behavior.
+semantics. Cove never performs an implicit deep copy. An independent, transitive
+snapshot is requested explicitly with `.copy()`; identity-bearing Host
+resources require type-specific copy behavior.
 
 `let` creates a read-only place and `var` a mutable place. A mutating method
 declares `var self` and requires a mutable place:
@@ -181,9 +181,8 @@ fn push(var self, value: T)
 This is a local write-permission rule, not a claim of deep immutability. A
 `let` handle cannot be used to mutate its storage, but it may observe changes
 made through another mutable alias. Similarly, a `var` parameter declares
-that a call may mutate through the supplied value. Cove does not attempt a
-whole-program retention or alias analysis: parameters and returned values may
-be retained through ordinary shallow copying.
+that a call may mutate through the supplied value. Cove does not attempt whole-program alias analysis. Parameters, fields,
+closures, and return values all use the same ordinary shallow-copy rule.
 
 Value equality uses `==`; identity-capable handles use `is` for shared
 storage identity. Mutable handles and structs containing them are not valid map
@@ -197,8 +196,8 @@ Cove tasks are lightweight runtime tasks with structured lifetimes, explicit
 asynchronous functions, cancellation, and deadlines. I/O wait suspends a task;
 CPU work runs on runtime workers.
 
-Read-only values may cross task boundaries. A mutable place and a task-local
-`Ref<T>` may not be captured by another task. Shared mutation requires an
+Read-only values may cross task boundaries. Mutable value or collection
+aliases may not be captured by another task. Shared mutation requires an
 explicit synchronized handle such as `Shared<T>`, `Mutex<T>`, `RwLock<T>`,
 `Atomic<T>`, or `Channel<T>`. The compiler rejects mutable captures that do
 not use such a type.
