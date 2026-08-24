@@ -137,18 +137,73 @@ memory, and GC work must be visible in traces. The allocator, object layout,
 root enumeration, stack maps, mark queue, sweep, and heap budget remain
 separate runtime components so the collector can evolve later.
 
+## Values, places, and receiver mutation
+
+Values do not carry mutability. `let` and `var` describe the place that holds
+a value:
+
+- `let x = value` creates a read-only place. Read-only storage-backed values
+  may be shallow-shared in O(1).
+- `var x = value` creates a mutable place. A storage-backed mutable place may
+  be updated in place but may not be implicitly aliased.
+
+A fresh value may initialize either place without changing the expression's
+source-level meaning. Copying from a mutable storage-backed place requires an
+explicit choice:
+
+```cove
+var values = [1, 2, 3]
+
+let snapshot = values.copy() // independent outer storage
+let alias = values.ref()     // the same mutable place
+```
+
+`.copy()` copies the outer mutable storage; contained immutable values may
+remain shared and contained references retain their identity. It is not a
+generic recursive deep copy. `.ref()` does not consume the original variable.
+It creates a `Ref<T>` to the same mutable place; an escaping reference may
+promote that place to a GC-managed heap cell. Mutations through either name are
+then visible through the other. Trivially copyable values such as numbers and
+value-only structs do not require either operation.
+
+Cove does not use copy-on-write to define mutation semantics. Read-only values
+may share storage, mutable places update stable storage, and transitions that
+would introduce mutable aliasing are explicit. Initializing a mutable place
+from an existing storage-backed read-only value therefore requires an explicit
+copy; a fresh rvalue can be taken directly.
+
+Receiver mutation is part of a method's source-level contract:
+
+```cove
+impl List<T> {
+  fn length(self) -> Int {
+    self.count
+  }
+
+  fn push(var self, value: T) {
+    // ...
+  }
+}
+```
+
+`self` is read-only and may be called through either a `let` or `var`
+place. `var self` may update the receiver and requires a mutable place or an
+explicit `Ref<T>`. It introduces no reference syntax, lifetime parameters, or
+whole-language borrow checker. Receiver mutability is written explicitly,
+appears in outlines, trait contracts, and API snapshots, and changing it is an
+API compatibility event.
+
 ## Tasks and shared mutation
 
 Cove tasks are lightweight runtime tasks with structured lifetimes, explicit
 asynchronous functions, cancellation, and deadlines. I/O wait suspends a task;
 CPU work runs on runtime workers.
 
-Immutable values may cross task boundaries. An ordinary mutable value may not
-be captured by another task. Shared mutation requires an explicit synchronization
-type such as `Mutex<T>`, `RwLock<T>`, `Atomic<T>`, or `Channel<T>`, held
-through a shared handle. The compiler rejects mutable captures that do not use
-such a type. This protects task boundaries without introducing a whole-language
-borrow checker.
+Read-only values may cross task boundaries. A mutable place and a task-local
+`Ref<T>` may not be captured by another task. Shared mutation requires an
+explicit synchronized handle such as `Shared<T>`, `Mutex<T>`, `RwLock<T>`,
+`Atomic<T>`, or `Channel<T>`. The compiler rejects mutable captures that do
+not use such a type.
 
 ## Progressive disclosure
 
@@ -382,6 +437,8 @@ generated behavior must remain inspectable.
 - What compatibility guarantees should generated API snapshots cover beyond
   source types, such as capability requirements and host bindings?
 - How are dependency cycles represented and diagnosed?
+- How should function signatures distinguish a temporary read of a mutable
+  place from retaining that value beyond the call?
 - Which annotations belong in the Language Card?
 - What Host API boundary remains stable across native, embedded, and Wasm
   execution?
