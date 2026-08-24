@@ -11,11 +11,22 @@ export fn health(request: http.Request) -> http.Response<HealthResponse> {
   http.json(200, HealthResponse(status: "ok"))
 }
 
+/// Builds the immutable routing table before any request task starts.
+fn routes() -> Array<http.Route> {
+  var building = Vector.of()
+
+  building.push(http.Route(
+    method: http.Method.Get,
+    path: "/health",
+    handler: health
+  ))
+
+  building.freeze()
+}
+
 /// Runs the HTTP server.
 export fn main() -> Result<Unit, Error> {
   console.println("listening on :8080")?
-  http.serve(8080, routes {
-    GET "/health" => health
-  })?
+  http.serve(8080, routes())?
   Ok(())
 }

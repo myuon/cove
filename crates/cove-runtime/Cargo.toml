@@ -1,0 +1,10 @@
+[package]
+name = "cove-runtime"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+cove-diag.workspace = true
+cove-syntax.workspace = true
+cove-sema.workspace = true
