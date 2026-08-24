@@ -71,6 +71,7 @@ reports that rather than guessing which reading was meant.
 - Missing values use `Option<T>`: `Some(value)` or `None`.
 - Expected failure uses `Result<T, E>`: `Ok(value)` or `Err(error)`.
 - `expr?` returns the error from the current function.
+- `await` binds tighter than `?`, so `await task()?` awaits and then propagates.
 - Panics are reserved for broken invariants, not ordinary errors.
 - `==` means value equality. Identity, when available, is explicit.
 

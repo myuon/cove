@@ -1263,9 +1263,13 @@ impl Parser<'_> {
         }
     }
 
-    /// `await` binds tighter than any binary operator and looser than the
-    /// postfix operators, so `await handler(event)?` awaits the whole
-    /// fallible call.
+    /// `await` binds tighter than any binary operator and tighter than a
+    /// trailing `?`, so `await handler(event)?` awaits the call and then
+    /// propagates the error from the `Result` the task produced: `Try(Await(Call))`.
+    /// A `?` in the middle of the chain, followed by more postfix operators,
+    /// stays part of the operand instead: `await f()?.g()` is
+    /// `Await(Field(Try(Call), g))`, not `Try(Await(...))`, because only a `?`
+    /// that ends the whole chain escapes outside the `Await`.
     fn parse_unary(&mut self) -> PResult<Expr> {
         let start = self.span();
         let op = match self.peek() {
@@ -1289,9 +1293,16 @@ impl Parser<'_> {
             }
             None => {
                 self.bump();
-                let operand = self.parse_unary()?;
-                let span = start.to(operand.span);
-                Ok(expr(ExprKind::Await(Box::new(operand)), span))
+                let operand = self.parse_postfix()?;
+                let operand_span = operand.span;
+                Ok(match operand.kind {
+                    ExprKind::Try(inner) => {
+                        let await_span = start.to(inner.span);
+                        let awaited = expr(ExprKind::Await(inner), await_span);
+                        expr(ExprKind::Try(Box::new(awaited)), start.to(operand_span))
+                    }
+                    _ => expr(ExprKind::Await(Box::new(operand)), start.to(operand_span)),
+                })
             }
         }
     }
@@ -2290,22 +2301,57 @@ mod tests {
     }
 
     #[test]
-    fn await_binds_tighter_than_binary_operators() {
+    fn await_binds_tighter_than_a_trailing_question_mark() {
         let value = tail_expr("await handler(event)?");
-        let ExprKind::Await(inner) = &value.kind else {
-            panic!("expected an await");
-        };
-        let ExprKind::Try(call) = &inner.kind else {
+        let ExprKind::Try(inner) = &value.kind else {
             panic!("expected a `?`");
         };
+        let ExprKind::Await(call) = &inner.kind else {
+            panic!("expected an await");
+        };
         assert!(matches!(call.kind, ExprKind::Call { .. }));
+    }
 
-        let sum = tail_expr("await a + b");
+    #[test]
+    fn await_alone_has_no_try() {
+        let value = tail_expr("await handler(event)");
+        let ExprKind::Await(call) = &value.kind else {
+            panic!("expected an await");
+        };
+        assert!(matches!(call.kind, ExprKind::Call { .. }));
+    }
+
+    #[test]
+    fn await_binds_tighter_than_binary_operators() {
+        let sum = tail_expr("await a() + b");
         let ExprKind::Binary { op, lhs, .. } = &sum.kind else {
             panic!("expected an addition");
         };
         assert_eq!(*op, BinaryOp::Add);
         assert!(matches!(lhs.kind, ExprKind::Await(_)));
+    }
+
+    /// A `?` that is followed by more of the postfix chain stays part of the
+    /// chain instead of escaping the `Await`: `await f()?.g()` awaits
+    /// `f()?.g()` as a whole, rather than awaiting `f()` and applying `?` to
+    /// the result afterwards.
+    #[test]
+    fn await_with_a_question_mark_mid_chain_keeps_it_inside_the_chain() {
+        let value = tail_expr("await f()?.g()");
+        let ExprKind::Await(inner) = &value.kind else {
+            panic!("expected an await");
+        };
+        let ExprKind::Call { callee, .. } = &inner.kind else {
+            panic!("expected a call to `g`");
+        };
+        let ExprKind::Field { base, name } = &callee.kind else {
+            panic!("expected a field access");
+        };
+        assert_eq!(name.node, "g");
+        let ExprKind::Try(call) = &base.kind else {
+            panic!("expected a `?`");
+        };
+        assert!(matches!(call.kind, ExprKind::Call { .. }));
     }
 
     #[test]
