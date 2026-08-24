@@ -14,10 +14,10 @@ export async fn loadDashboard() -> Result<Dashboard, Error> {
     let prices = tasks.spawn { api.fetch<Array<Price>>("/prices") }
 
     let result = clock.timeout(500ms) {
-      Dashboard {
+      Dashboard(
         bookings: bookings.await()?,
         prices: prices.await()?
-      }
+      )
     }?
 
     Ok(result)
