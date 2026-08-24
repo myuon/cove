@@ -36,7 +36,7 @@ impl Metrics {
   }
 }
 
-/// Minimal router that retains registered handlers.
+/// Minimal router that stores registered handlers.
 export struct Router {
   routes: List<Route>
 }
@@ -72,7 +72,7 @@ impl EventBus {
     self.subscribers[name].push(handler)
   }
 
-  /// Invokes current subscribers without retaining the event argument.
+  /// Invokes the current subscribers.
   async fn emit(
     self,
     name: String,
