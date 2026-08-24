@@ -23,6 +23,7 @@ pub fn lex(sources: &SourceMap, file: FileId) -> Result<Vec<Token>, Vec<Diagnost
         pos: 0,
         tokens: Vec::new(),
         diagnostics: Vec::new(),
+        pending_newline: false,
     };
     lexer.run();
 
@@ -39,6 +40,9 @@ struct Lexer<'a> {
     pos: usize,
     tokens: Vec<Token>,
     diagnostics: Vec<Diagnostic>,
+    /// Set once a line break is seen in the trivia before the next token, and
+    /// cleared when that token is produced.
+    pending_newline: bool,
 }
 
 fn is_ident_start(c: char) -> bool {
@@ -78,9 +82,16 @@ impl<'a> Lexer<'a> {
         Some(c)
     }
 
+    /// Produces one token, transferring any line break seen in the trivia
+    /// before it onto [`Token::preceded_by_newline`].
     fn push_token(&mut self, kind: TokenKind, start: usize) {
         let span = Span::new(self.file, start as u32, self.pos as u32);
-        self.tokens.push(Token { kind, span });
+        let preceded_by_newline = std::mem::take(&mut self.pending_newline);
+        self.tokens.push(Token {
+            kind,
+            span,
+            preceded_by_newline,
+        });
     }
 
     fn run(&mut self) {
@@ -126,14 +137,16 @@ impl<'a> Lexer<'a> {
         }
 
         let eof = self.pos as u32;
-        self.tokens.push(Token {
-            kind: TokenKind::Eof,
-            span: Span::new(self.file, eof, eof),
-        });
+        self.push_token(TokenKind::Eof, eof as usize);
     }
 
     fn skip_whitespace(&mut self) {
-        while matches!(self.peek_char(), Some(' ' | '\t' | '\r' | '\n')) {
+        while let Some(c) = self.peek_char() {
+            match c {
+                '\n' => self.pending_newline = true,
+                ' ' | '\t' | '\r' => {}
+                _ => return,
+            }
             self.bump();
         }
     }
@@ -188,6 +201,9 @@ impl<'a> Lexer<'a> {
             let start = self.pos;
             self.pos += 2;
             self.skip_block_comment(start);
+            if self.text[start..self.pos].contains('\n') {
+                self.pending_newline = true;
+            }
             return None;
         }
 
@@ -671,8 +687,24 @@ mod tests {
     }
 
     #[test]
-    fn whitespace_is_insignificant() {
+    fn whitespace_produces_no_tokens() {
         assert_eq!(kinds(" \t\r\n foo"), vec![TokenKind::Ident("foo".into())]);
+    }
+
+    /// A line break is recorded on the token that follows it rather than
+    /// becoming a token of its own, and comments do not hide it.
+    #[test]
+    fn tokens_record_a_preceding_line_break() {
+        let tokens = lex_ok("a b\nc /* x\ny */ d // e\nf");
+        let flags: Vec<bool> = tokens.iter().map(|t| t.preceded_by_newline).collect();
+        // a, b, c, d, f, Eof
+        assert_eq!(flags, vec![false, false, true, true, true, false]);
+    }
+
+    #[test]
+    fn a_block_comment_on_one_line_is_not_a_line_break() {
+        let tokens = lex_ok("a /* x */ b");
+        assert!(!tokens[1].preceded_by_newline);
     }
 
     #[test]

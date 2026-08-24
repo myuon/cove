@@ -39,6 +39,28 @@ export fn main(args: Array<String>) -> Result<Unit, Error> {
 - The last expression in a block is its value; `return` exits early.
 - Comments use `//` and `/* ... */`.
 
+## Statements end at the end of a line
+
+A line break ends a statement when the line could have ended there. There is
+no `;`.
+
+```cove
+let total = subtotal + tax
+console.println("{total}")?
+```
+
+A line break does not end anything when the statement is visibly incomplete or
+the next line visibly continues it:
+
+- inside `(`, `[`, or `<`, so multi-line argument lists and array literals read
+  normally;
+- when the line ends with an operator, so `a +` continues onto the next line;
+- when the next line begins with `.`, so method chains split across lines;
+- before `else` and before a `match` arm's `=>`.
+
+An operator that can only continue an expression cannot start a line. Cove
+reports that rather than guessing which reading was meant.
+
 ## Values and errors
 
 - There is no implicit `null`.
