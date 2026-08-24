@@ -64,9 +64,12 @@ own-package case nests its program one level down, conventionally as
 `<case>/main/main.cove` with `entry = "main.main"`.
 
 Give a case its own package when it needs to pin a **check-time** diagnostic,
-or any other program that would fail to resolve — a non-exhaustive `match`
-once that becomes a check-time error, an unknown `use` path, a duplicate
-declaration, and the like. Leave a case in the shared package otherwise: it is
+or any other program that would fail to resolve or type-check — a type error,
+a non-exhaustive `match`, an unknown `use` path, a duplicate declaration, and
+the like. `cove run` type-checks the whole package before it runs anything, so
+a case that used to fail at run time moves here as soon as the checker can see
+the mistake: `fail_mixed_arithmetic`, `fail_mixed_equality`, and
+`fail_count_removed` all did. Leave a case in the shared package otherwise: it is
 less to set up, and keeps the shared package's module count as the signal
 that most of the suite still lives together.
 

@@ -8,6 +8,7 @@ pub mod capability;
 pub mod config;
 pub mod package;
 pub mod resolve;
+pub mod typeck;
 
 pub use capability::Capability;
 pub use config::{Config, RunConfig};

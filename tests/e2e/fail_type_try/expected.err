@@ -1,0 +1,8 @@
+error[cove::type::try_operand]: `?` needs a `Result` or an `Option`, but found `Int`
+ --> <e2e>/fail_type_try/main/main.cove:9:16
+  |
+9 |   let length = "cove".length()?
+  |                ^^^^^^^^^^^^^^^^
+  rule: `expr?` returns the error from the current function.
+  help: `Int` cannot fail, so drop the `?`
+1 error(s)

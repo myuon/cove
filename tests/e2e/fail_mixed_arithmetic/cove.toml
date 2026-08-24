@@ -1,0 +1,3 @@
+[run.fail_mixed_arithmetic]
+entry = "main.main"
+allow = ["console"]

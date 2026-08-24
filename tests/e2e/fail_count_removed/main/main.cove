@@ -1,6 +1,10 @@
 use console.println
 
 /// Calls the removed `count()` instead of `length()`.
+///
+/// The type checker knows `items` is an `Array<Int>`, so this fails
+/// before the program runs. It lives in its own package so that
+/// check-time failure cannot take down every other case.
 export fn main() -> Result<Unit, Error> {
   let items = [1, 2, 3]
   println("never printed {items.count()}")?

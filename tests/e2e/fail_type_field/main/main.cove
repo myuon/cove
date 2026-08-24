@@ -1,0 +1,16 @@
+use console.println
+
+/// A point in the plane.
+export struct Point { x: Int, y: Int }
+
+/// Initializes a struct with the wrong field type and reads a field that
+/// does not exist.
+///
+/// A struct's fields are exactly what its declaration lists, so both are
+/// check-time errors. This case lives in its own package so that failure
+/// cannot take down every other case.
+export fn main() -> Result<Unit, Error> {
+  let point = Point(x: 1, y: "two")
+  println("{point.z}")?
+  Ok(())
+}

@@ -23,7 +23,7 @@ cove — the Cove toolchain
 
 usage:
   cove fmt [path] [--check]            format every `.cove` file in the package
-  cove check [path] [--deny-warnings]  parse and resolve every module in the package
+  cove check [path] [--deny-warnings]  parse, resolve, and type-check the package
   cove run <name> [flags] [args]       run the entry selected by `[run.<name>]` in cove.toml
   cove outline [path]                  show modules and their exported declarations
   cove help                            show this message
@@ -128,10 +128,25 @@ fn load(start: Option<&Path>) -> Result<(SourceMap, Package, Program), CliError>
         Ok(package) => package,
         Err(items) => return Err(CliError::Diagnostics { sources, items }),
     };
-    let program = match cove_sema::resolve::resolve(&package) {
+    let mut program = match cove_sema::resolve::resolve(&package) {
         Ok(program) => program,
         Err(items) => return Err(CliError::Diagnostics { sources, items }),
     };
+
+    // `cove check` type-checks, and `cove run` refuses to execute a package
+    // that does not check. Type warnings join the resolver's, so `cove check`
+    // reports and counts them the same way.
+    let (errors, warnings): (Vec<Diagnostic>, Vec<Diagnostic>) =
+        cove_sema::typeck::check(&package, &program)
+            .into_iter()
+            .partition(|d| d.severity == cove_diag::Severity::Error);
+    if !errors.is_empty() {
+        let mut items = errors;
+        items.extend(warnings);
+        return Err(CliError::Diagnostics { sources, items });
+    }
+    program.warnings.extend(warnings);
+
     Ok((sources, package, program))
 }
 

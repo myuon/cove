@@ -1,0 +1,3 @@
+[run.fail_type_try]
+entry = "main.main"
+allow = ["console"]

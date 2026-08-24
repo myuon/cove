@@ -1,0 +1,12 @@
+error[cove::type::branches]: this branch produces `Int`, but the other produces `String`
+  --> <e2e>/fail_type_branches/main/main.cove:12:10
+   |
+12 |   } else {
+   |          ^
+  --> <e2e>/fail_type_branches/main/main.cove:10:28
+   |
+10 |   let described = if n < 0 {
+   |                            ^ this branch produces `String`
+  rule: Every branch of an `if` or `match` used as an expression produces the same type.
+  help: make both branches produce `String`, or bind them separately
+1 error(s)

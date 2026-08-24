@@ -1,0 +1,12 @@
+use console.println
+
+/// Applies `?` to a value that cannot fail.
+///
+/// `expr?` returns the error from the current function, so its operand must
+/// be a `Result` or an `Option`. This case lives in its own package so that
+/// check-time failure cannot take down every other case.
+export fn main() -> Result<Unit, Error> {
+  let length = "cove".length()?
+  println("{length}")?
+  Ok(())
+}

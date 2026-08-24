@@ -1,0 +1,12 @@
+error[cove::type::mismatch]: expected `String`, found `Int`
+  --> <e2e>/fail_type_argument/main/main.cove:14:20
+   |
+14 |   println(greeting(42))?
+   |                    ^^
+ --> <e2e>/fail_type_argument/main/main.cove:4:13
+  |
+4 | fn greeting(name: String) -> String {
+  |             ^^^^^^^^^^^^ the parameter `name` is `String`
+  rule: Types are nominal and there are no implicit conversions: a value must already have the type its place asks for.
+  help: interpolate the `Int`, as in "{value}", to make a `String`
+1 error(s)

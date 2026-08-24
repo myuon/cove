@@ -1,0 +1,17 @@
+use console.println
+
+/// Binds an `if` whose branches produce different types.
+///
+/// Every branch of an `if` used as an expression produces the same type, so
+/// this is a check-time error. It lives in its own package so that failure
+/// cannot take down every other case.
+export fn main() -> Result<Unit, Error> {
+  let n = 1
+  let described = if n < 0 {
+    "negative"
+  } else {
+    n
+  }
+  println("{described}")?
+  Ok(())
+}

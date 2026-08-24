@@ -1,0 +1,16 @@
+use console.println
+
+/// Returns a greeting for `name`.
+fn greeting(name: String) -> String {
+  "Hello, {name}!"
+}
+
+/// Passes an `Int` where a `String` is declared.
+///
+/// The argument's type is known at the call site, so this is a check-time
+/// error. It lives in its own package so that failure cannot take down
+/// every other case.
+export fn main() -> Result<Unit, Error> {
+  println(greeting(42))?
+  Ok(())
+}

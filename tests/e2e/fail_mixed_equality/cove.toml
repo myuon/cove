@@ -1,0 +1,3 @@
+[run.fail_mixed_equality]
+entry = "main.main"
+allow = ["console"]
