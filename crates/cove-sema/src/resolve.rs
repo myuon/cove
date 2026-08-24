@@ -8,8 +8,8 @@ use std::rc::Rc;
 
 use cove_diag::{Diagnostic, Span};
 use cove_syntax::ast::{
-    Block, EnumDecl, Expr, ExprKind, FnDecl, Item, ItemKind, MatchArm, Stmt, StmtKind, StrPart,
-    StructDecl, TypeAlias,
+    Block, EnumDecl, Expr, ExprKind, FnDecl, Item, ItemKind, MatchArm, Pattern, PatternKind, Stmt,
+    StmtKind, StrPart, StructDecl, TypeAlias,
 };
 
 use crate::capability::Capability;
@@ -382,6 +382,11 @@ fn resolve_module(
         .collect();
     propagate_capabilities(&mut resolved, &call_graph);
 
+    // Pass 5: `match` exhaustiveness and case-name checks, now that every
+    // enum in the module is known. This walks every body a second time with
+    // the same walker as passes 2 and 3, just with `enums` filled in.
+    check_module_matches(&resolved, errors, warnings);
+
     resolved
 }
 
@@ -425,16 +430,84 @@ fn missing_doc(warnings: &mut Vec<Diagnostic>, item: &Item, name: &str, span: Sp
 /// a later pass).
 ///
 /// This only looks at calls textually inside `body` (including nested
-/// blocks, lambdas, match arms, and loops).
+/// blocks, lambdas, match arms, and loops). `enums` is `None` here: a
+/// module's enums are not all known yet at this point (see [`BodyWalk`]), so
+/// `match` exhaustiveness is not checked during this walk.
 fn analyze_body(
     body: &Block,
     host_uses: &BTreeSet<String>,
     host_items: &BTreeMap<String, String>,
 ) -> (BTreeSet<Capability>, Vec<CallShape>) {
-    let mut capabilities = BTreeSet::new();
-    let mut calls = Vec::new();
-    walk_block(body, host_uses, host_items, &mut capabilities, &mut calls);
-    (capabilities, calls)
+    let mut walk = BodyWalk {
+        host_uses,
+        host_items,
+        enums: None,
+        capabilities: BTreeSet::new(),
+        calls: Vec::new(),
+        errors: Vec::new(),
+        warnings: Vec::new(),
+    };
+    walk_block(body, &mut walk);
+    (walk.capabilities, walk.calls)
+}
+
+/// Checks every `match` expression in every function and method body of
+/// `resolved` for the exhaustiveness and case-name facts derivable without a
+/// type checker, now that every enum the module declares is known.
+///
+/// This reuses [`walk_block`] rather than a second traversal: the only
+/// difference from the walk [`analyze_body`] already did is that `enums` is
+/// filled in this time, so [`check_match_arms`] actually runs.
+fn check_module_matches(
+    resolved: &ResolvedModule,
+    errors: &mut Vec<Diagnostic>,
+    warnings: &mut Vec<Diagnostic>,
+) {
+    for entry in resolved.functions.values() {
+        check_body_matches(&entry.decl.body, resolved, errors, warnings);
+    }
+    for entry in resolved.methods.values() {
+        check_body_matches(&entry.decl.body, resolved, errors, warnings);
+    }
+}
+
+fn check_body_matches(
+    body: &Block,
+    resolved: &ResolvedModule,
+    errors: &mut Vec<Diagnostic>,
+    warnings: &mut Vec<Diagnostic>,
+) {
+    let mut walk = BodyWalk {
+        host_uses: &resolved.host_uses,
+        host_items: &resolved.host_items,
+        enums: Some(&resolved.enums),
+        capabilities: BTreeSet::new(),
+        calls: Vec::new(),
+        errors: Vec::new(),
+        warnings: Vec::new(),
+    };
+    walk_block(body, &mut walk);
+    errors.extend(walk.errors);
+    warnings.extend(walk.warnings);
+}
+
+/// Everything the body walker threads through a traversal, and what it
+/// collects along the way.
+///
+/// The walker runs twice per body. The first run, from [`analyze_body`],
+/// happens while a module's declarations are still being collected, so
+/// `enums` is `None` and only `capabilities` and `calls` are derived. The
+/// second run, from [`check_body_matches`], happens once every enum is
+/// known; `enums` is filled in, and [`check_match_arms`] records what it
+/// finds in `errors` and `warnings` instead.
+struct BodyWalk<'a> {
+    host_uses: &'a BTreeSet<String>,
+    host_items: &'a BTreeMap<String, String>,
+    enums: Option<&'a BTreeMap<String, EnumEntry>>,
+    capabilities: BTreeSet<Capability>,
+    calls: Vec<CallShape>,
+    errors: Vec<Diagnostic>,
+    warnings: Vec<Diagnostic>,
 }
 
 /// The shape of one call site's callee, kept just precise enough to resolve
@@ -460,44 +533,26 @@ enum FnKey {
     Method(String, String),
 }
 
-fn walk_block(
-    block: &Block,
-    host_uses: &BTreeSet<String>,
-    host_items: &BTreeMap<String, String>,
-    out: &mut BTreeSet<Capability>,
-    out_calls: &mut Vec<CallShape>,
-) {
+fn walk_block(block: &Block, walk: &mut BodyWalk) {
     for stmt in &block.statements {
-        walk_stmt(stmt, host_uses, host_items, out, out_calls);
+        walk_stmt(stmt, walk);
     }
     if let Some(tail) = &block.tail {
-        walk_expr(tail, host_uses, host_items, out, out_calls);
+        walk_expr(tail, walk);
     }
 }
 
-fn walk_stmt(
-    stmt: &Stmt,
-    host_uses: &BTreeSet<String>,
-    host_items: &BTreeMap<String, String>,
-    out: &mut BTreeSet<Capability>,
-    out_calls: &mut Vec<CallShape>,
-) {
+fn walk_stmt(stmt: &Stmt, walk: &mut BodyWalk) {
     match &stmt.kind {
-        StmtKind::Let { value, .. } => walk_expr(value, host_uses, host_items, out, out_calls),
-        StmtKind::Expr(expr) => walk_expr(expr, host_uses, host_items, out, out_calls),
+        StmtKind::Let { value, .. } => walk_expr(value, walk),
+        StmtKind::Expr(expr) => walk_expr(expr, walk),
         // A nested declaration (such as a local `fn`) is its own scope; it is
         // resolved and walked on its own, not as part of the enclosing body.
         StmtKind::Item(_) => {}
     }
 }
 
-fn walk_expr(
-    expr: &Expr,
-    host_uses: &BTreeSet<String>,
-    host_items: &BTreeMap<String, String>,
-    out: &mut BTreeSet<Capability>,
-    out_calls: &mut Vec<CallShape>,
-) {
+fn walk_expr(expr: &Expr, walk: &mut BodyWalk) {
     match &expr.kind {
         ExprKind::Int(_)
         | ExprKind::Float(_)
@@ -508,88 +563,454 @@ fn walk_expr(
         ExprKind::Str(parts) => {
             for part in parts {
                 if let StrPart::Interpolation(inner) = part {
-                    walk_expr(inner, host_uses, host_items, out, out_calls);
+                    walk_expr(inner, walk);
                 }
             }
         }
         ExprKind::ArrayLit(items) => {
             for item in items {
-                walk_expr(item, host_uses, host_items, out, out_calls);
+                walk_expr(item, walk);
             }
         }
-        ExprKind::Field { base, .. } => walk_expr(base, host_uses, host_items, out, out_calls),
+        ExprKind::Field { base, .. } => walk_expr(base, walk),
         ExprKind::Call {
             callee,
             args,
             trailing,
             ..
         } => {
-            if let Some(capability) = call_capability(callee, host_uses, host_items) {
-                out.insert(capability);
+            if let Some(capability) = call_capability(callee, walk.host_uses, walk.host_items) {
+                walk.capabilities.insert(capability);
             }
             if let Some(shape) = call_shape(callee) {
-                out_calls.push(shape);
+                walk.calls.push(shape);
             }
-            walk_expr(callee, host_uses, host_items, out, out_calls);
+            walk_expr(callee, walk);
             for arg in args {
-                walk_expr(&arg.value, host_uses, host_items, out, out_calls);
+                walk_expr(&arg.value, walk);
             }
             if let Some(trailing) = trailing {
-                walk_expr(trailing, host_uses, host_items, out, out_calls);
+                walk_expr(trailing, walk);
             }
         }
-        ExprKind::Unary { operand, .. } => {
-            walk_expr(operand, host_uses, host_items, out, out_calls)
-        }
+        ExprKind::Unary { operand, .. } => walk_expr(operand, walk),
         ExprKind::Binary { lhs, rhs, .. } => {
-            walk_expr(lhs, host_uses, host_items, out, out_calls);
-            walk_expr(rhs, host_uses, host_items, out, out_calls);
+            walk_expr(lhs, walk);
+            walk_expr(rhs, walk);
         }
         ExprKind::Assign { target, value, .. } => {
-            walk_expr(target, host_uses, host_items, out, out_calls);
-            walk_expr(value, host_uses, host_items, out, out_calls);
+            walk_expr(target, walk);
+            walk_expr(value, walk);
         }
-        ExprKind::Try(inner) | ExprKind::Await(inner) => {
-            walk_expr(inner, host_uses, host_items, out, out_calls)
-        }
-        ExprKind::Block(block) => walk_block(block, host_uses, host_items, out, out_calls),
+        ExprKind::Try(inner) | ExprKind::Await(inner) => walk_expr(inner, walk),
+        ExprKind::Block(block) => walk_block(block, walk),
         ExprKind::If {
             condition,
             then_branch,
             else_branch,
         } => {
-            walk_expr(condition, host_uses, host_items, out, out_calls);
-            walk_block(then_branch, host_uses, host_items, out, out_calls);
+            walk_expr(condition, walk);
+            walk_block(then_branch, walk);
             if let Some(else_branch) = else_branch {
-                walk_expr(else_branch, host_uses, host_items, out, out_calls);
+                walk_expr(else_branch, walk);
             }
         }
         ExprKind::Match { scrutinee, arms } => {
-            walk_expr(scrutinee, host_uses, host_items, out, out_calls);
+            walk_expr(scrutinee, walk);
+            check_match_arms(expr, arms, walk);
             for MatchArm { body, .. } in arms {
-                walk_expr(body, host_uses, host_items, out, out_calls);
+                walk_expr(body, walk);
             }
         }
         ExprKind::For { iterable, body, .. } => {
-            walk_expr(iterable, host_uses, host_items, out, out_calls);
-            walk_block(body, host_uses, host_items, out, out_calls);
+            walk_expr(iterable, walk);
+            walk_block(body, walk);
         }
         ExprKind::While { condition, body } => {
-            walk_expr(condition, host_uses, host_items, out, out_calls);
-            walk_block(body, host_uses, host_items, out, out_calls);
+            walk_expr(condition, walk);
+            walk_block(body, walk);
         }
         ExprKind::Return(inner) => {
             if let Some(inner) = inner {
-                walk_expr(inner, host_uses, host_items, out, out_calls);
+                walk_expr(inner, walk);
             }
         }
-        ExprKind::Lambda { body, .. } => walk_block(body, host_uses, host_items, out, out_calls),
-        ExprKind::Scope { body, .. } => walk_block(body, host_uses, host_items, out, out_calls),
+        ExprKind::Lambda { body, .. } => walk_block(body, walk),
+        ExprKind::Scope { body, .. } => walk_block(body, walk),
         ExprKind::Range { start, end, .. } => {
-            walk_expr(start, host_uses, host_items, out, out_calls);
-            walk_expr(end, host_uses, host_items, out, out_calls);
+            walk_expr(start, walk);
+            walk_expr(end, walk);
         }
     }
+}
+
+/// Checks one `match` expression for the exhaustiveness and case-name facts
+/// derivable without a type checker. A no-op until every enum in the module
+/// is known (`walk.enums.is_some()`); see [`BodyWalk`].
+///
+/// The scrutinee's enum is determined from the arms' `Variant` patterns
+/// alone (see [`resolve_target_enum`]); when it cannot be determined, this
+/// silently reports nothing rather than guess. `Wildcard` and `Binding` arms
+/// make a match exhaustive by construction, since there is no static type to
+/// check them against. Arms after the first such catch-all arm can never
+/// run, which is checked independently of whether the enum could be
+/// determined at all.
+fn check_match_arms(match_expr: &Expr, arms: &[MatchArm], walk: &mut BodyWalk) {
+    let Some(enums) = walk.enums else {
+        return;
+    };
+
+    let catch_all_index = arms.iter().position(|arm| is_catch_all(&arm.pattern));
+    if let Some(catch_all_index) = catch_all_index {
+        let catch_all_span = arms[catch_all_index].span;
+        for arm in &arms[catch_all_index + 1..] {
+            walk.warnings.push(
+                Diagnostic::warning(
+                    "cove::resolve::unreachable_match_arm",
+                    "this `match` arm can never run",
+                )
+                .at(arm.span)
+                .label(
+                    catch_all_span,
+                    "unreachable because this earlier arm matches everything",
+                )
+                .rule("An arm after a `_` or binding arm can never run."),
+            );
+        }
+    }
+    let has_catch_all = catch_all_index.is_some();
+
+    if let Some(target) = resolve_target_enum(arms, enums) {
+        let valid_cases = target.case_names();
+        let mut seen: BTreeMap<&str, Span> = BTreeMap::new();
+        for arm in arms {
+            let PatternKind::Variant { path, .. } = &arm.pattern.kind else {
+                continue;
+            };
+            let case_name = path.last().expect("a variant path is never empty");
+            if !valid_cases.iter().any(|case| case == &case_name.node) {
+                walk.errors.push(
+                    Diagnostic::error(
+                        "cove::resolve::unknown_enum_case",
+                        format!(
+                            "`{}` is not a case of `{}`",
+                            case_name.node,
+                            target.display_name()
+                        ),
+                    )
+                    .at(arm.pattern.span)
+                    .rule("Every `match` arm must name a case its enum declares.")
+                    .help(format!(
+                        "`{}` declares {}",
+                        target.display_name(),
+                        list_backticked(&valid_cases)
+                    )),
+                );
+                continue;
+            }
+            if let Some(first_span) = seen.get(case_name.node.as_str()) {
+                walk.errors.push(
+                    Diagnostic::error(
+                        "cove::resolve::duplicate_match_arm",
+                        format!("`{}` is already covered by an earlier arm", case_name.node),
+                    )
+                    .at(arm.pattern.span)
+                    .label(
+                        *first_span,
+                        format!("`{}` first matched here", case_name.node),
+                    )
+                    .rule("Each enum case may be matched by at most one arm."),
+                );
+            } else {
+                seen.insert(case_name.node.as_str(), arm.pattern.span);
+            }
+        }
+
+        if !has_catch_all {
+            let missing: Vec<String> = valid_cases
+                .iter()
+                .filter(|case| !seen.contains_key(case.as_str()))
+                .map(|case| target.qualified(case))
+                .collect();
+            if !missing.is_empty() {
+                walk.errors.push(non_exhaustive_enum_match(
+                    match_expr.span,
+                    &target,
+                    &missing,
+                ));
+            }
+        }
+        return;
+    }
+
+    check_literal_arms(match_expr, arms, catch_all_index, has_catch_all, walk);
+}
+
+/// Checks a `match`'s literal-pattern arms once no enum could be determined
+/// for the scrutinee (see [`resolve_target_enum`]).
+///
+/// `Bool` is exhaustible in a way `Int` and `String` are not: its domain is
+/// exactly two values, `true` and `false`, so a `match` whose literal arms
+/// are all `Bool` can be proven exhaustive once both are covered, with no
+/// catch-all required. This is a property of the type, not a special case
+/// carved out for `match` — `Int` and `String` have effectively unbounded
+/// domains, so a literal `match` over either can never be proven exhaustive
+/// without a catch-all. A match mixing a `Bool` literal with a non-`Bool`
+/// literal (which cannot happen once there is a type checker, but nothing
+/// here rules it out yet) is treated as the non-`Bool` case, since it still
+/// needs a catch-all.
+fn check_literal_arms(
+    match_expr: &Expr,
+    arms: &[MatchArm],
+    catch_all_index: Option<usize>,
+    has_catch_all: bool,
+    walk: &mut BodyWalk,
+) {
+    let literal_indices: Vec<usize> = arms
+        .iter()
+        .enumerate()
+        .filter(|(_, arm)| is_literal(&arm.pattern))
+        .map(|(index, _)| index)
+        .collect();
+    if literal_indices.is_empty() {
+        return;
+    }
+
+    let all_bool = literal_indices
+        .iter()
+        .all(|&index| literal_bool_value(&arms[index].pattern).is_some());
+
+    if !all_bool {
+        if !has_catch_all {
+            walk.errors.push(
+                Diagnostic::error(
+                    "cove::resolve::non_exhaustive_match",
+                    "`match` over literal patterns needs a `_` or binding arm",
+                )
+                .at(match_expr.span)
+                .rule("`match` must cover every enum case.")
+                .help(
+                    "add a `_` arm, or a binding arm, to cover every value the literal arms do not",
+                ),
+            );
+        }
+        return;
+    }
+
+    let mut seen: BTreeMap<bool, Span> = BTreeMap::new();
+    let mut covered_at: Option<usize> = None;
+    for &index in &literal_indices {
+        let value = literal_bool_value(&arms[index].pattern).expect("checked all_bool above");
+        if let Some(first_span) = seen.get(&value) {
+            walk.errors.push(
+                Diagnostic::error(
+                    "cove::resolve::duplicate_match_arm",
+                    format!("`{value}` is already covered by an earlier arm"),
+                )
+                .at(arms[index].pattern.span)
+                .label(*first_span, format!("`{value}` first matched here"))
+                .rule("Each value of `Bool` may be matched by at most one arm."),
+            );
+            continue;
+        }
+        seen.insert(value, arms[index].pattern.span);
+        if seen.len() == 2 && covered_at.is_none() {
+            covered_at = Some(index);
+        }
+    }
+
+    if let Some(catch_all_index) = catch_all_index {
+        if let Some(covered_at) = covered_at {
+            if covered_at < catch_all_index {
+                walk.warnings.push(
+                    Diagnostic::warning(
+                        "cove::resolve::unreachable_match_arm",
+                        "this `match` arm can never run",
+                    )
+                    .at(arms[catch_all_index].span)
+                    .label(
+                        arms[covered_at].span,
+                        "unreachable because `true` and `false` are already covered here",
+                    )
+                    .rule("A `match` over `Bool` covering both `true` and `false` leaves no value for a later `_` or binding arm."),
+                );
+            }
+        }
+        return;
+    }
+
+    if seen.len() < 2 {
+        let missing = if seen.contains_key(&true) {
+            "false"
+        } else {
+            "true"
+        };
+        walk.errors.push(
+            Diagnostic::error(
+                "cove::resolve::non_exhaustive_match",
+                format!("this `match` does not cover `{missing}`"),
+            )
+            .at(match_expr.span)
+            .rule("A `match` over `Bool` must cover both `true` and `false`.")
+            .help(format!("add a `{missing} => ...` arm, or add a `_` arm")),
+        );
+    }
+}
+
+/// The `Bool` value a literal pattern matches, or `None` when the pattern is
+/// not a literal or its literal is not a `Bool`.
+fn literal_bool_value(pattern: &Pattern) -> Option<bool> {
+    let PatternKind::Literal(expr) = &pattern.kind else {
+        return None;
+    };
+    match expr.kind {
+        ExprKind::Bool(value) => Some(value),
+        _ => None,
+    }
+}
+
+fn is_catch_all(pattern: &Pattern) -> bool {
+    matches!(
+        pattern.kind,
+        PatternKind::Wildcard | PatternKind::Binding(_)
+    )
+}
+
+fn is_literal(pattern: &Pattern) -> bool {
+    matches!(pattern.kind, PatternKind::Literal(_))
+}
+
+/// The enum a `match`'s `Variant` arms name, when this analysis can
+/// determine it. `Option` and `Result` are builtins rather than module
+/// declarations, so they are represented separately from a module `enum`.
+enum TargetEnum<'a> {
+    Declared(&'a EnumEntry),
+    Option,
+    Result,
+}
+
+impl TargetEnum<'_> {
+    fn display_name(&self) -> &str {
+        match self {
+            TargetEnum::Declared(entry) => &entry.decl.name.node,
+            TargetEnum::Option => "Option",
+            TargetEnum::Result => "Result",
+        }
+    }
+
+    /// Case names in declaration order.
+    fn case_names(&self) -> Vec<String> {
+        match self {
+            TargetEnum::Declared(entry) => entry
+                .decl
+                .cases
+                .iter()
+                .map(|case| case.name.node.clone())
+                .collect(),
+            TargetEnum::Option => vec!["Some".to_string(), "None".to_string()],
+            TargetEnum::Result => vec!["Ok".to_string(), "Err".to_string()],
+        }
+    }
+
+    /// How a missing case should read in a diagnostic: qualified for a
+    /// module enum (`LogLevel.Warn`), bare for a builtin, since arms write
+    /// `Some(x)` and `None`, never `Option.Some(x)`.
+    fn qualified(&self, case: &str) -> String {
+        match self {
+            TargetEnum::Declared(entry) => format!("{}.{case}", entry.decl.name.node),
+            TargetEnum::Option | TargetEnum::Result => case.to_string(),
+        }
+    }
+}
+
+/// Determines the enum a `match`'s `Variant` arms name, or `None` when this
+/// analysis cannot be sure: no arm is a `Variant`, the arms disagree about
+/// which enum they name, a bare case name matches no declared enum or more
+/// than one, or the settled-on enum is not declared in this module (which
+/// also excludes any enum imported from elsewhere; there is no
+/// module-to-module import resolution yet).
+fn resolve_target_enum<'a>(
+    arms: &[MatchArm],
+    enums: &'a BTreeMap<String, EnumEntry>,
+) -> Option<TargetEnum<'a>> {
+    let mut candidate: Option<String> = None;
+    for arm in arms {
+        let PatternKind::Variant { path, .. } = &arm.pattern.kind else {
+            continue;
+        };
+        let this_enum = match path.as_slice() {
+            [case] => bare_case_enum(&case.node, enums)?,
+            [enum_name, _case] => enum_name.node.clone(),
+            _ => return None,
+        };
+        match &candidate {
+            None => candidate = Some(this_enum),
+            Some(existing) if *existing != this_enum => return None,
+            _ => {}
+        }
+    }
+
+    match candidate?.as_str() {
+        "Option" => Some(TargetEnum::Option),
+        "Result" => Some(TargetEnum::Result),
+        other => enums.get(other).map(TargetEnum::Declared),
+    }
+}
+
+/// The enum a bare case name such as `Debug` names: `Option` or `Result` for
+/// their builtin case names, or the one module enum whose cases include it.
+/// `None` when no enum declares that case, or more than one does.
+fn bare_case_enum(case_name: &str, enums: &BTreeMap<String, EnumEntry>) -> Option<String> {
+    if case_name == "Some" || case_name == "None" {
+        return Some("Option".to_string());
+    }
+    if case_name == "Ok" || case_name == "Err" {
+        return Some("Result".to_string());
+    }
+    let mut matches = enums
+        .iter()
+        .filter(|(_, entry)| {
+            entry
+                .decl
+                .cases
+                .iter()
+                .any(|case| case.name.node == case_name)
+        })
+        .map(|(name, _)| name.clone());
+    let first = matches.next()?;
+    if matches.next().is_some() {
+        return None;
+    }
+    Some(first)
+}
+
+fn list_backticked(items: &[String]) -> String {
+    items
+        .iter()
+        .map(|item| format!("`{item}`"))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// Builds the `non_exhaustive_match` diagnostic for a `match` over `target`
+/// missing the cases in `missing`, in declaration order.
+fn non_exhaustive_enum_match(span: Span, target: &TargetEnum, missing: &[String]) -> Diagnostic {
+    let list = list_backticked(missing);
+    let help = if missing.len() == 1 {
+        format!("add an arm for {list}, or add a `_` arm")
+    } else {
+        format!("add arms for {list}, or add a `_` arm")
+    };
+    Diagnostic::error(
+        "cove::resolve::non_exhaustive_match",
+        format!(
+            "`match` does not cover every case of `{}`: missing {list}",
+            target.display_name()
+        ),
+    )
+    .at(span)
+    .rule("`match` must cover every enum case.")
+    .help(help)
 }
 
 /// The call-graph shape of `callee`, when it is a form the call graph can
@@ -1102,5 +1523,358 @@ mod tests {
         assert!(config_load_config
             .required_capabilities
             .contains(&Capability::new("env")));
+    }
+
+    #[test]
+    fn match_covering_every_enum_case_passes() {
+        let module = module_from_sources(
+            "exhaustive",
+            &["enum LogLevel {\n  Debug\n  Info\n}\n\n\
+               fn describe(level: LogLevel) -> String {\n  \
+               match level {\n    \
+               LogLevel.Debug => \"debug\"\n    \
+               LogLevel.Info => \"info\"\n  \
+               }\n}\n"],
+        );
+        let package = package_of(module);
+        let program = resolve(&package).expect("resolves");
+        assert!(program.warnings.is_empty());
+    }
+
+    #[test]
+    fn missing_case_is_reported_by_name() {
+        let module = module_from_sources(
+            "missing",
+            &["enum LogLevel {\n  Debug\n  Info\n  Warn\n  Error\n}\n\n\
+               fn describe(level: LogLevel) -> String {\n  \
+               match level {\n    \
+               LogLevel.Debug => \"debug\"\n    \
+               LogLevel.Info => \"info\"\n  \
+               }\n}\n"],
+        );
+        let package = package_of(module);
+        let errs = resolve(&package).unwrap_err();
+        let diag = errs
+            .iter()
+            .find(|d| d.code == "cove::resolve::non_exhaustive_match")
+            .expect("reports non_exhaustive_match");
+        assert!(diag.message.contains("LogLevel.Warn"));
+        assert!(diag.message.contains("LogLevel.Error"));
+        assert!(diag.help.as_deref().unwrap().contains("LogLevel.Warn"));
+    }
+
+    #[test]
+    fn a_wildcard_arm_makes_a_partial_match_exhaustive() {
+        let module = module_from_sources(
+            "wildcard_ok",
+            &["enum LogLevel {\n  Debug\n  Info\n  Warn\n  Error\n}\n\n\
+               fn describe(level: LogLevel) -> String {\n  \
+               match level {\n    \
+               LogLevel.Debug => \"debug\"\n    \
+               _ => \"other\"\n  \
+               }\n}\n"],
+        );
+        let package = package_of(module);
+        let program = resolve(&package).expect("resolves");
+        assert!(!program
+            .warnings
+            .iter()
+            .any(|d| d.code == "cove::resolve::non_exhaustive_match"));
+    }
+
+    #[test]
+    fn option_match_covering_both_cases_passes() {
+        let module = module_from_sources(
+            "option_ok",
+            &["fn describe(value: Option<Int>) -> Int {\n  \
+               match value {\n    \
+               Some(x) => x\n    \
+               None => 0\n  \
+               }\n}\n"],
+        );
+        let package = package_of(module);
+        resolve(&package).expect("resolves");
+    }
+
+    #[test]
+    fn option_match_missing_none_is_reported() {
+        let module = module_from_sources(
+            "option_missing",
+            &["fn describe(value: Option<Int>) -> Int {\n  \
+               match value {\n    \
+               Some(x) => x\n  \
+               }\n}\n"],
+        );
+        let package = package_of(module);
+        let errs = resolve(&package).unwrap_err();
+        let diag = errs
+            .iter()
+            .find(|d| d.code == "cove::resolve::non_exhaustive_match")
+            .expect("reports non_exhaustive_match");
+        assert!(diag.message.contains("None"));
+    }
+
+    #[test]
+    fn result_match_covering_both_cases_passes() {
+        let module = module_from_sources(
+            "result_ok",
+            &["fn describe(value: Result<Int, Error>) -> Int {\n  \
+               match value {\n    \
+               Ok(x) => x\n    \
+               Err(e) => 0\n  \
+               }\n}\n"],
+        );
+        let package = package_of(module);
+        resolve(&package).expect("resolves");
+    }
+
+    #[test]
+    fn result_match_missing_err_is_reported() {
+        let module = module_from_sources(
+            "result_missing",
+            &["fn describe(value: Result<Int, Error>) -> Int {\n  \
+               match value {\n    \
+               Ok(x) => x\n  \
+               }\n}\n"],
+        );
+        let package = package_of(module);
+        let errs = resolve(&package).unwrap_err();
+        let diag = errs
+            .iter()
+            .find(|d| d.code == "cove::resolve::non_exhaustive_match")
+            .expect("reports non_exhaustive_match");
+        assert!(diag.message.contains("Err"));
+    }
+
+    #[test]
+    fn unknown_enum_case_is_reported() {
+        let module = module_from_sources(
+            "unknown_case",
+            &["enum LogLevel {\n  Debug\n  Info\n}\n\n\
+               fn describe(level: LogLevel) -> String {\n  \
+               match level {\n    \
+               LogLevel.Debug => \"debug\"\n    \
+               LogLevel.Bogus => \"bogus\"\n  \
+               }\n}\n"],
+        );
+        let package = package_of(module);
+        let errs = resolve(&package).unwrap_err();
+        assert!(errs
+            .iter()
+            .any(|d| d.code == "cove::resolve::unknown_enum_case"));
+    }
+
+    #[test]
+    fn duplicate_match_arm_is_reported() {
+        let module = module_from_sources(
+            "dup_arm",
+            &["enum LogLevel {\n  Debug\n  Info\n}\n\n\
+               fn describe(level: LogLevel) -> String {\n  \
+               match level {\n    \
+               LogLevel.Debug => \"first\"\n    \
+               LogLevel.Debug => \"second\"\n    \
+               LogLevel.Info => \"info\"\n  \
+               }\n}\n"],
+        );
+        let package = package_of(module);
+        let errs = resolve(&package).unwrap_err();
+        assert!(errs
+            .iter()
+            .any(|d| d.code == "cove::resolve::duplicate_match_arm"));
+    }
+
+    #[test]
+    fn arm_after_a_wildcard_is_an_unreachable_warning() {
+        let module = module_from_sources(
+            "unreachable_arm",
+            &["fn tag(n: Int) -> String {\n  \
+               match n {\n    \
+               _ => \"any\"\n    \
+               1 => \"one\"\n  \
+               }\n}\n"],
+        );
+        let package = package_of(module);
+        let program = resolve(&package).expect("resolves; only a warning");
+        assert!(program
+            .warnings
+            .iter()
+            .any(|d| d.code == "cove::resolve::unreachable_match_arm"));
+    }
+
+    #[test]
+    fn literal_match_over_non_bool_without_a_catch_all_arm_is_reported() {
+        let module = module_from_sources(
+            "literal_missing",
+            &["fn tag(n: Int) -> String {\n  \
+               match n {\n    \
+               1 => \"one\"\n    \
+               2 => \"two\"\n  \
+               }\n}\n"],
+        );
+        let package = package_of(module);
+        let errs = resolve(&package).unwrap_err();
+        let diag = errs
+            .iter()
+            .find(|d| d.code == "cove::resolve::non_exhaustive_match")
+            .expect("reports non_exhaustive_match");
+        assert!(diag.message.contains("literal"));
+    }
+
+    /// `Bool`'s domain is exactly `{true, false}`, so covering both makes the
+    /// match exhaustive without a catch-all — unlike `Int` or `String`.
+    #[test]
+    fn bool_match_covering_both_values_passes_without_a_catch_all() {
+        let module = module_from_sources(
+            "bool_ok",
+            &["fn flag(on: Bool) -> String {\n  \
+               match on {\n    \
+               true => \"yes\"\n    \
+               false => \"no\"\n  \
+               }\n}\n"],
+        );
+        let package = package_of(module);
+        let program = resolve(&package).expect("resolves");
+        assert!(!program
+            .warnings
+            .iter()
+            .any(|d| d.code == "cove::resolve::non_exhaustive_match"));
+    }
+
+    #[test]
+    fn bool_match_missing_false_is_reported_by_name() {
+        let module = module_from_sources(
+            "bool_missing_false",
+            &["fn flag(on: Bool) -> String {\n  \
+               match on {\n    \
+               true => \"yes\"\n  \
+               }\n}\n"],
+        );
+        let package = package_of(module);
+        let errs = resolve(&package).unwrap_err();
+        let diag = errs
+            .iter()
+            .find(|d| d.code == "cove::resolve::non_exhaustive_match")
+            .expect("reports non_exhaustive_match");
+        assert!(diag.message.contains("`false`"));
+        assert!(diag.help.as_deref().unwrap().contains("false"));
+    }
+
+    #[test]
+    fn bool_match_missing_true_is_reported_by_name() {
+        let module = module_from_sources(
+            "bool_missing_true",
+            &["fn flag(on: Bool) -> String {\n  \
+               match on {\n    \
+               false => \"no\"\n  \
+               }\n}\n"],
+        );
+        let package = package_of(module);
+        let errs = resolve(&package).unwrap_err();
+        let diag = errs
+            .iter()
+            .find(|d| d.code == "cove::resolve::non_exhaustive_match")
+            .expect("reports non_exhaustive_match");
+        assert!(diag.message.contains("`true`"));
+        assert!(diag.help.as_deref().unwrap().contains("true"));
+    }
+
+    #[test]
+    fn bool_match_with_both_values_and_a_wildcard_warns_the_wildcard_is_unreachable() {
+        let module = module_from_sources(
+            "bool_wildcard_unreachable",
+            &["fn flag(on: Bool) -> String {\n  \
+               match on {\n    \
+               true => \"yes\"\n    \
+               false => \"no\"\n    \
+               _ => \"other\"\n  \
+               }\n}\n"],
+        );
+        let package = package_of(module);
+        let program = resolve(&package).expect("resolves; only a warning");
+        assert!(program
+            .warnings
+            .iter()
+            .any(|d| d.code == "cove::resolve::unreachable_match_arm"));
+    }
+
+    #[test]
+    fn duplicate_bool_match_arm_is_reported() {
+        let module = module_from_sources(
+            "bool_dup_arm",
+            &["fn flag(on: Bool) -> String {\n  \
+               match on {\n    \
+               true => \"yes\"\n    \
+               true => \"also yes\"\n    \
+               false => \"no\"\n  \
+               }\n}\n"],
+        );
+        let package = package_of(module);
+        let errs = resolve(&package).unwrap_err();
+        assert!(errs
+            .iter()
+            .any(|d| d.code == "cove::resolve::duplicate_match_arm"));
+    }
+
+    /// A literal `match` mixing a `Bool` arm with a non-`Bool` literal is not
+    /// exhaustible by the `Bool`-domain rule, so it keeps needing a
+    /// catch-all like any other literal match.
+    #[test]
+    fn mixed_bool_and_int_literal_match_still_needs_a_catch_all() {
+        let module = module_from_sources(
+            "mixed_literal",
+            &["fn describe(n: Int) -> String {\n  \
+               match n {\n    \
+               true => \"true?\"\n    \
+               1 => \"one\"\n  \
+               }\n}\n"],
+        );
+        let package = package_of(module);
+        let errs = resolve(&package).unwrap_err();
+        let diag = errs
+            .iter()
+            .find(|d| d.code == "cove::resolve::non_exhaustive_match")
+            .expect("reports non_exhaustive_match");
+        assert!(diag.message.contains("literal"));
+    }
+
+    /// Pins the shape used by `examples/config/load.cove`: string literals
+    /// with a final binding arm that catches everything else.
+    #[test]
+    fn literal_match_with_a_binding_arm_passes() {
+        let module = module_from_sources(
+            "literal_ok",
+            &["fn parseLevel(raw: String) -> String {\n  \
+               match raw {\n    \
+               \"debug\" => \"Debug\"\n    \
+               \"info\" => \"Info\"\n    \
+               other => other\n  \
+               }\n}\n"],
+        );
+        let package = package_of(module);
+        let program = resolve(&package).expect("resolves");
+        assert!(!program
+            .warnings
+            .iter()
+            .any(|d| d.code == "cove::resolve::non_exhaustive_match"));
+    }
+
+    #[test]
+    fn a_match_whose_enum_is_ambiguous_stays_silent() {
+        let module = module_from_sources(
+            "ambiguous_enum",
+            &["enum Left {\n  A\n  B\n}\n\n\
+               enum Right {\n  A\n  C\n}\n\n\
+               fn pick(x: Int) -> Int {\n  \
+               match x {\n    \
+               A => 1\n    \
+               B => 2\n  \
+               }\n}\n"],
+        );
+        let package = package_of(module);
+        let program = resolve(&package).expect("resolves; the enum cannot be determined");
+        assert!(!program
+            .warnings
+            .iter()
+            .any(|d| d.code.starts_with("cove::resolve::") && d.code.contains("match")));
     }
 }

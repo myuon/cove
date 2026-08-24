@@ -1,8 +1,8 @@
-error[cove::runtime]: no `match` arm covers `Green`
+error[cove::resolve::non_exhaustive_match]: `match` does not cover every case of `Signal`: missing `Signal.Green`
   --> <e2e>/fail_match_no_arm/main/main.cove:11:3
    |
 11 |   match signal {
    |   ^^^^^^^^^^^^^^
   rule: `match` must cover every enum case.
-  help: add an arm for this case, or a `_` arm
+  help: add an arm for `Signal.Green`, or add a `_` arm
 1 error(s)
