@@ -27,6 +27,9 @@ export fn main(args: Array<String>) -> Result<Unit, Error> {
 
 - `let` creates a read-only place; `var` creates a mutable place.
 - Functions use `fn name(arg: Type) -> ReturnType`.
+- Calls support static argument labels: `request(url: endpoint, timeout: 5s)`.
+- Struct initialization uses synthesized labeled calls: `User(name: "A")`.
+- A variadic `items: T...` is an immutable `Array<T>` inside the function.
 - Blocks and control-flow forms are expressions.
 - Structs are product types; enums are tagged unions.
 - `match` must cover every enum case.
@@ -51,7 +54,7 @@ Assignment and ordinary argument passing perform field-wise shallow copies.
 
 - Primitive values, strings, enums, and structs have value semantics.
 - `Array<T>` is fixed-length and immutable; `[1, 2]` is an array.
-- `Vector<T>` is growable and mutable; `Vector[1, 2]` constructs one.
+- `Vector<T>` is growable and mutable; `Vector.of(1, 2)` constructs one.
 - Vector assignment is O(1), and aliases share elements and length.
 - `Map` and `Set` are immutable in the MVP.
 - Cove never performs an implicit deep copy.
@@ -59,7 +62,7 @@ Assignment and ordinary argument passing perform field-wise shallow copies.
 ```cove
 let fixed = [1, 2]
 
-var first = Vector[1, 2]
+var first = Vector.of(1, 2)
 var second = first
 second.push(3)
 // both vectors observe [1, 2, 3]
