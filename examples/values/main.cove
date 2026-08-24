@@ -1,0 +1,61 @@
+use console.println
+
+/// Lifecycle state of a booking.
+export enum BookingStatus {
+  Pending
+  Confirmed
+}
+
+/// A value whose scalar fields copy independently and whose List field is a handle.
+export struct Booking {
+  id: String
+  status: BookingStatus
+  guests: List<String>
+}
+
+impl Booking {
+  /// Returns the number of guests.
+  fn guestCount(self) -> Int {
+    self.guests.length()
+  }
+
+  /// Changes a value field through a mutable place.
+  fn confirm(var self) {
+    self.status = BookingStatus.Confirmed
+  }
+
+  /// Changes the shared List storage through a mutable place.
+  fn addGuest(var self, name: String) {
+    self.guests.push(name)
+  }
+}
+
+/// Exercises Cove's shallow value copy and stable collection handles.
+export fn main() -> Result<Unit, Error> {
+  var original = Booking {
+    id: "booking-1",
+    status: BookingStatus.Pending,
+    guests: ["Alice"]
+  }
+
+  var alias = original
+  alias.confirm()
+  alias.addGuest("Bob")
+
+  // Struct value fields were copied.
+  console.println("{original.status}")? // Pending
+  console.println("{alias.status}")?    // Confirmed
+
+  // The List handle was copied, so both values observe the same storage.
+  console.println("{original.guestCount()}")? // 2
+  console.println("{alias.guestCount()}")?    // 2
+
+  // An independent graph is always explicit.
+  var snapshot = original.copy()
+  snapshot.addGuest("Carol")
+
+  console.println("{original.guestCount()}")? // 2
+  console.println("{snapshot.guestCount()}")? // 3
+
+  Ok(())
+}
