@@ -12,7 +12,7 @@ Together they test the core product hypotheses:
 | `server/` | A useful HTTP service without framework ceremony |
 | `restricted/` | Host-provided capabilities and denied ambient authority |
 | `tasks/` | Structured concurrency, cancellation, and trace boundaries |
-| `values/` | Struct value copies, shared collection handles, and explicit snapshots |
+| `values/` | Struct copies, Vector aliases, immutable Arrays, and freeze |
 | `callbacks/` | Routers, middleware, events, timers, retries, and task-safe captures |
 | `cove.toml` | Host-selected entry functions and granted capabilities |
 
@@ -21,42 +21,34 @@ The first implementation milestone should make `hello/` run. The MVP is
 not complete until all seven programs have defined behavior in both diagnostics
 and execution.
 
-## Value-and-handle diagnostics
+## Collection lifecycle
 
-A read-only place cannot call a mutating method:
-
-```cove
-let booking = Booking(...)
-booking.confirm()
-// error: `Booking.confirm` requires a mutable receiver
-```
-
-Struct assignment is a field-wise shallow copy. Value fields become independent;
-List, Map, Set, closure, and Host-resource fields remain shared handles. Assignment and argument passing use this same rule everywhere.
+Array literals produce immutable fixed-length data. A Vector is the explicit
+growable form and may be bound through either `let` or `var`.
 
 ```cove
-var copy = booking
-copy.status = Confirmed      // changes only copy.status
-copy.guests.push("Alice")    // visible through both List handles
+let finished = [1, 2]
+var building = Vector[1, 2]
+building.push(3)
 ```
 
-An independent transitive snapshot is explicit:
+Vector aliases share elements and length. `freeze()` consumes locally unique
+Vector storage into an Array in O(1); `toArray()` is the O(n) fallback when
+uniqueness cannot be proved. Vectors cannot cross task boundaries. Arrays can
+when their elements are task-safe.
 
-```cove
-var snapshot = booking.copy()
-snapshot.guests.push("Bob")  // not visible through booking
-```
-
-Collection mutation during iteration is rejected. Mutable handles and structs
-containing them are not map keys without a stable key representation.
+Ordinary parameters receive shallow copies. A `var` parameter is a
+non-escaping inout alias and is marked at both declaration and call site.
+Independent mutable graph copies exist only for types implementing
+`Snapshot`.
 
 ## Callback-model findings
 
-Callbacks are ordinary handle values. Routers, event buses, timers, structs,
-and closures store them through ordinary O(1) shallow copying.
+Callbacks are ordinary handle values. The example builds routes in a local
+Vector, freezes them into an Array, and only then starts request tasks. Event
+subscriptions use an immutable Map of Arrays. Mutable request metrics use
+`Shared<Metrics>`.
 
-A closure may freely outlive the call that created it, but mutable state cannot
-cross a task boundary unless it uses a synchronized type such as `Shared<T>`.
-The callback example therefore uses `Shared<Metrics>` for request counters
-while ordinary application and repository handles are shallow-copied into
-closures.
+A closure may outlive the call that created it, but it can cross a task boundary
+only when every capture is task-safe. Host resources such as the booking
+repository declare that property in their Host API schema.
