@@ -154,7 +154,10 @@ fn buildRouter(
   var builder = RouterBuilder(routes: Vector.of())
 
   builder.get("/health", withObservability(app, async fn(request) {
-    Ok(http.json(200, HealthStatus(status: "ok")))
+    Ok(http.json(
+      200,
+      Map.of(MapEntry(key: "status", value: "ok"))
+    ))
   }))
 
   builder.post("/bookings", withObservability(app, async fn(request) {
