@@ -1,0 +1,13 @@
+use console.println
+
+/// Returns a greeting for `name`.
+export fn greeting(name: String) -> String {
+  "Hello, {name}!"
+}
+
+/// Runs the command-line program.
+export fn main(args: Array<String>) -> Result<Unit, Error> {
+  let name = args.get(0).unwrapOr("world")
+  console.println(greeting(name))?
+  Ok(())
+}

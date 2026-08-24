@@ -1,0 +1,17 @@
+use documents.read
+use console.println
+
+/// Counts words in `text`.
+export fn wordCount(text: String) -> Int {
+  text.words().count()
+}
+
+/// Reads only through the document capability supplied by the host.
+export fn main() -> Result<Unit, Error> {
+  let text = documents.read("input")?
+  console.println("{wordCount(text)} words")?
+  Ok(())
+}
+
+// A host that grants only `documents` and `console` rejects any attempted
+// `filesystem.open(...)` call at the Host API boundary.

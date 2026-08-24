@@ -1,0 +1,23 @@
+[run.hello]
+entry = "hello.main"
+allow = ["console"]
+
+[run.server]
+entry = "server.main"
+allow = ["network", "console"]
+
+[run.restricted]
+entry = "restricted.main"
+allow = ["documents", "console"]
+
+[run.tasks]
+entry = "tasks.loadDashboard"
+allow = ["network", "clock"]
+
+[run.values]
+entry = "values.main"
+allow = ["console"]
+
+[run.callbacks]
+entry = "callbacks.main"
+allow = ["network", "database", "clock", "console"]

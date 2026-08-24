@@ -1,0 +1,25 @@
+use api.fetch
+use clock.timeout
+
+/// Data needed to render the dashboard.
+export struct Dashboard {
+  bookings: Array<Booking>
+  prices: Array<Price>
+}
+
+/// Loads independent dashboard inputs concurrently.
+export async fn loadDashboard() -> Result<Dashboard, Error> {
+  scope tasks {
+    let bookings = tasks.spawn { api.fetch<Array<Booking>>("/bookings") }
+    let prices = tasks.spawn { api.fetch<Array<Price>>("/prices") }
+
+    let result = clock.timeout(500ms) {
+      Dashboard(
+        bookings: bookings.await()?,
+        prices: prices.await()?
+      )
+    }?
+
+    Ok(result)
+  }
+}

@@ -1,0 +1,73 @@
+use console.println
+
+/// Lifecycle state of a booking.
+export enum BookingStatus {
+  Pending
+  Confirmed
+}
+
+/// A value whose scalar field copies and whose Vector field shares storage.
+export struct BookingDraft {
+  status: BookingStatus
+  guests: Vector<String>
+}
+
+impl BookingDraft {
+  /// Changes a value field through a mutable receiver.
+  fn confirm(var self) {
+    self.status = BookingStatus.Confirmed
+  }
+
+  /// Adds a guest to shared Vector storage.
+  fn addGuest(var self, name: String) {
+    self.guests.push(name)
+  }
+
+  /// Finishes this locally unique draft as immutable task-safe data.
+  fn finish(var self) -> Booking {
+    Booking(
+      status: self.status,
+      guests: self.guests.freeze()
+    )
+  }
+}
+
+/// Completed immutable booking data.
+export struct Booking {
+  status: BookingStatus
+  guests: Array<String>
+}
+
+/// Exercises Cove's value copies, Vector aliases, and freeze transition.
+export fn main() -> Result<Unit, Error> {
+  var original = BookingDraft(
+    status: BookingStatus.Pending,
+    guests: Vector.of("Alice")
+  )
+
+  var alias = original
+  alias.confirm()
+  alias.addGuest("Bob")
+
+  // Struct value fields were copied.
+  console.println("{original.status}")? // Pending
+  console.println("{alias.status}")?    // Confirmed
+
+  // The Vector handle was copied, so both drafts observe the same storage.
+  console.println("{original.guests.length()}")? // 2
+  console.println("{alias.guests.length()}")?    // 2
+
+  // Because an alias exists, an independent O(n) array is explicit.
+  let snapshot = original.guests.toArray()
+  console.println("{snapshot.length()}")? // 2
+
+  // A fresh, unique draft can finish with an O(1) freeze.
+  var fresh = BookingDraft(
+    status: BookingStatus.Pending,
+    guests: Vector.of("Carol")
+  )
+  let booking = fresh.finish()
+  console.println("{booking.guests.length()}")? // 1
+
+  Ok(())
+}

@@ -1,0 +1,38 @@
+use env.get
+
+/// Validated application configuration.
+export struct Config {
+  port: Int
+  logLevel: LogLevel
+}
+
+/// Supported logging levels.
+export enum LogLevel {
+  Debug
+  Info
+  Warn
+  Error
+}
+
+/// Configuration validation failures.
+export enum ConfigError {
+  InvalidPort(String)
+  InvalidLogLevel(String)
+}
+
+/// Loads configuration from the host environment.
+export fn loadConfig() -> Result<Config, ConfigError> {
+  let rawPort = env.get("PORT").unwrapOr("8080")
+  let port = Int.parse(rawPort).mapError { ConfigError.InvalidPort(rawPort) }?
+
+  let rawLevel = env.get("LOG_LEVEL").unwrapOr("info")
+  let logLevel = match rawLevel {
+    "debug" => LogLevel.Debug
+    "info" => LogLevel.Info
+    "warn" => LogLevel.Warn
+    "error" => LogLevel.Error
+    other => return Err(ConfigError.InvalidLogLevel(other))
+  }
+
+  Ok(Config(port: port, logLevel: logLevel))
+}

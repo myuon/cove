@@ -51,6 +51,11 @@ The language-specific delta must fit in a one-page **Language Card**. This is a
 design budget: adding a rule should require demonstrating that the language is
 still predictable from existing knowledge plus that card.
 
+Cove prefers explicit behavior over hidden behavior, but does not require
+facts the compiler can derive to be declared twice. Common choices receive one
+safe, predictable default; configuration is reserved for meaningful
+differences.
+
 Initial semantic preferences:
 
 - left-to-right evaluation;
@@ -61,30 +66,83 @@ Initial semantic preferences:
 - no side effects caused merely by importing a module;
 - structured lifetimes for concurrent tasks.
 
+The MVP type system includes nominal structs and enums, exhaustive matching,
+generics, traits, `Option`, `Result`, and local type inference. Function and
+public API boundaries remain explicitly typed. Higher-kinded types, implicit
+instance search, dependent types, and user-written effect polymorphism are out
+of scope.
+
+Trait conformance is explicit. Static and dynamic dispatch are distinct in the
+semantic model and generated code. The exact surface syntax remains open; one
+candidate is `T: Trait` for static dispatch and `dyn Trait` for dynamic
+dispatch.
+
+## Calls, initializers, and variadic arguments
+
+Function calls and value initialization use the same familiar call syntax.
+Argument labels are static parameter names and part of a public API contract.
+
+```cove
+let user = User(
+  name: "Alice",
+  age: 20
+)
+
+let response = request(
+  url: endpoint,
+  timeout: 5s
+)
+```
+
+Positional arguments may precede labeled arguments; after the first label, all
+remaining arguments are labeled. Structs receive a synthesized initializer
+whose labels match their fields. User-defined initializers use the same syntax.
+Cove does not use a separate `Type { fields }` expression form.
+
+A homogeneous variadic parameter is written `items: T...`. Inside the
+function it is an immutable `Array<T>`; the compiler may eliminate its
+allocation when that is not observable. Spread uses `...array`.
+
+```cove
+fn of(items: T...) -> Vector<T>
+let values = Vector.of(1, 2, 3)
+```
+
+This makes Vector construction an ordinary user-definable associated function,
+not a language-specific literal. Default arguments are evaluated by the callee.
+Dynamic keyword dictionaries and arbitrary keyword forwarding are not part of
+the MVP.
+
 Compiler diagnostics are part of the learning interface. Errors should explain
 the relevant Cove rule and show a corrected textual example.
 
 ## Host-controlled authority
 
 Cove code has no ambient authority in embedded or sandboxed execution. External
-operations are supplied by the host.
+operations are typed Host APIs supplied by the host.
 
-The language-level capability model is intentionally coarse:
+The compiler derives required capabilities per function from resolved Host API
+calls and their call graph. This analysis is useful for inspection and
+diagnostics but is not exposed as a user-written effect system.
 
-```cove
-module booking.creation {
-  allow { database network clock }
-}
+The host chooses the entry function and grants coarse capabilities at the
+execution boundary:
+
+```toml
+[run.booking_server]
+entry = "booking.main"
+allow = ["database", "network", "clock"]
 ```
 
-Capabilities describe broad Host API modules such as network and filesystem.
-They are not intended to become a general effect system or a fine-grained proof
-of authority.
-
 The host decides which implementations are available and may replace them with
-filtered, virtual, remote, test, or denied implementations. Strong isolation
-is enforced by the runtime and, where appropriate, process, syscall, Wasm, or
-microVM boundaries.
+filtered, virtual, remote, test, or denied implementations. The runtime rejects
+ungranted Host API calls. Stronger isolation may additionally use process,
+syscall, Wasm, or microVM boundaries.
+
+A machine-readable Host API schema is shared by the compiler, runtime, and CLI.
+Each operation describes its argument, result, and error types; capability;
+serialization and resource ownership; cancellation and recordability; and
+whether it is a read, reversible write, or irreversible write.
 
 ## Runtime resource control
 
@@ -102,6 +160,113 @@ The runtime should be able to impose:
 
 Totality, determinism, and absence of loops are explicitly not MVP guarantees.
 
+## Memory management
+
+The MVP uses a precise, non-moving, stop-the-world mark-and-sweep garbage
+collector. The compiler emits stack maps so the collector does not conservatively
+treat arbitrary integers as pointers. Non-moving objects simplify embedding,
+FFI, stable trace identity, and the initial runtime implementation.
+
+The MVP has no finalizers, compacting collector, generational collector, or
+concurrent collector. Heap fragmentation, pause time, allocation, live heap
+size, and GC work must be visible in traces. The allocator, object layout,
+root enumeration, stack maps, mark queue, sweep, and heap budget remain
+separate runtime components so the collector can evolve later.
+
+## Values, collections, and mutation
+
+Assignment and ordinary argument passing use one rule: field-wise shallow copy.
+Cove does not change expression semantics according to whether the destination
+is declared with `let` or `var`.
+
+Primitive values, strings, enums, and user-defined structs have value semantics.
+Copying a struct copies each field according to that field's semantics. A
+one-field wrapper therefore naturally behaves like the value it wraps.
+
+The MVP exposes two sequence types:
+
+- `Array<T>` is a fixed-length immutable sequence. Its length may be decided
+  at runtime. Array literals such as `[1, 2]` produce arrays.
+- `Vector<T>` is a growable mutable sequence backed by stable GC-managed
+  storage. Copying a vector handle is O(1), and aliases observe the same
+  elements and length.
+
+`Map<K, V>` and `Set<T>` are immutable collections in the MVP. They are
+created with literals, transformations, or scoped builders. A generally
+available mutable fixed-length array or mutable map is deferred until
+representative programs require it; `Array.build` and `Map.build` keep
+temporary mutation inside construction.
+
+```cove
+let fixed = [1, 2]
+
+var first = Vector.of(1, 2)
+var second = first
+second.push(3)
+// first and second both observe [1, 2, 3]
+```
+
+A vector's length, capacity, and element buffer belong to its shared storage, so
+growth remains visible through every alias even after reallocation. `let`
+creates a read-only place and `var` a mutable place. A `let Vector<T>` is a
+valid read-only view and may observe changes made through another mutable alias.
+
+A mutating receiver declares `var self`. An ordinary parameter receives a
+shallow copy. A `var` parameter is the explicit exception: it is an inout
+alias to the caller's mutable place and the call site also writes `var`.
+
+```cove
+fn length(self) -> Int
+fn push(var self, value: T)
+fn fill(var output: Vector<Int>)
+
+fill(var output)
+```
+
+This is local mutation syntax, not a whole-language borrow system. A `var`
+parameter cannot be stored or captured beyond the call.
+
+`Vector.freeze()` consumes a vector with uniquely owned storage and returns an
+`Array<T>` in O(1). The compiler only performs conservative, local uniqueness
+checking for this explicit transition. If uniqueness cannot be proved,
+`toArray()` creates an independent O(n) immutable array. Ordinary code does
+not otherwise use move semantics.
+
+```cove
+var output = Vector<Int>.of()
+output.push(1)
+let result = output.freeze()
+// output is no longer usable
+```
+
+Cove never performs an implicit deep copy. A type may implement the
+`Snapshot<T>` contract when it can create an independent mutable graph.
+Snapshots preserve cycles and internal sharing. Immutable values return
+themselves; closures, synchronized values, and Host resources do not implement
+`Snapshot` by default.
+
+Value equality uses `==`. Identity-capable mutable handles use `is` for
+shared-storage identity. Mutable handles and structs containing them are not
+valid map keys. Structural mutation through any vector alias during iteration
+is detected and rejected.
+
+## Tasks and shared mutation
+
+Cove tasks are lightweight runtime tasks with structured lifetimes, explicit
+asynchronous functions, cancellation, and deadlines. I/O wait suspends a task;
+CPU work runs on runtime workers.
+
+Task transfer is determined from types rather than whole-program alias analysis.
+Immutable values whose fields are task-safe may cross task boundaries.
+`Vector<T>` cannot cross a task boundary, even through a `let` place; finish
+it as an `Array<T>`, create an independent value, or use an explicit
+synchronized handle such as `Shared<T>`, `Mutex<T>`, `RwLock<T>`,
+`Atomic<T>`, or `Channel<T>`.
+
+Closures may cross a task boundary only when every capture is task-safe. Host
+resources declare task-safety in their Host API schema. The compiler rejects
+unsafe captures before execution.
+
 ## Progressive disclosure
 
 Source code should be understandable from the outside in:
@@ -110,55 +275,62 @@ Source code should be understandable from the outside in:
 repository -> component -> module -> declaration -> implementation
 ```
 
-The first roughly 50 lines of a significant file should reveal its purpose,
-public boundary, dependencies, owned data, authority, and entrypoints.
+Each module is a directory. Its name is derived from its path and cannot be
+overridden in source. Sibling `.cove` files are implementation units of the
+same module.
 
-Illustrative module contract:
-
-```cove
-module booking.creation {
-  purpose "Validate and create a booking"
-
-  provides { createBooking validateBookingRequest }
-  uses { inventory.reserve pricing.quote payment.authorize }
-  owns { BookingDraft }
-  allow { database clock network }
-  entrypoints { http.createBooking }
-}
-
-// implementation follows
-```
-
-The compiler should understand these declarations rather than treating them as
-comments:
-
-- `provides` defines the public boundary;
-- `uses` defines explicit dependencies;
-- `owns` records responsibility for data and concepts;
-- `allow` is the capability manifest;
-- `entrypoints` identifies externally invoked operations;
-- `purpose` preserves intent in ordinary text.
-
-Obvious information may be inferred to avoid duplication. Small programs may
-omit upper structural layers. Imports must not perform hidden initialization;
-initialization is an explicit entrypoint or function call.
-
-## Intent and performance annotations
-
-Decorators provide an extensible but visible place for non-core declarations:
+Illustrative public declarations:
 
 ```cove
-@intent("Reserve inventory and authorize payment")
-@hot
-@performance(latency = 20ms)
-fn createBooking(request: BookingRequest) -> Result<Booking, BookingError> {
+/// A confirmed booking.
+export struct Booking(
+  id: BookingId,
+  status: BookingStatus
+)
+
+/// Creates a booking after validation.
+export fn createBooking(
+  request: BookingRequest
+) -> Result<Booking, BookingError> {
   // ...
 }
 ```
 
-The MVP may parse and preserve `@intent` and `@hot` before it implements
-optimization based on them. An annotation must have documented semantics;
-unknown annotations must not silently change behavior.
+Exported declarations are the single source of truth. Other declarations are
+module-private. The compiler derives a typed outline, definition locations,
+required capabilities, and an interface hash directly from source. API
+snapshots and diffs provide stability checks without hand-written duplicate
+contracts.
+
+Ordinary purpose and intent are written as `///` doc comments attached to
+declarations. The compiler preserves them for outlines, generated
+documentation, and inspection, but does not pretend to verify their prose.
+Public modules and declarations without doc comments produce a warning by
+default; CI may promote warnings to errors.
+
+Imports must not perform hidden initialization. Compile-time constants are
+allowed, but external, fallible, or asynchronous initialization is an explicit
+ordinary function called from an entry or host. Module-level mutable variables
+are not part of the MVP. A one-time shared value, if needed, uses an explicit
+primitive such as `Once<T>` rather than an implicit module initializer.
+
+A package is rooted at the nearest `cove.toml`; module paths are relative to
+that root. The normal build never executes arbitrary project code. Build
+scripts are excluded from the MVP. Code generation is an explicit
+`cove generate` workflow whose generator runs as an ordinary capability-
+controlled Cove entry and whose output is inspectable source.
+
+## Documentation and annotations
+
+Ordinary purpose and intent are written as `///` doc comments attached to
+declarations. The compiler preserves them for outlines, generated
+documentation, and inspection, but does not pretend to verify their prose.
+Public modules and declarations without doc comments produce a warning by
+default; CI may promote warnings to errors.
+
+Decorator syntax is reserved for enforceable compiler or runtime behavior.
+The MVP defines no decorators. New decorators are accepted only after their
+checking, runtime, tracing, and compatibility semantics are specified.
 
 ## Observability
 
@@ -174,8 +346,8 @@ Traces should distinguish at least:
 - task spawn, suspension, cancellation, and completion;
 - cache hits and misses.
 
-Trace identities should correspond to the same modules, functions, and
-entrypoints visible in source. The host must be able to inspect and control a
+Trace identities should correspond to the same modules and functions visible
+in source, plus host-selected entry calls. The host must be able to inspect and control a
 running program from outside without language-specific application hooks.
 
 ## Performance and implementation direction
@@ -183,14 +355,19 @@ running program from outside without language-specific application hooks.
 Both compilation speed and execution speed are product requirements. They
 affect iteration time, operational cost, and predictability.
 
-The initial implementation should favor a simple compiler pipeline and a small
-runtime over a sophisticated JIT. Native AOT execution is the primary target.
+The initial target is approximately Go-class compilation speed and execution
+performance: predictable, sufficiently fast native programs without maximizing
+peak optimization at the expense of iteration speed.
+
+The implementation should favor a simple compiler pipeline, local inference,
+parallel package compilation, cached semantic graphs, and a small runtime over
+a sophisticated JIT. Native AOT execution is primary. Development builds use
+limited optimization; release builds may spend more time on inlining, escape
+analysis, bounds-check elimination, and profile-guided work. 
 The exact backend remains an MVP implementation decision; QBE, Cranelift, LLVM,
 and C generation should be compared by implementation cost, compile latency,
-runtime performance, debug information, and portability.
-
-The language must avoid backend-dependent semantics so that native and Wasm
-programs behave consistently.
+runtime performance, debug information, and portability. The language avoids
+backend-dependent semantics so native and Wasm programs behave consistently.
 
 ## Ordinary application DX
 
@@ -212,21 +389,67 @@ query protocol for models. Its AI experience comes from predictable syntax,
 small semantics, explicit architecture, strong diagnostics, and the ability to
 navigate between abstraction levels using ordinary source text.
 
+## Change experience and responsibility boundaries
+
+If implementation becomes cheap, producing code is no longer the main
+bottleneck. Understanding a change, validating it, observing it in production,
+and reversing it safely become the expensive work. Cove should optimize this
+**change experience**, not add model-specific syntax.
+
+Each layer has a distinct responsibility:
+
+- **Language and compiler:** define types, modules, exports, errors, structured
+  concurrency, and typed Host API calls. Build the semantic graph from which
+  public interfaces, capability requirements, and affected dependents can be
+  derived.
+- **Host API definitions:** describe each external operation's capability,
+  types, serialization, resource ownership, cancellation, recordability, and
+  whether it is a read, reversible write, or irreversible write.
+- **Runtime:** enforce grants and resource budgets; dispatch replaceable Host
+  API implementations; record tasks, CPU work, I/O wait, allocations, and Host
+  calls; support replay at the Host API boundary.
+- **Cove CLI:** present compiler and runtime facts through `outline`, API and
+  operational diffs, change-impact reports, traces, replay, and implementation
+  comparisons. It also owns ordinary workflows such as format, check, run,
+  test, and build.
+- **Project configuration:** select entries, granted capabilities, resource
+  budgets, Host API implementations, tracing policy, build target, and profile.
+- **Hosting systems:** own deployment, routing, canaries, traffic shadowing,
+  and rollback. These may use Cove metadata but are not language semantics.
+
+The CLI must not invent semantics known only to the CLI. The compiler derives
+facts, the runtime enforces and records them, and the CLI explains them and
+composes workflows around them.
+
+This boundary should enable a change review to answer, before deployment:
+
+- which exported types and behaviors changed;
+- which modules and entries may be affected;
+- which capabilities, resources, or irreversible operations were added;
+- whether recorded traffic can reproduce the relevant behavior;
+- how two implementations differ in result, trace, and performance.
+
+Replay is deliberately limited to replaceable Host API interactions. Cove does
+not require whole-language determinism to make failures reproducible enough for
+testing and comparison.
+
 ## MVP scope
 
-The first usable slice should include:
+The first usable slice should be built in this order:
 
-1. lexer, parser, formatter, and diagnostic framework;
-2. functions, structs, enums, pattern matching, generics, `Option`, and
-   `Result`;
-3. modules with `purpose`, `provides`, `uses`, `owns`, `allow`, and
-   `entrypoints`;
-4. a native executable backend;
-5. a minimal Host API and embedding interface;
-6. memory, time, cancellation, and execution-budget controls;
-7. structured traces separating CPU work from I/O wait;
-8. one CLI example, one HTTP server, and one embedded sandbox example;
-9. a one-page Language Card.
+1. **Language and compiler:** lexer, parser, formatter, diagnostics, core types,
+   directory modules, exports, semantic graph, native backend, and derived Host
+   API capability requirements.
+2. **Runtime:** Host API dispatch, grant enforcement, cancellation, deadlines,
+   CPU and memory budgets, and minimal trace events separating CPU from I/O
+   wait.
+3. **CLI:** `fmt`, `check`, `run`, `test`, `build`, `outline`, API snapshots and
+   diffs, traces, and change-impact reports.
+4. **Validation:** one CLI, one HTTP server, and one embedded sandbox program,
+   documented by the one-page Language Card.
+
+Host-boundary replay and side-by-side implementation comparison follow once
+Host API dispatch and trace identity are stable enough to support them.
 
 The MVP does not include a JIT, package registry, browser UI framework, effect
 system, totality checker, distributed actor runtime, durable workflows, or
@@ -243,6 +466,8 @@ The experiment is promising if:
   from file headers before opening implementations;
 - the same nontrivial module runs standalone and under restricted embedding;
 - CPU time and I/O wait are accurately attributable in traces;
+- API and impact reports explain the source and operational consequences of a
+  change without requiring a reviewer to reconstruct them from a code diff;
 - compile and execution performance are competitive enough that developers do
   not avoid Cove for ordinary tools and services.
 
@@ -260,11 +485,12 @@ generated behavior must remain inspectable.
 
 - Which implementation language and code-generation backend minimize time to a
   credible MVP?
-- GC, reference counting, ownership, arenas, or a hybrid memory model?
-- Which module-contract fields are mandatory, inferred, or advisory?
+- Which object representation, stack-map format, and allocator best support the
+  initial non-moving collector?
+- What compatibility guarantees should generated API snapshots cover beyond
+  source types, such as capability requirements and host bindings?
 - How are dependency cycles represented and diagnosed?
 - Which annotations belong in the Language Card?
 - What Host API boundary remains stable across native, embedded, and Wasm
   execution?
 - Which license should the project use?
-
