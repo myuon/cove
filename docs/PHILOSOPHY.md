@@ -14,6 +14,12 @@ Dependencies, authority, conversions, errors, and task lifetimes should be
 visible. Explicit does not mean duplicated: facts the compiler can derive from
 source should not be declared twice.
 
+## Make undesirable code harder
+
+The shortest path should preserve locality. Reading is easy; copying, retaining,
+sharing mutable identity, crossing task or trust boundaries, and irreversible
+operations require visible intent.
+
 ## Strong defaults
 
 Common choices should have one safe, predictable default. Configuration and
