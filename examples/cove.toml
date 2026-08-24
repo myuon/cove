@@ -14,8 +14,8 @@ allow = ["documents", "console"]
 entry = "tasks.loadDashboard"
 allow = ["network", "clock"]
 
-[run.places]
-entry = "places.main"
+[run.values]
+entry = "values.main"
 allow = ["console"]
 
 [run.callbacks]
