@@ -12,7 +12,7 @@ Together they test the core product hypotheses:
 | `server/` | A useful HTTP service without framework ceremony |
 | `restricted/` | Host-provided capabilities and denied ambient authority |
 | `tasks/` | Structured concurrency, cancellation, and trace boundaries |
-| `places/` | Struct value copies, shared collection handles, and explicit snapshots |
+| `values/` | Struct value copies, shared collection handles, and explicit snapshots |
 | `callbacks/` | Routers, middleware, events, timers, retries, and task-safe captures |
 | `cove.toml` | Host-selected entry functions and granted capabilities |
 
@@ -32,8 +32,7 @@ booking.confirm()
 ```
 
 Struct assignment is a field-wise shallow copy. Value fields become independent;
-List, Map, Set, closure, and Host-resource fields remain shared handles. No
-`retain`, `.ref()`, borrow, lifetime, or implicit copy mode is inferred.
+List, Map, Set, closure, and Host-resource fields remain shared handles. Assignment and argument passing use this same rule everywhere.
 
 ```cove
 var copy = booking
@@ -54,11 +53,10 @@ containing them are not map keys without a stable key representation.
 ## Callback-model findings
 
 Callbacks are ordinary handle values. Routers, event buses, timers, structs,
-and closures may store them through ordinary O(1) shallow copying; Cove has no
-special retained-function syntax or retention analysis.
+and closures store them through ordinary O(1) shallow copying.
 
-Retention and cross-task safety are separate concerns. A closure may freely
-outlive the call that created it, but mutable state cannot cross a task boundary
-unless it uses a synchronized type such as `Shared<T>`. The callback example
-therefore uses `Shared<Metrics>` for request counters while ordinary
-application and repository handles are shallow-copied into closures.
+A closure may freely outlive the call that created it, but mutable state cannot
+cross a task boundary unless it uses a synchronized type such as `Shared<T>`.
+The callback example therefore uses `Shared<Metrics>` for request counters
+while ordinary application and repository handles are shallow-copied into
+closures.
