@@ -193,6 +193,34 @@ whole-language borrow checker. Receiver mutability is written explicitly,
 appears in outlines, trait contracts, and API snapshots, and changing it is an
 API compatibility event.
 
+## Parameters and retention
+
+Passing a value for the duration of a call creates a temporary view and needs no
+copy or reference syntax. A normal parameter is read-only; a `var` parameter
+may update the caller's mutable place during the call. Neither permission alone
+creates a retained alias.
+
+The compiler derives whether a function retains each parameter by storing,
+returning, capturing, spawning, or passing it to another retaining operation.
+That fact is part of outlines and API snapshots.
+
+- Retaining a read-only argument shallow-shares its immutable storage in O(1).
+- Retaining a fresh result transfers its storage without a user-visible move.
+- Retaining a mutable place is rejected unless the program chooses an
+  independent `.copy()` or passes an explicit `Ref<T>` created by `.ref()`.
+- A temporary parameter copied inside the callee may be retained as an
+  independent snapshot.
+- A `var` parameter may not escape the call without the same explicit choice.
+
+Changing a public parameter from borrowed to retained is an operational
+compatibility event because mutable callers may need to choose a retention
+mode. Traits, dynamic calls, extern declarations, and Host APIs must expose the
+retention contract when it cannot be derived from an implementation.
+Higher-order calls may initially be analyzed conservatively.
+
+This makes ordinary reads and immutable constructors concise while ensuring
+that copying and mutable identity sharing remain visible where they occur.
+
 ## Tasks and shared mutation
 
 Cove tasks are lightweight runtime tasks with structured lifetimes, explicit
@@ -437,8 +465,6 @@ generated behavior must remain inspectable.
 - What compatibility guarantees should generated API snapshots cover beyond
   source types, such as capability requirements and host bindings?
 - How are dependency cycles represented and diagnosed?
-- How should function signatures distinguish a temporary read of a mutable
-  place from retaining that value beyond the call?
 - Which annotations belong in the Language Card?
 - What Host API boundary remains stable across native, embedded, and Wasm
   execution?
