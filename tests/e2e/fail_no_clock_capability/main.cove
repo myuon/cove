@@ -1,0 +1,9 @@
+use console.println
+use clock
+
+/// Reads the clock in a run that was granted `console` but not `clock`.
+export fn main() -> Result<Unit, Error> {
+  println("console was granted")?
+  println("the time is {clock.now()}")?
+  Ok(())
+}

@@ -1,0 +1,17 @@
+use console.println
+use clock
+
+/// Prints the facts about the real clock host that do not depend on when the
+/// program runs: time never goes backwards, a sleep of `d` takes at least
+/// `d`, and a negative sleep is an ordinary `Err`.
+export fn main() -> Result<Unit, Error> {
+  let first = clock.now()
+  clock.sleep(2ms)?
+  let second = clock.now()
+
+  println("monotonic {second >= first}")?
+  println("slept at least 2ms {second - first >= 2ms}")?
+  println("zero is ok {clock.sleep(0ns).isOk()}")?
+  println("negative is an error {clock.sleep(0ns - 1ms).isError()}")?
+  Ok(())
+}

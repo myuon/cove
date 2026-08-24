@@ -1,0 +1,8 @@
+error[cove::runtime]: `clock.now` requires the `clock` capability, which this run was not granted
+ --> <e2e>/fail_no_clock_capability/main.cove:7:25
+  |
+7 |   println("the time is {clock.now()}")?
+  |                         ^^^^^^^^^^^
+  rule: Cove code has no ambient authority; the host grants capabilities at the execution boundary.
+  help: add `clock` to `allow` in the run's `cove.toml` table
+1 error(s)

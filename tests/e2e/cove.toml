@@ -62,6 +62,10 @@ allow = ["console"]
 entry = "fail_no_capability.main"
 allow = []
 
+[run.fail_no_clock_capability]
+entry = "fail_no_clock_capability.main"
+allow = ["console"]
+
 [run.flow_bindings]
 entry = "flow_bindings.main"
 allow = ["console"]
@@ -101,6 +105,10 @@ allow = ["console"]
 [run.fn_variadic]
 entry = "fn_variadic.main"
 allow = ["console"]
+
+[run.host_clock]
+entry = "host_clock.main"
+allow = ["clock", "console"]
 
 [run.host_console]
 entry = "host_console.main"
