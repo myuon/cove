@@ -154,13 +154,16 @@ explicit choice:
 ```cove
 var values = [1, 2, 3]
 
-let snapshot = values.copy() // independent outer storage
+let snapshot = values.copy() // independent value graph
 let alias = values.ref()     // the same mutable place
 ```
 
-`.copy()` copies the outer mutable storage; contained immutable values may
-remain shared and contained references retain their identity. It is not a
-generic recursive deep copy. `.ref()` does not consume the original variable.
+`.copy()` recursively copies ordinary storage-backed value fields. Immutable
+storage may remain shared, and explicit identity such as `Ref<T>` is preserved
+rather than followed. Cycles therefore stop at explicit references. A type may
+implement its own `copy()`; a deliberately one-level copy should use a name
+such as `shallowCopy()` so the cheaper semantics remain visible. `.ref()` does
+not consume the original variable.
 It creates a `Ref<T>` to the same mutable place; an escaping reference may
 promote that place to a GC-managed heap cell. Mutations through either name are
 then visible through the other. Trivially copyable values such as numbers and
