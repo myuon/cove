@@ -12,7 +12,7 @@ Together they test the core product hypotheses:
 | `server/` | A useful HTTP service without framework ceremony |
 | `restricted/` | Host-provided capabilities and denied ambient authority |
 | `tasks/` | Structured concurrency, cancellation, and trace boundaries |
-| `places/` | Read-only retention, mutable places, snapshots, and explicit identity |
+| `places/` | Struct value copies, shared collection handles, and explicit snapshots |
 | `callbacks/` | Routers, middleware, events, timers, retries, and task-safe captures |
 | `cove.toml` | Host-selected entry functions and granted capabilities |
 
@@ -21,12 +21,9 @@ The first implementation milestone should make `hello/` run. The MVP is
 not complete until all seven programs have defined behavior in both diagnostics
 and execution.
 
-## Place-model diagnostics
+## Value-and-handle diagnostics
 
-The valid `places/` program also fixes the expected behavior of nearby invalid
-programs.
-
-A read-only receiver cannot call a mutating method:
+A read-only place cannot call a mutating method:
 
 ```cove
 let booking = Booking(...)
@@ -34,52 +31,34 @@ booking.confirm()
 // error: `Booking.confirm` requires a mutable receiver
 ```
 
-A retained mutable place requires an explicit snapshot or identity:
+Struct assignment is a field-wise shallow copy. Value fields become independent;
+List, Map, Set, closure, and Host-resource fields remain shared handles. No
+`retain`, `.ref()`, borrow, lifetime, or implicit copy mode is inferred.
 
 ```cove
-var booking = Booking(...)
-let view = BookingView.new(booking)
-// error: `BookingView.new` retains mutable argument `booking`
-// help: pass `booking.copy()` or change the API to accept `Ref<Booking>`
+var copy = booking
+copy.status = Confirmed      // changes only copy.status
+copy.guests.push("Alice")    // visible through both List handles
 ```
 
-A temporary parameter cannot escape without a retention mode:
+An independent transitive snapshot is explicit:
 
 ```cove
-fn invalid(var self, booking: Booking) {
-  self.saved = booking
-  // error: parameter `booking` escapes
-  // help: store `booking.copy()` or accept `Ref<Booking>`
-}
+var snapshot = booking.copy()
+snapshot.guests.push("Bob")  // not visible through booking
 ```
 
-These checks deliberately make temporary reads easy while making copies and
-mutable aliasing visible.
+Collection mutation during iteration is rejected. Mutable handles and structs
+containing them are not map keys without a stable key representation.
 
 ## Callback-model findings
 
-The `callbacks/` program distinguishes two independent facts:
+Callbacks are ordinary handle values. Routers, event buses, timers, structs,
+and closures may store them through ordinary O(1) shallow copying; Cove has no
+special retained-function syntax or retention analysis.
 
-- a callback value may escape because a router, event bus, or timer retains it;
-- arguments passed to that callback may themselves be borrowed or retained.
-
-A function type prefixed with `retain` is a candidate surface contract for the
-first fact:
-
-```cove
-type Handler = retain async fn(Request) -> Result<Response, Error>
-```
-
-Fresh closures can transfer directly into such a slot. Captured read-only
-values remain cheap to share; mutable captures require `.copy()`, `.ref()`,
-or `.shared()` according to their lifetime and task boundary.
-
-The first draft captured `Ref<EventBus>` in an HTTP handler. That is correctly
-invalid because a task-local reference would cross into request tasks. Building
-subscriptions locally and returning a fresh read-only `EventBus` produced
-simpler code. Truly mutable cross-task state, such as metrics, uses
-`Shared<T>`.
-
-Retry callbacks are non-escaping even though execution spans `await`: the
-caller remains suspended for the dynamic extent of the call. Router, event, and
-timer callbacks escape and therefore use the retained function type.
+Retention and cross-task safety are separate concerns. A closure may freely
+outlive the call that created it, but mutable state cannot cross a task boundary
+unless it uses a synchronized type such as `Shared<T>`. The callback example
+therefore uses `Shared<Metrics>` for request counters while ordinary
+application and repository handles are shallow-copied into closures.
