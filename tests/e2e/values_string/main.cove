@@ -12,7 +12,7 @@ export fn main() -> Result<Unit, Error> {
   let sentence = "  the quick  brown fox  "
   println("length {sentence.length()}")?
   println("words {sentence.words()}")?
-  println("count {sentence.words().count()}")?
+  println("length {sentence.words().length()}")?
   println("isEmpty {sentence.isEmpty()} {"".isEmpty()}")?
   Ok(())
 }

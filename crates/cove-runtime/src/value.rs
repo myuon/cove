@@ -13,6 +13,8 @@ use std::rc::Rc;
 
 use cove_syntax::ast::{FnDecl, Param};
 
+use crate::task::{Task, TaskScope};
+
 /// A Cove value.
 #[derive(Clone, Debug)]
 pub enum Value {
@@ -47,6 +49,64 @@ pub enum Value {
     },
     /// A type used as a value, such as `Vector` in `Vector.of(1, 2)`.
     Type(Rc<str>),
+    /// An integer range. `..` includes `end` and `..<` excludes it.
+    ///
+    /// A range is an ordinary value: it can be bound, passed, compared, and
+    /// iterated. An empty or reversed range such as `3..<0` yields nothing.
+    Range {
+        start: i64,
+        end: i64,
+        inclusive_end: bool,
+    },
+    /// The task scope `scope tasks { ... }` binds. Concurrent work belongs to
+    /// a task scope, and the scope owns the tasks spawned into it.
+    TaskScope(Rc<TaskScope>),
+    /// A handle to a spawned task. The task's value is reachable only through
+    /// `await` or through the scope settling it on exit.
+    Task(Rc<Task>),
+}
+
+/// The half-open bounds of a [`Value::Range`], widened to `i128` so that an
+/// inclusive `i64::MAX` end cannot overflow.
+#[derive(Clone, Copy, Debug)]
+pub struct RangeBounds {
+    /// The first value the range can yield.
+    pub start: i128,
+    /// The first value past the end.
+    pub end: i128,
+}
+
+impl RangeBounds {
+    /// Normalises the AST form, where `inclusive_end` selects `..` over `..<`.
+    pub fn of(start: i64, end: i64, inclusive_end: bool) -> RangeBounds {
+        RangeBounds {
+            start: i128::from(start),
+            end: i128::from(end) + i128::from(inclusive_end),
+        }
+    }
+
+    /// The number of values the range yields. A reversed range yields none.
+    pub fn len(self) -> i64 {
+        (self.end - self.start).max(0) as i64
+    }
+
+    /// Whether the range yields no values at all.
+    pub fn is_empty(self) -> bool {
+        self.end <= self.start
+    }
+
+    /// Whether `value` is one of the values the range yields.
+    pub fn contains(self, value: i64) -> bool {
+        let value = i128::from(value);
+        self.start <= value && value < self.end
+    }
+
+    /// The values the range yields, in order.
+    pub fn items(self) -> Vec<Value> {
+        (self.start..self.end)
+            .map(|n| Value::Int(n as i64))
+            .collect()
+    }
 }
 
 /// Growable vector storage. Length, capacity, and elements all belong to the
@@ -194,6 +254,9 @@ impl Value {
             Value::HostModule(m) => format!("host module `{m}`"),
             Value::HostFn { module, op } => format!("host operation `{module}.{op}`"),
             Value::Type(t) => format!("type `{t}`"),
+            Value::Range { .. } => "Range".into(),
+            Value::TaskScope(_) => "TaskScope".into(),
+            Value::Task(_) => "Task".into(),
         }
     }
 
@@ -226,6 +289,21 @@ impl Value {
                         .zip(b.payload.iter())
                         .all(|(x, y)| x.eq_value(y))
             }
+            // Ranges compare by the bounds they were written with, so `0..<3`
+            // and `0..2` are distinct values even though they yield the same
+            // integers.
+            (
+                Value::Range {
+                    start: a,
+                    end: b,
+                    inclusive_end: a_inclusive,
+                },
+                Value::Range {
+                    start: c,
+                    end: d,
+                    inclusive_end: b_inclusive,
+                },
+            ) => a == c && b == d && a_inclusive == b_inclusive,
             _ => false,
         }
     }
@@ -238,8 +316,8 @@ impl fmt::Display for Value {
             Value::Unit => f.write_str("()"),
             Value::Bool(b) => write!(f, "{b}"),
             Value::Int(i) => write!(f, "{i}"),
-            Value::Float(x) => write!(f, "{x}"),
-            Value::Duration(ns) => write!(f, "{ns}ns"),
+            Value::Float(x) => write_float(f, *x),
+            Value::Duration(ns) => write_duration(f, *ns),
             Value::Str(s) => f.write_str(s),
             Value::Array(items) => {
                 f.write_str("[")?;
@@ -322,6 +400,180 @@ impl fmt::Display for Value {
             Value::HostModule(m) => write!(f, "<host module {m}>"),
             Value::HostFn { module, op } => write!(f, "<host fn {module}.{op}>"),
             Value::Type(t) => write!(f, "<type {t}>"),
+            Value::Range {
+                start,
+                end,
+                inclusive_end,
+            } => {
+                let operator = if *inclusive_end { ".." } else { "..<" };
+                write!(f, "{start}{operator}{end}")
+            }
+            Value::TaskScope(scope) => write!(f, "<task scope {}>", scope.name),
+            // A task prints as a handle, never as the value it will produce:
+            // that value is observable only through `await` or scope exit.
+            Value::Task(_) => f.write_str("<task>"),
         }
+    }
+}
+
+/// Renders a `Float` so that it is never mistaken for an `Int`.
+///
+/// Cove performs no implicit numeric conversions, so a float with no
+/// fractional part still shows its point: `4.0`, not `4`. Negative zero keeps
+/// its sign, and the non-finite values print as `NaN`, `inf`, and `-inf`.
+fn write_float(f: &mut fmt::Formatter<'_>, x: f64) -> fmt::Result {
+    if x.is_nan() {
+        return f.write_str("NaN");
+    }
+    if x.is_infinite() {
+        return f.write_str(if x.is_sign_negative() { "-inf" } else { "inf" });
+    }
+    if x.fract() == 0.0 {
+        write!(f, "{x:.1}")
+    } else {
+        write!(f, "{x}")
+    }
+}
+
+/// Nanoseconds per duration unit, largest first, using the suffixes the lexer
+/// accepts.
+const DURATION_UNITS: [(i64, &str); 6] = [
+    (3_600_000_000_000, "h"),
+    (60_000_000_000, "m"),
+    (1_000_000_000, "s"),
+    (1_000_000, "ms"),
+    (1_000, "us"),
+    (1, "ns"),
+];
+
+/// Renders a `Duration` in the largest unit that divides it exactly.
+///
+/// A duration no larger unit divides exactly stays in nanoseconds, and a
+/// negative duration keeps its sign. Zero has no largest unit, so it prints as
+/// `0ns`.
+fn write_duration(f: &mut fmt::Formatter<'_>, ns: i64) -> fmt::Result {
+    if ns == 0 {
+        return f.write_str("0ns");
+    }
+    for (factor, suffix) in DURATION_UNITS {
+        if ns % factor == 0 {
+            return write!(f, "{}{suffix}", ns / factor);
+        }
+    }
+    unreachable!("every duration is divisible by one nanosecond")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn shown(value: Value) -> String {
+        value.to_string()
+    }
+
+    #[test]
+    fn a_float_is_never_shown_as_an_int() {
+        assert_eq!(shown(Value::Float(4.0)), "4.0");
+        assert_eq!(shown(Value::Float(-4.0)), "-4.0");
+        assert_eq!(shown(Value::Float(1500.0)), "1500.0");
+        assert_eq!(shown(Value::Float(1.5)), "1.5");
+        assert_eq!(shown(Value::Float(0.25)), "0.25");
+        assert_eq!(shown(Value::Float(-0.75)), "-0.75");
+        assert_eq!(shown(Value::Float(0.02)), "0.02");
+    }
+
+    #[test]
+    fn float_edge_cases_are_explicit() {
+        assert_eq!(shown(Value::Float(0.0)), "0.0");
+        assert_eq!(shown(Value::Float(-0.0)), "-0.0");
+        assert_eq!(shown(Value::Float(f64::INFINITY)), "inf");
+        assert_eq!(shown(Value::Float(f64::NEG_INFINITY)), "-inf");
+        assert_eq!(shown(Value::Float(f64::NAN)), "NaN");
+    }
+
+    #[test]
+    fn a_duration_uses_the_largest_unit_that_divides_it() {
+        assert_eq!(shown(Value::Duration(0)), "0ns");
+        assert_eq!(shown(Value::Duration(1)), "1ns");
+        assert_eq!(shown(Value::Duration(1_000)), "1us");
+        assert_eq!(shown(Value::Duration(1_000_000)), "1ms");
+        assert_eq!(shown(Value::Duration(1_000_000_000)), "1s");
+        assert_eq!(shown(Value::Duration(60_000_000_000)), "1m");
+        assert_eq!(shown(Value::Duration(3_600_000_000_000)), "1h");
+        assert_eq!(shown(Value::Duration(500_000_000)), "500ms");
+        assert_eq!(shown(Value::Duration(1_500_000_000)), "1500ms");
+        assert_eq!(shown(Value::Duration(90_000_000_000)), "90s");
+    }
+
+    #[test]
+    fn a_duration_no_larger_unit_divides_stays_in_nanoseconds() {
+        assert_eq!(shown(Value::Duration(1_001)), "1001ns");
+        assert_eq!(shown(Value::Duration(i64::MAX)), format!("{}ns", i64::MAX));
+    }
+
+    #[test]
+    fn a_negative_duration_keeps_its_sign() {
+        assert_eq!(shown(Value::Duration(-3_600_000_000_000)), "-1h");
+        assert_eq!(shown(Value::Duration(-500_000_000)), "-500ms");
+        assert_eq!(shown(Value::Duration(-1)), "-1ns");
+    }
+
+    fn range(start: i64, end: i64, inclusive_end: bool) -> Value {
+        Value::Range {
+            start,
+            end,
+            inclusive_end,
+        }
+    }
+
+    #[test]
+    fn a_range_shows_the_operator_it_was_written_with() {
+        assert_eq!(shown(range(0, 3, false)), "0..<3");
+        assert_eq!(shown(range(0, 3, true)), "0..3");
+        assert_eq!(shown(range(-2, -1, false)), "-2..<-1");
+    }
+
+    #[test]
+    fn ranges_compare_by_value() {
+        assert!(range(0, 3, false).eq_value(&range(0, 3, false)));
+        assert!(!range(0, 3, false).eq_value(&range(0, 3, true)));
+        assert!(!range(0, 3, false).eq_value(&range(1, 3, false)));
+        assert!(!range(0, 3, false).eq_value(&Value::Int(0)));
+    }
+
+    #[test]
+    fn range_bounds_measure_and_test_membership() {
+        let exclusive = RangeBounds::of(0, 3, false);
+        assert_eq!(exclusive.len(), 3);
+        assert!(!exclusive.is_empty());
+        assert!(exclusive.contains(0));
+        assert!(exclusive.contains(2));
+        assert!(!exclusive.contains(3));
+        assert!(!exclusive.contains(-1));
+
+        let inclusive = RangeBounds::of(0, 3, true);
+        assert_eq!(inclusive.len(), 4);
+        assert!(inclusive.contains(3));
+    }
+
+    #[test]
+    fn a_reversed_or_empty_range_is_empty() {
+        for bounds in [
+            RangeBounds::of(3, 0, false),
+            RangeBounds::of(3, 0, true),
+            RangeBounds::of(0, 0, false),
+        ] {
+            assert_eq!(bounds.len(), 0);
+            assert!(bounds.is_empty());
+            assert!(bounds.items().is_empty());
+            assert!(!bounds.contains(0));
+        }
+    }
+
+    #[test]
+    fn an_inclusive_range_that_ends_at_the_largest_int_does_not_overflow() {
+        let bounds = RangeBounds::of(i64::MAX, i64::MAX, true);
+        assert_eq!(bounds.len(), 1);
+        assert!(bounds.contains(i64::MAX));
     }
 }

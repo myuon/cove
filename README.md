@@ -32,11 +32,16 @@ Hello, world!
 ```
 
 Implemented: lexer, parser, directory modules, `export` visibility, derived
-outlines and capability requirements, a tree-walking interpreter, and Host API
-dispatch with grant enforcement. Not yet implemented: static type checking,
-`async`, tasks, `cove fmt`, `cove build`, `cove test`, and the garbage
-collector. The implementation direction is recorded in
-[ADR 0002](docs/adr/0002-implementation-language-and-backend.md).
+outlines and capability requirements, a tree-walking interpreter, Host API
+dispatch with grant enforcement, task scopes, and runtime budgets for fuel,
+deadlines, and host calls with tracing. Not yet implemented: static type
+checking, concurrent task execution, the `http`, `database`, and `clock`
+hosts, `cove fmt`, `cove build`, `cove test`, and the garbage collector.
+
+The implementation direction is recorded in
+[ADR 0002](docs/adr/0002-implementation-language-and-backend.md), and how
+tasks execute in
+[ADR 0003](docs/adr/0003-task-execution-and-runtime-control.md).
 
 Syntax is still provisional and may change.
 

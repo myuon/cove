@@ -12,7 +12,7 @@ fn joinAll(separator: String, items: String...) -> String {
       text = "{text}{separator}{item}"
     }
   }
-  "[{text}] from {items.count()} item(s)"
+  "[{text}] from {items.length()} item(s)"
 }
 
 /// Prints variadic calls with several arguments, none, and a spread.

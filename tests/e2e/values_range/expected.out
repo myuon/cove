@@ -1,0 +1,6 @@
+exclusive 0..<3
+length 3
+isEmpty false true
+contains true false false
+inclusive 0..3 length 4
+equality true false

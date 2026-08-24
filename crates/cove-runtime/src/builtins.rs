@@ -10,7 +10,7 @@ use std::rc::Rc;
 use cove_diag::Span;
 
 use crate::error::RuntimeError;
-use crate::value::{Value, VectorStorage};
+use crate::value::{RangeBounds, Value, VectorStorage};
 
 /// How the builtins call back into the evaluator.
 ///
@@ -110,13 +110,16 @@ pub fn call_method(
     args: Vec<Value>,
     span: Span,
 ) -> Result<Value, RuntimeError> {
+    if name == "count" && is_sequence(receiver) {
+        return Err(count_is_spelled_length(&receiver.type_name(), span));
+    }
     match receiver {
         Value::Array(items) => match name {
             "get" => Ok(index_of("Array.get", &args, span)?
                 .and_then(|i| items.get(i).cloned())
                 .map(Value::some)
                 .unwrap_or_else(Value::none)),
-            "length" | "count" => {
+            "length" => {
                 expect_args(name, args, 0, span)?;
                 Ok(Value::Int(items.len() as i64))
             }
@@ -138,7 +141,7 @@ pub fn call_method(
                     .and_then(|i| storage.elements.borrow().get(i).cloned())
                     .map(Value::some)
                     .unwrap_or_else(Value::none)),
-                "length" | "count" => {
+                "length" => {
                     expect_args(name, args, 0, span)?;
                     Ok(Value::Int(storage.len() as i64))
                 }
@@ -178,6 +181,31 @@ pub fn call_method(
             }
             _ => Err(no_method("String", name, span)),
         },
+        Value::Range {
+            start,
+            end,
+            inclusive_end,
+        } => {
+            let bounds = RangeBounds::of(*start, *end, *inclusive_end);
+            match name {
+                "length" => {
+                    expect_args(name, args, 0, span)?;
+                    Ok(Value::Int(bounds.len()))
+                }
+                "isEmpty" => {
+                    expect_args(name, args, 0, span)?;
+                    Ok(Value::Bool(bounds.is_empty()))
+                }
+                "contains" => {
+                    let args = expect_args("contains", args, 1, span)?;
+                    let Value::Int(value) = &args[0] else {
+                        return Err(type_error("Range.contains", "value", "Int", &args[0], span));
+                    };
+                    Ok(Value::Bool(bounds.contains(*value)))
+                }
+                _ => Err(no_method("Range", name, span)),
+            }
+        }
         Value::Enum(value) if &*value.type_name == "Option" => {
             let some = &*value.case == "Some";
             match name {
@@ -319,4 +347,22 @@ fn type_error(
 
 fn no_method(type_name: &str, method: &str, span: Span) -> RuntimeError {
     RuntimeError::new(format!("`{type_name}` has no method `{method}`")).at(span)
+}
+
+/// The builtin sequences, which all report their element count the same way.
+fn is_sequence(receiver: &Value) -> bool {
+    matches!(
+        receiver,
+        Value::Array(_) | Value::Vector(_) | Value::Str(_) | Value::Range { .. }
+    )
+}
+
+/// `count()` was removed in favour of a single spelling.
+fn count_is_spelled_length(type_name: &str, span: Span) -> RuntimeError {
+    RuntimeError::new(format!(
+        "`{type_name}` has no method `count`; Cove spells the number of elements `length()`"
+    ))
+    .at(span)
+    .with_rule("Every sequence reports its element count as `length()`; there is no `count()`.")
+    .with_help("write `length()` instead of `count()`")
 }

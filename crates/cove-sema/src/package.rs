@@ -68,6 +68,10 @@ pub fn load(root: &Path, sources: &mut SourceMap) -> Result<Package, Vec<Diagnos
 
 /// Recursively visits `dir`, turning every directory with `.cove` files
 /// directly inside it into a module.
+///
+/// A subdirectory holding its own `cove.toml` is a nested package, not a
+/// module of this one: the walk does not enter it, so its own check-time
+/// errors cannot fail resolution of an unrelated outer package.
 fn walk(
     root: &Path,
     dir: &Path,
@@ -113,6 +117,9 @@ fn walk(
     }
 
     for subdir in subdirs {
+        if subdir.join("cove.toml").is_file() {
+            continue;
+        }
         walk(root, &subdir, modules, sources, diagnostics);
     }
 }
@@ -312,6 +319,36 @@ mod tests {
         let package = load(dir.path(), &mut sources).expect("loads");
         assert_eq!(package.modules.len(), 1);
         assert!(package.modules.contains_key("hello"));
+    }
+
+    #[test]
+    fn a_nested_cove_toml_is_a_package_boundary() {
+        let dir = TempDir::new("nested-package");
+        write(
+            dir.path(),
+            "cove.toml",
+            "[run.hello]\nentry = \"hello.main\"\n",
+        );
+        write(dir.path(), "hello/main.cove", FN_MAIN);
+        // A subdirectory with its own `cove.toml` is a separate package.
+        // Its `.cove` files are not modules of this one, so even a file that
+        // could not resolve on its own does not fail this package's load.
+        write(
+            dir.path(),
+            "nested/cove.toml",
+            "[run.hello]\nentry = \"hello.main\"\n",
+        );
+        write(
+            dir.path(),
+            "nested/hello/main.cove",
+            "not valid cove source {{{",
+        );
+
+        let mut sources = SourceMap::new();
+        let package = load(dir.path(), &mut sources).expect("loads");
+        let mut names: Vec<&String> = package.modules.keys().collect();
+        names.sort();
+        assert_eq!(names, vec!["hello"]);
     }
 
     #[test]

@@ -1,5 +1,5 @@
 error[cove::runtime]: no `match` arm covers `Green`
-  --> <e2e>/fail_match_no_arm/main.cove:11:3
+  --> <e2e>/fail_match_no_arm/main/main.cove:11:3
    |
 11 |   match signal {
    |   ^^^^^^^^^^^^^^

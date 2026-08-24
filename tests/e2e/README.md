@@ -14,9 +14,11 @@ The harness lives in `crates/cove-cli/tests/e2e.rs`.
 
 ```text
 tests/e2e/
-  cove.toml                 one [run.<name>] table per case
+  cove.toml                 one [run.<name>] table per shared-package case
   documents/                documents the `documents` host may read
-  <case>/main.cove          the program
+  <case>/main.cove          the program, for a shared-package case
+  <case>/cove.toml          present only when <case> is its own package
+  <case>/main/main.cove     the program, for an own-package case
   <case>/expected.out       exact expected stdout
   <case>/expected.err       present only when the case must fail
   <case>/args               optional: one program argument per line
@@ -24,11 +26,11 @@ tests/e2e/
                             remove that variable from the child process
 ```
 
-Every directory containing a `main.cove` is discovered automatically and run
-in sorted order as `cove run <case> [arguments]`, with the working directory
-set to this one. A case with no matching `[run.<case>]` table fails the suite
-instead of being skipped silently, and a `[run.<name>]` table with no case
-directory fails it too.
+Every directory containing a `main.cove`, directly or through its own
+`cove.toml` (see below), is discovered automatically and run in sorted order
+as `cove run <case> [arguments]`. A case with no matching `[run.<case>]` table
+fails the suite instead of being skipped silently, and a `[run.<name>]` table
+with no case directory fails it too.
 
 ## Rules the harness enforces
 
@@ -42,17 +44,42 @@ compared: the absolute path of this directory becomes the literal `<e2e>`.
 Nothing else is normalised, so line and column numbers stay pinned and a
 diagnostic that moves is a visible change.
 
-Because the whole package is loaded and resolved on every run, a parse or
-resolve error in one case breaks every case. Failure cases therefore pin
-runtime failures, not compile-time ones.
+## Shared cases vs. a case that is its own package
+
+Most cases share this directory's package: their working directory is
+`tests/e2e/`, their `[run.<case>]` table lives in `tests/e2e/cove.toml`, and
+`cove run <case>` resolves every module below this directory before running
+anything. That means a parse or resolve error in any one shared case fails
+every shared case's run, so a shared case can only pin a *runtime* failure —
+by the time the program is running, the whole package has already resolved
+cleanly.
+
+A case directory that holds its own `cove.toml` is exempt from this: the
+harness runs `cove` with its working directory set to that case's own
+directory instead, and looks up `[run.<case>]` there. `cove` then resolves
+only that case's own package, so its check-time errors (a parse error, an
+unresolved `use`, a duplicate declaration, and so on) cannot affect any other
+case. A `.cove` file may not live directly in a package root, so an
+own-package case nests its program one level down, conventionally as
+`<case>/main/main.cove` with `entry = "main.main"`.
+
+Give a case its own package when it needs to pin a **check-time** diagnostic,
+or any other program that would fail to resolve — a non-exhaustive `match`
+once that becomes a check-time error, an unknown `use` path, a duplicate
+declaration, and the like. Leave a case in the shared package otherwise: it is
+less to set up, and keeps the shared package's module count as the signal
+that most of the suite still lives together.
 
 ## Adding a case
 
-1. Create `<case>/main.cove`. Give every exported declaration a `///` doc
-   comment, and print results with `console.println` so the behaviour is
-   observable.
-2. Add a `[run.<case>]` table to `cove.toml` granting exactly the capabilities
-   the program needs.
+1. Decide whether the case needs its own package (see above). For a shared
+   case, create `<case>/main.cove`; for an own-package case, create
+   `<case>/cove.toml` and `<case>/main/main.cove`. Give every exported
+   declaration a `///` doc comment, and print results with `console.println`
+   so the behaviour is observable.
+2. Add a `[run.<case>]` table — to `cove.toml` for a shared case, or to
+   `<case>/cove.toml` for an own-package case — granting exactly the
+   capabilities the program needs.
 3. Generate the golden files, then read the diff before committing it.
 
 ## Updating the golden files

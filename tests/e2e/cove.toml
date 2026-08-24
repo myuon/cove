@@ -26,16 +26,16 @@ allow = ["console"]
 entry = "fail_entry_error.main"
 allow = ["console"]
 
+[run.fail_count_removed]
+entry = "fail_count_removed.main"
+allow = ["console"]
+
 [run.fail_freeze_aliased]
 entry = "fail_freeze_aliased.main"
 allow = ["console"]
 
 [run.fail_int_overflow]
 entry = "fail_int_overflow.main"
-allow = ["console"]
-
-[run.fail_match_no_arm]
-entry = "fail_match_no_arm.main"
 allow = ["console"]
 
 [run.fail_mixed_arithmetic]
@@ -106,6 +106,10 @@ allow = ["console", "env"]
 entry = "type_enum.main"
 allow = ["console"]
 
+[run.type_enum_impl]
+entry = "type_enum_impl.main"
+allow = ["console"]
+
 [run.type_impl]
 entry = "type_impl.main"
 allow = ["console"]
@@ -148,6 +152,10 @@ allow = ["console"]
 
 [run.values_interpolation]
 entry = "values_interpolation.main"
+allow = ["console"]
+
+[run.values_range]
+entry = "values_range.main"
 allow = ["console"]
 
 [run.values_string]

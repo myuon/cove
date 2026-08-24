@@ -1,0 +1,8 @@
+use console.println
+
+/// Calls the removed `count()` instead of `length()`.
+export fn main() -> Result<Unit, Error> {
+  let items = [1, 2, 3]
+  println("never printed {items.count()}")?
+  Ok(())
+}

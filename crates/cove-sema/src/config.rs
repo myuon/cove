@@ -4,6 +4,7 @@
 //! boundary; it never changes the meaning of the language.
 
 use std::collections::BTreeMap;
+use std::time::Duration;
 
 /// A parsed `cove.toml`.
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -43,6 +44,10 @@ fn parse_run(name: &str, value: &toml::Value) -> Result<RunConfig, String> {
 
     let mut entry = None;
     let mut allow = Vec::new();
+    let mut fuel = None;
+    let mut deadline = None;
+    let mut max_host_calls = None;
+    let mut trace = None;
     for (key, value) in table {
         match key.as_str() {
             "entry" => {
@@ -64,12 +69,79 @@ fn parse_run(name: &str, value: &toml::Value) -> Result<RunConfig, String> {
                     allow.push(item.to_string());
                 }
             }
+            "fuel" => {
+                fuel = Some(parse_non_negative_integer(name, "fuel", value)?);
+            }
+            "deadline" => {
+                let text = value
+                    .as_str()
+                    .ok_or_else(|| format!("run `{name}`: `deadline` must be a string"))?;
+                deadline = Some(parse_duration(name, text)?);
+            }
+            "max_host_calls" => {
+                max_host_calls = Some(parse_non_negative_integer(name, "max_host_calls", value)?);
+            }
+            "trace" => {
+                trace = Some(
+                    value
+                        .as_str()
+                        .ok_or_else(|| format!("run `{name}`: `trace` must be a string"))?
+                        .to_string(),
+                );
+            }
             other => return Err(format!("run `{name}`: unknown key `{other}`")),
         }
     }
 
     let entry = entry.ok_or_else(|| format!("run `{name}`: missing `entry`"))?;
-    Ok(RunConfig { entry, allow })
+    Ok(RunConfig {
+        entry,
+        allow,
+        fuel,
+        deadline,
+        max_host_calls,
+        trace,
+    })
+}
+
+/// Parses a non-negative integer key, such as `fuel` or `max_host_calls`.
+fn parse_non_negative_integer(name: &str, key: &str, value: &toml::Value) -> Result<u64, String> {
+    let int = value
+        .as_integer()
+        .ok_or_else(|| format!("run `{name}`: `{key}` must be an integer"))?;
+    u64::try_from(int).map_err(|_| format!("run `{name}`: `{key}` must not be negative"))
+}
+
+/// Parses a duration such as `"500ms"` or `"5s"`, using the same unit
+/// meanings as the lexer's duration literals: `ns`, `us`, `ms`, `s`, `m`, and
+/// `h`.
+fn parse_duration(name: &str, text: &str) -> Result<Duration, String> {
+    let accepted = "the accepted units are `ns`, `us`, `ms`, `s`, `m`, and `h`";
+    let invalid =
+        || format!("run `{name}`: `deadline` value `{text}` is not a valid duration; {accepted}");
+
+    let split_at = text
+        .find(|c: char| !c.is_ascii_digit())
+        .ok_or_else(invalid)?;
+    let (digits, unit) = text.split_at(split_at);
+    if digits.is_empty() {
+        return Err(invalid());
+    }
+    let value: u64 = digits.parse().map_err(|_| invalid())?;
+
+    let nanos_per_unit: u64 = match unit {
+        "ns" => 1,
+        "us" => 1_000,
+        "ms" => 1_000_000,
+        "s" => 1_000_000_000,
+        "m" => 60_000_000_000,
+        "h" => 3_600_000_000_000,
+        _ => return Err(invalid()),
+    };
+    let nanos = value.checked_mul(nanos_per_unit).ok_or_else(|| {
+        format!("run `{name}`: `deadline` value `{text}` overflows a 64-bit nanosecond count")
+    })?;
+    Ok(Duration::from_nanos(nanos))
 }
 
 /// One `[run.<name>]` table.
@@ -79,6 +151,16 @@ pub struct RunConfig {
     pub entry: String,
     /// Coarse capabilities granted to this run.
     pub allow: Vec<String>,
+    /// The total fuel this run may spend before the runtime stops it.
+    pub fuel: Option<u64>,
+    /// The wall-clock deadline this run may take before the runtime stops
+    /// it, parsed from a duration string such as `"500ms"`.
+    pub deadline: Option<Duration>,
+    /// The total number of host calls this run may make before the runtime
+    /// stops it.
+    pub max_host_calls: Option<u64>,
+    /// A path to write a JSONL trace of this run to.
+    pub trace: Option<String>,
 }
 
 impl RunConfig {
@@ -153,5 +235,114 @@ mod tests {
     fn rejects_unknown_top_level_key() {
         let err = parse("[package]\nname = \"cove\"\n").unwrap_err();
         assert_eq!(err, "cove.toml: unknown top-level key `package`");
+    }
+
+    #[test]
+    fn a_run_table_with_no_resource_keys_still_parses() {
+        let config = parse("[run.hello]\nentry = \"hello.main\"\n").unwrap();
+        let hello = &config.runs["hello"];
+        assert_eq!(hello.fuel, None);
+        assert_eq!(hello.deadline, None);
+        assert_eq!(hello.max_host_calls, None);
+        assert_eq!(hello.trace, None);
+    }
+
+    #[test]
+    fn parses_fuel() {
+        let config = parse("[run.hello]\nentry = \"hello.main\"\nfuel = 1000\n").unwrap();
+        assert_eq!(config.runs["hello"].fuel, Some(1000));
+    }
+
+    #[test]
+    fn rejects_non_integer_fuel() {
+        let err = parse("[run.hello]\nentry = \"hello.main\"\nfuel = \"1000\"\n").unwrap_err();
+        assert_eq!(err, "run `hello`: `fuel` must be an integer");
+    }
+
+    #[test]
+    fn rejects_negative_fuel() {
+        let err = parse("[run.hello]\nentry = \"hello.main\"\nfuel = -1\n").unwrap_err();
+        assert_eq!(err, "run `hello`: `fuel` must not be negative");
+    }
+
+    #[test]
+    fn parses_max_host_calls() {
+        let config = parse("[run.hello]\nentry = \"hello.main\"\nmax_host_calls = 5\n").unwrap();
+        assert_eq!(config.runs["hello"].max_host_calls, Some(5));
+    }
+
+    #[test]
+    fn rejects_non_integer_max_host_calls() {
+        let err = parse("[run.hello]\nentry = \"hello.main\"\nmax_host_calls = 1.5\n").unwrap_err();
+        assert_eq!(err, "run `hello`: `max_host_calls` must be an integer");
+    }
+
+    #[test]
+    fn rejects_negative_max_host_calls() {
+        let err = parse("[run.hello]\nentry = \"hello.main\"\nmax_host_calls = -3\n").unwrap_err();
+        assert_eq!(err, "run `hello`: `max_host_calls` must not be negative");
+    }
+
+    #[test]
+    fn parses_every_deadline_unit() {
+        let cases = [
+            ("1ns", Duration::from_nanos(1)),
+            ("1us", Duration::from_micros(1)),
+            ("500ms", Duration::from_millis(500)),
+            ("5s", Duration::from_secs(5)),
+            ("1m", Duration::from_secs(60)),
+            ("1h", Duration::from_secs(3600)),
+        ];
+        for (text, expected) in cases {
+            let toml = format!("[run.hello]\nentry = \"hello.main\"\ndeadline = \"{text}\"\n");
+            let config = parse(&toml).unwrap_or_else(|e| panic!("`{text}` should parse: {e}"));
+            assert_eq!(config.runs["hello"].deadline, Some(expected), "{text}");
+        }
+    }
+
+    #[test]
+    fn rejects_non_string_deadline() {
+        let err = parse("[run.hello]\nentry = \"hello.main\"\ndeadline = 500\n").unwrap_err();
+        assert_eq!(err, "run `hello`: `deadline` must be a string");
+    }
+
+    #[test]
+    fn rejects_deadline_with_an_unknown_unit() {
+        let err = parse("[run.hello]\nentry = \"hello.main\"\ndeadline = \"5x\"\n").unwrap_err();
+        assert_eq!(
+            err,
+            "run `hello`: `deadline` value `5x` is not a valid duration; the accepted units are `ns`, `us`, `ms`, `s`, `m`, and `h`"
+        );
+    }
+
+    #[test]
+    fn rejects_deadline_with_no_unit() {
+        let err = parse("[run.hello]\nentry = \"hello.main\"\ndeadline = \"500\"\n").unwrap_err();
+        assert_eq!(
+            err,
+            "run `hello`: `deadline` value `500` is not a valid duration; the accepted units are `ns`, `us`, `ms`, `s`, `m`, and `h`"
+        );
+    }
+
+    #[test]
+    fn rejects_deadline_with_no_digits() {
+        let err = parse("[run.hello]\nentry = \"hello.main\"\ndeadline = \"ms\"\n").unwrap_err();
+        assert_eq!(
+            err,
+            "run `hello`: `deadline` value `ms` is not a valid duration; the accepted units are `ns`, `us`, `ms`, `s`, `m`, and `h`"
+        );
+    }
+
+    #[test]
+    fn parses_trace() {
+        let config =
+            parse("[run.hello]\nentry = \"hello.main\"\ntrace = \"trace.jsonl\"\n").unwrap();
+        assert_eq!(config.runs["hello"].trace, Some("trace.jsonl".to_string()));
+    }
+
+    #[test]
+    fn rejects_non_string_trace() {
+        let err = parse("[run.hello]\nentry = \"hello.main\"\ntrace = 1\n").unwrap_err();
+        assert_eq!(err, "run `hello`: `trace` must be a string");
     }
 }

@@ -8,10 +8,13 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::Write;
 use std::path::PathBuf;
+use std::time::Instant;
 
 use cove_sema::Capability;
 
+use crate::budget::Budget;
 use crate::error::RuntimeError;
+use crate::trace::{NullSink, TraceEvent, TraceSink};
 use crate::value::Value;
 
 /// One host-provided module, such as `console` or `env`.
@@ -52,9 +55,18 @@ impl Grants {
 }
 
 /// Holds every host module available to a run, and the grants that gate them.
+///
+/// `HostRegistry::call` is the single choke point through which Cove code
+/// reaches external authority, so it is also the right place to observe that
+/// authority being exercised: an optional [`Budget`] charges every call
+/// against the run's host-call limit before dispatch, and an optional
+/// [`TraceSink`] records every call, granted or denied, with how long it
+/// took.
 pub struct HostRegistry {
     modules: Vec<Box<dyn HostApi>>,
     grants: Grants,
+    trace: Box<dyn TraceSink>,
+    budget: Option<Budget>,
 }
 
 impl HostRegistry {
@@ -62,6 +74,8 @@ impl HostRegistry {
         HostRegistry {
             modules: Vec::new(),
             grants,
+            trace: Box::new(NullSink),
+            budget: None,
         }
     }
 
@@ -77,6 +91,33 @@ impl HostRegistry {
         self.modules.iter().any(|m| m.name() == name)
     }
 
+    /// Installs where trace events go. Replaces any sink installed earlier;
+    /// the default is [`NullSink`], which discards everything.
+    pub fn set_trace(&mut self, sink: Box<dyn TraceSink>) {
+        self.trace = sink;
+    }
+
+    /// Installs the budget every call is charged against. Replaces any
+    /// budget installed earlier; the default is no budget, which imposes no
+    /// host-call limit here (the interpreter's own safepoints still apply
+    /// its other limits).
+    pub fn set_budget(&mut self, budget: Budget) {
+        self.budget = Some(budget);
+    }
+
+    /// The installed budget, if any, so a caller can report its counters
+    /// after a run finishes.
+    pub fn budget(&self) -> Option<&Budget> {
+        self.budget.as_ref()
+    }
+
+    /// The installed budget, if any, so the interpreter can charge it at its
+    /// own safepoints (loop back edges, calls, `await`) through the same
+    /// registry it already holds.
+    pub fn budget_mut(&mut self) -> Option<&mut Budget> {
+        self.budget.as_mut()
+    }
+
     /// Looks up which host module exposes `op`, for unqualified `use` imports.
     pub fn module_for_operation(&self, op: &str) -> Option<&str> {
         self.modules
@@ -85,7 +126,8 @@ impl HostRegistry {
             .map(|m| m.name())
     }
 
-    /// Dispatches a Host API call after checking the grant.
+    /// Dispatches a Host API call after checking the grant and the budget,
+    /// tracing the outcome either way.
     pub fn call(
         &mut self,
         module: &str,
@@ -97,6 +139,13 @@ impl HostRegistry {
         };
         let capability = entry.capability();
         if !self.grants.allows(&capability) {
+            self.trace.record(TraceEvent::HostCall {
+                module: module.to_string(),
+                op: op.to_string(),
+                capability: capability.to_string(),
+                wait: std::time::Duration::ZERO,
+                granted: false,
+            });
             return Err(RuntimeError::new(format!(
                 "`{module}.{op}` requires the `{capability}` capability, which this run was not granted"
             ))
@@ -110,7 +159,32 @@ impl HostRegistry {
                 "host module `{module}` has no operation `{op}`"
             )));
         }
-        entry.call(op, args)
+
+        if let Some(budget) = self.budget.as_mut() {
+            if let Err(stopped) = budget.charge_host_call() {
+                let error = budget.to_runtime_error(stopped);
+                self.trace.record(TraceEvent::HostCall {
+                    module: module.to_string(),
+                    op: op.to_string(),
+                    capability: capability.to_string(),
+                    wait: std::time::Duration::ZERO,
+                    granted: false,
+                });
+                return Err(error);
+            }
+        }
+
+        let started = Instant::now();
+        let result = entry.call(op, args);
+        let wait = started.elapsed();
+        self.trace.record(TraceEvent::HostCall {
+            module: module.to_string(),
+            op: op.to_string(),
+            capability: capability.to_string(),
+            wait,
+            granted: true,
+        });
+        result
     }
 }
 
@@ -462,5 +536,106 @@ mod tests {
             .call("documents", "read", vec![Value::Str("input".into())])
             .expect("the call should be allowed");
         assert_eq!(ok_str(value), "hello world");
+    }
+
+    /// Collects every event recorded into it, for assertions.
+    #[derive(Clone, Default)]
+    struct RecordingSink(std::rc::Rc<std::cell::RefCell<Vec<TraceEvent>>>);
+
+    impl TraceSink for RecordingSink {
+        fn record(&mut self, event: TraceEvent) {
+            self.0.borrow_mut().push(event);
+        }
+    }
+
+    fn registry_with_documents() -> HostRegistry {
+        let mut hosts = HostRegistry::new(Grants::new(["documents"]));
+        hosts.register(Box::new(Documents::in_memory(BTreeMap::from([(
+            "input".to_string(),
+            "hello world".to_string(),
+        )]))));
+        hosts
+    }
+
+    #[test]
+    fn budget_stops_a_call_before_it_dispatches() {
+        use crate::budget::{Budget, Limits};
+
+        let mut hosts = registry_with_documents();
+        hosts.set_budget(Budget::new(Limits {
+            max_host_calls: Some(0),
+            ..Limits::default()
+        }));
+        let sink = RecordingSink::default();
+        hosts.set_trace(Box::new(sink.clone()));
+
+        let error = hosts
+            .call("documents", "read", vec![Value::Str("input".into())])
+            .expect_err("the call should be stopped by the budget");
+        assert!(error.rule.is_some(), "{error:?}");
+
+        let events = sink.0.borrow();
+        assert_eq!(events.len(), 1, "{events:?}");
+        match &events[0] {
+            TraceEvent::HostCall { granted, .. } => assert!(!granted),
+            other => panic!("expected a HostCall event, found {other:?}"),
+        }
+        assert_eq!(hosts.budget().unwrap().host_calls(), 1);
+    }
+
+    #[test]
+    fn a_granted_call_produces_one_event_with_a_plausible_wait() {
+        let mut hosts = registry_with_documents();
+        let sink = RecordingSink::default();
+        hosts.set_trace(Box::new(sink.clone()));
+
+        hosts
+            .call("documents", "read", vec![Value::Str("input".into())])
+            .expect("the call should be allowed");
+
+        let events = sink.0.borrow();
+        assert_eq!(events.len(), 1, "{events:?}");
+        match &events[0] {
+            TraceEvent::HostCall {
+                module,
+                op,
+                capability,
+                wait,
+                granted,
+            } => {
+                assert_eq!(module, "documents");
+                assert_eq!(op, "read");
+                assert_eq!(capability, "documents");
+                assert!(*granted);
+                assert!(*wait < std::time::Duration::from_secs(1), "{wait:?}");
+            }
+            other => panic!("expected a HostCall event, found {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_denied_call_produces_an_event_with_granted_false() {
+        let mut hosts = HostRegistry::new(Grants::new(Vec::<String>::new()));
+        hosts.register(Box::new(Documents::in_memory(BTreeMap::new())));
+        let sink = RecordingSink::default();
+        hosts.set_trace(Box::new(sink.clone()));
+
+        hosts
+            .call("documents", "read", vec![Value::Str("input".into())])
+            .expect_err("the call should be rejected for the missing grant");
+
+        let events = sink.0.borrow();
+        assert_eq!(events.len(), 1, "{events:?}");
+        match &events[0] {
+            TraceEvent::HostCall {
+                capability,
+                granted,
+                ..
+            } => {
+                assert_eq!(capability, "documents");
+                assert!(!granted);
+            }
+            other => panic!("expected a HostCall event, found {other:?}"),
+        }
     }
 }

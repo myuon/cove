@@ -1,0 +1,3 @@
+[run.fail_duplicate_fn]
+entry = "main.main"
+allow = ["console"]

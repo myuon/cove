@@ -22,7 +22,7 @@ export fn main() -> Result<Unit, Error> {
   println("the vector kept growing {second}")?
 
   println("get {first.get(0)} {first.get(99)}")?
-  println("count {first.count()} isEmpty {first.isEmpty()}")?
+  println("length {first.length()} isEmpty {first.isEmpty()}")?
 
   var empty = Vector.of()
   println("empty {empty} {empty.isEmpty()}")?

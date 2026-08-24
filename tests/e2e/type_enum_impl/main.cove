@@ -1,0 +1,30 @@
+use console.println
+
+/// A colour, with an associated fallback and a case-derived method.
+export enum Colour {
+  Red
+  Named(String)
+}
+
+impl Colour {
+  /// Returns the colour used when nothing was chosen.
+  fn fallback() -> Colour {
+    Colour.Red
+  }
+
+  /// Names this colour.
+  fn describe(self) -> String {
+    match self {
+      Colour.Red => "red"
+      Colour.Named(name) => name
+    }
+  }
+}
+
+/// Prints an enum's associated function, called as `Colour.fallback()`, and
+/// a `self` method on values it produces.
+export fn main() -> Result<Unit, Error> {
+  println("fallback {Colour.fallback()}")?
+  println("described {Colour.fallback().describe()} {Colour.Named("teal").describe()}")?
+  Ok(())
+}

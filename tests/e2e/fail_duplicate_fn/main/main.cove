@@ -1,0 +1,20 @@
+use console.println
+
+/// Greets by name.
+fn greet(name: String) -> String {
+  "Hello, {name}!"
+}
+
+/// A second `greet` that collides with the first: the package fails to
+/// resolve before this program ever runs, so this is a check-time error, not
+/// a runtime one. It lives in its own package so this failure cannot take
+/// down every other case.
+fn greet(name: String) -> String {
+  "Hi, {name}!"
+}
+
+/// Never reached.
+export fn main() -> Result<Unit, Error> {
+  println(greet("world"))?
+  Ok(())
+}

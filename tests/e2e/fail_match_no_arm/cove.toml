@@ -1,0 +1,3 @@
+[run.fail_match_no_arm]
+entry = "main.main"
+allow = ["console"]

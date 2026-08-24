@@ -1,8 +1,8 @@
 plain 1.5 0.25
 separators 1000.5
-exponent 1500 1500 0.02 200
+exponent 1500.0 1500.0 0.02 200.0
 addition 3.75 subtraction -0.75
-multiplication 3 division 1.5
+multiplication 3.0 division 1.5
 remainder 1.5
-a whole float prints without a point 4 4
+a whole float prints without a point 4.0 4.0
 comparison true true

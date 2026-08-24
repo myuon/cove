@@ -3,7 +3,7 @@ use console.println
 
 /// Counts words in `text`.
 export fn wordCount(text: String) -> Int {
-  text.words().count()
+  text.words().length()
 }
 
 /// Reads only through the document capability supplied by the host.

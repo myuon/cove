@@ -1,0 +1,11 @@
+error[cove::resolve::duplicate_declaration]: `greet` is declared twice in module `main`
+  --> <e2e>/fail_duplicate_fn/main/main.cove:12:4
+   |
+12 | fn greet(name: String) -> String {
+   |    ^^^^^
+ --> <e2e>/fail_duplicate_fn/main/main.cove:4:4
+  |
+4 | fn greet(name: String) -> String {
+  |    ^^^^^ `greet` first declared here
+  rule: Each name may be declared once per module across its implementation units.
+1 error(s)

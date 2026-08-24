@@ -3,12 +3,16 @@
 //! The CLI does not invent semantics: the compiler derives facts, the runtime
 //! enforces and records them, and the CLI explains them.
 
+use std::cell::RefCell;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
+use std::rc::Rc;
+use std::time::Duration;
 
 use cove_diag::{render, Diagnostic, SourceMap, Span};
 use cove_runtime::host::{Console, Documents, Env, Grants, HostRegistry};
 use cove_runtime::interp::Interpreter;
+use cove_runtime::{Budget, Cancellation, JsonlSink, Limits, NullSink, TraceEvent, TraceSink};
 use cove_sema::package::Package;
 use cove_sema::resolve::{AliasEntry, EnumEntry, FnEntry, Program, ResolvedModule, StructEntry};
 use cove_syntax::ast::ItemKind;
@@ -18,11 +22,19 @@ cove — the Cove toolchain
 
 usage:
   cove check [path] [--deny-warnings]  parse and resolve every module in the package
-  cove run <name> [args]               run the entry selected by `[run.<name>]` in cove.toml
+  cove run <name> [flags] [args]       run the entry selected by `[run.<name>]` in cove.toml
   cove outline [path]                  show modules and their exported declarations
   cove help                            show this message
 
 `--deny-warnings` fails `cove check` when the package has any warnings.
+
+`cove run` flags (may appear in any position after <name>; everything after a
+literal `--` is a program argument, even if it looks like a flag):
+  --fuel <n>            stop the run after <n> fuel is spent
+  --deadline <duration>  stop the run after <duration> has elapsed, e.g. `500ms`, `5s`, `1h`
+  --max-host-calls <n>  stop the run after <n> host calls
+  --trace <path>        write a JSONL trace to <path>, or `-` for stderr
+  --stats               print fuel spent, host calls, elapsed time, and host-call wait to stderr
 ";
 
 fn main() -> ExitCode {
@@ -508,20 +520,280 @@ fn cmd_run(args: &[String]) -> Result<(), CliError> {
         )));
     }
 
+    let flags = parse_run_flags(&args[1..])?;
+
     let mut hosts = HostRegistry::new(Grants::new(run.allow.clone()));
     hosts.register(Box::new(Console::new(std::io::stdout())));
     hosts.register(Box::new(Env::from_process()));
     hosts.register(Box::new(Documents::rooted(package.root.join("documents"))));
 
-    let program_args: Vec<std::rc::Rc<str>> = args[1..].iter().map(|a| a.as_str().into()).collect();
+    let limits = Limits {
+        fuel: flags.fuel.or(run.fuel),
+        deadline: flags.deadline.or(run.deadline),
+        max_host_calls: flags.max_host_calls.or(run.max_host_calls),
+        max_call_depth: None,
+    };
+    // The interpreter checks this budget at its own safepoints (loop back
+    // edges, calls, `await`); see `RunFlags` below for why the handle is not
+    // yet wired to SIGINT.
+    let cancellation = Cancellation::new();
+    let budget = Budget::with_cancellation(limits, cancellation);
+
+    let trace_target = flags
+        .trace
+        .or_else(|| run.trace.as_deref().map(TraceTarget::from_flag));
+    let wait_total = WaitTotal::default();
+    let primary_sink: Box<dyn TraceSink> = match &trace_target {
+        Some(TraceTarget::Stderr) => Box::new(JsonlSink::new(std::io::stderr())),
+        Some(TraceTarget::File(path)) => {
+            let file = std::fs::File::create(path).map_err(|e| {
+                CliError::Message(format!(
+                    "cannot create trace file `{}`: {e}",
+                    path.display()
+                ))
+            })?;
+            Box::new(JsonlSink::new(file))
+        }
+        None => Box::new(NullSink),
+    };
+    // `HostRegistry::call` and the interpreter's own task and entry events
+    // both need to reach the one trace destination `--trace` selected. A
+    // `SharedSink` lets each hold a handle to that one destination, rather
+    // than each opening or wrapping it separately — two independent sinks
+    // writing the same file would race for it.
+    let sink = SharedSink::new(Box::new(CompositeSink {
+        primary: primary_sink,
+        wait_total: wait_total.clone(),
+    }));
+    hosts.set_trace(Box::new(sink.clone()));
+    hosts.set_budget(budget);
+
+    let program_args: Vec<Rc<str>> = flags
+        .program_args
+        .iter()
+        .map(|a| a.as_str().into())
+        .collect();
 
     let mut interpreter = Interpreter::new(&program, &sources, &mut hosts);
-    match interpreter.run_entry(module, entry, program_args) {
+    interpreter.set_trace(Box::new(sink));
+    let outcome = interpreter.run_entry(module, entry, program_args);
+
+    if flags.stats {
+        print_stats(&hosts, &wait_total);
+    }
+
+    match outcome {
         Ok(value) => report_exit(value),
         Err(error) => Err(CliError::Diagnostics {
             sources,
             items: vec![error.to_diagnostic()],
         }),
+    }
+}
+
+/// A `--fuel`, `--deadline`, `--max-host-calls`, `--trace`, or `--stats` flag
+/// to `cove run`, parsed from anywhere after the run name.
+///
+/// This is deliberately not hooked up: Rust's standard library has no signal
+/// handling API, so installing a SIGINT handler would need a crate (such as
+/// `signal-hook` or `ctrlc`) or unsafe, platform-specific `extern "C"` FFI
+/// duplicating one. Neither fits "if it is not straightforward with std
+/// alone, skip it," so `cove run` cannot yet be interrupted through
+/// `Cancellation` from outside; only the limits below can stop a run.
+struct RunFlags {
+    fuel: Option<u64>,
+    deadline: Option<Duration>,
+    max_host_calls: Option<u64>,
+    trace: Option<TraceTarget>,
+    stats: bool,
+    program_args: Vec<String>,
+}
+
+/// Where `--trace` (or the config's `trace` key) sends trace lines.
+enum TraceTarget {
+    Stderr,
+    File(PathBuf),
+}
+
+impl TraceTarget {
+    fn from_flag(value: &str) -> TraceTarget {
+        if value == "-" {
+            TraceTarget::Stderr
+        } else {
+            TraceTarget::File(PathBuf::from(value))
+        }
+    }
+}
+
+/// Parses the flags and program arguments following `cove run <name>`.
+///
+/// Flags may appear in any position; everything after a literal `--` is a
+/// program argument even if it looks like a flag, and anything not
+/// recognized as a flag is a program argument too, so `cove run <name> <arg>`
+/// keeps working exactly as it always has.
+fn parse_run_flags(args: &[String]) -> Result<RunFlags, CliError> {
+    let mut flags = RunFlags {
+        fuel: None,
+        deadline: None,
+        max_host_calls: None,
+        trace: None,
+        stats: false,
+        program_args: Vec::new(),
+    };
+    let mut passthrough = false;
+    let mut i = 0;
+    while i < args.len() {
+        if passthrough {
+            flags.program_args.push(args[i].clone());
+            i += 1;
+            continue;
+        }
+        match args[i].as_str() {
+            "--" => passthrough = true,
+            "--fuel" => {
+                let value = flag_value(args, &mut i, "--fuel")?;
+                flags.fuel = Some(value.parse().map_err(|_| {
+                    CliError::Message(format!(
+                        "`--fuel` must be a non-negative integer, found `{value}`"
+                    ))
+                })?);
+            }
+            "--deadline" => {
+                let value = flag_value(args, &mut i, "--deadline")?;
+                flags.deadline = Some(
+                    parse_duration_flag(&value)
+                        .map_err(|e| CliError::Message(format!("`--deadline`: {e}")))?,
+                );
+            }
+            "--max-host-calls" => {
+                let value = flag_value(args, &mut i, "--max-host-calls")?;
+                flags.max_host_calls = Some(value.parse().map_err(|_| {
+                    CliError::Message(format!(
+                        "`--max-host-calls` must be a non-negative integer, found `{value}`"
+                    ))
+                })?);
+            }
+            "--trace" => {
+                let value = flag_value(args, &mut i, "--trace")?;
+                flags.trace = Some(TraceTarget::from_flag(&value));
+            }
+            "--stats" => flags.stats = true,
+            other => flags.program_args.push(other.to_string()),
+        }
+        i += 1;
+    }
+    Ok(flags)
+}
+
+/// Consumes and returns the value following the flag at `args[*i]`,
+/// advancing `*i` to point at it so the caller's loop increment lands on the
+/// next unconsumed argument.
+fn flag_value(args: &[String], i: &mut usize, flag: &str) -> Result<String, CliError> {
+    let value = args
+        .get(*i + 1)
+        .ok_or_else(|| CliError::Message(format!("`{flag}` needs a value")))?;
+    *i += 1;
+    Ok(value.clone())
+}
+
+/// Parses a `--deadline` value such as `"500ms"`, using the same unit
+/// meanings as `cove.toml`'s `deadline` key and the lexer's duration
+/// literals: `ns`, `us`, `ms`, `s`, `m`, and `h`.
+fn parse_duration_flag(text: &str) -> Result<Duration, String> {
+    let accepted = "the accepted units are `ns`, `us`, `ms`, `s`, `m`, and `h`";
+    let invalid = || format!("`{text}` is not a valid duration; {accepted}");
+
+    let split_at = text
+        .find(|c: char| !c.is_ascii_digit())
+        .ok_or_else(invalid)?;
+    let (digits, unit) = text.split_at(split_at);
+    if digits.is_empty() {
+        return Err(invalid());
+    }
+    let value: u64 = digits.parse().map_err(|_| invalid())?;
+
+    let nanos_per_unit: u64 = match unit {
+        "ns" => 1,
+        "us" => 1_000,
+        "ms" => 1_000_000,
+        "s" => 1_000_000_000,
+        "m" => 60_000_000_000,
+        "h" => 3_600_000_000_000,
+        _ => return Err(invalid()),
+    };
+    let nanos = value
+        .checked_mul(nanos_per_unit)
+        .ok_or_else(|| format!("`{text}` overflows a 64-bit nanosecond count"))?;
+    Ok(Duration::from_nanos(nanos))
+}
+
+/// Total host-call wait time, shared with the trace sink that measures it,
+/// so `--stats` can report it even when no trace file was requested.
+#[derive(Clone, Default)]
+struct WaitTotal(Rc<RefCell<Duration>>);
+
+impl WaitTotal {
+    fn get(&self) -> Duration {
+        *self.0.borrow()
+    }
+}
+
+impl TraceSink for WaitTotal {
+    fn record(&mut self, event: TraceEvent) {
+        if let TraceEvent::HostCall { wait, .. } = event {
+            *self.0.borrow_mut() += wait;
+        }
+    }
+}
+
+/// Lets two independent owners — the `HostRegistry` and the `Interpreter` —
+/// each hold a handle to the one real trace destination.
+///
+/// `HostRegistry::call` traces `HostCall`, and the interpreter traces task
+/// and entry events; both need to land in the same JSONL stream, in the
+/// order the single-threaded run produced them. Cloning shares the same
+/// underlying sink rather than opening or wrapping the destination twice.
+#[derive(Clone)]
+struct SharedSink(Rc<RefCell<Box<dyn TraceSink>>>);
+
+impl SharedSink {
+    fn new(sink: Box<dyn TraceSink>) -> Self {
+        SharedSink(Rc::new(RefCell::new(sink)))
+    }
+}
+
+impl TraceSink for SharedSink {
+    fn record(&mut self, event: TraceEvent) {
+        self.0.borrow_mut().record(event);
+    }
+}
+
+/// Forwards every event to both the sink `--trace` selected and the
+/// `WaitTotal` accumulator `--stats` reads from, so tracing and stats
+/// reporting compose instead of competing for the one sink slot.
+struct CompositeSink {
+    primary: Box<dyn TraceSink>,
+    wait_total: WaitTotal,
+}
+
+impl TraceSink for CompositeSink {
+    fn record(&mut self, event: TraceEvent) {
+        self.wait_total.record(event.clone());
+        self.primary.record(event);
+    }
+}
+
+/// Prints fuel spent, host calls, elapsed time, and host-call wait to
+/// stderr, for `--stats`.
+fn print_stats(hosts: &HostRegistry, wait_total: &WaitTotal) {
+    if let Some(budget) = hosts.budget() {
+        eprintln!(
+            "stats: fuel_spent={} host_calls={} elapsed={:?} wait={:?}",
+            budget.fuel_spent(),
+            budget.host_calls(),
+            budget.elapsed(),
+            wait_total.get(),
+        );
     }
 }
 
