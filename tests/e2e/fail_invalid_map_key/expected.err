@@ -4,5 +4,5 @@ error[cove::runtime]: `Map.of` cannot use a `Vector` as a map key
 6 |   let bad = Map.of(MapEntry(key: Vector.of(1), value: "nope"))
   |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
   rule: Mutable handles and structs containing them are not valid map keys: a key's equality must not change while a collection holds it.
-  help: use a value built only from `Bool`, `Int`, `Str`, `Duration`, `Unit`, arrays, structs, enum cases, `Map`, or `Set` — all free of mutable handles
+  help: use a value built only from `Bool`, `Int`, `Str`, `Duration`, `Unit`, a range, arrays, structs, enum cases, `Map`, or `Set` — all free of mutable handles
 1 error(s)

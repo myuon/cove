@@ -1,0 +1,11 @@
+use console.println
+
+/// `@` is reserved decorator syntax: the MVP defines no annotations, so this
+/// is a lex-time error, not a typo, and this case pins that diagnostic. It
+/// lives in its own package so a lex failure cannot take down every other
+/// case.
+@unknownDecorator
+export fn main() -> Result<Unit, Error> {
+  println("never reached")?
+  Ok(())
+}

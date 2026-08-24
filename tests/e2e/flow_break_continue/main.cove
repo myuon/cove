@@ -1,0 +1,38 @@
+use console.println
+
+/// Shows a loop is an expression: `break expr` supplies its value, a loop
+/// that never breaks yields `Unit`, and `continue` skips to the next
+/// iteration.
+export fn main() -> Result<Unit, Error> {
+  let firstMultipleOfThree = for value in [1, 2, 3, 4, 5] {
+    if value % 3 == 0 {
+      break value
+    }
+  }
+  println("first multiple of three: {firstMultipleOfThree}")?
+
+  let neverBreaks = for value in [1, 2] {
+    value
+  }
+  println("loop with no break: {neverBreaks}")?
+
+  var oddTotal = 0
+  for value in [1, 2, 3, 4, 5, 6] {
+    if value % 2 == 0 {
+      continue
+    }
+    oddTotal += value
+  }
+  println("sum of odd values: {oddTotal}")?
+
+  var attempts = 0
+  let settled = while true {
+    attempts += 1
+    if attempts == 3 {
+      break attempts
+    }
+  }
+  println("while settled after {settled} attempt(s)")?
+
+  Ok(())
+}

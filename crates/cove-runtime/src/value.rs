@@ -193,8 +193,11 @@ pub struct Closure {
 /// `Array`, or an enum case with a payload qualifies exactly when everything
 /// nested inside it does. `Map` and `Set` qualify too: both are immutable
 /// handles, so nesting one as a key changes nothing about the rule, only how
-/// deep the check goes. `Float` is rejected for an unrelated reason: `NaN` is
-/// not equal to itself, which breaks the total order every key needs.
+/// deep the check goes. A `Range` qualifies for the same reason: it is an
+/// immutable value with a stable `eq_value`, ordered consistently by its
+/// `(start, end, inclusive_end)` fields. `Float` is rejected for an unrelated
+/// reason: `NaN` is not equal to itself, which breaks the total order every
+/// key needs.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum MapKey {
     Unit,
@@ -218,6 +221,15 @@ pub enum MapKey {
     /// values need converting, and the first one that cannot be is why
     /// nesting a `Map` as a key can still fail.
     Map(BTreeMap<MapKey, MapKey>),
+    /// A range. Immutable with a stable `eq_value`, so it qualifies under the
+    /// same rule as every other key: its equality cannot change while a
+    /// collection holds it. Ordered by `(start, end, inclusive_end)`, which is
+    /// a total order because every field is.
+    Range {
+        start: i64,
+        end: i64,
+        inclusive_end: bool,
+    },
 }
 
 /// Why a value cannot be a `Map` key or `Set` element.
@@ -251,7 +263,7 @@ impl InvalidKey {
         if self.type_name == "Float" {
             "convert it to a stable key first, such as rounding to an `Int` or formatting it as a `String`".to_string()
         } else {
-            "use a value built only from `Bool`, `Int`, `Str`, `Duration`, `Unit`, arrays, structs, enum cases, `Map`, or `Set` — all free of mutable handles".to_string()
+            "use a value built only from `Bool`, `Int`, `Str`, `Duration`, `Unit`, a range, arrays, structs, enum cases, `Map`, or `Set` — all free of mutable handles".to_string()
         }
     }
 }
@@ -320,6 +332,15 @@ impl MapKey {
                 }
                 Ok(MapKey::Map(converted))
             }
+            Value::Range {
+                start,
+                end,
+                inclusive_end,
+            } => Ok(MapKey::Range {
+                start: *start,
+                end: *end,
+                inclusive_end: *inclusive_end,
+            }),
             Value::Float(_) => Err(InvalidKey {
                 path: anchor.map(str::to_string).unwrap_or_default(),
                 type_name: "Float".to_string(),
@@ -360,6 +381,15 @@ impl MapKey {
                     .map(|(key, value)| (key.clone(), value.to_value()))
                     .collect(),
             )),
+            MapKey::Range {
+                start,
+                end,
+                inclusive_end,
+            } => Value::Range {
+                start: *start,
+                end: *end,
+                inclusive_end: *inclusive_end,
+            },
         }
     }
 }
@@ -816,6 +846,38 @@ mod tests {
         );
     }
 
+    /// A `Range` is immutable with a stable `eq_value`, so it qualifies as a
+    /// map key or set element under the same rule as every other value here.
+    #[test]
+    fn a_range_is_a_valid_map_key() {
+        assert_eq!(
+            MapKey::from_value(&Value::Range {
+                start: 0,
+                end: 3,
+                inclusive_end: false,
+            }),
+            Ok(MapKey::Range {
+                start: 0,
+                end: 3,
+                inclusive_end: false,
+            })
+        );
+        // `0..<3` and `0..2` are distinct keys, exactly as they are distinct
+        // values: `eq_value` compares the bounds a range was written with.
+        assert_ne!(
+            MapKey::from_value(&Value::Range {
+                start: 0,
+                end: 3,
+                inclusive_end: false,
+            }),
+            MapKey::from_value(&Value::Range {
+                start: 0,
+                end: 2,
+                inclusive_end: true,
+            })
+        );
+    }
+
     #[test]
     fn a_struct_built_only_from_admissible_fields_is_a_valid_key() {
         let key = MapKey::from_value(&point(1, 2)).expect("a struct of Ints is a valid key");
@@ -940,6 +1002,11 @@ mod tests {
             MapKey::Str("hi".to_string()),
             MapKey::EnumCase("Color".to_string(), "Red".to_string(), Vec::new()),
             MapKey::Array(vec![MapKey::Int(1), MapKey::Int(2)]),
+            MapKey::Range {
+                start: 0,
+                end: 3,
+                inclusive_end: false,
+            },
             MapKey::Struct(
                 "test.Point".to_string(),
                 vec![

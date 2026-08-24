@@ -465,8 +465,13 @@ impl<'a> Parser<'a> {
         self.at_item_start()
             || matches!(
                 self.peek(),
-                TokenKind::Keyword(Keyword::Let | Keyword::Var | Keyword::Return)
-                    | TokenKind::DocComment(_)
+                TokenKind::Keyword(
+                    Keyword::Let
+                        | Keyword::Var
+                        | Keyword::Return
+                        | Keyword::Break
+                        | Keyword::Continue
+                ) | TokenKind::DocComment(_)
             )
     }
 
@@ -1566,6 +1571,19 @@ impl Parser<'_> {
                 };
                 Ok(expr(ExprKind::Return(value), start.to(self.prev_span())))
             }
+            TokenKind::Keyword(Keyword::Break) => {
+                self.bump();
+                let value = if self.can_start_expr() {
+                    Some(Box::new(self.parse_expr()?))
+                } else {
+                    None
+                };
+                Ok(expr(ExprKind::Break(value), start.to(self.prev_span())))
+            }
+            TokenKind::Keyword(Keyword::Continue) => {
+                self.bump();
+                Ok(expr(ExprKind::Continue, start.to(self.prev_span())))
+            }
             TokenKind::Keyword(Keyword::Fn | Keyword::Async) => self.parse_lambda(),
             _ => Err(self.expected_expression()),
         }
@@ -1595,6 +1613,8 @@ impl Parser<'_> {
                         | Keyword::Async
                         | Keyword::Await
                         | Keyword::Return
+                        | Keyword::Break
+                        | Keyword::Continue
                         | Keyword::SelfValue
                 )
         )
@@ -2427,6 +2447,12 @@ mod tests {
         assert!(matches!(tail_expr("[]").kind, ExprKind::ArrayLit(_)));
         assert!(matches!(tail_expr("self").kind, ExprKind::Ident(_)));
         assert!(matches!(tail_expr("return").kind, ExprKind::Return(None)));
+        assert!(matches!(tail_expr("break").kind, ExprKind::Break(None)));
+        assert!(matches!(
+            tail_expr("break 1").kind,
+            ExprKind::Break(Some(_))
+        ));
+        assert!(matches!(tail_expr("continue").kind, ExprKind::Continue));
         assert!(matches!(tail_expr("{ 1 }").kind, ExprKind::Block(_)));
         assert!(matches!(
             tail_expr("scope tasks { 1 }").kind,

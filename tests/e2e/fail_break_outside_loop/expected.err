@@ -1,0 +1,8 @@
+error[cove::resolve::break_outside_loop]: `break` outside a loop
+ --> <e2e>/fail_break_outside_loop/main/main.cove:8:3
+  |
+8 |   break
+  |   ^^^^^
+  rule: `break` only makes sense inside a `for` or `while` loop, and cannot reach one outside a closure.
+  help: move this `break` inside an enclosing loop, or remove it
+1 error(s)

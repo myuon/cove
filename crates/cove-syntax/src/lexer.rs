@@ -132,6 +132,12 @@ impl<'a> Lexer<'a> {
                 continue;
             }
 
+            if c == '@' {
+                self.bump();
+                self.reserved_annotation(start);
+                continue;
+            }
+
             self.bump();
             self.unexpected_character(c, start);
         }
@@ -164,6 +170,27 @@ impl<'a> Lexer<'a> {
                 .help("Remove the `;`; the next token or a newline ends the statement.");
         }
         self.diagnostics.push(diag);
+    }
+
+    /// `@` is reserved surface, not merely an unknown character: the
+    /// Language Card reserves decorator syntax for behavior with specified
+    /// compiler or runtime semantics, and the MVP defines none. This is
+    /// reported distinctly from [`Lexer::unexpected_character`] so the
+    /// message states that rule instead of reading as a stray-character typo.
+    fn reserved_annotation(&mut self, start: usize) {
+        let span = Span::new(self.file, start as u32, self.pos as u32);
+        self.diagnostics.push(
+            Diagnostic::error(
+                "cove::parse::reserved_annotation",
+                "`@` is reserved decorator syntax",
+            )
+            .at(span)
+            .rule(
+                "Decorator syntax is reserved for behavior with specified compiler or runtime \
+                 semantics; the MVP defines no annotations, so an unknown annotation is an error.",
+            )
+            .help("remove the `@...`; there is no annotation the MVP recognizes yet"),
+        );
     }
 
     fn find_line_end(&self) -> usize {
@@ -1007,6 +1034,14 @@ mod tests {
         let diags = lex_err("`");
         assert_eq!(diags.len(), 1);
         assert_eq!(diags[0].code, "cove::lex::unexpected_character");
+    }
+
+    #[test]
+    fn at_sign_is_reserved_decorator_syntax() {
+        let diags = lex_err("@decorate");
+        assert_eq!(diags.len(), 1);
+        assert_eq!(diags[0].code, "cove::parse::reserved_annotation");
+        assert!(diags[0].rule.as_deref().unwrap().contains("Decorator"));
     }
 
     #[test]

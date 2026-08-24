@@ -63,6 +63,11 @@ enum Control {
     Error(RuntimeError),
     /// `return` unwinds to the enclosing function call.
     Return(Value),
+    /// `break` / `break expr` unwinds to the nearest enclosing loop, which
+    /// then evaluates to this value.
+    Break(Value),
+    /// `continue` unwinds to the nearest enclosing loop's next iteration.
+    Continue,
 }
 
 impl From<RuntimeError> for Control {
@@ -74,11 +79,22 @@ impl From<RuntimeError> for Control {
 type Eval = Result<Value, Control>;
 
 /// Converts a completed call back into an ordinary result.
+///
+/// `Break` and `Continue` reaching a function call boundary would mean
+/// `break` or `continue` was used outside a loop (or reached past a closure
+/// boundary), which resolve-time checking rejects before the interpreter ever
+/// runs; see `cove_sema::resolve`'s `break_outside_loop` / `continue_outside_loop`.
 fn finish(result: Eval) -> Result<Value, RuntimeError> {
     match result {
         Ok(value) => Ok(value),
         Err(Control::Return(value)) => Ok(value),
         Err(Control::Error(error)) => Err(error),
+        Err(Control::Break(_)) => {
+            unreachable!("`break` outside a loop is rejected before execution")
+        }
+        Err(Control::Continue) => {
+            unreachable!("`continue` outside a loop is rejected before execution")
+        }
     }
 }
 
@@ -926,6 +942,9 @@ impl<'a> Interpreter<'a> {
                 body,
             } => {
                 let items = self.iterable_items(env, iterable)?;
+                // A loop is an expression: it evaluates to `Unit` unless a
+                // `break expr` inside it says otherwise.
+                let mut result_value = Value::Unit;
                 for item in items {
                     // Once per iteration, at the back edge: this is the
                     // safepoint that bounds a `for` over an unbounded
@@ -935,33 +954,42 @@ impl<'a> Interpreter<'a> {
                     env.declare(binding.node.as_str().into(), Place::binding(item, false));
                     let result = self.eval_block(env, body);
                     env.pop();
-                    result?;
-                }
-                Ok(Value::Unit)
-            }
-            ExprKind::While { condition, body } => {
-                loop {
-                    let test = self.eval(env, condition)?;
-                    let Value::Bool(test) = test else {
-                        return Err(RuntimeError::new(format!(
-                            "a `while` condition must be a `Bool`, but found `{}`",
-                            test.type_name()
-                        ))
-                        .at(condition.span)
-                        .into());
-                    };
-                    if !test {
-                        break;
+                    match result {
+                        Ok(_) => {}
+                        Err(Control::Break(value)) => {
+                            result_value = value;
+                            break;
+                        }
+                        Err(Control::Continue) => continue,
+                        Err(other) => return Err(other),
                     }
-                    // Once per iteration, at the back edge: this is the
-                    // safepoint that bounds a non-terminating `while`, which
-                    // is otherwise unbounded by anything the type system
-                    // proves.
-                    self.charge_safepoint(span)?;
-                    self.eval_block(env, body)?;
                 }
-                Ok(Value::Unit)
+                Ok(result_value)
             }
+            ExprKind::While { condition, body } => loop {
+                let test = self.eval(env, condition)?;
+                let Value::Bool(test) = test else {
+                    return Err(RuntimeError::new(format!(
+                        "a `while` condition must be a `Bool`, but found `{}`",
+                        test.type_name()
+                    ))
+                    .at(condition.span)
+                    .into());
+                };
+                if !test {
+                    return Ok(Value::Unit);
+                }
+                // Once per iteration, at the back edge: this is the
+                // safepoint that bounds a non-terminating `while`, which is
+                // otherwise unbounded by anything the type system proves.
+                self.charge_safepoint(span)?;
+                match self.eval_block(env, body) {
+                    Ok(_) => {}
+                    Err(Control::Break(value)) => return Ok(value),
+                    Err(Control::Continue) => continue,
+                    Err(other) => return Err(other),
+                }
+            },
             ExprKind::Return(value) => {
                 let value = match value {
                     Some(expr) => self.eval(env, expr)?,
@@ -969,6 +997,14 @@ impl<'a> Interpreter<'a> {
                 };
                 Err(Control::Return(value))
             }
+            ExprKind::Break(value) => {
+                let value = match value {
+                    Some(expr) => self.eval(env, expr)?,
+                    None => Value::Unit,
+                };
+                Err(Control::Break(value))
+            }
+            ExprKind::Continue => Err(Control::Continue),
             ExprKind::Lambda {
                 is_async,
                 params,
@@ -2318,11 +2354,12 @@ fn mention_expr(expr: &Expr, out: &mut BTreeSet<String>) {
             mention_expr(condition, out);
             mention_block(body, out);
         }
-        ExprKind::Return(inner) => {
+        ExprKind::Return(inner) | ExprKind::Break(inner) => {
             if let Some(inner) = inner {
                 mention_expr(inner, out);
             }
         }
+        ExprKind::Continue => {}
         ExprKind::Lambda { params, body, .. } => {
             mention_params(params, out);
             mention_block(body, out);
@@ -3269,6 +3306,80 @@ export fn main() -> Result<Unit, Error> {
 }
 "#;
         assert_eq!(run_entry_of(source, "main", &[]).output, "6 2\n");
+    }
+
+    #[test]
+    fn a_for_loop_evaluates_to_the_value_of_break() {
+        let source = r#"
+use console.println
+
+export fn main() -> Result<Unit, Error> {
+  let found = for value in [1, 2, 3, 4] {
+    if value == 3 {
+      break value * 10
+    }
+  }
+  console.println("{found}")?
+  Ok(())
+}
+"#;
+        assert_eq!(run_entry_of(source, "main", &[]).output, "30\n");
+    }
+
+    #[test]
+    fn a_loop_that_never_breaks_evaluates_to_unit() {
+        let source = r#"
+use console.println
+
+export fn main() -> Result<Unit, Error> {
+  let result = for value in [1, 2] {
+    value
+  }
+  console.println("{result}")?
+  Ok(())
+}
+"#;
+        assert_eq!(run_entry_of(source, "main", &[]).output, "()\n");
+    }
+
+    #[test]
+    fn continue_skips_the_rest_of_an_iteration() {
+        let source = r#"
+use console.println
+
+export fn main() -> Result<Unit, Error> {
+  var total = 0
+  for value in [1, 2, 3, 4] {
+    if value % 2 == 0 {
+      continue
+    }
+    total += value
+  }
+  console.println("{total}")?
+  Ok(())
+}
+"#;
+        assert_eq!(run_entry_of(source, "main", &[]).output, "4\n");
+    }
+
+    #[test]
+    fn a_while_loop_evaluates_to_the_value_of_break() {
+        let source = r#"
+use console.println
+
+export fn main() -> Result<Unit, Error> {
+  var count = 0
+  let found = while true {
+    count += 1
+    if count == 3 {
+      break count
+    }
+  }
+  console.println("{found}")?
+  Ok(())
+}
+"#;
+        assert_eq!(run_entry_of(source, "main", &[]).output, "3\n");
     }
 
     // ------------------------------------------------------------ rule 11
