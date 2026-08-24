@@ -1,0 +1,36 @@
+use console.println
+
+/// Prints `Map` construction, lookup, pure updates, and iteration.
+export fn main() -> Result<Unit, Error> {
+  let ages = Map.of(
+    MapEntry(key: "Alice", value: 30),
+    MapEntry(key: "Bob", value: 25)
+  )
+  println("literal {ages}")?
+  println("length {ages.length()} isEmpty {ages.isEmpty()}")?
+  println("get {ages.get("Alice")} {ages.get("Zoe")}")?
+  println("contains {ages.contains("Bob")} {ages.contains("Zoe")}")?
+  println("keys {ages.keys()} values {ages.values()}")?
+
+  let inserted = ages.inserted("Zoe", 19)
+  let removed = inserted.removed("Alice")
+  println("inserted {inserted}")?
+  println("removed {removed}")?
+  println("original is unchanged {ages}")?
+
+  var total = 0
+  for entry in ages {
+    total += entry.value
+  }
+  println("iterated total {total}")?
+
+  let empty = Map.of()
+  println("empty {empty} {empty.isEmpty()} {empty.length()}")?
+
+  let same = Map.of(
+    MapEntry(key: "Alice", value: 30),
+    MapEntry(key: "Bob", value: 25)
+  )
+  println("equality {ages == same} {ages == inserted}")?
+  Ok(())
+}

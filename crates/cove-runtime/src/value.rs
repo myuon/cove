@@ -7,7 +7,7 @@
 //! length. Cove never performs an implicit deep copy.
 
 use std::cell::RefCell;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::rc::Rc;
 
@@ -30,10 +30,14 @@ pub enum Value {
     /// Growable mutable sequence backed by stable shared storage. Copying the
     /// handle is O(1) and aliases observe the same elements and length.
     Vector(Rc<VectorStorage>),
-    /// Immutable in the MVP.
+    /// Immutable in the MVP. Iterates in ascending key order, since that is
+    /// the natural order of its `BTreeMap` storage.
     Map(Rc<BTreeMap<MapKey, Value>>),
-    /// Immutable in the MVP.
-    Set(Rc<Vec<Value>>),
+    /// Immutable in the MVP. Backed by the same key-ordered storage as `Map`,
+    /// so membership is O(log n) and iteration order is defined the same
+    /// way: ascending order. An element must satisfy the [`MapKey`]
+    /// restriction, exactly like a map key.
+    Set(Rc<BTreeSet<MapKey>>),
     /// A struct value. Cloning copies each field by that field's own rule.
     Struct(Box<StructValue>),
     /// An enum value, including `Option` and `Result`.
@@ -180,14 +184,199 @@ pub struct Closure {
     pub captures: Vec<(Rc<str>, Value)>,
 }
 
-/// A value usable as a `Map` key. Mutable handles are not valid map keys.
+/// A value usable as a `Map` key or `Set` element.
+///
+/// ADR 0001 draws the line at mutability, not at primitives: "mutable
+/// handles and structs containing them are not valid map keys." A key's
+/// equality must not change while a collection holds it, so this is
+/// recursive rather than a flat list of primitive shapes — a `Struct`, an
+/// `Array`, or an enum case with a payload qualifies exactly when everything
+/// nested inside it does. `Map` and `Set` qualify too: both are immutable
+/// handles, so nesting one as a key changes nothing about the rule, only how
+/// deep the check goes. `Float` is rejected for an unrelated reason: `NaN` is
+/// not equal to itself, which breaks the total order every key needs.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum MapKey {
+    Unit,
     Bool(bool),
     Int(i64),
+    Duration(i64),
     Str(String),
-    /// A payload-free enum case, keyed by `(type, case)`.
-    EnumCase(String, String),
+    /// An enum case, keyed by `(type, case)`, with every payload value
+    /// converted the same way.
+    EnumCase(String, String, Vec<MapKey>),
+    /// A struct, keyed by type name, with every field converted the same
+    /// way, in declaration order.
+    Struct(String, Vec<(String, MapKey)>),
+    /// An array, with every element converted the same way. An array is
+    /// fixed-length and immutable, so its equality cannot change.
+    Array(Vec<MapKey>),
+    /// A `Set`. Its elements are already `MapKey`s by construction, so
+    /// nesting one never fails.
+    Set(BTreeSet<MapKey>),
+    /// A `Map`. Its keys are already `MapKey`s by construction; only its
+    /// values need converting, and the first one that cannot be is why
+    /// nesting a `Map` as a key can still fail.
+    Map(BTreeMap<MapKey, MapKey>),
+}
+
+/// Why a value cannot be a `Map` key or `Set` element.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct InvalidKey {
+    /// How the offending part is reached from the value that was tested,
+    /// such as `Point.tags` or `Point.tags[0]`. Empty when the value itself,
+    /// not something nested inside it, is the problem.
+    pub path: String,
+    /// The type that cannot be a key.
+    pub type_name: String,
+}
+
+impl InvalidKey {
+    /// The rule this violation breaks.
+    ///
+    /// `Float` is excluded for a reason distinct from every other rejection:
+    /// `NaN != NaN` breaks the total order a key needs, which has nothing to
+    /// do with mutability. Stating that separately keeps anyone from later
+    /// "fixing" `Float` as if it were just another mutable-handle case.
+    pub fn rule(&self) -> &'static str {
+        if self.type_name == "Float" {
+            "A `Float` cannot be a map key or set element: `NaN` is not equal to itself, which breaks the total order every key needs."
+        } else {
+            "Mutable handles and structs containing them are not valid map keys: a key's equality must not change while a collection holds it."
+        }
+    }
+
+    /// A corrected textual example, tailored to the same distinction.
+    pub fn help(&self) -> String {
+        if self.type_name == "Float" {
+            "convert it to a stable key first, such as rounding to an `Int` or formatting it as a `String`".to_string()
+        } else {
+            "use a value built only from `Bool`, `Int`, `Str`, `Duration`, `Unit`, arrays, structs, enum cases, `Map`, or `Set` — all free of mutable handles".to_string()
+        }
+    }
+}
+
+impl MapKey {
+    /// Converts `value` to a map key or set element, or reports the specific
+    /// part that cannot be one, with the path to reach it.
+    pub fn from_value(value: &Value) -> Result<MapKey, InvalidKey> {
+        Self::convert(None, value)
+    }
+
+    /// `anchor` is the path to `value` from the root value under test, so a
+    /// rejection nested several levels down can still be reported precisely.
+    /// `None` at the root, since a bare value being tested has no name to
+    /// anchor a nested path to; a `Struct` or `Enum` invents one from its own
+    /// type name the first time a path is needed.
+    fn convert(anchor: Option<&str>, value: &Value) -> Result<MapKey, InvalidKey> {
+        match value {
+            Value::Unit => Ok(MapKey::Unit),
+            Value::Bool(b) => Ok(MapKey::Bool(*b)),
+            Value::Int(n) => Ok(MapKey::Int(*n)),
+            Value::Duration(ns) => Ok(MapKey::Duration(*ns)),
+            Value::Str(s) => Ok(MapKey::Str(s.to_string())),
+            Value::Enum(e) => {
+                let base = anchor
+                    .map(str::to_string)
+                    .unwrap_or_else(|| format!("{}.{}", short_name(&e.type_name), e.case));
+                let mut payload = Vec::with_capacity(e.payload.len());
+                for (i, item) in e.payload.iter().enumerate() {
+                    payload.push(Self::convert(Some(&format!("{base}({i})")), item)?);
+                }
+                Ok(MapKey::EnumCase(
+                    e.type_name.to_string(),
+                    e.case.to_string(),
+                    payload,
+                ))
+            }
+            Value::Struct(s) => {
+                let base = anchor
+                    .map(str::to_string)
+                    .unwrap_or_else(|| short_name(&s.type_name).to_string());
+                let mut fields = Vec::with_capacity(s.fields.len());
+                for (name, field) in &s.fields {
+                    let child = Self::convert(Some(&format!("{base}.{name}")), field)?;
+                    fields.push((name.to_string(), child));
+                }
+                Ok(MapKey::Struct(s.type_name.to_string(), fields))
+            }
+            Value::Array(items) => {
+                let base = anchor.unwrap_or_default();
+                let mut converted = Vec::with_capacity(items.len());
+                for (i, item) in items.iter().enumerate() {
+                    converted.push(Self::convert(Some(&format!("{base}[{i}]")), item)?);
+                }
+                Ok(MapKey::Array(converted))
+            }
+            // A `Set`'s elements are already `MapKey`s by construction, so
+            // this never fails.
+            Value::Set(items) => Ok(MapKey::Set((**items).clone())),
+            Value::Map(entries) => {
+                let base = anchor.unwrap_or_default();
+                let mut converted = BTreeMap::new();
+                for (key, item) in entries.iter() {
+                    let child = Self::convert(Some(&format!("{base}[{key}]")), item)?;
+                    converted.insert(key.clone(), child);
+                }
+                Ok(MapKey::Map(converted))
+            }
+            Value::Float(_) => Err(InvalidKey {
+                path: anchor.map(str::to_string).unwrap_or_default(),
+                type_name: "Float".to_string(),
+            }),
+            other => Err(InvalidKey {
+                path: anchor.map(str::to_string).unwrap_or_default(),
+                type_name: other.type_name(),
+            }),
+        }
+    }
+
+    /// Renders this key back as an ordinary value, for `keys()`, `Set`
+    /// iteration, and `toArray()`.
+    pub fn to_value(&self) -> Value {
+        match self {
+            MapKey::Unit => Value::Unit,
+            MapKey::Bool(b) => Value::Bool(*b),
+            MapKey::Int(n) => Value::Int(*n),
+            MapKey::Duration(ns) => Value::Duration(*ns),
+            MapKey::Str(s) => Value::Str(s.as_str().into()),
+            MapKey::EnumCase(type_name, case, payload) => Value::Enum(Box::new(EnumValue {
+                type_name: type_name.as_str().into(),
+                case: case.as_str().into(),
+                payload: payload.iter().map(MapKey::to_value).collect(),
+            })),
+            MapKey::Struct(type_name, fields) => Value::Struct(Box::new(StructValue {
+                type_name: type_name.as_str().into(),
+                fields: fields
+                    .iter()
+                    .map(|(name, key)| (name.as_str().into(), key.to_value()))
+                    .collect(),
+            })),
+            MapKey::Array(items) => Value::Array(items.iter().map(MapKey::to_value).collect()),
+            MapKey::Set(items) => Value::Set(Rc::new(items.clone())),
+            MapKey::Map(entries) => Value::Map(Rc::new(
+                entries
+                    .iter()
+                    .map(|(key, value)| (key.clone(), value.to_value()))
+                    .collect(),
+            )),
+        }
+    }
+}
+
+/// The unqualified name shown in a key path, matching how `Value`'s
+/// `Display` shortens a struct's fully qualified type name.
+fn short_name(qualified: &str) -> &str {
+    qualified.rsplit('.').next().unwrap_or(qualified)
+}
+
+/// A key displays exactly as the value it represents would, so a `Map`'s
+/// entries read the same way here as they would anywhere else in the
+/// language.
+impl fmt::Display for MapKey {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.to_value())
+    }
 }
 
 impl Value {
@@ -272,6 +461,17 @@ impl Value {
             (Value::Array(a), Value::Array(b)) => {
                 a.len() == b.len() && a.iter().zip(b.iter()).all(|(x, y)| x.eq_value(y))
             }
+            // Both sides are `BTreeMap`s keyed the same way, so two maps with
+            // the same keys line up entry-for-entry once both are in their
+            // one true ascending order.
+            (Value::Map(a), Value::Map(b)) => {
+                a.len() == b.len()
+                    && a.iter()
+                        .zip(b.iter())
+                        .all(|((ka, va), (kb, vb))| ka == kb && va.eq_value(vb))
+            }
+            // `BTreeSet<MapKey>` already compares as a set of keys.
+            (Value::Set(a), Value::Set(b)) => a == b,
             (Value::Struct(a), Value::Struct(b)) => {
                 a.type_name == b.type_name
                     && a.fields.len() == b.fields.len()
@@ -304,6 +504,10 @@ impl Value {
                     inclusive_end: b_inclusive,
                 },
             ) => a == c && b == d && a_inclusive == b_inclusive,
+            // `Vector` falls through to `false` deliberately: it is a
+            // growable shared handle, not a value, so whether `==` should
+            // compare handles or elements is the identity question the
+            // Language Card leaves to `is`, not a gap in this match.
             _ => false,
         }
     }
@@ -345,13 +549,7 @@ impl fmt::Display for Value {
                     if i > 0 {
                         f.write_str(", ")?;
                     }
-                    match k {
-                        MapKey::Bool(b) => write!(f, "{b}")?,
-                        MapKey::Int(n) => write!(f, "{n}")?,
-                        MapKey::Str(s) => write!(f, "{s}")?,
-                        MapKey::EnumCase(t, c) => write!(f, "{t}.{c}")?,
-                    }
-                    write!(f, ": {v}")?;
+                    write!(f, "{k}: {v}")?;
                 }
                 f.write_str("}")
             }
@@ -575,5 +773,262 @@ mod tests {
         let bounds = RangeBounds::of(i64::MAX, i64::MAX, true);
         assert_eq!(bounds.len(), 1);
         assert!(bounds.contains(i64::MAX));
+    }
+
+    fn payload_free_case(type_name: &str, case: &str) -> Value {
+        Value::Enum(Box::new(EnumValue {
+            type_name: type_name.into(),
+            case: case.into(),
+            payload: Vec::new(),
+        }))
+    }
+
+    fn point(x: i64, y: i64) -> Value {
+        Value::Struct(Box::new(StructValue {
+            type_name: "test.Point".into(),
+            fields: vec![("x".into(), Value::Int(x)), ("y".into(), Value::Int(y))],
+        }))
+    }
+
+    #[test]
+    fn map_keys_accept_the_primitive_shapes() {
+        assert_eq!(MapKey::from_value(&Value::Unit), Ok(MapKey::Unit));
+        assert_eq!(
+            MapKey::from_value(&Value::Bool(true)),
+            Ok(MapKey::Bool(true))
+        );
+        assert_eq!(MapKey::from_value(&Value::Int(7)), Ok(MapKey::Int(7)));
+        assert_eq!(
+            MapKey::from_value(&Value::Duration(500)),
+            Ok(MapKey::Duration(500))
+        );
+        assert_eq!(
+            MapKey::from_value(&Value::Str("a".into())),
+            Ok(MapKey::Str("a".to_string()))
+        );
+        assert_eq!(
+            MapKey::from_value(&payload_free_case("Color", "Red")),
+            Ok(MapKey::EnumCase(
+                "Color".to_string(),
+                "Red".to_string(),
+                Vec::new()
+            ))
+        );
+    }
+
+    #[test]
+    fn a_struct_built_only_from_admissible_fields_is_a_valid_key() {
+        let key = MapKey::from_value(&point(1, 2)).expect("a struct of Ints is a valid key");
+        assert_eq!(
+            key,
+            MapKey::Struct(
+                "test.Point".to_string(),
+                vec![
+                    ("x".to_string(), MapKey::Int(1)),
+                    ("y".to_string(), MapKey::Int(2)),
+                ]
+            )
+        );
+    }
+
+    #[test]
+    fn a_struct_nested_inside_a_struct_is_a_valid_key_when_every_field_is() {
+        let line = Value::Struct(Box::new(StructValue {
+            type_name: "test.Line".into(),
+            fields: vec![("from".into(), point(0, 0)), ("to".into(), point(1, 1))],
+        }));
+        let key = MapKey::from_value(&line).expect("nested structs of Ints are a valid key");
+        assert_eq!(
+            key,
+            MapKey::Struct(
+                "test.Line".to_string(),
+                vec![
+                    (
+                        "from".to_string(),
+                        MapKey::Struct(
+                            "test.Point".to_string(),
+                            vec![
+                                ("x".to_string(), MapKey::Int(0)),
+                                ("y".to_string(), MapKey::Int(0)),
+                            ]
+                        )
+                    ),
+                    (
+                        "to".to_string(),
+                        MapKey::Struct(
+                            "test.Point".to_string(),
+                            vec![
+                                ("x".to_string(), MapKey::Int(1)),
+                                ("y".to_string(), MapKey::Int(1)),
+                            ]
+                        )
+                    ),
+                ]
+            )
+        );
+    }
+
+    #[test]
+    fn an_enum_case_with_an_admissible_payload_is_a_valid_key() {
+        let value = Value::Enum(Box::new(EnumValue {
+            type_name: "test.Colour".into(),
+            case: "Named".into(),
+            payload: vec![Value::Str("teal".into())],
+        }));
+        assert_eq!(
+            MapKey::from_value(&value),
+            Ok(MapKey::EnumCase(
+                "test.Colour".to_string(),
+                "Named".to_string(),
+                vec![MapKey::Str("teal".to_string())]
+            ))
+        );
+    }
+
+    #[test]
+    fn an_array_built_only_from_admissible_elements_is_a_valid_key() {
+        let value = Value::Array(vec![Value::Int(1), Value::Int(2)].into());
+        assert_eq!(
+            MapKey::from_value(&value),
+            Ok(MapKey::Array(vec![MapKey::Int(1), MapKey::Int(2)]))
+        );
+    }
+
+    #[test]
+    fn map_keys_reject_a_float_for_a_reason_distinct_from_mutability() {
+        let invalid = MapKey::from_value(&Value::Float(1.0)).unwrap_err();
+        assert_eq!(invalid.type_name, "Float");
+        assert!(invalid.path.is_empty());
+        assert!(
+            invalid.rule().contains("NaN"),
+            "a Float's rejection must cite the broken order, not mutability: {}",
+            invalid.rule()
+        );
+    }
+
+    #[test]
+    fn map_keys_reject_a_vector_naming_it_directly_at_the_root() {
+        let invalid =
+            MapKey::from_value(&Value::Vector(VectorStorage::new(Vec::new()))).unwrap_err();
+        assert_eq!(invalid.type_name, "Vector");
+        assert!(invalid.path.is_empty());
+        assert!(
+            invalid.rule().contains("Mutable handles"),
+            "{}",
+            invalid.rule()
+        );
+    }
+
+    #[test]
+    fn a_struct_containing_a_vector_is_rejected_naming_the_nested_field() {
+        let value = Value::Struct(Box::new(StructValue {
+            type_name: "test.Point".into(),
+            fields: vec![("tags".into(), Value::Vector(VectorStorage::new(Vec::new())))],
+        }));
+        let invalid = MapKey::from_value(&value).unwrap_err();
+        assert_eq!(invalid.type_name, "Vector");
+        assert_eq!(invalid.path, "Point.tags");
+    }
+
+    #[test]
+    fn a_map_key_round_trips_through_to_value() {
+        for key in [
+            MapKey::Unit,
+            MapKey::Bool(false),
+            MapKey::Int(42),
+            MapKey::Duration(500),
+            MapKey::Str("hi".to_string()),
+            MapKey::EnumCase("Color".to_string(), "Red".to_string(), Vec::new()),
+            MapKey::Array(vec![MapKey::Int(1), MapKey::Int(2)]),
+            MapKey::Struct(
+                "test.Point".to_string(),
+                vec![
+                    ("x".to_string(), MapKey::Int(1)),
+                    ("y".to_string(), MapKey::Int(2)),
+                ],
+            ),
+        ] {
+            let value = key.to_value();
+            assert_eq!(MapKey::from_value(&value), Ok(key));
+        }
+    }
+
+    #[test]
+    fn a_set_is_a_valid_key_because_its_elements_are_already_map_keys() {
+        let inner = Value::Set(Rc::new(BTreeSet::from([MapKey::Int(1), MapKey::Int(2)])));
+        assert_eq!(
+            MapKey::from_value(&inner),
+            Ok(MapKey::Set(BTreeSet::from([
+                MapKey::Int(1),
+                MapKey::Int(2)
+            ])))
+        );
+    }
+
+    #[test]
+    fn a_map_is_a_valid_key_when_every_value_is_admissible() {
+        let inner = Value::Map(Rc::new(BTreeMap::from([(
+            MapKey::Str("a".to_string()),
+            Value::Int(1),
+        )])));
+        assert_eq!(
+            MapKey::from_value(&inner),
+            Ok(MapKey::Map(BTreeMap::from([(
+                MapKey::Str("a".to_string()),
+                MapKey::Int(1)
+            )])))
+        );
+    }
+
+    #[test]
+    fn a_map_containing_an_inadmissible_value_is_rejected_naming_the_entry() {
+        let inner = Value::Map(Rc::new(BTreeMap::from([(
+            MapKey::Str("a".to_string()),
+            Value::Vector(VectorStorage::new(Vec::new())),
+        )])));
+        let invalid = MapKey::from_value(&inner).unwrap_err();
+        assert_eq!(invalid.type_name, "Vector");
+        assert_eq!(invalid.path, "[a]");
+    }
+
+    fn map_of(pairs: Vec<(MapKey, Value)>) -> Value {
+        Value::Map(Rc::new(pairs.into_iter().collect()))
+    }
+
+    fn set_of(keys: Vec<MapKey>) -> Value {
+        Value::Set(Rc::new(keys.into_iter().collect()))
+    }
+
+    #[test]
+    fn maps_compare_structurally() {
+        let a = map_of(vec![(MapKey::Str("x".to_string()), Value::Int(1))]);
+        let b = map_of(vec![(MapKey::Str("x".to_string()), Value::Int(1))]);
+        let c = map_of(vec![(MapKey::Str("x".to_string()), Value::Int(2))]);
+        assert!(a.eq_value(&b));
+        assert!(!a.eq_value(&c));
+    }
+
+    #[test]
+    fn sets_compare_structurally() {
+        let a = set_of(vec![MapKey::Int(1), MapKey::Int(2)]);
+        let b = set_of(vec![MapKey::Int(2), MapKey::Int(1)]);
+        let c = set_of(vec![MapKey::Int(1)]);
+        assert!(a.eq_value(&b));
+        assert!(!a.eq_value(&c));
+    }
+
+    #[test]
+    fn a_map_shows_entries_in_ascending_key_order() {
+        let value = map_of(vec![
+            (MapKey::Int(2), Value::Str("b".into())),
+            (MapKey::Int(1), Value::Str("a".into())),
+        ]);
+        assert_eq!(shown(value), "{1: a, 2: b}");
+    }
+
+    #[test]
+    fn a_set_shows_elements_in_ascending_order() {
+        let value = set_of(vec![MapKey::Int(3), MapKey::Int(1), MapKey::Int(2)]);
+        assert_eq!(shown(value), "{1, 2, 3}");
     }
 }

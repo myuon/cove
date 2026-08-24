@@ -1,0 +1,10 @@
+literal {a, b, c}
+length 3 isEmpty false
+contains true false
+toArray [a, b, c]
+inserted {a, b, c, d}
+removed {a, c, d}
+original is unchanged {a, b, c}
+iterated abc
+empty {} true 0
+equality true false

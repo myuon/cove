@@ -1285,8 +1285,23 @@ impl<'a> Interpreter<'a> {
                 end,
                 inclusive_end,
             } => Ok(RangeBounds::of(start, end, inclusive_end).items()),
+            // A `Set` is `BTreeSet<MapKey>`-backed, so it iterates its
+            // elements in ascending order, the same order `Display` shows.
+            Value::Set(items) => Ok(items.iter().map(|key| key.to_value()).collect()),
+            // A `Map` iterates in ascending key order, matching its
+            // `BTreeMap` storage. Each binding is a `MapEntry` carrying that
+            // iteration's `key` and `value`, the same shape `Map.of` accepts.
+            Value::Map(entries) => Ok(entries
+                .iter()
+                .map(|(key, value)| {
+                    Value::Struct(Box::new(StructValue {
+                        type_name: "MapEntry".into(),
+                        fields: vec![("key".into(), key.to_value()), ("value".into(), value.clone())],
+                    }))
+                })
+                .collect()),
             other => Err(RuntimeError::new(format!(
-                "`for` iterates an `Array`, a `Vector`, or a `Range`, but found `{}`",
+                "`for` iterates an `Array`, a `Vector`, a `Range`, a `Set`, or a `Map`, but found `{}`",
                 other.type_name()
             ))
             .at(expr.span)
@@ -1479,6 +1494,10 @@ impl<'a> Interpreter<'a> {
                     let args = self.eval_args(env, args, trailing)?;
                     let values = plain_values(args, name)?;
                     return Ok(self.call_host(&host, name, values, span)?);
+                }
+                if name == "MapEntry" {
+                    let args = self.eval_args(env, args, trailing)?;
+                    return Ok(init_map_entry(args, span)?);
                 }
                 if builtins::is_constructor(name) {
                     let args = self.eval_args(env, args, trailing)?;
@@ -2048,6 +2067,33 @@ fn unary(op: UnaryOp, value: Value, span: Span) -> Result<Value, RuntimeError> {
 }
 
 // -------------------------------------------------------------- arguments
+
+/// The labels `MapEntry(key:, value:)` accepts, in declaration order.
+const MAP_ENTRY_FIELDS: [&str; 2] = ["key", "value"];
+
+/// `MapEntry(key: ..., value: ...)` is a synthesized labeled call for a
+/// builtin struct, exactly like a user struct's synthesized initializer. It
+/// exists only so `Map.of` has an ordinary call-shaped way to build the pairs
+/// it collects; it is not a declared struct because nothing else derives it.
+fn init_map_entry(args: Vec<EvaluatedArg>, span: Span) -> Result<Value, RuntimeError> {
+    let (mut slots, _) = assign_labels(&MAP_ENTRY_FIELDS, args, "MapEntry", false)?;
+    let mut fields = Vec::with_capacity(MAP_ENTRY_FIELDS.len());
+    for (index, field_name) in MAP_ENTRY_FIELDS.iter().enumerate() {
+        let Some(arg) = slots[index].take() else {
+            return Err(RuntimeError::new(format!(
+                "`MapEntry` needs a value for field `{field_name}`"
+            ))
+            .at(span)
+            .with_rule("Struct initialization is a synthesized labeled call.")
+            .with_help(format!("add `{field_name}: <value>` to the initializer")));
+        };
+        fields.push(((*field_name).into(), value_of(&arg, field_name, arg.span)?));
+    }
+    Ok(Value::Struct(Box::new(StructValue {
+        type_name: "MapEntry".into(),
+        fields,
+    })))
+}
 
 /// Matches call-site arguments to declared names.
 ///
@@ -3453,6 +3499,8 @@ export fn main() -> Result<Unit, Error> {
             "  let n = Vector.of(1, 2).count()",
             "  let n = \"a b\".count()",
             "  let n = (0..<3).count()",
+            "  let n = Map.of().count()",
+            "  let n = Set.of().count()",
         ];
         for body in bodies {
             let error = error_of(body);
@@ -3477,6 +3525,286 @@ export fn main() -> Result<Unit, Error> {
             r#"  console.println("{[1, 2].length()} {Vector.of(1).length()} {"ab".length()} {(0..<4).length()}")?"#,
         );
         assert_eq!(output, "2 1 2 4\n");
+    }
+
+    // ------------------------------------------------------- map and set
+
+    #[test]
+    fn map_of_builds_a_map_and_answers_its_methods() {
+        let output = output_of(
+            r#"  let ages = Map.of(
+    MapEntry(key: "Alice", value: 30),
+    MapEntry(key: "Bob", value: 25)
+  )
+  console.println("{ages}")?
+  console.println("{ages.length()} {ages.isEmpty()}")?
+  console.println("{ages.get("Alice")} {ages.get("Zoe")}")?
+  console.println("{ages.contains("Bob")} {ages.contains("Zoe")}")?
+  console.println("{ages.keys()} {ages.values()}")?"#,
+        );
+        assert_eq!(
+            output,
+            "{Alice: 30, Bob: 25}\n2 false\nSome(30) None\ntrue false\n[Alice, Bob] [30, 25]\n"
+        );
+    }
+
+    #[test]
+    fn an_empty_map_is_empty() {
+        let output = output_of(r#"  console.println("{Map.of()} {Map.of().isEmpty()}")?"#);
+        assert_eq!(output, "{} true\n");
+    }
+
+    #[test]
+    fn map_of_rejects_a_duplicate_key() {
+        let error = error_of(
+            r#"  let bad = Map.of(
+    MapEntry(key: "x", value: 1),
+    MapEntry(key: "x", value: 2)
+  )"#,
+        );
+        assert_eq!(
+            error.message,
+            "`Map.of` was given the key `x` more than once"
+        );
+    }
+
+    #[test]
+    fn map_of_rejects_an_argument_that_is_not_a_map_entry() {
+        let error = error_of("  let bad = Map.of(1)");
+        assert!(
+            error.message.contains("`Map.of` expects `MapEntry` values"),
+            "{}",
+            error.message
+        );
+    }
+
+    #[test]
+    fn map_entry_labels_are_key_then_value_in_declaration_order() {
+        let error = error_of(r#"  let bad = MapEntry(value: 1, key: "x")"#);
+        assert!(
+            error.message.contains("out of declaration order"),
+            "{}",
+            error.message
+        );
+    }
+
+    #[test]
+    fn map_get_and_contains_reject_an_invalid_key_type() {
+        let error = error_of(
+            r#"  let m = Map.of()
+  let bad = m.get(Vector.of(1))"#,
+        );
+        assert_eq!(
+            error.message,
+            "`Map.get` cannot use a `Vector` as a map key"
+        );
+        assert!(
+            error
+                .rule
+                .as_deref()
+                .unwrap_or_default()
+                .contains("Mutable handles and structs containing them are not valid map keys"),
+            "{:?}",
+            error.rule
+        );
+    }
+
+    #[test]
+    fn map_inserted_and_removed_return_a_new_map_and_do_not_mutate_the_original() {
+        let output = output_of(
+            r#"  let original = Map.of(MapEntry(key: "a", value: 1))
+  let inserted = original.inserted("b", 2)
+  let removed = inserted.removed("a")
+  console.println("{original} {inserted} {removed}")?"#,
+        );
+        assert_eq!(output, "{a: 1} {a: 1, b: 2} {b: 2}\n");
+    }
+
+    #[test]
+    fn maps_compare_by_structural_equality() {
+        let output = output_of(
+            r#"  let a = Map.of(MapEntry(key: "x", value: 1))
+  let b = Map.of(MapEntry(key: "x", value: 1))
+  let c = Map.of(MapEntry(key: "x", value: 2))
+  console.println("{a == b} {a == c}")?"#,
+        );
+        assert_eq!(output, "true false\n");
+    }
+
+    #[test]
+    fn map_iterates_map_entries_in_ascending_key_order() {
+        let output = output_of(
+            r#"  let scores = Map.of(
+    MapEntry(key: "b", value: 2),
+    MapEntry(key: "a", value: 1)
+  )
+  for entry in scores {
+    console.println("{entry.key} {entry.value}")?
+  }"#,
+        );
+        assert_eq!(output, "a 1\nb 2\n");
+    }
+
+    #[test]
+    fn set_of_builds_a_set_and_answers_its_methods() {
+        let output = output_of(
+            r#"  let names = Set.of("b", "a", "c")
+  console.println("{names}")?
+  console.println("{names.length()} {names.isEmpty()}")?
+  console.println("{names.contains("a")} {names.contains("z")}")?
+  console.println("{names.toArray()}")?"#,
+        );
+        assert_eq!(output, "{a, b, c}\n3 false\ntrue false\n[a, b, c]\n");
+    }
+
+    #[test]
+    fn set_of_rejects_a_duplicate_element() {
+        let error = error_of("  let bad = Set.of(1, 1)");
+        assert_eq!(
+            error.message,
+            "`Set.of` was given the element `1` more than once"
+        );
+    }
+
+    #[test]
+    fn set_of_rejects_an_invalid_element_type() {
+        let error = error_of("  let bad = Set.of(Vector.of(1))");
+        assert_eq!(
+            error.message,
+            "`Set.of` cannot use a `Vector` as a set element"
+        );
+    }
+
+    #[test]
+    fn set_inserted_and_removed_return_a_new_set_and_do_not_mutate_the_original() {
+        let output = output_of(
+            r#"  let original = Set.of(1, 2)
+  let inserted = original.inserted(3)
+  let removed = inserted.removed(1)
+  console.println("{original} {inserted} {removed}")?"#,
+        );
+        assert_eq!(output, "{1, 2} {1, 2, 3} {2, 3}\n");
+    }
+
+    #[test]
+    fn sets_compare_by_structural_equality() {
+        let output = output_of(
+            r#"  let a = Set.of(1, 2)
+  let b = Set.of(2, 1)
+  let c = Set.of(1)
+  console.println("{a == b} {a == c}")?"#,
+        );
+        assert_eq!(output, "true false\n");
+    }
+
+    #[test]
+    fn set_iterates_in_ascending_order() {
+        let output = output_of(
+            r#"  var total = 0
+  for item in Set.of(3, 1, 2) {
+    total = total * 10 + item
+  }
+  console.println("{total}")?"#,
+        );
+        assert_eq!(output, "123\n");
+    }
+
+    #[test]
+    fn a_payload_free_enum_case_is_a_valid_map_key() {
+        let run = colour_body(
+            r#"  let byColour = Map.of(MapEntry(key: Colour.Red, value: "stop"))
+  console.println("{byColour.get(Colour.Red)}")?"#,
+        );
+        assert_eq!(run.output, "Some(stop)\n");
+    }
+
+    #[test]
+    fn an_enum_case_with_a_payload_is_a_valid_set_element() {
+        let run = colour_body(
+            r#"  let colours = Set.of(Colour.Red, Colour.Named("teal"))
+  console.println("{colours.contains(Colour.Named("teal"))} {colours.contains(Colour.Named("blue"))}")?"#,
+        );
+        assert_eq!(run.output, "true false\n");
+    }
+
+    #[test]
+    fn a_struct_built_only_from_ints_is_a_valid_set_element() {
+        let run = point_body(
+            r#"  let points = Set.of(Point(x: 1, y: 2), Point(x: 3, y: 4))
+  console.println("{points.contains(Point(x: 1, y: 2))} {points.contains(Point(x: 9, y: 9))}")?"#,
+        );
+        assert_eq!(run.output, "true false\n");
+    }
+
+    #[test]
+    fn a_struct_nested_inside_a_struct_is_a_valid_set_element() {
+        let source = r#"
+use console.println
+
+struct Address {
+  city: String
+}
+
+struct Person {
+  name: String
+  address: Address
+}
+
+export fn main() -> Result<Unit, Error> {
+  let people = Set.of(
+    Person(name: "Ada", address: Address(city: "London")),
+    Person(name: "Grace", address: Address(city: "New York"))
+  )
+  console.println("{people.contains(Person(name: "Ada", address: Address(city: "London")))}")?
+  console.println("{people.contains(Person(name: "Ada", address: Address(city: "Paris")))}")?
+  Ok(())
+}
+"#;
+        assert_eq!(run_entry_of(source, "main", &[]).output, "true\nfalse\n");
+    }
+
+    #[test]
+    fn an_array_built_only_from_ints_is_a_valid_set_element() {
+        let output = output_of(
+            r#"  let pairs = Set.of([1, 2], [3, 4])
+  console.println("{pairs.contains([1, 2])} {pairs.contains([9])}")?"#,
+        );
+        assert_eq!(output, "true false\n");
+    }
+
+    #[test]
+    fn a_struct_containing_a_vector_is_rejected_naming_the_nested_field() {
+        let source = r#"
+use console.println
+
+struct Point {
+  tags: Vector<Int>
+}
+
+export fn main() -> Result<Unit, Error> {
+  let bad = Set.of(Point(tags: Vector.of(1)))
+  Ok(())
+}
+"#;
+        let error = run_entry_of(source, "main", &[]).error();
+        assert_eq!(
+            error.message,
+            "`Set.of` cannot use a `Vector` inside `Point.tags` as a set element"
+        );
+    }
+
+    #[test]
+    fn a_float_is_rejected_as_a_key_for_a_reason_distinct_from_mutability() {
+        let error = error_of("  let bad = Set.of(1.5)");
+        assert_eq!(
+            error.message,
+            "`Set.of` cannot use a `Float` as a set element"
+        );
+        assert!(
+            error.rule.as_deref().unwrap_or_default().contains("NaN"),
+            "{:?}",
+            error.rule
+        );
     }
 
     // --------------------------------- associated functions on an enum
