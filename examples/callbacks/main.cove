@@ -3,17 +3,17 @@ use console.println
 use clock.every
 use database
 
-/// A callback retained by the router and invoked for each request.
-export type Handler = retain async fn(
+/// A callback stored by the router and invoked for each request.
+export type Handler = async fn(
   request: http.Request
 ) -> Result<http.Response, Error>
 
-/// A callback retained by the event bus.
-export type EventHandler = retain async fn(
+/// A callback stored by the event bus.
+export type EventHandler = async fn(
   event: Event
 ) -> Result<Unit, Error>
 
-/// Application dependencies are read-only and cheap to retain in handlers.
+/// Application dependencies are shallow-copied into handlers.
 export struct App {
   repository: BookingRepository
   metrics: Shared<Metrics>
@@ -42,7 +42,7 @@ export struct Router {
 }
 
 impl Router {
-  /// Retains a handler for future requests.
+  /// Stores a handler for future requests.
   fn get(var self, path: String, handler: Handler) {
     self.routes.push(Route {
       method: http.Method.Get,
@@ -51,7 +51,7 @@ impl Router {
     })
   }
 
-  /// Retains a handler for future requests.
+  /// Stores a handler for future requests.
   fn post(var self, path: String, handler: Handler) {
     self.routes.push(Route {
       method: http.Method.Post,
@@ -61,13 +61,13 @@ impl Router {
   }
 }
 
-/// Event dispatcher that retains its subscribers.
+/// Event dispatcher that stores its subscribers.
 export struct EventBus {
   subscribers: Map<String, List<EventHandler>>
 }
 
 impl EventBus {
-  /// Retains a callback until the bus is released.
+  /// Stores a callback until the bus is released.
   fn on(var self, name: String, handler: EventHandler) {
     self.subscribers[name].push(handler)
   }
@@ -86,7 +86,7 @@ impl EventBus {
   }
 }
 
-/// Adds logging and metrics around a retained handler.
+/// Adds logging and metrics around a stored handler.
 fn withObservability(
   app: App,
   next: Handler
@@ -107,7 +107,7 @@ fn withObservability(
   }
 }
 
-/// Retries an operation only during this call; it does not retain the callback.
+/// Retries an operation only during this call.
 async fn retry<T>(
   attempts: Int,
   operation: async fn(attempt: Int) -> Result<T, Error>
@@ -124,7 +124,7 @@ async fn retry<T>(
   Err(lastError)
 }
 
-/// Builds routes whose callbacks retain only read-only App data and Shared state.
+/// Builds routes whose callbacks capture App handles and Shared state.
 fn buildRouter(
   app: App,
   events: EventBus
@@ -165,7 +165,7 @@ fn buildEvents() -> EventBus {
   events
 }
 
-/// Runs a server with retained callbacks and structured background work.
+/// Runs a server with stored callbacks and structured background work.
 export async fn main() -> Result<Unit, Error> {
   let repository = await BookingRepository.connect()?
   let metrics = Shared(Metrics {
