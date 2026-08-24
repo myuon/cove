@@ -2,6 +2,10 @@
 entry = "hello.main"
 allow = ["console"]
 
+[run.config]
+entry = "config.loadConfig"
+allow = ["env"]
+
 [run.server]
 entry = "server.main"
 allow = ["network", "console"]

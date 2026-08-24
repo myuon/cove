@@ -19,8 +19,26 @@ design is recorded in [ADR 0001](docs/adr/0001-mvp-language-design.md).
 
 ## Status
 
-No compiler or runtime has been implemented yet. Syntax shown in the ADR is
-illustrative and may change.
+An MVP compiler front end and interpreter exist. `cove check` and `cove outline`
+cover every representative program; `cove run` executes the ones that do not yet
+need asynchronous execution.
+
+```console
+$ cd examples
+$ cove check
+checked 7 module(s), 7 file(s)
+$ cove run hello
+Hello, world!
+```
+
+Implemented: lexer, parser, directory modules, `export` visibility, derived
+outlines and capability requirements, a tree-walking interpreter, and Host API
+dispatch with grant enforcement. Not yet implemented: static type checking,
+`async`, tasks, `cove fmt`, `cove build`, `cove test`, and the garbage
+collector. The implementation direction is recorded in
+[ADR 0002](docs/adr/0002-implementation-language-and-backend.md).
+
+Syntax is still provisional and may change.
 
 ## Name
 

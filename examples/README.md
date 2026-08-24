@@ -1,7 +1,11 @@
 # Representative programs
 
-These programs are executable design tests for Cove. The compiler does not
-exist yet, so the syntax is provisional.
+These programs are executable design tests for Cove. The syntax is still
+provisional.
+
+`hello`, `config`, `values`, and `restricted` run today. `server`, `tasks`, and
+`callbacks` parse, resolve, and report their required capabilities, but stop at
+execution because asynchronous functions are not implemented yet.
 
 Together they test the core product hypotheses:
 
@@ -17,7 +21,7 @@ Together they test the core product hypotheses:
 | `cove.toml` | Host-selected entry functions and granted capabilities |
 
 Each directory is a module; declarations marked `export` form its public API.
-The first implementation milestone should make `hello/` run. The MVP is
+The first implementation milestone, making `hello/` run, is done. The MVP is
 not complete until all seven programs have defined behavior in both diagnostics
 and execution.
 
