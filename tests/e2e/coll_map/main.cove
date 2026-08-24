@@ -4,7 +4,7 @@ use console.println
 export fn main() -> Result<Unit, Error> {
   let ages = Map.of(
     MapEntry(key: "Alice", value: 30),
-    MapEntry(key: "Bob", value: 25)
+    MapEntry(key: "Bob", value: 25),
   )
   println("literal {ages}")?
   println("length {ages.length()} isEmpty {ages.isEmpty()}")?
@@ -29,7 +29,7 @@ export fn main() -> Result<Unit, Error> {
 
   let same = Map.of(
     MapEntry(key: "Alice", value: 30),
-    MapEntry(key: "Bob", value: 25)
+    MapEntry(key: "Bob", value: 25),
   )
   println("equality {ages == same} {ages == inserted}")?
   Ok(())

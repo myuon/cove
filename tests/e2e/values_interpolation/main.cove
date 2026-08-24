@@ -1,7 +1,10 @@
 use console.println
 
 /// A value with a field and a method worth interpolating.
-export struct Reading { label: String, celsius: Int }
+export struct Reading {
+  label: String
+  celsius: Int
+}
 
 impl Reading {
   /// Returns this reading in tenths of a degree.

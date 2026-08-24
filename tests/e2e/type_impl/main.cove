@@ -1,7 +1,10 @@
 use console.println
 
 /// A counter with methods that read and mutate it.
-export struct Counter { hits: Int, label: String }
+export struct Counter {
+  hits: Int
+  label: String
+}
 
 impl Counter {
   /// Builds a counter that starts at zero.

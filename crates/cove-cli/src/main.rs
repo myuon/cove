@@ -21,10 +21,16 @@ const USAGE: &str = "\
 cove — the Cove toolchain
 
 usage:
+  cove fmt [path] [--check]            format every `.cove` file in the package
   cove check [path] [--deny-warnings]  parse and resolve every module in the package
   cove run <name> [flags] [args]       run the entry selected by `[run.<name>]` in cove.toml
   cove outline [path]                  show modules and their exported declarations
   cove help                            show this message
+
+`cove fmt` rewrites files in place and prints how many changed. `--check`
+writes nothing, prints the path of every file that would change, and exits
+non-zero when there is one, which is the form to run in CI. A file that does
+not parse is reported and never rewritten.
 
 `--deny-warnings` fails `cove check` when the package has any warnings.
 
@@ -42,6 +48,7 @@ fn main() -> ExitCode {
     let command = args.first().map(String::as_str).unwrap_or("help");
 
     let result = match command {
+        "fmt" => cmd_fmt(&args[1..]),
         "check" => cmd_check(&args[1..]),
         "run" => cmd_run(&args[1..]),
         "outline" => cmd_outline(args.get(1).map(Path::new)),
@@ -75,7 +82,7 @@ fn main() -> ExitCode {
                 ExitCode::SUCCESS
             }
         }
-        Err(CliError::WarningsDenied) => ExitCode::FAILURE,
+        Err(CliError::WarningsDenied) | Err(CliError::Unformatted) => ExitCode::FAILURE,
     }
 }
 
@@ -88,6 +95,9 @@ enum CliError {
     /// `cove check --deny-warnings` found warnings. The warnings and summary
     /// were already printed, so there is nothing left to say.
     WarningsDenied,
+    /// `cove fmt --check` found files that are not formatted. Their paths
+    /// were already printed, so there is nothing left to say.
+    Unformatted,
 }
 
 impl From<String> for CliError {
@@ -136,6 +146,128 @@ fn find_root(start: &Path) -> Option<PathBuf> {
         dir = current.parent();
     }
     None
+}
+
+/// Formats every `.cove` file the user asked for, or reports the ones that
+/// are not formatted when `--check` is given.
+fn cmd_fmt(args: &[String]) -> Result<(), CliError> {
+    let mut check = false;
+    let mut path: Option<&Path> = None;
+    for arg in args {
+        if arg == "--check" {
+            check = true;
+        } else {
+            path = Some(Path::new(arg.as_str()));
+        }
+    }
+
+    let mut sources = SourceMap::new();
+    let mut diagnostics = Vec::new();
+    let mut changed: Vec<PathBuf> = Vec::new();
+
+    for target in fmt_targets(path)? {
+        let text = std::fs::read_to_string(&target)
+            .map_err(|e| CliError::Message(format!("cannot read `{}`: {e}", target.display())))?;
+        let file = sources.add(&target, text.clone());
+        // A file that does not parse is reported and never rewritten.
+        let unit = match cove_syntax::parse_file(&sources, file) {
+            Ok(unit) => unit,
+            Err(items) => {
+                diagnostics.extend(items);
+                continue;
+            }
+        };
+        let formatted = cove_syntax::format::format_source(&text, &unit);
+        if formatted == text {
+            continue;
+        }
+        if !check {
+            std::fs::write(&target, &formatted).map_err(|e| {
+                CliError::Message(format!("cannot write `{}`: {e}", target.display()))
+            })?;
+        }
+        changed.push(target);
+    }
+
+    if !diagnostics.is_empty() {
+        return Err(CliError::Diagnostics {
+            sources,
+            items: diagnostics,
+        });
+    }
+
+    if !check {
+        println!("{}", fmt_summary(changed.len()));
+        return Ok(());
+    }
+    for path in &changed {
+        println!("{}", path.display());
+    }
+    if changed.is_empty() {
+        Ok(())
+    } else {
+        Err(CliError::Unformatted)
+    }
+}
+
+/// The one-line summary `cove fmt` prints to stdout.
+fn fmt_summary(changed: usize) -> String {
+    format!("formatted {changed} file(s)")
+}
+
+/// The files `cove fmt` should consider: one named file, or every `.cove`
+/// file in the package `path` sits in.
+fn fmt_targets(path: Option<&Path>) -> Result<Vec<PathBuf>, CliError> {
+    if let Some(path) = path {
+        if path.is_file() {
+            return Ok(vec![path.to_path_buf()]);
+        }
+    }
+    let start = match path {
+        Some(path) => path.to_path_buf(),
+        None => std::env::current_dir()
+            .map_err(|e| CliError::Message(format!("cannot read the current directory: {e}")))?,
+    };
+    let root = find_root(&start).ok_or_else(|| {
+        CliError::Message(format!(
+            "no `cove.toml` found in `{}` or any parent directory",
+            start.display()
+        ))
+    })?;
+    let mut files = Vec::new();
+    collect_cove_files(&root, &mut files);
+    Ok(files)
+}
+
+/// Every `.cove` file of the package rooted at `dir`, in sorted order.
+///
+/// A subdirectory holding its own `cove.toml` is a nested package, so its
+/// files belong to `cove fmt` run there, not here.
+fn collect_cove_files(dir: &Path, found: &mut Vec<PathBuf>) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    let mut paths: Vec<PathBuf> = entries
+        .filter_map(|entry| Some(entry.ok()?.path()))
+        .collect();
+    paths.sort();
+    for path in paths {
+        let name = path
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .into_owned();
+        if name.starts_with('.') || name == "target" {
+            continue;
+        }
+        if path.is_dir() {
+            if !path.join("cove.toml").is_file() {
+                collect_cove_files(&path, found);
+            }
+        } else if path.extension().and_then(|e| e.to_str()) == Some("cove") {
+            found.push(path);
+        }
+    }
 }
 
 fn cmd_check(args: &[String]) -> Result<(), CliError> {
@@ -865,6 +997,72 @@ mod tests {
         let package = load(root, &mut sources).expect("fixture package loads");
         let program = resolve(&package).expect("fixture package resolves");
         (sources, package, program)
+    }
+
+    #[test]
+    fn fmt_check_reports_an_unformatted_file_and_formatting_makes_it_clean() {
+        let dir = TempDir::new("fmt");
+        write(dir.path(), "cove.toml", "");
+        let unformatted = "\
+use console.println
+/// Runs.
+export fn main() -> Result<Unit,Error> {
+        Ok(())
+}
+";
+        let formatted = "\
+use console.println
+
+/// Runs.
+export fn main() -> Result<Unit, Error> {
+  Ok(())
+}
+";
+        write(dir.path(), "app/main.cove", unformatted);
+        let source = dir.path().join("app/main.cove");
+        let path = dir.path().display().to_string();
+
+        let Err(error) = cmd_fmt(&["--check".into(), path.clone()]) else {
+            panic!("an unformatted file must fail `--check`");
+        };
+        assert!(matches!(error, CliError::Unformatted));
+        assert_eq!(
+            std::fs::read_to_string(&source).unwrap(),
+            unformatted,
+            "`--check` must not rewrite anything"
+        );
+
+        assert!(
+            cmd_fmt(std::slice::from_ref(&path)).is_ok(),
+            "formatting succeeds"
+        );
+        assert_eq!(std::fs::read_to_string(&source).unwrap(), formatted);
+
+        assert!(
+            cmd_fmt(&["--check".into(), path]).is_ok(),
+            "a formatted package passes `--check`"
+        );
+    }
+
+    #[test]
+    fn fmt_reports_a_file_that_does_not_parse_and_leaves_it_alone() {
+        let dir = TempDir::new("fmt-broken");
+        write(dir.path(), "cove.toml", "");
+        let broken = "fn main() {\n  let x = ;\n}\n";
+        write(dir.path(), "app/main.cove", broken);
+        let source = dir.path().join("app/main.cove");
+
+        let Err(error) = cmd_fmt(&[dir.path().display().to_string()]) else {
+            panic!("a file that does not parse must be an error");
+        };
+        assert!(matches!(error, CliError::Diagnostics { .. }));
+        assert_eq!(std::fs::read_to_string(&source).unwrap(), broken);
+    }
+
+    #[test]
+    fn fmt_summary_counts_the_files_it_rewrote() {
+        assert_eq!(fmt_summary(0), "formatted 0 file(s)");
+        assert_eq!(fmt_summary(3), "formatted 3 file(s)");
     }
 
     #[test]

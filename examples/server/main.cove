@@ -18,7 +18,7 @@ fn routes() -> Array<http.Route> {
   building.push(http.Route(
     method: http.Method.Get,
     path: "/health",
-    handler: health
+    handler: health,
   ))
 
   building.freeze()

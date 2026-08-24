@@ -29,14 +29,16 @@ $ cove check
 checked 7 module(s), 7 file(s)
 $ cove run hello
 Hello, world!
+$ cove fmt --check
 ```
 
 Implemented: lexer, parser, directory modules, `export` visibility, derived
-outlines and capability requirements, a tree-walking interpreter, Host API
-dispatch with grant enforcement, task scopes, and runtime budgets for fuel,
-deadlines, and host calls with tracing. Not yet implemented: static type
-checking, concurrent task execution, the `http`, `database`, and `clock`
-hosts, `cove fmt`, `cove build`, `cove test`, and the garbage collector.
+outlines and capability requirements, a deterministic formatter, a
+tree-walking interpreter, Host API dispatch with grant enforcement, task
+scopes, and runtime budgets for fuel, deadlines, and host calls with tracing.
+Not yet implemented: static type checking, concurrent task execution, the
+`http`, `database`, and `clock` hosts, `cove build`, `cove test`, and the
+garbage collector.
 
 The implementation direction is recorded in
 [ADR 0002](docs/adr/0002-implementation-language-and-backend.md), and how

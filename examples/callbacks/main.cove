@@ -5,13 +5,11 @@ use database
 
 /// A callback stored by the router and invoked for each request.
 export type Handler = async fn(
-  request: http.Request
+  request: http.Request,
 ) -> Result<http.Response, Error>
 
 /// A callback stored by the event bus.
-export type EventHandler = async fn(
-  event: Event
-) -> Result<Unit, Error>
+export type EventHandler = async fn(event: Event) -> Result<Unit, Error>
 
 /// Task-safe application dependencies captured by request handlers.
 export struct App {
@@ -51,7 +49,7 @@ impl RouterBuilder {
     self.routes.push(Route(
       method: http.Method.Get,
       path: path,
-      handler: handler
+      handler: handler,
     ))
   }
 
@@ -60,7 +58,7 @@ impl RouterBuilder {
     self.routes.push(Route(
       method: http.Method.Post,
       path: path,
-      handler: handler
+      handler: handler,
     ))
   }
 
@@ -77,11 +75,7 @@ export struct EventBus {
 
 impl EventBus {
   /// Invokes the current subscribers.
-  async fn emit(
-    self,
-    name: String,
-    event: Event
-  ) -> Result<Unit, Error> {
+  async fn emit(self, name: String, event: Event) -> Result<Unit, Error> {
     for handler in self.subscribers.get(name).unwrapOr([]) {
       await handler(event)?
     }
@@ -90,10 +84,7 @@ impl EventBus {
 }
 
 /// Adds logging and metrics around a stored handler.
-fn withObservability(
-  app: App,
-  next: Handler
-) -> Handler {
+fn withObservability(app: App, next: Handler) -> Handler {
   async fn(request) {
     let startedAt = clock.now()
     let result = await next(request)
@@ -102,9 +93,7 @@ fn withObservability(
       metrics.record(result.isError())
     })
 
-    console.println(
-      "{request.method} {request.path} {clock.now() - startedAt}"
-    )?
+    console.println("{request.method} {request.path} {clock.now() - startedAt}")?
 
     result
   }
@@ -113,7 +102,7 @@ fn withObservability(
 /// Retries an operation during this call.
 async fn retry<T>(
   attempts: Int,
-  operation: async fn(attempt: Int) -> Result<T, Error>
+  operation: async fn(attempt: Int) -> Result<T, Error>,
 ) -> Result<T, Error> {
   var lastError = Error("retry did not run")
 
@@ -133,31 +122,20 @@ fn buildEvents() -> EventBus {
     async fn(event) {
       console.println("event: {event}")?
       Ok(())
-    }
+    },
   ]
 
   EventBus(
-    subscribers: Map.of(
-      MapEntry(
-        key: "booking.created",
-        value: handlers
-      )
-    )
+    subscribers: Map.of(MapEntry(key: "booking.created", value: handlers)),
   )
 }
 
 /// Builds routes locally and freezes them before request tasks begin.
-fn buildRouter(
-  app: App,
-  events: EventBus
-) -> Router {
+fn buildRouter(app: App, events: EventBus) -> Router {
   var builder = RouterBuilder(routes: Vector.of())
 
   builder.get("/health", withObservability(app, async fn(request) {
-    Ok(http.json(
-      200,
-      Map.of(MapEntry(key: "status", value: "ok"))
-    ))
+    Ok(http.json(200, Map.of(MapEntry(key: "status", value: "ok"))))
   }))
 
   builder.post("/bookings", withObservability(app, async fn(request) {
@@ -167,10 +145,7 @@ fn buildRouter(
       app.repository.create(input, attempt)
     })?
 
-    await events.emit(
-      "booking.created",
-      Event.BookingCreated(booking.id)
-    )?
+    await events.emit("booking.created", Event.BookingCreated(booking.id))?
 
     Ok(http.json(201, booking))
   }))
@@ -182,10 +157,7 @@ fn buildRouter(
 export async fn main() -> Result<Unit, Error> {
   // The Host API schema declares BookingRepository task-safe.
   let repository = await BookingRepository.connect()?
-  let metrics = Shared(Metrics(
-    requests: 0,
-    failures: 0
-  ))
+  let metrics = Shared(Metrics(requests: 0, failures: 0))
   let app = App(repository: repository, metrics: metrics)
 
   let events = buildEvents()
@@ -193,19 +165,17 @@ export async fn main() -> Result<Unit, Error> {
 
   scope services {
     let reportTimer = services.spawn {
-      clock.every(60s, async fn {
+      clock.every(60s, async fn() {
         app.metrics.lock(fn(metrics) {
           console.println(
-            "requests={metrics.requests} failures={metrics.failures}"
+            "requests={metrics.requests} failures={metrics.failures}",
           )
         })?
         Ok(())
       })
     }
 
-    let server = services.spawn {
-      http.serve(8080, router)
-    }
+    let server = services.spawn { http.serve(8080, router) }
 
     await server?
     reportTimer.cancel()
