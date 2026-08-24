@@ -1,13 +1,22 @@
 use console.println
 
 /// A point in the plane.
-export struct Point { x: Int, y: Int }
+export struct Point {
+  x: Int
+  y: Int
+}
 
 /// A line between two points.
-export struct Segment { start: Point, end: Point }
+export struct Segment {
+  start: Point
+  end: Point
+}
 
-/// A struct declared with the parenthesised field list.
-export struct Tag(name: String, weight: Int)
+/// A struct whose fields are written one per line, as `cove fmt` renders them.
+export struct Tag {
+  name: String
+  weight: Int
+}
 
 /// Prints struct initialization and field reads, then fails: a synthesized
 /// struct initializer rejects labels out of declaration order, just like an
@@ -22,7 +31,7 @@ export fn main() -> Result<Unit, Error> {
   println("nested fields {segment.start.x} {segment.end.y}")?
 
   let tag = Tag(name: "north", weight: 5)
-  println("parenthesised form {tag} {tag.name}")?
+  println("third struct {tag} {tag.name}")?
 
   let reordered = Point(y: 20, x: 10)
   println("initializer labels out of declaration order {reordered}")?

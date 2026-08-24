@@ -1,7 +1,11 @@
 use console.println
 
 /// Formats `value` with an optional unit and an optional prefix.
-fn measure(value: Int, unit: String = "m", prefix: String = "length") -> String {
+fn measure(
+  value: Int,
+  unit: String = "m",
+  prefix: String = "length",
+) -> String {
   "{prefix}: {value}{unit}"
 }
 

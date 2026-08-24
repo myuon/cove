@@ -1,6 +1,7 @@
 //! Lexer, AST, and parser for the Cove surface language.
 
 pub mod ast;
+pub mod format;
 pub mod lexer;
 pub mod parser;
 pub mod token;

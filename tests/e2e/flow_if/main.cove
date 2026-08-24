@@ -15,7 +15,11 @@ fn classify(n: Int) -> String {
 export fn main() -> Result<Unit, Error> {
   println("expression {classify(-1)} {classify(0)} {classify(1)}")?
 
-  let bound = if classify(2) == "positive" { 1 } else { 2 }
+  let bound = if classify(2) == "positive" {
+    1
+  } else {
+    2
+  }
   println("bound {bound}")?
 
   var seen = "none"
@@ -31,7 +35,9 @@ export fn main() -> Result<Unit, Error> {
   }
   println("statement with else {seen}")?
 
-  let withoutElse = if false { 1 }
+  let withoutElse = if false {
+    1
+  }
   println("an `if` with no `else` and a false condition is {withoutElse}")?
   Ok(())
 }

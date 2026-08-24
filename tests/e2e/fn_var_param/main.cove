@@ -1,7 +1,9 @@
 use console.println
 
 /// A counter mutated through a `var` parameter.
-export struct Counter { hits: Int }
+export struct Counter {
+  hits: Int
+}
 
 /// Adds `by` to the caller's own place.
 fn bump(var total: Int, by: Int) {

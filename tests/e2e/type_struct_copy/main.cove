@@ -1,10 +1,15 @@
 use console.println
 
 /// A nested value copied with its owner.
-export struct Meta { version: Int }
+export struct Meta {
+  version: Int
+}
 
 /// A struct that contains another struct.
-export struct Document { title: String, meta: Meta }
+export struct Document {
+  title: String
+  meta: Meta
+}
 
 impl Document {
   /// Renames this document through a mutable receiver.
