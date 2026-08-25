@@ -26,6 +26,10 @@ allow = ["console"]
 entry = "fail_assign_let.main"
 allow = ["console"]
 
+[run.fail_database_connect_denied]
+entry = "fail_database_connect_denied.main"
+allow = ["database", "console"]
+
 [run.fail_database_denied]
 entry = "fail_database_denied.main"
 allow = ["database", "console"]
@@ -126,9 +130,21 @@ allow = ["console"]
 entry = "gc_tasks.main"
 allow = ["console"]
 
+[run.fail_http_no_capability]
+entry = "fail_http_no_capability.main"
+allow = ["console"]
+
+[run.fail_http_stale_handle]
+entry = "fail_http_stale_handle.main"
+allow = ["http", "console"]
+
 [run.host_clock]
 entry = "host_clock.main"
 allow = ["clock", "console"]
+
+[run.host_http_resource]
+entry = "host_http_resource.main"
+allow = ["http", "console"]
 
 [run.host_console]
 entry = "host_console.main"

@@ -33,8 +33,9 @@ use crate::budget::{Cancellation, Stopped};
 use crate::builtins::{self, Callable};
 use crate::error::RuntimeError;
 use crate::heap::{Collection, Heap, HeapStats, Roots};
-use crate::host::HostRegistry;
+use crate::host::{HostRegistry, Reentry, ResourceHandle};
 use crate::runtime::Runtime;
+use crate::schema::TypeSchema;
 use crate::task::{Task, TaskOutcome, TaskScope, TaskState, Transfer};
 use crate::trace::{Timing, TraceEvent};
 use crate::value::{Closure, DynValue, EnumValue, RangeBounds, StructValue, Value};
@@ -372,6 +373,13 @@ pub struct Interpreter<'a> {
     /// safepoint checks: it stops one task without stopping the run, which is
     /// what leaving a scope early asks for.
     cancellation: Option<Cancellation>,
+    /// Flags raised by a host call that bounds the work it was given, one for
+    /// each such call this thread is inside.
+    ///
+    /// `clock.timeout` is the one that raises them. A safepoint checks these
+    /// beside the task's own flag, which is what makes a timeout stop the
+    /// body it bounds rather than measure it afterwards.
+    stops: Vec<Cancellation>,
     /// Ids of the tasks whose bodies this thread is running, innermost last,
     /// so a nested `spawn` can name its immediate parent.
     task_stack: Vec<u64>,
@@ -418,6 +426,7 @@ impl<'a> Interpreter<'a> {
             runtime,
             depth: 0,
             cancellation: None,
+            stops: Vec::new(),
             task_stack: Vec::new(),
             timings: Vec::new(),
             roots: Rc::new(RefCell::new(Roots::new())),
@@ -869,6 +878,13 @@ impl<'a> Interpreter<'a> {
                 return Err(task_cancelled(span));
             }
         }
+        // A bounded call's flag stops only the body it bounds. The host that
+        // raised it turns the stop into the answer it promised — a timeout
+        // reports that it timed out — so this need only say that the body is
+        // not to continue.
+        if self.stops.iter().any(Cancellation::is_cancelled) {
+            return Err(work_stopped(span));
+        }
         if let Some(Err(error)) = self.hosts.with_budget(|budget| {
             budget
                 .safepoint(SAFEPOINT_FUEL)
@@ -898,10 +914,114 @@ impl<'a> Interpreter<'a> {
         values: Vec<Value>,
         span: Span,
     ) -> Result<Value, RuntimeError> {
+        let hosts = self.hosts;
         let started = Instant::now();
-        let result = self.hosts.call(module, op, values);
+        let result = hosts.call_with(
+            module,
+            op,
+            values,
+            &mut Callback {
+                interpreter: self,
+                span,
+            },
+        );
         self.charge_wait(started.elapsed());
         result.map_err(|e| e.at(span))
+    }
+
+    /// Dispatches an operation on a resource handle, through the same
+    /// boundary and with the same accounting as any other host call.
+    fn call_host_resource(
+        &mut self,
+        handle: &ResourceHandle,
+        op: &str,
+        values: Vec<Value>,
+        span: Span,
+    ) -> Result<Value, RuntimeError> {
+        let hosts = self.hosts;
+        let started = Instant::now();
+        let result = hosts.call_resource(
+            handle,
+            op,
+            values,
+            &mut Callback {
+                interpreter: self,
+                span,
+            },
+        );
+        self.charge_wait(started.elapsed());
+        result.map_err(|e| e.at(span))
+    }
+
+    /// Builds one value of a type a host module declares.
+    ///
+    /// A host type is ordinary data, so this is [`Interpreter::init_struct`]
+    /// with the fields read from a schema instead of from a declaration: the
+    /// labels are checked the same way and the value that comes out is an
+    /// ordinary struct whose type name is qualified by the module.
+    fn init_host_type(
+        &mut self,
+        module: &str,
+        declared: TypeSchema,
+        args: Vec<EvaluatedArg>,
+        span: Span,
+    ) -> Result<Value, RuntimeError> {
+        if declared.is_enum() {
+            return Err(RuntimeError::new(format!(
+                "`{module}.{}` is an enum, not a function",
+                declared.name
+            ))
+            .at(span)
+            .with_help(format!(
+                "name a case, such as `{module}.{}.{}`",
+                declared.name, declared.cases[0]
+            )));
+        }
+        let names: Vec<&str> = declared.fields.iter().map(|field| field.name).collect();
+        let (mut slots, _) = assign_labels(&names, args, declared.name, false)?;
+        let mut fields = Vec::with_capacity(declared.fields.len());
+        for (index, field) in declared.fields.iter().enumerate() {
+            let Some(arg) = slots[index].take() else {
+                return Err(RuntimeError::new(format!(
+                    "`{module}.{}` needs a value for field `{}`",
+                    declared.name, field.name
+                ))
+                .at(span)
+                .with_rule("Struct initialization is a synthesized labeled call.")
+                .with_help(format!(
+                    "the Host API schema declares `{module}.{}`",
+                    declared.initializer()
+                )));
+            };
+            fields.push((field.name.into(), value_of(&arg, field.name, arg.span)?));
+        }
+        Ok(Value::Struct(Box::new(StructValue {
+            type_name: format!("{module}.{}", declared.name).into(),
+            fields,
+        })))
+    }
+
+    /// One case of an enum a host module declares.
+    fn host_enum_case(
+        &self,
+        module: &str,
+        declared: &TypeSchema,
+        case: &str,
+        span: Span,
+    ) -> Result<Value, RuntimeError> {
+        if !declared.cases.contains(&case) {
+            return Err(RuntimeError::new(format!(
+                "host type `{module}.{}` has no case `{case}`",
+                declared.name
+            ))
+            .at(span)
+            .with_help(format!("known cases: {}", declared.cases.join(", "))));
+        }
+        Ok(Value::Enum(Box::new(EnumValue {
+            type_name: format!("{module}.{}", declared.name).into(),
+            case: case.into(),
+            payload: Vec::new(),
+        })))
     }
 
     // ---------------------------------------------------------------- calls
@@ -1998,6 +2118,12 @@ impl<'a> Interpreter<'a> {
                     return Ok(self.enum_case(&owner, &decl, name, Vec::new(), span)?);
                 }
                 if self.is_host_module(&module, head) {
+                    // `http.Method` names a type the host declares, while
+                    // `http.fetch` names one of its operations. A type is not
+                    // callable, so the two cannot be confused.
+                    if self.hosts.host_type(head, name).is_some() {
+                        return Ok(Value::Type(format!("{head}.{name}").into()));
+                    }
                     return Ok(Value::HostFn {
                         module: head.as_str().into(),
                         op: name.into(),
@@ -2024,14 +2150,21 @@ impl<'a> Interpreter<'a> {
                     Some((owner, decl)) => {
                         Ok(self.enum_case(&owner, &decl, name, Vec::new(), span)?)
                     }
-                    None => Err(no_field(type_name, name, span).into()),
+                    // `http.Method.Get`: a case of an enum a host declares.
+                    None => match self.hosts.host_type(owner, short) {
+                        Some(declared) => Ok(self.host_enum_case(owner, &declared, name, span)?),
+                        None => Err(no_field(type_name, name, span).into()),
+                    },
                 },
                 None => Err(no_field(type_name, name, span).into()),
             },
-            Value::HostModule(module) => Ok(Value::HostFn {
-                module: module.clone(),
-                op: name.into(),
-            }),
+            Value::HostModule(module) => match self.hosts.host_type(module, name) {
+                Some(_) => Ok(Value::Type(format!("{module}.{name}").into())),
+                None => Ok(Value::HostFn {
+                    module: module.clone(),
+                    op: name.into(),
+                }),
+            },
             other => Err(RuntimeError::new(format!(
                 "`{}` has no field `{name}`",
                 other.type_name()
@@ -2182,6 +2315,13 @@ impl<'a> Interpreter<'a> {
                     if env.lookup(head).is_none() {
                         let module = env.module.clone();
                         if self.is_host_module(&module, head) {
+                            // `http.Route(method: ..., path: ...)` initializes
+                            // a type the host declares; anything else is one
+                            // of its operations.
+                            if let Some(declared) = self.hosts.host_type(head, &name.node) {
+                                let args = self.eval_args(env, args, trailing)?;
+                                return Ok(self.init_host_type(head, declared, args, span)?);
+                            }
                             let args = self.eval_args(env, args, trailing)?;
                             let values = plain_values(args, &format!("{head}.{}", name.node))?;
                             return Ok(self.call_host(head, &name.node, values, span)?);
@@ -2380,6 +2520,24 @@ impl<'a> Interpreter<'a> {
             (_, Some(value)) => value.type_name(),
             _ => unreachable!("a receiver is either a place or a temporary"),
         };
+
+        // A resource handle's methods belong to the host that issued it, so
+        // they are dispatched through the boundary rather than looked up in
+        // the package. A handle is a name; the host owns what it names.
+        let handle = match (&place, &temporary) {
+            (Some(place), _) => place.with_ref(span, |value| match value {
+                Value::Resource(handle) => Some(handle.clone()),
+                _ => None,
+            })?,
+            (_, Some(Value::Resource(handle))) => Some(handle.clone()),
+            _ => None,
+        };
+        if let Some(handle) = handle {
+            let what = format!("{}.{name}", handle.qualified_type());
+            let args = self.eval_args(env, args, trailing)?;
+            let values = plain_values(args, &what)?;
+            return Ok(self.call_host_resource(&handle, name, values, span)?);
+        }
 
         if let Some((type_module, short)) = type_name.rsplit_once('.') {
             if let Some((module, decl)) = self.find_method(type_module, short, name) {
@@ -3309,6 +3467,83 @@ fn run_task(
         .with_rule(crate::task::TASK_SAFETY_RULE)
         .with_help(found.help("returning it from a task"))
     })
+}
+
+/// The way back into a running program for a host call that was handed work.
+///
+/// [`crate::host::Reentry`] is the whole of what a host may do with a Cove
+/// callback, and this is its one real implementation. The callback runs on
+/// this interpreter — this task's stack, this task's heap, this run's budget
+/// — because a host that ran Cove code anywhere else would be running it
+/// outside the controls the run was given.
+struct Callback<'i, 'a> {
+    interpreter: &'i mut Interpreter<'a>,
+    /// Where the host call that is running this callback was written, so a
+    /// failure inside it points at the call rather than at nothing.
+    span: Span,
+}
+
+impl Callback<'_, '_> {
+    fn run(&mut self, callee: &Value, args: Vec<Value>) -> Result<Value, RuntimeError> {
+        let span = self.span;
+        let args: Vec<EvaluatedArg> = args
+            .into_iter()
+            .map(|value| EvaluatedArg {
+                label: None,
+                spread: false,
+                slot: ArgSlot::Value(value),
+                span,
+            })
+            .collect();
+        let value = self
+            .interpreter
+            .call_value_slots(callee.clone(), args, span)?;
+        // An `async fn` answers with a task. A host was handed a callback and
+        // not a task, so settling it here is what `await` would have done at
+        // the call site the host is standing in for.
+        match value {
+            Value::Task(task) => self.interpreter.settle(&task, span),
+            other => Ok(other),
+        }
+    }
+}
+
+impl Reentry for Callback<'_, '_> {
+    fn call(&mut self, callee: &Value, args: Vec<Value>) -> Result<Value, RuntimeError> {
+        self.run(callee, args)
+    }
+
+    fn call_until(
+        &mut self,
+        callee: &Value,
+        args: Vec<Value>,
+        stop: &Cancellation,
+    ) -> Result<Value, RuntimeError> {
+        self.interpreter.stops.push(stop.clone());
+        let result = self.run(callee, args);
+        self.interpreter.stops.pop();
+        result
+    }
+
+    fn is_cancelled(&self) -> bool {
+        self.interpreter
+            .cancellation
+            .as_ref()
+            .is_some_and(Cancellation::is_cancelled)
+    }
+}
+
+/// Work a host call bounded, stopped at a safepoint because the bound was
+/// reached.
+///
+/// The host that raised the flag reports what the bound was — `clock.timeout`
+/// says it timed out — so this message is only what the body itself can say.
+fn work_stopped(span: Span) -> RuntimeError {
+    RuntimeError::new("this work was stopped before it finished")
+        .at(span)
+        .with_rule(
+            "A host call that bounds the work it was given stops that work at its next safepoint.",
+        )
 }
 
 /// A task that stopped because its own cancellation was requested.

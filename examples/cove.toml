@@ -8,7 +8,7 @@ allow = ["env"]
 
 [run.server]
 entry = "server.main"
-allow = ["network", "console"]
+allow = ["http", "console"]
 
 [run.restricted]
 entry = "restricted.main"
@@ -20,7 +20,7 @@ allow = ["console"]
 
 [run.tasks]
 entry = "tasks.loadDashboard"
-allow = ["network", "clock"]
+allow = ["http", "clock"]
 
 [run.values]
 entry = "values.main"
@@ -28,7 +28,7 @@ allow = ["console"]
 
 [run.callbacks]
 entry = "callbacks.main"
-allow = ["network", "database", "clock", "console"]
+allow = ["http", "database", "clock", "console"]
 
 [run.statusCodes]
 entry = "codegen.statusCodes"

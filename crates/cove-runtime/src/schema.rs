@@ -17,10 +17,16 @@
 //! cannot drift apart at run time.
 //!
 //! Only the parts of ADR 0001's list that something reads are modelled here.
-//! Serialization and resource ownership are left out: every value that
-//! crosses the boundary today is an ordinary [`crate::value::Value`], no
-//! shipped operation hands back a live resource handle, and a field nothing
-//! consults is a claim nothing checks.
+//! Serialization is left out: every value that crosses the boundary is an
+//! ordinary [`crate::value::Value`], and a field nothing consults is a claim
+//! nothing checks.
+//!
+//! Resource ownership is no longer among the omissions. A host may declare
+//! types of its own — [`TypeSchema`] for the ones that are plain data, and
+//! [`ResourceSchema`] for the ones the host keeps on the far side of the
+//! boundary — and ADR 0013 makes the second of those the whole of a resource
+//! handle's contract: which operations it answers, what capability each of
+//! them needs, and whether the handle may cross a task boundary.
 
 use std::fmt;
 
@@ -59,6 +65,20 @@ pub enum HostType {
     /// type, exactly as it is in Cove source, rather than a second channel
     /// beside it.
     Result(&'static HostType, &'static HostType),
+    /// A type the host declares, written qualified: `http.Response`.
+    ///
+    /// The name is the one Cove source writes, module included, because that
+    /// is what a signature in a diagnostic has to read as. Whether it names a
+    /// [`TypeSchema`] or a [`ResourceSchema`] is the host's business; a
+    /// signature says only which type it is.
+    Named(&'static str),
+    /// Any value at all.
+    ///
+    /// This is not a missing type: it is the type of an operation whose
+    /// meaning does not depend on which value it was given. `http.json`
+    /// renders whatever it is handed, and a callback a host stores and calls
+    /// later is a value the host never looks inside.
+    Any,
 }
 
 impl fmt::Display for HostType {
@@ -73,6 +93,8 @@ impl fmt::Display for HostType {
             HostType::Array(inner) => write!(f, "Array<{inner}>"),
             HostType::Option(inner) => write!(f, "Option<{inner}>"),
             HostType::Result(ok, error) => write!(f, "Result<{ok}, {error}>"),
+            HostType::Named(name) => f.write_str(name),
+            HostType::Any => f.write_str("Any"),
         }
     }
 }
@@ -142,9 +164,12 @@ pub struct OperationSchema {
     /// write that has already reached the outside world cannot.
     pub cancellable: bool,
     /// Whether the call's result can be recorded and handed back later
-    /// without calling the host again, which is what `cove replay` needs. An
-    /// operation that returns a live resource handle rather than a plain
-    /// value is not recordable.
+    /// without calling the host again, which is what `cove replay` needs.
+    ///
+    /// An operation that opens a resource is recordable, because ADR 0013
+    /// makes a handle a name rather than a live thing: what the trace records
+    /// is the identity the host issued, and a replay hands the same identity
+    /// back and answers the calls made on it from the trace too.
     pub recordable: bool,
     /// Whether the value this operation produces may cross a task boundary.
     ///
@@ -197,6 +222,94 @@ impl OperationSchema {
         } else {
             format!("{least} {noun}")
         }
+    }
+}
+
+/// One field of a host type.
+#[derive(Clone, Copy, Debug)]
+pub struct FieldSchema {
+    /// The label Cove source writes in the initializer, such as `method`.
+    pub name: &'static str,
+    /// The field's type.
+    pub ty: HostType,
+}
+
+/// The shape of one type a host declares.
+///
+/// A host type is ordinary data: `http.Method` is an enum whose cases carry
+/// nothing, and `http.Route` is a struct initialized with labels, exactly as a
+/// Cove struct is. Neither needs a representation of its own — the runtime
+/// builds a [`crate::value::Value::Enum`] or a
+/// [`crate::value::Value::Struct`] whose type name is qualified by the module
+/// — so what the schema adds is only the vocabulary: which names exist and
+/// what they are made of.
+///
+/// A type whose values the host keeps rather than hands over is a
+/// [`ResourceSchema`] instead.
+#[derive(Clone, Copy, Debug)]
+pub struct TypeSchema {
+    /// The name Cove source writes after the module, such as `Route`.
+    pub name: &'static str,
+    /// The cases, for an enum. Empty for a struct.
+    pub cases: &'static [&'static str],
+    /// The fields, for a struct. Empty for an enum.
+    pub fields: &'static [FieldSchema],
+}
+
+impl TypeSchema {
+    /// Whether this is an enum, which is what having cases means.
+    pub fn is_enum(&self) -> bool {
+        !self.cases.is_empty()
+    }
+
+    /// The initializer, in the form it would be written in Cove source:
+    /// `Route(method: http.Method, path: String, handler: Any)`.
+    pub fn initializer(&self) -> String {
+        let fields = self
+            .fields
+            .iter()
+            .map(|field| format!("{}: {}", field.name, field.ty))
+            .collect::<Vec<_>>();
+        format!("{}({})", self.name, fields.join(", "))
+    }
+}
+
+/// One kind of host resource: a value the host owns and Cove only names.
+///
+/// ADR 0013 states the contract this carries. A handle is an identity, not
+/// state: the host keeps whatever a `database.Connection` really is, and Cove
+/// holds the name of it. So a resource declares three things and nothing
+/// else — what it is called, which operations it answers, and whether the
+/// name may cross a task boundary.
+///
+/// `task_safe` is the Language Card's sentence applied to a host's own types:
+/// "Host resources declare task-safety in their Host API schema." A resource
+/// whose state the host keeps behind a lock says `true`, and its name then
+/// crosses like any other immutable value; one whose state belongs to the
+/// task that opened it says `false`, and the name is refused at the boundary
+/// with the same diagnostic a vector gets.
+#[derive(Clone, Copy, Debug)]
+pub struct ResourceSchema {
+    /// The name Cove source writes after the module, such as `Connection`.
+    pub name: &'static str,
+    /// Whether a handle to this resource may cross a task boundary.
+    pub task_safe: bool,
+    /// The operations a handle answers, called as methods on it.
+    pub operations: &'static [OperationSchema],
+}
+
+impl ResourceSchema {
+    /// The operation `name`, if this resource has one.
+    pub fn operation(&self, name: &str) -> Option<&OperationSchema> {
+        self.operations.iter().find(|entry| entry.name == name)
+    }
+
+    /// Every operation name, for a diagnostic that has to list them.
+    pub fn operation_names(&self) -> Vec<String> {
+        self.operations
+            .iter()
+            .map(|entry| format!("`{}`", entry.name))
+            .collect()
     }
 }
 

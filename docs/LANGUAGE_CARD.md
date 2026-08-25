@@ -166,7 +166,7 @@ boundary:
 ```toml
 [run.server]
 entry = "server.main"
-allow = ["network", "clock"]
+allow = ["http", "clock"]
 ```
 
 A host may provide real, fake, filtered, remote, or denied implementations.

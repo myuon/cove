@@ -1666,7 +1666,7 @@ impl<'a> Checker<'a> {
                         ),
                     )
                     .at(span)
-                    .rule("A Host API's types come from its schema, and there is no schema yet.")
+                    .rule("A Host API's types come from its schema, which the checker does not read.")
                     .help(
                         "the checker treats this type as unknown; every operation on it is left to the runtime",
                     ),
@@ -2180,7 +2180,7 @@ impl<'a> Checker<'a> {
                 .at(span)
                 .rule("A module sees its own declarations, what it imports with `use`, and the builtins; anything else must come from a host module.")
                 .help(format!(
-                    "declare `{name}` in this module, or leave it to the host; until the Host API schema exists, values of `{name}` are unchecked"
+                    "declare `{name}` in this module, or leave it to the host; values of `{name}` are unchecked until the checker reads the Host API schema"
                 )),
             );
         } else {
@@ -7607,7 +7607,7 @@ fn handle(request: http.Request) -> Int {
         );
         assert_eq!(
             warnings[0].rule.as_deref().unwrap(),
-            "A Host API's types come from its schema, and there is no schema yet."
+            "A Host API's types come from its schema, which the checker does not read."
         );
     }
 

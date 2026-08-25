@@ -679,8 +679,9 @@ impl Scan {
             // collecting thread may already hold.
             Value::Shared(_) => {}
             // A `Set`'s elements are `MapKey`s, which no mutable handle can
-            // be, so no reference hides in one. Every remaining case is a
-            // scalar, a string, or a range.
+            // be, so no reference hides in one. A resource handle is a name
+            // the host resolves, so it owns no Cove object either. Every
+            // remaining case is a scalar, a string, or a range.
             _ => {}
         }
     }

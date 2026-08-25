@@ -1,58 +1,59 @@
-//! `database`: queries, and the connection this runtime cannot yet hold.
+//! `database`: connections, and the queries made on them.
 //!
 //! The Language Card lists the database among the operations that are typed
 //! Host APIs, and `examples/callbacks/main.cove` shows the shape it expects:
 //!
 //! ```cove
-//! let repository = await BookingRepository.connect()?
-//! app.repository.create(input, attempt)
+//! let repository = database.connect("bookings")?
+//! repository.query("insert into bookings ...")?
 //! ```
 //!
-//! That is a *host resource handle*: `connect` hands back a value, and later
-//! calls are made on that value rather than on the module. Nothing in this
-//! runtime can produce one, and the gap is not in this module.
+//! That is a *host resource handle*: `connect` hands back a name, and later
+//! calls are made on that name rather than on the module. ADR 0013 is what
+//! makes one possible — [`crate::host::ResourceHandle`] is the value, and
+//! `Connection` in this module's [`crate::schema::ResourceSchema`] is what
+//! says which operations it answers and that it may cross a task boundary.
 //!
-//! [`crate::host::HostApi::call`] answers with a [`Value`], and a [`Value`]
-//! has no variant that means "a live resource this host still owns". A host
-//! could return [`Value::HostModule`], but the interpreter dispatches a
-//! method call by the receiver's `type_name`: it looks for a declared type of
-//! the package, then for a task scope or task, and then hands the call to the
-//! builtins, which know nothing about hosts. There is no branch that sends a
-//! method call on a host-returned value back to the registry. Adding one
-//! means changing the interpreter and the value representation, and until it
-//! is added, `connect` would hand back something no later call could use.
+//! What a connection *is* stays here, on the host's side. A handle carries a
+//! number and nothing else, so the only way to learn anything through one is
+//! to call an operation the schema declares, and a handle whose connection
+//! has been closed finds nothing to call: that is a reported error, not a
+//! call on whatever occupies the slot now.
 //!
-//! `BookingRepository` is a second, separate gap: it is a host *type*, and a
-//! `use database` binds only the module, so `BookingRepository.connect()`
-//! resolves to nothing at all. Host types have no representation either — the
-//! type checker says as much, warning that a host type's values are
-//! unchecked because "a Host API's types come from its schema, and there is
-//! no schema yet."
-//!
-//! So this module ships what a connectionless database can honestly do: one
-//! `query` that takes SQL and answers with rows. There is no real
-//! implementation, and this module does not pretend otherwise. Connecting to
-//! a database means speaking a wire protocol to a server, and the runtime
-//! depends on nothing but the standard library, which cannot. What exists is
-//! the pair the Language Card promises for the ones that cannot be real:
-//! [`Database::recorded`], a fake that answers from a table of canned rows,
-//! and [`Database::denied`], which refuses every query and says why. The CLI
-//! installs the denied one, so a program that asks for `database` is told
-//! that this host has none rather than being told that `database` does not
-//! exist.
+//! There is still no real implementation, and this module does not pretend
+//! otherwise. Connecting to a database means speaking a wire protocol to a
+//! server, and the runtime depends on nothing but the standard library, which
+//! cannot. What exists is the pair the Language Card promises for the ones
+//! that cannot be real: [`Database::recorded`], a fake whose connections
+//! answer from a table of canned rows, and [`Database::denied`], which
+//! refuses to connect and says why. The CLI installs the denied one, so a
+//! program that asks for `database` is told that this host has none rather
+//! than being told that `database` does not exist.
 
 use std::collections::BTreeMap;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Mutex;
 
 use cove_sema::Capability;
 
 use crate::error::RuntimeError;
-use crate::host::HostApi;
-use crate::schema::{Effect, HostType, OperationSchema};
+use crate::host::{HostApi, Reentry, ResourceHandle};
+use crate::schema::{Effect, HostType, OperationSchema, ResourceSchema};
 use crate::value::Value;
 
 /// `database`: querying a database, when the host has one.
 pub struct Database {
     source: DatabaseSource,
+    /// Which connections this host still has open, by the identity it
+    /// issued.
+    ///
+    /// A handle addresses an entry here and nothing else. What is stored is
+    /// the name the program connected to, because a fake has nothing else to
+    /// keep; a real host would store the socket in the same place, and
+    /// nothing above this line would change.
+    open: Mutex<BTreeMap<u64, String>>,
+    /// The identity the next connection gets.
+    next_id: AtomicU64,
 }
 
 enum DatabaseSource {
@@ -73,16 +74,69 @@ enum DatabaseSource {
 /// operation with a separate [`Effect`], and this module does not ship one:
 /// an `execute` whose only implementation is a fake would be a promise that
 /// data was written somewhere.
-static DATABASE_SCHEMA: &[OperationSchema] = &[OperationSchema {
-    name: "query",
-    params: &[HostType::String],
-    variadic: false,
-    result: HostType::Result(&HostType::Array(&HostType::String), &HostType::Error),
-    capability: "database",
-    effect: Effect::Read,
-    cancellable: true,
-    recordable: true,
-    result_is_task_safe: true,
+static DATABASE_SCHEMA: &[OperationSchema] = &[
+    OperationSchema {
+        name: "query",
+        params: &[HostType::String],
+        variadic: false,
+        result: HostType::Result(&HostType::Array(&HostType::String), &HostType::Error),
+        capability: "database",
+        effect: Effect::Read,
+        cancellable: true,
+        recordable: true,
+        result_is_task_safe: true,
+    },
+    OperationSchema {
+        name: "connect",
+        params: &[HostType::String],
+        variadic: false,
+        result: HostType::Result(&HostType::Named("database.Connection"), &HostType::Error),
+        capability: "database",
+        // Taking a connection is a change the same host can put back, which
+        // is what `close` does.
+        effect: Effect::ReversibleWrite,
+        cancellable: false,
+        // A handle is a name, so a trace records the name and a replay hands
+        // the same one back.
+        recordable: true,
+        result_is_task_safe: true,
+    },
+];
+
+/// What a `database.Connection` handle answers.
+///
+/// The connection is task-safe. What a handle names lives behind this host's
+/// own lock, so two tasks holding the same handle take turns rather than
+/// racing — which is exactly the condition the Language Card puts on a host
+/// resource crossing a task boundary. `examples/callbacks/main.cove` depends
+/// on it: the repository is captured by handlers that run in request tasks.
+static DATABASE_RESOURCES: &[ResourceSchema] = &[ResourceSchema {
+    name: "Connection",
+    task_safe: true,
+    operations: &[
+        OperationSchema {
+            name: "query",
+            params: &[HostType::String],
+            variadic: false,
+            result: HostType::Result(&HostType::Array(&HostType::String), &HostType::Error),
+            capability: "database",
+            effect: Effect::Read,
+            cancellable: true,
+            recordable: true,
+            result_is_task_safe: true,
+        },
+        OperationSchema {
+            name: "close",
+            params: &[],
+            variadic: false,
+            result: HostType::Result(&HostType::Unit, &HostType::Error),
+            capability: "database",
+            effect: Effect::ReversibleWrite,
+            cancellable: false,
+            recordable: true,
+            result_is_task_safe: true,
+        },
+    ],
 }];
 
 impl Database {
@@ -92,9 +146,7 @@ impl Database {
     /// recorded answer, not a query engine: a fake that interpreted SQL would
     /// be a database this project did not write and cannot vouch for.
     pub fn recorded(rows: BTreeMap<String, Vec<String>>) -> Self {
-        Database {
-            source: DatabaseSource::Recorded(rows),
-        }
+        Database::with_source(DatabaseSource::Recorded(rows))
     }
 
     /// A host with no database, which refuses every query and says so.
@@ -105,9 +157,39 @@ impl Database {
     /// schema — and a run that asks is told what is missing instead of being
     /// told that `database` is not a host module.
     pub fn denied() -> Self {
+        Database::with_source(DatabaseSource::Denied)
+    }
+
+    fn with_source(source: DatabaseSource) -> Self {
         Database {
-            source: DatabaseSource::Denied,
+            source,
+            open: Mutex::new(BTreeMap::new()),
+            next_id: AtomicU64::new(1),
         }
+    }
+
+    /// Opens a connection to `name` and issues the handle that names it.
+    fn connect(&self, name: &str) -> Value {
+        match &self.source {
+            DatabaseSource::Recorded(_) => {
+                let id = self.next_id.fetch_add(1, Ordering::Relaxed);
+                self.locked().insert(id, name.to_string());
+                Value::ok(Value::Resource(ResourceHandle::new(
+                    "database",
+                    &DATABASE_RESOURCES[0],
+                    id,
+                )))
+            }
+            DatabaseSource::Denied => Value::err(Value::error(
+                "database: this host has no database, so nothing can connect",
+            )),
+        }
+    }
+
+    fn locked(&self) -> std::sync::MutexGuard<'_, BTreeMap<u64, String>> {
+        self.open
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
     fn query(&self, sql: &str) -> Result<Vec<String>, String> {
@@ -144,22 +226,82 @@ impl HostApi for Database {
                         "`database.query` takes one `String` argument",
                     ));
                 };
-                Ok(match self.query(sql) {
-                    Ok(rows) => Value::ok(Value::Array(
-                        rows.into_iter().map(|row| Value::Str(row.into())).collect(),
-                    )),
-                    Err(message) => Value::err(Value::error(message)),
-                })
+                Ok(rows_of(self.query(sql)))
+            }
+            "connect" => {
+                let [Value::Str(name)] = args.as_slice() else {
+                    return Err(RuntimeError::new(
+                        "`database.connect` takes one `String` argument",
+                    ));
+                };
+                Ok(self.connect(name))
             }
             _ => unreachable!("checked by HostRegistry::call"),
         }
     }
+
+    fn resources(&self) -> &[ResourceSchema] {
+        DATABASE_RESOURCES
+    }
+
+    fn call_resource(
+        &self,
+        handle: &ResourceHandle,
+        op: &str,
+        args: Vec<Value>,
+        _back: &mut dyn Reentry,
+    ) -> Result<Value, RuntimeError> {
+        match op {
+            "query" => {
+                let [Value::Str(sql)] = args.as_slice() else {
+                    return Err(RuntimeError::new(
+                        "`database.Connection.query` takes one `String` argument",
+                    ));
+                };
+                if !self.locked().contains_key(&handle.id) {
+                    return Err(closed(handle, "query"));
+                }
+                Ok(rows_of(self.query(sql)))
+            }
+            "close" => match self.locked().remove(&handle.id) {
+                Some(_) => Ok(Value::ok(Value::Unit)),
+                None => Err(closed(handle, "close")),
+            },
+            _ => unreachable!("checked by HostRegistry::call_resource"),
+        }
+    }
+}
+
+/// `Ok(rows)` or `Err(Error(message))`, as Cove reads it.
+fn rows_of(answer: Result<Vec<String>, String>) -> Value {
+    match answer {
+        Ok(rows) => Value::ok(Value::Array(
+            rows.into_iter().map(|row| Value::Str(row.into())).collect(),
+        )),
+        Err(message) => Value::err(Value::error(message)),
+    }
+}
+
+/// A call on a handle whose connection this host no longer has.
+///
+/// This is a [`RuntimeError`] rather than a Cove `Err`, and deliberately: a
+/// query against a connection that was closed is not an expected failure the
+/// program should handle, it is the program having kept a name past the thing
+/// it named.
+fn closed(handle: &ResourceHandle, op: &str) -> RuntimeError {
+    RuntimeError::new(format!(
+        "`{handle}` is closed, so `{op}` has nothing to act on"
+    ))
+    .with_rule(
+        "A host resource handle names a resource the host owns. Closing the resource ends the handle; the name outlives it and addresses nothing.",
+    )
+    .with_help("open a new one, or move the `close` after the last use")
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::host::{Grants, HostRegistry};
+    use crate::host::{Grants, HostRegistry, NoReentry};
 
     fn str_arg(text: &str) -> Value {
         Value::Str(text.into())
@@ -268,6 +410,87 @@ mod tests {
     fn signatures_read_like_source() {
         let database = Database::denied();
         let rendered: Vec<String> = database.schema().iter().map(|op| op.signature()).collect();
-        assert_eq!(rendered, ["query(String) -> Result<Array<String>, Error>"]);
+        assert_eq!(
+            rendered,
+            [
+                "query(String) -> Result<Array<String>, Error>",
+                "connect(String) -> Result<database.Connection, Error>",
+            ]
+        );
+        let rendered: Vec<String> = DATABASE_RESOURCES[0]
+            .operations
+            .iter()
+            .map(|op| op.signature())
+            .collect();
+        assert_eq!(
+            rendered,
+            [
+                "query(String) -> Result<Array<String>, Error>",
+                "close() -> Result<Unit, Error>",
+            ]
+        );
+    }
+
+    /// A handle is a name, and closing the resource ends what it named.
+    #[test]
+    fn a_closed_connection_reports_that_its_handle_addresses_nothing() {
+        let mut hosts = HostRegistry::new(Grants::new(["database"]));
+        hosts.register(Box::new(recorded()));
+
+        let opened = hosts
+            .call("database", "connect", vec![str_arg("bookings")])
+            .expect("the call should be allowed");
+        let Value::Enum(result) = opened else {
+            panic!("expected `Ok(...)`");
+        };
+        let Some(Value::Resource(handle)) = result.payload.into_iter().next() else {
+            panic!("`connect` answers with a handle");
+        };
+        assert_eq!(handle.qualified_type(), "database.Connection");
+        assert!(handle.task_safe);
+
+        let rows = hosts
+            .call_resource(
+                &handle,
+                "query",
+                vec![str_arg("select id from bookings")],
+                &mut NoReentry,
+            )
+            .expect("a query on an open connection is allowed");
+        assert_eq!(super::tests::rows(rows), ["b-1", "b-2"]);
+
+        hosts
+            .call_resource(&handle, "close", Vec::new(), &mut NoReentry)
+            .expect("closing an open connection is allowed");
+
+        let error = hosts
+            .call_resource(
+                &handle,
+                "query",
+                vec![str_arg("select id from bookings")],
+                &mut NoReentry,
+            )
+            .expect_err("a query on a closed connection is refused");
+        assert_eq!(
+            error.message,
+            "`database.Connection#1` is closed, so `query` has nothing to act on"
+        );
+    }
+
+    /// The grant gates a handle's operations exactly as it gates the
+    /// module's: the boundary is one choke point, not two.
+    #[test]
+    fn a_run_without_the_database_grant_cannot_use_a_handle() {
+        let mut hosts = HostRegistry::new(Grants::new(["console"]));
+        hosts.register(Box::new(Database::denied()));
+        let handle = ResourceHandle::new("database", &DATABASE_RESOURCES[0], 1);
+
+        let error = hosts
+            .call_resource(&handle, "query", vec![str_arg("select 1")], &mut NoReentry)
+            .expect_err("the call should be rejected");
+        assert_eq!(
+            error.message,
+            "`database.Connection.query` requires the `database` capability, which this run was not granted"
+        );
     }
 }

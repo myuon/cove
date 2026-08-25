@@ -1,6 +1,6 @@
 use http
 use console.println
-use clock.every
+use clock
 use database
 
 /// A callback stored by the router and invoked for each request.
@@ -11,9 +11,23 @@ export type Handler = async fn(
 /// A callback stored by the event bus.
 export type EventHandler = async fn(event: Event) -> Result<Unit, Error>
 
+/// Something a request did that subscribers may care about.
+export enum Event {
+  BookingCreated(String)
+}
+
+/// A booking this service stored.
+export struct Booking {
+  id: String
+}
+
 /// Task-safe application dependencies captured by request handlers.
+///
+/// The repository is a host resource handle. Its Host API schema declares
+/// `database.Connection` task-safe, which is what lets this whole struct be
+/// captured by a closure that crosses into a task.
 export struct App {
-  repository: BookingRepository
+  repository: database.Connection
   metrics: Shared<Metrics>
 }
 
@@ -35,18 +49,18 @@ impl Metrics {
 
 /// Immutable routes shared by all request tasks.
 export struct Router {
-  routes: Array<Route>
+  routes: Array<http.Route>
 }
 
 /// Locally mutable route construction.
 struct RouterBuilder {
-  routes: Vector<Route>
+  routes: Vector<http.Route>
 }
 
 impl RouterBuilder {
   /// Adds a route during construction.
   fn get(var self, path: String, handler: Handler) {
-    self.routes.push(Route(
+    self.routes.push(http.Route(
       method: http.Method.Get,
       path: path,
       handler: handler,
@@ -55,7 +69,7 @@ impl RouterBuilder {
 
   /// Adds a route during construction.
   fn post(var self, path: String, handler: Handler) {
-    self.routes.push(Route(
+    self.routes.push(http.Route(
       method: http.Method.Post,
       path: path,
       handler: handler,
@@ -86,14 +100,13 @@ impl EventBus {
 /// Adds logging and metrics around a stored handler.
 fn withObservability(app: App, next: Handler) -> Handler {
   async fn(request) {
-    let startedAt = clock.now()
     let result = await next(request)
 
     app.metrics.lock(fn(var metrics) {
       metrics.record(result.isError())
     })
 
-    console.println("{request.method} {request.path} {clock.now() - startedAt}")?
+    console.println("{request.method} {request.path}")?
 
     result
   }
@@ -130,7 +143,7 @@ fn buildEvents() -> EventBus {
   )
 }
 
-/// Builds routes locally and freezes them before request tasks begin.
+/// Builds routes locally and freezes them before any request is served.
 fn buildRouter(app: App, events: EventBus) -> Router {
   var builder = RouterBuilder(routes: Vector.of())
 
@@ -139,10 +152,9 @@ fn buildRouter(app: App, events: EventBus) -> Router {
   }))
 
   builder.post("/bookings", withObservability(app, async fn(request) {
-    let input = request.json<CreateBookingRequest>()?
-
     let booking = await retry(3, async fn(attempt) {
-      app.repository.create(input, attempt)
+      app.repository.query("insert into bookings values ({request.body})")?
+      Ok(Booking(id: request.body))
     })?
 
     await events.emit("booking.created", Event.BookingCreated(booking.id))?
@@ -155,13 +167,15 @@ fn buildRouter(app: App, events: EventBus) -> Router {
 
 /// Runs a server with immutable routes and structured background work.
 export async fn main() -> Result<Unit, Error> {
-  // The Host API schema declares BookingRepository task-safe.
-  let repository = await BookingRepository.connect()?
+  let repository = database.connect("bookings")?
   let metrics = Shared(Metrics(requests: 0, failures: 0))
   let app = App(repository: repository, metrics: metrics)
 
   let events = buildEvents()
   let router = buildRouter(app, events)
+
+  let server = http.listen(8080)?
+  console.println("listening on :{server.port()}")?
 
   scope services {
     let reportTimer = services.spawn {
@@ -175,11 +189,12 @@ export async fn main() -> Result<Unit, Error> {
       })
     }
 
-    let server = services.spawn { http.serve(8080, router) }
+    while server.handle(router.routes)? { }
 
-    await server?
     reportTimer.cancel()
   }
 
+  server.close()?
+  repository.close()?
   Ok(())
 }

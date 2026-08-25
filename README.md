@@ -21,14 +21,15 @@ design is recorded in [ADR 0001](docs/adr/0001-mvp-language-design.md).
 
 ## Status
 
-An MVP compiler front end and interpreter exist. `cove check` and `cove outline`
-cover every representative program; `cove run` executes the ones whose hosts
-exist.
+An MVP compiler front end and interpreter exist. `cove check`, `cove outline`,
+and `cove run` all cover every representative program; what a run does depends
+on which host implementations it was given, and one of them still has no real
+implementation to give.
 
 ```console
 $ cd examples
 $ cove check
-checked 9 module(s), 9 file(s), 18 warning(s)
+checked 11 module(s), 11 file(s), 8 warning(s)
 $ cove run hello
 Hello, world!
 $ cove test
@@ -38,7 +39,7 @@ ran 2 test(s), 2 passed
 $ cove fmt --check
 $ cove generate --check
 $ cove build hello
-built `hello` from 9 file(s) into `target/hello`
+built `hello` from 11 file(s) into `target/hello`
   entry:  hello.main
   grants: console
   limits: (none)
@@ -50,15 +51,33 @@ Implemented: lexer, parser, directory modules, `export` visibility, derived
 outlines and capability requirements, a deterministic formatter, a
 tree-walking interpreter, Host API dispatch with grant enforcement, task
 scopes with a thread per task, a per-task mark-and-sweep collector, and
-runtime budgets for fuel, deadlines, memory, and host calls with tracing.
-`cove trace` reads a recorded trace back and summarises it, and `cove replay`
-runs an entry again with every host answering from the trace, reporting a
-divergence when the program asks for something the trace does not have.
-The `console`, `env`, `documents`, `clock`, `files`, and `process` hosts each
-ship a real and a fake implementation; `database` ships a fake and a denied
-one, because connecting to a real database needs more than the standard
-library. `cove test` runs every `test fn` in a package, granting each test
-the fake implementation of every capability its call graph requires unless
+runtime budgets for fuel, deadlines, memory, and host calls with tracing. A
+host resource handle is a name for something the host owns -- a module, a
+resource kind, an identity number, and the task-safety its schema declares --
+never the resource itself, and every operation called on one goes through the
+same dispatch as any other Host API call, so it gets the same grant check, the
+same schema check, the same budget charge, and the same trace; a handle whose
+resource has been closed reports a diagnostic rather than acting on whatever
+now occupies the slot. A host module may also declare plain-data types in a
+`TypeSchema`, which Cove source names and initializes with labels exactly like
+its own structs and enums. `Reentry` lets a host that was handed a Cove
+closure run it on the task that made the call, on that task's stack, against
+that run's budget, with no second thread and no scheduler. `cove trace` reads
+a recorded trace back and summarises it, and `cove replay` runs an entry again
+with every host answering from the trace -- reproducing a resource handle by
+handing back the recorded name -- and reports a divergence when the program
+asks for something the trace does not have. The `console`, `env`, `documents`,
+`clock`, `files`, and `process` hosts each ship a real and a fake
+implementation; `http` ships a real implementation speaking a deliberately
+small HTTP/1.1 over TCP, a recorded fake, and a denied one; `database` ships a
+fake and a denied one, because connecting to a real database needs more than
+the standard library. `clock.timeout` bounds a block against a watchdog on a
+real clock, and against how far the block pushed a virtual one that has no
+time of its own; `clock.every` repeats a callback until its task is cancelled
+or the callback fails, firing exactly once on a virtual clock, because one
+round is all a clock that moves only when the host moves it can honestly give.
+`cove test` runs every `test fn` in a package, granting each test the fake
+implementation of every capability its call graph requires unless
 `cove.toml`'s `[test] allow_real` names one. `cove build` packages a run as a
 single native executable that runs with no toolchain, no `cove` on the path,
 and no source tree. `cove generate <name>` runs a `[run.<name>]` entry that
@@ -68,8 +87,12 @@ the package; `cove generate --check` regenerates every such run into memory
 and fails on the first file that differs from what is on disk, which is what
 CI runs. Tasks spawned in a scope run on threads, so a trace attributes each
 one's wait to the task that waited, and `Shared` holds mutable state across
-them. Not yet implemented: the `http` host, host resource handles such as a
-database connection, and the garbage collector.
+them. Still missing: a real `database` implementation, because connecting to
+one means speaking a wire protocol the standard library cannot; TLS in the
+`http` host, where an `https` URL is refused rather than downgraded; a type
+checker that reads the Host API schema, so `http.Request` and its neighbors
+are still reported as unchecked host types; and native code generation, still
+ADR 0002's open decision.
 
 `cove build` is not a code generator. The executable it writes embeds the
 program's sources and the interpreter, so it delivers a program without
@@ -85,9 +108,11 @@ the runtime; running one needs neither. This is recorded in
 decision.
 
 The implementation direction is recorded in
-[ADR 0002](docs/adr/0002-implementation-language-and-backend.md), and how
+[ADR 0002](docs/adr/0002-implementation-language-and-backend.md), how
 tasks execute in
-[ADR 0003](docs/adr/0003-task-execution-and-runtime-control.md).
+[ADR 0003](docs/adr/0003-task-execution-and-runtime-control.md), and how a
+host hands out a resource handle and reenters a Cove closure in
+[ADR 0013](docs/adr/0013-host-resource-handles.md).
 
 Syntax is still provisional and may change.
 

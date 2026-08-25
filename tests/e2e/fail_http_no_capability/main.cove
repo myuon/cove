@@ -1,0 +1,7 @@
+use http
+
+/// Listens without the capability that grants the network.
+export fn main() -> Result<Unit, Error> {
+  http.listen(8080)?
+  Ok(())
+}

@@ -1,0 +1,13 @@
+use http
+
+/// Uses a handle after the resource it names has been closed.
+///
+/// Closing ends the resource; the name outlives it and addresses nothing, so
+/// the second `close` is reported rather than quietly answered.
+export fn main() -> Result<Unit, Error> {
+  let server = http.listen(0)?
+
+  server.close()?
+  server.close()?
+  Ok(())
+}

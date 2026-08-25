@@ -346,7 +346,7 @@ mod tests {
         let server = &config.runs["server"];
         assert_eq!(
             server.allow,
-            vec!["network".to_string(), "console".to_string()]
+            vec!["http".to_string(), "console".to_string()]
         );
     }
 

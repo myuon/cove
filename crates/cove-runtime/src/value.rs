@@ -14,6 +14,7 @@ use std::sync::Arc;
 
 use cove_syntax::ast::{FnDecl, Param};
 
+use crate::host::ResourceHandle;
 use crate::shared::SharedCell;
 use crate::task::{Task, TaskScope};
 
@@ -58,6 +59,16 @@ pub enum Value {
     Dyn(Rc<DynValue>),
     /// A bound host module such as `console`.
     HostModule(Rc<str>),
+    /// A handle to a resource the host owns, such as a database connection.
+    ///
+    /// The handle is a name, never the thing itself: what a
+    /// `database.Connection` really is stays on the host's side of the
+    /// boundary, and this value carries only the identity that addresses it.
+    /// That is what lets a handle be copied like any other value, crossed
+    /// into a task when its schema allows it, written into a trace, and
+    /// handed back by a replay — see ADR 0013 and
+    /// [`crate::host::ResourceHandle`].
+    Resource(Arc<ResourceHandle>),
     /// A bound host operation such as `console.println`.
     HostFn {
         module: Rc<str>,
@@ -501,6 +512,7 @@ impl Value {
             Value::Closure(_) => "fn".into(),
             Value::Dyn(d) => format!("dyn {}", d.trait_name),
             Value::HostModule(m) => format!("host module `{m}`"),
+            Value::Resource(handle) => handle.qualified_type(),
             Value::HostFn { module, op } => format!("host operation `{module}.{op}`"),
             Value::Type(t) => format!("type `{t}`"),
             Value::Range { .. } => "Range".into(),
@@ -565,6 +577,10 @@ impl Value {
                     inclusive_end: b_inclusive,
                 },
             ) => a == c && b == d && a_inclusive == b_inclusive,
+            // Two handles are equal when they name the same resource. A
+            // handle has no contents to compare, so naming the same thing is
+            // the whole of being the same value.
+            (Value::Resource(a), Value::Resource(b)) => a.names_same(b),
             // Two trait objects are equal when they were taken at the same
             // trait and hold equal values.
             (Value::Dyn(a), Value::Dyn(b)) => {
@@ -670,6 +686,10 @@ impl fmt::Display for Value {
             Value::Dyn(d) => write!(f, "{}", d.value),
             Value::Closure(_) => f.write_str("<fn>"),
             Value::HostModule(m) => write!(f, "<host module {m}>"),
+            // A handle prints as what it names, identity included: two
+            // connections are told apart by the number the host issued and
+            // by nothing else.
+            Value::Resource(handle) => write!(f, "<{}>", handle),
             Value::HostFn { module, op } => write!(f, "<host fn {module}.{op}>"),
             Value::Type(t) => write!(f, "<type {t}>"),
             Value::Range {

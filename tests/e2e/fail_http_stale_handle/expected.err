@@ -1,0 +1,8 @@
+error[cove::runtime]: `http.Server#1` is closed, so `close` has nothing to act on
+  --> <e2e>/fail_http_stale_handle/main.cove:11:3
+   |
+11 |   server.close()?
+   |   ^^^^^^^^^^^^^^
+  rule: A host resource handle names a resource the host owns. Closing the resource ends the handle; the name outlives it and addresses nothing.
+  help: open a new one, or move the `close` after the last use
+1 error(s)

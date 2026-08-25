@@ -4,13 +4,23 @@
 # against the interface the current source derives, so check it in and let a
 # reviewer read the difference. Do not edit it by hand.
 cove-api 1
-hash fnv1a64:75fad32f2d2bf174
+hash fnv1a64:9daaca44b37a71ce
 
 module callbacks
   /// Task-safe application dependencies captured by request handlers.
+  ///
+  /// The repository is a host resource handle. Its Host API schema declares
+  /// `database.Connection` task-safe, which is what lets this whole struct be
+  /// captured by a closure that crosses into a task.
   export struct App
-    field repository: BookingRepository
+    field repository: database.Connection
     field metrics: Shared<Metrics>
+  /// A booking this service stored.
+  export struct Booking
+    field id: String
+  /// Something a request did that subscribers may care about.
+  export enum Event
+    case BookingCreated(String)
   /// Immutable event subscriptions shared by request tasks.
   export struct EventBus
     field subscribers: Map<String, Array<EventHandler>>
@@ -24,10 +34,10 @@ module callbacks
     field failures: Int
   /// Immutable routes shared by all request tasks.
   export struct Router
-    field routes: Array<Route>
+    field routes: Array<http.Route>
   /// Runs a server with immutable routes and structured background work.
   export async fn main() -> Result<Unit, Error>
-    requires clock, console, http
+    requires clock, console, database, http
 
 module codegen
   /// Builds the `httpstatus.StatusCode` module from `files/status_codes.txt`,
@@ -95,20 +105,29 @@ module server
   export struct HealthResponse
     field status: String
   /// Returns a stable health response without external I/O.
-  export fn health(request: http.Request) -> http.Response<HealthResponse>
+  export fn health(request: http.Request) -> http.Response
     requires http
   /// Runs the HTTP server.
+  ///
+  /// The loop belongs to the program rather than to the host: `handle` answers
+  /// one request and returns, so the run's fuel, deadline, and cancellation
+  /// reach a server exactly as they reach any other Cove code. It ends when the
+  /// listener has nothing more to serve.
   export fn main() -> Result<Unit, Error>
     requires console, http
 
 module tasks
   /// Data needed to render the dashboard.
   export struct Dashboard
-    field bookings: Array<Booking>
-    field prices: Array<Price>
+    field bookings: String
+    field prices: String
   /// Loads independent dashboard inputs concurrently.
+  ///
+  /// The two fetches run on threads of their own, and `clock.timeout` bounds the
+  /// wait for both together: a body it stops does not finish, and the error
+  /// names the bound rather than whatever the stopped body was doing.
   export async fn loadDashboard() -> Result<Dashboard, Error>
-    requires api, clock
+    requires clock, http
 
 module text
   /// Reports the word count of `text` on the console the host granted.

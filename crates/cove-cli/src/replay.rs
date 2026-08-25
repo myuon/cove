@@ -28,10 +28,11 @@ use std::sync::{Arc, Mutex};
 use cove_runtime::host::{HostApi, HostRegistry};
 use cove_runtime::interp::Interpreter;
 use cove_runtime::runtime::Runtime;
-use cove_runtime::schema::OperationSchema;
+use cove_runtime::schema::{OperationSchema, ResourceSchema, TypeSchema};
 use cove_runtime::Transfer;
 use cove_runtime::{
-    value_to_json, Budget, Cancellation, Grants, Limits, RuntimeError, Value, ValueCapture,
+    value_to_json, Budget, Cancellation, Grants, Limits, ResourceHandle, RuntimeError, Value,
+    ValueCapture,
 };
 use cove_sema::Capability;
 
@@ -299,6 +300,8 @@ struct ReplayHost {
     name: String,
     capability: Capability,
     operations: Vec<OperationSchema>,
+    types: Vec<TypeSchema>,
+    resources: Vec<ResourceSchema>,
     tape: Arc<Mutex<Tape>>,
 }
 
@@ -315,12 +318,44 @@ impl HostApi for ReplayHost {
         &self.operations
     }
 
+    fn types(&self) -> &[TypeSchema] {
+        &self.types
+    }
+
+    fn resources(&self) -> &[ResourceSchema] {
+        &self.resources
+    }
+
     fn call(&self, op: &str, args: Vec<Value>) -> Result<Value, RuntimeError> {
         let name = self.name.clone();
         self.tape
             .lock()
             .expect("the replay tape is not shared across threads that panic")
             .answer(&name, op, &args)
+    }
+
+    /// Answers an operation on a handle from the trace, the handle included.
+    ///
+    /// A handle is a name, so a replay reproduces one by handing the recorded
+    /// name back: the `Value::Resource` this receives came out of the trace,
+    /// and matching it against the recorded first argument is what says the
+    /// program reached for the same resource it reached for before.
+    fn call_resource(
+        &self,
+        handle: &ResourceHandle,
+        op: &str,
+        args: Vec<Value>,
+        _back: &mut dyn cove_runtime::Reentry,
+    ) -> Result<Value, RuntimeError> {
+        let name = self.name.clone();
+        let op = format!("{}.{op}", handle.type_name);
+        let mut asked = Vec::with_capacity(args.len() + 1);
+        asked.push(Value::Resource(Arc::new(handle.clone())));
+        asked.extend(args);
+        self.tape
+            .lock()
+            .expect("the replay tape is not shared across threads that panic")
+            .answer(&name, &op, &asked)
     }
 }
 
@@ -393,6 +428,8 @@ pub(crate) fn cmd_replay(args: &[String]) -> Result<(), CliError> {
             name: module.name,
             capability: module.capability,
             operations: module.operations,
+            types: module.types,
+            resources: module.resources,
             tape: Arc::clone(&tape),
         }));
     }
@@ -499,6 +536,8 @@ mod tests {
                 name: module.name,
                 capability: module.capability,
                 operations: module.operations,
+                types: module.types,
+                resources: module.resources,
                 tape: Arc::clone(tape),
             }));
         }
@@ -638,6 +677,8 @@ mod tests {
                 name: module.name,
                 capability: module.capability,
                 operations: module.operations,
+                types: module.types,
+                resources: module.resources,
                 tape: Arc::clone(&tape),
             }));
         }

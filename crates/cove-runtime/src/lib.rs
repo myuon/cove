@@ -9,6 +9,7 @@ pub mod error;
 pub mod files;
 pub mod heap;
 pub mod host;
+pub mod http;
 pub mod interp;
 pub mod process;
 pub mod runtime;
@@ -26,11 +27,12 @@ pub use files::Files;
 pub use heap::{Collection, Heap, HeapStats, Roots};
 pub use host::{
     shipped_schema, Console, Documents, Env, GrantSource, Grants, HostApi, HostRegistry,
-    ModuleSchema,
+    ModuleSchema, NoReentry, Reentry, ResourceHandle,
 };
+pub use http::{Http, ScriptedRequest, Served};
 pub use process::{Process, ProcessLog};
 pub use runtime::Runtime;
-pub use schema::{Effect, HostType, OperationSchema};
+pub use schema::{Effect, FieldSchema, HostType, OperationSchema, ResourceSchema, TypeSchema};
 pub use shared::SharedCell;
 pub use task::Transfer;
 pub use trace::{

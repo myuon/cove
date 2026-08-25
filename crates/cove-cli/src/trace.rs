@@ -492,6 +492,26 @@ fn decode_value(json: &Json) -> Result<Recorded, String> {
                 }),
             }
         }
+        "resource" => {
+            let name = string_field(json, "name")?;
+            let id = field(json, "id")?
+                .as_i64()
+                .ok_or_else(|| "a `resource` needs an integer `id`".to_string())?;
+            let (module, type_name) = name
+                .rsplit_once('.')
+                .ok_or_else(|| format!("a `resource` name must be qualified, found `{name}`"))?;
+            let handle = cove_runtime::ResourceHandle {
+                module: module.to_string(),
+                type_name: type_name.to_string(),
+                id: id as u64,
+                // A handle that reached a trace crossed the boundary that
+                // records values, and only a task-safe one can: a resource
+                // its schema keeps to one task is recorded as opaque instead.
+                task_safe: true,
+            };
+            let shown = format!("<{handle}>");
+            recorded(Value::Resource(std::sync::Arc::new(handle)), shown)
+        }
         "redacted" => {
             let of = string_field(json, "of")?;
             Ok(Recorded {
