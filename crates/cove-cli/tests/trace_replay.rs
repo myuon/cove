@@ -84,6 +84,28 @@ fn record(path: &Path) -> String {
     std::fs::read_to_string(path).expect("the trace was written")
 }
 
+/// Records a trace of `cove run tasks_host_order` into `path`, from the
+/// `tests/e2e` shared package.
+///
+/// `tasks_host_order` spawns two tasks, each making exactly one
+/// `console.println` host call, and awaits the first before spawning the
+/// second — so the order the two calls reach the host is fixed by the
+/// program rather than by the scheduler, and this recording can never flake.
+fn record_tasks_host_order(path: &Path) -> String {
+    let run = cove_in(
+        &e2e(),
+        &[
+            "run",
+            "tasks_host_order",
+            "--trace",
+            &path.display().to_string(),
+        ],
+    );
+    assert!(run.status.success(), "the run failed: {}", stderr(&run));
+    assert_eq!(stdout(&run), "first\nsecond\n");
+    std::fs::read_to_string(path).expect("the trace was written")
+}
+
 #[test]
 fn a_recorded_run_reads_back_and_replays() {
     let dir = TempDir::new("roundtrip");
@@ -336,4 +358,121 @@ fn a_resource_handle_is_recorded_and_replayed_by_the_name_it_is() {
         "{}",
         stdout(&replay)
     );
+}
+
+/// Boundary 6: concurrent Host-call ordering.
+///
+/// `crates/cove-cli/src/replay.rs`'s module doc names the reason this
+/// boundary exists at all: ADR 0008 runs each spawned task on a thread of its
+/// own, so "the order in which two concurrent tasks reach the host is the
+/// scheduler's, and a trace records the order one run happened to take" —
+/// and it is why "a scope's contract is the set of effects it produces and
+/// never their sequence." `tests/e2e/tasks_host_order` deliberately does not
+/// exercise that freedom: it awaits its first task before spawning its
+/// second, so there is exactly one order its two `console.println` calls can
+/// reach the host in, and recording it can never flake.
+#[test]
+fn a_recorded_task_scope_replays_the_host_calls_it_made() {
+    let dir = TempDir::new("host-order");
+    let path = dir.join("t.jsonl");
+    let recorded = record_tasks_host_order(&path);
+
+    // The trace really did record the two `console.println` calls, in the
+    // program's order: `first` before `second`.
+    let calls: Vec<&str> = recorded
+        .lines()
+        .filter(|line| line.contains(r#""event":"host_call""#))
+        .collect();
+    assert_eq!(calls.len(), 2, "{recorded}");
+    assert!(
+        calls[0].contains(r#""args":[{"type":"string","value":"first"}]"#),
+        "{recorded}"
+    );
+    assert!(
+        calls[1].contains(r#""args":[{"type":"string","value":"second"}]"#),
+        "{recorded}"
+    );
+
+    let replay = cove_in(
+        &e2e(),
+        &["replay", &path.display().to_string(), "tasks_host_order"],
+    );
+    assert!(
+        replay.status.success(),
+        "`cove replay` failed: {}",
+        stderr(&replay)
+    );
+    let played = stdout(&replay);
+    assert!(
+        played.contains("host calls  2 of 2 recorded call(s), answered from the trace"),
+        "{played}"
+    );
+    // Only the boundary is canned, so `console` answered from the trace
+    // instead of printing: the program's own output is not repeated.
+    assert!(!played.contains("first"), "{played}");
+    assert!(!played.contains("second"), "{played}");
+}
+
+/// The other half of boundary 6: a trace whose two concurrent calls are
+/// reordered is exactly the trace a different interleaving of the same two
+/// tasks would have produced — same events, different order — which is a
+/// deterministic stand-in for a scheduler race that a real thread
+/// interleaving is not. `crates/cove-cli/src/replay.rs`'s module doc calls
+/// this "the truth about the program rather than a defect in the replay."
+///
+/// The swap touches only which of the two `host_call` lines comes first, and
+/// this test proves that: the swapped trace has the same lines, sorted, as
+/// the original, so nothing about either call's content changed.
+#[test]
+fn a_trace_whose_concurrent_calls_are_reordered_diverges_and_says_where() {
+    let dir = TempDir::new("host-order-reordered");
+    let path = dir.join("t.jsonl");
+    let recorded = record_tasks_host_order(&path);
+
+    let mut lines: Vec<&str> = recorded.lines().collect();
+    let host_call_indices: Vec<usize> = lines
+        .iter()
+        .enumerate()
+        .filter(|(_, line)| line.contains(r#""event":"host_call""#))
+        .map(|(i, _)| i)
+        .collect();
+    let [first, second] = host_call_indices.as_slice() else {
+        panic!("expected exactly two host_call lines:\n{recorded}");
+    };
+    lines.swap(*first, *second);
+    let swapped = lines.join("\n") + "\n";
+
+    // The technique: a reordering, not an edit. Sorted, the two traces have
+    // exactly the same lines.
+    let mut original_sorted: Vec<&str> = recorded.lines().collect();
+    let mut swapped_sorted: Vec<&str> = swapped.lines().collect();
+    original_sorted.sort();
+    swapped_sorted.sort();
+    assert_eq!(original_sorted, swapped_sorted, "only the order may differ");
+    assert_ne!(recorded, swapped, "the order must actually differ");
+
+    std::fs::write(&path, &swapped).unwrap();
+
+    let replay = cove_in(
+        &e2e(),
+        &["replay", &path.display().to_string(), "tasks_host_order"],
+    );
+    assert!(!replay.status.success(), "a reordered trace must diverge");
+    let report = stderr(&replay);
+    for expected in [
+        "divergence: the program asked for a different host call",
+        "at recorded call   1",
+        r#"the trace records  console.println("second")"#,
+        r#"the program asked  console.println("first")"#,
+    ] {
+        assert!(report.contains(expected), "missing `{expected}`:\n{report}");
+    }
+    // The trailing `rule` block, which every divergence carries.
+    for expected in [
+        "rule               a replay answers every Host API call from the trace, in the",
+        "recorded order; the program's own computation runs for real,",
+        "so a divergence means it took a different path than it did",
+    ] {
+        assert!(report.contains(expected), "missing `{expected}`:\n{report}");
+    }
 }

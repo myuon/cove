@@ -170,6 +170,10 @@ allow = ["console"]
 entry = "module_import.main"
 allow = ["console"]
 
+[run.tasks_host_order]
+entry = "tasks_host_order.main"
+allow = ["console"]
+
 [run.tasks_scope]
 entry = "tasks_scope.main"
 allow = ["console", "clock"]
