@@ -257,12 +257,14 @@ operation tells the reader to rebuild rather than to edit a `cove.toml` the
 binary will never read — which is the `GrantSource::Sealed` help, reached
 through the same dispatch as everything else.
 
-A handle cannot outlive the process that issued it. It is not a capability
-token, it is not signed, and it means nothing to another run: an identity read
-out of a trace and handed to a live host finds an empty table, which is the
-stale-handle error. That is a property worth stating out loud, because a
-design where a handle *did* travel would be a design where a file could grant
-authority, and that is precisely what a sealed artifact exists to prevent.
+A handle is not a bearer token. It is not signed, it grants nothing, and it
+cannot travel: there is no syntax that writes one down and no operation that
+takes one from outside, so the only way to hold one is to have been handed it
+by a host in this run. An identity is meaningful only against the table that
+issued it, and a fresh host starts with an empty table and its own numbering.
+That is worth stating out loud, because a design where a handle *did* travel
+would be a design where a file could grant authority, and a sealed artifact
+exists precisely to prevent that.
 
 ## The other direction: `Reentry`
 
