@@ -149,7 +149,9 @@ use std::fmt;
 use std::rc::Rc;
 
 use cove_diag::{Diagnostic, Span};
-use cove_schema::builtins::{BuiltinSchema, BuiltinType, MethodSchema};
+use cove_schema::builtins::{
+    BuiltinSchema, BuiltinType, FreeBuiltinKind, FreeBuiltinSchema, MethodSchema, ParamSchema,
+};
 use cove_schema::{HostType, OperationSchema, ResourceSchema, TypeSchema};
 use cove_syntax::ast::{
     Arg, BinaryOp, Block, EnumDecl, Expr, ExprKind, FnDecl, GenericParam, Ident, ItemKind,
@@ -3296,9 +3298,9 @@ impl<'a> Checker<'a> {
     /// a test and a failing assertion is an expected failure rather than a
     /// panic.
     ///
-    /// This is the static half of `cove_runtime::builtins::call_assertion`:
-    /// every assertion the runtime dispatches appears here with a type, and
-    /// nothing else does.
+    /// The signature comes from `cove_schema::builtins::FREE_BUILTINS`, which
+    /// the runtime dispatches out of as well, so an assertion cannot take one
+    /// number of arguments here and another there.
     fn assertion(
         &mut self,
         name: &str,
@@ -3306,52 +3308,40 @@ impl<'a> Checker<'a> {
         trailing: Option<&Expr>,
         span: Span,
     ) -> Option<Ty> {
+        let schema = free_builtin(name, FreeBuiltinKind::Assertion)?;
         let supplied: Vec<&Expr> = args.iter().map(|arg| &arg.value).chain(trailing).collect();
-        let arity = match name {
-            "assert" => 1,
-            "assertEqual" => 2,
-            _ => return None,
-        };
-        if supplied.len() != arity {
+        let mut bindings = FreeBindings::new(schema);
+        if supplied.len() == schema.arity() {
+            self.free_arguments(schema, &supplied, &mut bindings, span);
+        } else {
+            // An assertion given the wrong number of arguments is told that
+            // and nothing else: which argument was meant to be which is no
+            // longer a question with an answer.
             self.diagnostics.push(
-                Diagnostic::error(
-                    ARITY,
-                    format!(
-                        "`{name}` takes {arity} argument(s), but {} were given",
-                        supplied.len()
-                    ),
-                )
-                .at(span)
-                .rule("`assert` checks one condition; `assertEqual` compares one pair of values.")
-                .help(match name {
-                    "assert" => "write `assert(condition)`".to_string(),
-                    _ => "write `assertEqual(actual, expected)`".to_string(),
-                }),
+                free_arity(schema, supplied.len(), span)
+                    .rule(
+                        "`assert` checks one condition; `assertEqual` compares one pair of values.",
+                    )
+                    .help(format!(
+                        "write `{name}({})`",
+                        schema
+                            .params
+                            .iter()
+                            .map(|param| param.name)
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    )),
             );
             self.check_args_freely(args, trailing);
-        } else if name == "assert" {
-            let expected = Expected::new(
-                Ty::Bool,
-                span,
-                "`assert` checks a `Bool` condition".to_string(),
-            );
-            self.expr(supplied[0], Some(&expected));
-        } else {
-            // The expected value is checked against the actual one's type:
-            // comparing two values of different types is the mistake this
-            // catches, and either operand could be the one that is wrong.
-            let actual = self.expr(supplied[0], None);
-            let expected = Expected::new(
-                actual,
-                supplied[0].span,
-                "`assertEqual` compares two values of one type".to_string(),
-            );
-            self.expr(supplied[1], Some(&expected));
         }
-        Some(Ty::Result(Box::new(Ty::Unit), Box::new(Ty::Error)))
+        Some(bindings.open(&schema.result))
     }
 
     /// `Ok(v)`, `Err(e)`, `Some(v)`, `Error("message")`, and `Shared(value)`.
+    ///
+    /// Which names these are, what each carries, and what each produces are
+    /// the shared table's; what a call site adds is the type it expects,
+    /// which is the only thing that can say what the `E` of an `Ok` is.
     fn constructor(
         &mut self,
         name: &str,
@@ -3360,90 +3350,69 @@ impl<'a> Checker<'a> {
         span: Span,
         expected: Option<&Expected>,
     ) -> Option<Ty> {
-        let hint = expected.map(|e| &e.ty);
-        let (params, ret): (Vec<Ty>, Ty) = match name {
-            "Ok" => {
-                let (ok, error) = match hint {
-                    Some(Ty::Result(ok, error)) => ((**ok).clone(), (**error).clone()),
-                    _ => (Ty::Unknown, Ty::Unknown),
-                };
-                (vec![ok.clone()], Ty::Result(Box::new(ok), Box::new(error)))
-            }
-            "Err" => {
-                let (ok, error) = match hint {
-                    Some(Ty::Result(ok, error)) => ((**ok).clone(), (**error).clone()),
-                    _ => (Ty::Unknown, Ty::Unknown),
-                };
-                (
-                    vec![error.clone()],
-                    Ty::Result(Box::new(ok), Box::new(error)),
-                )
-            }
-            "Some" => {
-                let inner = match hint {
-                    Some(Ty::Option(inner)) => (**inner).clone(),
-                    _ => Ty::Unknown,
-                };
-                (vec![inner.clone()], Ty::Option(Box::new(inner)))
-            }
-            "Error" => (vec![Ty::Str], Ty::Error),
-            "Shared" => {
-                let inner = match hint {
-                    Some(Ty::Shared(inner)) => (**inner).clone(),
-                    _ => Ty::Unknown,
-                };
-                (vec![inner.clone()], Ty::Shared(Box::new(inner)))
-            }
-            _ => return None,
-        };
+        let schema = free_builtin(name, FreeBuiltinKind::Constructor)?;
+        let mut bindings = FreeBindings::new(schema);
+        if let Some(hint) = expected.map(|e| &e.ty) {
+            bindings.read_off(&schema.result, hint, span);
+        }
         let mut supplied: Vec<&Expr> = args.iter().map(|arg| &arg.value).collect();
         if let Some(trailing) = trailing {
             supplied.push(trailing);
         }
-        if supplied.len() != 1 {
+        if supplied.len() != schema.arity() {
             self.diagnostics.push(
-                Diagnostic::error(
-                    ARITY,
-                    format!(
-                        "`{name}` takes 1 argument, but {} were given",
-                        supplied.len()
-                    ),
-                )
-                .at(span)
-                .rule("A constructor carries exactly one value.")
-                .help(format!("write `{name}(value)`")),
+                free_arity(schema, supplied.len(), span)
+                    .rule("A constructor carries exactly one value.")
+                    .help(format!("write `{name}(value)`")),
             );
         }
-        let mut ret = ret;
+        // Unlike an assertion, a constructor still checks the payload it was
+        // given: there is only one parameter, so a wrong count says nothing
+        // about which value was meant for it.
+        self.free_arguments(schema, &supplied, &mut bindings, span);
+        Some(bindings.open(&schema.result))
+    }
+
+    /// Checks a free builtin's arguments against the parameters it declares.
+    ///
+    /// A parameter whose type is already settled — by the type the call site
+    /// expects, or by an argument that came before it — is what its argument
+    /// is checked against. One that is not is settled *by* its argument,
+    /// which is how `Ok(1)` decides it makes a `Result<Int, _>` and how
+    /// `assertEqual`'s first argument decides what its second one must be.
+    fn free_arguments(
+        &mut self,
+        schema: &'static FreeBuiltinSchema,
+        supplied: &[&Expr],
+        bindings: &mut FreeBindings,
+        span: Span,
+    ) {
         for (index, value) in supplied.iter().enumerate() {
-            match params.get(index) {
-                Some(param) if !param.is_wild() => {
-                    let expected =
-                        Expected::new(param.clone(), span, format!("`{name}` carries a `{param}`"));
-                    self.expr(value, Some(&expected));
-                }
-                _ => {
-                    // Nothing constrains the payload, so it decides the
-                    // constructed type instead.
-                    let ty = self.expr(value, None);
-                    if index == 0 {
-                        ret = match (name, ret) {
-                            ("Ok", Ty::Result(_, error)) => Ty::Result(Box::new(ty), error),
-                            ("Err", Ty::Result(ok, _)) => Ty::Result(ok, Box::new(ty)),
-                            ("Some", Ty::Option(_)) => Ty::Option(Box::new(ty)),
-                            // What `Shared` wraps must be task-safe, so the
-                            // payload is checked here as well as where a
-                            // `Shared<T>` is written as a type.
-                            ("Shared", Ty::Shared(_)) => {
-                                Ty::Shared(Box::new(self.task_safe_argument(ty, span)))
-                            }
-                            (_, ret) => ret,
-                        };
-                    }
-                }
+            let Some(param) = schema.params.get(index) else {
+                // An argument the signature has no parameter for is still
+                // checked, so a mistake inside it is reported next to the
+                // arity rather than after it is fixed.
+                self.expr(value, None);
+                continue;
+            };
+            let declared = bindings.open(&param.ty);
+            if declared.is_wild() {
+                let found = self.expr(value, None);
+                // What a `Shared` wraps must be task-safe, so the payload is
+                // checked here as well as where a `Shared<T>` is written as a
+                // type.
+                let found = if matches!(schema.result, BuiltinType::Shared(_)) {
+                    self.task_safe_argument(found, span)
+                } else {
+                    found
+                };
+                bindings.bind(&param.ty, found, value.span);
+            } else {
+                let reason = free_builtin_reason(schema, param, &declared);
+                let expected = Expected::new(declared, bindings.origin(&param.ty, span), reason);
+                self.expr(value, Some(&expected));
             }
         }
-        Some(ret)
     }
 
     /// `head.name(...)` where `head` is not a local binding: a host
@@ -5433,6 +5402,7 @@ fn builtin_ty(declared: &BuiltinType, bound: &BTreeMap<&str, Ty>, receiver: Opti
         BuiltinType::Option(some) => Ty::Option(nested(some)),
         BuiltinType::Result(ok, error) => Ty::Result(nested(ok), nested(error)),
         BuiltinType::Task(inner) => Ty::Task(nested(inner)),
+        BuiltinType::Shared(inner) => Ty::Shared(nested(inner)),
         BuiltinType::Fn(params, ret) => Ty::func(
             false,
             params
@@ -5448,6 +5418,143 @@ fn builtin_ty(declared: &BuiltinType, bound: &BTreeMap<&str, Ty>, receiver: Opti
         // Only an associated function is opened with no receiver, and the
         // schema's own tests hold one to naming no `Self`.
         BuiltinType::SelfType => receiver.cloned().unwrap_or(Ty::Unknown),
+    }
+}
+
+/// The free builtin `name` describes itself with, when it is one of `kind`.
+///
+/// The kind is asked for because the two are reached separately: an assertion
+/// is dispatched through the path that carries its arguments' source text,
+/// and a constructor through the one that reads the type the call site
+/// expects.
+fn free_builtin(name: &str, kind: FreeBuiltinKind) -> Option<&'static FreeBuiltinSchema> {
+    cove_schema::free_builtin(name).filter(|schema| schema.kind == kind)
+}
+
+/// What a free builtin's call has settled its type parameters to, and where.
+///
+/// A free builtin binds every parameter it names itself — there is no
+/// receiver to read one off — and exactly two things can settle one: the type
+/// the call site expects, and an argument. An unsettled parameter is
+/// [`Ty::Unknown`] rather than a [`Ty::Param`], because nothing declared it
+/// for a call site to instantiate: `Ok(1)` written where nothing expects a
+/// `Result` genuinely does not know what its error type is.
+///
+/// The spans are here because a diagnostic points at whatever settled the
+/// parameter it is complaining about: `assertEqual("a", 1)` says the `1`
+/// should have been a `String` and points at the `"a"` that decided so.
+struct FreeBindings {
+    types: BTreeMap<&'static str, Ty>,
+    origins: BTreeMap<&'static str, Span>,
+}
+
+impl FreeBindings {
+    /// Every parameter `schema` binds, so far settled by nothing.
+    fn new(schema: &'static FreeBuiltinSchema) -> FreeBindings {
+        FreeBindings {
+            types: schema
+                .generics
+                .iter()
+                .map(|name| (*name, Ty::Unknown))
+                .collect(),
+            origins: BTreeMap::new(),
+        }
+    }
+
+    /// `declared`, with every parameter settled so far substituted in.
+    fn open(&self, declared: &BuiltinType) -> Ty {
+        builtin_ty(declared, &self.types, None)
+    }
+
+    /// Settles the parameter `declared` names, when it names one bare.
+    ///
+    /// A parameter mentioned inside a larger type is not settled by an
+    /// argument, because no free builtin declares one that way and reading a
+    /// type back out of a value's type is unification the checker does not do
+    /// here.
+    fn bind(&mut self, declared: &BuiltinType, ty: Ty, at: Span) {
+        if let BuiltinType::Param(name) = declared {
+            self.types.insert(name, ty);
+            self.origins.insert(name, at);
+        }
+    }
+
+    /// Reads the parameters of `declared` off `actual`, as far as the two
+    /// have the same shape.
+    ///
+    /// This is how the type a call site expects reaches a constructor's
+    /// payload: `Result<T, E>` against `Result<Int, Error>` settles both, and
+    /// `Result<T, E>` against something that is not a `Result` settles
+    /// neither, leaving the argument to say what it can.
+    fn read_off(&mut self, declared: &BuiltinType, actual: &Ty, at: Span) {
+        match (declared, actual) {
+            (BuiltinType::Param(_), _) => self.bind(declared, actual.clone(), at),
+            (BuiltinType::Array(inner), Ty::Array(ty))
+            | (BuiltinType::Vector(inner), Ty::Vector(ty))
+            | (BuiltinType::Set(inner), Ty::Set(ty))
+            | (BuiltinType::Option(inner), Ty::Option(ty))
+            | (BuiltinType::Task(inner), Ty::Task(ty))
+            | (BuiltinType::Shared(inner), Ty::Shared(ty)) => self.read_off(inner, ty, at),
+            (BuiltinType::Map(key, value), Ty::Map(left, right))
+            | (BuiltinType::MapEntry(key, value), Ty::MapEntry(left, right))
+            | (BuiltinType::Result(key, value), Ty::Result(left, right)) => {
+                self.read_off(key, left, at);
+                self.read_off(value, right, at);
+            }
+            _ => {}
+        }
+    }
+
+    /// Where the parameter `declared` names was settled, or `fallback` when
+    /// it was settled by the call site rather than by an argument.
+    fn origin(&self, declared: &BuiltinType, fallback: Span) -> Span {
+        match declared {
+            BuiltinType::Param(name) => self.origins.get(name).copied().unwrap_or(fallback),
+            _ => fallback,
+        }
+    }
+}
+
+/// A free builtin was given the wrong number of arguments.
+///
+/// The rule and the correction are the caller's, because they are what the
+/// two kinds do not share: a constructor carries a value and an assertion
+/// checks one.
+fn free_arity(schema: &FreeBuiltinSchema, found: usize, span: Span) -> Diagnostic {
+    Diagnostic::error(
+        ARITY,
+        match schema.kind {
+            FreeBuiltinKind::Constructor => format!(
+                "`{}` takes {} argument, but {found} were given",
+                schema.name,
+                schema.arity()
+            ),
+            FreeBuiltinKind::Assertion => format!(
+                "`{}` takes {} argument(s), but {found} were given",
+                schema.name,
+                schema.arity()
+            ),
+        },
+    )
+    .at(span)
+}
+
+/// What a diagnostic says a free builtin's parameter is for.
+///
+/// The sentence is the checker's rather than the table's: the table says what
+/// a call takes, and this says why, which is prose no other crate reads.
+fn free_builtin_reason(schema: &FreeBuiltinSchema, param: &ParamSchema, ty: &Ty) -> String {
+    match schema.kind {
+        FreeBuiltinKind::Constructor => format!("`{}` carries a `{ty}`", schema.name),
+        // An assertion either checks one value against a type it declares or
+        // compares a pair against each other, and its one parameter or its
+        // two are what say which.
+        FreeBuiltinKind::Assertion if schema.arity() == 1 => {
+            format!("`{}` checks a `{ty}` {}", schema.name, param.name)
+        }
+        FreeBuiltinKind::Assertion => {
+            format!("`{}` compares two values of one type", schema.name)
+        }
     }
 }
 

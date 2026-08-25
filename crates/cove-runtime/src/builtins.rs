@@ -6,19 +6,23 @@
 //! method it came from.
 //!
 //! What each builtin *is* — its parameters, its result, and whether its
-//! receiver is `var self` — is [`cove_schema::builtins`], one table below
-//! both this crate and the compiler. This module is the other half: the
-//! bodies, which have to be here because a body reaches into a [`Value`] and
-//! `cove-schema` has no values. The two questions a name alone can answer
-//! are asked of the schema rather than answered twice, and
-//! `tests/builtin_schema.rs` drives every entry in that table through a real
-//! interpreter, so a signature declared with no body behind it fails a test
-//! rather than a program.
+//! receiver is `var self` — is [`cove_schema::builtins`], two tables below
+//! both this crate and the compiler: one for what is called on a receiver and
+//! one for the constructors and assertions, which are called on nothing. This
+//! module is the other half: the bodies, which have to be here because a body
+//! reaches into a [`Value`] and `cove-schema` has no values. Every question a
+//! name alone can answer is asked of the schema rather than answered twice —
+//! which names are namespaces, which methods mutate, which names construct,
+//! which assert, how many arguments each takes, and which receivers report a
+//! `length` — and `tests/builtin_schema.rs` drives every entry in both tables
+//! through a real interpreter, so a signature declared with no body behind it
+//! fails a test rather than a program.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::rc::Rc;
 
 use cove_diag::Span;
+use cove_schema::builtins::{FreeBuiltinKind, FreeBuiltinSchema};
 
 use crate::error::RuntimeError;
 use crate::shared::SharedCell;
@@ -62,10 +66,15 @@ pub trait Callable {
     fn arity(&self, callee: &Value) -> Option<usize>;
 }
 
-/// The assertion builtins a test calls: `assert` and `assertEqual`.
-pub fn is_assertion(name: &str) -> bool {
-    matches!(name, "assert" | "assertEqual")
-}
+/// The builtins that are called on nothing: the constructors `Ok`, `Err`,
+/// `Some`, `Error`, and `Shared`, and the assertions `assert` and
+/// `assertEqual`.
+///
+/// This is [`cove_schema::builtins::free_builtin`], re-exported so that the
+/// interpreter still asks one module about builtins. Which of the two kinds
+/// an entry is decides which path a call is dispatched through, and how many
+/// arguments it declares is what that call is held to.
+pub use cove_schema::builtins::free_builtin;
 
 /// `assert(condition: Bool) -> Result<Unit, Error>` and
 /// `assertEqual(actual: T, expected: T) -> Result<Unit, Error>`.
@@ -79,17 +88,25 @@ pub fn is_assertion(name: &str) -> bool {
 /// a panic — panics stay reserved for broken invariants. `assertEqual`
 /// reports both values, since knowing only that they differ rarely explains
 /// why.
+///
+/// How many arguments each takes and what each one is called are the shared
+/// table's, so the arity this enforces is the arity `cove check` reported on.
 pub fn call_assertion(
     name: &str,
     args: Vec<Value>,
     sources: &[&str],
     span: Span,
 ) -> Result<Value, RuntimeError> {
+    let Some(schema) =
+        free_builtin(name).filter(|schema| schema.kind == FreeBuiltinKind::Assertion)
+    else {
+        return Err(RuntimeError::new(format!("unknown assertion `{name}`")).at(span));
+    };
+    let args = expect_args(name, args, schema.arity(), span)?;
     match name {
         "assert" => {
-            let args = expect_args("assert", args, 1, span)?;
             let Value::Bool(holds) = &args[0] else {
-                return Err(type_error("assert", "condition", "Bool", &args[0], span));
+                return Err(declared_type_error(schema, 0, &args[0], span));
             };
             if *holds {
                 return Ok(Value::ok(Value::Unit));
@@ -100,9 +117,9 @@ pub fn call_assertion(
             )))
         }
         "assertEqual" => {
-            let args = expect_args("assertEqual", args, 2, span)?;
             // `assertEqual` compares the way `==` does, so it refuses the
-            // same comparison `==` refuses.
+            // same comparison `==` refuses. The shared table says as much by
+            // naming one type parameter twice.
             if args[0].type_name() != args[1].type_name() {
                 return Err(RuntimeError::new(format!(
                     "`assertEqual` cannot compare `{}` with `{}`",
@@ -122,8 +139,26 @@ pub fn call_assertion(
                 args[1]
             )))
         }
+        // The table admitted the name, so this is a table entry with no body
+        // behind it, which `tests/builtin_schema.rs` is what catches.
         _ => Err(RuntimeError::new(format!("unknown assertion `{name}`")).at(span)),
     }
+}
+
+/// A free builtin was given an argument its declared parameter does not
+/// admit.
+///
+/// The parameter's name and type are read out of the shared table, so
+/// `Error("boom")` and `assert(1)` are refused in the words the table
+/// declares them in.
+fn declared_type_error(
+    schema: &FreeBuiltinSchema,
+    index: usize,
+    found: &Value,
+    span: Span,
+) -> RuntimeError {
+    let param = &schema.params[index];
+    type_error(schema.name, param.name, &param.ty.to_string(), found, span)
 }
 
 /// The `Err` a failed assertion produces.
@@ -137,14 +172,18 @@ fn source_of<'a>(sources: &[&'a str], index: usize) -> &'a str {
     sources.get(index).copied().unwrap_or("?")
 }
 
-/// Names usable as bare constructor calls, such as `Ok(value)`.
-pub fn is_constructor(name: &str) -> bool {
-    matches!(name, "Ok" | "Err" | "Some" | "Error" | "Shared")
-}
-
 /// `Ok(v)`, `Err(e)`, `Some(v)`, `Error("message")`, `Shared(value)`.
+///
+/// Which names these are and how many arguments each carries come from the
+/// shared table; what each one builds is here, because building one needs a
+/// [`Value`].
 pub fn call_constructor(name: &str, args: Vec<Value>, span: Span) -> Result<Value, RuntimeError> {
-    let mut args = expect_args(name, args, 1, span)?;
+    let Some(schema) =
+        free_builtin(name).filter(|schema| schema.kind == FreeBuiltinKind::Constructor)
+    else {
+        return Err(RuntimeError::new(format!("unknown constructor `{name}`")).at(span));
+    };
+    let mut args = expect_args(name, args, schema.arity(), span)?;
     let value = args.remove(0);
     Ok(match name {
         "Ok" => Value::ok(value),
@@ -157,9 +196,11 @@ pub fn call_constructor(name: &str, args: Vec<Value>, span: Span) -> Result<Valu
         "Error" => match value {
             Value::Str(message) => Value::error(message.to_string()),
             other => {
-                return Err(type_error("Error", "message", "String", &other, span));
+                return Err(declared_type_error(schema, 0, &other, span));
             }
         },
+        // As in `call_assertion`: a name the table declares and nothing here
+        // builds is what `tests/builtin_schema.rs` refuses to let happen.
         _ => return Err(RuntimeError::new(format!("unknown constructor `{name}`")).at(span)),
     })
 }
