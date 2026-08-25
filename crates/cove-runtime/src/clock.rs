@@ -201,6 +201,12 @@ impl Clock {
     /// nothing to wait for. One round is what a clock that only moves when
     /// the host moves it can honestly give, and it is what makes a program
     /// with a timer testable without one.
+    ///
+    /// The flag is read before the first round, so a timer whose task is
+    /// cancelled before its thread gets this far runs nothing at all. How many
+    /// rounds such a timer completed is therefore decided by neither this
+    /// clock nor the program that spawned it, and ADR 0008's amendment records
+    /// why nothing orders the two.
     fn every(
         &self,
         nanos: i64,

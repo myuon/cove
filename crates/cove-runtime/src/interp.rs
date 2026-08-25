@@ -1830,6 +1830,13 @@ impl<'a> Interpreter<'a> {
     /// what may cross a task boundary is exactly what a thread can own, so a
     /// capture that may not cross is reported at the `spawn` that would have
     /// carried it, before any thread exists.
+    ///
+    /// This returns once the thread exists and orders nothing else: whether
+    /// the child has run an instruction by the time the parent's next
+    /// statement runs is the operating system's answer, not this runtime's. A
+    /// rendezvous here would be a scheduling policy, which ADR 0008's
+    /// amendment refuses for the same reason the concurrency limit below
+    /// refuses to wait.
     fn spawn(
         &mut self,
         scope: &Rc<TaskScope>,
