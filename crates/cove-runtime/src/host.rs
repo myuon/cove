@@ -76,6 +76,23 @@ impl Grants {
     }
 }
 
+/// Where a run's grants came from, and so what a reader has to change to
+/// widen them.
+///
+/// A `cove run` reads `[run.<name>] allow` every time it starts, so editing
+/// that table is the answer. A binary `cove build` produced carries the grant
+/// set it was built with and reads no configuration at all, so the answer
+/// there is to change the table and build again — advice to edit a
+/// `cove.toml` would be advice that does nothing.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum GrantSource {
+    /// The `[run.<name>] allow` table this run read when it started.
+    #[default]
+    Config,
+    /// The grant set baked into a built binary.
+    Sealed,
+}
+
 /// Holds every host module available to a run, and the grants that gate them.
 ///
 /// `HostRegistry::call` is the single choke point through which Cove code
@@ -87,6 +104,7 @@ impl Grants {
 pub struct HostRegistry {
     modules: Vec<Box<dyn HostApi>>,
     grants: Grants,
+    grant_source: GrantSource,
     trace: Arc<dyn TraceSink>,
     /// The run's budget, shared by every task: ADR 0008 draws a task's fuel
     /// from the run's budget rather than giving each task one of its own, so
@@ -100,6 +118,7 @@ impl HostRegistry {
         HostRegistry {
             modules: Vec::new(),
             grants,
+            grant_source: GrantSource::default(),
             trace: Arc::new(NullSink),
             budget: Mutex::new(None),
             irreversible_writes: AtomicU64::new(0),
@@ -112,6 +131,12 @@ impl HostRegistry {
 
     pub fn grants(&self) -> &Grants {
         &self.grants
+    }
+
+    /// Records where these grants came from, which is what a refused call
+    /// tells the reader to change.
+    pub fn set_grant_source(&mut self, source: GrantSource) {
+        self.grant_source = source;
     }
 
     pub fn contains(&self, name: &str) -> bool {
@@ -237,9 +262,16 @@ impl HostRegistry {
                 "`{module}.{op}` requires the `{capability}` capability, which this run was not granted"
             ))
             .with_rule("Cove code has no ambient authority; the host grants capabilities at the execution boundary.")
-            .with_help(format!(
-                "add `{capability}` to `allow` in the run's `cove.toml` table"
-            )));
+            .with_help(match self.grant_source {
+                GrantSource::Config => {
+                    format!("add `{capability}` to `allow` in the run's `cove.toml` table")
+                }
+                // Naming a `cove.toml` here would name a file this binary
+                // never reads: its grants were fixed when it was built.
+                GrantSource::Sealed => format!(
+                    "this binary carries the capabilities it was built with; add `{capability}` to `allow` in the run's `cove.toml` table and build it again"
+                ),
+            }));
         }
         let Some(schema) = declared else {
             let known = entry

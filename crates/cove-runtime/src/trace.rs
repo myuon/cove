@@ -262,6 +262,23 @@ pub trait TraceSink: Send + Sync {
     }
 }
 
+/// Creates the file a trace is written to, readable only by its owner where
+/// the platform can say so.
+///
+/// A full-capture trace holds whatever the host answered with, so it is not a
+/// file to leave world-readable by default. The mode applies to a file this
+/// call creates; one that already exists keeps the permissions it has.
+pub fn create_trace_file(path: &std::path::Path) -> std::io::Result<std::fs::File> {
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    options.open(path)
+}
+
 /// Discards every event. The default when a run is not being traced.
 pub struct NullSink;
 
