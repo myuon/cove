@@ -163,12 +163,25 @@ struct Run {
     stderr: String,
 }
 
+/// Runs `program`, retrying while Linux reports the executable as busy.
+///
+/// These tests run in threads and each spawns processes. A child forked by
+/// one test inherits the write descriptor another test still holds on the
+/// executable it is copying, and Linux refuses to exec a file any process has
+/// open for writing. The descriptor closes on its own; nothing here can wait
+/// for a fork it did not make, so this waits for the symptom.
 fn run(program: &Path, dir: &Path, args: &[&str]) -> Run {
-    let output = Command::new(program)
-        .current_dir(dir)
-        .args(args)
-        .output()
-        .unwrap_or_else(|e| panic!("cannot run `{}`: {e}", program.display()));
+    let mut attempt = 0;
+    let output = loop {
+        match Command::new(program).current_dir(dir).args(args).output() {
+            Ok(output) => break output,
+            Err(e) if e.raw_os_error() == Some(26) && attempt < 50 => {
+                attempt += 1;
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+            Err(e) => panic!("cannot run `{}`: {e}", program.display()),
+        }
+    };
     Run {
         status: output.status,
         stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
