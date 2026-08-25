@@ -6,6 +6,7 @@ members = [
   "crates/cove-sema",
   "crates/cove-runtime",
   "crates/cove-cli",
+  "crates/cove-bench",
 ]
 
 [workspace.package]

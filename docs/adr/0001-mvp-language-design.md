@@ -42,6 +42,65 @@ Cove should support the same source language in several execution profiles:
 Browser replacement is not a goal. Wasm is an optional deployment target, not
 the semantic center of the language.
 
+### Execution profile classification
+
+The four profiles above are not one commitment of equal weight. The list
+describes the shape a mature Cove should eventually have; it does not by
+itself say which parts an MVP may still be missing, and a reader comparing it
+against the implementation cannot tell a completion criterion from a
+direction of travel. This section removes that ambiguity.
+
+- **Native — MVP required.** `cove run` and `cove build` are the primary way
+  every other claim in this ADR is exercised, in the CLI itself and in
+  `examples/`. A Cove that could not run natively would not be testing this
+  ADR's hypothesis at all.
+- **Sandboxed — MVP required.** `crates/cove-runtime/src/host.rs` rejects a
+  Host API call the run was not granted, and `crates/cove-runtime/src/budget.rs`
+  stops a run that exceeds its fuel, deadline, host-call, or memory budget.
+  Every profile below runs under this same boundary; "sandboxed" is not a
+  fourth build mode to add later, it is host-controlled authority and runtime
+  limits, which already exist and are covered by both modules' own tests.
+- **Embedded — MVP required.** `crates/cove-runtime/src/embed.rs` lets a Rust
+  host carry a Cove package inside its own binary and fix its entry, grants,
+  and limits at build time; `HostApi` and `HostRegistry` let that host
+  register capability implementations `cove-runtime` never ships, not only
+  the shipped `Console`, `Documents`, `Clock`, `Files`, `Process`, and
+  `Database`. The smallest acceptance test this requires is
+  `crates/cove-runtime/tests/embedding.rs`: a host registers its own
+  `documents` implementation, grants it and stays under its own host-call
+  limit (a successful run, with the host's implementation observed to have
+  run), then withholds the grant (a denial), then grants it but sets its own
+  limit to zero (a second denial, from the host's resource control rather
+  than its capability control). `cargo test --workspace` runs this test, so a
+  regression here fails CI rather than going unnoticed.
+- **Wasm — deferred.** No crate in this workspace targets Wasm; nothing here
+  builds, links, or runs on it. Issue #1's roadmap explicitly defers a
+  production Wasm backend. For this MVP, Wasm is only a semantic-portability
+  constraint on the language and backend design — "the language avoids
+  backend-dependent semantics so native and Wasm programs behave
+  consistently" — and not a working target the MVP must produce. A reader
+  should not infer a Wasm build from the list above; it names Wasm as a
+  possible future profile, not a present or MVP-required one.
+
+The MVP's execution-profile claim is complete only when every line below
+holds, each backed by a passing test rather than a description:
+
+- [x] **Native:** `cove run` and `cove build` execute a representative
+      program end to end (`examples/hello`, and `cove-cli`'s own tests).
+- [x] **Sandboxed:** an ungranted Host API call is refused, and a run is
+      stopped by at least one of its fuel, deadline, host-call, and memory
+      limits (`crates/cove-runtime/src/host.rs` and `.../budget.rs` tests).
+- [x] **Embedded:** a host outside `cove-runtime` can supply its own
+      capability implementation and its own limits, and observe both a
+      successful run and a denial (`crates/cove-runtime/tests/embedding.rs`).
+- [ ] **Wasm:** intentionally not attempted. There is no MVP checklist item
+      for a working Wasm build; its only MVP obligation is the
+      semantic-portability constraint stated above.
+
+A profile claimed above without a passing test to back it is not
+"MVP required" and complete — it is a direction of travel, and should be
+described as one rather than as delivered.
+
 ## Familiar core, explicit delta
 
 Cove should reuse syntax and semantics already familiar from TypeScript, Go,

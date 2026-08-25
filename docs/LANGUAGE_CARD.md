@@ -196,6 +196,10 @@ let metrics = Shared(Metrics(requests: 0, failures: 0))
 metrics.lock(fn(var value) { value.record(failed) })
 ```
 
+`Shared` ownership must stay acyclic. A cell may not come to hold a handle to
+itself; `lock` rejects a closure that would leave the cell reachable from its
+own new value. A cycle through two or more cells is not detected and leaks.
+
 Memory is managed by a precise, non-moving mark-and-sweep collector. CPU,
 memory, time, concurrency, and Host-call limits are runtime controls, not
 termination proofs.

@@ -340,6 +340,44 @@ impl Transfer {
         Transfer::convert("", value)
     }
 
+    /// Whether `target` is reachable from this transfer without passing
+    /// through a second [`SharedCell`].
+    ///
+    /// [`SharedCell::lock`] calls this on the value it is about to store,
+    /// with `target` the cell being locked, to reject the one shape of cycle
+    /// ADR 0011 makes cheap to catch: a cell ending up holding a handle to
+    /// itself. `Transfer::Shared` holds an `Arc` handle, not the other cell's
+    /// contents — those sit behind a `Mutex` this walk does not take — so
+    /// the search stops at every `Shared` it meets and never risks the
+    /// deadlock or unbounded work that chasing into another cell could
+    /// cause. A cycle through two or more cells is invisible to this check;
+    /// that is the wider, deferred problem the ADR's amendment names.
+    pub(crate) fn reaches(&self, target: *const SharedCell) -> bool {
+        match self {
+            Transfer::Shared(cell) => std::ptr::eq(Arc::as_ptr(cell), target),
+            Transfer::Array(items) => items.iter().any(|item| item.reaches(target)),
+            Transfer::Map(entries) => entries.values().any(|item| item.reaches(target)),
+            Transfer::Struct { fields, .. } => fields.iter().any(|(_, item)| item.reaches(target)),
+            Transfer::Enum { payload, .. } => payload.iter().any(|item| item.reaches(target)),
+            Transfer::Dyn { value, .. } => value.reaches(target),
+            Transfer::Closure(closure) => closure
+                .captures
+                .iter()
+                .any(|(_, item)| item.reaches(target)),
+            Transfer::Unit
+            | Transfer::Bool(_)
+            | Transfer::Int(_)
+            | Transfer::Float(_)
+            | Transfer::Duration(_)
+            | Transfer::Str(_)
+            | Transfer::Set(_)
+            | Transfer::HostModule(_)
+            | Transfer::HostFn { .. }
+            | Transfer::Type(_)
+            | Transfer::Range { .. } => false,
+        }
+    }
+
     /// `path` names how the value was reached, and is extended as the walk
     /// descends, so a diagnostic can point at the capture rather than at the
     /// closure as a whole.

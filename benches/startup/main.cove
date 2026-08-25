@@ -1,0 +1,4 @@
+/// The smallest possible entry, run only to measure process startup: exec,
+/// parsing, resolving, host registration, and returning, with as little
+/// interpreter work in between as `cove-bench` can ask for.
+export fn main() { }

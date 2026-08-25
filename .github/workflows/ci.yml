@@ -87,3 +87,15 @@ jobs:
       - name: cove test (examples)
         working-directory: examples
         run: ../target/debug/cove test
+
+      # ADR 0012's performance-gate harness. Wall-clock numbers are too
+      # noisy on a shared runner for a threshold to mean anything, so this
+      # runs the harness for correctness only: every benchmark executes,
+      # every metric it names comes back well-formed, and the process exits
+      # 0. Reading the numbers for a real measurement is a local exercise,
+      # documented in ADR 0012.
+      - name: Build cove-bench
+        run: cargo build -p cove-bench
+
+      - name: cove-bench (correctness only; no threshold gate)
+        run: ./target/debug/cove-bench --iterations 3

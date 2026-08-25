@@ -1,0 +1,11 @@
+[run.pure]
+entry = "pure.main"
+allow = []
+
+[run.hostheavy]
+entry = "hostheavy.main"
+allow = ["console", "clock"]
+
+[run.startup]
+entry = "startup.main"
+allow = []
