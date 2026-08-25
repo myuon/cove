@@ -1,8 +1,15 @@
-//! Name resolution across the units of a module.
+//! Name resolution across the units of a module, and across the modules of a
+//! package.
 //!
 //! Resolution produces the flat program the runtime executes and the derived
 //! facts (`export` visibility, required capabilities, trait conformances)
 //! that tooling reports.
+//!
+//! ADR 0005 makes a module able to name another module's exported
+//! declarations, so resolution is a package-wide pass rather than a
+//! per-module one: a `use` is checked against another module's declarations,
+//! the module dependency graph must be acyclic, and required capabilities are
+//! derived from the whole package's call graph.
 //!
 //! # Conformances
 //!
@@ -16,6 +23,14 @@
 //! The conformance itself is recorded separately, because the set of a
 //! trait's implementors is a fact the type checker needs (to check a bound)
 //! and tooling needs (to show a type's interface).
+//!
+//! Either party to a conformance may be imported (ADR 0006's orphan rule
+//! names the module that declares the trait or the module that declares the
+//! type; ADR 0005 lets a third module name both), so the rule is checked
+//! against what the module *declares*, not against what it can see. The two
+//! rules together also make a conformance unique without a further check:
+//! for both parties' modules to declare the same one, each would have to
+//! import the other, which is the cycle ADR 0005 forbids.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::rc::Rc;
@@ -47,15 +62,26 @@ pub struct FnEntry {
     /// Capabilities used directly in this function's body.
     pub direct_capabilities: BTreeSet<Capability>,
     /// Capabilities this function requires, including those reached through
-    /// calls to other declarations in the same module.
+    /// calls to other declarations of the package — its own module's, and
+    /// any module it imports from.
     ///
     /// A call through a field access (`receiver.method(...)`) whose receiver
-    /// is not a bare reference to a struct or enum this module declares is
-    /// resolved to *every* method in the module sharing that name. There is
-    /// no static type checker yet to narrow the receiver's actual type, so
-    /// this is a deliberate over-approximation: it can report a capability a
-    /// function does not really need, but never omits one it does. Static
-    /// type checking would let this be exact.
+    /// is not a bare reference to a struct or enum visible where the call is
+    /// written is resolved to *every* method sharing that name in this
+    /// module and in every module it imports from. There is no static type
+    /// checker yet to narrow the receiver's actual type, so this is a
+    /// deliberate over-approximation: it can report a capability a function
+    /// does not really need, but never omits one it does. Static type
+    /// checking would let this be exact.
+    ///
+    /// Module imports made no part of that precise. They widened it: an
+    /// unknown receiver used to be able to reach only the module's own
+    /// methods, and can now reach the methods of every module reachable
+    /// through its imports, because that is where a value it did not declare
+    /// can come from.
+    /// What they did narrow is the *other* direction — a call that leaves
+    /// the module is now followed rather than lost, so a capability reached
+    /// through an imported helper is reported instead of missed.
     pub required_capabilities: BTreeSet<Capability>,
 }
 
@@ -94,10 +120,16 @@ impl TraitEntry {
 /// Conformance is explicit, so this is the complete set of implementors a
 /// trait has, which is what makes a bound checkable and a `dyn Trait` value's
 /// implementation findable.
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct Conformance {
     pub trait_name: String,
     pub type_name: String,
+    /// The module that declares the trait, and the module that declares the
+    /// type. Either may be this module or one it imports from — the orphan
+    /// rule only requires that one of them *is* this module — so a
+    /// conformance names both parties by the module they belong to.
+    pub trait_module: String,
+    pub type_module: String,
     /// Every method the conformance supplies, whether written in the block or
     /// inherited from the trait's default body.
     pub methods: BTreeSet<String>,
@@ -130,6 +162,105 @@ pub struct ResolvedModule {
     pub host_uses: BTreeSet<String>,
     /// Names imported unqualified by `use`, such as `println` -> `console`.
     pub host_items: BTreeMap<String, String>,
+    /// Declarations imported from another module of the package, mapping the
+    /// name they are visible under — the `use` path's last segment, which is
+    /// the declaration's own name — to the module that declares them.
+    ///
+    /// Only exported declarations ever appear here; a `use` naming a
+    /// module-private one is rejected.
+    pub imports: BTreeMap<String, String>,
+    /// Modules imported whole, mapping the name they are visible under — the
+    /// `use` path's last segment — to the full module name, so their exports
+    /// can be reached qualified as `booking.createBooking`.
+    pub module_imports: BTreeMap<String, String>,
+}
+
+impl ResolvedModule {
+    /// The module that declares `name` as this module sees it: itself when it
+    /// declares `name`, and the module `name` was imported from otherwise.
+    ///
+    /// A local declaration wins, which is only reachable when a conflicting
+    /// import was already reported: [`resolve`] refuses a `use` that binds a
+    /// name this module also declares.
+    pub fn owner_of<'a>(&'a self, name: &str) -> Option<&'a str> {
+        if self.functions.contains_key(name)
+            || self.structs.contains_key(name)
+            || self.enums.contains_key(name)
+            || self.traits.contains_key(name)
+            || self.aliases.contains_key(name)
+        {
+            return Some(&self.name);
+        }
+        self.imports.get(name).map(String::as_str)
+    }
+
+    /// Whether this module's declaration of `name` is exported, or `None`
+    /// when it declares no `name`.
+    ///
+    /// A method is not a declaration in this sense: it is reached through
+    /// its type, so the type's visibility is what governs it.
+    pub fn exported(&self, name: &str) -> Option<bool> {
+        if let Some(entry) = self.functions.get(name) {
+            return Some(entry.exported);
+        }
+        if let Some(entry) = self.structs.get(name) {
+            return Some(entry.exported);
+        }
+        if let Some(entry) = self.enums.get(name) {
+            return Some(entry.exported);
+        }
+        if let Some(entry) = self.traits.get(name) {
+            return Some(entry.exported);
+        }
+        self.aliases.get(name).map(|entry| entry.exported)
+    }
+
+    /// Every name this module exports, in name order.
+    pub fn exports(&self) -> Vec<String> {
+        let functions = self
+            .functions
+            .iter()
+            .filter(|(_, entry)| entry.exported)
+            .map(|(name, _)| name);
+        let structs = self
+            .structs
+            .iter()
+            .filter(|(_, entry)| entry.exported)
+            .map(|(name, _)| name);
+        let enums = self
+            .enums
+            .iter()
+            .filter(|(_, entry)| entry.exported)
+            .map(|(name, _)| name);
+        let traits = self
+            .traits
+            .iter()
+            .filter(|(_, entry)| entry.exported)
+            .map(|(name, _)| name);
+        let aliases = self
+            .aliases
+            .iter()
+            .filter(|(_, entry)| entry.exported)
+            .map(|(name, _)| name);
+        let mut names: Vec<String> = functions
+            .chain(structs)
+            .chain(enums)
+            .chain(traits)
+            .chain(aliases)
+            .cloned()
+            .collect();
+        names.sort();
+        names
+    }
+
+    /// Every module this one imports from, whether by declaration or whole.
+    pub fn dependencies(&self) -> BTreeSet<&str> {
+        self.imports
+            .values()
+            .chain(self.module_imports.values())
+            .map(String::as_str)
+            .collect()
+    }
 }
 
 /// A resolved package, ready to run or inspect.
@@ -148,17 +279,54 @@ impl Program {
     }
 }
 
-/// Resolves every module of `package`, merging its implementation units and
-/// deriving `use` bindings and direct Host API capabilities.
+/// Resolves every module of `package` into the flat program the runtime
+/// executes.
+///
+/// Because a module may name another module's exported declarations, this is
+/// a package-wide pass rather than a per-module one:
+///
+/// 1. each module's *surface* — what it declares, and whether each
+///    declaration is exported — is collected, since a `use` in one module is
+///    answered by another module's declarations;
+/// 2. every `use` is resolved against the package's modules first and the
+///    host registry second (ADR 0005);
+/// 3. the module dependency graph is checked for cycles, which ADR 0005
+///    forbids;
+/// 4. each module's own declarations are merged across its units;
+/// 5. required capabilities are derived as a fixed point over the
+///    *package's* call graph, so a function reaching a Host API through an
+///    imported helper reports it;
+/// 6. every body is checked against everything now known, including enums
+///    reached through an import.
 pub fn resolve(package: &Package) -> Result<Program, Vec<Diagnostic>> {
     let mut program = Program::default();
     let mut errors = Vec::new();
     let mut warnings = Vec::new();
 
+    let surfaces: BTreeMap<&str, Surface> = package
+        .modules
+        .iter()
+        .map(|(name, module)| (name.as_str(), Surface::of(module)))
+        .collect();
+
+    let mut call_sites: BTreeMap<Node, Vec<CallShape>> = BTreeMap::new();
+    let mut edges: Vec<ImportEdge> = Vec::new();
     for (name, module) in &package.modules {
-        let resolved = resolve_module(name, module, &mut errors, &mut warnings);
+        let uses = resolve_uses(name, module, &surfaces, &mut errors);
+        edges.extend(uses.edges.iter().cloned());
+        let (resolved, calls) =
+            resolve_module(name, module, uses, &surfaces, &mut errors, &mut warnings);
+        for (key, shapes) in calls {
+            call_sites.insert((name.clone(), key), shapes);
+        }
         program.modules.insert(name.clone(), resolved);
     }
+
+    check_import_cycles(&edges, &mut errors);
+    check_method_collisions(&program, &mut errors);
+    let call_graph = package_call_graph(&program, &call_sites);
+    propagate_capabilities(&mut program, &call_graph);
+    check_bodies(&program, &mut errors, &mut warnings);
 
     if errors.is_empty() {
         program.warnings = warnings;
@@ -172,71 +340,19 @@ pub fn resolve(package: &Package) -> Result<Program, Vec<Diagnostic>> {
 fn resolve_module(
     name: &str,
     module: &crate::package::Module,
+    uses: ModuleUses,
+    surfaces: &BTreeMap<&str, Surface>,
     errors: &mut Vec<Diagnostic>,
     warnings: &mut Vec<Diagnostic>,
-) -> ResolvedModule {
+) -> (ResolvedModule, BTreeMap<FnKey, Vec<CallShape>>) {
     let mut resolved = ResolvedModule {
         name: name.to_string(),
+        host_uses: uses.host_uses.clone(),
+        host_items: uses.host_items.clone(),
+        imports: uses.imports.clone(),
+        module_imports: uses.module_imports.clone(),
         ..ResolvedModule::default()
     };
-
-    // Pass 1: `use` declarations. These must be known before we can derive
-    // capabilities for any function body in pass 2.
-    let mut host_item_origin: BTreeMap<String, (String, Span)> = BTreeMap::new();
-    for unit in &module.units {
-        for use_decl in &unit.ast.uses {
-            let segments: Vec<&str> = use_decl.path.iter().map(|i| i.node.as_str()).collect();
-            match segments.len() {
-                1 => {
-                    resolved.host_uses.insert(segments[0].to_string());
-                }
-                2 => {
-                    let host = segments[0].to_string();
-                    let item = segments[1].to_string();
-                    resolved.host_uses.insert(host.clone());
-                    match host_item_origin.get(&item) {
-                        Some((existing_host, existing_span)) if existing_host != &host => {
-                            errors.push(
-                                Diagnostic::error(
-                                    "cove::resolve::ambiguous_use",
-                                    format!(
-                                        "`{item}` is imported from both `{existing_host}` and `{host}`"
-                                    ),
-                                )
-                                .at(use_decl.span)
-                                .label(
-                                    *existing_span,
-                                    format!("first imported from `{existing_host}` here"),
-                                )
-                                .rule(
-                                    "An unqualified `use` name must resolve to exactly one host module.",
-                                )
-                                .help(format!(
-                                    "Use `{host}.{item}` explicitly wherever it should not mean `{existing_host}.{item}`."
-                                )),
-                            );
-                        }
-                        _ => {
-                            host_item_origin.insert(item.clone(), (host.clone(), use_decl.span));
-                            resolved.host_items.insert(item, host);
-                        }
-                    }
-                }
-                _ => {
-                    errors.push(
-                        Diagnostic::error(
-                            "cove::resolve::unsupported_use",
-                            format!("`use {}` names more than two segments", segments.join(".")),
-                        )
-                        .at(use_decl.span)
-                        .rule(
-                            "`use` names a host module or one host item; module-to-module imports are not supported yet.",
-                        ),
-                    );
-                }
-            }
-        }
-    }
 
     // Pass 2: top-level declarations, merged across every unit of the module.
     let mut fn_spans: BTreeMap<String, Span> = BTreeMap::new();
@@ -395,14 +511,21 @@ fn resolve_module(
         let type_name = impl_block.type_name.node.clone();
         let declares_type =
             resolved.structs.contains_key(&type_name) || resolved.enums.contains_key(&type_name);
+        // A conformance may name an imported type, so the type an `impl`
+        // extends is looked up the way every other name is: this module
+        // first, then what it imported.
+        let type_module = declaring_module_of(surfaces, name, &uses, &type_name, DeclKind::Type);
 
         // The orphan rule: a conformance may only be declared where one of
-        // its two parties is. Today a module sees only its own declarations,
-        // so "declares" and "can see" coincide; when module-to-module imports
-        // arrive, only these two lookups widen.
+        // its two parties *is declared*. Imports widen which names an `impl`
+        // can spell, but not this: a third module that imports both a trait
+        // and a type still may not make one conform to the other, which is
+        // the whole point of the rule.
         if let Some(trait_ident) = &impl_block.trait_name {
             let trait_name = trait_ident.node.clone();
             let declares_trait = resolved.traits.contains_key(&trait_name);
+            let trait_module =
+                declaring_module_of(surfaces, name, &uses, &trait_name, DeclKind::Trait);
             if !declares_trait && !declares_type {
                 errors.push(orphan_conformance(
                     name,
@@ -412,30 +535,54 @@ fn resolve_module(
                 ));
                 continue;
             }
-            if !declares_trait {
+            if trait_module.is_none() {
                 errors.push(
                     Diagnostic::error(
                         "cove::resolve::unknown_trait",
-                        format!("`{trait_name}` names a trait module `{name}` does not declare"),
+                        format!("`{trait_name}` names a trait module `{name}` can see"),
                     )
                     .at(trait_ident.span)
-                    .rule("A conformance names a trait the module can see; there are no module-to-module imports yet.")
-                    .help(format!("Declare `trait {trait_name}` in this module, or fix the name.")),
+                    .rule("A conformance names a trait the module declares or imports.")
+                    .help(format!(
+                        "Declare `trait {trait_name}` in this module, `use <module>.{trait_name}` to import it, or fix the name."
+                    )),
                 );
                 continue;
             }
         }
 
-        if !declares_type {
+        if type_module.is_none() {
             errors.push(
                 Diagnostic::error(
                     "cove::resolve::unknown_impl_type",
-                    format!("`impl {type_name}` names a type module `{name}` does not declare"),
+                    format!("`impl {type_name}` names a type module `{name}` can see"),
                 )
                 .at(impl_block.type_name.span)
-                .rule("An `impl` block extends a struct or enum declared in the same module.")
+                .rule("An `impl` block extends a struct or enum the module declares, or one it imports as part of a conformance.")
                 .help(format!(
-                    "Declare `struct {type_name}` or `enum {type_name}` in this module, or fix the name."
+                    "Declare `struct {type_name}` or `enum {type_name}` in this module, `use <module>.{type_name}` to import it, or fix the name."
+                )),
+            );
+            continue;
+        }
+        let type_module = type_module.expect("checked just above").to_string();
+
+        // An inherent `impl` extends only a type this module declares: it is
+        // not a conformance, so the orphan rule has nothing to say about it,
+        // and adding methods to another module's type from outside would be
+        // exactly what that rule forbids.
+        if impl_block.trait_name.is_none() && !declares_type {
+            errors.push(
+                Diagnostic::error(
+                    "cove::resolve::foreign_inherent_impl",
+                    format!(
+                        "`impl {type_name}` adds methods to a type module `{type_module}` declares"
+                    ),
+                )
+                .at(impl_block.type_name.span)
+                .rule("An `impl` block with no trait extends a type its own module declares; a method for another module's type belongs to a trait, so that the conformance is a fact both modules can see.")
+                .help(format!(
+                    "move this block to module `{type_module}`, or declare a trait here and write `impl <Trait> for {type_name}`"
                 )),
             );
             continue;
@@ -457,13 +604,24 @@ fn resolve_module(
                 );
                 continue;
             }
+            let trait_module =
+                declaring_module_of(surfaces, name, &uses, &trait_ident.node, DeclKind::Trait)
+                    .expect("checked above")
+                    .to_string();
+            let trait_decl = surfaces[trait_module.as_str()].traits[&trait_ident.node].clone();
             check_conformance(
                 &mut resolved,
                 name,
                 impl_block,
-                trait_ident.node.clone(),
-                type_name.clone(),
-                header,
+                Conformance {
+                    trait_name: trait_ident.node.clone(),
+                    type_name: type_name.clone(),
+                    trait_module,
+                    type_module,
+                    methods: BTreeSet::new(),
+                    span: header,
+                },
+                trait_decl,
                 &mut method_spans,
                 &mut call_sites,
                 errors,
@@ -530,21 +688,606 @@ fn resolve_module(
         }
     }
 
-    // Pass 4: derive `required_capabilities` as the least fixed point of the
-    // module's call graph, now that every function, method, struct, and enum
-    // is known.
-    let call_graph: BTreeMap<FnKey, BTreeSet<FnKey>> = call_sites
-        .into_iter()
-        .map(|(key, calls)| (key, resolve_calls(&calls, &resolved)))
+    // The call sites found in passes 2 and 3 are resolved to call-graph
+    // edges by [`package_call_graph`], once every module is resolved: a call
+    // may reach an imported declaration, so the graph is the package's.
+    (resolved, call_sites)
+}
+
+// ------------------------------------------------------------------ imports
+
+/// The host modules a package may name without declaring them.
+///
+/// This mirrors the modules `cove_runtime::host` registers, which the
+/// compiler cannot ask directly because it does not depend on the runtime —
+/// the same arrangement `typeck`'s builtin tables already use. It is only
+/// consulted to refuse a package module that would shadow a host module: a
+/// `use` naming an unknown host module is still accepted, since a host may
+/// register any module it likes.
+const HOST_MODULES: [&str; 4] = ["clock", "console", "documents", "env"];
+
+/// What one module offers a `use` in another: every top-level declaration it
+/// makes, what kind it is, whether it is exported, and where it was written.
+///
+/// This is collected before any module is resolved, because a `use` in one
+/// module is answered by another module's declarations, and because an
+/// `impl Trait for Type` may name an imported trait whose declaration has to
+/// be read while the importing module is still being resolved.
+///
+/// Methods do not appear: a method is reached through its type, so importing
+/// the type is what makes it visible.
+#[derive(Debug, Default)]
+struct Surface {
+    declarations: BTreeMap<String, Declared>,
+    /// The traits this module declares, whose method lists an
+    /// `impl Trait for Type` in another module has to read.
+    traits: BTreeMap<String, Rc<TraitDecl>>,
+}
+
+#[derive(Debug)]
+struct Declared {
+    kind: DeclKind,
+    exported: bool,
+    span: Span,
+}
+
+/// What a declaration is, to the extent a `use` and an `impl` need to know.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DeclKind {
+    Function,
+    /// A struct or an enum: the two kinds an `impl` block may extend.
+    Type,
+    Trait,
+    Alias,
+}
+
+impl Surface {
+    fn of(module: &crate::package::Module) -> Surface {
+        let mut declarations: BTreeMap<String, Declared> = BTreeMap::new();
+        let mut traits: BTreeMap<String, Rc<TraitDecl>> = BTreeMap::new();
+        for unit in &module.units {
+            for item in &unit.ast.items {
+                if let ItemKind::Trait(decl) = &item.kind {
+                    traits
+                        .entry(decl.name.node.clone())
+                        .or_insert_with(|| Rc::new(decl.clone()));
+                }
+                let (name, kind) = match &item.kind {
+                    ItemKind::Fn(decl) => (&decl.name, DeclKind::Function),
+                    ItemKind::Struct(decl) => (&decl.name, DeclKind::Type),
+                    ItemKind::Enum(decl) => (&decl.name, DeclKind::Type),
+                    ItemKind::Trait(decl) => (&decl.name, DeclKind::Trait),
+                    ItemKind::TypeAlias(decl) => (&decl.name, DeclKind::Alias),
+                    ItemKind::Impl(_) => continue,
+                };
+                declarations.entry(name.node.clone()).or_insert(Declared {
+                    kind,
+                    exported: item.exported,
+                    span: name.span,
+                });
+            }
+        }
+        Surface {
+            declarations,
+            traits,
+        }
+    }
+
+    /// Whether this module declares `name` as `kind`.
+    fn declares(&self, name: &str, kind: DeclKind) -> bool {
+        self.declarations
+            .get(name)
+            .is_some_and(|declared| declared.kind == kind)
+    }
+}
+
+/// The declaration a name in module `module` refers to, when some module of
+/// the package declares it as `kind`: the module that declares it, and the
+/// name itself.
+///
+/// A module's own declaration answers first, and an import answers second —
+/// the same order every other lookup uses. A `use` cannot bind a name the
+/// module declares, so at most one of the two ever applies.
+fn declaring_module_of<'a>(
+    surfaces: &'a BTreeMap<&'a str, Surface>,
+    module: &'a str,
+    uses: &'a ModuleUses,
+    name: &str,
+    kind: DeclKind,
+) -> Option<&'a str> {
+    if surfaces
+        .get(module)
+        .is_some_and(|surface| surface.declares(name, kind))
+    {
+        return Some(module);
+    }
+    let owner = uses.imports.get(name)?.as_str();
+    surfaces
+        .get(owner)
+        .is_some_and(|surface| surface.declares(name, kind))
+        .then_some(owner)
+}
+
+/// One module's resolved `use` declarations.
+#[derive(Debug, Default)]
+struct ModuleUses {
+    imports: BTreeMap<String, String>,
+    module_imports: BTreeMap<String, String>,
+    host_uses: BTreeSet<String>,
+    host_items: BTreeMap<String, String>,
+    /// One edge per `use` that names a module of this package, for the
+    /// cycle check.
+    edges: Vec<ImportEdge>,
+}
+
+/// A module dependency, with the `use` that created it so a cycle can point
+/// at the line that closes it.
+#[derive(Clone, Debug)]
+struct ImportEdge {
+    from: String,
+    to: String,
+    span: Span,
+}
+
+/// What one `use` binds in the module that writes it, for conflict reports.
+#[derive(Clone, Debug)]
+enum Bound {
+    /// `use console.println` binds `println` to a host module.
+    HostItem(String),
+    /// `use booking.create` binds `create` to a module's declaration.
+    Item(String),
+    /// `use booking` binds `booking` to a whole module.
+    Module(String),
+}
+
+impl Bound {
+    fn describe(&self) -> String {
+        match self {
+            Bound::HostItem(host) => format!("the host module `{host}`"),
+            Bound::Item(module) => format!("module `{module}`"),
+            Bound::Module(module) => format!("the module `{module}`"),
+        }
+    }
+}
+
+/// Resolves every `use` of one module.
+///
+/// ADR 0005: a dotted path resolves against the package's modules first and
+/// the host registry second, so a package's own structure does not change
+/// meaning because a host gained an operation. Concretely, for a path `p`:
+///
+/// 1. when `p` names a module, it imports that module, whose exports are
+///    then reachable qualified;
+/// 2. otherwise, when `p` without its last segment names a module, it
+///    imports that module's declaration of the last segment, which must be
+///    exported;
+/// 3. otherwise it is a host path: one segment names a host module, two name
+///    a host module and one operation, and anything longer matches nothing
+///    and is reported.
+///
+/// A module that shares a name with a host module is refused rather than
+/// preferred, since the host namespace is not the package's to change.
+fn resolve_uses(
+    name: &str,
+    module: &crate::package::Module,
+    surfaces: &BTreeMap<&str, Surface>,
+    errors: &mut Vec<Diagnostic>,
+) -> ModuleUses {
+    let mut uses = ModuleUses::default();
+    let mut bound: BTreeMap<String, (Bound, Span)> = BTreeMap::new();
+    let own = surfaces.get(name);
+
+    for unit in &module.units {
+        for use_decl in &unit.ast.uses {
+            let segments: Vec<&str> = use_decl.path.iter().map(|i| i.node.as_str()).collect();
+            let path = segments.join(".");
+            let span = use_decl.span;
+            let last = segments.last().expect("a `use` path is never empty");
+
+            if surfaces.contains_key(path.as_str()) {
+                if let Some(diagnostic) = shadowed_host(&path, span) {
+                    errors.push(diagnostic);
+                    continue;
+                }
+                if let Some(diagnostic) = ambiguous_module_path(&path, &segments, surfaces, span) {
+                    errors.push(diagnostic);
+                    continue;
+                }
+                bind(
+                    &mut bound,
+                    name,
+                    own,
+                    last,
+                    Bound::Module(path.clone()),
+                    span,
+                    errors,
+                );
+                uses.module_imports.insert(last.to_string(), path.clone());
+                uses.edges.push(ImportEdge {
+                    from: name.to_string(),
+                    to: path,
+                    span,
+                });
+                continue;
+            }
+
+            if segments.len() >= 2 {
+                let owner = segments[..segments.len() - 1].join(".");
+                if let Some(surface) = surfaces.get(owner.as_str()) {
+                    if let Some(diagnostic) = shadowed_host(&owner, span) {
+                        errors.push(diagnostic);
+                        continue;
+                    }
+                    match surface.declarations.get(*last) {
+                        Some(declared) if declared.exported => {
+                            bind(
+                                &mut bound,
+                                name,
+                                own,
+                                last,
+                                Bound::Item(owner.clone()),
+                                span,
+                                errors,
+                            );
+                            uses.imports.insert(last.to_string(), owner.clone());
+                            uses.edges.push(ImportEdge {
+                                from: name.to_string(),
+                                to: owner,
+                                span,
+                            });
+                        }
+                        Some(declared) => {
+                            errors.push(private_declaration(&owner, last, span, declared.span))
+                        }
+                        None => errors.push(no_such_declaration(&owner, last, surface, span)),
+                    }
+                    continue;
+                }
+            }
+
+            match segments.len() {
+                1 => {
+                    uses.host_uses.insert(path);
+                }
+                2 => {
+                    let host = segments[0].to_string();
+                    uses.host_uses.insert(host.clone());
+                    bind(
+                        &mut bound,
+                        name,
+                        own,
+                        last,
+                        Bound::HostItem(host.clone()),
+                        span,
+                        errors,
+                    );
+                    uses.host_items.insert(last.to_string(), host);
+                }
+                _ => errors.push(unknown_use(&path, &segments, surfaces, span)),
+            }
+        }
+    }
+
+    uses
+}
+
+/// Records that `use` binds `name` in the importing module, reporting a name
+/// it already binds and a name the importing module declares itself.
+///
+/// A repeated `use` of the same thing is not a conflict: writing
+/// `use booking.create` in two units of one module means the same import
+/// twice.
+fn bind(
+    bound: &mut BTreeMap<String, (Bound, Span)>,
+    module: &str,
+    own: Option<&Surface>,
+    name: &str,
+    what: Bound,
+    span: Span,
+    errors: &mut Vec<Diagnostic>,
+) {
+    if let Some(declared) = own.and_then(|surface| surface.declarations.get(name)) {
+        errors.push(
+            Diagnostic::error(
+                "cove::resolve::import_conflict",
+                format!("`{name}` is imported, but module `{module}` also declares it"),
+            )
+            .at(span)
+            .label(declared.span, format!("`{name}` is declared here"))
+            .rule("An imported name and a declared name cannot both mean `name` in one module.")
+            .help("rename one of them, or drop the `use` and name the import qualified"),
+        );
+        return;
+    }
+    match bound.get(name) {
+        Some((existing, existing_span)) if !same_origin(existing, &what) => {
+            // Two host modules disagreeing about one unqualified name is the
+            // case that predates module imports, and keeps its own code.
+            let code = match (existing, &what) {
+                (Bound::HostItem(_), Bound::HostItem(_)) => "cove::resolve::ambiguous_use",
+                _ => "cove::resolve::import_conflict",
+            };
+            errors.push(
+                Diagnostic::error(
+                    code,
+                    format!(
+                        "`{name}` is imported from both {} and {}",
+                        existing.describe(),
+                        what.describe()
+                    ),
+                )
+                .at(span)
+                .label(
+                    *existing_span,
+                    format!("first imported from {} here", existing.describe()),
+                )
+                .rule("A `use` name must resolve to exactly one declaration or host module.")
+                .help(format!(
+                    "drop one of the two `use` declarations, and name `{name}` qualified where the other meaning is wanted"
+                )),
+            );
+        }
+        Some(_) => {}
+        None => {
+            bound.insert(name.to_string(), (what, span));
+        }
+    }
+}
+
+fn same_origin(a: &Bound, b: &Bound) -> bool {
+    match (a, b) {
+        (Bound::HostItem(a), Bound::HostItem(b))
+        | (Bound::Item(a), Bound::Item(b))
+        | (Bound::Module(a), Bound::Module(b)) => a == b,
+        _ => false,
+    }
+}
+
+/// Refuses a module that shares its name with a host module.
+///
+/// Modules resolve first, so such a module would silently make the host
+/// module unreachable for the whole package.
+fn shadowed_host(module: &str, span: Span) -> Option<Diagnostic> {
+    if !HOST_MODULES.contains(&module) {
+        return None;
+    }
+    Some(
+        Diagnostic::error(
+            "cove::resolve::module_shadows_host",
+            format!("module `{module}` has the same name as the host module `{module}`"),
+        )
+        .at(span)
+        .rule(
+            "`use` resolves against the package's modules first, so a module named after a host module hides it.",
+        )
+        .help(format!(
+            "rename the `{module}` module; the host namespace is not this package's to change"
+        )),
+    )
+}
+
+/// Refuses a path that names a module *and* an exported declaration of the
+/// module one segment shorter, which ADR 0005 does not settle.
+fn ambiguous_module_path(
+    path: &str,
+    segments: &[&str],
+    surfaces: &BTreeMap<&str, Surface>,
+    span: Span,
+) -> Option<Diagnostic> {
+    if segments.len() < 2 {
+        return None;
+    }
+    let owner = segments[..segments.len() - 1].join(".");
+    let last = segments[segments.len() - 1];
+    let declared = surfaces
+        .get(owner.as_str())?
+        .declarations
+        .get(last)
+        .filter(|declared| declared.exported)?;
+    Some(
+        Diagnostic::error(
+            "cove::resolve::ambiguous_use",
+            format!("`use {path}` names both the module `{path}` and `{last}`, exported by module `{owner}`"),
+        )
+        .at(span)
+        .label(declared.span, format!("`{last}` is declared here"))
+        .rule("A `use` path must have exactly one meaning.")
+        .help(format!(
+            "rename the `{path}` module or `{owner}.{last}`, so the path names one of them"
+        )),
+    )
+}
+
+fn private_declaration(module: &str, name: &str, span: Span, declared: Span) -> Diagnostic {
+    Diagnostic::error(
+        "cove::resolve::private_declaration",
+        format!("`{name}` is declared by module `{module}`, but is not exported"),
+    )
+    .at(span)
+    .label(
+        declared,
+        format!("`{name}` is declared here, without `export`"),
+    )
+    .rule("An `export` declaration is public; other declarations are module-private.")
+    .help(format!(
+        "write `export` on `{name}` in module `{module}`, or import something else"
+    ))
+}
+
+fn no_such_declaration(module: &str, name: &str, surface: &Surface, span: Span) -> Diagnostic {
+    let exported: Vec<String> = surface
+        .declarations
+        .iter()
+        .filter(|(_, declared)| declared.exported)
+        .map(|(name, _)| name.clone())
         .collect();
-    propagate_capabilities(&mut resolved, &call_graph);
+    Diagnostic::error(
+        "cove::resolve::unknown_use",
+        format!("module `{module}` declares no `{name}`, and `{module}` is not a host module"),
+    )
+    .at(span)
+    .rule("`use` names a module of this package, one of its exported declarations, a host module, or one host operation.")
+    .help(if exported.is_empty() {
+        format!("module `{module}` exports nothing; write `export` on the declaration to import")
+    } else {
+        format!("module `{module}` exports {}", list_backticked(&exported))
+    })
+}
 
-    // Pass 5: `match` exhaustiveness and case-name checks, now that every
-    // enum in the module is known. This walks every body a second time with
-    // the same walker as passes 2 and 3, just with `enums` filled in.
-    check_module_matches(&resolved, errors, warnings);
+fn unknown_use(
+    path: &str,
+    segments: &[&str],
+    surfaces: &BTreeMap<&str, Surface>,
+    span: Span,
+) -> Diagnostic {
+    let owner = segments[..segments.len() - 1].join(".");
+    let modules: Vec<String> = surfaces.keys().map(|name| name.to_string()).collect();
+    Diagnostic::error(
+        "cove::resolve::unknown_use",
+        format!("`use {path}` names neither a module of this package nor a host module"),
+    )
+    .at(span)
+    .rule("`use` resolves against the package's modules first and the host registry second.")
+    .help(format!(
+        "there is no module `{path}` or `{owner}`; this package declares {}, and a host path names a module (`use console`) or one operation (`use console.println`)",
+        list_backticked(&modules)
+    ))
+}
 
-    resolved
+/// Rejects one type having two methods of one name, when they were declared
+/// in different modules.
+///
+/// A conformance may be declared where the trait is, for a type declared
+/// elsewhere, so a type's methods no longer all come from one module — and
+/// the per-module duplicate check cannot see the other one. Two candidates
+/// with no rule to choose between them is the same mistake wherever the two
+/// are written: `impl Trait for Type` in the trait's module and an inherent
+/// method of that name in the type's own would leave the checker and the
+/// interpreter free to pick differently.
+fn check_method_collisions(program: &Program, errors: &mut Vec<Diagnostic>) {
+    /// One method of one type: the module that declares the type, the type,
+    /// and the method name.
+    type MethodOf<'a> = (&'a str, &'a str, &'a str);
+    /// Where a method was written: the module, and the name's span.
+    type Site<'a> = (&'a str, Span);
+
+    let mut declared: BTreeMap<MethodOf, Vec<Site>> = BTreeMap::new();
+    for (module, resolved) in &program.modules {
+        for ((type_name, method), entry) in &resolved.methods {
+            let Some(owner) = resolved.owner_of(type_name) else {
+                continue;
+            };
+            declared
+                .entry((owner, type_name.as_str(), method.as_str()))
+                .or_default()
+                .push((module.as_str(), entry.decl.name.span));
+        }
+    }
+
+    for ((type_module, type_name, method), sites) in declared {
+        let [(first_module, first), rest @ ..] = sites.as_slice() else {
+            continue;
+        };
+        for (module, span) in rest {
+            errors.push(
+                Diagnostic::error(
+                    "cove::resolve::duplicate_declaration",
+                    format!(
+                        "`{type_name}.{method}` is declared in module `{module}` and in module `{first_module}`"
+                    ),
+                )
+                .at(*span)
+                .label(*first, format!("`{method}` first declared here"))
+                .rule(
+                    "Each method name may be declared once per type, across every module: a conformance declared where its trait is must not collide with a method of the type's own module.",
+                )
+                .help(format!(
+                    "rename one of them, or move both into module `{type_module}`, which declares `{type_name}`"
+                )),
+            );
+        }
+    }
+}
+
+/// Rejects a module that imports, directly or transitively, a module that
+/// imports it.
+///
+/// ADR 0001 left "how are dependency cycles represented and diagnosed" open;
+/// ADR 0005 answers it by forbidding them, so a package whose modules form a
+/// cycle has a structure its author can see and fix.
+fn check_import_cycles(edges: &[ImportEdge], errors: &mut Vec<Diagnostic>) {
+    let mut graph: BTreeMap<&str, Vec<&ImportEdge>> = BTreeMap::new();
+    for edge in edges {
+        graph.entry(edge.from.as_str()).or_default().push(edge);
+    }
+
+    let mut settled: BTreeSet<&str> = BTreeSet::new();
+    let mut reported: BTreeSet<Vec<&str>> = BTreeSet::new();
+    let roots: Vec<&str> = graph.keys().copied().collect();
+    for root in roots {
+        let mut stack: Vec<&ImportEdge> = Vec::new();
+        walk_imports(
+            root,
+            &graph,
+            &mut Vec::new(),
+            &mut stack,
+            &mut settled,
+            &mut reported,
+            errors,
+        );
+    }
+}
+
+/// Depth-first walk over the module dependency graph, reporting the first
+/// time each cycle is closed.
+fn walk_imports<'a>(
+    module: &'a str,
+    graph: &BTreeMap<&'a str, Vec<&'a ImportEdge>>,
+    path: &mut Vec<&'a str>,
+    stack: &mut Vec<&'a ImportEdge>,
+    settled: &mut BTreeSet<&'a str>,
+    reported: &mut BTreeSet<Vec<&'a str>>,
+    errors: &mut Vec<Diagnostic>,
+) {
+    if settled.contains(module) {
+        return;
+    }
+    if let Some(start) = path.iter().position(|name| *name == module) {
+        let mut cycle: Vec<&str> = path[start..].to_vec();
+        cycle.push(module);
+        let closing = *stack.last().expect("a cycle is closed by an edge");
+        // One cycle is reachable from every module on it; report it once,
+        // keyed by its members rather than by where the walk entered it.
+        let mut members: Vec<&str> = cycle.clone();
+        members.sort();
+        members.dedup();
+        if reported.insert(members) {
+            errors.push(
+                Diagnostic::error(
+                    "cove::resolve::import_cycle",
+                    format!(
+                        "module `{module}` imports itself through {}",
+                        cycle.join(" -> ")
+                    ),
+                )
+                .at(closing.span)
+                .rule(
+                    "A module may not import, directly or transitively, a module that imports it.",
+                )
+                .help("move what both modules need into a third module they can each import"),
+            );
+        }
+        return;
+    }
+
+    path.push(module);
+    for edge in graph.get(module).into_iter().flatten() {
+        stack.push(edge);
+        walk_imports(&edge.to, graph, path, stack, settled, reported, errors);
+        stack.pop();
+    }
+    path.pop();
+    settled.insert(module);
 }
 
 /// Checks one `impl Trait for Type` block and records the conformance it
@@ -560,16 +1303,26 @@ fn check_conformance(
     resolved: &mut ResolvedModule,
     module: &str,
     impl_block: &cove_syntax::ast::ImplBlock,
-    trait_name: String,
-    type_name: String,
-    header: Span,
+    conformance: Conformance,
+    trait_decl: Rc<TraitDecl>,
     method_spans: &mut BTreeMap<(String, String), Span>,
     call_sites: &mut BTreeMap<FnKey, Vec<CallShape>>,
     errors: &mut Vec<Diagnostic>,
 ) {
-    let entry = &resolved.traits[&trait_name];
-    let trait_decl = entry.decl.clone();
-    let trait_exported = entry.exported;
+    let Conformance {
+        trait_name,
+        type_name,
+        span: header,
+        ..
+    } = conformance.clone();
+    // A conformance's methods are as public as the pair it joins: a trait
+    // declared elsewhere is one this module imported, which it could only do
+    // if the trait is exported.
+    let trait_exported = resolved
+        .traits
+        .get(&trait_name)
+        .map(|entry| entry.exported)
+        .unwrap_or(true);
     let mut supplied: BTreeSet<String> = BTreeSet::new();
 
     for inner in &impl_block.items {
@@ -687,12 +1440,10 @@ fn check_conformance(
     }
 
     resolved.conformances.insert(
-        (trait_name.clone(), type_name.clone()),
+        (trait_name, type_name),
         Conformance {
-            trait_name,
-            type_name,
             methods,
-            span: header,
+            ..conformance
         },
     );
 }
@@ -836,50 +1587,80 @@ fn analyze_body(
     (walk.capabilities, walk.calls)
 }
 
-/// Checks every `match` expression in every function and method body of
-/// `resolved` for the exhaustiveness and case-name facts derivable without a
-/// type checker, now that every enum the module declares is known. This walk
-/// also reports `break` and `continue` outside a loop, which does not depend
-/// on `enums` and so already ran once (harmlessly, since [`analyze_body`]
-/// discards its walk's errors) during pass 2.
+/// The enums a module can name: the ones it declares, plus the ones it
+/// imported, under the single name each is visible by.
+type EnumsInScope<'a> = BTreeMap<&'a str, &'a EnumEntry>;
+
+/// Checks every `match` expression in every body of `program` for the
+/// exhaustiveness and case-name facts derivable without a type checker, now
+/// that every enum a module can name is known — including an imported one.
+/// This walk also reports `break` and `continue` outside a loop, which does
+/// not depend on `enums` and so already ran once (harmlessly, since
+/// [`analyze_body`] discards its walk's errors) while the module's
+/// declarations were being collected.
 ///
 /// This reuses [`walk_block`] rather than a second traversal: the only
 /// difference from the walk [`analyze_body`] already did is that `enums` is
 /// filled in this time, so [`check_match_arms`] actually runs.
-fn check_module_matches(
-    resolved: &ResolvedModule,
-    errors: &mut Vec<Diagnostic>,
-    warnings: &mut Vec<Diagnostic>,
-) {
-    for entry in resolved.functions.values() {
-        check_body_matches(&entry.decl.body, resolved, errors, warnings);
-    }
-    for entry in resolved.methods.values() {
-        // A default body belongs to the trait that declares it, so it is
-        // walked once below rather than once per conformance.
-        if entry.from_trait_default.is_none() {
-            check_body_matches(&entry.decl.body, resolved, errors, warnings);
+fn check_bodies(program: &Program, errors: &mut Vec<Diagnostic>, warnings: &mut Vec<Diagnostic>) {
+    for resolved in program.modules.values() {
+        let enums = enums_in_scope(program, resolved);
+        for entry in resolved.functions.values() {
+            check_body(&entry.decl.body, resolved, &enums, errors, warnings);
         }
-    }
-    for entry in resolved.traits.values() {
-        for method in &entry.decl.methods {
-            if let Some(body) = &method.default {
-                check_body_matches(body, resolved, errors, warnings);
+        for entry in resolved.methods.values() {
+            // A default body belongs to the trait that declares it, so it is
+            // walked once below rather than once per conformance — and in
+            // the module that declares the trait, whose enums are the ones
+            // its arms can name.
+            if entry.from_trait_default.is_none() {
+                check_body(&entry.decl.body, resolved, &enums, errors, warnings);
+            }
+        }
+        for entry in resolved.traits.values() {
+            for method in &entry.decl.methods {
+                if let Some(body) = &method.default {
+                    check_body(body, resolved, &enums, errors, warnings);
+                }
             }
         }
     }
 }
 
-fn check_body_matches(
+/// Every enum `resolved` can name, whether it declares it or imported it.
+///
+/// A `use` cannot bind a name the importing module declares, so the two
+/// sources never disagree about a name.
+fn enums_in_scope<'a>(program: &'a Program, resolved: &'a ResolvedModule) -> EnumsInScope<'a> {
+    let mut enums: EnumsInScope<'a> = resolved
+        .enums
+        .iter()
+        .map(|(name, entry)| (name.as_str(), entry))
+        .collect();
+    for (name, owner) in &resolved.imports {
+        let Some(entry) = program
+            .modules
+            .get(owner)
+            .and_then(|owner| owner.enums.get(name))
+        else {
+            continue;
+        };
+        enums.insert(name.as_str(), entry);
+    }
+    enums
+}
+
+fn check_body(
     body: &Block,
     resolved: &ResolvedModule,
+    enums: &EnumsInScope,
     errors: &mut Vec<Diagnostic>,
     warnings: &mut Vec<Diagnostic>,
 ) {
     let mut walk = BodyWalk {
         host_uses: &resolved.host_uses,
         host_items: &resolved.host_items,
-        enums: Some(&resolved.enums),
+        enums: Some(enums),
         capabilities: BTreeSet::new(),
         calls: Vec::new(),
         errors: Vec::new(),
@@ -903,7 +1684,7 @@ fn check_body_matches(
 struct BodyWalk<'a> {
     host_uses: &'a BTreeSet<String>,
     host_items: &'a BTreeMap<String, String>,
-    enums: Option<&'a BTreeMap<String, EnumEntry>>,
+    enums: Option<&'a EnumsInScope<'a>>,
     capabilities: BTreeSet<Capability>,
     calls: Vec<CallShape>,
     errors: Vec<Diagnostic>,
@@ -1368,14 +2149,14 @@ impl TargetEnum<'_> {
 
 /// Determines the enum a `match`'s `Variant` arms name, or `None` when this
 /// analysis cannot be sure: no arm is a `Variant`, the arms disagree about
-/// which enum they name, a bare case name matches no declared enum or more
-/// than one, or the settled-on enum is not declared in this module (which
-/// also excludes any enum imported from elsewhere; there is no
-/// module-to-module import resolution yet).
-fn resolve_target_enum<'a>(
-    arms: &[MatchArm],
-    enums: &'a BTreeMap<String, EnumEntry>,
-) -> Option<TargetEnum<'a>> {
+/// which enum they name, a bare case name matches no enum in scope or more
+/// than one, or the settled-on enum is one this module can neither declare
+/// nor name through an import.
+///
+/// A path of three or more segments, such as the `booking.Status.Confirmed`
+/// an imported *module* makes writable, still abstains: the arms carry no
+/// type, so the enum a qualified path names is left to the type checker.
+fn resolve_target_enum<'a>(arms: &[MatchArm], enums: &EnumsInScope<'a>) -> Option<TargetEnum<'a>> {
     let mut candidate: Option<String> = None;
     for arm in arms {
         let PatternKind::Variant { path, .. } = &arm.pattern.kind else {
@@ -1396,14 +2177,14 @@ fn resolve_target_enum<'a>(
     match candidate?.as_str() {
         "Option" => Some(TargetEnum::Option),
         "Result" => Some(TargetEnum::Result),
-        other => enums.get(other).map(TargetEnum::Declared),
+        other => enums.get(other).copied().map(TargetEnum::Declared),
     }
 }
 
 /// The enum a bare case name such as `Debug` names: `Option` or `Result` for
-/// their builtin case names, or the one module enum whose cases include it.
+/// their builtin case names, or the one enum in scope whose cases include it.
 /// `None` when no enum declares that case, or more than one does.
-fn bare_case_enum(case_name: &str, enums: &BTreeMap<String, EnumEntry>) -> Option<String> {
+fn bare_case_enum(case_name: &str, enums: &EnumsInScope) -> Option<String> {
     if case_name == "Some" || case_name == "None" {
         return Some("Option".to_string());
     }
@@ -1419,7 +2200,7 @@ fn bare_case_enum(case_name: &str, enums: &BTreeMap<String, EnumEntry>) -> Optio
                 .iter()
                 .any(|case| case.name.node == case_name)
         })
-        .map(|(name, _)| name.clone());
+        .map(|(name, _)| (*name).to_string());
     let first = matches.next()?;
     if matches.next().is_some() {
         return None;
@@ -1476,45 +2257,134 @@ fn call_shape(callee: &Expr) -> Option<CallShape> {
     }
 }
 
-/// Resolves the raw call sites found in one declaration's body to the
-/// declarations of `resolved` they may call.
+/// One node of the package's call graph: a declaration, and the module that
+/// declares it.
+type Node = (String, FnKey);
+
+/// Resolves every call site recorded while the modules were resolved to the
+/// declarations it may reach, anywhere in the package.
+fn package_call_graph(
+    program: &Program,
+    call_sites: &BTreeMap<Node, Vec<CallShape>>,
+) -> BTreeMap<Node, BTreeSet<Node>> {
+    let reachable: BTreeMap<&str, BTreeSet<&str>> = program
+        .modules
+        .keys()
+        .map(|name| (name.as_str(), reachable_modules(program, name)))
+        .collect();
+    call_sites
+        .iter()
+        .map(|((module, key), calls)| {
+            (
+                (module.clone(), key.clone()),
+                resolve_calls(program, module, calls, &reachable[module.as_str()]),
+            )
+        })
+        .collect()
+}
+
+/// Every module `module` can reach through imports, directly or through the
+/// modules it imports, including itself.
 ///
-/// A bare-name call resolves to the module's free function of that name, if
-/// any. A field-access call whose receiver is a bare identifier naming a
-/// struct or enum this module declares resolves precisely to that type's
-/// method. Every other field-access call — a receiver that is `self`, a
-/// local variable, or any other expression whose type is unknown without a
-/// type checker — resolves to *every* method in the module sharing that
-/// name. That is a deliberate over-approximation: it can name a capability a
-/// call site does not really reach, but never misses one.
-fn resolve_calls(calls: &[CallShape], resolved: &ResolvedModule) -> BTreeSet<FnKey> {
+/// This is the set a value's type can be declared by where `module` runs: a
+/// declaration this module never mentions still arrives here through
+/// something it does import. The walk terminates because it visits each
+/// module once, so a cycle that resolution is about to reject cannot spin it.
+fn reachable_modules<'a>(program: &'a Program, module: &'a str) -> BTreeSet<&'a str> {
+    let mut reached: BTreeSet<&str> = BTreeSet::new();
+    let mut pending: Vec<&str> = vec![module];
+    while let Some(name) = pending.pop() {
+        if !reached.insert(name) {
+            continue;
+        }
+        if let Some(resolved) = program.modules.get(name) {
+            pending.extend(resolved.dependencies());
+        }
+    }
+    reached
+}
+
+/// Resolves the raw call sites found in one declaration's body to the
+/// declarations they may call, in `module` or in any module `module` imports
+/// from.
+///
+/// A bare-name call resolves to the free function of that name the calling
+/// module declares, or, failing that, to the one it imported under that
+/// name. A call qualified by an imported module (`booking.create(...)`)
+/// resolves to that module's exported function. A field-access call whose
+/// receiver is a bare identifier naming a struct or enum in scope — declared
+/// here or imported — resolves precisely to that type's method, in the
+/// module that declares the type.
+///
+/// Every other field-access call — a receiver that is `self`, a local
+/// variable, or any other expression whose type is unknown without a type
+/// checker — resolves to *every* method sharing that name in `reachable`,
+/// the modules this one can reach through imports. That is a deliberate
+/// over-approximation: it can name a capability a call site does not really
+/// reach, but never misses one. `reachable` is transitive rather than
+/// direct because a value can be declared by a module this one never
+/// mentions and still arrive here, as the result of something it does
+/// import.
+fn resolve_calls(
+    program: &Program,
+    module: &str,
+    calls: &[CallShape],
+    reachable: &BTreeSet<&str>,
+) -> BTreeSet<Node> {
+    let Some(resolved) = program.modules.get(module) else {
+        return BTreeSet::new();
+    };
     let mut targets = BTreeSet::new();
     for call in calls {
         match call {
             CallShape::Ident(name) => {
                 if resolved.functions.contains_key(name) {
-                    targets.insert(FnKey::Fn(name.clone()));
+                    targets.insert((module.to_string(), FnKey::Fn(name.clone())));
+                } else if let Some(owner) = declaring_module(program, resolved, name, |owner| {
+                    owner.functions.contains_key(name)
+                }) {
+                    targets.insert((owner, FnKey::Fn(name.clone())));
                 }
             }
             CallShape::Field {
                 receiver_ident,
                 method,
             } => {
-                let known_type = receiver_ident.as_ref().filter(|type_name| {
-                    resolved.structs.contains_key(type_name.as_str())
-                        || resolved.enums.contains_key(type_name.as_str())
+                let owner = receiver_ident.as_ref().and_then(|head| {
+                    declaring_module(program, resolved, head, |owner| {
+                        owner.structs.contains_key(head) || owner.enums.contains_key(head)
+                    })
+                    .map(|owner| (owner, head.clone()))
                 });
-                if let Some(type_name) = known_type {
-                    if resolved
-                        .methods
-                        .contains_key(&(type_name.clone(), method.clone()))
-                    {
-                        targets.insert(FnKey::Method(type_name.clone(), method.clone()));
+                if let Some((owner, type_name)) = owner {
+                    targets.extend(type_methods(program, &owner, &type_name, method));
+                    continue;
+                }
+                if let Some(target) = receiver_ident
+                    .as_ref()
+                    .and_then(|head| resolved.module_imports.get(head))
+                {
+                    if let Some(owner) = program.modules.get(target) {
+                        if owner
+                            .functions
+                            .get(method)
+                            .is_some_and(|entry| entry.exported)
+                        {
+                            targets.insert((target.clone(), FnKey::Fn(method.clone())));
+                            continue;
+                        }
                     }
-                } else {
-                    for (type_name, method_name) in resolved.methods.keys() {
+                }
+                for name in reachable {
+                    let Some(candidate) = program.modules.get(*name) else {
+                        continue;
+                    };
+                    for (type_name, method_name) in candidate.methods.keys() {
                         if method_name == method {
-                            targets.insert(FnKey::Method(type_name.clone(), method_name.clone()));
+                            targets.insert((
+                                (*name).to_string(),
+                                FnKey::Method(type_name.clone(), method_name.clone()),
+                            ));
                         }
                     }
                 }
@@ -1524,31 +2394,91 @@ fn resolve_calls(calls: &[CallShape], resolved: &ResolvedModule) -> BTreeSet<FnK
     targets
 }
 
-/// Fills in `required_capabilities` on every function and method of
-/// `resolved` as the least fixed point of "start from what a declaration
-/// calls directly, then union in whatever every declaration it (transitively)
+/// The declarations `type_module.type_name`'s method `method` may reach.
+///
+/// A type's methods usually live in the module that declares the type. A
+/// conformance is the exception: ADR 0006 allows `impl Trait for Type` in the
+/// module that declares the *trait*, so a method of this type can live in any
+/// module that conforms it to a trait of its own.
+fn type_methods(
+    program: &Program,
+    type_module: &str,
+    type_name: &str,
+    method: &str,
+) -> BTreeSet<Node> {
+    let key = (type_name.to_string(), method.to_string());
+    let mut found = BTreeSet::new();
+    if let Some(owner) = program.modules.get(type_module) {
+        if owner.methods.contains_key(&key) {
+            found.insert((
+                type_module.to_string(),
+                FnKey::Method(key.0.clone(), key.1.clone()),
+            ));
+        }
+    }
+    for (name, resolved) in &program.modules {
+        let conforms = resolved.conformances.values().any(|conformance| {
+            conformance.type_module == type_module
+                && conformance.type_name == type_name
+                && conformance.methods.contains(method)
+        });
+        if conforms && resolved.methods.contains_key(&key) {
+            found.insert((name.clone(), FnKey::Method(key.0.clone(), key.1.clone())));
+        }
+    }
+    found
+}
+
+/// The module that declares `name` as `resolved` sees it, when the
+/// declaration it finds there satisfies `is_kind`.
+fn declaring_module(
+    program: &Program,
+    resolved: &ResolvedModule,
+    name: &str,
+    is_kind: impl Fn(&ResolvedModule) -> bool,
+) -> Option<String> {
+    if is_kind(resolved) {
+        return Some(resolved.name.clone());
+    }
+    let owner_name = resolved.imports.get(name)?;
+    let owner = program.modules.get(owner_name)?;
+    is_kind(owner).then(|| owner_name.clone())
+}
+
+/// Fills in `required_capabilities` on every function and method of the
+/// package as the least fixed point of "start from what a declaration calls
+/// directly, then union in whatever every declaration it (transitively)
 /// calls requires."
+///
+/// The graph is the package's, not one module's: a function that reaches
+/// `console.println` only through an imported helper requires `console`.
 ///
 /// A fixed point rather than a recursive walk is required because the call
 /// graph can be cyclic: direct and mutual recursion must not recurse forever.
+/// Module imports may not form a cycle, but calls within a module still may.
 /// Each round only ever adds capabilities to a finite set, so the loop is
 /// guaranteed to terminate.
-fn propagate_capabilities(
-    resolved: &mut ResolvedModule,
-    call_graph: &BTreeMap<FnKey, BTreeSet<FnKey>>,
-) {
-    let mut required: BTreeMap<FnKey, BTreeSet<Capability>> = BTreeMap::new();
-    for (name, entry) in &resolved.functions {
-        required.insert(FnKey::Fn(name.clone()), entry.direct_capabilities.clone());
-    }
-    for ((type_name, method_name), entry) in &resolved.methods {
-        required.insert(
-            FnKey::Method(type_name.clone(), method_name.clone()),
-            entry.direct_capabilities.clone(),
-        );
+fn propagate_capabilities(program: &mut Program, call_graph: &BTreeMap<Node, BTreeSet<Node>>) {
+    let mut required: BTreeMap<Node, BTreeSet<Capability>> = BTreeMap::new();
+    for (module, resolved) in &program.modules {
+        for (name, entry) in &resolved.functions {
+            required.insert(
+                (module.clone(), FnKey::Fn(name.clone())),
+                entry.direct_capabilities.clone(),
+            );
+        }
+        for ((type_name, method_name), entry) in &resolved.methods {
+            required.insert(
+                (
+                    module.clone(),
+                    FnKey::Method(type_name.clone(), method_name.clone()),
+                ),
+                entry.direct_capabilities.clone(),
+            );
+        }
     }
 
-    let keys: Vec<FnKey> = required.keys().cloned().collect();
+    let keys: Vec<Node> = required.keys().cloned().collect();
     loop {
         let mut changed = false;
         for key in &keys {
@@ -1576,15 +2506,20 @@ fn propagate_capabilities(
         }
     }
 
-    for (name, entry) in resolved.functions.iter_mut() {
-        entry.required_capabilities = required
-            .remove(&FnKey::Fn(name.clone()))
-            .unwrap_or_default();
-    }
-    for ((type_name, method_name), entry) in resolved.methods.iter_mut() {
-        entry.required_capabilities = required
-            .remove(&FnKey::Method(type_name.clone(), method_name.clone()))
-            .unwrap_or_default();
+    for (module, resolved) in program.modules.iter_mut() {
+        for (name, entry) in resolved.functions.iter_mut() {
+            entry.required_capabilities = required
+                .remove(&(module.clone(), FnKey::Fn(name.clone())))
+                .unwrap_or_default();
+        }
+        for ((type_name, method_name), entry) in resolved.methods.iter_mut() {
+            entry.required_capabilities = required
+                .remove(&(
+                    module.clone(),
+                    FnKey::Method(type_name.clone(), method_name.clone()),
+                ))
+                .unwrap_or_default();
+        }
     }
 }
 
@@ -1638,13 +2573,58 @@ mod tests {
     }
 
     fn package_of(module: Module) -> Package {
-        let mut modules = BTreeMap::new();
-        modules.insert(module.name.clone(), module);
+        package_of_modules(vec![module])
+    }
+
+    /// Builds a package out of several inline modules, so a `use` in one can
+    /// be answered by another.
+    fn package_of_modules(modules: Vec<Module>) -> Package {
+        let mut map = BTreeMap::new();
+        for module in modules {
+            map.insert(module.name.clone(), module);
+        }
         Package {
             root: PathBuf::new(),
             config: Config::default(),
-            modules,
+            modules: map,
         }
+    }
+
+    /// Resolves a package of inline modules, one source per module.
+    fn resolve_modules(modules: &[(&str, &str)]) -> Result<Program, Vec<Diagnostic>> {
+        let package = package_of_modules(
+            modules
+                .iter()
+                .map(|(name, source)| module_from_sources(name, &[source]))
+                .collect(),
+        );
+        resolve(&package)
+    }
+
+    #[track_caller]
+    fn resolve_ok(modules: &[(&str, &str)]) -> Program {
+        match resolve_modules(modules) {
+            Ok(program) => program,
+            Err(errors) => panic!(
+                "expected the package to resolve, found: {}",
+                errors
+                    .iter()
+                    .map(|d| format!("{}: {}", d.code, d.message))
+                    .collect::<Vec<_>>()
+                    .join("; ")
+            ),
+        }
+    }
+
+    /// Resolves a package expected to fail, and returns the one diagnostic
+    /// with `code`.
+    #[track_caller]
+    fn resolve_err(modules: &[(&str, &str)], code: &str) -> Diagnostic {
+        let errors = resolve_modules(modules).expect_err("expected the package to be rejected");
+        errors
+            .into_iter()
+            .find(|d| d.code == code)
+            .unwrap_or_else(|| panic!("expected a `{code}` diagnostic"))
     }
 
     #[test]
@@ -1974,13 +2954,759 @@ impl Show for B {
     }
 
     #[test]
-    fn three_segment_use_is_unsupported() {
-        let module = module_from_sources("toolong", &["use a.b.c\n"]);
-        let package = package_of(module);
-        let errs = resolve(&package).unwrap_err();
-        assert!(errs
+    fn a_use_matching_no_module_and_no_host_path_is_rejected() {
+        let diagnostic = resolve_err(&[("toolong", "use a.b.c\n")], "cove::resolve::unknown_use");
+        assert!(diagnostic.message.contains("a.b.c"));
+        // The message names both things the compiler looked for.
+        assert!(diagnostic.message.contains("module"));
+        assert!(diagnostic.message.contains("host module"));
+    }
+
+    // ------------------------------------------------------- module imports
+
+    #[test]
+    fn a_use_imports_an_exported_declaration() {
+        let program = resolve_ok(&[
+            (
+                "greet",
+                "/// Greets by name.\nexport fn greeting(name: String) -> String {\n  name\n}\n",
+            ),
+            (
+                "hello",
+                "use greet.greeting\n\n/// Entry point.\nexport fn main() -> String {\n  greeting(\"world\")\n}\n",
+            ),
+        ]);
+        assert_eq!(
+            program.modules["hello"].imports.get("greeting"),
+            Some(&"greet".to_string())
+        );
+        assert!(program.modules["hello"].module_imports.is_empty());
+        // A module of this package is not a host module, so nothing was
+        // recorded as one.
+        assert!(program.modules["hello"].host_uses.is_empty());
+    }
+
+    #[test]
+    fn a_use_of_a_module_alone_imports_the_module() {
+        let program = resolve_ok(&[
+            (
+                "greet",
+                "/// Greets by name.\nexport fn greeting(name: String) -> String {\n  name\n}\n",
+            ),
+            (
+                "hello",
+                "use greet\n\n/// Entry point.\nexport fn main() -> String {\n  greet.greeting(\"world\")\n}\n",
+            ),
+        ]);
+        assert_eq!(
+            program.modules["hello"].module_imports.get("greet"),
+            Some(&"greet".to_string())
+        );
+        assert!(program.modules["hello"].imports.is_empty());
+        assert!(program.modules["hello"].host_uses.is_empty());
+    }
+
+    #[test]
+    fn a_nested_module_is_imported_by_its_full_path() {
+        let program = resolve_ok(&[
+            (
+                "src.booking",
+                "/// Creates a booking.\nexport fn createBooking() -> String {\n  \"b\"\n}\n",
+            ),
+            (
+                "app",
+                "use src.booking.createBooking\n\n/// Entry point.\nexport fn main() -> String {\n  createBooking()\n}\n",
+            ),
+        ]);
+        assert_eq!(
+            program.modules["app"].imports.get("createBooking"),
+            Some(&"src.booking".to_string())
+        );
+    }
+
+    #[test]
+    fn a_use_of_a_private_declaration_is_rejected() {
+        let diagnostic = resolve_err(
+            &[
+                (
+                    "greet",
+                    "fn greeting(name: String) -> String {\n  name\n}\n",
+                ),
+                ("hello", "use greet.greeting\n"),
+            ],
+            "cove::resolve::private_declaration",
+        );
+        assert!(diagnostic.message.contains("not exported"));
+        // The declaration itself is labelled, and `export` is the fix.
+        assert_eq!(diagnostic.labels.len(), 1);
+        assert!(diagnostic.help.as_deref().unwrap().contains("export"));
+    }
+
+    #[test]
+    fn a_use_naming_a_module_that_declares_no_such_name_is_rejected() {
+        let diagnostic = resolve_err(
+            &[
+                (
+                    "greet",
+                    "/// Greets.\nexport fn greeting() -> String {\n  \"hi\"\n}\n",
+                ),
+                ("hello", "use greet.farewell\n"),
+            ],
+            "cove::resolve::unknown_use",
+        );
+        assert!(diagnostic.message.contains("declares no `farewell`"));
+        assert!(diagnostic.message.contains("not a host module"));
+        assert!(diagnostic.help.as_deref().unwrap().contains("greeting"));
+    }
+
+    #[test]
+    fn a_module_named_after_a_host_module_is_rejected_rather_than_preferred() {
+        let diagnostic = resolve_err(
+            &[
+                (
+                    "console",
+                    "/// Prints.\nexport fn println(line: String) {\n}\n",
+                ),
+                ("app", "use console.println\n"),
+            ],
+            "cove::resolve::module_shadows_host",
+        );
+        assert!(diagnostic.help.as_deref().unwrap().contains("rename"));
+    }
+
+    #[test]
+    fn a_use_naming_both_a_module_and_a_declaration_is_rejected() {
+        let diagnostic = resolve_err(
+            &[
+                (
+                    "booking",
+                    "/// Creates a booking.\nexport fn create() -> String {\n  \"b\"\n}\n",
+                ),
+                (
+                    "booking.create",
+                    "/// Validates a booking.\nexport fn validate() -> Bool {\n  true\n}\n",
+                ),
+                ("app", "use booking.create\n"),
+            ],
+            "cove::resolve::ambiguous_use",
+        );
+        assert!(diagnostic.message.contains("both"));
+    }
+
+    #[test]
+    fn an_import_colliding_with_a_declaration_is_rejected() {
+        let diagnostic = resolve_err(
+            &[
+                (
+                    "greet",
+                    "/// Greets.\nexport fn greeting() -> String {\n  \"hi\"\n}\n",
+                ),
+                (
+                    "hello",
+                    "use greet.greeting\n\nfn greeting() -> String {\n  \"other\"\n}\n",
+                ),
+            ],
+            "cove::resolve::import_conflict",
+        );
+        assert!(diagnostic.message.contains("also declares it"));
+    }
+
+    #[test]
+    fn two_imports_of_one_name_from_different_modules_are_rejected() {
+        let diagnostic = resolve_err(
+            &[
+                (
+                    "left",
+                    "/// Greets.\nexport fn greeting() -> String {\n  \"l\"\n}\n",
+                ),
+                (
+                    "right",
+                    "/// Greets.\nexport fn greeting() -> String {\n  \"r\"\n}\n",
+                ),
+                ("hello", "use left.greeting\nuse right.greeting\n"),
+            ],
+            "cove::resolve::import_conflict",
+        );
+        assert!(diagnostic.message.contains("both"));
+    }
+
+    #[test]
+    fn importing_the_same_declaration_twice_is_not_a_conflict() {
+        let package = package_of_modules(vec![
+            module_from_sources(
+                "greet",
+                &["/// Greets.\nexport fn greeting() -> String {\n  \"hi\"\n}\n"],
+            ),
+            module_from_sources("hello", &["use greet.greeting\n", "use greet.greeting\n"]),
+        ]);
+        resolve(&package).expect("resolves");
+    }
+
+    #[test]
+    fn an_unknown_two_segment_use_is_still_a_host_path() {
+        let program = resolve_ok(&[("app", "use other.println\n")]);
+        assert!(program.modules["app"].host_uses.contains("other"));
+        assert_eq!(
+            program.modules["app"].host_items.get("println"),
+            Some(&"other".to_string())
+        );
+    }
+
+    // -------------------------------------------------------------- cycles
+
+    #[test]
+    fn a_direct_import_cycle_is_rejected() {
+        let diagnostic = resolve_err(
+            &[
+                (
+                    "a",
+                    "use b.fromB\n\n/// Exported.\nexport fn fromA() -> Int {\n  1\n}\n",
+                ),
+                (
+                    "b",
+                    "use a.fromA\n\n/// Exported.\nexport fn fromB() -> Int {\n  2\n}\n",
+                ),
+            ],
+            "cove::resolve::import_cycle",
+        );
+        assert!(
+            diagnostic.message.contains("a -> b -> a")
+                || diagnostic.message.contains("b -> a -> b")
+        );
+    }
+
+    #[test]
+    fn a_transitive_import_cycle_is_rejected() {
+        let diagnostic = resolve_err(
+            &[
+                (
+                    "a",
+                    "use b.fromB\n\n/// Exported.\nexport fn fromA() -> Int {\n  1\n}\n",
+                ),
+                (
+                    "b",
+                    "use c.fromC\n\n/// Exported.\nexport fn fromB() -> Int {\n  2\n}\n",
+                ),
+                (
+                    "c",
+                    "use a.fromA\n\n/// Exported.\nexport fn fromC() -> Int {\n  3\n}\n",
+                ),
+            ],
+            "cove::resolve::import_cycle",
+        );
+        assert!(diagnostic.message.contains(" -> "));
+        assert_eq!(
+            resolve_modules(&[
+                (
+                    "a",
+                    "use b.fromB\n\n/// Exported.\nexport fn fromA() -> Int {\n  1\n}\n",
+                ),
+                (
+                    "b",
+                    "use c.fromC\n\n/// Exported.\nexport fn fromB() -> Int {\n  2\n}\n",
+                ),
+                (
+                    "c",
+                    "use a.fromA\n\n/// Exported.\nexport fn fromC() -> Int {\n  3\n}\n",
+                ),
+            ])
+            .unwrap_err()
             .iter()
-            .any(|d| d.code == "cove::resolve::unsupported_use"));
+            .filter(|d| d.code == "cove::resolve::import_cycle")
+            .count(),
+            1,
+            "one cycle is reported once, however many modules it runs through"
+        );
+    }
+
+    #[test]
+    fn a_module_importing_itself_is_a_cycle() {
+        resolve_err(
+            &[(
+                "a",
+                "use a.fromA\n\n/// Exported.\nexport fn fromA() -> Int {\n  1\n}\n",
+            )],
+            "cove::resolve::import_cycle",
+        );
+    }
+
+    /// A diamond is ordinary: importing a module runs none of its code, so
+    /// two modules may import a third without any ordering question.
+    #[test]
+    fn a_diamond_import_is_accepted() {
+        let program = resolve_ok(&[
+            (
+                "base",
+                "/// The shared helper.\nexport fn base() -> Int {\n  1\n}\n",
+            ),
+            (
+                "left",
+                "use base.base\n\n/// Exported.\nexport fn left() -> Int {\n  base()\n}\n",
+            ),
+            (
+                "right",
+                "use base.base\n\n/// Exported.\nexport fn right() -> Int {\n  base()\n}\n",
+            ),
+            (
+                "top",
+                "use left.left\nuse right.right\n\n/// Exported.\nexport fn top() -> Int {\n  left() + right()\n}\n",
+            ),
+        ]);
+        assert_eq!(program.modules.len(), 4);
+    }
+
+    // ------------------------------------------- capabilities across modules
+
+    #[test]
+    fn required_capabilities_cross_a_module_boundary() {
+        let program = resolve_ok(&[
+            (
+                "log",
+                "use console.println\n\n/// Logs a message.\nexport fn log(msg: String) {\n  console.println(msg)\n}\n",
+            ),
+            (
+                "app",
+                "use log.log\n\n/// Entry point; never names a host module.\nexport fn main() {\n  log(\"hi\")\n}\n",
+            ),
+        ]);
+        let main = &program.modules["app"].functions["main"];
+        assert!(main.direct_capabilities.is_empty());
+        assert!(main
+            .required_capabilities
+            .contains(&Capability::new("console")));
+    }
+
+    #[test]
+    fn required_capabilities_cross_a_qualified_module_call() {
+        let program = resolve_ok(&[
+            (
+                "log",
+                "use console.println\n\n/// Logs a message.\nexport fn log(msg: String) {\n  console.println(msg)\n}\n",
+            ),
+            (
+                "app",
+                "use log\n\n/// Entry point.\nexport fn main() {\n  log.log(\"hi\")\n}\n",
+            ),
+        ]);
+        assert!(program.modules["app"].functions["main"]
+            .required_capabilities
+            .contains(&Capability::new("console")));
+    }
+
+    #[test]
+    fn required_capabilities_cross_two_module_boundaries() {
+        let program = resolve_ok(&[
+            (
+                "bottom",
+                "use console.println\n\n/// Logs.\nexport fn log(msg: String) {\n  console.println(msg)\n}\n",
+            ),
+            (
+                "middle",
+                "use bottom.log\n\n/// Logs twice.\nexport fn twice(msg: String) {\n  log(msg)\n  log(msg)\n}\n",
+            ),
+            (
+                "top",
+                "use middle.twice\n\n/// Entry point.\nexport fn main() {\n  twice(\"hi\")\n}\n",
+            ),
+        ]);
+        assert!(program.modules["top"].functions["main"]
+            .required_capabilities
+            .contains(&Capability::new("console")));
+    }
+
+    #[test]
+    fn required_capabilities_cross_an_imported_type_s_method() {
+        let program = resolve_ok(&[
+            (
+                "thing",
+                "use console.println\n\n/// A thing.\nexport struct Thing {\n  id: String\n}\n\n\
+                 impl Thing {\n  /// Prints the id.\n  fn touch(self) {\n    console.println(self.id)\n  }\n}\n",
+            ),
+            (
+                "app",
+                "use thing.Thing\n\n/// Entry point.\nexport fn main() {\n  Thing.touch()\n}\n",
+            ),
+        ]);
+        assert!(program.modules["app"].functions["main"]
+            .required_capabilities
+            .contains(&Capability::new("console")));
+    }
+
+    /// A receiver whose type the resolver cannot know reaches every method
+    /// of that name in this module *and* in the modules it imports, which is
+    /// what keeps the over-approximation sound across a boundary.
+    #[test]
+    fn an_unknown_receiver_reaches_an_imported_type_s_method() {
+        let program = resolve_ok(&[
+            (
+                "thing",
+                "use console.println\n\n/// A thing.\nexport struct Thing {\n  id: String\n}\n\n\
+                 impl Thing {\n  /// Prints the id.\n  fn touch(self) {\n    console.println(self.id)\n  }\n}\n",
+            ),
+            (
+                "app",
+                "use thing.Thing\n\n/// Entry point.\nexport fn main(value: Thing) {\n  value.touch()\n}\n",
+            ),
+        ]);
+        assert!(program.modules["app"].functions["main"]
+            .required_capabilities
+            .contains(&Capability::new("console")));
+    }
+
+    #[test]
+    fn a_module_that_imports_nothing_requires_nothing_from_its_neighbours() {
+        let program = resolve_ok(&[
+            (
+                "log",
+                "use console.println\n\n/// Logs a message.\nexport fn log(msg: String) {\n  console.println(msg)\n}\n",
+            ),
+            (
+                "pure",
+                "/// Adds.\nexport fn add(a: Int, b: Int) -> Int {\n  a + b\n}\n",
+            ),
+        ]);
+        assert!(program.modules["pure"].functions["add"]
+            .required_capabilities
+            .is_empty());
+    }
+
+    // --------------------------------------------- imported enums in `match`
+
+    #[test]
+    fn match_over_an_imported_enum_is_checked_for_exhaustiveness() {
+        let diagnostic = resolve_err(
+            &[
+                (
+                    "levels",
+                    "/// Levels.\nexport enum LogLevel {\n  Debug\n  Info\n  Warn\n}\n",
+                ),
+                (
+                    "app",
+                    "use levels.LogLevel\n\n/// Describes a level.\nexport fn describe(level: LogLevel) -> String {\n  \
+                     match level {\n    LogLevel.Debug => \"debug\"\n    LogLevel.Info => \"info\"\n  }\n}\n",
+                ),
+            ],
+            "cove::resolve::non_exhaustive_match",
+        );
+        assert!(diagnostic.message.contains("LogLevel.Warn"));
+    }
+
+    #[test]
+    fn match_covering_every_case_of_an_imported_enum_passes() {
+        let program = resolve_ok(&[
+            (
+                "levels",
+                "/// Levels.\nexport enum LogLevel {\n  Debug\n  Info\n}\n",
+            ),
+            (
+                "app",
+                "use levels.LogLevel\n\n/// Describes a level.\nexport fn describe(level: LogLevel) -> String {\n  \
+                 match level {\n    LogLevel.Debug => \"debug\"\n    LogLevel.Info => \"info\"\n  }\n}\n",
+            ),
+        ]);
+        assert!(program.warnings.is_empty());
+    }
+
+    #[test]
+    fn an_unknown_case_of_an_imported_enum_is_reported() {
+        let diagnostic = resolve_err(
+            &[
+                (
+                    "levels",
+                    "/// Levels.\nexport enum LogLevel {\n  Debug\n  Info\n}\n",
+                ),
+                (
+                    "app",
+                    "use levels.LogLevel\n\n/// Describes a level.\nexport fn describe(level: LogLevel) -> String {\n  \
+                     match level {\n    LogLevel.Debug => \"debug\"\n    LogLevel.Bogus => \"bogus\"\n    LogLevel.Info => \"info\"\n  }\n}\n",
+                ),
+            ],
+            "cove::resolve::unknown_enum_case",
+        );
+        assert!(diagnostic.message.contains("Bogus"));
+    }
+
+    // ------------------------------------------ conformances across modules
+
+    /// The trait, and the type, every cross-module conformance test builds
+    /// on: one exported trait with a required and a defaulted method, and one
+    /// exported struct, each in a module of its own.
+    const DISPLAY: &str = "\
+/// Renders itself.
+export trait Display {
+  /// The full form.
+  fn describe(self) -> String
+
+  /// A short form, defaulting to the full one.
+  fn label(self) -> String { self.describe() }
+}
+";
+
+    const BOOKING: &str = "\
+/// A booking.
+export struct Booking {
+  id: Int
+}
+";
+
+    /// ADR 0006 allows a conformance in the module that declares the type,
+    /// which with imports means the trait may be an imported one.
+    #[test]
+    fn a_module_may_conform_its_own_type_to_an_imported_trait() {
+        let program = resolve_ok(&[
+            ("display", DISPLAY),
+            (
+                "booking",
+                &format!(
+                    "use display.Display\n\n{BOOKING}\nimpl Display for Booking {{\n  \
+                     /// The full form.\n  fn describe(self) -> String {{\n    \"b\"\n  }}\n}}\n"
+                ),
+            ),
+        ]);
+        let conformance = program.modules["booking"]
+            .conformances
+            .get(&("Display".to_string(), "Booking".to_string()))
+            .expect("the conformance is recorded where the type is declared");
+        assert_eq!(conformance.trait_module, "display");
+        assert_eq!(conformance.type_module, "booking");
+        // The defaulted method comes along, so dispatch finds both.
+        assert_eq!(
+            conformance.methods.iter().cloned().collect::<Vec<_>>(),
+            ["describe", "label"]
+        );
+    }
+
+    /// And the reverse: a conformance in the module that declares the trait,
+    /// for a type it imported.
+    #[test]
+    fn a_module_may_conform_an_imported_type_to_its_own_trait() {
+        let program = resolve_ok(&[
+            ("booking", BOOKING),
+            (
+                "display",
+                &format!(
+                    "use booking.Booking\n\n{DISPLAY}\nimpl Display for Booking {{\n  \
+                     /// The full form.\n  fn describe(self) -> String {{\n    \"b\"\n  }}\n}}\n"
+                ),
+            ),
+        ]);
+        let conformance = program.modules["display"]
+            .conformances
+            .get(&("Display".to_string(), "Booking".to_string()))
+            .expect("the conformance is recorded where the trait is declared");
+        assert_eq!(conformance.trait_module, "display");
+        assert_eq!(conformance.type_module, "booking");
+        // The methods live with the conformance, not with the type.
+        assert!(program.modules["display"]
+            .methods
+            .contains_key(&("Booking".to_string(), "describe".to_string())));
+        assert!(program.modules["booking"].methods.is_empty());
+    }
+
+    /// The orphan rule is what imports must *not* widen: a module that can
+    /// see both parties still may not join them.
+    #[test]
+    fn a_third_module_may_not_conform_an_imported_type_to_an_imported_trait() {
+        let diagnostic = resolve_err(
+            &[
+                ("display", DISPLAY),
+                ("booking", BOOKING),
+                (
+                    "app",
+                    "use display.Display\nuse booking.Booking\n\n\
+                     impl Display for Booking {\n  /// The full form.\n  fn describe(self) -> String {\n    \"b\"\n  }\n}\n",
+                ),
+            ],
+            "cove::resolve::orphan_conformance",
+        );
+        assert!(diagnostic.message.contains("declares neither"));
+    }
+
+    /// An inherent `impl` is not a conformance, so it may not reach across a
+    /// module boundary at all: there would be no fact for the type's own
+    /// module to see.
+    #[test]
+    fn an_inherent_impl_may_not_extend_an_imported_type() {
+        let diagnostic = resolve_err(
+            &[
+                ("booking", BOOKING),
+                (
+                    "app",
+                    "use booking.Booking\n\nimpl Booking {\n  /// The id.\n  fn id(self) -> Int {\n    self.id\n  }\n}\n",
+                ),
+            ],
+            "cove::resolve::foreign_inherent_impl",
+        );
+        assert!(diagnostic.help.as_deref().unwrap().contains("booking"));
+    }
+
+    /// A conformance declared where the trait is may not collide with a
+    /// method the type's own module declares: the checker would resolve one
+    /// and the interpreter the other.
+    #[test]
+    fn a_conformance_may_not_collide_with_the_type_s_own_method() {
+        let diagnostic = resolve_err(
+            &[
+                (
+                    "booking",
+                    &format!(
+                        "{BOOKING}\nimpl Booking {{\n  /// Describes.\n  export fn describe(self) -> String {{\n    \"inherent\"\n  }}\n}}\n"
+                    ),
+                ),
+                (
+                    "display",
+                    &format!(
+                        "use booking.Booking\n\n{DISPLAY}\nimpl Display for Booking {{\n  \
+                         /// The full form.\n  fn describe(self) -> String {{\n    \"conformance\"\n  }}\n}}\n"
+                    ),
+                ),
+            ],
+            "cove::resolve::duplicate_declaration",
+        );
+        assert!(diagnostic.message.contains("Booking.describe"));
+        assert!(diagnostic.message.contains("display"));
+        assert!(diagnostic.message.contains("booking"));
+    }
+
+    /// The same collision between two conformances in two modules, which the
+    /// per-module duplicate check cannot see either.
+    #[test]
+    fn two_modules_may_not_give_one_type_the_same_method_name() {
+        let diagnostic = resolve_err(
+            &[
+                ("booking", BOOKING),
+                (
+                    "display",
+                    &format!(
+                        "use booking.Booking\n\n{DISPLAY}\nimpl Display for Booking {{\n  \
+                         /// The full form.\n  fn describe(self) -> String {{\n    \"d\"\n  }}\n}}\n"
+                    ),
+                ),
+                (
+                    "audit",
+                    "use booking.Booking\n\n\
+                     /// Audits itself.\nexport trait Audit {\n  /// The full form.\n  fn describe(self) -> String\n}\n\n\
+                     impl Audit for Booking {\n  /// The full form.\n  fn describe(self) -> String {\n    \"a\"\n  }\n}\n",
+                ),
+            ],
+            "cove::resolve::duplicate_declaration",
+        );
+        assert!(diagnostic.message.contains("Booking.describe"));
+    }
+
+    /// Two modules cannot both declare the same conformance, and the import
+    /// rules are what guarantee it: each would have to import the other's
+    /// party, which is a cycle. No separate check is needed, so this pins
+    /// the shape that would need one if cycles were ever allowed.
+    #[test]
+    fn one_conformance_cannot_be_declared_in_both_parties_modules() {
+        let diagnostic = resolve_err(
+            &[
+                (
+                    "display",
+                    &format!(
+                        "use booking.Booking\n\n{DISPLAY}\nimpl Display for Booking {{\n  \
+                         /// The full form.\n  fn describe(self) -> String {{\n    \"d\"\n  }}\n}}\n"
+                    ),
+                ),
+                (
+                    "booking",
+                    &format!(
+                        "use display.Display\n\n{BOOKING}\nimpl Display for Booking {{\n  \
+                         /// The full form.\n  fn describe(self) -> String {{\n    \"b\"\n  }}\n}}\n"
+                    ),
+                ),
+            ],
+            "cove::resolve::import_cycle",
+        );
+        assert!(diagnostic.message.contains(" -> "));
+    }
+
+    #[test]
+    fn an_import_colliding_with_a_declared_trait_is_rejected() {
+        let diagnostic = resolve_err(
+            &[
+                ("display", DISPLAY),
+                (
+                    "app",
+                    "use display.Display\n\ntrait Display {\n  /// The full form.\n  fn describe(self) -> String\n}\n",
+                ),
+            ],
+            "cove::resolve::import_conflict",
+        );
+        assert!(diagnostic.message.contains("also declares it"));
+    }
+
+    #[test]
+    fn a_use_of_a_private_trait_is_rejected() {
+        resolve_err(
+            &[
+                (
+                    "display",
+                    "trait Display {\n  /// The full form.\n  fn describe(self) -> String\n}\n",
+                ),
+                ("app", "use display.Display\n"),
+            ],
+            "cove::resolve::private_declaration",
+        );
+    }
+
+    #[test]
+    fn a_conformance_naming_a_trait_no_module_declares_is_rejected() {
+        let diagnostic = resolve_err(
+            &[(
+                "booking",
+                &format!("{BOOKING}\nimpl Display for Booking {{\n  fn describe(self) -> String {{\n    \"b\"\n  }}\n}}\n"),
+            )],
+            "cove::resolve::unknown_trait",
+        );
+        assert!(diagnostic.help.as_deref().unwrap().contains("use"));
+    }
+
+    /// A conformance method is a method of the type wherever it was written,
+    /// so a capability it needs reaches every caller of that method.
+    #[test]
+    fn required_capabilities_cross_a_conformance_in_another_module() {
+        let program = resolve_ok(&[
+            ("booking", BOOKING),
+            (
+                "display",
+                &format!(
+                    "use console.println\nuse booking.Booking\n\n{DISPLAY}\n\
+                     impl Display for Booking {{\n  /// The full form.\n  fn describe(self) -> String {{\n    \
+                     console.println(\"tracing\")\n    \"b\"\n  }}\n}}\n"
+                ),
+            ),
+            (
+                "app",
+                "use booking.Booking\nuse display.Display\n\n\
+                 /// Entry point.\nexport fn main(value: Booking) -> String {\n  value.describe()\n}\n",
+            ),
+        ]);
+        assert!(program.modules["app"].functions["main"]
+            .required_capabilities
+            .contains(&Capability::new("console")));
+    }
+
+    /// A bare case name resolves against the enums in scope, which now
+    /// includes an imported one.
+    #[test]
+    fn a_bare_case_of_an_imported_enum_resolves() {
+        let diagnostic = resolve_err(
+            &[
+                (
+                    "levels",
+                    "/// Levels.\nexport enum LogLevel {\n  Debug\n  Info\n}\n",
+                ),
+                (
+                    "app",
+                    "use levels.LogLevel\n\n/// Describes a level.\nexport fn describe(level: LogLevel) -> String {\n  \
+                     match level {\n    Debug => \"debug\"\n  }\n}\n",
+                ),
+            ],
+            "cove::resolve::non_exhaustive_match",
+        );
+        assert!(diagnostic.message.contains("LogLevel.Info"));
     }
 
     #[test]

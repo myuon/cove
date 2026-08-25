@@ -1,0 +1,12 @@
+use console.println
+use secret.hidden
+
+/// Imports a declaration that exists but is module-private.
+///
+/// An `export` declaration is public; other declarations are
+/// module-private, so this cannot resolve. This case lives in its own
+/// package so that failure cannot take down every other case.
+export fn main() -> Result<Unit, Error> {
+  println(hidden())?
+  Ok(())
+}

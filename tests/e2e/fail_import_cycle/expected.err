@@ -1,0 +1,8 @@
+error[cove::resolve::import_cycle]: module `helper` imports itself through helper -> main -> helper
+ --> <e2e>/fail_import_cycle/main/main.cove:2:1
+  |
+2 | use helper.decorate
+  | ^^^^^^^^^^^^^^^^^^^
+  rule: A module may not import, directly or transitively, a module that imports it.
+  help: move what both modules need into a third module they can each import
+1 error(s)

@@ -1,0 +1,11 @@
+use console.println
+
+/// Counts words in `text`.
+export fn wordCount(text: String) -> Int {
+  text.words().length()
+}
+
+/// Reports the word count of `text` on the console the host granted.
+export fn report(text: String) -> Result<Unit, Error> {
+  console.println("{wordCount(text)} words")
+}

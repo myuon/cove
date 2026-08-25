@@ -114,6 +114,14 @@ allow = ["console", "documents"]
 entry = "host_env.main"
 allow = ["console", "env"]
 
+[run.module_conformance]
+entry = "module_conformance.main"
+allow = ["console"]
+
+[run.module_import]
+entry = "module_import.main"
+allow = ["console"]
+
 [run.type_enum]
 entry = "type_enum.main"
 allow = ["console"]

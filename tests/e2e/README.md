@@ -17,6 +17,9 @@ tests/e2e/
   cove.toml                 one [run.<name>] table per shared-package case
   documents/                documents the `documents` host may read
   <case>/main.cove          the program, for a shared-package case
+  <case>/<module>/*.cove    a further module of the same package, which the
+                            case may `use`; it is not a case of its own,
+                            since it holds no main.cove
   <case>/cove.toml          present only when <case> is its own package
   <case>/main/main.cove     the program, for an own-package case
   <case>/expected.out       exact expected stdout

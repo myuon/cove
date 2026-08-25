@@ -1,0 +1,17 @@
+use console.println
+use helper.decorate
+
+/// Imports a module that imports this one back.
+///
+/// A module may not import, directly or transitively, a module that imports
+/// it. This case lives in its own package so that failure cannot take down
+/// every other case.
+export fn main() -> Result<Unit, Error> {
+  println(decorate())?
+  Ok(())
+}
+
+/// The label `helper` reaches back for.
+export fn label() -> String {
+  "main"
+}

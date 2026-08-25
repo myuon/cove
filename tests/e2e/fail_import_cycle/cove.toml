@@ -1,0 +1,3 @@
+[run.fail_import_cycle]
+entry = "main.main"
+allow = ["console"]

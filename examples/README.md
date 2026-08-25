@@ -20,9 +20,16 @@ Together they test the core product hypotheses:
 | `values/` | Struct copies, Vector aliases, immutable Arrays, and freeze |
 | `traits/` | Nominal traits, generic bounds, and both dispatch forms |
 | `callbacks/` | Routers, middleware, events, timers, retries, and task-safe captures |
+| `text/` | Not a program: the module `restricted/` imports, for `export` and capabilities across a boundary |
 | `cove.toml` | Host-selected entry functions and granted capabilities |
 
 Each directory is a module; declarations marked `export` form its public API.
+A module may name another module's exported declarations with `use`, so
+`text/` is not a program of its own: `restricted/` imports it, and reaches
+`console` only through `text.report`. That is why `cove outline` reports
+`restricted.main` as requiring `console` although it names no host module —
+required capabilities are derived from the package's call graph, not one
+module's.
 The first implementation milestone, making `hello/` run, is done. The MVP is
 not complete until all eight programs have defined behavior in both diagnostics
 and execution.
