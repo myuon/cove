@@ -2,6 +2,12 @@
 
 - Status: Accepted
 - Date: 2026-08-25
+- Amended by: [ADR 0005](0005-module-to-module-imports.md), which gave the
+  checker the import environment "Checking is per-module" said it would need,
+  and [ADR 0006](0006-traits-and-dispatch.md), which turned "parametric and
+  unbounded" into parametric with bounds
+- Implemented by: PR #12
+- Implementation status: partial — see "What is not checked yet" below
 
 ## Context
 
@@ -119,3 +125,33 @@ this ADR; both become able to change.
 
 Higher-kinded types, implicit instance search, dependent types, and effect
 polymorphism remain out of scope, as ADR 0001 decided.
+
+## What is not checked yet (2026-08-25)
+
+The checker described above exists and `cove check` runs it, so the Context's
+"none of that is true today" is history. Two of its promises are not kept, and
+naming them here is cheaper for a reader than deriving them from the code.
+
+The Host API schema is still unread. ADR 0001 asks for one description of each
+operation's argument, result, and error types shared by the compiler, runtime,
+and CLI, and `OperationSchema` holds all three — but nothing in `cove-sema`
+looks at it, so a host call's result is `Unknown` and its arguments are
+unchecked. The checker does not hide this: it warns (`HOST_TYPE`) wherever a
+host type is named, which is why `cove check` reports warnings on
+`examples/server` and `examples/callbacks`. The runtime does not check the
+other end either, which is [issue #38](https://github.com/myuon/cove/issues/38).
+
+"Annotations are mandatory at boundaries" is not enforced for a declaration's
+parameters. A parameter written without a type becomes `Unknown` rather than
+an error, and `Unknown` is equal to everything, so a call passing the wrong
+thing checks clean. The cause is structural — a declaration's parameter and a
+lambda's parameter are the same node, and ADR 0004 wants the second to infer —
+and the fix is a decision rather than a line, so it is
+[issue #41](https://github.com/myuon/cove/issues/41).
+
+Two smaller things are worth stating because they read as gaps and are not. A
+bound written on a `struct`, `enum`, or `type` parameter is rejected outright,
+because a bound is checked where its parameter is instantiated and only a call
+site instantiates one. And the builtin method table is still mirrored between
+`cove-sema` and `cove-runtime` rather than shared, exactly as this ADR said it
+would have to be until a crate both can depend on exists.

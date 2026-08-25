@@ -2,6 +2,14 @@
 
 - Status: Accepted
 - Date: 2026-08-25
+- Supersedes: phase 2 of
+  [ADR 0003](0003-task-execution-and-runtime-control.md)'s Decision, and with it
+  its "What Phase 1 does not validate" section
+- Amends: [ADR 0001](0001-mvp-language-design.md), which names `Shared<T>`,
+  `Mutex<T>`, `RwLock<T>`, `Atomic<T>`, and `Channel<T>` as the synchronized
+  handles; the MVP has the first and none of the rest
+- Implemented by: PR #23
+- Implementation status: complete
 
 ## Context
 

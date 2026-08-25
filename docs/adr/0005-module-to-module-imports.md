@@ -2,6 +2,10 @@
 
 - Status: Accepted
 - Date: 2026-08-25
+- Amends: [ADR 0004](0004-static-type-checking.md), whose per-module checking
+  gains the import environment it anticipated
+- Implemented by: PR #15
+- Implementation status: complete
 
 ## Context
 

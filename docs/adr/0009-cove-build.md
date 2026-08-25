@@ -2,6 +2,11 @@
 
 - Status: Accepted
 - Date: 2026-08-25
+- Amended by: [ADR 0012](0012-performance-gate-and-native-backend.md), which
+  measured the performance criterion this ADR could not evaluate and wrote down
+  what would have to be true before a real backend is worth building
+- Implemented by: PR #24
+- Implementation status: complete
 
 ## Context
 
@@ -68,7 +73,10 @@ the language.
 The card's `cove build` line becomes true, with a stated limitation. ADR 0001's
 success criterion about competitive execution performance still cannot be
 evaluated — that one waits on a real backend, and this ADR does not pretend
-otherwise.
+otherwise. [ADR 0012](0012-performance-gate-and-native-backend.md) later made
+the waiting explicit: there is now a recorded baseline for what the embedded
+interpreter costs, and a gate saying a backend must not regress the warm
+process startup this artifact already achieves.
 
 Build time is Rust's, because building an executable means linking the runtime.
 That is acceptable for an artifact you produce to deploy and unacceptable for

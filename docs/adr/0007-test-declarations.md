@@ -2,6 +2,8 @@
 
 - Status: Accepted
 - Date: 2026-08-25
+- Implemented by: PR #19
+- Implementation status: complete
 
 ## Context
 

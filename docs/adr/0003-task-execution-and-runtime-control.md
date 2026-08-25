@@ -1,7 +1,14 @@
 # ADR 0003: Task execution and runtime control
 
-- Status: Accepted
+- Status: Accepted, superseded in part by
+  [ADR 0008](0008-concurrent-task-execution.md)
 - Date: 2026-08-25
+- Superseded by: [ADR 0008](0008-concurrent-task-execution.md), which took over
+  phase 2 of the Decision below and, with it, the whole of "What Phase 1 does
+  not validate"
+- Implemented by: PR #6 (phase 1); PR #23 replaced phase 1's execution model
+- Implementation status: complete — phase 1 shipped whole, and phase 2 became an
+  ADR of its own rather than a later commit against this one
 
 ## Context
 
@@ -95,3 +102,27 @@ behaviour is defined by the Language Card rather than by when the interpreter
 happens to run the body. Any test that would pass only because tasks run
 sequentially is a test of the implementation, not of Cove, and should be
 written so Phase 2 does not have to change it.
+
+## Superseded in part (2026-08-25): phase 2 became ADR 0008
+
+Phase 1 shipped as written, and almost all of it is still what the runtime
+does. Fuel, a wall-clock deadline, a cancellation flag, a call-depth limit,
+and host-call accounting are checked at exactly the safepoints named above —
+loop back edges, calls, and `await` — and a task spawn, completion, or
+cancellation, and every host call, is still an event. Those parts were built
+first precisely so that they would survive the change of execution model, and
+they did.
+
+What did not survive is sequential execution itself.
+[ADR 0008](0008-concurrent-task-execution.md) took over phase 2 rather than
+leaving it a later commit against this ADR, so `spawn` starts a thread and
+`Shared<T>` is defined there rather than here. The consequence for a reader is
+that the Decision's phase 1 paragraph and the whole of "What Phase 1 does not
+validate" describe what was true between PR #6 and PR #23, and describe
+nothing about the runtime today: tasks interleave, a deadline stops a task
+while another runs, and `clock.timeout` overlaps the work it bounds. ADR
+0001's success criterion about attributing CPU time and I/O wait is the one
+line of that section still worth checking rather than assuming — a trace now
+carries each task's own CPU and each host call's wait, but not which task made
+the call, which `cove trace` says of itself under "not carried by these
+events".
