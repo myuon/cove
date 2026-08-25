@@ -209,11 +209,15 @@ fn cmd_fmt(args: &[String]) -> Result<(), CliError> {
         changed.push(target);
     }
 
+    // A file that does not parse cannot be formatted, and saying whether
+    // source is valid is `cove check`'s job, not this one. Report it and
+    // carry on: the exit status reflects formatting, so a broken file cannot
+    // hide an unformatted one, and `cove check` still refuses the package.
+    for diagnostic in &diagnostics {
+        eprint!("{}", render(&sources, diagnostic));
+    }
     if !diagnostics.is_empty() {
-        return Err(CliError::Diagnostics {
-            sources,
-            items: diagnostics,
-        });
+        eprintln!("{}", skipped_summary(diagnostics.len()));
     }
 
     if !check {
@@ -235,8 +239,14 @@ fn fmt_summary(changed: usize) -> String {
     format!("formatted {changed} file(s)")
 }
 
-/// The files `cove fmt` should consider: one named file, or every `.cove`
-/// file in the package `path` sits in.
+/// The one-line note `cove fmt` prints when it could not parse a file.
+fn skipped_summary(skipped: usize) -> String {
+    format!("skipped {skipped} file(s) that do not parse; run `cove check`")
+}
+
+/// The files `cove fmt` should consider: one named file, every `.cove` file
+/// in the package `path` sits in, or -- when there is no package -- every
+/// `.cove` file below `path`.
 fn fmt_targets(path: Option<&Path>) -> Result<Vec<PathBuf>, CliError> {
     if let Some(path) = path {
         if path.is_file() {
@@ -248,22 +258,24 @@ fn fmt_targets(path: Option<&Path>) -> Result<Vec<PathBuf>, CliError> {
         None => std::env::current_dir()
             .map_err(|e| CliError::Message(format!("cannot read the current directory: {e}")))?,
     };
-    let root = find_root(&start).ok_or_else(|| {
-        CliError::Message(format!(
-            "no `cove.toml` found in `{}` or any parent directory",
-            start.display()
-        ))
-    })?;
+    // Formatting is syntactic, so it does not need a package. When there is
+    // one, format it, and leave a nested package to a `cove fmt` run there.
+    // When there is not -- a directory of packages, such as a repository root
+    // -- format everything below, nested packages included, because that is
+    // what naming the directory asked for.
     let mut files = Vec::new();
-    collect_cove_files(&root, &mut files);
+    match find_root(&start) {
+        Some(root) => collect_cove_files(&root, true, &mut files),
+        None => collect_cove_files(&start, false, &mut files),
+    }
     Ok(files)
 }
 
-/// Every `.cove` file of the package rooted at `dir`, in sorted order.
+/// Every `.cove` file below `dir`, in sorted order.
 ///
-/// A subdirectory holding its own `cove.toml` is a nested package, so its
-/// files belong to `cove fmt` run there, not here.
-fn collect_cove_files(dir: &Path, found: &mut Vec<PathBuf>) {
+/// With `stop_at_nested_package`, a subdirectory holding its own `cove.toml`
+/// is a package of its own and its files belong to a `cove fmt` run there.
+fn collect_cove_files(dir: &Path, stop_at_nested_package: bool, found: &mut Vec<PathBuf>) {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return;
     };
@@ -281,8 +293,8 @@ fn collect_cove_files(dir: &Path, found: &mut Vec<PathBuf>) {
             continue;
         }
         if path.is_dir() {
-            if !path.join("cove.toml").is_file() {
-                collect_cove_files(&path, found);
+            if !(stop_at_nested_package && path.join("cove.toml").is_file()) {
+                collect_cove_files(&path, stop_at_nested_package, found);
             }
         } else if path.extension().and_then(|e| e.to_str()) == Some("cove") {
             found.push(path);
@@ -1152,11 +1164,65 @@ export fn main() -> Result<Unit, Error> {
         write(dir.path(), "app/main.cove", broken);
         let source = dir.path().join("app/main.cove");
 
-        let Err(error) = cmd_fmt(&[dir.path().display().to_string()]) else {
-            panic!("a file that does not parse must be an error");
-        };
-        assert!(matches!(error, CliError::Diagnostics { .. }));
+        // Saying whether source is valid is `cove check`'s job. `cove fmt`
+        // reports what it could not parse and succeeds, so that a broken file
+        // cannot mask an unformatted one in `--check`.
+        assert!(
+            cmd_fmt(&[dir.path().display().to_string()]).is_ok(),
+            "fmt does not fail on a parse error"
+        );
         assert_eq!(std::fs::read_to_string(&source).unwrap(), broken);
+    }
+
+    #[test]
+    fn fmt_check_fails_for_an_unformatted_file_even_beside_a_broken_one() {
+        let dir = TempDir::new("fmt-broken-and-unformatted");
+        write(dir.path(), "cove.toml", "");
+        write(dir.path(), "app/main.cove", "fn main() {\n  let x = ;\n}\n");
+        write(dir.path(), "app/other.cove", "export fn f() -> Int {1}\n");
+
+        let Err(error) = cmd_fmt(&["--check".into(), dir.path().display().to_string()]) else {
+            panic!("an unformatted file must fail `--check`");
+        };
+        assert!(matches!(error, CliError::Unformatted));
+    }
+
+    #[test]
+    fn fmt_formats_a_directory_of_packages_that_is_not_one_itself() {
+        let dir = TempDir::new("fmt-no-package");
+        write(dir.path(), "one/cove.toml", "");
+        write(
+            dir.path(),
+            "one/app/main.cove",
+            "export fn f() -> Int {1}\n",
+        );
+        write(dir.path(), "two/cove.toml", "");
+        write(
+            dir.path(),
+            "two/app/main.cove",
+            "export fn g() -> Int {2}\n",
+        );
+
+        assert!(
+            cmd_fmt(&[dir.path().display().to_string()]).is_ok(),
+            "formatting succeeds"
+        );
+
+        for path in ["one/app/main.cove", "two/app/main.cove"] {
+            let text = std::fs::read_to_string(dir.path().join(path)).unwrap();
+            assert!(
+                text.contains("  1\n") || text.contains("  2\n"),
+                "`{path}` was not formatted: {text}"
+            );
+        }
+    }
+
+    #[test]
+    fn skipped_summary_counts_files_it_could_not_parse() {
+        assert_eq!(
+            skipped_summary(1),
+            "skipped 1 file(s) that do not parse; run `cove check`"
+        );
     }
 
     #[test]
