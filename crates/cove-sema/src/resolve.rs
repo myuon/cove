@@ -2325,16 +2325,19 @@ fn is_literal(pattern: &Pattern) -> bool {
 /// declarations, so they are represented separately from a module `enum`.
 enum TargetEnum<'a> {
     Declared(&'a EnumEntry),
-    Option,
-    Result,
+    /// One of the language's own enums, held as the schema entry that
+    /// declares it. What its cases are is a question this crate asks rather
+    /// than answers: `cove_schema::builtins` says that an `Option` is `Some`
+    /// and `None`, and the runtime builds those values out of the same
+    /// entry.
+    Builtin(&'static cove_schema::builtins::BuiltinSchema),
 }
 
 impl TargetEnum<'_> {
     fn display_name(&self) -> &str {
         match self {
             TargetEnum::Declared(entry) => &entry.decl.name.node,
-            TargetEnum::Option => "Option",
-            TargetEnum::Result => "Result",
+            TargetEnum::Builtin(schema) => schema.name,
         }
     }
 
@@ -2347,8 +2350,11 @@ impl TargetEnum<'_> {
                 .iter()
                 .map(|case| case.name.node.clone())
                 .collect(),
-            TargetEnum::Option => vec!["Some".to_string(), "None".to_string()],
-            TargetEnum::Result => vec!["Ok".to_string(), "Err".to_string()],
+            TargetEnum::Builtin(schema) => schema
+                .cases
+                .iter()
+                .map(|case| case.name.to_string())
+                .collect(),
         }
     }
 
@@ -2358,7 +2364,7 @@ impl TargetEnum<'_> {
     fn qualified(&self, case: &str) -> String {
         match self {
             TargetEnum::Declared(entry) => format!("{}.{case}", entry.decl.name.node),
-            TargetEnum::Option | TargetEnum::Result => case.to_string(),
+            TargetEnum::Builtin(_) => case.to_string(),
         }
     }
 }
@@ -2390,22 +2396,22 @@ fn resolve_target_enum<'a>(arms: &[MatchArm], enums: &EnumsInScope<'a>) -> Optio
         }
     }
 
-    match candidate?.as_str() {
-        "Option" => Some(TargetEnum::Option),
-        "Result" => Some(TargetEnum::Result),
-        other => enums.get(other).copied().map(TargetEnum::Declared),
+    let candidate = candidate?;
+    match cove_schema::builtin(&candidate) {
+        Some(schema) if schema.is_enum() => Some(TargetEnum::Builtin(schema)),
+        _ => enums
+            .get(candidate.as_str())
+            .copied()
+            .map(TargetEnum::Declared),
     }
 }
 
-/// The enum a bare case name such as `Debug` names: `Option` or `Result` for
-/// their builtin case names, or the one enum in scope whose cases include it.
-/// `None` when no enum declares that case, or more than one does.
+/// The enum a bare case name such as `Debug` names: the builtin enum that
+/// declares it, or the one enum in scope whose cases include it. `None` when
+/// no enum declares that case, or more than one does.
 fn bare_case_enum(case_name: &str, enums: &EnumsInScope) -> Option<String> {
-    if case_name == "Some" || case_name == "None" {
-        return Some("Option".to_string());
-    }
-    if case_name == "Ok" || case_name == "Err" {
-        return Some("Result".to_string());
+    if let Some(schema) = cove_schema::builtins::enum_declaring(case_name) {
+        return Some(schema.name.to_string());
     }
     let mut matches = enums
         .iter()

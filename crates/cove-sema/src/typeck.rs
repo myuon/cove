@@ -151,6 +151,7 @@ use std::rc::Rc;
 use cove_diag::{Diagnostic, Span};
 use cove_schema::builtins::{
     BuiltinSchema, BuiltinType, FreeBuiltinKind, FreeBuiltinSchema, MethodSchema, ParamSchema,
+    MAP_ENTRY, NONE_CASE, SCOPE,
 };
 use cove_schema::{HostType, OperationSchema, ResourceSchema, TypeSchema};
 use cove_syntax::ast::{
@@ -1813,13 +1814,19 @@ impl<'a> Checker<'a> {
     }
 
     /// The builtin named `name`, with its arity checked.
+    ///
+    /// How many type arguments each builtin takes is the number of
+    /// parameters `cove_schema::builtins` declares it binds, so `Map<K, V>`
+    /// takes two here because it takes two there. What `Ty` each name is
+    /// stays this crate's, since `Ty` is this crate's representation.
     fn builtin_type(&mut self, name: &str, args: &[Ty], span: Span) -> Option<Ty> {
-        let arity = match name {
-            "Unit" | "Bool" | "Int" | "Float" | "String" | "Duration" | "Error" | "Range" => 0,
-            "Array" | "Vector" | "Set" | "Option" | "Task" | "Shared" => 1,
-            "Map" | "MapEntry" | "Result" => 2,
-            _ => return None,
-        };
+        // `Scope` is the one builtin whose type a program never writes: a
+        // task scope is reached through `scope name { ... }`, so naming it is
+        // an undeclared name rather than a builtin with the wrong arity.
+        if name == SCOPE.name {
+            return None;
+        }
+        let arity = cove_schema::builtin(name)?.parameters.len();
         self.check_type_arity(name, arity, args.len(), span);
         let first = args.first().cloned().unwrap_or(Ty::Unknown);
         let second = args.get(1).cloned().unwrap_or(Ty::Unknown);
@@ -2193,7 +2200,7 @@ impl<'a> Checker<'a> {
         if let Some(binding) = self.lookup(name) {
             return binding.ty.clone();
         }
-        if name == "None" {
+        if name == NONE_CASE.name {
             return match expected.map(|e| &e.ty) {
                 Some(Ty::Option(inner)) => Ty::Option(inner.clone()),
                 _ => Ty::Option(Box::new(Ty::Unknown)),
@@ -2210,7 +2217,7 @@ impl<'a> Checker<'a> {
             || self.module.enums.contains_key(name)
             || self.is_imported(name)
             || cove_schema::is_builtin_type(name)
-            || name == "MapEntry"
+            || name == MAP_ENTRY.name
             || self.module.host_uses.contains(name)
             || self.module.host_items.contains_key(name)
             || self.module.module_imports.contains_key(name)
@@ -2356,22 +2363,11 @@ impl<'a> Checker<'a> {
                 let declared = declared.clone();
                 self.host_field(&declared, name, span)
             }
-            Ty::MapEntry(key, value) => match name.node.as_str() {
-                "key" => (**key).clone(),
-                "value" => (**value).clone(),
-                other => {
-                    self.diagnostics.push(
-                        Diagnostic::error(
-                            UNKNOWN_FIELD,
-                            format!("`MapEntry` has no field `{other}`"),
-                        )
-                        .at(span)
-                        .rule("A `MapEntry` carries exactly a `key` and a `value`.")
-                        .help("write `.key` or `.value`"),
-                    );
-                    Ty::Unknown
-                }
-            },
+            // The two builtin structs. Their fields are declared in
+            // `cove_schema::builtins`, which is also where the runtime reads
+            // what to build, so `error.message` and `entry.key` are one
+            // description rather than a checker's and an interpreter's.
+            Ty::MapEntry(_, _) | Ty::Error => self.builtin_field(base_ty, name, span),
             // A type parameter and a trait object both stand for some type
             // the checker cannot see, so neither has fields: only the traits
             // in play say what can be done with the value.
@@ -2948,16 +2944,13 @@ impl<'a> Checker<'a> {
         let case = path.last().expect("a variant path is never empty");
         let payload_types: Option<Vec<Ty>> = match scrutinee {
             Ty::Unknown | Ty::Never => None,
-            Ty::Option(inner) => match case.node.as_str() {
-                "Some" => Some(vec![(**inner).clone()]),
-                "None" => Some(Vec::new()),
-                _ => None,
-            },
-            Ty::Result(ok, error) => match case.node.as_str() {
-                "Ok" => Some(vec![(**ok).clone()]),
-                "Err" => Some(vec![(**error).clone()]),
-                _ => None,
-            },
+            // The language's own enums declare their cases in
+            // `cove_schema::builtins`, and a case's payload is written in the
+            // parameters the scrutinee binds: `Some` carries a `T`, so
+            // `Some(n)` against an `Option<Int>` binds an `Int`. A case the
+            // schema does not declare answers `None` here, because resolution
+            // is what reports an arm that names one.
+            Ty::Option(_) | Ty::Result(_, _) => builtin_case_payload(scrutinee, &case.node),
             Ty::Enum(name, args) => {
                 if let [qualifier, _] = path {
                     if self.key(&qualifier.node) != **name {
@@ -3267,7 +3260,7 @@ impl<'a> Checker<'a> {
         if let Some(module) = self.module.host_items.get(name).cloned() {
             return self.host_call(&module, name, args, trailing, span);
         }
-        if name == "MapEntry" {
+        if name == MAP_ENTRY.name {
             return self.map_entry(args, trailing, span);
         }
         if let Some(ty) = self.assertion(name, args, trailing, span) {
@@ -3276,7 +3269,7 @@ impl<'a> Checker<'a> {
         if let Some(ty) = self.constructor(name, args, trailing, span, expected) {
             return ty;
         }
-        if name == "None" {
+        if name == NONE_CASE.name {
             self.diagnostics.push(
                 Diagnostic::error(NOT_CALLABLE, "`None` is a value, not a call")
                     .at(callee_span)
@@ -3768,6 +3761,41 @@ impl<'a> Checker<'a> {
         Some(Ty::Host(qualified))
     }
 
+    /// `error.message` and `entry.key`: a field of a builtin struct, typed
+    /// from the shared table.
+    ///
+    /// The runtime builds both of these as ordinary struct values and has
+    /// always served a read of their fields. What it had no way to tell the
+    /// checker was what those fields are called, so `Error` was opaque here
+    /// and answered that it had no `message` at all; declaring the fields in
+    /// `cove_schema::builtins` is what closed that.
+    fn builtin_field(&mut self, base_ty: &Ty, name: &Ident, span: Span) -> Ty {
+        let Some(schema) = builtin_schema_of(base_ty) else {
+            return Ty::Unknown;
+        };
+        let bound = receiver_binding(schema, base_ty);
+        match schema.field(&name.node) {
+            Some(field) => builtin_ty(&field.ty, &bound, Some(base_ty)),
+            None => {
+                let known: Vec<String> = schema.fields.iter().map(|f| f.name.to_string()).collect();
+                self.diagnostics.push(
+                    Diagnostic::error(
+                        UNKNOWN_FIELD,
+                        format!("`{}` has no field `{}`", schema.name, name.node),
+                    )
+                    .at(span)
+                    .rule("A builtin struct's fields are exactly the ones the language defines.")
+                    .help(format!(
+                        "`{}` declares {}",
+                        schema.name,
+                        list(&known)
+                    )),
+                );
+                Ty::Unknown
+            }
+        }
+    }
+
     /// `request.path`: a field of a host type, typed from the schema.
     fn host_field(&mut self, declared: &str, name: &Ident, span: Span) -> Ty {
         let Some(schema) = host_declared_type(declared) else {
@@ -3897,17 +3925,28 @@ impl<'a> Checker<'a> {
         self.call_builtin(&sig, &what, args, trailing, span)
     }
 
-    /// `MapEntry(key: ..., value: ...)`, the one builtin struct: a
-    /// synthesized labeled call, exactly like a declared struct's
-    /// initializer, that exists so `Map.of` has a call-shaped way to write
-    /// the pairs it collects.
+    /// `MapEntry(key: ..., value: ...)`: a synthesized labeled call, exactly
+    /// like a declared struct's initializer, that exists so `Map.of` has a
+    /// call-shaped way to write the pairs it collects.
+    ///
+    /// Its labels are the fields [`MAP_ENTRY`] declares, which is also what
+    /// the interpreter assigns the arguments to, so a call and the value it
+    /// builds cannot come apart.
     fn map_entry(&mut self, args: &[Arg], trailing: Option<&Expr>, span: Span) -> Ty {
+        // There is no receiver here, so the entry's own `K` and `V` are what
+        // the call site settles, the way a generic function's are.
+        let bound = BTreeMap::new();
         let sig = BuiltinSig {
-            generics: vec!["K".into(), "V".into()],
-            params: vec![
-                ("key", Ty::Param("K".into())),
-                ("value", Ty::Param("V".into())),
-            ],
+            generics: MAP_ENTRY
+                .parameters
+                .iter()
+                .map(|name| Rc::from(*name))
+                .collect(),
+            params: MAP_ENTRY
+                .fields
+                .iter()
+                .map(|field| (field.name, builtin_ty(&field.ty, &bound, None)))
+                .collect(),
             variadic: false,
             ret: Ty::MapEntry(
                 Box::new(Ty::Param("K".into())),
@@ -5328,10 +5367,9 @@ fn unchecked_host_type(shown: &str, span: Span) -> Diagnostic {
 
 /// The builtin type `receiver` is one of, when it is one.
 ///
-/// `MapEntry` is deliberately absent: it is a builtin *struct* rather than a
-/// builtin type with a table of its own, built by a synthesized labeled call
-/// and read by its two fields, so it answers no methods and declares no
-/// associated functions.
+/// `MapEntry` and `Error` are here for their *fields* rather than their
+/// methods: both are builtin structs that answer no methods at all, and what
+/// the table says about them is what they carry.
 fn builtin_schema_of(receiver: &Ty) -> Option<&'static BuiltinSchema> {
     let name = match receiver {
         Ty::Unit => "Unit",
@@ -5345,6 +5383,7 @@ fn builtin_schema_of(receiver: &Ty) -> Option<&'static BuiltinSchema> {
         Ty::Array(_) => "Array",
         Ty::Vector(_) => "Vector",
         Ty::Map(_, _) => "Map",
+        Ty::MapEntry(_, _) => "MapEntry",
         Ty::Set(_) => "Set",
         Ty::Option(_) => "Option",
         Ty::Result(_, _) => "Result",
@@ -5369,7 +5408,7 @@ fn receiver_arguments(receiver: &Ty) -> Vec<Ty> {
         | Ty::Option(item)
         | Ty::Task(item)
         | Ty::Shared(item) => vec![(**item).clone()],
-        Ty::Map(left, right) | Ty::Result(left, right) => {
+        Ty::Map(left, right) | Ty::MapEntry(left, right) | Ty::Result(left, right) => {
             vec![(**left).clone(), (**right).clone()]
         }
         _ => Vec::new(),
@@ -5587,6 +5626,38 @@ fn builtin_sig(
         variadic: method.variadic,
         ret: builtin_ty(&method.result, &bound, receiver),
     }
+}
+
+/// What a builtin's own type parameters stand for in `receiver`.
+///
+/// `Map<String, Int>` binds `K` to `String` and `V` to `Int`, which is what
+/// opens a method's signature, a case's payload, and a field's type alike.
+fn receiver_binding<'a>(schema: &'a BuiltinSchema, receiver: &Ty) -> BTreeMap<&'a str, Ty> {
+    schema
+        .parameters
+        .iter()
+        .copied()
+        .zip(receiver_arguments(receiver))
+        .collect()
+}
+
+/// The types a builtin enum's case binds, read off the scrutinee, or `None`
+/// when the enum declares no such case.
+///
+/// This is the same opening [`builtin_sig`] does, with a case's payload where
+/// a signature's parameters would be: `Ok` carries the `T` of the `Result<T,
+/// E>` the `match` is over, so one description of what `Ok` carries serves
+/// both the pattern's binding here and the value the interpreter builds.
+fn builtin_case_payload(scrutinee: &Ty, case: &str) -> Option<Vec<Ty>> {
+    let schema = builtin_schema_of(scrutinee)?;
+    let case = schema.case(case)?;
+    let bound = receiver_binding(schema, scrutinee);
+    Some(
+        case.payload
+            .iter()
+            .map(|ty| builtin_ty(ty, &bound, Some(scrutinee)))
+            .collect(),
+    )
 }
 
 /// The signature of a builtin method, or `None` when the receiver has no such
@@ -6245,9 +6316,42 @@ fn build() -> Array<Int> {
         assert_eq!(error.message, "`MapEntry` has no field `other`");
         assert_eq!(
             error.rule.unwrap(),
-            "A `MapEntry` carries exactly a `key` and a `value`."
+            "A builtin struct's fields are exactly the ones the language defines."
         );
-        assert_eq!(error.help.unwrap(), "write `.key` or `.value`");
+        assert_eq!(error.help.unwrap(), "`MapEntry` declares `key`, `value`");
+    }
+
+    /// The runtime builds an `Error` with a `message` and has always served a
+    /// read of it; the checker used to answer that `Error` had no such field
+    /// and suggest a method `Error` does not have. One table is what let the
+    /// two agree.
+    #[test]
+    fn an_error_carries_a_message() {
+        accepts_body("  let message: String = Error(\"boom\").message");
+        accepts_body(
+            "  let outcome: Result<Int, Error> = Err(Error(\"boom\"))\n\
+             \x20 match outcome {\n\
+             \x20   Ok(n) => n,\n\
+             \x20   Err(failure) => failure.message.length()\n\
+             \x20 }",
+        );
+        let error = rejects_body("  let code = Error(\"boom\").code");
+        assert_eq!(error.code, UNKNOWN_FIELD);
+        assert_eq!(error.message, "`Error` has no field `code`");
+        assert_eq!(
+            error.rule.unwrap(),
+            "A builtin struct's fields are exactly the ones the language defines."
+        );
+        assert_eq!(error.help.unwrap(), "`Error` declares `message`");
+    }
+
+    /// An `Error`'s message is a `String`, so using it as anything else is
+    /// the ordinary mismatch rather than an unknown field.
+    #[test]
+    fn an_error_s_message_is_a_string() {
+        let error = rejects_body("  let code: Int = Error(\"boom\").message");
+        assert_eq!(error.code, MISMATCH);
+        assert_eq!(error.message, "expected `Int`, found `String`");
     }
 
     #[test]
