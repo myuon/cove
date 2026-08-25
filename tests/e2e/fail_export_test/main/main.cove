@@ -1,0 +1,9 @@
+/// Runs the command-line program.
+export fn main() -> Result<Unit, Error> {
+  Ok(())
+}
+
+/// A test may not also be exported: the test runner is its only caller.
+export test fn alwaysPasses() -> Result<Unit, Error> {
+  Ok(())
+}

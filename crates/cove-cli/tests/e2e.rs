@@ -5,7 +5,8 @@
 //! `cove run <case> [arguments]`, with the working directory set to
 //! `tests/e2e/`. A case must have a matching `[run.<case>]` table in
 //! `tests/e2e/cove.toml`; a case without one fails the suite rather than being
-//! skipped.
+//! skipped. A case that holds a `command` file runs that command instead, and
+//! so needs no such table.
 //!
 //! A case directory may instead hold its own `cove.toml`. When it does, that
 //! directory is its own package: the binary runs with its working directory
@@ -31,9 +32,15 @@
 //!   <case>/expected.out       exact expected stdout
 //!   <case>/expected.err       present only when the case must fail
 //!   <case>/args               optional: one program argument per line
+//!   <case>/command            optional: the `cove` subcommand and flags to
+//!                             run instead of `run <case>`, one per line
 //!   <case>/env                optional: KEY=VALUE per line, or a bare KEY
 //!                             to remove that variable from the child
 //! ```
+//!
+//! A `command` file is how a case exercises a command other than `cove run`
+//! — `cove test`, for instance. Such a case needs no `[run.<case>]` table,
+//! since nothing looks one up.
 //!
 //! The rules this harness enforces:
 //!
@@ -92,7 +99,10 @@ struct Case {
     /// The working directory for the `cove` invocation: `dir` for an
     /// own-package case, the shared `tests/e2e` root otherwise.
     run_dir: PathBuf,
-    /// Extra arguments passed after `cove run <name>`.
+    /// The `cove` subcommand and flags to run, defaulting to
+    /// `run <name>`.
+    command: Vec<String>,
+    /// Extra arguments passed after the command.
     args: Vec<String>,
     /// Variables to set, or to remove when the value is `None`.
     env: Vec<(String, Option<String>)>,
@@ -129,23 +139,27 @@ fn every_case_matches_its_golden_files() {
 
     for entry in &discovered {
         let name = &entry.name;
-        if entry.own_package {
-            let case_dir = root.join(name.replace('.', std::path::MAIN_SEPARATOR_STR));
-            if !declared_runs(&case_dir).contains(name) {
+        let case = Case::load(&root, name, entry.own_package);
+        // Only a case that runs a program needs an entry to run; a case with
+        // a `command` of its own looks up nothing.
+        if case.runs_an_entry() {
+            if entry.own_package {
+                let case_dir = root.join(name.replace('.', std::path::MAIN_SEPARATOR_STR));
+                if !declared_runs(&case_dir).contains(name) {
+                    failures.push(format!(
+                        "case `{name}`: `{name}/cove.toml` has no `[run.{name}]` table\n  \
+                         add one so the case actually runs"
+                    ));
+                    continue;
+                }
+            } else if !shared_declared.contains(name) {
                 failures.push(format!(
-                    "case `{name}`: `{name}/cove.toml` has no `[run.{name}]` table\n  \
+                    "case `{name}`: `tests/e2e/cove.toml` has no `[run.{name}]` table\n  \
                      add one so the case actually runs"
                 ));
                 continue;
             }
-        } else if !shared_declared.contains(name) {
-            failures.push(format!(
-                "case `{name}`: `tests/e2e/cove.toml` has no `[run.{name}]` table\n  \
-                 add one so the case actually runs"
-            ));
-            continue;
         }
-        let case = Case::load(&root, name, entry.own_package);
         let actual = case.run(&root);
         if update {
             case.write_goldens(&actual);
@@ -186,6 +200,14 @@ impl Case {
         let args = read_optional(&dir.join("args"))
             .map(|text| text.lines().map(str::to_string).collect())
             .unwrap_or_default();
+        let command = read_optional(&dir.join("command"))
+            .map(|text| {
+                text.lines()
+                    .filter(|line| !line.trim().is_empty())
+                    .map(|line| line.trim().to_string())
+                    .collect()
+            })
+            .unwrap_or_else(|| vec!["run".to_string(), name.to_string()]);
         let env = read_optional(&dir.join("env"))
             .map(|text| {
                 text.lines()
@@ -201,20 +223,25 @@ impl Case {
             name: name.to_string(),
             dir,
             run_dir,
+            command,
             args,
             env,
         }
     }
 
-    /// Runs the real `cove` binary, from `run_dir`. `root` is the shared
+    /// Whether this case runs a `[run.<name>]` entry, which is what makes
+    /// such a table required.
+    fn runs_an_entry(&self) -> bool {
+        self.command == ["run".to_string(), self.name.clone()]
+    }
+
+    /// Runs the real `cove` binary, from `run_dir`, with this case's command.
+    /// `root` is the shared
     /// `tests/e2e` directory, whose absolute path is normalised out of
     /// stderr even for an own-package case nested below it.
     fn run(&self, root: &Path) -> Actual {
         let mut command = Command::new(env!("CARGO_BIN_EXE_cove"));
-        command
-            .current_dir(&self.run_dir)
-            .arg("run")
-            .arg(&self.name);
+        command.current_dir(&self.run_dir).args(&self.command);
         command.args(&self.args);
         for (key, value) in &self.env {
             match value {

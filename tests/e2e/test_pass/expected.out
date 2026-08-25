@@ -1,0 +1,3 @@
+ok    greet.greetsByName
+ok    greet.printsTheGreeting
+ran 2 test(s), 2 passed

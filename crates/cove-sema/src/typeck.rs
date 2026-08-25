@@ -210,6 +210,8 @@ pub const DYN_MUTATING: &str = "cove::type::dyn_mutating_method";
 pub const UNSUPPORTED_BOUND: &str = "cove::type::unsupported_bound";
 /// A qualified name reaches nothing an imported module exports.
 pub const UNKNOWN_MEMBER: &str = "cove::type::unknown_member";
+/// A `test fn` does not have the shape the test runner calls.
+pub const TEST: &str = "cove::type::test";
 
 /// Type-checks a resolved program.
 ///
@@ -236,7 +238,75 @@ pub fn check(package: &Package, program: &Program) -> Vec<Diagnostic> {
         checked.insert(name, checker);
     }
     check_entries(package, &checked, &mut diagnostics);
+    check_tests(program, &checked, &mut diagnostics);
     diagnostics
+}
+
+/// Checks every `test fn` against the one shape the test runner calls.
+///
+/// The runner passes nothing and reports the test's failure through its
+/// `Err`, so a test takes no parameters and returns `Result<Unit, Error>`.
+/// Anything else is rejected here rather than at run time, naming the shape
+/// that is required.
+fn check_tests(
+    program: &Program,
+    checked: &BTreeMap<&str, Checker<'_>>,
+    diagnostics: &mut Vec<Diagnostic>,
+) {
+    let required = Ty::Result(Box::new(Ty::Unit), Box::new(Ty::Error));
+    for test in program.tests() {
+        let Some(checker) = checked.get(test.module) else {
+            continue;
+        };
+        let Some(sig) = checker.functions.get(test.name) else {
+            continue;
+        };
+        let shape = format!("write `test fn {}() -> Result<Unit, Error>`", test.name);
+
+        if let Some(param) = sig.params.first() {
+            diagnostics.push(
+                Diagnostic::error(
+                    TEST,
+                    format!(
+                        "test `{}` declares {} parameter(s)",
+                        test.qualified_name(),
+                        sig.params.len()
+                    ),
+                )
+                .at(param.span)
+                .rule("A `test fn` takes no parameters: the test runner is its only caller, and it passes nothing.")
+                .help(shape.clone()),
+            );
+        }
+
+        if sig.is_async {
+            diagnostics.push(
+                Diagnostic::error(
+                    TEST,
+                    format!("test `{}` is `async`", test.qualified_name()),
+                )
+                .at(test.entry.decl.name.span)
+                .rule("A `test fn` is an ordinary function the test runner calls and awaits nothing of.")
+                .help(shape.clone()),
+            );
+        }
+
+        if !sig.ret.matches(&required) {
+            diagnostics.push(
+                Diagnostic::error(
+                    TEST,
+                    format!(
+                        "test `{}` returns `{}`, but a test returns `Result<Unit, Error>`",
+                        test.qualified_name(),
+                        sig.ret
+                    ),
+                )
+                .at(sig.ret_span)
+                .rule("A test reports failure the way every other Cove function reports expected failure, so it returns `Result<Unit, Error>` and `?` works inside it.")
+                .help(shape),
+            );
+        }
+    }
 }
 
 /// Every module of `program`, each after the modules it imports from.
@@ -3005,6 +3075,9 @@ impl<'a> Checker<'a> {
         if name == "MapEntry" {
             return self.map_entry(args, trailing, span);
         }
+        if let Some(ty) = self.assertion(name, args, trailing, span) {
+            return ty;
+        }
         if let Some(ty) = self.constructor(name, args, trailing, span, expected) {
             return ty;
         }
@@ -3020,6 +3093,69 @@ impl<'a> Checker<'a> {
         }
         self.check_args_freely(args, trailing);
         self.unresolved_name(name, callee_span)
+    }
+
+    /// `assert(condition)` and `assertEqual(actual, expected)`.
+    ///
+    /// These are builtins rather than a library because a failure message
+    /// names the source text of the condition, which only the compiler has.
+    /// Both report failure as an ordinary `Err`, so `?` works on them inside
+    /// a test and a failing assertion is an expected failure rather than a
+    /// panic.
+    ///
+    /// This is the static half of `cove_runtime::builtins::call_assertion`:
+    /// every assertion the runtime dispatches appears here with a type, and
+    /// nothing else does.
+    fn assertion(
+        &mut self,
+        name: &str,
+        args: &[Arg],
+        trailing: Option<&Expr>,
+        span: Span,
+    ) -> Option<Ty> {
+        let supplied: Vec<&Expr> = args.iter().map(|arg| &arg.value).chain(trailing).collect();
+        let arity = match name {
+            "assert" => 1,
+            "assertEqual" => 2,
+            _ => return None,
+        };
+        if supplied.len() != arity {
+            self.diagnostics.push(
+                Diagnostic::error(
+                    ARITY,
+                    format!(
+                        "`{name}` takes {arity} argument(s), but {} were given",
+                        supplied.len()
+                    ),
+                )
+                .at(span)
+                .rule("`assert` checks one condition; `assertEqual` compares one pair of values.")
+                .help(match name {
+                    "assert" => "write `assert(condition)`".to_string(),
+                    _ => "write `assertEqual(actual, expected)`".to_string(),
+                }),
+            );
+            self.check_args_freely(args, trailing);
+        } else if name == "assert" {
+            let expected = Expected::new(
+                Ty::Bool,
+                span,
+                "`assert` checks a `Bool` condition".to_string(),
+            );
+            self.expr(supplied[0], Some(&expected));
+        } else {
+            // The expected value is checked against the actual one's type:
+            // comparing two values of different types is the mistake this
+            // catches, and either operand could be the one that is wrong.
+            let actual = self.expr(supplied[0], None);
+            let expected = Expected::new(
+                actual,
+                supplied[0].span,
+                "`assertEqual` compares two values of one type".to_string(),
+            );
+            self.expr(supplied[1], Some(&expected));
+        }
+        Some(Ty::Result(Box::new(Ty::Unit), Box::new(Ty::Error)))
     }
 
     /// `Ok(v)`, `Err(e)`, `Some(v)`, and `Error("message")`.
@@ -5084,6 +5220,86 @@ mod tests {
                 .join("; ")
         );
         errors.remove(0)
+    }
+
+    #[test]
+    fn accepts_a_test_of_the_shape_the_runner_calls() {
+        accepts("test fn passes() -> Result<Unit, Error> {\n  Ok(())\n}\n");
+    }
+
+    #[test]
+    fn rejects_a_test_that_declares_a_parameter() {
+        let error = rejects("test fn passes(n: Int) -> Result<Unit, Error> {\n  Ok(())\n}\n");
+        assert_eq!(error.code, TEST);
+        assert!(error.message.contains("declares 1 parameter(s)"));
+        assert_eq!(
+            error.help.as_deref(),
+            Some("write `test fn passes() -> Result<Unit, Error>`")
+        );
+    }
+
+    #[test]
+    fn rejects_a_test_that_returns_something_else() {
+        for source in [
+            "test fn passes() -> Int {\n  1\n}\n",
+            "test fn passes() {\n}\n",
+            "test fn passes() -> Result<Int, Error> {\n  Ok(1)\n}\n",
+        ] {
+            let error = rejects(source);
+            assert_eq!(error.code, TEST, "{source}");
+            assert!(
+                error
+                    .message
+                    .contains("a test returns `Result<Unit, Error>`"),
+                "{}",
+                error.message
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_an_async_test() {
+        let error = rejects("test async fn passes() -> Result<Unit, Error> {\n  Ok(())\n}\n");
+        assert_eq!(error.code, TEST);
+        assert!(error.message.contains("is `async`"));
+    }
+
+    #[test]
+    fn assert_takes_a_bool_and_produces_a_result() {
+        accepts("test fn passes() -> Result<Unit, Error> {\n  assert(1 == 1)?\n  Ok(())\n}\n");
+        let error =
+            rejects("test fn passes() -> Result<Unit, Error> {\n  assert(1)?\n  Ok(())\n}\n");
+        assert_eq!(error.code, MISMATCH);
+    }
+
+    #[test]
+    fn assert_equal_compares_two_values_of_one_type() {
+        accepts(
+            "test fn passes() -> Result<Unit, Error> {\n  assertEqual(1 + 1, 2)?\n  Ok(())\n}\n",
+        );
+        let error = rejects(
+            "test fn passes() -> Result<Unit, Error> {\n  assertEqual(1, \"1\")?\n  Ok(())\n}\n",
+        );
+        assert_eq!(error.code, MISMATCH);
+    }
+
+    #[test]
+    fn an_assertion_takes_the_number_of_arguments_it_declares() {
+        let error =
+            rejects("test fn passes() -> Result<Unit, Error> {\n  assert()?\n  Ok(())\n}\n");
+        assert_eq!(error.code, ARITY);
+        let error =
+            rejects("test fn passes() -> Result<Unit, Error> {\n  assertEqual(1)?\n  Ok(())\n}\n");
+        assert_eq!(error.code, ARITY);
+    }
+
+    #[test]
+    fn a_declaration_of_the_same_name_wins_over_the_assertion_builtin() {
+        // The module's own `assert` answers first, exactly as it does for
+        // every other builtin the checker knows.
+        accepts(
+            "fn assert(message: String) -> Result<Unit, Error> {\n  Ok(())\n}\n\n             test fn passes() -> Result<Unit, Error> {\n  assert(\"anything\")?\n  Ok(())\n}\n",
+        );
     }
 
     /// Wraps `body` in an entry function, the shape most of these tests need.

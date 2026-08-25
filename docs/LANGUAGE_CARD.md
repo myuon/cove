@@ -27,6 +27,10 @@ export fn main(args: Array<String>) -> Result<Unit, Error> {
 
 - `let` creates a read-only place; `var` creates a mutable place.
 - Functions use `fn name(arg: Type) -> ReturnType`.
+- `test fn name() -> Result<Unit, Error>` declares a test. `test` sits where
+  `export` sits and excludes it: `cove test` is a test's only caller. The
+  builtin `assert(condition)` and `assertEqual(actual, expected)` report a
+  failure as an `Err` that quotes the condition's source text.
 - Calls support static argument labels: `request(url: endpoint, timeout: 5s)`.
   Labels are parameter names, so they appear in declaration order.
 - Struct initialization uses synthesized labeled calls: `User(name: "A")`.
@@ -167,6 +171,10 @@ allow = ["network", "clock"]
 
 A host may provide real, fake, filtered, remote, or denied implementations.
 The runtime rejects Host API calls that were not granted.
+
+`cove test` is such a host: it grants each test the capabilities its call
+graph requires, taking every implementation's fake form so a suite is
+deterministic, and `[test] allow_real = [...]` names the exceptions.
 
 ## Tasks and resource control
 

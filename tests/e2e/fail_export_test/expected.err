@@ -1,0 +1,8 @@
+error[cove::parse::exported_test]: a `test fn` may not be exported
+ --> <e2e>/fail_export_test/main/main.cove:7:1
+  |
+7 | export test fn alwaysPasses() -> Result<Unit, Error> {
+  | ^^^^^^^^^^^
+  rule: A test's whole contract is that the test runner is its only caller, so `test` and `export` cannot both apply to one declaration.
+  help: Remove `export`, or remove `test` and call it like any other declaration.
+1 error(s)

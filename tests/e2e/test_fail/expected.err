@@ -1,0 +1,6 @@
+error[cove::test::failed]: test `count.countsAnEmptyTextAsOne` failed: assertion failed: `wordCount("") == 1`
+  --> <e2e>/test_fail/count/count.cove:15:3
+   |
+15 |   assert(wordCount("") == 1)?
+   |   ^^^^^^^^^^^^^^^^^^^^^^^^^^
+  rule: A test reports failure as an `Err`, the way every Cove function reports expected failure.

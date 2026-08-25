@@ -20,7 +20,7 @@ Together they test the core product hypotheses:
 | `values/` | Struct copies, Vector aliases, immutable Arrays, and freeze |
 | `traits/` | Nominal traits, generic bounds, and both dispatch forms |
 | `callbacks/` | Routers, middleware, events, timers, retries, and task-safe captures |
-| `text/` | Not a program: the module `restricted/` imports, for `export` and capabilities across a boundary |
+| `text/` | Not a program: the module `restricted/` imports, for `export` and capabilities across a boundary, and the package's own `test fn` declarations |
 | `cove.toml` | Host-selected entry functions and granted capabilities |
 
 Each directory is a module; declarations marked `export` form its public API.

@@ -9,3 +9,18 @@ export fn wordCount(text: String) -> Int {
 export fn report(text: String) -> Result<Unit, Error> {
   console.println("{wordCount(text)} words")
 }
+
+/// A word is a run of non-space characters, so the count is the number of
+/// runs and an empty text has none.
+test fn countsWordsSeparatedBySpaces() -> Result<Unit, Error> {
+  assertEqual(wordCount("one two three"), 3)?
+  assertEqual(wordCount(""), 0)?
+  Ok(())
+}
+
+/// `report` reaches `console` through its body, so this test requires
+/// `console` too, and the runner grants it the fake one.
+test fn reportsOnTheConsole() -> Result<Unit, Error> {
+  report("one two")?
+  Ok(())
+}

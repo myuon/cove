@@ -48,6 +48,81 @@ pub fn is_builtin_type(name: &str) -> bool {
     )
 }
 
+/// The assertion builtins a test calls: `assert` and `assertEqual`.
+pub fn is_assertion(name: &str) -> bool {
+    matches!(name, "assert" | "assertEqual")
+}
+
+/// `assert(condition: Bool) -> Result<Unit, Error>` and
+/// `assertEqual(actual: T, expected: T) -> Result<Unit, Error>`.
+///
+/// `sources` holds the source text of each argument expression, in order.
+/// That text is the whole reason these are builtins rather than a library:
+/// a failure message says which condition failed in the words the test was
+/// written in, and only the compiler has them.
+///
+/// A failing assertion is an expected failure, so it is an `Err` rather than
+/// a panic — panics stay reserved for broken invariants. `assertEqual`
+/// reports both values, since knowing only that they differ rarely explains
+/// why.
+pub fn call_assertion(
+    name: &str,
+    args: Vec<Value>,
+    sources: &[&str],
+    span: Span,
+) -> Result<Value, RuntimeError> {
+    match name {
+        "assert" => {
+            let args = expect_args("assert", args, 1, span)?;
+            let Value::Bool(holds) = &args[0] else {
+                return Err(type_error("assert", "condition", "Bool", &args[0], span));
+            };
+            if *holds {
+                return Ok(Value::ok(Value::Unit));
+            }
+            Ok(assertion_failure(format!(
+                "assertion failed: `{}`",
+                source_of(sources, 0)
+            )))
+        }
+        "assertEqual" => {
+            let args = expect_args("assertEqual", args, 2, span)?;
+            // `assertEqual` compares the way `==` does, so it refuses the
+            // same comparison `==` refuses.
+            if args[0].type_name() != args[1].type_name() {
+                return Err(RuntimeError::new(format!(
+                    "`assertEqual` cannot compare `{}` with `{}`",
+                    args[0].type_name(),
+                    args[1].type_name()
+                ))
+                .at(span)
+                .with_rule("`==` means value equality between values of the same type."));
+            }
+            if args[0].eq_value(&args[1]) {
+                return Ok(Value::ok(Value::Unit));
+            }
+            Ok(assertion_failure(format!(
+                "assertion failed: `{}` is `{}`, expected `{}`",
+                source_of(sources, 0),
+                args[0],
+                args[1]
+            )))
+        }
+        _ => Err(RuntimeError::new(format!("unknown assertion `{name}`")).at(span)),
+    }
+}
+
+/// The `Err` a failed assertion produces.
+fn assertion_failure(message: String) -> Value {
+    Value::err(Value::error(message))
+}
+
+/// The source text of argument `index`, or a placeholder when the caller
+/// could not supply it.
+fn source_of<'a>(sources: &[&'a str], index: usize) -> &'a str {
+    sources.get(index).copied().unwrap_or("?")
+}
+
 /// Names usable as bare constructor calls, such as `Ok(value)`.
 pub fn is_constructor(name: &str) -> bool {
     matches!(name, "Ok" | "Err" | "Some" | "Error")

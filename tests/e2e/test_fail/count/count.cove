@@ -1,0 +1,17 @@
+/// Counts the words in `text`.
+export fn wordCount(text: String) -> Int {
+  text.words().length()
+}
+
+/// Two words are two words.
+test fn countsTwoWords() -> Result<Unit, Error> {
+  assertEqual(wordCount("one two"), 2)?
+  Ok(())
+}
+
+/// Wrong on purpose: an empty text has no words, and the failure names the
+/// condition in the words it was written in.
+test fn countsAnEmptyTextAsOne() -> Result<Unit, Error> {
+  assert(wordCount("") == 1)?
+  Ok(())
+}

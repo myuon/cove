@@ -648,6 +648,9 @@ impl<'a> Formatter<'a> {
         if item.exported {
             self.out.write("export ");
         }
+        if item.is_test {
+            self.out.write("test ");
+        }
         match &item.kind {
             ItemKind::Fn(decl) => self.fn_decl(decl, indent),
             ItemKind::Struct(decl) => self.struct_decl(decl, indent),
@@ -2156,6 +2159,19 @@ fn c() { }
 /// Documented.
 export async fn run<T>(self, var count: Int, items: String...) -> Result<T, U> {
   count
+}
+",
+        );
+    }
+
+    #[test]
+    fn formats_a_test_declaration() {
+        formatted(
+            "
+/// Greeting names the person it greets.
+test fn greetsByName() -> Result<Unit, Error> {
+  assert(greet(\"Ada\") == \"Hello, Ada!\")?
+  Ok(())
 }
 ",
         );

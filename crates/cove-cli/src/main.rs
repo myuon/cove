@@ -27,6 +27,7 @@ mod api;
 #[cfg(test)]
 mod fixture;
 mod impact;
+mod test;
 
 const USAGE: &str = "\
 cove — the Cove toolchain
@@ -35,6 +36,7 @@ usage:
   cove fmt [path] [--check]            format every `.cove` file in the package
   cove check [path] [--deny-warnings]  parse, resolve, and type-check the package
   cove run <name> [flags] [args]       run the entry selected by `[run.<name>]` in cove.toml
+  cove test [path] [--filter <sub>]    run every `test fn` the package declares
   cove outline [path]                  show modules and their exported declarations
   cove api snapshot [path]             record the package's derived public interface
   cove api diff [path]                 compare the source against a recorded interface
@@ -49,6 +51,13 @@ not parse is reported and never rewritten.
 `--deny-warnings` fails `cove check` when the package has any warnings, as
 does setting `deny_warnings = true` in `cove.toml`'s `[check]` table; either
 one is enough to deny.
+
+`cove test` runs every `test fn` in the package, reports each one, and exits
+non-zero when any failed. `--filter` runs only the tests whose qualified name
+contains the given substring. Each test is granted exactly the capabilities
+its call graph requires, with each host's fake implementation, so a suite is
+deterministic; `cove.toml`'s `[test] allow_real = [...]` names the
+capabilities to grant for real instead.
 
 `cove api snapshot` derives the package's public interface from source and
 writes it to `cove-api.txt` at the package root, or to `--out <file>`. Check
@@ -84,6 +93,7 @@ fn main() -> ExitCode {
         "fmt" => cmd_fmt(&args[1..]),
         "check" => cmd_check(&args[1..]),
         "run" => cmd_run(&args[1..]),
+        "test" => test::cmd_test(&args[1..]),
         "outline" => cmd_outline(args.get(1).map(Path::new)),
         "api" => api::cmd_api(&args[1..]),
         "impact" => impact::cmd_impact(&args[1..]),
@@ -119,7 +129,8 @@ fn main() -> ExitCode {
         }
         Err(CliError::WarningsDenied)
         | Err(CliError::Unformatted)
-        | Err(CliError::BreakingChange) => ExitCode::FAILURE,
+        | Err(CliError::BreakingChange)
+        | Err(CliError::TestsFailed) => ExitCode::FAILURE,
     }
 }
 
@@ -138,6 +149,9 @@ pub(crate) enum CliError {
     /// `cove api diff` found a breaking change. The classified changes were
     /// already printed, so there is nothing left to say.
     BreakingChange,
+    /// `cove test` had a test fail. Each failure and the summary were
+    /// already printed, so there is nothing left to say.
+    TestsFailed,
 }
 
 impl From<String> for CliError {
