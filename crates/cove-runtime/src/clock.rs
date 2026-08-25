@@ -22,7 +22,7 @@ use cove_sema::Capability;
 use crate::budget::Cancellation;
 use crate::error::RuntimeError;
 use crate::host::{HostApi, Reentry};
-use crate::schema::{Effect, HostType, OperationSchema};
+use crate::schema::{ModuleSchema, OperationSchema};
 use crate::value::Value;
 
 /// How often a watchdog looks at the work it is bounding.
@@ -85,69 +85,12 @@ enum ClockSource {
     Virtual(VirtualTime),
 }
 
-/// The operations `clock` exposes.
+/// What `clock` declares about itself.
 ///
-/// `timeout` and `every` are both given work rather than data: the first
-/// takes the block it bounds as a trailing closure, and the second takes the
-/// body it repeats. Neither could be written before ADR 0013 added
-/// [`Reentry`], because [`HostApi::call`] receives values and had no way to
-/// run one.
-///
-/// Both are reads. Waiting leaves nothing outside the run different, and
-/// whatever the body does is charged where the body does it.
-static CLOCK_SCHEMA: &[OperationSchema] = &[
-    OperationSchema {
-        name: "now",
-        params: &[],
-        variadic: false,
-        result: HostType::Duration,
-        capability: "clock",
-        effect: Effect::Read,
-        cancellable: false,
-        recordable: true,
-        result_is_task_safe: true,
-    },
-    OperationSchema {
-        name: "sleep",
-        params: &[HostType::Duration],
-        variadic: false,
-        result: HostType::Result(&HostType::Unit, &HostType::Error),
-        capability: "clock",
-        // Waiting leaves nothing outside the run different, so it reads the
-        // clock rather than writing anything.
-        effect: Effect::Read,
-        // Nothing has happened yet while a wait is in flight, so abandoning
-        // one is safe. A cancelled task stops at its next safepoint, which is
-        // after the wait it is already inside returns.
-        cancellable: true,
-        recordable: true,
-        result_is_task_safe: true,
-    },
-    OperationSchema {
-        name: "timeout",
-        params: &[HostType::Duration, HostType::Any],
-        variadic: false,
-        result: HostType::Result(&HostType::Any, &HostType::Error),
-        capability: "clock",
-        effect: Effect::Read,
-        cancellable: true,
-        // What the body did is the body's own business and is recorded where
-        // it happened; what this call answers is whether the bound held.
-        recordable: true,
-        result_is_task_safe: true,
-    },
-    OperationSchema {
-        name: "every",
-        params: &[HostType::Duration, HostType::Any],
-        variadic: false,
-        result: HostType::Result(&HostType::Unit, &HostType::Error),
-        capability: "clock",
-        effect: Effect::Read,
-        cancellable: true,
-        recordable: true,
-        result_is_task_safe: true,
-    },
-];
+/// The table is [`cove_schema::hosts::CLOCK`], so the description the
+/// compiler checks a call against and the one the boundary dispatches through
+/// are the same bytes.
+const SCHEMA: ModuleSchema = cove_schema::hosts::CLOCK;
 
 impl Clock {
     /// Real monotonic time, measured from the instant this host is built.
@@ -323,7 +266,7 @@ impl HostApi for Clock {
     }
 
     fn schema(&self) -> &[OperationSchema] {
-        CLOCK_SCHEMA
+        SCHEMA.operations
     }
 
     fn call_with(
@@ -335,17 +278,13 @@ impl HostApi for Clock {
         match op {
             "timeout" => {
                 let [Value::Duration(nanos), body] = args.as_slice() else {
-                    return Err(RuntimeError::new(
-                        "`clock.timeout` takes a `Duration` and the work to bound",
-                    ));
+                    unreachable!("checked by HostRegistry::call")
                 };
                 self.timeout(*nanos, body, back)
             }
             "every" => {
                 let [Value::Duration(nanos), body] = args.as_slice() else {
-                    return Err(RuntimeError::new(
-                        "`clock.every` takes a `Duration` and the work to repeat",
-                    ));
+                    unreachable!("checked by HostRegistry::call")
                 };
                 self.every(*nanos, body, back)
             }
@@ -358,9 +297,7 @@ impl HostApi for Clock {
             "now" => Ok(Value::Duration(self.now_nanos())),
             "sleep" => {
                 let [Value::Duration(nanos)] = args.as_slice() else {
-                    return Err(RuntimeError::new(
-                        "`clock.sleep` takes one `Duration` argument",
-                    ));
+                    unreachable!("checked by HostRegistry::call")
                 };
                 Ok(self.sleep(*nanos))
             }

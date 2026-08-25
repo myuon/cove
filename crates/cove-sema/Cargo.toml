@@ -6,5 +6,6 @@ license.workspace = true
 
 [dependencies]
 cove-diag.workspace = true
+cove-schema.workspace = true
 cove-syntax.workspace = true
 toml = { version = "0.8", default-features = false, features = ["parse"] }

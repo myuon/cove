@@ -9,7 +9,8 @@
   [ADR 0012](0012-performance-gate-and-native-backend.md), which turns the
   performance criterion into a measured gate; and
   [ADR 0013](0013-host-resource-handles.md), which gives the Host API boundary
-  resource handles and a way back into Cove
+  resource handles and a way back into Cove, and whose two amendments make the
+  schema this ADR asks for one description both ends enforce
 - Implemented by: [ADR 0002](0002-implementation-language-and-backend.md)
   through [ADR 0013](0013-host-resource-handles.md), each of which decides and
   builds a part of this one
@@ -74,12 +75,6 @@ a sentence somewhere above that a reader would have to check against the code:
   execution profile means a binary that runs anywhere, which exists; it does
   not mean machine code generated from Cove, which does not.
 - **Wasm.** Deferred, as the classification below states.
-- **Host API schema checking.** The schema is machine-readable and shared, as
-  this ADR asks, and one end now reads its types: the runtime holds a host to
-  the result it declared ([ADR 0013](0013-host-resource-handles.md)'s
-  amendment). A call's arguments are read by neither end — the checker still
-  has nothing to check one against, and the boundary counts arguments without
-  looking at them. See [issue #44](https://github.com/myuon/cove/issues/44).
 - **Written types at a declaration's parameters.** "Function and public API
   boundaries remain explicitly typed" is a rule nothing enforces: a parameter
   written without a type becomes the checker's `Unknown`, which is equal to
@@ -280,6 +275,14 @@ A machine-readable Host API schema is shared by the compiler, runtime, and CLI.
 Each operation describes its argument, result, and error types; capability;
 serialization and resource ownership; cancellation and recordability; and
 whether it is a read, reversible write, or irreversible write.
+
+"Shared" is literal: the description is one table, in a crate the compiler and
+the runtime both depend on, rather than a description in one of them and a
+copy in the other. Both ends read it and both ends enforce it — `cove check`
+checks a call's arguments where they are written, and the boundary checks them
+again for the host modules a compiler cannot see, which is every module an
+embedding registers. [ADR 0013](0013-host-resource-handles.md)'s two
+amendments decide the whole of that.
 
 ## Runtime resource control
 

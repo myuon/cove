@@ -38,7 +38,7 @@ use cove_sema::Capability;
 
 use crate::error::RuntimeError;
 use crate::host::{HostApi, Reentry, ResourceHandle};
-use crate::schema::{Effect, HostType, OperationSchema, ResourceSchema};
+use crate::schema::{ModuleSchema, OperationSchema, ResourceSchema};
 use crate::value::Value;
 
 /// `database`: querying a database, when the host has one.
@@ -63,81 +63,12 @@ enum DatabaseSource {
     Denied,
 }
 
-/// The operations `database` exposes.
+/// What `database` declares about itself.
 ///
-/// A row is a `String` because the runtime has no way to describe a row's
-/// columns: a typed row would be a host type, and host types have no
-/// representation. One `Array<String>` of rows is what a host can honestly
-/// hand back today.
-///
-/// `query` reads. A statement that changes stored data would be a separate
-/// operation with a separate [`Effect`], and this module does not ship one:
-/// an `execute` whose only implementation is a fake would be a promise that
-/// data was written somewhere.
-static DATABASE_SCHEMA: &[OperationSchema] = &[
-    OperationSchema {
-        name: "query",
-        params: &[HostType::String],
-        variadic: false,
-        result: HostType::Result(&HostType::Array(&HostType::String), &HostType::Error),
-        capability: "database",
-        effect: Effect::Read,
-        cancellable: true,
-        recordable: true,
-        result_is_task_safe: true,
-    },
-    OperationSchema {
-        name: "connect",
-        params: &[HostType::String],
-        variadic: false,
-        result: HostType::Result(&HostType::Named("database.Connection"), &HostType::Error),
-        capability: "database",
-        // Taking a connection is a change the same host can put back, which
-        // is what `close` does.
-        effect: Effect::ReversibleWrite,
-        cancellable: false,
-        // A handle is a name, so a trace records the name and a replay hands
-        // the same one back.
-        recordable: true,
-        result_is_task_safe: true,
-    },
-];
-
-/// What a `database.Connection` handle answers.
-///
-/// The connection is task-safe. What a handle names lives behind this host's
-/// own lock, so two tasks holding the same handle take turns rather than
-/// racing — which is exactly the condition the Language Card puts on a host
-/// resource crossing a task boundary. `examples/callbacks/main.cove` depends
-/// on it: the repository is captured by handlers that run in request tasks.
-static DATABASE_RESOURCES: &[ResourceSchema] = &[ResourceSchema {
-    name: "Connection",
-    task_safe: true,
-    operations: &[
-        OperationSchema {
-            name: "query",
-            params: &[HostType::String],
-            variadic: false,
-            result: HostType::Result(&HostType::Array(&HostType::String), &HostType::Error),
-            capability: "database",
-            effect: Effect::Read,
-            cancellable: true,
-            recordable: true,
-            result_is_task_safe: true,
-        },
-        OperationSchema {
-            name: "close",
-            params: &[],
-            variadic: false,
-            result: HostType::Result(&HostType::Unit, &HostType::Error),
-            capability: "database",
-            effect: Effect::ReversibleWrite,
-            cancellable: false,
-            recordable: true,
-            result_is_task_safe: true,
-        },
-    ],
-}];
+/// The table is [`cove_schema::hosts::DATABASE`], so the description the
+/// compiler checks a call against and the one the boundary dispatches through
+/// are the same bytes.
+const SCHEMA: ModuleSchema = cove_schema::hosts::DATABASE;
 
 impl Database {
     /// A fake that answers each query from a table of canned rows, for tests.
@@ -176,7 +107,7 @@ impl Database {
                 self.locked().insert(id, name.to_string());
                 Value::ok(Value::Resource(ResourceHandle::new(
                     "database",
-                    &DATABASE_RESOURCES[0],
+                    &SCHEMA.resources[0],
                     id,
                 )))
             }
@@ -215,24 +146,20 @@ impl HostApi for Database {
     }
 
     fn schema(&self) -> &[OperationSchema] {
-        DATABASE_SCHEMA
+        SCHEMA.operations
     }
 
     fn call(&self, op: &str, args: Vec<Value>) -> Result<Value, RuntimeError> {
         match op {
             "query" => {
                 let [Value::Str(sql)] = args.as_slice() else {
-                    return Err(RuntimeError::new(
-                        "`database.query` takes one `String` argument",
-                    ));
+                    unreachable!("checked by HostRegistry::call")
                 };
                 Ok(rows_of(self.query(sql)))
             }
             "connect" => {
                 let [Value::Str(name)] = args.as_slice() else {
-                    return Err(RuntimeError::new(
-                        "`database.connect` takes one `String` argument",
-                    ));
+                    unreachable!("checked by HostRegistry::call")
                 };
                 Ok(self.connect(name))
             }
@@ -241,7 +168,7 @@ impl HostApi for Database {
     }
 
     fn resources(&self) -> &[ResourceSchema] {
-        DATABASE_RESOURCES
+        SCHEMA.resources
     }
 
     fn call_resource(
@@ -254,9 +181,7 @@ impl HostApi for Database {
         match op {
             "query" => {
                 let [Value::Str(sql)] = args.as_slice() else {
-                    return Err(RuntimeError::new(
-                        "`database.Connection.query` takes one `String` argument",
-                    ));
+                    unreachable!("checked by HostRegistry::call")
                 };
                 if !self.locked().contains_key(&handle.id) {
                     return Err(closed(handle, "query"));
@@ -417,7 +342,7 @@ mod tests {
                 "connect(String) -> Result<database.Connection, Error>",
             ]
         );
-        let rendered: Vec<String> = DATABASE_RESOURCES[0]
+        let rendered: Vec<String> = SCHEMA.resources[0]
             .operations
             .iter()
             .map(|op| op.signature())
@@ -483,7 +408,7 @@ mod tests {
     fn a_run_without_the_database_grant_cannot_use_a_handle() {
         let mut hosts = HostRegistry::new(Grants::new(["console"]));
         hosts.register(Box::new(Database::denied()));
-        let handle = ResourceHandle::new("database", &DATABASE_RESOURCES[0], 1);
+        let handle = ResourceHandle::new("database", &SCHEMA.resources[0], 1);
 
         let error = hosts
             .call_resource(&handle, "query", vec![str_arg("select 1")], &mut NoReentry)

@@ -30,15 +30,21 @@ name = "cove-runtime"
 version = "0.1.0"
 dependencies = [
  "cove-diag",
+ "cove-schema",
  "cove-sema",
  "cove-syntax",
 ]
+
+[[package]]
+name = "cove-schema"
+version = "0.1.0"
 
 [[package]]
 name = "cove-sema"
 version = "0.1.0"
 dependencies = [
  "cove-diag",
+ "cove-schema",
  "cove-syntax",
  "toml",
 ]

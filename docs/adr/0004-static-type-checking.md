@@ -6,9 +6,10 @@
   checker the import environment "Checking is per-module" said it would need,
   and [ADR 0006](0006-traits-and-dispatch.md), which turned "parametric and
   unbounded" into parametric with bounds
-- Implemented by: PR #12; the declaration-parameter rule by PR #43
-- Implementation status: partial — the Host API schema is still unread
-  (#38); see "What is not checked yet" below
+- Implemented by: PR #12; the declaration-parameter rule by PR #43; the Host
+  API schema by PR #48
+- Implementation status: partial — see "What is not checked yet" below, which
+  is now shorter than it was: the checker reads the Host API schema (#44)
 
 ## Context
 
@@ -136,20 +137,32 @@ polymorphism remain out of scope, as ADR 0001 decided.
 ## What is not checked yet (2026-08-25)
 
 The checker described above exists and `cove check` runs it, so the Context's
-"none of that is true today" is history. One of its promises is not kept, and
-naming it here is cheaper for a reader than deriving it from the code.
+"none of that is true today" is history. What it does not check, it says
+here, because naming it is cheaper for a reader than deriving it from the
+code.
 
-The Host API schema is still unread. ADR 0001 asks for one description of each
+The Host API schema is read. ADR 0001 asks for one description of each
 operation's argument, result, and error types shared by the compiler, runtime,
-and CLI, and `OperationSchema` holds all three — but nothing in `cove-sema`
-looks at it, so a host call's result is `Unknown` and its arguments are
-unchecked. The checker does not hide this: it warns (`HOST_TYPE`) wherever a
-host type is named, which is why `cove check` reports warnings on
-`examples/server` and `examples/callbacks`. The runtime reads half of the same
-description now — it holds a host to the result its schema declares, which
-[ADR 0013](0013-host-resource-handles.md)'s amendment decided — and a call's
-arguments are still read by neither end, which is
-[issue #44](https://github.com/myuon/cove/issues/44).
+and CLI; that description is now `cove-schema`, a crate below both this one
+and the runtime, and the checker reads it. A call into a host module the
+toolchain ships is checked at its call site — its arity, each argument against
+the type declared for it, and its result is the type the schema declares
+rather than `Unknown`. A host type is an ordinary nominal type: `http.Request`
+in a signature is checked like any other, and so are its fields, its cases,
+and the operations a resource handle answers.
+[ADR 0013](0013-host-resource-handles.md)'s second amendment decides all of
+it, and closes [issue #44](https://github.com/myuon/cove/issues/44).
+
+Three things about a host call stay unchecked here, each for a stated reason.
+A host module the toolchain does *not* ship is invisible to any compiler — an
+embedding registers its modules at run time — so a call into one is `Unknown`
+and warns (`HOST_TYPE`), and the boundary is what checks it. An operation that
+declares `HostType::Any`, which is what `clock.timeout` says of the work it
+bounds, becomes `Unknown` too, because a type carrying no constraint and *the
+checker does not know* are the same thing at a call site. And a host
+resource's declared task-safety is enforced by the runtime alone; no shipped
+resource declares itself unsafe to cross a task boundary, so there is nothing
+to check yet.
 
 "Annotations are mandatory at boundaries" used to have a second exception,
 worth recording now that it is closed: a declaration's parameter could omit
@@ -162,5 +175,8 @@ Two smaller things are worth stating because they read as gaps and are not. A
 bound written on a `struct`, `enum`, or `type` parameter is rejected outright,
 because a bound is checked where its parameter is instantiated and only a call
 site instantiates one. And the builtin method table is still mirrored between
-`cove-sema` and `cove-runtime` rather than shared, exactly as this ADR said it
-would have to be until a crate both can depend on exists.
+`cove-sema` and `cove-runtime` rather than shared — but the crate both can
+depend on, which this ADR said that would have to wait for, now exists:
+`cove-schema` carries the Host API schema, and the builtin table is the
+obvious second thing to move into it
+([issue #49](https://github.com/myuon/cove/issues/49)).

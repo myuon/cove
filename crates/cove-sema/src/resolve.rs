@@ -858,28 +858,20 @@ fn resolve_module(
 
 /// The host modules a package may name without declaring them.
 ///
-/// This mirrors the modules `cove_runtime::host` registers, which the
-/// compiler cannot ask directly because it does not depend on the runtime —
-/// the same arrangement `typeck`'s builtin tables already use. It is only
-/// consulted to refuse a package module that would shadow a host module: a
-/// `use` naming an unknown host module is still accepted, since a host may
-/// register any module it likes.
+/// This is [`cove_schema::hosts::SHIPPED`], the one description of the host
+/// modules the toolchain ships, rather than a list kept here in step with it:
+/// the compiler cannot ask the runtime, which depends on it, but it can read
+/// the schema both of them do. It used to be a hand-written array with a
+/// cross-crate test to catch the drift, written after `http` had already
+/// drifted out of it and let a package module shadow the host module in
+/// silence.
 ///
-/// Two lists that must agree and cannot see each other drift silently, and a
-/// name missing from this one shadows its host without a word. `cove-cli`
-/// depends on both crates, so
-/// `crates/cove-cli/tests/host_modules.rs` compares this list against
-/// `cove_runtime::shipped_schema()` and is what catches the drift.
-pub const HOST_MODULES: [&str; 8] = [
-    "clock",
-    "console",
-    "database",
-    "documents",
-    "env",
-    "files",
-    "http",
-    "process",
-];
+/// It is only consulted to refuse a package module that would shadow a host
+/// module. A `use` naming a module that is not here is still accepted, since
+/// a host may register any module it likes.
+pub fn host_modules() -> impl Iterator<Item = &'static str> {
+    cove_schema::shipped().iter().map(|module| module.name)
+}
 
 /// What one module offers a `use` in another: every top-level declaration it
 /// makes, what kind it is, whether it is exported, and where it was written.
@@ -1223,7 +1215,7 @@ fn same_origin(a: &Bound, b: &Bound) -> bool {
 /// Modules resolve first, so such a module would silently make the host
 /// module unreachable for the whole package.
 fn shadowed_host(module: &str, span: Span) -> Option<Diagnostic> {
-    if !HOST_MODULES.contains(&module) {
+    if !host_modules().any(|host| host == module) {
         return None;
     }
     Some(
@@ -3451,16 +3443,17 @@ impl Show for B {
         assert!(diagnostic.help.as_deref().unwrap().contains("rename"));
     }
 
-    /// Every host the runtime registers must be here, or a package module of
-    /// that name shadows it silently -- modules resolve first.
+    /// Every host module the shipped schema describes is refused as a
+    /// package module, or a package module of that name shadows it silently
+    /// -- modules resolve first.
     ///
-    /// The loop reads [`HOST_MODULES`] rather than repeating it, because a
+    /// The loop reads [`host_modules`] rather than repeating it, because a
     /// second copy of the list is a second place for a host to go missing:
     /// `http` was absent from both for as long as this test spelled its own
     /// names out.
     #[test]
-    fn every_registered_host_module_is_refused_as_a_package_module() {
-        for host in HOST_MODULES {
+    fn every_shipped_host_module_is_refused_as_a_package_module() {
+        for host in host_modules() {
             let diagnostic = resolve_err(
                 &[
                     (host, "/// Does something.\nexport fn thing() {\n}\n"),

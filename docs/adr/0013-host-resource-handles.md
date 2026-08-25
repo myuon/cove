@@ -7,14 +7,19 @@
   boundary gains a second direction: a call may now run a Cove closure
 - Amended by: this ADR's own "Amendment (2026-08-25): a host answers the type
   it declared" below, which makes `OperationSchema::result` a promise the
-  boundary holds a host to rather than a signature it renders
-- Implemented by: PR #35; the amendment by PR #46
-- Implementation status: complete — the boundary is built in both directions.
-  What sits behind it is a separate question this ADR states rather than
-  answers: `database` still ships only a fake and a denied host, and `http`
-  speaks no TLS. A host is now held to the result its schema declares; a call's
-  arguments are read by neither end
-  ([issue #44](https://github.com/myuon/cove/issues/44)).
+  boundary holds a host to rather than a signature it renders; and
+  "Amendment (2026-08-25): a call passes the arguments it declared, and both
+  ends say so", which does the same for `OperationSchema::params` and moves
+  the schema into a crate the compiler can read
+- Implemented by: PR #35; the first amendment by PR #46 and the second by
+  PR #48
+- Implementation status: complete — the boundary is built in both directions
+  and both ends read the schema. What sits behind it is a separate question
+  this ADR states rather than answers: `database` still ships only a fake and
+  a denied host, and `http` speaks no TLS. A declared type's fields are still
+  taken on trust at the boundary, and a host resource's task-safety is still
+  the runtime's alone; the second amendment's "What is still not checked" says
+  why.
 
 ## Context
 
@@ -184,7 +189,9 @@ The type checker does not read any of this. `cove-runtime` depends on
 `cove-sema` and not the other way round, so a host type in a signature is
 still reported as unchecked. That is a real limitation and it is unchanged by
 this ADR; what changed is that the schema now exists to be read when something
-inverts that dependency.
+inverts that dependency. The second amendment below is that something: the
+description moved *below* both crates rather than inverting anything, and the
+checker reads it.
 
 ### Capability requirements
 
@@ -478,4 +485,143 @@ usually the *program's* mistake, made at a call site with a span, and it is the
 same mistake `cove check` should catch before the run starts — so what the
 boundary says about it cannot be settled without settling what the checker says
 about it, and the checker still reads no schema at all. Both halves are
-[issue #44](https://github.com/myuon/cove/issues/44).
+[issue #44](https://github.com/myuon/cove/issues/44), and both are settled by
+the amendment below.
+
+## Amendment (2026-08-25): a call passes the arguments it declared, and both ends say so
+
+The amendment above left one half of ADR 0001's sentence unkept. An operation
+describes "argument, result, and error types"; the result became a promise the
+boundary holds a host to, and the arguments stayed what they had always been —
+counted by the boundary, never looked at, and restated by hand in sixteen
+`let [Value::Str(name)] = args.as_slice() else { ... }` arms across eight
+modules. The checker, meanwhile, said of itself that it had "nothing to check
+a host call against", so `cove check` warned at `http.Request` and its
+neighbours rather than checking them and a wrong argument reached the run.
+
+Issue #44 asks four questions. This amendment answers them.
+
+### Where the description lives
+
+In `cove-schema`, a crate below both `cove-sema` and `cove-runtime`.
+
+This is the answer the other three depend on. `OperationSchema` lived in
+`cove-runtime`, which depends on `cove-sema` and not the other way round —
+"Schema typing" above records that as the reason the checker read none of it —
+so the compiler could not see the description it was supposed to share. The
+dependency must not be inverted: a compiler that depends on a runtime is a
+compiler that cannot be used without one. So the description moved below both
+of them. `HostType`, `Effect`, `OperationSchema`, `FieldSchema`, `TypeSchema`,
+`ResourceSchema`, and `ModuleSchema` are `cove-schema`'s, and so are the
+shipped hosts' own tables; `cove_runtime::schema` re-exports every one of them,
+so a host written against the runtime still names one crate.
+
+What did not move is `HostType::admits`, which is about values and needs one.
+It stays beside `Value` as the `Admits` trait. The schema describes types; the
+runtime owns values; a crate that held both would be a runtime again.
+
+The shipped hosts' tables moved with the types, and that is the part worth
+arguing. Each `HostApi` now answers `schema()` with its entry from
+`cove_schema::hosts::SHIPPED` rather than a static of its own, so the
+description a run enforces, the one `cove check` checks a call against, and
+the one `cove trace` reads out of a recorded file are the same bytes rather
+than copies that agree. The alternative — a second table in `cove-sema` and a
+cross-crate test holding it against the first — is what the compiler's list of
+host module *names* already was, and that list is how `http` came to be
+missing from it: a package module named `http` shadowed the host module and
+nothing said a word until a test was written to compare the two. One list
+cannot drift. The cost is that a host's schema and its implementation are now
+in different crates, which is a real cost and the reason this paragraph exists.
+
+### Both ends check the arguments, and neither is redundant
+
+They are not alternatives, and issue #44's first question — whether the
+boundary checks arguments at all, "or whether an argument is the checker's
+business once the checker reads the schema" — has to be answered *no* on both
+sides.
+
+The checker cannot see an embedder's host. A `HostApi` implemented outside
+this workspace and registered at run time is named in no table any compiler
+reads, and ADR 0001's whole point is that such a host is ordinary: "real,
+fake, filtered, remote, or denied implementations". For a program written
+against one, the boundary is the only thing standing between it and an
+argument the host's own schema does not admit.
+
+The boundary cannot point at a call site. It has the operation, the values,
+and no source: a diagnostic from it names the call that failed and the run
+stops. `cove check` has the span, catches the mistake before anything runs,
+and catches it in code that never runs at all — which is where a wrong
+argument most often hides.
+
+So both, and each says the same thing about the same table.
+
+### What the boundary does
+
+`HostRegistry::dispatch` checks each argument against `OperationSchema::params`
+where it already checked the arity: before the host is reached, before the
+budget is charged, and with nothing written to the trace, because a call
+refused there never happened. Arity and types are one check on one
+declaration, and they are made together.
+
+The check is the same walk the result check makes, run on the way in instead
+of the way out: structural through `Array`, `Option`, and `Result`;
+`HostType::Any` admits everything, which is what `clock.timeout` declares of
+the work it bounds; and a `Named` type is checked by the name the value
+carries. Nothing is allocated by a call that keeps its declaration.
+
+A violation is a `RuntimeError` that stops the run, for the reason the result
+check gives: the program asked for something the operation does not offer, and
+there is no value the host could produce that would make it right. It names
+the operation, which argument, what was found, and where — `` `documents.read`
+was given `Int` as argument 1, but its schema declares `String` there `` — and
+quotes the same signature the boundary's other diagnostics quote.
+
+The sixteen hand-written arms are gone. Each is now the
+`unreachable!("checked by HostRegistry::call")` that the operation arms beside
+them have always been, including the one an embedder writes: an embedding host
+declares its schema and the boundary holds every call to it, so restating the
+declaration in Rust is writing the same thing twice.
+
+### What the checker does
+
+`cove-sema` reads the same entry. A call into a shipped host module is checked
+at its call site — its arity, each argument against the type declared for it,
+and the result becomes the type the schema declares rather than `Unknown`.
+
+A host type is a type. `Ty::Host("http.Request")` is nominal, compared by the
+name the schema wrote, so `fn health(request: http.Request) -> http.Response`
+is checked like any other signature; its fields come from the schema, its
+cases come from the schema, and an operation on a resource handle —
+`server.handle(routes)`, `repository.query(sql)` — is checked against that
+kind's own `ResourceSchema`. `HostType::Any` becomes `Ty::Unknown`, which is
+not a loss: a type that carries no constraint and *the checker does not know*
+mean the same thing at a call site.
+
+The `cove::type::host_type` warning survives, narrowed to what it can honestly
+say. It no longer greets every host type; it greets a type from a host module
+this build ships no schema for, which is the one case where the checker really
+does abstain and the boundary really is alone. `cove check` on `examples/`
+reported eight of those warnings and reports none: every host type those
+programs name is one a shipped module declares.
+
+### What is still not checked
+
+Three things, and they are worth stating exactly.
+
+A declared type's **fields are not checked by the boundary**. The first
+amendment's reasoning is unchanged: a value calling itself an `http.Response`
+is taken at its word about what is inside it. The checker does read those
+fields — `request.path` is a `String` because the schema says a `Request` has
+one — so what is checked there is that the *program* built the value the
+schema describes, not that the host did.
+
+A host resource's **task-safety is the runtime's alone**. `ResourceSchema`
+declares it and the boundary enforces it; `Ty::Host` says nothing about
+crossing a task boundary, so a resource declaring `task_safe: false` is
+refused where it crosses and not before. No shipped resource declares it, so
+there is nothing to check today and nothing to test against; the day one does
+is the day to move it.
+
+A **host module the toolchain does not ship** is unchecked by the compiler, by
+construction. That is not a gap to be closed — it is the reason the boundary
+checks arguments at all.

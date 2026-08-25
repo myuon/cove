@@ -24,7 +24,7 @@ use cove_sema::Capability;
 
 use crate::error::RuntimeError;
 use crate::host::HostApi;
-use crate::schema::{Effect, HostType, OperationSchema};
+use crate::schema::{ModuleSchema, OperationSchema};
 use crate::value::Value;
 
 /// What a program asked a fake process to do, shared between the host and
@@ -94,56 +94,12 @@ enum Control {
     },
 }
 
-/// The operations `process` exposes.
+/// What `process` declares about itself.
 ///
-/// `exit` and `run` are irreversible writes: a process that has ended cannot
-/// be brought back, and a subprocess that has run has already done whatever
-/// it does. Neither is cancellable for the same reason.
-///
-/// `exit` is the one shipped operation that is not recordable. Recordability
-/// means the result can be handed back later without calling the host again,
-/// and `exit` has no result worth handing back — a replay that returned
-/// `Unit` in its place would continue running a program that had ended.
-///
-/// `run` is deliberately not a spawn: it starts the subprocess, waits for it,
-/// and answers with what it wrote to standard output. Handing back a live
-/// child would need a host resource handle, which no Host API can produce
-/// yet; see [`crate::database`] for what is missing.
-static PROCESS_SCHEMA: &[OperationSchema] = &[
-    OperationSchema {
-        name: "args",
-        params: &[],
-        variadic: false,
-        result: HostType::Array(&HostType::String),
-        capability: "process",
-        effect: Effect::Read,
-        cancellable: true,
-        recordable: true,
-        result_is_task_safe: true,
-    },
-    OperationSchema {
-        name: "exit",
-        params: &[HostType::Int],
-        variadic: false,
-        result: HostType::Unit,
-        capability: "process",
-        effect: Effect::IrreversibleWrite,
-        cancellable: false,
-        recordable: false,
-        result_is_task_safe: true,
-    },
-    OperationSchema {
-        name: "run",
-        params: &[HostType::String, HostType::Array(&HostType::String)],
-        variadic: false,
-        result: HostType::Result(&HostType::String, &HostType::Error),
-        capability: "process",
-        effect: Effect::IrreversibleWrite,
-        cancellable: false,
-        recordable: true,
-        result_is_task_safe: true,
-    },
-];
+/// The table is [`cove_schema::hosts::PROCESS`], so the description the
+/// compiler checks a call against and the one the boundary dispatches through
+/// are the same bytes.
+const SCHEMA: ModuleSchema = cove_schema::hosts::PROCESS;
 
 impl Process {
     /// The real process.
@@ -261,7 +217,7 @@ impl HostApi for Process {
     }
 
     fn schema(&self) -> &[OperationSchema] {
-        PROCESS_SCHEMA
+        SCHEMA.operations
     }
 
     fn call(&self, op: &str, args: Vec<Value>) -> Result<Value, RuntimeError> {
@@ -274,22 +230,20 @@ impl HostApi for Process {
             )),
             "exit" => {
                 let [Value::Int(code)] = args.as_slice() else {
-                    return Err(RuntimeError::new("`process.exit` takes one `Int` argument"));
+                    unreachable!("checked by HostRegistry::call")
                 };
                 Ok(self.exit(*code))
             }
             "run" => {
                 let [Value::Str(program), Value::Array(arguments)] = args.as_slice() else {
-                    return Err(RuntimeError::new(
-                        "`process.run` takes a `String` and an `Array<String>`",
-                    ));
+                    unreachable!("checked by HostRegistry::call")
                 };
                 let mut collected = Vec::with_capacity(arguments.len());
                 for argument in arguments.iter() {
+                    // The boundary followed `Array<String>` all the way down,
+                    // so every element is one.
                     let Value::Str(argument) = argument else {
-                        return Err(RuntimeError::new(
-                            "`process.run` takes a `String` and an `Array<String>`",
-                        ));
+                        unreachable!("checked by HostRegistry::call")
                     };
                     collected.push(argument.to_string());
                 }

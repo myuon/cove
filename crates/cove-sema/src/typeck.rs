@@ -81,13 +81,20 @@
 //! checker simply failed to walk. It comes from exactly these places, each of
 //! which is a gap in the *language*, not in this pass:
 //!
-//! - **Host APIs.** `console.println(...)`, `http.Request`, and every other
-//!   operation or type reached through a host module. ADR 0001 promises a
-//!   typed Host API schema shared by the compiler, runtime, and CLI; the
-//!   runtime reads it — a host is held to the result it declares — and this
-//!   crate cannot see it, so the checker still has nothing to check a host
-//!   call against. It warns ([`HOST_TYPE`]) at a host *type* so the gap is
-//!   visible in `cove check`.
+//! - **A host module this build ships no schema for.** ADR 0001's Host API
+//!   schema is [`cove_schema`], which this crate reads: `console.println`,
+//!   `http.Request`, and every other operation and type of a *shipped* host
+//!   module is checked against the same description the boundary dispatches
+//!   it through. What stays `Unknown` is a module the toolchain does not
+//!   ship. An embedding registers its host modules at run time and names
+//!   them in no table a compiler could read, so a call into one is unchecked
+//!   here and checked at the boundary instead; a type from one warns
+//!   ([`HOST_TYPE`]) so the gap is visible in `cove check`.
+//! - **A host operation that declares `Any`.** `clock.timeout` bounds work
+//!   whose type it does not depend on, which the schema writes
+//!   `cove_schema::HostType::Any` and this pass reads as `Unknown` — the
+//!   claim that there is nothing there to check, rather than a failure to
+//!   check it.
 //! - **Names nothing in scope explains.** A capitalized name a module
 //!   neither declares nor imports cannot be resolved by any means the
 //!   language offers; it is assumed to come from the host and warns
@@ -109,6 +116,16 @@
 //! of a struct field, a declared parameter, or a call to a function this
 //! module declares or imports, so an ordinary program's errors cannot hide
 //! behind it.
+//!
+//! Two things about a shipped host module are read here and *not* enforced by
+//! the boundary, which is worth stating in one place. A host type's fields
+//! are typed from the schema — `request.path` is a `String` because the
+//! schema says a `Request` has one — while the boundary checks a declared
+//! type by name only, so what this checks is that the *program* built the
+//! value the schema describes. And a host resource's declared task-safety is
+//! still the runtime's alone: `Ty::Host` says nothing about crossing a task
+//! boundary, so a resource declaring `task_safe: false` is refused where it
+//! crosses and not before.
 //!
 //! # What the runtime keeps
 //!
@@ -132,6 +149,7 @@ use std::fmt;
 use std::rc::Rc;
 
 use cove_diag::{Diagnostic, Span};
+use cove_schema::{HostType, OperationSchema, ResourceSchema, TypeSchema};
 use cove_syntax::ast::{
     Arg, BinaryOp, Block, EnumDecl, Expr, ExprKind, FnDecl, GenericParam, Ident, ItemKind,
     MatchArm, Param, Pattern, PatternKind, Stmt, StmtKind, StrPart, StructDecl, TraitMethod, Type,
@@ -156,8 +174,14 @@ pub const UNKNOWN_NAME: &str = "cove::type::unknown_name";
 pub const UNRESOLVED_NAME: &str = "cove::type::unresolved_name";
 /// A type name no module declares (warning).
 pub const UNKNOWN_TYPE: &str = "cove::type::unknown_type";
-/// A type reached through a host module (warning).
+/// A type reached through a host module the schema does not describe
+/// (warning).
 pub const HOST_TYPE: &str = "cove::type::host_type";
+/// A host module's schema declares no type of that name.
+pub const UNKNOWN_HOST_TYPE: &str = "cove::type::unknown_host_type";
+/// A host module's schema declares no operation of that name, on the module
+/// or on one of its resources.
+pub const UNKNOWN_HOST_OPERATION: &str = "cove::type::unknown_host_operation";
 /// A generic type is given the wrong number of type arguments.
 pub const TYPE_ARGUMENTS: &str = "cove::type::type_arguments";
 /// A type alias expands to itself.
@@ -526,6 +550,16 @@ pub enum Ty {
     /// where a bounded type parameter is expected, and only the trait's
     /// `self`-taking methods can be called on it.
     Dyn(Rc<str>),
+    /// A type a host module declares, named the way Cove source writes it:
+    /// `http.Request`, `database.Connection`.
+    ///
+    /// It is nominal like every other type here and carries no arguments,
+    /// because [`cove_schema::HostType`] has none to carry. Whether the host
+    /// hands the value over or keeps it — a `TypeSchema` or a
+    /// `ResourceSchema` — does not change how it is written or compared, so
+    /// it does not change this either; what the schema says about it decides
+    /// what may be read from it and what may be called on it.
+    Host(Rc<str>),
 }
 
 /// A function type: `fn(Int) -> Int`, `async fn() -> Result<Unit, Error>`.
@@ -581,7 +615,9 @@ impl Ty {
                     && a.params.iter().zip(&b.params).all(|(a, b)| a.matches(b))
                     && a.ret.matches(&b.ret)
             }
-            (Ty::Param(a), Ty::Param(b)) | (Ty::Dyn(a), Ty::Dyn(b)) => a == b,
+            (Ty::Param(a), Ty::Param(b))
+            | (Ty::Dyn(a), Ty::Dyn(b))
+            | (Ty::Host(a), Ty::Host(b)) => a == b,
             (a, b) => std::mem::discriminant(a) == std::mem::discriminant(b),
         }
     }
@@ -663,6 +699,7 @@ impl fmt::Display for Ty {
             Ty::MapEntry(k, v) => write!(f, "MapEntry<{k}, {v}>"),
             Ty::Result(t, e) => write!(f, "Result<{t}, {e}>"),
             Ty::Param(name) => f.write_str(name),
+            Ty::Host(name) => f.write_str(name),
             Ty::Dyn(name) => write!(f, "dyn {name}"),
             Ty::Struct(name, args) | Ty::Enum(name, args) => {
                 f.write_str(name)?;
@@ -1682,20 +1719,11 @@ impl<'a> Checker<'a> {
                 return self.foreign_type(&key, arguments, span);
             }
             if self.module.host_uses.contains(head.as_str()) {
-                self.diagnostics.push(
-                    Diagnostic::warning(
-                        HOST_TYPE,
-                        format!(
-                            "`{}` is a host type, so values of it are unchecked",
-                            join_path(path)
-                        ),
-                    )
-                    .at(span)
-                    .rule("A Host API's types come from its schema, which the checker does not read.")
-                    .help(
-                        "the checker treats this type as unknown; every operation on it is left to the runtime",
-                    ),
-                );
+                if path.len() == 2 {
+                    return self.host_named_type(head, &path[1].node, arguments.len(), span);
+                }
+                self.diagnostics
+                    .push(unchecked_host_type(&join_path(path), span));
             } else {
                 self.diagnostics.push(
                     Diagnostic::warning(
@@ -2252,6 +2280,21 @@ impl<'a> Checker<'a> {
     /// `base.name`: an enum case, a host operation, an imported module's
     /// declaration, or a struct field.
     fn field(&mut self, base: &Expr, name: &Ident, span: Span) -> Ty {
+        // `http.Method.Get` is three segments, so it reaches here as a field
+        // of a field. A host module's enum has no other way to be written.
+        if let ExprKind::Field {
+            base: module,
+            name: declared,
+        } = &base.kind
+        {
+            if let ExprKind::Ident(head) = &module.kind {
+                if self.lookup(head).is_none() && self.module.host_uses.contains(head.as_str()) {
+                    if let Some(ty) = self.host_enum_case(head, &declared.node, name, span) {
+                        return ty;
+                    }
+                }
+            }
+        }
         if let ExprKind::Ident(head) = &base.kind {
             if self.lookup(head).is_none() {
                 let key = self.key(head);
@@ -2305,6 +2348,10 @@ impl<'a> Checker<'a> {
                         Ty::Unknown
                     }
                 }
+            }
+            Ty::Host(declared) => {
+                let declared = declared.clone();
+                self.host_field(&declared, name, span)
             }
             Ty::MapEntry(key, value) => match name.node.as_str() {
                 "key" => (**key).clone(),
@@ -2934,6 +2981,43 @@ impl<'a> Checker<'a> {
                     self.case_payload(name, &case.node, args)
                 }
             }
+            // A host module's enum has cases and nothing inside them: the
+            // schema writes `cases: &["Get", "Post"]` and gives them no
+            // payload to bind.
+            Ty::Host(declared) => match host_declared_type(declared) {
+                Some(schema) if schema.cases.contains(&case.node.as_str()) => Some(Vec::new()),
+                Some(schema) if schema.is_enum() => {
+                    let known: Vec<String> =
+                        schema.cases.iter().map(|c| (*c).to_string()).collect();
+                    self.diagnostics.push(
+                        Diagnostic::error(
+                            UNKNOWN_CASE,
+                            format!("`{declared}` has no case `{}`", case.node),
+                        )
+                        .at(span)
+                        .rule(HOST_SCHEMA_RULE)
+                        .help(format!("`{declared}` declares {}", list(&known))),
+                    );
+                    None
+                }
+                _ => {
+                    self.diagnostics.push(
+                        Diagnostic::error(
+                            PATTERN,
+                            format!(
+                                "`{declared}` has no cases, so it cannot be matched by `{}`",
+                                case.node
+                            ),
+                        )
+                        .at(span)
+                        .rule(HOST_SCHEMA_RULE)
+                        .help(format!(
+                            "match a `{declared}` with a binding, or read one of its fields"
+                        )),
+                    );
+                    None
+                }
+            },
             other => {
                 self.diagnostics.push(
                     Diagnostic::error(
@@ -3174,9 +3258,11 @@ impl<'a> Checker<'a> {
             self.check_args_freely(args, trailing);
             return Ty::Unknown;
         }
-        if self.module.host_items.contains_key(name) {
-            self.check_args_freely(args, trailing);
-            return Ty::Unknown;
+        // `use console.println` makes `println(...)` the same call as
+        // `console.println(...)`, so it is checked against the same schema
+        // entry.
+        if let Some(module) = self.module.host_items.get(name).cloned() {
+            return self.host_call(&module, name, args, trailing, span);
         }
         if name == "MapEntry" {
             return self.map_entry(args, trailing, span);
@@ -3371,8 +3457,7 @@ impl<'a> Checker<'a> {
         span: Span,
     ) -> Option<Ty> {
         if self.module.host_uses.contains(head) {
-            self.check_args_freely(args, trailing);
-            return Some(Ty::Unknown);
+            return Some(self.host_call(head, &name.node, args, trailing, span));
         }
         // A module imported whole answers a qualified call with whatever it
         // exports under that name: a function to call, or a struct to
@@ -3445,6 +3530,359 @@ impl<'a> Checker<'a> {
             return Some(self.builtin_associated(head, name, args, trailing, span));
         }
         None
+    }
+
+    // --------------------------------------------------------- host calls
+    //
+    // ADR 0001 asks for one description of each Host API operation's
+    // argument, result, and error types, "shared by the compiler, runtime,
+    // and CLI". `cove-schema` is that description and this is the compiler's
+    // half of reading it: a call reaching a host module is checked against
+    // the same entry `HostRegistry::dispatch` will check it against, except
+    // that here the mistake still has a span to point at.
+    //
+    // What the checker cannot do is see a host it does not ship. An
+    // embedding registers its modules at run time, so a module named in no
+    // shipped schema is left exactly where it was — unchecked, and said to be
+    // — and the boundary is what holds such a host to its word.
+
+    /// `http.fetch(...)`, `http.Route(...)`, or `println(...)` reached
+    /// through `use console.println`.
+    fn host_call(
+        &mut self,
+        module: &str,
+        name: &str,
+        args: &[Arg],
+        trailing: Option<&Expr>,
+        span: Span,
+    ) -> Ty {
+        let Some(schema) = cove_schema::module(module) else {
+            // A module this build ships no schema for. Its operations are
+            // between the host that registered it and the boundary.
+            self.check_args_freely(args, trailing);
+            return Ty::Unknown;
+        };
+        if let Some(operation) = schema.operation(name) {
+            return self.call_host_operation(
+                operation,
+                &format!("{module}.{name}"),
+                args,
+                trailing,
+                span,
+            );
+        }
+        if let Some(declared) = schema.declared_type(name) {
+            if !declared.is_enum() {
+                return self.host_type_init(module, declared, args, trailing, span);
+            }
+            self.diagnostics.push(
+                Diagnostic::error(
+                    NOT_CALLABLE,
+                    format!("`{module}.{name}` is a host enum, not a function"),
+                )
+                .at(span)
+                .rule(HOST_SCHEMA_RULE)
+                .help(format!(
+                    "name a case, such as `{module}.{name}.{}`",
+                    declared.cases.first().copied().unwrap_or("Case")
+                )),
+            );
+            self.check_args_freely(args, trailing);
+            return Ty::Host(format!("{module}.{name}").into());
+        }
+        if schema.resource(name).is_some() {
+            self.diagnostics.push(
+                Diagnostic::error(
+                    NOT_CALLABLE,
+                    format!("`{module}.{name}` is a host resource, not a function"),
+                )
+                .at(span)
+                .rule("A host resource is opened by an operation of its module, which hands back a handle to it.")
+                .help(format!(
+                    "call the operation that opens one, such as {}",
+                    list(&operation_names(schema.operations))
+                )),
+            );
+            self.check_args_freely(args, trailing);
+            return Ty::Unknown;
+        }
+        self.diagnostics.push(
+            Diagnostic::error(
+                UNKNOWN_HOST_OPERATION,
+                format!("host module `{module}` has no operation `{name}`"),
+            )
+            .at(span)
+            .rule(HOST_SCHEMA_RULE)
+            .help(format!(
+                "`{module}` exposes {}",
+                list(&operation_names(schema.operations))
+            )),
+        );
+        self.check_args_freely(args, trailing);
+        Ty::Unknown
+    }
+
+    /// Checks a call against one operation's declared signature.
+    ///
+    /// A host operation's parameters have types and no names, so they are
+    /// named by position: the diagnostic for the second one reads "argument
+    /// `#2`", and the runtime's own message for the same mistake counts the
+    /// same way.
+    fn call_host_operation(
+        &mut self,
+        operation: &'static OperationSchema,
+        shown: &str,
+        args: &[Arg],
+        trailing: Option<&Expr>,
+        span: Span,
+    ) -> Ty {
+        let supplied = args.len() + usize::from(trailing.is_some());
+        // A spread argument stands for a sequence whose length is not known
+        // here, so it is the one call whose arity cannot be counted; the
+        // boundary counts it when the values exist.
+        let spread = args.iter().any(|arg| arg.spread);
+        if !spread && !operation.accepts(supplied) {
+            self.diagnostics.push(
+                Diagnostic::error(
+                    ARITY,
+                    format!(
+                        "`{shown}` takes {}, but {supplied} were given",
+                        operation.expected_arity()
+                    ),
+                )
+                .at(span)
+                .rule(HOST_SCHEMA_RULE)
+                .help(declared_signature(shown, operation)),
+            );
+            self.check_args_freely(args, trailing);
+            return host_ty(&operation.result);
+        }
+        let last = operation.params.len().saturating_sub(1);
+        let params: Vec<ParamSig> = operation
+            .params
+            .iter()
+            .enumerate()
+            .map(|(index, declared)| {
+                // A variadic parameter answers for every argument from its
+                // own position onwards, so it is named the way the signature
+                // writes it: `#1...`, not `#1`.
+                let variadic = operation.variadic && index == last;
+                ParamSig {
+                    name: format!("#{}{}", index + 1, if variadic { "..." } else { "" }),
+                    ty: host_ty(declared),
+                    variadic,
+                    has_default: false,
+                    span,
+                }
+            })
+            .collect();
+        self.match_arguments(
+            &params,
+            &[],
+            BTreeMap::new(),
+            args,
+            trailing,
+            span,
+            &format!("`{shown}`"),
+            "argument",
+        );
+        host_ty(&operation.result)
+    }
+
+    /// `http.Route(method: ..., path: ..., handler: ...)`: a host type
+    /// initialized from Cove source, exactly as a struct is.
+    ///
+    /// This is the one place a host type's *fields* are checked. The boundary
+    /// checks a declared type by name only — ADR 0013's amendment says why —
+    /// so what is checked here is that the program built the value the schema
+    /// describes, not that the host did.
+    fn host_type_init(
+        &mut self,
+        module: &str,
+        declared: &'static TypeSchema,
+        args: &[Arg],
+        trailing: Option<&Expr>,
+        span: Span,
+    ) -> Ty {
+        let params: Vec<ParamSig> = declared
+            .fields
+            .iter()
+            .map(|field| ParamSig {
+                name: field.name.to_string(),
+                ty: host_ty(&field.ty),
+                variadic: false,
+                has_default: false,
+                span,
+            })
+            .collect();
+        self.match_arguments(
+            &params,
+            &[],
+            BTreeMap::new(),
+            args,
+            trailing,
+            span,
+            &format!("`{module}.{}`", declared.name),
+            "the field",
+        );
+        Ty::Host(format!("{module}.{}", declared.name).into())
+    }
+
+    /// `http.Request` written as a type.
+    fn host_named_type(&mut self, module: &str, name: &str, arguments: usize, span: Span) -> Ty {
+        let qualified = format!("{module}.{name}");
+        let Some(schema) = cove_schema::module(module) else {
+            self.diagnostics.push(unchecked_host_type(&qualified, span));
+            return Ty::Unknown;
+        };
+        if !schema.declares_type(name) {
+            let mut known: Vec<String> = schema
+                .types
+                .iter()
+                .map(|declared| declared.name.to_string())
+                .collect();
+            known.extend(
+                schema
+                    .resources
+                    .iter()
+                    .map(|resource| resource.name.to_string()),
+            );
+            self.diagnostics.push(
+                Diagnostic::error(
+                    UNKNOWN_HOST_TYPE,
+                    format!("host module `{module}` declares no type `{name}`"),
+                )
+                .at(span)
+                .rule(HOST_SCHEMA_RULE)
+                .help(if known.is_empty() {
+                    format!("`{module}` declares no types of its own")
+                } else {
+                    format!("`{module}` declares {}", list(&known))
+                }),
+            );
+            return Ty::Unknown;
+        }
+        // A host type takes no arguments, because the schema has none to
+        // give it.
+        self.check_type_arity(&qualified, 0, arguments, span);
+        Ty::Host(qualified.into())
+    }
+
+    /// `http.Method.Get`, if `module` is a host module whose schema declares
+    /// `declared` as an enum. `None` leaves the expression to be read the way
+    /// it was before.
+    fn host_enum_case(
+        &mut self,
+        module: &str,
+        declared: &str,
+        case: &Ident,
+        span: Span,
+    ) -> Option<Ty> {
+        let schema = cove_schema::module(module)?.declared_type(declared)?;
+        if !schema.is_enum() {
+            return None;
+        }
+        let qualified: Rc<str> = format!("{module}.{declared}").into();
+        if !schema.cases.contains(&case.node.as_str()) {
+            let known: Vec<String> = schema.cases.iter().map(|c| (*c).to_string()).collect();
+            self.diagnostics.push(
+                Diagnostic::error(
+                    UNKNOWN_CASE,
+                    format!("`{qualified}` has no case `{}`", case.node),
+                )
+                .at(span)
+                .rule(HOST_SCHEMA_RULE)
+                .help(format!("`{qualified}` declares {}", list(&known))),
+            );
+        }
+        Some(Ty::Host(qualified))
+    }
+
+    /// `request.path`: a field of a host type, typed from the schema.
+    fn host_field(&mut self, declared: &str, name: &Ident, span: Span) -> Ty {
+        let Some(schema) = host_declared_type(declared) else {
+            // A resource keeps its state on the far side of the boundary, so
+            // there is nothing in it to read: everything it answers, it
+            // answers as an operation.
+            self.diagnostics.push(
+                Diagnostic::error(
+                    UNKNOWN_FIELD,
+                    format!("`{declared}` has no field `{}`", name.node),
+                )
+                .at(span)
+                .rule("A host resource is a name for something the host keeps, so it has operations rather than fields.")
+                .help(format!("call an operation on it, such as `{}()`", name.node)),
+            );
+            return Ty::Unknown;
+        };
+        match schema.fields.iter().find(|f| f.name == name.node) {
+            Some(field) => host_ty(&field.ty),
+            None => {
+                let known: Vec<String> = schema.fields.iter().map(|f| f.name.to_string()).collect();
+                self.diagnostics.push(
+                    Diagnostic::error(
+                        UNKNOWN_FIELD,
+                        format!("`{declared}` has no field `{}`", name.node),
+                    )
+                    .at(span)
+                    .rule(HOST_SCHEMA_RULE)
+                    .help(if known.is_empty() {
+                        format!("`{declared}` carries no fields")
+                    } else {
+                        format!("`{declared}` declares {}", list(&known))
+                    }),
+                );
+                Ty::Unknown
+            }
+        }
+    }
+
+    /// `server.handle(routes)`: an operation called on a host resource
+    /// handle, checked against the same schema a module's operation is.
+    fn host_method_call(
+        &mut self,
+        declared: &str,
+        name: &Ident,
+        args: &[Arg],
+        trailing: Option<&Expr>,
+        span: Span,
+    ) -> Ty {
+        if let Some(resource) = host_resource(declared) {
+            if let Some(operation) = resource.operation(&name.node) {
+                return self.call_host_operation(
+                    operation,
+                    &format!("{declared}.{}", name.node),
+                    args,
+                    trailing,
+                    span,
+                );
+            }
+            self.diagnostics.push(
+                Diagnostic::error(
+                    UNKNOWN_HOST_OPERATION,
+                    format!("`{declared}` has no operation `{}`", name.node),
+                )
+                .at(span)
+                .rule(HOST_SCHEMA_RULE)
+                .help(format!(
+                    "`{declared}` answers {}",
+                    list(&operation_names(resource.operations))
+                )),
+            );
+            self.check_args_freely(args, trailing);
+            return Ty::Unknown;
+        }
+        self.diagnostics.push(
+            Diagnostic::error(
+                UNKNOWN_HOST_OPERATION,
+                format!("`{declared}` has no operation `{}`", name.node),
+            )
+            .at(span)
+            .rule("A host type that is plain data has fields; only a host resource answers operations.")
+            .help(format!("read a field, such as `.{}`", name.node)),
+        );
+        self.check_args_freely(args, trailing);
+        Ty::Unknown
     }
 
     /// `Vector.of(...)`, `Map.of(...)`, `Set.of(...)`, `Int.parse(...)`.
@@ -4338,6 +4776,10 @@ impl<'a> Checker<'a> {
                 let trait_name = trait_name.clone();
                 return self.dyn_method_call(&trait_name, name, args, trailing, span);
             }
+            Ty::Host(declared) => {
+                let declared = declared.clone();
+                return self.host_method_call(&declared, name, args, trailing, span);
+            }
             _ => {}
         }
 
@@ -4861,6 +5303,91 @@ struct BuiltinSig {
     /// `Vector.of(items: T...)` does.
     variadic: bool,
     ret: Ty,
+}
+
+// ---------------------------------------------------------- the host schema
+
+/// The Language Card sentence a Host API diagnostic quotes.
+///
+/// The schema is one description and both ends read it, so both ends say the
+/// same thing about a call that does not fit: this is the compiler's wording
+/// of the rule `cove_runtime::host` states at the boundary.
+const HOST_SCHEMA_RULE: &str = "A Host API operation's argument, result, and error types come from its schema, which the compiler, the runtime, and the CLI all read.";
+
+/// The type a Host API schema's type is, here.
+///
+/// The two vocabularies are the same one written twice, so the translation is
+/// mechanical except at the ends. [`cove_schema::HostType::Any`] becomes
+/// [`Ty::Unknown`]: an operation that declares `Any` is one whose meaning
+/// does not depend on which value it was given — the work `clock.timeout`
+/// bounds — and *the checker does not know* is exactly what a type carrying
+/// no constraint means here. [`cove_schema::HostType::Named`] becomes
+/// [`Ty::Host`], which is nominal and compared by the name the schema wrote.
+fn host_ty(declared: &HostType) -> Ty {
+    match declared {
+        HostType::Unit => Ty::Unit,
+        HostType::Bool => Ty::Bool,
+        HostType::Int => Ty::Int,
+        HostType::String => Ty::Str,
+        HostType::Duration => Ty::Duration,
+        HostType::Error => Ty::Error,
+        HostType::Array(item) => Ty::Array(Box::new(host_ty(item))),
+        HostType::Option(some) => Ty::Option(Box::new(host_ty(some))),
+        HostType::Result(ok, error) => Ty::Result(Box::new(host_ty(ok)), Box::new(host_ty(error))),
+        HostType::Named(name) => Ty::Host((*name).into()),
+        HostType::Any => Ty::Unknown,
+    }
+}
+
+/// The signature the schema declares, qualified the way the call was named,
+/// which is word for word what the boundary's own diagnostic quotes.
+fn declared_signature(shown: &str, operation: &OperationSchema) -> String {
+    let owner = match shown.rsplit_once('.') {
+        Some((owner, _)) => owner,
+        None => shown,
+    };
+    format!(
+        "the Host API schema declares `{owner}.{}`",
+        operation.signature()
+    )
+}
+
+/// The names of the operations in one table, for a diagnostic that has to
+/// list what does exist.
+fn operation_names(operations: &'static [OperationSchema]) -> Vec<String> {
+    operations
+        .iter()
+        .map(|entry| entry.name.to_string())
+        .collect()
+}
+
+/// The schema of the host type `qualified` names, when it is one a host hands
+/// over rather than one it keeps.
+fn host_declared_type(qualified: &str) -> Option<&'static TypeSchema> {
+    let (module, name) = qualified.split_once('.')?;
+    cove_schema::module(module)?.declared_type(name)
+}
+
+/// The schema of the host resource `qualified` names.
+fn host_resource(qualified: &str) -> Option<&'static ResourceSchema> {
+    let (module, name) = qualified.split_once('.')?;
+    cove_schema::module(module)?.resource(name)
+}
+
+/// A type reached through a host module this build ships no schema for.
+///
+/// This is the warning that used to greet every host type. It is now what
+/// greets only the ones the checker genuinely cannot answer for: an embedding
+/// may register any module it likes, and a program written against one is
+/// checked by the boundary at run time and by nothing before it.
+fn unchecked_host_type(shown: &str, span: Span) -> Diagnostic {
+    Diagnostic::warning(
+        HOST_TYPE,
+        format!("`{shown}` comes from a host module this build has no schema for, so values of it are unchecked"),
+    )
+    .at(span)
+    .rule("A Host API's types come from its schema; the checker reads the schema of the host modules the toolchain ships.")
+    .help("the checker treats this type as unknown; every operation on it is left to the runtime, which holds the host to the schema it registered with")
 }
 
 /// Whether `name` is a builtin type usable as a namespace.
@@ -7624,19 +8151,370 @@ fn run() -> Int {
         );
     }
 
-    // ------------------------------------------------- abstention
+    // ------------------------------------------------- the Host API schema
+    //
+    // ADR 0001's schema is one description shared by the compiler, runtime,
+    // and CLI, and these are the compiler's half of reading it. The runtime's
+    // half is in `cove_runtime::host`; the two check the same table against
+    // the same call, and a program that gets past both has been checked
+    // twice.
 
     #[test]
-    fn a_host_call_is_unknown_and_suppresses_what_follows() {
-        // `console.println` has no schema, so nothing it returns can be
-        // checked — and nothing derived from it is wrongly reported either.
+    fn a_host_call_produces_the_type_its_schema_declares() {
+        // `env.get` declares `Option<String>` and `documents.read` declares
+        // `Result<String, Error>`, so both are ordinary typed values here.
         accepts(
             "\
 use console.println
 use env.get
+use documents
 
 export fn main() -> Result<Unit, Error> {
-  let value = env.get(\"PORT\").unwrapOr(\"8080\")
+  let port: String = env.get(\"PORT\").unwrapOr(\"8080\")
+  let note: String = documents.read(\"input\")?
+  println(\"{port} {note}\")?
+  Ok(())
+}
+",
+        );
+    }
+
+    #[test]
+    fn a_host_call_s_result_is_checked_where_it_is_used() {
+        let error = rejects(
+            "\
+use env.get
+
+export fn main() -> Int {
+  get(\"PORT\").unwrapOr(\"8080\") + 1
+}
+",
+        );
+        assert_eq!(error.code, OPERATOR);
+        assert_eq!(error.message, "`+` is not defined for `String` and `Int`");
+    }
+
+    #[test]
+    fn an_argument_a_host_operation_does_not_declare_is_rejected_at_the_call() {
+        let error = rejects(
+            "\
+use documents
+
+export fn main() -> Result<Unit, Error> {
+  documents.read(1)?
+  Ok(())
+}
+",
+        );
+        assert_eq!(error.code, MISMATCH);
+        assert_eq!(error.message, "expected `String`, found `Int`");
+        assert_eq!(
+            error.rule.unwrap(),
+            "Types are nominal and the only implicit conversion is to `dyn Trait`: a value must otherwise already have the type its place asks for."
+        );
+    }
+
+    /// The same mistake the boundary refuses, caught where it has a span.
+    #[test]
+    fn a_host_call_with_the_wrong_number_of_arguments_is_rejected_at_the_call() {
+        let error = rejects(
+            "\
+use documents
+
+export fn main() -> Result<Unit, Error> {
+  documents.read(\"input\", \"extra\")?
+  Ok(())
+}
+",
+        );
+        assert_eq!(error.code, ARITY);
+        assert_eq!(
+            error.message,
+            "`documents.read` takes 1 argument, but 2 were given"
+        );
+        assert_eq!(
+            error.help.unwrap(),
+            "the Host API schema declares `documents.read(String) -> Result<String, Error>`",
+            "the boundary's diagnostic for the same mistake quotes it word for word"
+        );
+    }
+
+    /// `console.println("a", "b")` is one line of two parts, so a variadic
+    /// operation accepts any number of arguments and checks every one of them
+    /// against its one declared type.
+    #[test]
+    fn a_variadic_host_operation_checks_every_argument() {
+        accepts(
+            "\
+use console
+
+export fn main() -> Result<Unit, Error> {
+  console.println()?
+  console.println(\"one\", \"two\", \"three\")?
+  Ok(())
+}
+",
+        );
+
+        let error = rejects(
+            "\
+use console
+
+export fn main() -> Result<Unit, Error> {
+  console.println(\"one\", 2)?
+  Ok(())
+}
+",
+        );
+        assert_eq!(error.code, MISMATCH);
+        assert_eq!(error.message, "expected `String`, found `Int`");
+    }
+
+    /// `clock.timeout` declares `Any` for the work it bounds, which is not a
+    /// gap in the schema but a claim: the operation's meaning does not depend
+    /// on which value it was given. `Unknown` is what that claim is here.
+    #[test]
+    fn a_parameter_declared_any_accepts_whatever_it_is_given() {
+        accepts(
+            "\
+use clock
+
+export fn main() -> Result<Unit, Error> {
+  clock.timeout(500ms) {
+    1
+  }?
+  clock.every(60s, fn() {
+    Ok(())
+  })?
+  Ok(())
+}
+",
+        );
+    }
+
+    #[test]
+    fn an_operation_the_schema_does_not_declare_is_rejected() {
+        let error = rejects(
+            "\
+use documents
+
+export fn main() -> Result<Unit, Error> {
+  documents.write(\"input\", \"text\")?
+  Ok(())
+}
+",
+        );
+        assert_eq!(error.code, UNKNOWN_HOST_OPERATION);
+        assert_eq!(
+            error.message,
+            "host module `documents` has no operation `write`"
+        );
+        assert_eq!(error.help.unwrap(), "`documents` exposes `read`");
+    }
+
+    /// A host type is nominal and named the way source writes it, so a
+    /// signature written in terms of one is checked like any other.
+    #[test]
+    fn a_host_type_is_a_type() {
+        accepts(
+            "\
+use http
+
+/// Answers one request.
+export fn health(request: http.Request) -> http.Response {
+  http.json(200, request.path)
+}
+",
+        );
+
+        let error = rejects(
+            "\
+use http
+
+export fn health(request: http.Request) -> Int {
+  http.json(200, \"ok\")
+}
+",
+        );
+        assert_eq!(error.code, MISMATCH);
+        assert_eq!(error.message, "expected `Int`, found `http.Response`");
+    }
+
+    /// A host type's fields come from the schema, which is the one place they
+    /// are read: the boundary checks a declared type by name only.
+    #[test]
+    fn a_host_type_s_fields_are_typed_by_the_schema() {
+        let error = rejects(
+            "\
+use http
+
+export fn path(request: http.Request) -> Int {
+  request.path
+}
+",
+        );
+        assert_eq!(error.code, MISMATCH);
+        assert_eq!(error.message, "expected `Int`, found `String`");
+
+        let missing = rejects(
+            "\
+use http
+
+export fn path(request: http.Request) -> String {
+  request.query
+}
+",
+        );
+        assert_eq!(missing.code, UNKNOWN_FIELD);
+        assert_eq!(missing.message, "`http.Request` has no field `query`");
+        assert_eq!(
+            missing.help.unwrap(),
+            "`http.Request` declares `method`, `path`, `body`"
+        );
+    }
+
+    /// A host type that is plain data is initialized from Cove source exactly
+    /// as a struct is, labels and all.
+    #[test]
+    fn a_host_type_is_initialized_with_the_fields_the_schema_declares() {
+        accepts(
+            "\
+use http
+
+/// Answers one request.
+fn health(request: http.Request) -> http.Response {
+  http.json(200, \"ok\")
+}
+
+/// The one route this program serves.
+export fn routes() -> Array<http.Route> {
+  [http.Route(method: http.Method.Get, path: \"/health\", handler: health)]
+}
+",
+        );
+
+        let error = rejects(
+            "\
+use http
+
+export fn routes() -> Array<http.Route> {
+  [http.Route(method: http.Method.Get, path: 8080, handler: 1)]
+}
+",
+        );
+        assert_eq!(error.code, MISMATCH);
+        assert_eq!(error.message, "expected `String`, found `Int`");
+    }
+
+    #[test]
+    fn a_case_the_host_enum_does_not_declare_is_rejected() {
+        let error = rejects(
+            "\
+use http
+
+export fn method() -> http.Method {
+  http.Method.Delete
+}
+",
+        );
+        assert_eq!(error.code, UNKNOWN_CASE);
+        assert_eq!(error.message, "`http.Method` has no case `Delete`");
+        assert_eq!(error.help.unwrap(), "`http.Method` declares `Get`, `Post`");
+    }
+
+    /// A resource handle answers the operations its kind declares, checked
+    /// through the same entry the boundary dispatches them through.
+    #[test]
+    fn an_operation_on_a_host_resource_is_checked_against_its_kind() {
+        accepts(
+            "\
+use http
+use console.println
+
+export fn main() -> Result<Unit, Error> {
+  let server = http.listen(8080)?
+  println(\"listening on :{server.port()}\")?
+  server.close()?
+  Ok(())
+}
+",
+        );
+
+        let error = rejects(
+            "\
+use http
+
+export fn main() -> Result<Unit, Error> {
+  let server = http.listen(8080)?
+  server.handle(\"routes\")?
+  Ok(())
+}
+",
+        );
+        assert_eq!(error.code, MISMATCH);
+        assert_eq!(
+            error.message,
+            "expected `Array<http.Route>`, found `String`"
+        );
+    }
+
+    #[test]
+    fn an_operation_a_host_resource_does_not_declare_is_rejected() {
+        let error = rejects(
+            "\
+use http
+
+export fn main() -> Result<Unit, Error> {
+  let server = http.listen(8080)?
+  server.stop()?
+  Ok(())
+}
+",
+        );
+        assert_eq!(error.code, UNKNOWN_HOST_OPERATION);
+        assert_eq!(error.message, "`http.Server` has no operation `stop`");
+        assert_eq!(
+            error.help.unwrap(),
+            "`http.Server` answers `port`, `handle`, `close`"
+        );
+    }
+
+    #[test]
+    fn a_type_a_host_module_does_not_declare_is_rejected() {
+        let error = rejects(
+            "\
+use http
+
+export fn handle(request: http.Payload) -> Int {
+  1
+}
+",
+        );
+        assert_eq!(error.code, UNKNOWN_HOST_TYPE);
+        assert_eq!(
+            error.message,
+            "host module `http` declares no type `Payload`"
+        );
+        assert_eq!(
+            error.help.unwrap(),
+            "`http` declares `Method`, `Request`, `Response`, `Route`, `Server`"
+        );
+    }
+
+    // ------------------------------------------------- abstention
+
+    /// A host module this build ships no schema for is the one host call the
+    /// checker still abstains from: an embedding registers its modules at run
+    /// time, and the boundary is what holds such a host to its word.
+    #[test]
+    fn a_call_into_a_host_module_with_no_schema_is_unknown_and_suppresses_what_follows() {
+        accepts(
+            "\
+use console.println
+use sensors
+
+export fn main() -> Result<Unit, Error> {
+  let value = sensors.read(\"pressure\")
   println(\"{value + 1}\")?
   Ok(())
 }
@@ -7645,12 +8523,12 @@ export fn main() -> Result<Unit, Error> {
     }
 
     #[test]
-    fn a_host_type_warns_rather_than_failing() {
+    fn a_type_from_a_host_module_with_no_schema_warns_rather_than_failing() {
         let warnings = warnings_of(
             "\
-use http
+use sensors
 
-fn handle(request: http.Request) -> Int {
+fn handle(reading: sensors.Reading) -> Int {
   1
 }
 ",
@@ -7659,11 +8537,11 @@ fn handle(request: http.Request) -> Int {
         assert_eq!(warnings[0].code, HOST_TYPE);
         assert_eq!(
             warnings[0].message,
-            "`http.Request` is a host type, so values of it are unchecked"
+            "`sensors.Reading` comes from a host module this build has no schema for, so values of it are unchecked"
         );
         assert_eq!(
             warnings[0].rule.as_deref().unwrap(),
-            "A Host API's types come from its schema, which the checker does not read."
+            "A Host API's types come from its schema; the checker reads the schema of the host modules the toolchain ships."
         );
     }
 
