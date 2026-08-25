@@ -58,8 +58,10 @@ document. The language and compiler exist, from the lexer through resolution,
 a type checker, module-to-module imports, traits and both dispatch forms, and
 derived outlines, capability requirements, and API snapshots. The runtime
 exists, with Host API dispatch under grants, a thread per task, `Shared<T>`, a
-per-task collector, budgets for fuel, deadlines, memory, and host calls, and
-traces that feed `cove trace` and `cove replay`. Every command in the Language
+per-task collector, budgets for fuel, deadlines, memory, host calls, and the
+tasks a run holds at once — the last decided by
+[ADR 0003](0003-task-execution-and-runtime-control.md)'s amendment — and traces
+that feed `cove trace` and `cove replay`. Every command in the Language
 Card's tooling contract exists and does what the card says. The eight
 representative programs all execute.
 
@@ -72,9 +74,6 @@ a sentence somewhere above that a reader would have to check against the code:
   execution profile means a binary that runs anywhere, which exists; it does
   not mean machine code generated from Cove, which does not.
 - **Wasm.** Deferred, as the classification below states.
-- **A concurrency limit.** "Runtime resource control" below lists one, and
-  nothing imposes one: a scope starts a thread for every `spawn` its body
-  reaches. See [issue #37](https://github.com/myuon/cove/issues/37).
 - **Host API schema checking.** The schema is machine-readable and shared, as
   this ADR asks, and neither end reads its types: the checker has nothing to
   check a host call against, and the runtime checks a call's arity but not its

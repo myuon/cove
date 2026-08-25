@@ -51,46 +51,46 @@ Hello, world!
 ```
 
 Implemented: lexer, parser, directory modules, `export` visibility, derived
-outlines and capability requirements, a deterministic formatter, a
-tree-walking interpreter, Host API dispatch with grant enforcement, task
-scopes with a thread per task, a per-task mark-and-sweep collector, and
-runtime budgets for fuel, deadlines, memory, and host calls with tracing. A
-host resource handle is a name for something the host owns -- a module, a
-resource kind, an identity number, and the task-safety its schema declares --
-never the resource itself, and every operation called on one goes through the
-same dispatch as any other Host API call, so it gets the same grant check, the
-same schema check, the same budget charge, and the same trace; a handle whose
+outlines and capability requirements, a deterministic formatter, a tree-walking
+interpreter, Host API dispatch with grant enforcement, task scopes with a
+thread per task, a per-task mark-and-sweep collector, and runtime budgets for
+fuel, deadlines, memory, host calls, and concurrency with tracing. A host
+resource handle is a name for something the host owns -- a module, a resource
+kind, an identity number, and the task-safety its schema declares -- never the
+resource itself, and every operation called on one goes through the same
+dispatch as any other Host API call, so it gets the same grant check, the same
+schema check, the same budget charge, and the same trace; a handle whose
 resource has been closed reports a diagnostic rather than acting on whatever
 now occupies the slot. A host module may also declare plain-data types in a
 `TypeSchema`, which Cove source names and initializes with labels exactly like
-its own structs and enums. `Reentry` lets a host that was handed a Cove
-closure run it on the task that made the call, on that task's stack, against
-that run's budget, with no second thread and no scheduler. `cove trace` reads
-a recorded trace back and summarises it, and `cove replay` runs an entry again
-with every host answering from the trace -- reproducing a resource handle by
-handing back the recorded name -- and reports a divergence when the program
-asks for something the trace does not have. The `console`, `env`, `documents`,
-`clock`, `files`, and `process` hosts each ship a real and a fake
-implementation; `http` ships a real implementation speaking a deliberately
-small HTTP/1.1 over TCP, a recorded fake, and a denied one; `database` ships a
-fake and a denied one, because connecting to a real database needs more than
-the standard library. `clock.timeout` bounds a block against a watchdog on a
-real clock, and against how far the block pushed a virtual one that has no
-time of its own; `clock.every` repeats a callback until its task is cancelled
-or the callback fails, firing exactly once on a virtual clock, because one
-round is all a clock that moves only when the host moves it can honestly give.
-`cove test` runs every `test fn` in a package, granting each test the fake
-implementation of every capability its call graph requires unless
-`cove.toml`'s `[test] allow_real` names one. `cove build` packages a run as a
-single native executable that runs with no toolchain, no `cove` on the path,
-and no source tree. `cove generate <name>` runs a `[run.<name>]` entry that
-returns `Result<String, Error>` under its granted capabilities, writes and
-formats what it returns to the package-relative `generates` path, and checks
-the package; `cove generate --check` regenerates every such run into memory
-and fails on the first file that differs from what is on disk, which is what
-CI runs. Tasks spawned in a scope run on threads, so waits genuinely overlap
-and a trace records each task's own CPU time and each host call's wait, and
-`Shared` holds mutable state across them.
+its own structs and enums. `Reentry` lets a host that was handed a Cove closure
+run it on the task that made the call, on that task's stack, against that run's
+budget, with no second thread and no scheduler. `cove trace` reads a recorded
+trace back and summarises it, and `cove replay` runs an entry again with every
+host answering from the trace -- reproducing a resource handle by handing back
+the recorded name -- and reports a divergence when the program asks for
+something the trace does not have. The `console`, `env`, `documents`, `clock`,
+`files`, and `process` hosts each ship a real and a fake implementation; `http`
+ships a real implementation speaking a deliberately small HTTP/1.1 over TCP, a
+recorded fake, and a denied one; `database` ships a fake and a denied one,
+because connecting to a real database needs more than the standard library.
+`clock.timeout` bounds a block against a watchdog on a real clock, and against
+how far the block pushed a virtual one that has no time of its own;
+`clock.every` repeats a callback until its task is cancelled or the callback
+fails, firing exactly once on a virtual clock, because one round is all a clock
+that moves only when the host moves it can honestly give. `cove test` runs
+every `test fn` in a package, granting each test the fake implementation of
+every capability its call graph requires unless `cove.toml`'s `[test]
+allow_real` names one. `cove build` packages a run as a single native
+executable that runs with no toolchain, no `cove` on the path, and no source
+tree. `cove generate <name>` runs a `[run.<name>]` entry that returns
+`Result<String, Error>` under its granted capabilities, writes and formats what
+it returns to the package-relative `generates` path, and checks the package;
+`cove generate --check` regenerates every such run into memory and fails on the
+first file that differs from what is on disk, which is what CI runs. Tasks
+spawned in a scope run on threads, so waits genuinely overlap and a trace
+records each task's own CPU time and each host call's wait, and `Shared` holds
+mutable state across them.
 
 Still missing, and each of these is a documented gap rather than an oversight:
 a real `database` implementation, because connecting to one means speaking a
@@ -99,9 +99,7 @@ wire protocol the standard library cannot; TLS in the `http` host, where an
 call against the types its schema declares, at either end — the checker reports
 `http.Request` and its neighbors as unchecked host types, and the runtime
 checks a call's arity but not its result
-([#38](https://github.com/myuon/cove/issues/38)); a concurrency limit, so a
-scope starts a thread for every `spawn` its body reaches and no budget refuses
-one ([#37](https://github.com/myuon/cove/issues/37)); a trace event for task
+([#38](https://github.com/myuon/cove/issues/38)); a trace event for task
 suspension or for a cache, and a task id on a host call, which is why `cove
 trace` ends its summary with what it cannot tell you; and native code
 generation, still ADR 0002's open decision, which
@@ -144,8 +142,8 @@ against the profile list on its own:
   representative program end to end; see `examples/` and `cove-cli`'s own
   tests.
 - [x] **Sandboxed — MVP required.** An ungranted Host API call is refused and
-  a run is stopped by its fuel, deadline, host-call, or memory limits; see the
-  tests in `crates/cove-runtime/src/host.rs` and
+  a run is stopped by its fuel, deadline, host-call, memory, or concurrency
+  limits; see the tests in `crates/cove-runtime/src/host.rs` and
   `crates/cove-runtime/src/budget.rs`.
 - [x] **Embedded — MVP required.** A host outside `cove-runtime` can supply
   its own capability implementation and its own limits, and see both a
