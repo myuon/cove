@@ -1,0 +1,15 @@
+use console.println
+
+/// Never prints: this case pins the diagnostic a run gets when a `spawn`
+/// would leave more tasks alive at once than `[run.fail_max_tasks]`'s
+/// `max_tasks` allows. The first two tasks are still held when the third is
+/// asked for, so the third is refused before it is given a thread.
+export fn main() -> Result<Unit, Error> {
+  scope tasks {
+    let first = tasks.spawn { 1 }
+    let second = tasks.spawn { 2 }
+    let third = tasks.spawn { 3 }
+    println("{await first + await second + await third}")?
+  }
+  Ok(())
+}
