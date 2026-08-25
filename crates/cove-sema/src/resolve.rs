@@ -347,7 +347,7 @@ impl Program {
     /// conforms it to a trait of its own.
     ///
     /// One name answers to one method, whichever module declares it:
-    /// [`check_method_collisions`] rejects a package where two modules
+    /// `check_method_collisions` rejects a package where two modules
     /// declare a method of one name for one type.
     pub fn methods_of(&self, type_module: &str, type_name: &str) -> Vec<DeclaredMethod<'_>> {
         let mut found: BTreeMap<&str, DeclaredMethod<'_>> = BTreeMap::new();

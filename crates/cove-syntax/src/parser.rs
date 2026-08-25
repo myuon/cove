@@ -1,6 +1,6 @@
 //! The Cove parser.
 //!
-//! Turns a token stream into an [`ast::SourceUnit`]. Cove has no statement
+//! Turns a token stream into an [`ast::SourceUnit`](crate::ast::SourceUnit). Cove has no statement
 //! terminators: `;` is not part of the language. Instead, as in Go and Swift,
 //! a newline ends a statement when the line could have ended there. The last
 //! expression of a block is still that block's value.
@@ -12,12 +12,12 @@
 //! 1. the token after the break carries [`Token::preceded_by_newline`];
 //! 2. the token before the break can end an expression — an identifier,
 //!    `self`, a literal, `)`, `]`, `}`, `?`, or `...` (see
-//!    [`ends_expression`]);
+//!    `ends_expression`);
 //! 3. the parser is at a point where continuing is optional: a postfix `(`,
 //!    `<` generic argument list, or `{` trailing closure, or a binary,
 //!    range, or assignment operator;
 //! 4. the parser is not inside a `(`, `[`, or `<` group (see
-//!    [`Parser::grouped`]). `{` is not such a group: the statements of a
+//!    `Parser::grouped`). `{` is not such a group: the statements of a
 //!    block do end at newlines.
 //!
 //! Two exceptions keep familiar code working. A line that starts with `.`
