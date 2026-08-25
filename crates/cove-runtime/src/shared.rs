@@ -32,7 +32,7 @@
 //! amendment picks a narrower, cheaper policy: `lock` rejects the one shape
 //! of cycle it can see for free — the cell ending up holding a handle to
 //! itself — and leaves everything wider as a documented, accepted leak. See
-//! [`Transfer::reaches`] and [`direct_cycle`].
+//! `Transfer::reaches` and `direct_cycle`.
 
 use std::fmt;
 use std::sync::atomic::{AtomicU64, Ordering};
