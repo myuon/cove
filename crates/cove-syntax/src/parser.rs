@@ -436,10 +436,7 @@ impl<'a> Parser<'a> {
     fn collect_doc(&mut self) -> Option<(String, Span)> {
         let mut lines: Vec<String> = Vec::new();
         let mut span: Option<Span> = None;
-        loop {
-            let TokenKind::DocComment(text) = self.peek() else {
-                break;
-            };
+        while let TokenKind::DocComment(text) = self.peek() {
             let text = text.clone();
             let line_span = self.span();
             span = Some(match span {
