@@ -1,0 +1,37 @@
+use console.println
+
+/// A node that reaches its own container, so a `Node` inside `next` is a
+/// cycle: the vector holds the struct, and the struct holds the vector.
+struct Node {
+  next: Vector<Node>
+}
+
+/// Builds and abandons `count` cycles, keeping one vector of its own that
+/// nothing else can reach, and reports what that vector still holds.
+///
+/// ADR 0008 runs this on a thread of its own and ADR 0011 gives that thread a
+/// heap of its own, so the collections this task runs touch nothing any other
+/// task owns. A collection that reached across the boundary would empty
+/// `kept`.
+fn churn(mark: Int, count: Int) -> Int {
+  var kept = Vector.of(mark, mark, mark)
+  var i = 0
+  while i < count {
+    var v: Vector<Node> = Vector.of()
+    v.push(Node(next: v))
+    i += 1
+  }
+  kept.length() * 100 + mark
+}
+
+/// Runs four tasks that collect at the same time, on heaps of their own.
+export fn main() -> Result<Unit, Error> {
+  scope tasks {
+    let a = tasks.spawn { churn(1, 500) }
+    let b = tasks.spawn { churn(2, 500) }
+    let c = tasks.spawn { churn(3, 500) }
+    let d = tasks.spawn { churn(4, 500) }
+    println("{a.await()} {b.await()} {c.await()} {d.await()}")?
+  }
+  Ok(())
+}

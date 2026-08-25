@@ -49,7 +49,8 @@ Hello, world!
 Implemented: lexer, parser, directory modules, `export` visibility, derived
 outlines and capability requirements, a deterministic formatter, a
 tree-walking interpreter, Host API dispatch with grant enforcement, task
-scopes, and runtime budgets for fuel, deadlines, and host calls with tracing.
+scopes with a thread per task, a per-task mark-and-sweep collector, and
+runtime budgets for fuel, deadlines, memory, and host calls with tracing.
 `cove trace` reads a recorded trace back and summarises it, and `cove replay`
 runs an entry again with every host answering from the trace, reporting a
 divergence when the program asks for something the trace does not have.

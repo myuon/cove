@@ -10,9 +10,10 @@
 //! What a summary reports is limited by what the events carry. ADR 0001 asks
 //! traces to distinguish CPU execution, I/O wait, allocation and memory
 //! pressure, host calls and capability use, task lifecycle, and cache hits
-//! and misses. Three of those have events today and three do not, and
+//! and misses. Four of those have events today and two do not, and
 //! [`render_summary`] says so rather than printing a zero that reads like a
-//! measurement.
+//! measurement. Allocation and memory pressure joined the four when ADR 0011
+//! added a collector for them to be measured by.
 
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
@@ -69,6 +70,22 @@ pub(crate) enum Event {
         function: String,
         cpu: Duration,
         wait: Duration,
+    },
+    HeapCollected {
+        task: Option<u64>,
+        allocated: u64,
+        freed: u64,
+        live_objects: u64,
+        live_bytes: u64,
+        pause: Duration,
+    },
+    HeapSummary {
+        allocated: u64,
+        allocated_bytes: u64,
+        collections: u64,
+        live_bytes: u64,
+        peak_bytes: u64,
+        pause: Duration,
     },
 }
 
@@ -287,6 +304,29 @@ fn parse_event(line: &str) -> Result<Event, String> {
             function: string_field(&json, "function")?,
             cpu: nanos_field(&json, "cpu_ns")?,
             wait: nanos_field(&json, "wait_ns")?,
+        }),
+        "heap_collected" => Ok(Event::HeapCollected {
+            task: match field(&json, "task")? {
+                Json::Null => None,
+                other => Some(
+                    other
+                        .as_u64()
+                        .ok_or_else(|| "`task` must be an integer or null".to_string())?,
+                ),
+            },
+            allocated: u64_field(&json, "allocated")?,
+            freed: u64_field(&json, "freed")?,
+            live_objects: u64_field(&json, "live_objects")?,
+            live_bytes: u64_field(&json, "live_bytes")?,
+            pause: nanos_field(&json, "pause_ns")?,
+        }),
+        "heap_summary" => Ok(Event::HeapSummary {
+            allocated: u64_field(&json, "allocated")?,
+            allocated_bytes: u64_field(&json, "allocated_bytes")?,
+            collections: u64_field(&json, "collections")?,
+            live_bytes: u64_field(&json, "live_bytes")?,
+            peak_bytes: u64_field(&json, "peak_bytes")?,
+            pause: nanos_field(&json, "pause_ns")?,
         }),
         other => Err(format!(
             "unknown event `{other}`; this build of `cove` reads trace format version {TRACE_FORMAT_VERSION}"
@@ -605,6 +645,15 @@ impl Schema {
     }
 }
 
+/// What a run's `heap_summary` event carried.
+struct HeapTotals {
+    allocated: u64,
+    allocated_bytes: u64,
+    live_bytes: u64,
+    peak_bytes: u64,
+    pause: Duration,
+}
+
 /// Counts of the calls one capability accounts for.
 #[derive(Default)]
 struct CapabilityCounts {
@@ -656,6 +705,9 @@ pub(crate) fn render_summary(path: &Path, trace: &Trace) -> String {
     let mut unknown = Vec::new();
     let (mut dispatched, mut refused, mut irreversible) = (0usize, 0usize, 0usize);
     let mut wait_total = Duration::ZERO;
+    let (mut collections, mut collected_allocated, mut freed_objects) = (0usize, 0u64, 0u64);
+    let mut collected_by: BTreeMap<Option<u64>, usize> = BTreeMap::new();
+    let mut heap: Option<HeapTotals> = None;
     for event in &trace.events {
         match event {
             Event::TaskSpawned { .. } => spawned += 1,
@@ -664,6 +716,33 @@ pub(crate) fn render_summary(path: &Path, trace: &Trace) -> String {
                 task_cpu += *cpu;
             }
             Event::TaskCancelled { .. } => cancelled += 1,
+            Event::HeapCollected {
+                task,
+                allocated,
+                freed,
+                ..
+            } => {
+                collections += 1;
+                collected_allocated += allocated;
+                freed_objects += freed;
+                *collected_by.entry(*task).or_default() += 1;
+            }
+            Event::HeapSummary {
+                allocated,
+                allocated_bytes,
+                live_bytes,
+                peak_bytes,
+                pause,
+                ..
+            } => {
+                heap = Some(HeapTotals {
+                    allocated: *allocated,
+                    allocated_bytes: *allocated_bytes,
+                    live_bytes: *live_bytes,
+                    peak_bytes: *peak_bytes,
+                    pause: *pause,
+                });
+            }
             Event::EntryEnter { .. } => {}
             Event::EntryExit {
                 module,
@@ -727,6 +806,27 @@ pub(crate) fn render_summary(path: &Path, trace: &Trace) -> String {
         out,
         "  irreversible {irreversible} of the {dispatched} dispatched calls cannot be taken back"
     );
+    match &heap {
+        Some(totals) => {
+            let _ = writeln!(
+                out,
+                "  heap         {} object(s) allocated in {} bytes, {} live at the end, peak {}",
+                totals.allocated, totals.allocated_bytes, totals.live_bytes, totals.peak_bytes
+            );
+            let _ = writeln!(
+                out,
+                "  collections  {collections} over {} heap(s), {freed_objects} object(s) reclaimed of {collected_allocated} allocated between them, pause {}",
+                collected_by.len(),
+                pretty(totals.pause)
+            );
+        }
+        None => {
+            let _ = writeln!(
+                out,
+                "  heap         no `heap_summary` event, so this trace says nothing about memory"
+            );
+        }
+    }
     if !unknown.is_empty() {
         let _ = writeln!(
             out,
@@ -756,7 +856,6 @@ pub(crate) fn render_summary(path: &Path, trace: &Trace) -> String {
 
     out.push_str(
         "\nnot carried by these events\n\
-         \x20 allocation and memory pressure   no event records either\n\
          \x20 task suspension and resumption   only spawn, completion, and cancellation are recorded\n\
          \x20 cache hits and misses            no event records either\n\
          \x20 which task made a host call      `host_call` carries no task id\n",
@@ -796,6 +895,38 @@ pub(crate) fn render_timeline(trace: &Trace, filter: &Filter) -> String {
             }
             Event::TaskCompleted { id, cpu } => {
                 let _ = writeln!(out, "{at:>4}  task_completed  {id}, cpu {}", pretty(*cpu));
+            }
+            Event::HeapCollected {
+                task,
+                allocated,
+                freed,
+                live_objects,
+                live_bytes,
+                pause,
+            } => {
+                let whose = match task {
+                    Some(id) => format!("task {id}"),
+                    None => "the entry".to_string(),
+                };
+                let _ = writeln!(
+                    out,
+                    "{at:>4}  heap_collected  {whose}: {allocated} allocated, {freed} freed, {live_objects} live in {live_bytes} bytes, pause {}",
+                    pretty(*pause)
+                );
+            }
+            Event::HeapSummary {
+                allocated,
+                allocated_bytes,
+                collections,
+                live_bytes,
+                peak_bytes,
+                pause,
+            } => {
+                let _ = writeln!(
+                    out,
+                    "{at:>4}  heap_summary    {allocated} allocated in {allocated_bytes} bytes, {collections} collection(s), {live_bytes} live, peak {peak_bytes}, pause {}",
+                    pretty(*pause)
+                );
             }
             Event::TaskCancelled { id } => {
                 let _ = writeln!(out, "{at:>4}  task_cancelled  {id}");
@@ -873,10 +1004,13 @@ impl Filter {
                 Event::HostCall(call) => &call.capability == name,
                 _ => false,
             },
+            // A collection belongs to the task whose heap it swept, and that
+            // task's id is the one thing this event does carry.
             Filter::Task(wanted) => match event {
                 Event::TaskSpawned { id, .. }
                 | Event::TaskCompleted { id, .. }
                 | Event::TaskCancelled { id } => id == wanted,
+                Event::HeapCollected { task: Some(id), .. } => id == wanted,
                 _ => false,
             },
         }
@@ -1115,13 +1249,73 @@ mod tests {
     fn the_summary_says_which_distinctions_the_events_do_not_carry() {
         let text = render_summary(Path::new("t.jsonl"), &example_trace());
         for missing in [
-            "allocation and memory pressure",
             "task suspension and resumption",
             "cache hits and misses",
             "which task made a host call",
         ] {
             assert!(text.contains(missing), "{missing} is not reported: {text}");
         }
+        // ADR 0011 added the events for this one, so it left the list.
+        assert!(!text.contains("allocation and memory pressure"), "{text}");
+    }
+
+    /// A trace with no `heap_summary` says so, rather than printing zeroes
+    /// that would read as "this run allocated nothing".
+    #[test]
+    fn a_trace_without_a_heap_summary_says_it_carries_no_memory_figures() {
+        let text = render_summary(Path::new("t.jsonl"), &example_trace());
+        assert!(text.contains("no `heap_summary` event"), "{text}");
+    }
+
+    #[test]
+    fn the_summary_reports_allocation_collections_and_the_live_heap() {
+        let trace = read(&[
+            HEADER,
+            r#"{"event":"heap_collected","task":1,"allocated":40,"freed":36,"live_objects":4,"live_bytes":512,"pause_ns":9000}"#,
+            r#"{"event":"heap_collected","task":2,"allocated":24,"freed":24,"live_objects":0,"live_bytes":0,"pause_ns":3000}"#,
+            r#"{"event":"heap_summary","allocated":64,"allocated_bytes":4096,"collections":2,"live_bytes":512,"peak_bytes":900,"pause_ns":12000}"#,
+        ]);
+        let text = render_summary(Path::new("t.jsonl"), &trace);
+        assert!(
+            text.contains(
+                "heap         64 object(s) allocated in 4096 bytes, 512 live at the end, peak 900"
+            ),
+            "{text}"
+        );
+        // Two heaps were collected, which is what a run with tasks looks like.
+        assert!(
+            text.contains(
+                "collections  2 over 2 heap(s), 60 object(s) reclaimed of 64 allocated between them"
+            ),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn the_timeline_shows_a_collection_and_the_run_s_heap_summary() {
+        let trace = read(&[
+            HEADER,
+            r#"{"event":"heap_collected","task":2,"allocated":64,"freed":60,"live_objects":4,"live_bytes":512,"pause_ns":9000}"#,
+            r#"{"event":"heap_summary","allocated":64,"allocated_bytes":4096,"collections":1,"live_bytes":512,"peak_bytes":900,"pause_ns":9000}"#,
+        ]);
+        let text = render_timeline(&trace, &Filter::All);
+        assert!(
+            text.contains("heap_collected  task 2: 64 allocated, 60 freed, 4 live in 512 bytes"),
+            "{text}"
+        );
+        assert!(
+            text.contains("heap_summary    64 allocated in 4096 bytes, 1 collection(s)"),
+            "{text}"
+        );
+        // A collection belongs to a task, so a task filter keeps it.
+        assert!(
+            render_timeline(&trace, &Filter::Task(2)).contains("heap_collected"),
+            "{text}"
+        );
+        assert!(
+            !render_timeline(&trace, &Filter::Task(1)).contains("heap_collected"),
+            "{text}"
+        );
     }
 
     #[test]

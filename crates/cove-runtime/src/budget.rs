@@ -8,6 +8,7 @@
 //! loop back edges, calls, and `await` — rather than at arbitrary points, so
 //! the cost of enforcement is bounded and predictable.
 
+use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -44,6 +45,16 @@ pub struct Limits {
     pub max_host_calls: Option<u64>,
     /// The deepest a call may nest before it is stopped.
     pub max_call_depth: Option<usize>,
+    /// The bytes a run's live heaps may hold before it is stopped.
+    ///
+    /// ADR 0001 lists memory alongside CPU and time, and ADR 0003 could not
+    /// implement it because nothing accounted for allocation. The collector
+    /// added by ADR 0011 does, so this is checked the way fuel is: at a
+    /// safepoint, against what the most recent collection measured. Like fuel
+    /// and host calls, it bounds the *run*: each task reports its own heap and
+    /// the budget compares their sum, so a run cannot stay under the limit by
+    /// spreading the same memory over more tasks.
+    pub max_memory: Option<u64>,
 }
 
 /// Why execution was stopped.
@@ -59,6 +70,8 @@ pub enum Stopped {
     CallDepth,
     /// The host-call limit was exceeded.
     HostCalls,
+    /// The live heaps grew past the memory budget.
+    Memory,
 }
 
 /// A cancellation flag shared with whoever may cancel the run.
@@ -108,6 +121,14 @@ pub struct Budget {
     fuel_spent: u64,
     host_calls: u64,
     safepoints_since_deadline_check: u64,
+    /// What each task's heap measured as live at its most recent collection,
+    /// keyed by task id, with zero for the entry's own.
+    ///
+    /// A heap is measured by the thread that owns it, so the run's live total
+    /// is the sum of the latest report from each. An entry is dropped when a
+    /// task's heap is retired, so a finished task stops counting against a
+    /// run that outlives it.
+    live: BTreeMap<u64, u64>,
 }
 
 impl Budget {
@@ -126,6 +147,7 @@ impl Budget {
             fuel_spent: 0,
             host_calls: 0,
             safepoints_since_deadline_check: 0,
+            live: BTreeMap::new(),
         }
     }
 
@@ -186,6 +208,28 @@ impl Budget {
         Ok(())
     }
 
+    /// Records what `task`'s heap measured as live, and checks the run's
+    /// total against the memory budget. The interpreter calls this after every
+    /// collection.
+    pub fn charge_memory(&mut self, task: u64, live_bytes: u64) -> Result<(), Stopped> {
+        self.live.insert(task, live_bytes);
+        match self.limits.max_memory {
+            Some(limit) if self.live_bytes() > limit => Err(Stopped::Memory),
+            _ => Ok(()),
+        }
+    }
+
+    /// Forgets `task`'s heap, which has gone with its thread.
+    pub fn release_memory(&mut self, task: u64) {
+        self.live.remove(&task);
+    }
+
+    /// The live heaps of every task that has reported one, summed: what the
+    /// memory budget bounds, and what a stop reports.
+    pub fn live_bytes(&self) -> u64 {
+        self.live.values().sum()
+    }
+
     /// Total fuel spent so far, for reporting.
     pub fn fuel_spent(&self) -> u64 {
         self.fuel_spent
@@ -224,6 +268,11 @@ impl Budget {
                 "execution stopped: host-call limit of {} exceeded",
                 self.limits.max_host_calls.unwrap_or_default()
             ),
+            Stopped::Memory => format!(
+                "execution stopped: memory budget of {} bytes exceeded, with {} bytes live after collection",
+                self.limits.max_memory.unwrap_or_default(),
+                self.live_bytes(),
+            ),
         };
         RuntimeError::new(message).with_rule(RULE)
     }
@@ -241,6 +290,7 @@ impl From<Stopped> for RuntimeError {
             Stopped::Cancelled => "execution stopped: the run was cancelled",
             Stopped::CallDepth => "execution stopped: call-depth limit exceeded",
             Stopped::HostCalls => "execution stopped: host-call limit exceeded",
+            Stopped::Memory => "execution stopped: memory budget exceeded",
         };
         RuntimeError::new(message).with_rule(RULE)
     }
@@ -355,6 +405,74 @@ mod tests {
         let mut budget = Budget::with_cancellation(Limits::default(), cancellation.clone());
         cancellation.cancel();
         assert_eq!(budget.charge_host_call(), Err(Stopped::Cancelled));
+    }
+
+    #[test]
+    fn memory_limit_fires_when_the_live_heaps_are_larger() {
+        let mut budget = Budget::new(Limits {
+            max_memory: Some(1_000),
+            ..Limits::default()
+        });
+        assert_eq!(budget.charge_memory(0, 999), Ok(()));
+        assert_eq!(budget.charge_memory(0, 1_000), Ok(()));
+        assert_eq!(budget.charge_memory(0, 1_001), Err(Stopped::Memory));
+        assert_eq!(budget.live_bytes(), 1_001);
+    }
+
+    /// Memory is a budget for the run, so two tasks that each stay under the
+    /// limit but together exceed it stop the run — the same way their fuel is
+    /// drawn from one budget rather than one each.
+    #[test]
+    fn a_run_cannot_stay_under_the_limit_by_spreading_it_over_tasks() {
+        let mut budget = Budget::new(Limits {
+            max_memory: Some(1_000),
+            ..Limits::default()
+        });
+        assert_eq!(budget.charge_memory(1, 600), Ok(()));
+        assert_eq!(budget.charge_memory(2, 600), Err(Stopped::Memory));
+        // A task whose heap has gone stops counting against the run.
+        budget.release_memory(2);
+        assert_eq!(budget.live_bytes(), 600);
+        assert_eq!(budget.charge_memory(3, 300), Ok(()));
+    }
+
+    /// A later report from the same task replaces its earlier one rather than
+    /// adding to it: a heap has one live set, not a history of them.
+    #[test]
+    fn a_task_s_latest_measurement_replaces_its_previous_one() {
+        let mut budget = Budget::new(Limits::default());
+        assert_eq!(budget.charge_memory(1, 500), Ok(()));
+        assert_eq!(budget.charge_memory(1, 200), Ok(()));
+        assert_eq!(budget.live_bytes(), 200);
+    }
+
+    #[test]
+    fn memory_limit_absent_never_stops() {
+        let mut budget = Budget::new(Limits::default());
+        assert_eq!(budget.charge_memory(0, u64::MAX), Ok(()));
+    }
+
+    /// The memory diagnostic has the same shape as the fuel one: it names the
+    /// limit that was configured, and cites the rule.
+    #[test]
+    fn the_memory_diagnostic_names_the_limit_and_the_measurement() {
+        let mut budget = Budget::new(Limits {
+            max_memory: Some(4_096),
+            ..Limits::default()
+        });
+        assert_eq!(budget.charge_memory(0, 9_000), Err(Stopped::Memory));
+        let error = budget.to_runtime_error(Stopped::Memory);
+        assert!(
+            error.message.contains("memory budget of 4096 bytes"),
+            "{}",
+            error.message
+        );
+        assert!(
+            error.message.contains("9000 bytes live"),
+            "{}",
+            error.message
+        );
+        assert!(error.rule.is_some());
     }
 
     #[test]

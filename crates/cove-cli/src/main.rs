@@ -14,8 +14,8 @@ use cove_runtime::embed::{register_hosts, HostSetup};
 use cove_runtime::host::HostRegistry;
 use cove_runtime::interp::Interpreter;
 use cove_runtime::{
-    create_trace_file, Budget, Cancellation, JsonlSink, Limits, NullSink, Runtime, TraceEvent,
-    TraceHeader, TraceSink, ValueCapture,
+    create_trace_file, Budget, Cancellation, HeapStats, JsonlSink, Limits, NullSink, Runtime,
+    TraceEvent, TraceHeader, TraceSink, ValueCapture,
 };
 use cove_sema::config::RunConfig;
 use cove_sema::package::Package;
@@ -125,7 +125,8 @@ literal `--` is a program argument, even if it looks like a flag):
   --max-host-calls <n>  stop the run after <n> host calls
   --trace <path>        write a JSONL trace to <path>, or `-` for stderr
   --trace-values <mode> `full` (the default) records each host call's arguments and result, which is what `cove replay` needs; `redacted` records only their types
-  --stats               print fuel spent, host calls, irreversible writes, elapsed time, and host-call wait to stderr
+  --max-memory <bytes>  stop the run when its tasks' live heaps hold more than <bytes> after a collection
+  --stats               print fuel spent, host calls, irreversible writes, elapsed time, host-call wait, and the heap to stderr
   --files-root <path>   the one directory the `files` host may reach; defaults to `files/` in the package
   --allow-exec <path>   an absolute path `process.run` may start; repeat to allow more, and omit to allow none
 ";
@@ -989,6 +990,7 @@ pub(crate) fn execute_entry(
         deadline: flags.deadline.or(run.deadline),
         max_host_calls: flags.max_host_calls.or(run.max_host_calls),
         max_call_depth: None,
+        max_memory: flags.max_memory.or(run.max_memory),
     };
     // The interpreter checks this budget at its own safepoints (loop back
     // edges, calls, `await`); see `RunFlags` below for why the handle is not
@@ -1055,10 +1057,12 @@ pub(crate) fn execute_entry(
 
     let runtime =
         Runtime::new(Arc::clone(program), Arc::clone(sources), Arc::new(hosts)).with_trace(sink);
-    let outcome = Interpreter::new(&runtime).run_entry(module, entry, program_args);
+    let mut interpreter = Interpreter::new(&runtime);
+    let outcome = interpreter.run_entry(module, entry, program_args);
+    let heap = interpreter.heap_stats();
 
     if flags.stats {
-        print_stats(runtime.hosts(), &wait_total);
+        print_stats(runtime.hosts(), &wait_total, &heap);
     }
 
     outcome.map_err(ExecuteError::Runtime)
@@ -1085,6 +1089,8 @@ pub(crate) struct RunFlags {
     fuel: Option<u64>,
     deadline: Option<Duration>,
     max_host_calls: Option<u64>,
+    /// The bytes the run's live heaps may hold before it is stopped.
+    max_memory: Option<u64>,
     trace: Option<TraceTarget>,
     /// How much of each host call the trace records.
     trace_values: ValueCapture,
@@ -1106,6 +1112,7 @@ impl RunFlags {
             fuel: None,
             deadline: None,
             max_host_calls: None,
+            max_memory: None,
             trace: None,
             trace_values: ValueCapture::Full,
             stats: false,
@@ -1143,6 +1150,7 @@ fn parse_run_flags(args: &[String]) -> Result<RunFlags, CliError> {
         fuel: None,
         deadline: None,
         max_host_calls: None,
+        max_memory: None,
         trace: None,
         trace_values: ValueCapture::Full,
         stats: false,
@@ -1180,6 +1188,14 @@ fn parse_run_flags(args: &[String]) -> Result<RunFlags, CliError> {
                 flags.max_host_calls = Some(value.parse().map_err(|_| {
                     CliError::Message(format!(
                         "`--max-host-calls` must be a non-negative integer, found `{value}`"
+                    ))
+                })?);
+            }
+            "--max-memory" => {
+                let value = flag_value(args, &mut i, "--max-memory")?;
+                flags.max_memory = Some(value.parse().map_err(|_| {
+                    CliError::Message(format!(
+                        "`--max-memory` must be a non-negative integer number of bytes, found `{value}`"
                     ))
                 })?);
             }
@@ -1304,12 +1320,17 @@ impl TraceSink for CompositeSink {
     }
 }
 
-/// Prints fuel spent, host calls, elapsed time, and host-call wait to
-/// stderr, for `--stats`.
+/// Prints fuel spent, host calls, elapsed time, host-call wait, and the heap
+/// to stderr, for `--stats`.
 ///
 /// `irreversible_writes` is the count of calls whose Host API schema declares
-/// them irreversible: how much of what this run did cannot be taken back.
-fn print_stats(hosts: &HostRegistry, wait_total: &WaitTotal) {
+/// them irreversible: how much of what this run did cannot be taken back. The
+/// heap figures are what ADR 0011 asks a run to be able to report: how much
+/// every task allocated, how often their heaps were collected, how much is
+/// live, and how long tasks were stopped for. `pause` is summed over threads,
+/// so a run whose tasks collected at the same time can report more pause than
+/// it took wall-clock time.
+fn print_stats(hosts: &HostRegistry, wait_total: &WaitTotal, heap: &HeapStats) {
     let counters =
         hosts.with_budget(|budget| (budget.fuel_spent(), budget.host_calls(), budget.elapsed()));
     if let Some((fuel_spent, host_calls, elapsed)) = counters {
@@ -1322,6 +1343,16 @@ fn print_stats(hosts: &HostRegistry, wait_total: &WaitTotal) {
             wait_total.get(),
         );
     }
+    eprintln!(
+        "heap: allocated={} allocated_bytes={} collections={} freed={} live_bytes={} peak_bytes={} pause={:?}",
+        heap.allocated_objects,
+        heap.allocated_bytes,
+        heap.collections,
+        heap.freed_objects,
+        heap.live_bytes,
+        heap.peak_bytes,
+        heap.pause,
+    );
 }
 
 /// An entry returning `Err(...)` fails the run and prints the error.

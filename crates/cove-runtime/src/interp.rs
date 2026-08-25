@@ -32,11 +32,12 @@ use cove_syntax::ast::{
 use crate::budget::{Cancellation, Stopped};
 use crate::builtins::{self, Callable};
 use crate::error::RuntimeError;
+use crate::heap::{Collection, Heap, HeapStats, Roots};
 use crate::host::HostRegistry;
 use crate::runtime::Runtime;
 use crate::task::{Task, TaskOutcome, TaskScope, TaskState, Transfer};
 use crate::trace::{Timing, TraceEvent};
-use crate::value::{Closure, DynValue, EnumValue, RangeBounds, StructValue, Value, VectorStorage};
+use crate::value::{Closure, DynValue, EnumValue, RangeBounds, StructValue, Value};
 
 /// How deep Cove calls may nest before the runtime reports a limit instead of
 /// exhausting the host stack.
@@ -60,6 +61,23 @@ const MAX_CALL_DEPTH: usize = 256;
 /// non-terminating loop or an unbounded recursion, and nothing more precise
 /// than that is claimed.
 const SAFEPOINT_FUEL: u64 = 10;
+
+/// How many safepoints pass between forced collections when a memory budget
+/// is set.
+///
+/// Allocating a collectable object is what ordinarily schedules a collection,
+/// and a task that allocates none never pays for one. A memory budget has to
+/// hold anyway: a program can grow its live set by appending to a string or to
+/// one vector it already owns, allocating no object at all. So a run with a
+/// budget measures on a schedule as well, which is the cost of asking for the
+/// bound.
+const MEMORY_CHECK_INTERVAL: u64 = 1_024;
+
+/// The task id a heap reports under when it is the entry's own.
+///
+/// The entry is not a spawned task and has no id of its own, so it takes the
+/// one id [`Runtime::next_task_id`] never hands out.
+const ENTRY_TASK: u64 = 0;
 
 /// Non-local control flow raised while evaluating an expression.
 enum Control {
@@ -183,33 +201,68 @@ impl Place {
     }
 }
 
+/// One block scope: the bindings declared in it, and where they begin in this
+/// thread's root list.
+struct Scope {
+    bindings: Vec<(Rc<str>, Place)>,
+    roots_mark: usize,
+}
+
 /// One lexical environment: the module a body resolves names in, and a stack
 /// of block scopes holding places.
+///
+/// Every binding an environment declares is registered in its interpreter's
+/// [`Roots`], and leaving a block — or dropping the whole environment when a
+/// call returns — truncates that list back to where the scope began. The
+/// collector's roots are therefore the environment chain itself, which is what
+/// ADR 0011 means by "the roots are the interpreter's own structures": there is
+/// no machine stack to map, because nothing a Cove binding names lives anywhere
+/// but here.
+///
+/// The list belongs to one interpreter, and ADR 0008 gives each task an
+/// interpreter of its own, so these are one task's roots and no others'.
 struct Env {
     module: Rc<str>,
-    scopes: Vec<Vec<(Rc<str>, Place)>>,
+    scopes: Vec<Scope>,
+    roots: Rc<RefCell<Roots>>,
+    /// Where this environment's own bindings begin in `roots`.
+    base: usize,
 }
 
 impl Env {
-    fn new(module: Rc<str>) -> Env {
+    fn new(module: Rc<str>, roots: Rc<RefCell<Roots>>) -> Env {
+        let base = roots.borrow().len();
         Env {
             module,
-            scopes: vec![Vec::new()],
+            scopes: vec![Scope {
+                bindings: Vec::new(),
+                roots_mark: base,
+            }],
+            roots,
+            base,
         }
     }
 
     fn push(&mut self) {
-        self.scopes.push(Vec::new());
+        let roots_mark = self.roots.borrow().len();
+        self.scopes.push(Scope {
+            bindings: Vec::new(),
+            roots_mark,
+        });
     }
 
     fn pop(&mut self) {
-        self.scopes.pop();
+        if let Some(scope) = self.scopes.pop() {
+            self.roots.borrow_mut().truncate(scope.roots_mark);
+        }
     }
 
     fn declare(&mut self, name: Rc<str>, place: Place) {
+        self.roots.borrow_mut().push(place.slot.clone());
         self.scopes
             .last_mut()
             .expect("an environment always has one scope")
+            .bindings
             .push((name, place));
     }
 
@@ -217,7 +270,7 @@ impl Env {
         self.scopes
             .iter()
             .rev()
-            .find_map(|scope| scope.iter().rev().find(|(n, _)| &**n == name))
+            .find_map(|scope| scope.bindings.iter().rev().find(|(n, _)| &**n == name))
             .map(|(_, place)| place)
     }
 
@@ -233,7 +286,7 @@ impl Env {
     ) -> Result<Vec<(Rc<str>, Value)>, RuntimeError> {
         let mut captured: Vec<(Rc<str>, Value)> = Vec::new();
         for scope in &self.scopes {
-            for (name, place) in scope {
+            for (name, place) in &scope.bindings {
                 if !mentioned.contains(&**name) {
                     continue;
                 }
@@ -245,6 +298,16 @@ impl Env {
             }
         }
         Ok(captured)
+    }
+}
+
+/// An environment's bindings leave the root set with the environment, so a
+/// call that returns — by any path, including an error — takes its own
+/// bindings out of the collector's reach at the same moment the program loses
+/// them.
+impl Drop for Env {
+    fn drop(&mut self) {
+        self.roots.borrow_mut().truncate(self.base);
     }
 }
 
@@ -318,6 +381,20 @@ pub struct Interpreter<'a> {
     /// stack of its own, which is what makes one task's CPU work and
     /// another's wait separately attributable.
     timings: Vec<Timing>,
+    /// Every binding every live environment on this thread has declared, in
+    /// declaration order. This is the list a collection walks; see [`Env`] for
+    /// how it stays in step with the environment chain.
+    roots: Rc<RefCell<Roots>>,
+    /// This task's heap.
+    ///
+    /// ADR 0011: a value belongs to one task or is immutable and shared, so a
+    /// task's objects are its own. ADR 0008 gives each task a thread, so this
+    /// heap is reached only from the thread that owns it: a collection needs
+    /// no safepoint from any other task and takes no lock.
+    heap: Heap,
+    /// Safepoints passed since the last collection, for the scheduled
+    /// measurement a memory budget needs.
+    safepoints_since_collection: u64,
     /// Where the most recent assertion failed, and the message it produced.
     ///
     /// A failed assertion is an ordinary `Err`, which carries a message and
@@ -343,8 +420,112 @@ impl<'a> Interpreter<'a> {
             cancellation: None,
             task_stack: Vec::new(),
             timings: Vec::new(),
+            roots: Rc::new(RefCell::new(Roots::new())),
+            heap: Heap::new(),
+            safepoints_since_collection: 0,
             assertion_failure: None,
         }
+    }
+
+    /// The task whose heap this interpreter owns: the spawned task's id, or
+    /// [`ENTRY_TASK`] when this interpreter is running the entry.
+    fn task_id(&self) -> u64 {
+        self.task_stack.last().copied().unwrap_or(ENTRY_TASK)
+    }
+
+    /// What this run's heaps have done so far: allocation, collections, live
+    /// heap, peak live heap, and total pause.
+    ///
+    /// The counters come from every heap retired so far, folded into the
+    /// [`Runtime`] as each task's thread ended. The live figures come from
+    /// this interpreter's own heap, which at the end of a run is the only one
+    /// left: every task's heap went with its thread, and summing what those
+    /// last measured would report memory that no longer exists.
+    pub fn heap_stats(&self) -> HeapStats {
+        let mut stats = self.runtime.heap_stats();
+        let mine = self.heap.stats();
+        stats.live_bytes = mine.live_bytes;
+        stats.live_objects = mine.live_objects;
+        stats
+    }
+
+    /// Allocates growable vector storage in this task's heap.
+    ///
+    /// Every `Vector` a Cove program can reach is created here, which is what
+    /// makes the heap's table of objects complete.
+    pub fn allocate_vector(&mut self, elements: Vec<Value>) -> Value {
+        Value::Vector(self.heap.allocate(elements))
+    }
+
+    /// Marks and sweeps this task's heap, and records what it did.
+    ///
+    /// The interpreter calls this at safepoints; a host may call it directly
+    /// to observe the heap at a chosen moment.
+    pub fn collect(&mut self) -> Collection {
+        let roots = Rc::clone(&self.roots);
+        let collected = {
+            let roots = roots.borrow();
+            self.heap.collect(&roots)
+        };
+        self.safepoints_since_collection = 0;
+        self.runtime.trace(TraceEvent::HeapCollected {
+            task: self.task_stack.last().copied(),
+            allocated: collected.allocated,
+            freed: collected.freed_objects,
+            live_objects: collected.live_objects,
+            live_bytes: collected.live_bytes,
+            pause: collected.pause,
+        });
+        collected
+    }
+
+    /// Collects when enough has been allocated to be worth it, or when a
+    /// memory budget makes the measurement due, and stops the run if the live
+    /// heaps are over that budget.
+    fn collect_if_due(&mut self, span: Span) -> Result<(), RuntimeError> {
+        self.safepoints_since_collection += 1;
+        let bounded = self
+            .hosts
+            .with_budget(|budget| budget.limits().max_memory.is_some())
+            .unwrap_or(false);
+        let due = self.heap.should_collect()
+            || (bounded && self.safepoints_since_collection >= MEMORY_CHECK_INTERVAL);
+        if !due {
+            return Ok(());
+        }
+        let live_bytes = self.collect().live_bytes;
+        let task = self.task_id();
+        if let Some(Err(error)) = self.hosts.with_budget(|budget| {
+            budget
+                .charge_memory(task, live_bytes)
+                .map_err(|stopped| budget.to_runtime_error(stopped))
+        }) {
+            return Err(error.at(span));
+        }
+        Ok(())
+    }
+
+    /// Ends this task's heap and folds what it did into the run's totals.
+    ///
+    /// One last collection runs first. A heap dies with the thread that owns
+    /// it, and a `Weak` table dropped without a sweep takes nothing with it —
+    /// so a task that ends while a cycle it built is still in scope would
+    /// leave that cycle behind, which is the one thing this collector exists
+    /// to prevent. By the time this runs, every environment on this thread
+    /// has dropped and the roots are empty, so the only thing left to survive
+    /// is what the value the task produced still holds; the reference counts
+    /// find that, as they find any other value the collector cannot read.
+    ///
+    /// Afterwards the run's memory budget stops counting this heap: a task
+    /// that has finished holds nothing.
+    fn retire_heap(&mut self) {
+        if !self.heap.is_empty() {
+            self.collect();
+        }
+        let task = self.task_id();
+        self.hosts.with_budget(|budget| budget.release_memory(task));
+        let stats = self.heap.take_stats();
+        self.runtime.retire_heap(&stats);
     }
 
     /// Where the most recent failed assertion was written, together with the
@@ -454,6 +635,19 @@ impl<'a> Interpreter<'a> {
             function: name.to_string(),
             cpu: timing.cpu(),
             wait: timing.wait(),
+        });
+        // Every task's thread has been joined by now — leaving a scope waits
+        // for or cancels its children — so every heap but this one has been
+        // retired and the totals are complete.
+        self.retire_heap();
+        let heap = self.heap_stats();
+        self.runtime.trace(TraceEvent::HeapSummary {
+            allocated: heap.allocated_objects,
+            allocated_bytes: heap.allocated_bytes,
+            collections: heap.collections,
+            live_bytes: heap.live_bytes,
+            peak_bytes: heap.peak_bytes,
+            pause: heap.pause,
         });
 
         outcome
@@ -682,7 +876,7 @@ impl<'a> Interpreter<'a> {
         }) {
             return Err(error.at(span));
         }
-        Ok(())
+        self.collect_if_due(span)
     }
 
     /// Records `wait` against every active [`Timing`] context, so a trace can
@@ -771,7 +965,7 @@ impl<'a> Interpreter<'a> {
         args: Vec<EvaluatedArg>,
         span: Span,
     ) -> Result<Value, RuntimeError> {
-        let mut env = Env::new(target.module.clone());
+        let mut env = Env::new(target.module.clone(), Rc::clone(&self.roots));
         for (name, value) in target.captures {
             env.declare(name.clone(), Place::binding(value.clone(), false));
         }
@@ -2099,7 +2293,9 @@ impl<'a> Interpreter<'a> {
                         if builtins::is_builtin_type(head) {
                             let args = self.eval_args(env, args, trailing)?;
                             let values = plain_values(args, &format!("{head}.{}", name.node))?;
-                            return Ok(builtins::call_associated(head, &name.node, values, span)?);
+                            return Ok(builtins::call_associated(
+                                self, head, &name.node, values, span,
+                            )?);
                         }
                     }
                 }
@@ -2550,7 +2746,7 @@ impl<'a> Interpreter<'a> {
                 for item in &elements {
                     snapshotted.push(self.snapshot(item, span)?);
                 }
-                Ok(Value::Vector(VectorStorage::new(snapshotted)))
+                Ok(self.allocate_vector(snapshotted))
             }
             Value::Dyn(wrapped) => Ok(Value::Dyn(Rc::new(DynValue {
                 trait_name: wrapped.trait_name.clone(),
@@ -2595,6 +2791,10 @@ impl<'a> Interpreter<'a> {
 }
 
 impl Callable for Interpreter<'_> {
+    fn allocate_vector(&mut self, elements: Vec<Value>) -> Value {
+        Interpreter::allocate_vector(self, elements)
+    }
+
     fn call_value(
         &mut self,
         callee: &Value,
@@ -3086,6 +3286,10 @@ fn run_task(
         .timings
         .pop()
         .expect("a task pushes exactly the one timing it pops");
+    // This task's heap ends with this thread. What it did joins the run's
+    // totals, and what it was holding stops counting against the run's memory
+    // budget, before the value it produced crosses back.
+    interpreter.retire_heap();
     // A task stopped by its own cancellation did not run to completion, so it
     // is traced as cancelled — by whoever waits for it, which is the only
     // place that knows it stopped rather than finished — and not here.
@@ -3310,6 +3514,7 @@ mod tests {
 
     use crate::budget::{Budget, Limits};
     use crate::host::{Console, Documents, Env as EnvHost, Grants, HostRegistry};
+    use crate::trace::TraceSink;
 
     /// A `console` sink the tests can read back.
     ///
@@ -6483,5 +6688,452 @@ export fn main() -> Result<Unit, Error> {
 
         assert_eq!(buffer.text(), "5 words\n");
         assert_eq!(value.to_string(), "Ok(())");
+    }
+
+    // ------------------------------------------------- garbage collection
+
+    /// A sink that keeps every event, so a test can assert on what a run
+    /// recorded rather than on how it was formatted.
+    ///
+    /// Task threads record through the same sink as the entry, so this is
+    /// shared and locked exactly as the real ones are.
+    #[derive(Clone, Default)]
+    struct Recorder(Arc<Mutex<Vec<TraceEvent>>>);
+
+    impl TraceSink for Recorder {
+        fn record(&self, event: TraceEvent) {
+            self.0
+                .lock()
+                .expect("no test panics while tracing")
+                .push(event);
+        }
+    }
+
+    impl Recorder {
+        fn events(&self) -> Vec<TraceEvent> {
+            self.0.lock().expect("no test panics while tracing").clone()
+        }
+    }
+
+    /// One run, together with what its heaps did.
+    struct HeapRun {
+        value: Result<Value, RuntimeError>,
+        output: String,
+        events: Vec<TraceEvent>,
+        stats: HeapStats,
+    }
+
+    impl HeapRun {
+        /// Every collection the run recorded, as `(task, allocated, freed)`.
+        fn collections(&self) -> Vec<(Option<u64>, u64, u64)> {
+            self.events
+                .iter()
+                .filter_map(|event| match event {
+                    TraceEvent::HeapCollected {
+                        task,
+                        allocated,
+                        freed,
+                        ..
+                    } => Some((*task, *allocated, *freed)),
+                    _ => None,
+                })
+                .collect()
+        }
+
+        /// The run's `heap_summary`, which is always its last heap event.
+        fn summary(&self) -> HeapStats {
+            self.events
+                .iter()
+                .rev()
+                .find_map(|event| match event {
+                    TraceEvent::HeapSummary {
+                        allocated,
+                        allocated_bytes,
+                        collections,
+                        live_bytes,
+                        peak_bytes,
+                        pause,
+                    } => Some(HeapStats {
+                        allocated_objects: *allocated,
+                        allocated_bytes: *allocated_bytes,
+                        collections: *collections,
+                        freed_objects: 0,
+                        live_bytes: *live_bytes,
+                        live_objects: 0,
+                        peak_bytes: *peak_bytes,
+                        pause: *pause,
+                    }),
+                    _ => None,
+                })
+                .expect("a run ends with a heap summary")
+        }
+    }
+
+    /// Runs `source`'s `test.main` under `limits`, watching every heap.
+    fn run_watching_the_heap(source: &str, limits: crate::budget::Limits) -> HeapRun {
+        let (sources, program) = program_of(source);
+        let buffer = Buffer::default();
+        let mut hosts = HostRegistry::new(Grants::new(["console"]));
+        hosts.register(Box::new(Console::new(buffer.clone())));
+        hosts.set_budget(crate::budget::Budget::new(limits));
+        let recorder = Recorder::default();
+        let runtime =
+            Runtime::new(program, sources, Arc::new(hosts)).with_trace(Arc::new(recorder.clone()));
+        let mut interpreter = Interpreter::new(&runtime);
+        let value = interpreter.run_entry("test", "main", Vec::new());
+        let stats = interpreter.heap_stats();
+        HeapRun {
+            value,
+            output: buffer.text(),
+            events: recorder.events(),
+            stats,
+        }
+    }
+
+    /// Runs `body` inside `test.main`, watching every heap.
+    fn run_collecting(body: &str) -> HeapRun {
+        let source = format!(
+            "use console.println\n\nexport fn main() -> Result<Unit, Error> {{\n{body}\n  Ok(())\n}}\n"
+        );
+        run_watching_the_heap(&source, crate::budget::Limits::default())
+    }
+
+    /// Enough abandoned objects for a heap to have collected several times.
+    const CHURN: usize = 200;
+
+    /// A loop body that builds one cycle and abandons it.
+    fn churn(count: usize) -> String {
+        format!(
+            "  var i = 0\n  while i < {count} {{\n    var v = Vector.of()\n    v.push(v)\n    i += 1\n  }}\n"
+        )
+    }
+
+    /// The whole reason for the collector. `Rc` cannot free a vector that
+    /// holds itself, so without a mark and a sweep every one of these would
+    /// still be live at the end of the run.
+    #[test]
+    fn a_cycle_through_a_vector_element_is_reclaimed() {
+        let run = run_collecting(&churn(CHURN));
+        run.value.as_ref().expect("the program ran");
+        assert!(
+            run.summary().allocated_objects >= CHURN as u64,
+            "{:?}",
+            run.summary()
+        );
+        assert!(
+            run.collections().iter().any(|(_, _, freed)| *freed > 0),
+            "nothing was reclaimed: {:?}",
+            run.collections()
+        );
+        assert_eq!(run.stats.live_objects, 0, "{:?}", run.stats);
+    }
+
+    #[test]
+    fn a_cycle_through_a_struct_field_is_reclaimed() {
+        let run = run_watching_the_heap(
+            &format!(
+                "struct Node(next: Vector<Node>)\n\nexport fn main() -> Result<Unit, Error> {{\n  var i = 0\n  while i < {CHURN} {{\n    var v: Vector<Node> = Vector.of()\n    v.push(Node(next: v))\n    i += 1\n  }}\n  Ok(())\n}}\n"
+            ),
+            crate::budget::Limits::default(),
+        );
+        run.value.as_ref().expect("the program ran");
+        assert!(
+            run.collections().iter().any(|(_, _, freed)| *freed > 0),
+            "{:?}",
+            run.collections()
+        );
+        assert_eq!(run.stats.live_objects, 0, "{:?}", run.stats);
+    }
+
+    /// A closure captures by value, so a vector holding a closure that
+    /// captured that vector is a cycle whose back edge is a capture.
+    #[test]
+    fn a_cycle_through_a_closure_capture_is_reclaimed() {
+        let run = run_collecting(&format!(
+            "  var i = 0\n  while i < {CHURN} {{\n    var v: Vector<fn() -> Int> = Vector.of()\n    let f = fn() {{\n      v.length()\n    }}\n    v.push(f)\n    i += 1\n  }}\n"
+        ));
+        run.value.as_ref().expect("the program ran");
+        assert!(
+            run.collections().iter().any(|(_, _, freed)| *freed > 0),
+            "{:?}",
+            run.collections()
+        );
+        assert_eq!(run.stats.live_objects, 0, "{:?}", run.stats);
+    }
+
+    /// The roots are the environment chain, so a binding's value survives
+    /// however many collections run while it is in scope — including the
+    /// elements it was holding.
+    #[test]
+    fn a_value_the_environment_chain_holds_is_not_collected() {
+        let run = run_collecting(&format!(
+            "  var kept = Vector.of(1, 2, 3)\n{}  println(\"kept {{kept.length()}} {{kept}}\")?\n",
+            churn(CHURN)
+        ));
+        run.value.as_ref().expect("the program ran");
+        assert_eq!(run.output, "kept 3 [1, 2, 3]\n");
+        assert!(run.collections().iter().any(|(_, _, freed)| *freed > 0));
+    }
+
+    /// A binding is a root only while it is in scope: the same vector that
+    /// survived above is reclaimed once the block that named it is left.
+    #[test]
+    fn a_value_whose_binding_has_gone_out_of_scope_is_collected() {
+        let run = run_collecting(&format!(
+            "  {{\n    var doomed = Vector.of()\n    doomed.push(doomed)\n  }}\n{}",
+            churn(CHURN)
+        ));
+        run.value.as_ref().expect("the program ran");
+        assert_eq!(
+            run.stats.live_objects, 0,
+            "the block's vector outlived its block: {:?}",
+            run.stats
+        );
+    }
+
+    /// A task collects the heap of its own thread, and the event says whose
+    /// it was.
+    #[test]
+    fn a_task_collects_its_own_heap() {
+        let run = run_watching_the_heap(
+            &format!(
+                "fn work() -> Int {{\n{}  i\n}}\n\nexport fn main() -> Result<Unit, Error> {{\n  scope tasks {{\n    let one = tasks.spawn {{ work() }}\n    let done = one.await()\n    done\n  }}\n  Ok(())\n}}\n",
+                churn(CHURN)
+            ),
+            crate::budget::Limits::default(),
+        );
+        run.value.as_ref().expect("the program ran");
+        assert!(
+            run.collections()
+                .iter()
+                .any(|(task, _, freed)| task.is_some() && *freed > 0),
+            "no collection ran inside the task: {:?}",
+            run.collections()
+        );
+    }
+
+    /// ADR 0011's per-task heap, on ADR 0008's threads: two tasks running at
+    /// the same time each collect their own objects, and neither disturbs
+    /// what the other is holding.
+    ///
+    /// The two are held at a barrier until both have arrived, so they are
+    /// provably churning at the same time rather than merely both having run.
+    /// Each then builds a vector only it can reach, churns through enough
+    /// cycles to be collected several times, and reads its own vector back. A
+    /// collection that reached across the boundary would empty one of them.
+    ///
+    /// The barrier's spin is bounded so that a runtime which never lets both
+    /// tasks arrive fails this test rather than hanging it.
+    #[test]
+    fn two_tasks_collect_at_the_same_time_without_disturbing_each_other() {
+        let run = run_watching_the_heap(
+            &format!(
+                "use console.println\n\nfn work(gate: Shared<Int>, mark: Int) -> Int {{\n  var kept = Vector.of(mark, mark, mark)\n  gate.lock(fn(var arrived) {{\n    arrived += 1\n  }})\n  var both = 0\n  var spins = 0\n  while both < 2 && spins < 100000000 {{\n    both = gate.lock(fn(arrived) {{\n      arrived\n    }})\n    spins += 1\n  }}\n{}  kept.length() * 1000 + both * 100 + mark\n}}\n\nexport fn main() -> Result<Unit, Error> {{\n  let gate = Shared(0)\n  scope tasks {{\n    let one = tasks.spawn {{ work(gate, 1) }}\n    let two = tasks.spawn {{ work(gate, 2) }}\n    println(\"{{one.await()}} {{two.await()}}\")?\n  }}\n  Ok(())\n}}\n",
+                churn(CHURN)
+            ),
+            crate::budget::Limits::default(),
+        );
+        run.value.as_ref().expect("the program ran");
+        // `3201` and `3202`: each task kept its own three-element vector, both
+        // saw the barrier open, and each saw the mark it was given. A
+        // collection that reached across the boundary would have emptied one
+        // of those vectors.
+        assert_eq!(run.output, "3201 3202\n");
+
+        let collected: BTreeSet<Option<u64>> = run
+            .collections()
+            .into_iter()
+            .filter(|(_, _, freed)| *freed > 0)
+            .map(|(task, _, _)| task)
+            .collect();
+        assert!(
+            collected.contains(&Some(1)) && collected.contains(&Some(2)),
+            "both tasks should have collected: {collected:?}"
+        );
+    }
+
+    /// A heap dies with the thread that owns it, and dropping a table of
+    /// `Weak`s takes nothing with it — so a task that ends while a cycle it
+    /// built is still in scope would leave that cycle behind. Retiring a heap
+    /// sweeps it one last time, which is what makes a task's memory a task's
+    /// to give back.
+    #[test]
+    fn a_task_that_ends_still_naming_a_cycle_leaves_nothing_behind() {
+        let run = run_watching_the_heap(
+            &format!(
+                "struct Node(next: Vector<Node>)\n\nfn holds() -> Int {{\n  var kept: Vector<Node> = Vector.of()\n  kept.push(Node(next: kept))\n{}  kept.length()\n}}\n\nexport fn main() -> Result<Unit, Error> {{\n  scope tasks {{\n    let one = tasks.spawn {{ holds() }}\n    let done = one.await()\n    done\n  }}\n  Ok(())\n}}\n",
+                churn(CHURN)
+            ),
+            crate::budget::Limits::default(),
+        );
+        run.value.as_ref().expect("the program ran");
+        let summary = run.summary();
+        // Every object the task allocated, including the cycle it was still
+        // naming when it ended, was reclaimed.
+        let freed: u64 = run.collections().iter().map(|(_, _, freed)| freed).sum();
+        assert_eq!(
+            freed, summary.allocated_objects,
+            "a cycle outlived the task that built it: {summary:?}"
+        );
+    }
+
+    /// A value crossing a task boundary is copied, so the copy the task runs
+    /// on is its own and the original stays behind — where the sending task's
+    /// heap reclaims it like anything else it stopped naming.
+    #[test]
+    fn a_value_transferred_into_a_task_leaves_the_original_to_the_sender() {
+        let run = run_watching_the_heap(
+            &format!(
+                "use console.println\n\nfn sum(items: Array<Int>) -> Int {{\n  var total = 0\n  for item in items {{\n    total += item\n  }}\n  total\n}}\n\nexport fn main() -> Result<Unit, Error> {{\n  let crossed = {{\n    var building = Vector.of(1, 2, 3)\n    building.toArray()\n  }}\n  scope tasks {{\n    let one = tasks.spawn {{ sum(crossed) }}\n    println(\"{{one.await()}}\")?\n  }}\n{}  Ok(())\n}}\n",
+                churn(CHURN)
+            ),
+            crate::budget::Limits::default(),
+        );
+        run.value.as_ref().expect("the program ran");
+        assert_eq!(run.output, "6\n");
+        // The vector the array was built from was named only inside the block
+        // it was built in; nothing crossed but the array's copy, so the
+        // entry's heap has nothing left.
+        assert_eq!(run.stats.live_objects, 0, "{:?}", run.stats);
+    }
+
+    /// A `Shared`'s contents belong to the cell, not to any task's heap, and
+    /// a collection never takes the cell's lock — which it could not, since
+    /// `lock` holds it for the whole of a closure that reaches safepoints.
+    #[test]
+    fn a_collection_inside_a_lock_neither_waits_nor_loses_the_cell_s_contents() {
+        let run = run_watching_the_heap(
+            &format!(
+                "use console.println\n\nexport fn main() -> Result<Unit, Error> {{\n  let total = Shared(0)\n  scope tasks {{\n    let one = tasks.spawn {{ bump(total) }}\n    let two = tasks.spawn {{ bump(total) }}\n    let first = one.await()\n    let second = two.await()\n    first + second\n  }}\n  total.lock(fn(value) {{\n    println(\"total {{value}}\")\n  }})?\n  Ok(())\n}}\n\nfn bump(total: Shared<Int>) -> Int {{\n  total.lock(fn(var value) {{\n{}    value += 1\n    value\n  }})\n}}\n",
+                churn(CHURN)
+            ),
+            crate::budget::Limits::default(),
+        );
+        run.value.as_ref().expect("the program ran");
+        assert_eq!(run.output, "total 2\n");
+        // The churn happened while each task held the lock, so collections ran
+        // inside `lock` without waiting for it.
+        assert!(
+            run.collections()
+                .iter()
+                .any(|(task, _, freed)| task.is_some() && *freed > 0),
+            "{:?}",
+            run.collections()
+        );
+    }
+
+    /// The memory budget stops a run the way fuel does, with a diagnostic
+    /// naming the limit that was configured.
+    #[test]
+    fn the_memory_budget_stops_a_run_that_exceeds_it() {
+        let run = run_watching_the_heap(
+            "export fn main() -> Result<Unit, Error> {\n  var kept = Vector.of()\n  var i = 0\n  while i < 100000 {\n    kept.push(i)\n    i += 1\n  }\n  Ok(())\n}\n",
+            crate::budget::Limits {
+                max_memory: Some(4_096),
+                ..crate::budget::Limits::default()
+            },
+        );
+        let error = run.value.as_ref().expect_err("the run should have stopped");
+        assert!(
+            error
+                .message
+                .contains("memory budget of 4096 bytes exceeded"),
+            "{}",
+            error.message
+        );
+        assert!(error.span.is_some(), "the stop points at the loop");
+        assert!(error.rule.is_some());
+    }
+
+    /// Memory bounds the run, not one task, so two tasks that each stay under
+    /// the limit but together exceed it still stop it — the same way their
+    /// fuel is drawn from one budget rather than one each.
+    #[test]
+    fn the_memory_budget_is_the_run_s_and_not_one_task_s() {
+        let grow = "  var kept = Vector.of()\n  var i = 0\n  while i < 100000 {\n    kept.push(i)\n    i += 1\n  }\n  kept.length()\n";
+        let run = run_watching_the_heap(
+            &format!(
+                "fn grow() -> Int {{\n{grow}}}\n\nexport fn main() -> Result<Unit, Error> {{\n  scope tasks {{\n    let one = tasks.spawn {{ grow() }}\n    let two = tasks.spawn {{ grow() }}\n    let first = one.await()\n    let second = two.await()\n    first + second\n  }}\n  Ok(())\n}}\n"
+            ),
+            crate::budget::Limits {
+                max_memory: Some(600_000),
+                ..crate::budget::Limits::default()
+            },
+        );
+        let error = run.value.as_ref().expect_err("the run should have stopped");
+        assert!(
+            error
+                .message
+                .contains("memory budget of 600000 bytes exceeded"),
+            "{}",
+            error.message
+        );
+    }
+
+    /// A run that stays inside its budget is not stopped by it.
+    #[test]
+    fn a_run_within_the_memory_budget_is_not_stopped() {
+        let run = run_watching_the_heap(
+            "use console.println\n\nexport fn main() -> Result<Unit, Error> {\n  var kept = Vector.of()\n  var i = 0\n  while i < 100 {\n    kept.push(i)\n    i += 1\n  }\n  println(\"{kept.length()}\")?\n  Ok(())\n}\n",
+            crate::budget::Limits {
+                max_memory: Some(1 << 20),
+                ..crate::budget::Limits::default()
+            },
+        );
+        run.value.as_ref().expect("the program ran");
+        assert_eq!(run.output, "100\n");
+    }
+
+    /// ADR 0011 asks allocation, live heap size, collection count, and pause
+    /// time to be trace events. This is the run that produces all four.
+    #[test]
+    fn the_trace_carries_allocation_the_live_heap_collections_and_pause() {
+        let run = run_collecting(&format!("  var kept = Vector.of(1)\n{}", churn(CHURN)));
+        run.value.as_ref().expect("the program ran");
+
+        let collections = run.collections();
+        assert!(!collections.is_empty(), "no collection was recorded");
+        for (_, allocated, _) in &collections {
+            assert!(*allocated > 0, "a collection recorded no allocation");
+        }
+
+        let summary = run.summary();
+        assert_eq!(summary.allocated_objects, CHURN as u64 + 1);
+        assert!(summary.allocated_bytes > 0);
+        assert_eq!(summary.collections, collections.len() as u64);
+        // The summary's live figure is what the run ended holding, which is
+        // nothing: the entry's own bindings went with it, and retiring its
+        // heap swept them. What `kept` was worth shows in the peak, and in the
+        // collections that ran while it was still named.
+        assert_eq!(summary.live_bytes, 0);
+        assert!(summary.peak_bytes > 0, "the kept vector was live");
+        let live_while_running: Vec<u64> = run
+            .events
+            .iter()
+            .filter_map(|event| match event {
+                TraceEvent::HeapCollected { live_bytes, .. } => Some(*live_bytes),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            live_while_running.iter().any(|bytes| *bytes > 0),
+            "no collection saw the kept vector: {live_while_running:?}"
+        );
+        assert!(
+            summary.pause > Duration::ZERO,
+            "a collection took no time at all"
+        );
+    }
+
+    /// A program that allocates nothing collectable pays for no collection at
+    /// all: the heap a task starts with is a table and two counters.
+    #[test]
+    fn a_program_that_allocates_nothing_is_never_collected() {
+        let run = run_collecting("  println(\"{1 + 1}\")?\n");
+        run.value.as_ref().expect("the program ran");
+        assert_eq!(run.output, "2\n");
+        assert_eq!(run.summary().collections, 0);
+        assert_eq!(run.summary().allocated_objects, 0);
+        assert!(run.collections().is_empty());
     }
 }
