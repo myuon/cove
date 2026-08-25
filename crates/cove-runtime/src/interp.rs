@@ -157,6 +157,13 @@ const STACK_MARGIN: usize = 3;
 /// is the one case the runtime cannot size, and the one case where the
 /// promise is the embedder's to keep; see that method for what to do about
 /// it.
+///
+/// `cove_syntax`'s `MAX_NESTING_DEPTH` answers the same question from the
+/// other side. The parser is handed a thread rather than making one, so it
+/// cannot size the stack and instead fixes the stack it is willing to promise
+/// — 2 MiB, what an unsized thread has — and derives its limit from what a
+/// level of nesting costs on it. Together the two bound both halves of a
+/// `.cove` file's route through the toolchain: reading it and running it.
 pub const STACK_SIZE: usize =
     STACK_MARGIN * (MAX_CALL_DEPTH * STACK_PER_FRAME + MAX_REENTRY_DEPTH * STACK_PER_REENTRY);
 
