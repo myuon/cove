@@ -262,8 +262,9 @@ pub struct NotTaskSafe {
 /// one condition: the Language Card lets a value cross exactly when copying
 /// it is the whole of transferring it, which is what a thread requires too.
 ///
-/// So this is not a second task-safety rule beside [`task_safety`] — it *is*
-/// that rule. [`Transfer::of`] answers both questions in one walk: whether
+/// So this is not a second task-safety rule standing beside the first — it
+/// *is* the rule, and the walk that once only answered it was replaced by
+/// this one. [`Transfer::of`] answers both questions in one walk: whether
 /// the value may cross, and what the receiving task owns once it has.
 #[derive(Clone, Debug)]
 pub enum Transfer {
