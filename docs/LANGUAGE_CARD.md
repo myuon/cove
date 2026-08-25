@@ -212,11 +212,14 @@ metrics.lock(fn(var value) { value.record(failed) })
 itself; `lock` rejects a closure that would leave the cell reachable from its
 own new value. A cycle through two or more cells is not detected and leaks.
 
-Memory is managed by a precise, non-moving mark-and-sweep collector. CPU,
-memory, time, concurrency, and Host-call limits are runtime controls, not
-termination proofs. Every one of them is imposed today. The concurrency limit
-bounds the tasks a run holds at once: a `spawn` past it stops the run, refused
-before its thread exists rather than made to wait for a sibling to finish.
+Memory is managed by a precise, non-moving mark-and-sweep collector, whose
+allocation, live-heap, peak-heap, and pause-time numbers are observable but not
+enforced: strict memory isolation is a process, container, or microVM
+boundary's job, not this runtime's. CPU, time, concurrency, and Host-call
+limits are runtime controls, not termination proofs, and every one of them is
+imposed today. The concurrency limit bounds the tasks a run holds at once: a
+`spawn` past it stops the run, refused before its thread exists rather than
+made to wait for a sibling to finish.
 
 ## Annotations
 

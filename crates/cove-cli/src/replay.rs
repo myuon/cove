@@ -431,7 +431,6 @@ pub(crate) fn cmd_replay(args: &[String]) -> Result<(), CliError> {
             fuel: run.fuel,
             deadline: run.deadline,
             max_host_calls: run.max_host_calls,
-            max_memory: run.max_memory,
             max_call_depth: None,
             max_tasks: run.max_tasks,
         },

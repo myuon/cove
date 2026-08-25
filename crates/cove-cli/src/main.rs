@@ -125,7 +125,6 @@ literal `--` is a program argument, even if it looks like a flag):
   --max-host-calls <n>  stop the run after <n> host calls
   --trace <path>        write a JSONL trace to <path>, or `-` for stderr
   --trace-values <mode> `full` (the default) records each host call's arguments and result, which is what `cove replay` needs; `redacted` records only their types
-  --max-memory <bytes>  stop the run when its tasks' live heaps hold more than <bytes> after a collection
   --max-tasks <n>       stop the run when it would hold more than <n> tasks at once
   --stats               print fuel spent, host calls, irreversible writes, elapsed time, host-call wait, and the heap to stderr
   --files-root <path>   the one directory the `files` host may reach; defaults to `files/` in the package
@@ -991,7 +990,6 @@ pub(crate) fn execute_entry(
         deadline: flags.deadline.or(run.deadline),
         max_host_calls: flags.max_host_calls.or(run.max_host_calls),
         max_call_depth: None,
-        max_memory: flags.max_memory.or(run.max_memory),
         max_tasks: flags.max_tasks.or(run.max_tasks),
     };
     // The interpreter checks this budget at its own safepoints (loop back
@@ -1091,8 +1089,6 @@ pub(crate) struct RunFlags {
     fuel: Option<u64>,
     deadline: Option<Duration>,
     max_host_calls: Option<u64>,
-    /// The bytes the run's live heaps may hold before it is stopped.
-    max_memory: Option<u64>,
     /// The tasks the run may hold alive at once, across the whole run,
     /// before it is stopped.
     max_tasks: Option<u64>,
@@ -1117,7 +1113,6 @@ impl RunFlags {
             fuel: None,
             deadline: None,
             max_host_calls: None,
-            max_memory: None,
             max_tasks: None,
             trace: None,
             trace_values: ValueCapture::Full,
@@ -1156,7 +1151,6 @@ fn parse_run_flags(args: &[String]) -> Result<RunFlags, CliError> {
         fuel: None,
         deadline: None,
         max_host_calls: None,
-        max_memory: None,
         max_tasks: None,
         trace: None,
         trace_values: ValueCapture::Full,
@@ -1195,14 +1189,6 @@ fn parse_run_flags(args: &[String]) -> Result<RunFlags, CliError> {
                 flags.max_host_calls = Some(value.parse().map_err(|_| {
                     CliError::Message(format!(
                         "`--max-host-calls` must be a non-negative integer, found `{value}`"
-                    ))
-                })?);
-            }
-            "--max-memory" => {
-                let value = flag_value(args, &mut i, "--max-memory")?;
-                flags.max_memory = Some(value.parse().map_err(|_| {
-                    CliError::Message(format!(
-                        "`--max-memory` must be a non-negative integer number of bytes, found `{value}`"
                     ))
                 })?);
             }

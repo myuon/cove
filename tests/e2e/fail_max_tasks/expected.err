@@ -3,5 +3,5 @@ error[cove::runtime]: execution stopped: concurrency limit of 2 task(s) exceeded
    |
 11 |     let third = tasks.spawn { 3 }
    |                 ^^^^^^^^^^^^^^^^^
-  rule: ADR 0001: CPU, memory, time, concurrency, and host-call limits are runtime controls, not termination proofs.
+  rule: ADR 0001: CPU, time, concurrency, and host-call limits are runtime controls, not termination proofs.
 1 error(s)

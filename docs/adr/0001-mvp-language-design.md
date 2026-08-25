@@ -13,7 +13,11 @@
   schema this ADR asks for one description both ends enforce; and
   [ADR 0004](0004-static-type-checking.md)'s third amendment, which settles
   the builtin `Error` as a struct carrying a `message` a program may read,
-  rather than an opaque type
+  rather than an opaque type; and
+  [ADR 0011](0011-garbage-collection.md)'s "Amendment (2026-08-25): the memory
+  budget is removed", which retracts the memory limit this ADR lists under
+  "Runtime resource control" below, leaving the collector's measurements as
+  observability rather than an enforced bound
 - Implemented by: [ADR 0002](0002-implementation-language-and-backend.md)
   through [ADR 0013](0013-host-resource-handles.md), each of which decides and
   builds a part of this one
@@ -62,12 +66,13 @@ document. The language and compiler exist, from the lexer through resolution,
 a type checker, module-to-module imports, traits and both dispatch forms, and
 derived outlines, capability requirements, and API snapshots. The runtime
 exists, with Host API dispatch under grants, a thread per task, `Shared<T>`, a
-per-task collector, budgets for fuel, deadlines, memory, host calls, and the
-tasks a run holds at once — the last decided by
-[ADR 0003](0003-task-execution-and-runtime-control.md)'s amendment — and traces
-that feed `cove trace` and `cove replay`. Every command in the Language
-Card's tooling contract exists and does what the card says. The eight
-representative programs all execute.
+per-task collector whose allocation and heap size are observable rather than
+enforced, budgets for fuel, deadlines, host calls, and the tasks a run holds
+at once — the last decided by
+[ADR 0003](0003-task-execution-and-runtime-control.md)'s amendment — and
+traces that feed `cove trace` and `cove replay`. Every command in the
+Language Card's tooling contract exists and does what the card says. The
+eight representative programs all execute.
 
 What is not built is worth naming in one place, because each item is otherwise
 a sentence somewhere above that a reader would have to check against the code:
@@ -127,7 +132,10 @@ direction of travel. This section removes that ambiguity.
   ADR's hypothesis at all.
 - **Sandboxed — MVP required.** `crates/cove-runtime/src/host.rs` rejects a
   Host API call the run was not granted, and `crates/cove-runtime/src/budget.rs`
-  stops a run that exceeds its fuel, deadline, host-call, or memory budget.
+  stops a run that exceeds its fuel, deadline, or host-call budget (memory was
+  a fourth budget here until [ADR 0011](0011-garbage-collection.md)'s
+  "Amendment (2026-08-25): the memory budget is removed" retracted it; the
+  collector's allocation and heap numbers stay observable, not enforced).
   Every profile below runs under this same boundary; "sandboxed" is not a
   fourth build mode to add later, it is host-controlled authority and runtime
   limits, which already exist and are covered by both modules' own tests.
@@ -161,6 +169,10 @@ holds, each backed by a passing test rather than a description:
 - [x] **Sandboxed:** an ungranted Host API call is refused, and a run is
       stopped by at least one of its fuel, deadline, host-call, and memory
       limits (`crates/cove-runtime/src/host.rs` and `.../budget.rs` tests).
+      The memory clause no longer holds: see
+      [ADR 0011](0011-garbage-collection.md)'s "Amendment (2026-08-25): the
+      memory budget is removed". Fuel, deadline, and host-call limits still
+      do.
 - [x] **Embedded:** a host outside `cove-runtime` can supply its own
       capability implementation and its own limits, and observe both a
       successful run and a denial (`crates/cove-runtime/tests/embedding.rs`).
@@ -295,6 +307,12 @@ The runtime should be able to impose:
 - cancellation;
 - concurrency limits;
 - host-call limits and timeouts.
+
+Memory's place in this list was retracted by
+[ADR 0011](0011-garbage-collection.md)'s "Amendment (2026-08-25): the memory
+budget is removed"; the collector still reports allocation and heap size, but
+the runtime no longer imposes a memory limit, so that entry now records what
+was decided in 2026, not what holds today.
 
 Totality, determinism, and absence of loops are explicitly not MVP guarantees.
 

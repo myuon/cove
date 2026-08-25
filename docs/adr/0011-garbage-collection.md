@@ -7,7 +7,11 @@
   [ADR 0002](0002-implementation-language-and-backend.md), which deferred a
   collector until "cyclic structures and tasks exist"
 - Amended by: this ADR's own "Amendment (2026-08-25): a policy for cycles among
-  cells" below, which decides what "What this leaves uncollected" defers
+  cells" below, which decides what "What this leaves uncollected" defers, and
+  this ADR's own "Amendment (2026-08-25): the memory budget is removed" below,
+  which retracts the memory budget the "Budgets" section below gives `Limits`
+  and leaves the collector's measurements as observability rather than an
+  enforced bound
 - Implemented by: PR #26; the amendment by PR #33
 - Implementation status: complete — with one accepted, documented leak: a cycle
   closed through two or more `Shared` cells
@@ -98,6 +102,9 @@ each task reports what its own heap measured and the budget compares their
 sum, so a run cannot stay under the limit by spreading the same memory over
 more tasks.
 
+See the amendment below: this budget was later removed, and memory reverted
+to an observed quantity rather than an enforced one.
+
 ### Scope
 
 No finalizers, no compaction, no generations, no concurrent or incremental
@@ -110,7 +117,8 @@ each remains so.
 reclamation strategy either. It reclaims every acyclic value exactly as it
 did, which is nearly every value a program makes; the collector exists for
 the one thing it cannot do. The change is invisible to Cove programs except
-that a cycle no longer leaks and memory becomes observable and limitable.
+that a cycle no longer leaks and memory becomes observable (and, until the
+amendment below retracted it, limitable).
 
 The heap cannot hold a strong reference to what it tracks, because `freeze()`
 consumes *uniquely owned* vector storage and asks `Rc::strong_count` whether
@@ -205,3 +213,47 @@ language grows it.
 The stop-the-world collector for cells stays exactly where the section above
 left it: worth building once `Shared` sees enough real use that an indirect,
 multi-cell cycle is a problem programs actually hit, not before.
+
+## Amendment (2026-08-25): the memory budget is removed
+
+"Budgets" above gave `Limits` a memory budget: each task reports what its own
+heap measured, the budget compares their sum against `max_memory`, and
+exceeding it stops the run the way an exhausted fuel budget does.
+[Issue #56](https://github.com/myuon/cove/issues/56) asks whether that budget
+ever measured what its name promised, and the answer is no. The live-heap
+figure that `crates/cove-runtime/src/heap.rs` reports counts only the objects
+the collector tracks — principally cycle-capable `VectorStorage`, per "What
+it collects that `Rc` does not" above — and says nothing about ordinary
+Rust-owned values, interpreter data structures, thread stacks, Host
+allocations, or the sockets and database clients a Host implementation opens
+on a run's behalf. A `Limits::max_memory` that a program could exceed only by
+allocating vectors, while every other kind of memory it or its Host held went
+uncounted, was not a memory ceiling; it was a ceiling on one instrument's
+readout, wearing a ceiling's name.
+
+This amendment removes `Limits::max_memory`, the `Stopped::Memory` outcome,
+and `Budget::charge_memory` as an enforcement path
+(`crates/cove-runtime/src/budget.rs`), along with `--max-memory` on both
+`cove run` and `cove build`, the `max_memory` key in `cove.toml`'s
+`[run.<name>]` tables, and the sealed-build and replay plumbing that carried
+a configured value into a built binary and back out of a trace.
+
+Nothing the collector measures changes. `crates/cove-runtime/src/heap.rs`
+still runs the same mark-and-sweep pass at the same safepoints, and
+allocation, collection count, live-heap size, peak-heap size, and pause time
+are reported exactly as before: in `cove run --stats`, in the
+`heap_collected` and `heap_summary` trace events, and in `cove-bench`'s own
+numbers. The collector's job was always measurement — "Visibility" above
+already made that the point — and the budget this amendment removes
+conflated that measurement with a promise the collector alone cannot back: a
+bound over everything a Cove run holds in memory, not only over what one
+collector's table can see.
+
+Strict memory isolation, the guarantee `max_memory` gestured at without
+giving, belongs at the process, container, or microVM boundary that can
+actually see a run's whole address space. That boundary is a future
+mechanism, not something this runtime enforces today, and
+[ADR 0001](0001-mvp-language-design.md)'s "Runtime resource control" list is
+amended accordingly: fuel, deadlines, host-call limits, and the concurrency
+limit [ADR 0003](0003-task-execution-and-runtime-control.md)'s amendment adds
+remain imposed runtime budgets; memory does not.
