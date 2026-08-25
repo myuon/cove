@@ -823,13 +823,14 @@ impl Marker<'_> {
             // they are neither marked nor measured here; see this module's
             // documentation for why the lock is never taken.
             Value::Shared(_) => {}
-            Value::TaskScope(scope) => {
-                if self.walked.insert(Rc::as_ptr(scope) as usize) {
-                    self.bytes += size_of::<TaskScope>() as u64;
-                    if let Ok(tasks) = scope.tasks.try_borrow() {
-                        for task in tasks.iter() {
-                            self.visit_task(task);
-                        }
+            Value::TaskScope(scope) if self.walked.insert(Rc::as_ptr(scope) as usize) => {
+                self.bytes += size_of::<TaskScope>() as u64;
+                // A scope this thread is mid-way through mutating cannot be
+                // read, so its tasks go unsighted and the shortfall rule
+                // roots them.
+                if let Ok(tasks) = scope.tasks.try_borrow() {
+                    for task in tasks.iter() {
+                        self.visit_task(task);
                     }
                 }
             }
