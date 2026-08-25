@@ -30,7 +30,7 @@ use cove_sema::Capability;
 
 use crate::error::RuntimeError;
 use crate::host::HostApi;
-use crate::schema::{Effect, HostType, OperationSchema};
+use crate::schema::{ModuleSchema, OperationSchema};
 use crate::value::Value;
 
 /// `files`: reading, writing, listing, and removing files under one root.
@@ -50,78 +50,12 @@ enum FileSource {
     InMemory(Mutex<BTreeMap<String, String>>),
 }
 
-/// The operations `files` exposes.
+/// What `files` declares about itself.
 ///
-/// This is the first host whose operations disagree about [`Effect`], and the
-/// disagreement is real: `read`, `exists`, and `list` leave the filesystem
-/// exactly as they found it, while `write` and `delete` destroy whatever was
-/// there before and no host can put it back. Nothing in the language consults
-/// `effect` — `cove impact` is its eventual consumer — but the runtime does:
-/// [`crate::host::HostRegistry::irreversible_writes`] counts the calls that
-/// changed the world, and `cove run --stats` reports the count, so a run says
-/// how much of what it did cannot be undone.
-///
-/// `read`, `exists`, and `list` are cancellable for the same reason
-/// `clock.sleep` is: abandoning one leaves nothing outside the run different.
-/// `write` and `delete` are not, because a call already in flight may already
-/// have reached the disk.
-static FILES_SCHEMA: &[OperationSchema] = &[
-    OperationSchema {
-        name: "read",
-        params: &[HostType::String],
-        variadic: false,
-        result: HostType::Result(&HostType::String, &HostType::Error),
-        capability: "files",
-        effect: Effect::Read,
-        cancellable: true,
-        recordable: true,
-        result_is_task_safe: true,
-    },
-    OperationSchema {
-        name: "write",
-        params: &[HostType::String, HostType::String],
-        variadic: false,
-        result: HostType::Result(&HostType::Unit, &HostType::Error),
-        capability: "files",
-        effect: Effect::IrreversibleWrite,
-        cancellable: false,
-        recordable: true,
-        result_is_task_safe: true,
-    },
-    OperationSchema {
-        name: "exists",
-        params: &[HostType::String],
-        variadic: false,
-        result: HostType::Bool,
-        capability: "files",
-        effect: Effect::Read,
-        cancellable: true,
-        recordable: true,
-        result_is_task_safe: true,
-    },
-    OperationSchema {
-        name: "list",
-        params: &[HostType::String],
-        variadic: false,
-        result: HostType::Result(&HostType::Array(&HostType::String), &HostType::Error),
-        capability: "files",
-        effect: Effect::Read,
-        cancellable: true,
-        recordable: true,
-        result_is_task_safe: true,
-    },
-    OperationSchema {
-        name: "delete",
-        params: &[HostType::String],
-        variadic: false,
-        result: HostType::Result(&HostType::Unit, &HostType::Error),
-        capability: "files",
-        effect: Effect::IrreversibleWrite,
-        cancellable: false,
-        recordable: true,
-        result_is_task_safe: true,
-    },
-];
+/// The table is [`cove_schema::hosts::FILES`], so the description the
+/// compiler checks a call against and the one the boundary dispatches through
+/// are the same bytes.
+const SCHEMA: ModuleSchema = cove_schema::hosts::FILES;
 
 impl Files {
     /// The real filesystem, reachable only inside `root`.
@@ -424,7 +358,7 @@ impl HostApi for Files {
     }
 
     fn schema(&self) -> &[OperationSchema] {
-        FILES_SCHEMA
+        SCHEMA.operations
     }
 
     fn call(&self, op: &str, args: Vec<Value>) -> Result<Value, RuntimeError> {
@@ -435,9 +369,7 @@ impl HostApi for Files {
             }
             "write" => {
                 let [Value::Str(path), Value::Str(contents)] = args.as_slice() else {
-                    return Err(RuntimeError::new(
-                        "`files.write` takes two `String` arguments",
-                    ));
+                    unreachable!("checked by HostRegistry::call")
                 };
                 let (path, contents) = (path.to_string(), contents.to_string());
                 Ok(result(self.write(&path, &contents).map(|()| Value::Unit)))
@@ -475,6 +407,7 @@ fn one_path(op: &str, args: &[Value]) -> Result<String, RuntimeError> {
 mod tests {
     use super::*;
     use crate::host::{Grants, HostRegistry};
+    use crate::schema::Effect;
     use std::path::Path;
 
     /// A temporary directory, removed on drop.

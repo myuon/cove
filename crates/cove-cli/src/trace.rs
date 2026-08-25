@@ -654,7 +654,10 @@ impl Schema {
         let mut table = BTreeMap::new();
         for module in cove_runtime::shipped_schema() {
             for operation in module.operations {
-                table.insert((module.name.clone(), operation.name.to_string()), operation);
+                table.insert(
+                    (module.name.to_string(), operation.name.to_string()),
+                    *operation,
+                );
             }
         }
         Schema(table)

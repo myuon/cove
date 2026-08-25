@@ -8,15 +8,22 @@
 //! [`HostRegistry`], [`Grants`], [`Budget`], [`Limits`], and [`Runtime`],
 //! plus [`cove_runtime::interp::Interpreter`].
 //!
-//! A host module's *name* is fixed by the compiler -- `cove_sema::resolve`
-//! resolves `documents` as a host module without consulting any schema, since
-//! ADR 0001's Host API schema is a runtime and tooling concern, not a
-//! compile-time one -- but its *implementation* is not. `cove run` and
-//! `cove build` always wire up [`cove_runtime::Documents`]; this test wires
-//! up a host-owned implementation instead, to show that the boundary an
-//! embedding host programs against is the trait, not any one shipped struct.
-//! It touches no network and no real filesystem: the package and the
-//! documents it serves are held in memory.
+//! A host module's *name* and the shape of its operations are the compiler's:
+//! `cove_sema` resolves `documents` as a host module and checks
+//! `read("welcome")` against `cove_schema`'s description of it. Its
+//! *implementation* is not. `cove run` and `cove build` always wire up
+//! [`cove_runtime::Documents`]; this test wires up a host-owned
+//! implementation instead, to show that the boundary an embedding host
+//! programs against is the trait, not any one shipped struct. It touches no
+//! network and no real filesystem: the package and the documents it serves
+//! are held in memory.
+//!
+//! A host that takes a shipped module's name takes its description with it,
+//! which is what lets the compiler check a program written against it. A host
+//! that registers a module of its own is one the compiler has never heard of
+//! and checks nothing about -- and is exactly why the boundary checks a
+//! call's arguments as well: the schema this file declares below is enforced
+//! against every call made through it, whether or not any compiler read it.
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -69,10 +76,11 @@ impl HostApi for HostOwnedDocuments {
 
     fn call(&self, op: &str, args: Vec<Value>) -> Result<Value, RuntimeError> {
         assert_eq!(op, "read", "the only operation this test host registers");
+        // The registry checked the call against the schema above before
+        // dispatching it, so an embedding host restates none of it: the
+        // operation exists, there is one argument, and it is a `String`.
         let [Value::Str(name)] = args.as_slice() else {
-            return Err(RuntimeError::new(
-                "`documents.read` takes one `String` argument",
-            ));
+            unreachable!("checked by HostRegistry::call")
         };
         self.reads.lock().unwrap().push(name.to_string());
         Ok(match self.notes.get(&**name) {
@@ -203,5 +211,37 @@ fn a_host_s_own_limit_stops_a_granted_call() {
         error.message.contains("host-call limit of 0 exceeded"),
         "{}",
         error.message
+    );
+}
+
+/// The boundary holds a call to the schema the *host* declared, not to one
+/// the toolchain knows: this host's `documents` is its own, and a call
+/// carrying an `Int` where its schema says `String` is refused before the
+/// implementation above is reached.
+///
+/// This is the half of the argument check `cove check` cannot make. The
+/// compiler reads the description of the modules the toolchain ships, and an
+/// embedding may register anything; the boundary reads the description the
+/// module registered with.
+#[test]
+fn an_argument_the_host_s_own_schema_does_not_admit_is_refused() {
+    let reads = Arc::new(Mutex::new(Vec::new()));
+    let mut hosts = HostRegistry::new(Grants::new(vec!["documents"]));
+    hosts.register(Box::new(HostOwnedDocuments {
+        notes: BTreeMap::new(),
+        reads: Arc::clone(&reads),
+    }));
+
+    let error = hosts
+        .call("documents", "read", vec![Value::Int(3)])
+        .expect_err("an `Int` where the host declared a `String` is refused");
+
+    assert_eq!(
+        error.message,
+        "`documents.read` was given `Int` as argument 1, but its schema declares `String` there"
+    );
+    assert!(
+        reads.lock().unwrap().is_empty(),
+        "a call the boundary refused must never reach the host's own implementation"
     );
 }

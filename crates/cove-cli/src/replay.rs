@@ -28,7 +28,7 @@ use std::sync::{Arc, Mutex};
 use cove_runtime::host::{HostApi, HostRegistry};
 use cove_runtime::interp::Interpreter;
 use cove_runtime::runtime::Runtime;
-use cove_runtime::schema::{OperationSchema, ResourceSchema, TypeSchema};
+use cove_runtime::schema::{ModuleSchema, OperationSchema, ResourceSchema, TypeSchema};
 use cove_runtime::Transfer;
 use cove_runtime::{
     value_to_json, Budget, Cancellation, Grants, Limits, ResourceHandle, RuntimeError, Value,
@@ -292,46 +292,42 @@ impl Divergence {
 
 /// A host module that answers from a trace instead of from the world.
 ///
-/// It carries the real module's name, capability, and schema, so the registry
-/// gates, checks arity, and counts irreversible writes exactly as it does for
-/// a real run — a replay that skipped those checks would be reproducing a
-/// different boundary than the one that was recorded.
+/// It declares itself out of the real module's own schema entry, so the
+/// registry gates, checks the arguments and the arity, and counts
+/// irreversible writes exactly as it does for a real run — a replay that
+/// skipped those checks would be reproducing a different boundary than the
+/// one that was recorded.
 struct ReplayHost {
-    name: String,
-    capability: Capability,
-    operations: Vec<OperationSchema>,
-    types: Vec<TypeSchema>,
-    resources: Vec<ResourceSchema>,
+    declared: &'static ModuleSchema,
     tape: Arc<Mutex<Tape>>,
 }
 
 impl HostApi for ReplayHost {
     fn name(&self) -> &str {
-        &self.name
+        self.declared.name
     }
 
     fn capability(&self) -> Capability {
-        self.capability.clone()
+        Capability::new(self.declared.capability)
     }
 
     fn schema(&self) -> &[OperationSchema] {
-        &self.operations
+        self.declared.operations
     }
 
     fn types(&self) -> &[TypeSchema] {
-        &self.types
+        self.declared.types
     }
 
     fn resources(&self) -> &[ResourceSchema] {
-        &self.resources
+        self.declared.resources
     }
 
     fn call(&self, op: &str, args: Vec<Value>) -> Result<Value, RuntimeError> {
-        let name = self.name.clone();
         self.tape
             .lock()
             .expect("the replay tape is not shared across threads that panic")
-            .answer(&name, op, &args)
+            .answer(self.declared.name, op, &args)
     }
 
     /// Answers an operation on a handle from the trace, the handle included.
@@ -347,7 +343,6 @@ impl HostApi for ReplayHost {
         args: Vec<Value>,
         _back: &mut dyn cove_runtime::Reentry,
     ) -> Result<Value, RuntimeError> {
-        let name = self.name.clone();
         let op = format!("{}.{op}", handle.type_name);
         let mut asked = Vec::with_capacity(args.len() + 1);
         asked.push(Value::Resource(Arc::new(handle.clone())));
@@ -355,7 +350,7 @@ impl HostApi for ReplayHost {
         self.tape
             .lock()
             .expect("the replay tape is not shared across threads that panic")
-            .answer(&name, &op, &asked)
+            .answer(self.declared.name, &op, &asked)
     }
 }
 
@@ -425,11 +420,7 @@ pub(crate) fn cmd_replay(args: &[String]) -> Result<(), CliError> {
     let mut hosts = HostRegistry::new(Grants::new(run.allow.clone()));
     for module in cove_runtime::shipped_schema() {
         hosts.register(Box::new(ReplayHost {
-            name: module.name,
-            capability: module.capability,
-            operations: module.operations,
-            types: module.types,
-            resources: module.resources,
+            declared: module,
             tape: Arc::clone(&tape),
         }));
     }
@@ -534,11 +525,7 @@ mod tests {
         let mut hosts = HostRegistry::new(Grants::new(["console"]));
         for module in cove_runtime::shipped_schema() {
             hosts.register(Box::new(ReplayHost {
-                name: module.name,
-                capability: module.capability,
-                operations: module.operations,
-                types: module.types,
-                resources: module.resources,
+                declared: module,
                 tape: Arc::clone(tape),
             }));
         }
@@ -675,11 +662,7 @@ mod tests {
         let mut hosts = HostRegistry::new(Grants::new(["process"]));
         for module in cove_runtime::shipped_schema() {
             hosts.register(Box::new(ReplayHost {
-                name: module.name,
-                capability: module.capability,
-                operations: module.operations,
-                types: module.types,
-                resources: module.resources,
+                declared: module,
                 tape: Arc::clone(&tape),
             }));
         }

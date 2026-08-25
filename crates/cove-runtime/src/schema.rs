@@ -1,107 +1,34 @@
-//! The machine-readable Host API schema.
+//! The Host API schema, and what a value has to be for a declared type to
+//! admit it.
 //!
-//! ADR 0001 states what this module has to carry:
+//! The schema itself is [`cove_schema`], a crate below both this one and the
+//! compiler, because ADR 0001 makes it "shared by the compiler, runtime, and
+//! CLI" and the dependency between those two runs one way. Everything it
+//! declares is re-exported here, so a host written against the runtime still
+//! names one crate: `cove_runtime::schema::HostType` is
+//! `cove_schema::HostType`.
 //!
-//! > A machine-readable Host API schema is shared by the compiler, runtime,
-//! > and CLI. Each operation describes its argument, result, and error types;
-//! > capability; serialization and resource ownership; cancellation and
-//! > recordability; and whether it is a read, reversible write, or
-//! > irreversible write.
-//!
-//! and the Language Card adds the sentence that makes the schema load-bearing
-//! for tasks: "Host resources declare task-safety in their Host API schema."
-//!
-//! A schema entry is Rust data, not a parsed declaration, because a host is
-//! written in Rust: [`crate::host::HostApi::schema`] returns a `'static`
-//! table that a module declares alongside its implementation, so the two
-//! cannot drift apart at run time.
-//!
-//! Only the parts of ADR 0001's list that something reads are modelled here.
-//! Serialization is left out: every value that crosses the boundary is an
-//! ordinary [`crate::value::Value`], and a field nothing consults is a claim
-//! nothing checks.
-//!
-//! Resource ownership is no longer among the omissions. A host may declare
-//! types of its own — [`TypeSchema`] for the ones that are plain data, and
-//! [`ResourceSchema`] for the ones the host keeps on the far side of the
-//! boundary — and ADR 0013 makes the second of those the whole of a resource
-//! handle's contract: which operations it answers, what capability each of
-//! them needs, and whether the handle may cross a task boundary.
+//! What is *not* there is [`Admits`], which is the only part of the schema
+//! that needs values. A `HostType` is a description and a [`Value`] is the
+//! runtime's; this is where the two meet, so it lives on the side of the
+//! boundary where values live. The compiler answers the same question against
+//! its own `Ty`, at the call site, where a mistake still has a span.
 
-use std::fmt;
+pub use cove_schema::hosts;
+pub use cove_schema::{
+    module, shipped, Effect, FieldSchema, HostType, ModuleSchema, OperationSchema, ResourceSchema,
+    TypeSchema,
+};
 
 use crate::value::Value;
 
-/// A type in a Host API signature, written in Cove's source vocabulary.
+/// Whether a value is one a declared type admits.
 ///
-/// This is a small enum rather than [`cove_syntax::ast::Type`] because an
-/// `ast::Type` is a *parsed* type: every node carries a span into a source
-/// file and its path segments are identifiers with spans of their own, all of
-/// which would have to be invented for an operation that has no source to
-/// point at. The rendering vocabulary is the same one — [`fmt::Display`]
-/// produces the form the type would be written in Cove — so a signature
-/// printed from a schema entry reads exactly like a signature written by
-/// hand.
-///
-/// The variants cover exactly the types the shipped hosts use. Add one when a
-/// host needs it; an unused variant is a type nobody can produce.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum HostType {
-    /// `Unit`, the value an operation returns when it returns nothing.
-    Unit,
-    /// `Bool`.
-    Bool,
-    /// `Int`, a signed 64-bit integer.
-    Int,
-    /// `String`.
-    String,
-    /// `Duration`, a signed count of nanoseconds.
-    Duration,
-    /// `Error`, the builtin error struct.
-    Error,
-    /// `Array<T>`, the fixed-length immutable sequence.
-    Array(&'static HostType),
-    /// `Option<T>`.
-    Option(&'static HostType),
-    /// `Result<T, E>`. Expected failure is part of an operation's result
-    /// type, exactly as it is in Cove source, rather than a second channel
-    /// beside it.
-    Result(&'static HostType, &'static HostType),
-    /// A type the host declares, written qualified: `http.Response`.
-    ///
-    /// The name is the one Cove source writes, module included, because that
-    /// is what a signature in a diagnostic has to read as. Whether it names a
-    /// [`TypeSchema`] or a [`ResourceSchema`] is the host's business; a
-    /// signature says only which type it is.
-    Named(&'static str),
-    /// Any value at all.
-    ///
-    /// This is not a missing type: it is the type of an operation whose
-    /// meaning does not depend on which value it was given. `http.json`
-    /// renders whatever it is handed, and a callback a host stores and calls
-    /// later is a value the host never looks inside.
-    Any,
-}
-
-impl fmt::Display for HostType {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            HostType::Unit => f.write_str("Unit"),
-            HostType::Bool => f.write_str("Bool"),
-            HostType::Int => f.write_str("Int"),
-            HostType::String => f.write_str("String"),
-            HostType::Duration => f.write_str("Duration"),
-            HostType::Error => f.write_str("Error"),
-            HostType::Array(inner) => write!(f, "Array<{inner}>"),
-            HostType::Option(inner) => write!(f, "Option<{inner}>"),
-            HostType::Result(ok, error) => write!(f, "Result<{ok}, {error}>"),
-            HostType::Named(name) => f.write_str(name),
-            HostType::Any => f.write_str("Any"),
-        }
-    }
-}
-
-impl HostType {
+/// This is an extension of [`HostType`] rather than an inherent method
+/// because the type lives in a crate that has no values to check. Everything
+/// it says about *which* values a type admits is the schema's; only the
+/// walking of a [`Value`] is this crate's.
+pub trait Admits {
     /// Whether `value` is one this type admits, and where it stops being one
     /// when it is not.
     ///
@@ -121,7 +48,11 @@ impl HostType {
     /// unchecked is a [`TypeSchema`]'s *fields*: a value calling itself an
     /// `http.Response` is taken at its word about what is inside it. See ADR
     /// 0013's amendment for why that line is drawn there.
-    pub fn admits(&self, value: &Value) -> Result<(), Mismatch> {
+    fn admits(&self, value: &Value) -> Result<(), Mismatch>;
+}
+
+impl Admits for HostType {
+    fn admits(&self, value: &Value) -> Result<(), Mismatch> {
         match (self, value) {
             (HostType::Any, _)
             | (HostType::Unit, Value::Unit)
@@ -143,14 +74,14 @@ impl HostType {
                 match (&*case.case, case.payload.as_slice()) {
                     ("Some", [inner]) => some.admits(inner).map_err(|m| m.inside("Some(_)")),
                     ("None", []) => Ok(()),
-                    _ => Err(self.mismatched(value)),
+                    _ => Err(mismatched(self, value)),
                 }
             }
             (HostType::Result(ok, error), Value::Enum(case)) if &*case.type_name == "Result" => {
                 match (&*case.case, case.payload.as_slice()) {
                     ("Ok", [inner]) => ok.admits(inner).map_err(|m| m.inside("Ok(_)")),
                     ("Err", [inner]) => error.admits(inner).map_err(|m| m.inside("Err(_)")),
-                    _ => Err(self.mismatched(value)),
+                    _ => Err(mismatched(self, value)),
                 }
             }
             // A handle names its module and its kind, which together are the
@@ -162,19 +93,33 @@ impl HostType {
             }
             (HostType::Named(name), Value::Struct(fields)) if &*fields.type_name == *name => Ok(()),
             (HostType::Named(name), Value::Enum(case)) if &*case.type_name == *name => Ok(()),
-            _ => Err(self.mismatched(value)),
+            _ => Err(mismatched(self, value)),
         }
     }
+}
 
-    /// This type and a value that is none of it, as a mismatch at the point
-    /// the two part company.
-    fn mismatched(&self, value: &Value) -> Mismatch {
-        Mismatch {
-            path: String::new(),
-            expected: *self,
-            found: value.type_name(),
-        }
+/// A declared type and a value that is none of it, as a mismatch at the point
+/// the two part company.
+fn mismatched(declared: &HostType, value: &Value) -> Mismatch {
+    Mismatch {
+        path: String::new(),
+        expected: *declared,
+        found: value.type_name(),
     }
+}
+
+/// Which part of a call a mismatch was found in.
+///
+/// The two are the same check on the same table read from opposite sides: a
+/// wrong result is the host breaking its own word, and a wrong argument is
+/// the program breaking it, so the diagnostic says which happened rather than
+/// leaving the reader to work it out from the operation's name.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Part {
+    /// The value the host answered with.
+    Result,
+    /// The argument at this position, counted from one as a reader counts.
+    Argument(usize),
 }
 
 /// Where a value stopped agreeing with the type declared for it, and what was
@@ -208,239 +153,29 @@ impl Mismatch {
 
     /// The disagreement, phrased for a diagnostic about the operation
     /// `shown` names.
-    pub fn describe(&self, shown: &str) -> String {
+    pub fn describe(&self, shown: &str, part: Part) -> String {
+        let (verb, whole) = match part {
+            Part::Result => ("answered", "its result".to_string()),
+            Part::Argument(position) => ("was given", format!("argument {position}")),
+        };
+        let (found, expected) = (&self.found, &self.expected);
         if self.path.is_empty() {
-            format!(
-                "`{shown}` answered `{}`, but its schema declares `{}`",
-                self.found, self.expected
-            )
-        } else {
-            format!(
-                "`{shown}` answered `{}` at `{}` of its result, but its schema declares `{}` there",
-                self.found, self.path, self.expected
-            )
-        }
-    }
-}
-
-/// Whether an operation observes the world or changes it, and whether the
-/// change can be taken back.
-///
-/// ADR 0001 asks each operation to say which of the three it is. The
-/// distinction is about the world outside the run, not about the host's own
-/// bookkeeping: waiting is a [`Effect::Read`] because nothing outside the run
-/// is different afterwards.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Effect {
-    /// Observes state without changing it.
-    Read,
-    /// Changes state in a way the same host can put back.
-    ReversibleWrite,
-    /// Changes state nothing can put back, such as bytes already on a
-    /// terminal or a message already sent.
-    IrreversibleWrite,
-}
-
-impl fmt::Display for Effect {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Effect::Read => f.write_str("read"),
-            Effect::ReversibleWrite => f.write_str("reversible write"),
-            Effect::IrreversibleWrite => f.write_str("irreversible write"),
-        }
-    }
-}
-
-/// One operation of one host module.
-///
-/// Every field is read by something: [`crate::host::HostRegistry::call`]
-/// checks `name` and arity before it dispatches and holds the host to
-/// `result` after it answers, `params` and `result` render the signature a
-/// diagnostic shows, `capability` is the gate, and
-/// `result_is_task_safe` answers the Language Card's rule for values leaving
-/// a host call for a task. `effect`, `cancellable`, and `recordable` are the
-/// three ADR 0001 facts whose consumers are named but not yet built —
-/// `cove replay` for `recordable`, `cove impact` for `effect`, and for
-/// `cancellable`, a host that could abandon a call in flight: a cancelled
-/// task stops at its next safepoint, which is after the call it is already
-/// inside returns.
-#[derive(Clone, Copy, Debug)]
-pub struct OperationSchema {
-    /// The name Cove source calls, such as `println`.
-    pub name: &'static str,
-    /// Parameter types in declaration order.
-    pub params: &'static [HostType],
-    /// Whether the last parameter is variadic.
-    ///
-    /// Cove writes a variadic parameter `items: T...` and makes it an
-    /// immutable `Array<T>` inside the callee, so it accepts zero or more
-    /// arguments: a variadic operation's minimum arity is one less than
-    /// `params.len()`.
-    pub variadic: bool,
-    /// The type the operation produces.
-    ///
-    /// This is a promise the boundary holds the host to rather than a label
-    /// on it: [`crate::host::HostRegistry`] checks what the host answered
-    /// against this before handing it on, so an operation cannot declare one
-    /// type and produce another. [`HostType::admits`] says how far the check
-    /// goes.
-    pub result: HostType,
-    /// The capability a host must grant before this operation may be called.
-    pub capability: &'static str,
-    /// Whether the operation reads, writes reversibly, or writes
-    /// irreversibly.
-    pub effect: Effect,
-    /// Whether abandoning a call that is already in flight is meaningful and
-    /// safe. A wait can be abandoned because nothing has happened yet; a
-    /// write that has already reached the outside world cannot.
-    pub cancellable: bool,
-    /// Whether the call's result can be recorded and handed back later
-    /// without calling the host again, which is what `cove replay` needs.
-    ///
-    /// An operation that opens a resource is recordable, because ADR 0013
-    /// makes a handle a name rather than a live thing: what the trace records
-    /// is the identity the host issued, and a replay hands the same identity
-    /// back and answers the calls made on it from the trace too.
-    pub recordable: bool,
-    /// Whether the value this operation produces may cross a task boundary.
-    ///
-    /// The Language Card puts this decision here rather than in the value:
-    /// "Host resources declare task-safety in their Host API schema."
-    pub result_is_task_safe: bool,
-}
-
-impl OperationSchema {
-    /// The fewest arguments the operation accepts.
-    pub fn min_arity(&self) -> usize {
-        if self.variadic {
-            self.params.len().saturating_sub(1)
-        } else {
-            self.params.len()
-        }
-    }
-
-    /// Whether a call with `arity` arguments has the right number of them.
-    pub fn accepts(&self, arity: usize) -> bool {
-        if self.variadic {
-            arity >= self.min_arity()
-        } else {
-            arity == self.params.len()
-        }
-    }
-
-    /// The signature, in the form it would be written in Cove source, without
-    /// the module qualifier: `println(String...) -> Result<Unit, Error>`.
-    pub fn signature(&self) -> String {
-        let mut params = self
-            .params
-            .iter()
-            .map(HostType::to_string)
-            .collect::<Vec<_>>();
-        if self.variadic {
-            if let Some(last) = params.last_mut() {
-                last.push_str("...");
+            match part {
+                // A result is the whole of what an operation answers, so
+                // naming the place it was found would add nothing.
+                Part::Result => {
+                    format!("`{shown}` {verb} `{found}`, but its schema declares `{expected}`")
+                }
+                Part::Argument(_) => format!(
+                    "`{shown}` {verb} `{found}` as {whole}, but its schema declares `{expected}` there"
+                ),
             }
-        }
-        format!("{}({}) -> {}", self.name, params.join(", "), self.result)
-    }
-
-    /// How many arguments this operation takes, phrased for a diagnostic.
-    pub fn expected_arity(&self) -> String {
-        let least = self.min_arity();
-        let noun = if least == 1 { "argument" } else { "arguments" };
-        if self.variadic {
-            format!("at least {least} {noun}")
         } else {
-            format!("{least} {noun}")
+            format!(
+                "`{shown}` {verb} `{found}` at `{}` of {whole}, but its schema declares `{expected}` there",
+                self.path
+            )
         }
-    }
-}
-
-/// One field of a host type.
-#[derive(Clone, Copy, Debug)]
-pub struct FieldSchema {
-    /// The label Cove source writes in the initializer, such as `method`.
-    pub name: &'static str,
-    /// The field's type.
-    pub ty: HostType,
-}
-
-/// The shape of one type a host declares.
-///
-/// A host type is ordinary data: `http.Method` is an enum whose cases carry
-/// nothing, and `http.Route` is a struct initialized with labels, exactly as a
-/// Cove struct is. Neither needs a representation of its own — the runtime
-/// builds a [`crate::value::Value::Enum`] or a
-/// [`crate::value::Value::Struct`] whose type name is qualified by the module
-/// — so what the schema adds is only the vocabulary: which names exist and
-/// what they are made of.
-///
-/// A type whose values the host keeps rather than hands over is a
-/// [`ResourceSchema`] instead.
-#[derive(Clone, Copy, Debug)]
-pub struct TypeSchema {
-    /// The name Cove source writes after the module, such as `Route`.
-    pub name: &'static str,
-    /// The cases, for an enum. Empty for a struct.
-    pub cases: &'static [&'static str],
-    /// The fields, for a struct. Empty for an enum.
-    pub fields: &'static [FieldSchema],
-}
-
-impl TypeSchema {
-    /// Whether this is an enum, which is what having cases means.
-    pub fn is_enum(&self) -> bool {
-        !self.cases.is_empty()
-    }
-
-    /// The initializer, in the form it would be written in Cove source:
-    /// `Route(method: http.Method, path: String, handler: Any)`.
-    pub fn initializer(&self) -> String {
-        let fields = self
-            .fields
-            .iter()
-            .map(|field| format!("{}: {}", field.name, field.ty))
-            .collect::<Vec<_>>();
-        format!("{}({})", self.name, fields.join(", "))
-    }
-}
-
-/// One kind of host resource: a value the host owns and Cove only names.
-///
-/// ADR 0013 states the contract this carries. A handle is an identity, not
-/// state: the host keeps whatever a `database.Connection` really is, and Cove
-/// holds the name of it. So a resource declares three things and nothing
-/// else — what it is called, which operations it answers, and whether the
-/// name may cross a task boundary.
-///
-/// `task_safe` is the Language Card's sentence applied to a host's own types:
-/// "Host resources declare task-safety in their Host API schema." A resource
-/// whose state the host keeps behind a lock says `true`, and its name then
-/// crosses like any other immutable value; one whose state belongs to the
-/// task that opened it says `false`, and the name is refused at the boundary
-/// with the same diagnostic a vector gets.
-#[derive(Clone, Copy, Debug)]
-pub struct ResourceSchema {
-    /// The name Cove source writes after the module, such as `Connection`.
-    pub name: &'static str,
-    /// Whether a handle to this resource may cross a task boundary.
-    pub task_safe: bool,
-    /// The operations a handle answers, called as methods on it.
-    pub operations: &'static [OperationSchema],
-}
-
-impl ResourceSchema {
-    /// The operation `name`, if this resource has one.
-    pub fn operation(&self, name: &str) -> Option<&OperationSchema> {
-        self.operations.iter().find(|entry| entry.name == name)
-    }
-
-    /// Every operation name, for a diagnostic that has to list them.
-    pub fn operation_names(&self) -> Vec<String> {
-        self.operations
-            .iter()
-            .map(|entry| format!("`{}`", entry.name))
-            .collect()
     }
 }
 
@@ -450,74 +185,12 @@ mod tests {
     use crate::host::ResourceHandle;
     use crate::value::StructValue;
 
-    const READ_A_STRING: OperationSchema = OperationSchema {
-        name: "read",
-        params: &[HostType::String],
-        variadic: false,
-        result: HostType::Result(&HostType::String, &HostType::Error),
-        capability: "documents",
-        effect: Effect::Read,
-        cancellable: false,
-        recordable: true,
-        result_is_task_safe: true,
-    };
-
-    const PRINT_MANY: OperationSchema = OperationSchema {
-        name: "println",
-        params: &[HostType::String],
-        variadic: true,
-        result: HostType::Result(&HostType::Unit, &HostType::Error),
-        capability: "console",
-        effect: Effect::IrreversibleWrite,
-        cancellable: false,
-        recordable: true,
-        result_is_task_safe: true,
-    };
-
-    #[test]
-    fn types_render_in_cove_source_form() {
-        assert_eq!(HostType::Unit.to_string(), "Unit");
-        assert_eq!(HostType::Bool.to_string(), "Bool");
-        assert_eq!(HostType::Int.to_string(), "Int");
-        assert_eq!(HostType::Duration.to_string(), "Duration");
-        assert_eq!(
-            HostType::Array(&HostType::String).to_string(),
-            "Array<String>"
-        );
-        assert_eq!(
-            HostType::Option(&HostType::String).to_string(),
-            "Option<String>"
-        );
-        assert_eq!(
-            HostType::Result(&HostType::Unit, &HostType::Error).to_string(),
-            "Result<Unit, Error>"
-        );
-    }
-
-    #[test]
-    fn a_fixed_operation_accepts_exactly_its_parameters() {
-        assert!(!READ_A_STRING.accepts(0));
-        assert!(READ_A_STRING.accepts(1));
-        assert!(!READ_A_STRING.accepts(2));
-        assert_eq!(READ_A_STRING.min_arity(), 1);
-        assert_eq!(READ_A_STRING.expected_arity(), "1 argument");
-    }
-
-    #[test]
-    fn a_variadic_operation_accepts_zero_or_more() {
-        assert!(PRINT_MANY.accepts(0));
-        assert!(PRINT_MANY.accepts(1));
-        assert!(PRINT_MANY.accepts(7));
-        assert_eq!(PRINT_MANY.min_arity(), 0);
-        assert_eq!(PRINT_MANY.expected_arity(), "at least 0 arguments");
-    }
-
     // ------------------------------------------- what a declared type admits
     //
     // ADR 0001 asks each operation to describe its argument, result, and
-    // error types, and ADR 0013's amendment makes the result one the boundary
-    // holds a host to. These pin the vocabulary of that check; `host.rs` pins
-    // what the boundary does with it.
+    // error types, and ADR 0013's amendment makes both the result and the
+    // arguments ones the boundary holds a call to. These pin the vocabulary
+    // of that check; `host.rs` pins what the boundary does with it.
 
     /// The one kind of resource a host in these tests can open.
     static CONNECTION: ResourceSchema = ResourceSchema {
@@ -557,8 +230,23 @@ mod tests {
         assert_eq!(mismatch.expected, HostType::String);
         assert_eq!(mismatch.found, "Int");
         assert_eq!(
-            mismatch.describe("wayward.read"),
+            mismatch.describe("wayward.read", Part::Result),
             "`wayward.read` answered `Int`, but its schema declares `String`"
+        );
+    }
+
+    /// The same mismatch, read from the other side of the call. A wrong
+    /// argument is the program's mistake rather than the host's, so it is
+    /// phrased as one.
+    #[test]
+    fn a_mismatch_names_the_argument_it_was_found_in() {
+        let mismatch = HostType::String
+            .admits(&Value::Int(3))
+            .expect_err("an `Int` is not a `String`");
+
+        assert_eq!(
+            mismatch.describe("documents.read", Part::Argument(1)),
+            "`documents.read` was given `Int` as argument 1, but its schema declares `String` there"
         );
     }
 
@@ -584,8 +272,12 @@ mod tests {
         assert_eq!(mismatch.path, "Ok(_)[1]");
         assert_eq!(mismatch.expected, HostType::String);
         assert_eq!(
-            mismatch.describe("wayward.list"),
+            mismatch.describe("wayward.list", Part::Result),
             "`wayward.list` answered `Int` at `Ok(_)[1]` of its result, but its schema declares `String` there"
+        );
+        assert_eq!(
+            mismatch.describe("wayward.list", Part::Argument(2)),
+            "`wayward.list` was given `Int` at `Ok(_)[1]` of argument 2, but its schema declares `String` there"
         );
     }
 
@@ -658,18 +350,6 @@ mod tests {
                 .expect_err("the same kind of another module is another type")
                 .found,
             "http.Connection"
-        );
-    }
-
-    #[test]
-    fn signatures_read_like_source() {
-        assert_eq!(
-            READ_A_STRING.signature(),
-            "read(String) -> Result<String, Error>"
-        );
-        assert_eq!(
-            PRINT_MANY.signature(),
-            "println(String...) -> Result<Unit, Error>"
         );
     }
 }

@@ -31,8 +31,8 @@ use cove_sema::resolve::HOST_MODULES;
 #[test]
 fn the_compiler_refuses_exactly_the_host_modules_a_run_registers() {
     let registered: BTreeSet<String> = cove_runtime::shipped_schema()
-        .into_iter()
-        .map(|module| module.name)
+        .iter()
+        .map(|module| module.name.to_string())
         .collect();
     let refused: BTreeSet<String> = HOST_MODULES
         .iter()

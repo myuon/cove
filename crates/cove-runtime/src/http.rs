@@ -45,7 +45,7 @@ use cove_sema::Capability;
 
 use crate::error::RuntimeError;
 use crate::host::{HostApi, Reentry, ResourceHandle};
-use crate::schema::{Effect, FieldSchema, HostType, OperationSchema, ResourceSchema, TypeSchema};
+use crate::schema::{ModuleSchema, OperationSchema, ResourceSchema, TypeSchema};
 use crate::value::{EnumValue, StructValue, Value};
 
 /// How long the real host waits for one client to send its request line.
@@ -54,165 +54,12 @@ use crate::value::{EnumValue, StructValue, Value};
 /// open for as long as the peer chose to keep it.
 const READ_TIMEOUT: Duration = Duration::from_secs(30);
 
-/// The types `http` declares.
+/// What `http` declares about itself.
 ///
-/// All four are ordinary data: a request and a response are what crossed the
-/// wire, a method is one of two names, and a route pairs them with the
-/// callback that answers it. A `handler` is [`HostType::Any`] because the
-/// host never looks inside it — it stores the value and calls it.
-static HTTP_TYPES: &[TypeSchema] = &[
-    TypeSchema {
-        name: "Method",
-        cases: &["Get", "Post"],
-        fields: &[],
-    },
-    TypeSchema {
-        name: "Request",
-        cases: &[],
-        fields: &[
-            FieldSchema {
-                name: "method",
-                ty: HostType::Named("http.Method"),
-            },
-            FieldSchema {
-                name: "path",
-                ty: HostType::String,
-            },
-            FieldSchema {
-                name: "body",
-                ty: HostType::String,
-            },
-        ],
-    },
-    TypeSchema {
-        name: "Response",
-        cases: &[],
-        fields: &[
-            FieldSchema {
-                name: "status",
-                ty: HostType::Int,
-            },
-            FieldSchema {
-                name: "body",
-                ty: HostType::String,
-            },
-        ],
-    },
-    TypeSchema {
-        name: "Route",
-        cases: &[],
-        fields: &[
-            FieldSchema {
-                name: "method",
-                ty: HostType::Named("http.Method"),
-            },
-            FieldSchema {
-                name: "path",
-                ty: HostType::String,
-            },
-            FieldSchema {
-                name: "handler",
-                ty: HostType::Any,
-            },
-        ],
-    },
-];
-
-/// The operations `http` exposes.
-///
-/// `listen` is a reversible write: it takes a port from the machine, and
-/// `close` gives it back. `fetch` reads, since a `GET` is what it sends and
-/// nothing outside the run is different afterwards. `json` touches nothing at
-/// all — it is a constructor the host owns because the host owns the
-/// encoding.
-static HTTP_SCHEMA: &[OperationSchema] = &[
-    OperationSchema {
-        name: "fetch",
-        params: &[HostType::String],
-        variadic: false,
-        result: HostType::Result(&HostType::String, &HostType::Error),
-        capability: "http",
-        effect: Effect::Read,
-        cancellable: true,
-        recordable: true,
-        result_is_task_safe: true,
-    },
-    OperationSchema {
-        name: "json",
-        params: &[HostType::Int, HostType::Any],
-        variadic: false,
-        result: HostType::Named("http.Response"),
-        capability: "http",
-        effect: Effect::Read,
-        cancellable: false,
-        recordable: true,
-        result_is_task_safe: true,
-    },
-    OperationSchema {
-        name: "listen",
-        params: &[HostType::Int],
-        variadic: false,
-        result: HostType::Result(&HostType::Named("http.Server"), &HostType::Error),
-        capability: "http",
-        effect: Effect::ReversibleWrite,
-        cancellable: false,
-        // A handle is a name, so recording one records the name. A replay
-        // hands the same name back and answers the calls made on it from the
-        // trace as well.
-        recordable: true,
-        result_is_task_safe: true,
-    },
-];
-
-/// What a `http.Server` handle answers.
-///
-/// The listener lives behind a lock the host owns, so two tasks may both hold
-/// the handle and take turns accepting: the resource is task-safe, and the
-/// schema is where it says so.
-static HTTP_RESOURCES: &[ResourceSchema] = &[ResourceSchema {
-    name: "Server",
-    task_safe: true,
-    operations: &[
-        OperationSchema {
-            name: "port",
-            params: &[],
-            variadic: false,
-            result: HostType::Int,
-            capability: "http",
-            effect: Effect::Read,
-            cancellable: false,
-            recordable: true,
-            result_is_task_safe: true,
-        },
-        OperationSchema {
-            name: "handle",
-            params: &[HostType::Array(&HostType::Named("http.Route"))],
-            variadic: false,
-            result: HostType::Result(&HostType::Bool, &HostType::Error),
-            capability: "http",
-            // A response that has reached a client cannot be taken back.
-            effect: Effect::IrreversibleWrite,
-            cancellable: true,
-            // The answer is whether a request arrived, which is a fact about
-            // the run and not about the handler that ran inside it. Replaying
-            // it reproduces the shape of the loop; the handler runs for real
-            // either way, because it is the program's own code.
-            recordable: true,
-            result_is_task_safe: true,
-        },
-        OperationSchema {
-            name: "close",
-            params: &[],
-            variadic: false,
-            result: HostType::Result(&HostType::Unit, &HostType::Error),
-            capability: "http",
-            effect: Effect::ReversibleWrite,
-            cancellable: false,
-            recordable: true,
-            result_is_task_safe: true,
-        },
-    ],
-}];
+/// The table is [`cove_schema::hosts::HTTP`], so the description the compiler
+/// checks a call against, the one the boundary dispatches through, and the
+/// one `cove trace` reads out of a recorded file are the same bytes.
+const SCHEMA: ModuleSchema = cove_schema::hosts::HTTP;
 
 /// `http`: reaching a server, and being one.
 pub struct Http {
@@ -365,7 +212,7 @@ impl Http {
         self.locked().insert(id, listener);
         Ok(Value::ok(Value::Resource(ResourceHandle::new(
             "http",
-            &HTTP_RESOURCES[0],
+            &SCHEMA.resources[0],
             id,
         ))))
     }
@@ -612,38 +459,34 @@ impl HostApi for Http {
     }
 
     fn schema(&self) -> &[OperationSchema] {
-        HTTP_SCHEMA
+        SCHEMA.operations
     }
 
     fn types(&self) -> &[TypeSchema] {
-        HTTP_TYPES
+        SCHEMA.types
     }
 
     fn resources(&self) -> &[ResourceSchema] {
-        HTTP_RESOURCES
+        SCHEMA.resources
     }
 
     fn call(&self, op: &str, args: Vec<Value>) -> Result<Value, RuntimeError> {
         match op {
             "fetch" => {
                 let [Value::Str(url)] = args.as_slice() else {
-                    return Err(RuntimeError::new(
-                        "`http.fetch` takes one `String` argument",
-                    ));
+                    unreachable!("checked by HostRegistry::call")
                 };
                 Ok(self.fetch(url))
             }
             "json" => {
                 let [Value::Int(status), body] = args.as_slice() else {
-                    return Err(RuntimeError::new(
-                        "`http.json` takes an `Int` status and a value to encode",
-                    ));
+                    unreachable!("checked by HostRegistry::call")
                 };
                 Ok(response(*status, &json_of(body)))
             }
             "listen" => {
                 let [Value::Int(port)] = args.as_slice() else {
-                    return Err(RuntimeError::new("`http.listen` takes one `Int` argument"));
+                    unreachable!("checked by HostRegistry::call")
                 };
                 self.listen(*port)
             }
@@ -671,9 +514,7 @@ impl HostApi for Http {
             },
             "handle" => {
                 let [routes] = args.as_slice() else {
-                    return Err(RuntimeError::new(
-                        "`http.Server.handle` takes one `Array<http.Route>` argument",
-                    ));
+                    unreachable!("checked by HostRegistry::call")
                 };
                 self.serve_one(handle, routes, back)
             }

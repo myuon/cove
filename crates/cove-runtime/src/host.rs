@@ -30,7 +30,9 @@ use cove_sema::Capability;
 
 use crate::budget::{Budget, Cancellation};
 use crate::error::RuntimeError;
-use crate::schema::{Effect, HostType, OperationSchema, ResourceSchema, TypeSchema};
+use crate::schema::{
+    Admits, Effect, ModuleSchema, OperationSchema, Part, ResourceSchema, TypeSchema,
+};
 use crate::trace::{HostOutcome, NullSink, RecordedValue, TraceEvent, TraceSink};
 use crate::value::Value;
 
@@ -578,10 +580,14 @@ impl HostRegistry {
         })
     }
 
-    /// The grant check, the schema check, the budget charge, the trace, the
-    /// dispatch itself, and the check that what came back is what was
-    /// declared — everything a Host API call passes through, whether it was
-    /// addressed to a module or to a handle.
+    /// The grant check, the schema check on the way in, the budget charge,
+    /// the trace, the dispatch itself, and the schema check on the way out —
+    /// everything a Host API call passes through, whether it was addressed to
+    /// a module or to a handle.
+    ///
+    /// Both schema checks read one declaration from both sides: the
+    /// arguments must be what `params` says before the host is reached, and
+    /// the result must be what `result` says before it is handed on.
     fn dispatch(
         &self,
         callee: &Callee,
@@ -650,6 +656,33 @@ impl HostRegistry {
                 callee.signature(&schema)
             )));
         }
+        // Arity and types are the same check on the same declaration, so they
+        // are made together and in the same place: before the host is
+        // reached, before the budget is charged, and with nothing on the
+        // trace, because a call refused here never happened.
+        //
+        // `cove check` makes this check too, at the call site, where the
+        // mistake has a span to point at — but it can only make it for the
+        // hosts it can see. An embedder's own module is registered at run
+        // time and named in no table the compiler reads, so this is the only
+        // thing standing between such a host and an argument its schema does
+        // not admit.
+        for (index, argument) in args.iter().enumerate() {
+            let Some(declared) = schema.param(index) else {
+                break;
+            };
+            if let Err(mismatch) = declared.admits(argument) {
+                return Err(RuntimeError::new(
+                    mismatch.describe(&shown, Part::Argument(index + 1)),
+                )
+                .with_rule(A_CALL_KEEPS_THE_SCHEMA)
+                .with_help(format!(
+                    "the Host API schema declares `{}.{}`",
+                    callee.module,
+                    callee.signature(&schema)
+                )));
+            }
+        }
 
         if let Some(Err(error)) = self.with_budget(|budget| {
             budget
@@ -707,7 +740,7 @@ impl HostRegistry {
         // one inside a Cove `Result`, not this one.
         if let Ok(value) = &result {
             if let Err(mismatch) = schema.result.admits(value) {
-                return Err(RuntimeError::new(mismatch.describe(&shown))
+                return Err(RuntimeError::new(mismatch.describe(&shown, Part::Result))
                     .with_rule(HOST_KEEPS_ITS_SCHEMA)
                     .with_help(format!(
                         "the Host API schema declares `{}.{}`",
@@ -728,85 +761,34 @@ impl HostRegistry {
 /// as a value that program never asked for and cannot handle.
 const HOST_KEEPS_ITS_SCHEMA: &str = "A host operation answers the type its Host API schema declares; the schema is one description shared by the compiler, runtime, and CLI.";
 
-/// The name, capability, and operations of one host module, without the
-/// module itself.
+/// The rule a call breaks by passing an argument the operation's own
+/// declaration does not admit.
 ///
-/// [`HostApi::schema`] borrows from a live module, and a tool that reads a
-/// recorded trace has no live module to borrow from. The entries are
-/// [`Copy`], so this is the same table, detached.
-#[derive(Clone, Debug)]
-pub struct ModuleSchema {
-    /// The name Cove source uses, such as `console`.
-    pub name: String,
-    /// The capability a host must grant for this module.
-    pub capability: Capability,
-    /// Every operation the module exposes.
-    pub operations: Vec<OperationSchema>,
-    /// Every type the module declares.
-    pub types: Vec<TypeSchema>,
-    /// Every kind of resource the module can open.
-    pub resources: Vec<ResourceSchema>,
-}
+/// This is the program's mistake rather than the host's, and `cove check`
+/// reports it at the call site before a run starts. It is stated again here
+/// because the checker reads only the schema of the modules the toolchain
+/// ships, and a host may be anyone's.
+const A_CALL_KEEPS_THE_SCHEMA: &str = "A Host API call passes the argument types its operation's schema declares; the schema is one description shared by the compiler, runtime, and CLI.";
 
 /// The schema of every host module the toolchain ships.
 ///
 /// `cove trace` and `cove replay` read a trace without a host to ask, and
 /// both need what the schema says: which calls the trace recorded are
 /// irreversible, which capability each one needs, and whether a result was
-/// recordable. Building the modules to ask them keeps that answer the same
-/// one `cove run` enforces, rather than a second copy that can drift.
-pub fn shipped_schema() -> Vec<ModuleSchema> {
-    let modules: Vec<Box<dyn HostApi>> = vec![
-        Box::new(Console::new(std::io::sink())),
-        Box::new(Env::new(BTreeMap::new())),
-        Box::new(Documents::in_memory(BTreeMap::new())),
-        Box::new(crate::clock::Clock::real()),
-        Box::new(crate::files::Files::in_memory(BTreeMap::new())),
-        Box::new(crate::process::Process::real(Vec::new(), Vec::new())),
-        Box::new(crate::database::Database::denied()),
-        Box::new(crate::http::Http::real()),
-    ];
-    modules
-        .iter()
-        .map(|module| ModuleSchema {
-            name: module.name().to_string(),
-            capability: module.capability(),
-            operations: module.schema().to_vec(),
-            types: module.types().to_vec(),
-            resources: module.resources().to_vec(),
-        })
-        .collect()
+/// recordable. `cove-sema` needs the same table with no runtime to depend on
+/// at all. So the table is [`cove_schema::hosts::SHIPPED`] and every module
+/// below answers with its entry from it: not a copy that agrees, the same
+/// bytes.
+pub fn shipped_schema() -> &'static [ModuleSchema] {
+    cove_schema::hosts::shipped()
 }
 
-/// The operations `console` exposes.
+/// What `console` declares about itself.
 ///
-/// Both take a variadic `String`, which is why `console.println("a", "b")`
-/// prints one line of two space-separated parts. Bytes already handed to the
-/// terminal cannot be taken back, so both are irreversible writes.
-static CONSOLE_SCHEMA: &[OperationSchema] = &[
-    OperationSchema {
-        name: "println",
-        params: &[HostType::String],
-        variadic: true,
-        result: HostType::Result(&HostType::Unit, &HostType::Error),
-        capability: "console",
-        effect: Effect::IrreversibleWrite,
-        cancellable: false,
-        recordable: true,
-        result_is_task_safe: true,
-    },
-    OperationSchema {
-        name: "print",
-        params: &[HostType::String],
-        variadic: true,
-        result: HostType::Result(&HostType::Unit, &HostType::Error),
-        capability: "console",
-        effect: Effect::IrreversibleWrite,
-        cancellable: false,
-        recordable: true,
-        result_is_task_safe: true,
-    },
-];
+/// The table is [`cove_schema::hosts::CONSOLE`], so the description the
+/// compiler checks a call against and the one the boundary dispatches through
+/// are the same bytes.
+const CONSOLE_SCHEMA: ModuleSchema = cove_schema::hosts::CONSOLE;
 
 /// `console`: line-oriented output.
 pub struct Console<W: Write + Send> {
@@ -833,7 +815,7 @@ impl<W: Write + Send> HostApi for Console<W> {
     }
 
     fn schema(&self) -> &[OperationSchema] {
-        CONSOLE_SCHEMA
+        CONSOLE_SCHEMA.operations
     }
 
     fn call(&self, op: &str, args: Vec<Value>) -> Result<Value, RuntimeError> {
@@ -858,18 +840,8 @@ impl<W: Write + Send> HostApi for Console<W> {
     }
 }
 
-/// The operations `env` exposes.
-static ENV_SCHEMA: &[OperationSchema] = &[OperationSchema {
-    name: "get",
-    params: &[HostType::String],
-    variadic: false,
-    result: HostType::Option(&HostType::String),
-    capability: "env",
-    effect: Effect::Read,
-    cancellable: false,
-    recordable: true,
-    result_is_task_safe: true,
-}];
+/// What `env` declares about itself.
+const ENV_SCHEMA: ModuleSchema = cove_schema::hosts::ENV;
 
 /// `env`: read-only access to the environment the host supplies.
 ///
@@ -904,14 +876,14 @@ impl HostApi for Env {
     }
 
     fn schema(&self) -> &[OperationSchema] {
-        ENV_SCHEMA
+        ENV_SCHEMA.operations
     }
 
     fn call(&self, op: &str, args: Vec<Value>) -> Result<Value, RuntimeError> {
         match op {
             "get" => {
                 let [Value::Str(name)] = args.as_slice() else {
-                    return Err(RuntimeError::new("`env.get` takes one `String` argument"));
+                    unreachable!("checked by HostRegistry::call")
                 };
                 Ok(match self.vars.get(&**name) {
                     Some(value) => Value::some(Value::Str(value.as_str().into())),
@@ -923,18 +895,8 @@ impl HostApi for Env {
     }
 }
 
-/// The operations `documents` exposes.
-static DOCUMENTS_SCHEMA: &[OperationSchema] = &[OperationSchema {
-    name: "read",
-    params: &[HostType::String],
-    variadic: false,
-    result: HostType::Result(&HostType::String, &HostType::Error),
-    capability: "documents",
-    effect: Effect::Read,
-    cancellable: false,
-    recordable: true,
-    result_is_task_safe: true,
-}];
+/// What `documents` declares about itself.
+const DOCUMENTS_SCHEMA: ModuleSchema = cove_schema::hosts::DOCUMENTS;
 
 /// `documents`: a filtered, read-only view over a fixed set of named text
 /// documents.
@@ -1010,16 +972,14 @@ impl HostApi for Documents {
     }
 
     fn schema(&self) -> &[OperationSchema] {
-        DOCUMENTS_SCHEMA
+        DOCUMENTS_SCHEMA.operations
     }
 
     fn call(&self, op: &str, args: Vec<Value>) -> Result<Value, RuntimeError> {
         match op {
             "read" => {
                 let [Value::Str(name)] = args.as_slice() else {
-                    return Err(RuntimeError::new(
-                        "`documents.read` takes one `String` argument",
-                    ));
+                    unreachable!("checked by HostRegistry::call")
                 };
                 Ok(match self.read(name) {
                     Ok(text) => Value::ok(Value::Str(text.into())),
@@ -1034,6 +994,7 @@ impl HostApi for Documents {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::schema::HostType;
     use std::path::Path;
 
     /// A temporary directory, removed on drop.
@@ -1487,42 +1448,47 @@ mod tests {
         assert_eq!(hosts.result_is_task_safe("network", "read"), None);
     }
 
-    /// The registry gates on the module's capability, and each operation
-    /// declares the capability it needs. Nothing today mixes capabilities
-    /// inside one module, and a module whose operations disagreed with it
-    /// would make the grant check and the schema tell different stories.
+    /// Every module a run registers declares itself out of
+    /// [`cove_schema::hosts::SHIPPED`] rather than out of a table of its own.
+    ///
+    /// This is what makes "one description shared by the compiler, runtime,
+    /// and CLI" a fact rather than an intention. `cove-sema` reads that table
+    /// and never sees a host, so a module answering with anything else would
+    /// be a second description with nothing holding it against the first —
+    /// which is exactly how `http` once came to be missing from the
+    /// compiler's list of host modules with no diagnostic anywhere. A test
+    /// used to compare the two lists; there is one list now, and this is what
+    /// keeps it one.
     #[test]
-    fn every_operation_declares_its_module_capability() {
-        for module in shipped_schema() {
-            for entry in &module.operations {
-                assert_eq!(
-                    entry.capability,
-                    module.capability.as_str(),
-                    "`{}.{}`",
-                    module.name,
-                    entry.name
-                );
-            }
-        }
-    }
+    fn every_module_a_run_registers_declares_itself_out_of_the_shared_schema() {
+        let modules: Vec<Box<dyn HostApi>> = vec![
+            Box::new(Console::new(std::io::sink())),
+            Box::new(Env::new(BTreeMap::new())),
+            Box::new(Documents::in_memory(BTreeMap::new())),
+            Box::new(crate::clock::Clock::real()),
+            Box::new(crate::files::Files::in_memory(BTreeMap::new())),
+            Box::new(crate::process::Process::real(Vec::new(), Vec::new())),
+            Box::new(crate::database::Database::denied()),
+            Box::new(crate::http::Http::real()),
+        ];
 
-    /// What `cove trace` and `cove replay` read instead of a live host.
-    #[test]
-    fn the_shipped_schema_names_every_module_a_run_registers() {
-        let names: Vec<String> = shipped_schema().into_iter().map(|m| m.name).collect();
         assert_eq!(
-            names,
-            [
-                "console",
-                "env",
-                "documents",
-                "clock",
-                "files",
-                "process",
-                "database",
-                "http"
-            ]
+            modules.len(),
+            shipped_schema().len(),
+            "a module the schema describes is one a run registers, and the reverse"
         );
+        for (module, declared) in modules.iter().zip(shipped_schema()) {
+            assert_eq!(module.name(), declared.name);
+            assert_eq!(module.capability().as_str(), declared.capability);
+            assert_eq!(module.schema(), declared.operations, "`{}`", declared.name);
+            assert_eq!(module.types(), declared.types, "`{}`", declared.name);
+            assert_eq!(
+                module.resources(),
+                declared.resources,
+                "`{}`",
+                declared.name
+            );
+        }
     }
 
     /// The counter behind `cove run --stats`, and the one thing that reads
@@ -1650,6 +1616,45 @@ mod tests {
             params: &[],
             variadic: false,
             result: HostType::Any,
+            capability: "wayward",
+            effect: Effect::Read,
+            cancellable: false,
+            recordable: true,
+            result_is_task_safe: true,
+        },
+        // An argument with something inside it, so a disagreement can be
+        // nested there too.
+        OperationSchema {
+            name: "send",
+            params: &[HostType::Array(&HostType::String)],
+            variadic: false,
+            result: HostType::Result(&HostType::String, &HostType::Error),
+            capability: "wayward",
+            effect: Effect::Read,
+            cancellable: false,
+            recordable: true,
+            result_is_task_safe: true,
+        },
+        // One declared parameter answering for as many arguments as the call
+        // makes, which is what `console.println` declares.
+        OperationSchema {
+            name: "say",
+            params: &[HostType::String],
+            variadic: true,
+            result: HostType::Result(&HostType::String, &HostType::Error),
+            capability: "wayward",
+            effect: Effect::Read,
+            cancellable: false,
+            recordable: true,
+            result_is_task_safe: true,
+        },
+        // An operation that declares nothing about what it is *given*, which
+        // is what `clock.timeout` declares of the work it bounds.
+        OperationSchema {
+            name: "bound",
+            params: &[HostType::Any],
+            variadic: false,
+            result: HostType::Result(&HostType::String, &HostType::Error),
             capability: "wayward",
             effect: Effect::Read,
             cancellable: false,
@@ -1894,7 +1899,7 @@ mod tests {
         assert_eq!(calls.load(Ordering::Relaxed), 0);
     }
 
-    /// Arity is the one part of an operation's declared shape the boundary
+    /// Arity is the first part of an operation's declared shape the boundary
     /// enforces, and it enforces it before the host is reached.
     #[test]
     fn arguments_the_schema_does_not_accept_are_refused_before_the_host_sees_them() {
@@ -1914,6 +1919,105 @@ mod tests {
             "{help}"
         );
         assert_eq!(calls.load(Ordering::Relaxed), 0);
+    }
+
+    /// An argument the operation's own declaration does not admit is refused
+    /// before the host sees it, and nothing of the call is recorded: a call
+    /// stopped here never happened.
+    ///
+    /// This is the same table as the result check, read from the other side.
+    /// `cove check` reports this mistake at the call site, where it has a
+    /// span; the boundary reports it for the hosts the checker cannot see —
+    /// which is every host an embedder writes.
+    #[test]
+    fn an_argument_the_schema_does_not_admit_is_refused_before_the_host_sees_it() {
+        let (hosts, calls, sink) = registry_with_wayward(Answer::Declared);
+
+        let error = hosts
+            .call("wayward", "read", vec![Value::Int(3)])
+            .expect_err("an `Int` where a `String` was declared is refused");
+
+        assert_eq!(
+            error.message,
+            "`wayward.read` was given `Int` as argument 1, but its schema declares `String` there"
+        );
+        let help = error.help.expect("the diagnostic quotes the schema");
+        assert!(
+            help.contains("wayward.read(String) -> Result<String, Error>"),
+            "{help}"
+        );
+        assert_eq!(calls.load(Ordering::Relaxed), 0);
+        assert!(
+            sink.events().is_empty(),
+            "a call the boundary refused never reached the host to be recorded"
+        );
+    }
+
+    /// An argument is followed as far down as a result is, so an `Int` among
+    /// the strings of a declared `Array<String>` is caught and the diagnostic
+    /// says which element.
+    #[test]
+    fn a_violation_inside_an_argument_says_where_it_is() {
+        let (hosts, calls, _) = registry_with_wayward(Answer::Declared);
+
+        let error = hosts
+            .call(
+                "wayward",
+                "send",
+                vec![Value::Array(
+                    vec![Value::Str("one".into()), Value::Int(2)].into(),
+                )],
+            )
+            .expect_err("an `Int` among the declared strings is refused");
+
+        assert_eq!(
+            error.message,
+            "`wayward.send` was given `Int` at `[1]` of argument 1, but its schema declares `String` there"
+        );
+        assert_eq!(calls.load(Ordering::Relaxed), 0);
+    }
+
+    /// A variadic operation's one declared parameter answers for every
+    /// argument from its own position onwards, so the fourth `say` is checked
+    /// against the same `String` the first one was.
+    #[test]
+    fn a_variadic_operation_checks_every_argument_against_its_declared_type() {
+        let (hosts, _, _) = registry_with_wayward(Answer::Declared);
+
+        hosts
+            .call(
+                "wayward",
+                "say",
+                vec![Value::Str("a".into()), Value::Str("b".into())],
+            )
+            .expect("strings all the way along are admitted");
+
+        let error = hosts
+            .call(
+                "wayward",
+                "say",
+                vec![Value::Str("a".into()), Value::Int(2)],
+            )
+            .expect_err("an `Int` among the declared strings is refused");
+        assert_eq!(
+            error.message,
+            "`wayward.say` was given `Int` as argument 2, but its schema declares `String` there"
+        );
+    }
+
+    /// `Any` admits whatever it is given on the way in for the same reason it
+    /// does on the way out: it is the type of an operation whose meaning does
+    /// not depend on which value it was handed.
+    #[test]
+    fn an_argument_declared_any_admits_whatever_it_is_given() {
+        let (hosts, calls, _) = registry_with_wayward(Answer::Declared);
+
+        for argument in [Value::Int(3), Value::Unit, Value::Str("text".into())] {
+            hosts
+                .call("wayward", "bound", vec![argument])
+                .expect("`Any` admits everything");
+        }
+        assert_eq!(calls.load(Ordering::Relaxed), 3);
     }
 
     /// A host whose *result* violates its declared type is refused, and the

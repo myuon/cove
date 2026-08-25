@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
   "crates/cove-diag",
+  "crates/cove-schema",
   "crates/cove-syntax",
   "crates/cove-sema",
   "crates/cove-runtime",
@@ -17,6 +18,7 @@ repository = "https://github.com/myuon/cove"
 
 [workspace.dependencies]
 cove-diag = { path = "crates/cove-diag" }
+cove-schema = { path = "crates/cove-schema" }
 cove-syntax = { path = "crates/cove-syntax" }
 cove-sema = { path = "crates/cove-sema" }
 cove-runtime = { path = "crates/cove-runtime" }
