@@ -7,7 +7,7 @@
   and [ADR 0006](0006-traits-and-dispatch.md), which turned "parametric and
   unbounded" into parametric with bounds
 - Implemented by: PR #12; the declaration-parameter rule by PR #43; the Host
-  API schema by PR #47
+  API schema by PR #48
 - Implementation status: partial — see "What is not checked yet" below, which
   is now shorter than it was: the checker reads the Host API schema (#44)
 
@@ -178,4 +178,5 @@ site instantiates one. And the builtin method table is still mirrored between
 `cove-sema` and `cove-runtime` rather than shared — but the crate both can
 depend on, which this ADR said that would have to wait for, now exists:
 `cove-schema` carries the Host API schema, and the builtin table is the
-obvious second thing to move into it.
+obvious second thing to move into it
+([issue #49](https://github.com/myuon/cove/issues/49)).

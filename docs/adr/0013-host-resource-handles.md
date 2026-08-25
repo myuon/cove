@@ -12,7 +12,7 @@
   ends say so", which does the same for `OperationSchema::params` and moves
   the schema into a crate the compiler can read
 - Implemented by: PR #35; the first amendment by PR #46 and the second by
-  PR #47
+  PR #48
 - Implementation status: complete — the boundary is built in both directions
   and both ends read the schema. What sits behind it is a separate question
   this ADR states rather than answers: `database` still ships only a fake and
