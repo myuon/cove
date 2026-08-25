@@ -132,6 +132,25 @@ literal `--` is a program argument, even if it looks like a flag):
 ";
 
 fn main() -> ExitCode {
+    // Every command runs on a thread the runtime sized, because the process
+    // main thread's stack is the platform's business — 8 MiB here, 1 MiB on
+    // Windows — and a tree walker that recurses on it holds its depth limit
+    // only by luck. This is the whole of the CLI rather than only the
+    // commands that run a program: the parser, the resolver and the type
+    // checker all recurse over the same nesting a program may contain, and
+    // one place that is true is easier to keep true than five.
+    match cove_runtime::on_cove_stack(dispatch) {
+        Ok(code) => code,
+        Err(error) => {
+            eprintln!("error: cove could not start the thread it runs on: {error}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+/// Reads the command out of the process arguments, runs it, and turns what it
+/// answered into an exit code.
+fn dispatch() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let command = args.first().map(String::as_str).unwrap_or("help");
 

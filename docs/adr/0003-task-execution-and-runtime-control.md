@@ -10,18 +10,22 @@
   below, which adds the one control [ADR 0001](0001-mvp-language-design.md)
   asked for and phase 1 did not build; its "Amendment (2026-08-25): a
   blocking Host call must cooperate", which closes the hole a host call leaves
-  in the chain of safepoints those controls are checked at; and its
+  in the chain of safepoints those controls are checked at; its
   "Amendment (2026-08-25): a run ends with an event, and a call names its
-  task", which makes what these controls do to a run visible in the trace
+  task", which makes what these controls do to a run visible in the trace;
+  and its "Amendment (2026-08-25): the runtime sizes the stack it recurses
+  on", which gives the call-depth control the one thing it measures against
 - Implemented by: PR #6 (phase 1); PR #23 replaced phase 1's execution model;
   the concurrency limit by PR #45; the blocking-Host-call contract by the
   change that closed issue #57; the terminal event and the task on a Host call
-  by the change that closed issue #61
+  by the change that closed issue #61; the stack the depth limit is measured
+  against by the change that closed issue #67
 - Implementation status: complete — phase 1 shipped whole, phase 2 became an
   ADR of its own rather than a later commit against this one, the concurrency
   limit the first amendment adds is imposed, the blocking operations the
-  toolchain's own hosts perform keep the second amendment's contract, and every
-  run the toolchain starts records how it ended
+  toolchain's own hosts perform keep the second amendment's contract, every
+  run the toolchain starts records how it ended, and every thread the runtime
+  evaluates Cove on is one it sized
 
 ## Context
 
@@ -361,3 +365,135 @@ stops the run, which `run_ended` then reports with that task's own message, or
 is handled, in which case no terminal classification would have been true of
 it. A fourth per-task event would duplicate the run's without being able to say
 anything the run's could not.
+
+## Amendment (2026-08-25): the runtime sizes the stack it recurses on
+
+`MAX_CALL_DEPTH` is one of the controls above, and it is the only one whose
+subject is not something the runtime owns. Fuel is counted, a deadline is
+read from a clock, a host call is charged at a boundary the runtime holds;
+the depth limit's subject is the native stack, and until this amendment
+nothing in the runtime decided how much of that there was.
+[Issue #67](https://github.com/myuon/cove/issues/67) is what that costs. The
+constant is 256 and its comment promises that Cove calls nest that deep
+"before the runtime reports a limit instead of exhausting the host stack".
+The deepest a plain `fn nest(n: Int) -> Int` that calls itself and adds one
+actually reached, by binary search on one machine:
+
+| build   | entry, on the process main thread | a spawned task |
+|---------|-----------------------------------|----------------|
+| debug   | 65                                | 15             |
+| release | 254, and 255 stopped at the limit | 212            |
+
+The promise held in one cell of that table. Everywhere else an ordinary Cove
+program with no capability granted at all ended the process with `fatal
+runtime error: stack overflow` — a failure that stops every task of the run
+at once, tells the embedder nothing, and cannot be caught, which is the one
+failure a sandbox may not have. Two different stacks are behind those two
+columns and the runtime chose neither: `Interpreter::spawn` built its thread
+with no `stack_size`, so a task took the platform default of 2 MiB, and the
+entry took whatever the process main thread happened to have, which is 8 MiB
+on macOS and Linux and 1 MiB on Windows.
+
+**What is decided: the runtime does not evaluate Cove on a stack it did not
+choose the size of.** A public `STACK_SIZE` says what that size is, a task
+thread is built with it, and every path the toolchain has into a Cove program
+— `cove run`, `cove test`, `cove generate`, `cove replay`, a sealed `cove
+build` binary, and `cove-bench` — does its whole run on a thread the runtime
+created with it. `cove_runtime::on_cove_stack` is that thread: it is scoped,
+so the run is built inside it and nothing Cove-shaped has to cross the
+boundary, which matters because a `Value` is `Rc`-based and could not.
+
+**The size is derived from the limits, not chosen beside them.** The issue
+offered three ways out — give task threads a stack big enough for the limit,
+lower the limit to what the smallest stack holds, or measure the per-frame
+cost and relate the two — and this is the third, run in the direction that
+keeps the limit a language-visible constant: `STACK_SIZE` is `MAX_CALL_DEPTH`
+frames plus `MAX_REENTRY_DEPTH` reentry levels, times a margin. Raising the
+depth limit raises the stack, in the source, where the next reader will look.
+Lowering the limit instead was refused because it would cost every program
+the difference — 256 frames would have become 15 in a debug build — to buy
+nothing but agreement with a number nobody chose.
+
+**The per-frame cost was measured, four shapes of it.** Calibrating on the
+cheapest recursion Cove can write would produce a bound that is wrong for the
+programs people write, so the deepest clean run was binary-searched with the
+depth limit lifted, on task threads of two known sizes, and the figure taken
+as the slope between them so that whatever the interpreter spends before the
+recursion starts cancels out. Per Cove frame, which is what `MAX_CALL_DEPTH`
+counts:
+
+| recursion through          | debug   | release |
+|----------------------------|---------|---------|
+| a free function            | 123 KiB | 9.6 KiB |
+| a method on a struct       | 135 KiB | 9.6 KiB |
+| a `dyn` trait conformance  | 95 KiB  | 7.3 KiB |
+| a `match` with live locals | 101 KiB | 8.2 KiB |
+
+A reentry level of the shipped hosts, measured the same way with
+`clock.timeout` nested into itself, costs 163.8 KiB in a debug build and 16.1
+KiB in a release one, and the eight of them `MAX_REENTRY_DEPTH` allows are
+budgeted here too. That figure also confirms the one
+[ADR 0013](0013-host-resource-handles.md) calibrated that bound against: a
+thirteenth level exhausted a 2 MiB task thread, which is 161 KiB a level.
+
+**Two numbers, because a debug frame costs fourteen times a release one.**
+`#[cfg(debug_assertions)]` picks between them. One number for both would be
+absurd in release or useless in debug, and the profile is the only variable
+in the table above that changes the answer by more than a factor of two. With
+the worst measured shape and a margin of three, that is about 106 MiB in a
+debug build and about 8 MiB in a release one.
+
+**The margin is three because the table is measured shapes and not a worst
+case.** The interpreter recurses once more for each level of expression
+nesting, so a program that writes its recursive call inside a long chain of
+nested expressions spends more per frame than anything measured, and no
+constant can be the worst case for a program the compiler has not seen. The
+margin stands in for that, for another platform's calling convention, and for
+a host that spends stack of its own inside a callback.
+
+**A hundred megabytes per thread is affordable because a stack is address
+space.** That was checked rather than assumed, because the whole point of
+this amendment is that a number with no measurement behind it is what caused
+the defect. A debug run holding a hundred tasks alive at once reached a
+maximum resident set of 14.9 to 15.1 MB under the new size and 15.07 MB under
+the old platform default — a difference smaller than the variation between
+runs — against over 10 GiB of reserved address space: a thread stack commits
+a page at a time as it is touched. What the size costs is therefore address
+space per live task, which a 64-bit host does not notice and `max_tasks`
+already bounds, and not memory per live task, which was the trade the issue
+was worried about.
+
+**The one thread the runtime cannot size is an embedder's.** A host that
+calls `Interpreter::run_entry` on a thread of its own gets whatever that
+thread has, and no counter inside the interpreter can read it. That is said
+where an embedder reads — on `run_entry`, with the one line that fixes it —
+and `tests/embedding.rs`, which is the acceptance test for a host outside the
+crate supplying its own limits, now supplies its own stack in the same way
+and demonstrates that a run stopped by the depth limit reports it. It is the
+same admission the Host API's blocking-call contract makes above: an
+operation that genuinely cannot cooperate must say so, and a stack the
+runtime did not create is one of those.
+
+**What is deliberately not added: a stack-headroom check.** Recording the
+address of a local when a run starts and comparing it against one in `invoke`
+would bound the *bytes* rather than the frames, and would hold whatever a
+frame costs. It was considered and left out for three reasons. The only place
+the interpreter could cheaply check it is `invoke`, which is where
+`MAX_CALL_DEPTH` already stops recursion, so it would add coverage for one
+case: a call whose per-frame cost is inflated by deep expression nesting.
+That case is reached through `eval_expr`, and checking there would put an
+address comparison on the interpreter's hottest path to catch what the margin
+already covers. And the budget it compared against would have to be a
+fraction of `STACK_SIZE`, which is a fact about a thread the runtime sized
+and a fiction about one it did not — so on an embedder's small thread, the
+one place the check would earn its keep, it would be silently inert. A
+mechanism that cannot be tested without a program the parser cannot parse is
+not a mechanism this runtime should carry.
+
+**A boundary this does not close.** `cove_syntax`'s parser recurses over
+expression nesting with no limit of its own, so a source file with a few
+thousand nested parentheses still ends the process — in the parser, before
+any run begins. Sizing the thread every `cove` command runs on moved that
+from a few hundred levels to a few thousand, which is a side effect and not a
+fix: the fix is a nesting limit in the parser, and it is a separate defect
+from this one.

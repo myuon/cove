@@ -8,6 +8,14 @@
 //! [`HostRegistry`], [`Grants`], [`Budget`], [`Limits`], and [`Runtime`],
 //! plus [`cove_runtime::interp::Interpreter`].
 //!
+//! One thing a host supplies that is not a limit is the stack. The runtime
+//! sizes every thread it creates for Cove, because its call depth limit is a
+//! promise about the native stack and a promise like that needs a known
+//! stack underneath it; a thread the host created is the one thread the
+//! runtime cannot size. So an embedding runs Cove inside
+//! [`cove_runtime::on_cove_stack`], which is one line and is the last case
+//! below.
+//!
 //! A host module's *name* and the shape of its operations are the compiler's:
 //! `cove_sema` resolves `documents` as a host module and checks
 //! `read("welcome")` against `cove_schema`'s description of it. Its
@@ -94,9 +102,8 @@ impl HostApi for HostOwnedDocuments {
 /// entirely in memory: embedding Cove needs no directory on disk, so proving
 /// it does not either.
 fn program() -> (Arc<SourceMap>, Arc<Program>) {
-    let mut sources = SourceMap::new();
-    let path = PathBuf::from("app/main.cove");
-    let text = "\
+    program_of(
+        "\
 use documents.read
 
 /// Reads a note through the embedding host's own `documents`
@@ -104,7 +111,14 @@ use documents.read
 export fn main() -> Result<String, Error> {
   read(\"welcome\")
 }
-";
+",
+    )
+}
+
+/// Parses and resolves a one-module package written inline.
+fn program_of(text: &str) -> (Arc<SourceMap>, Arc<Program>) {
+    let mut sources = SourceMap::new();
+    let path = PathBuf::from("app/main.cove");
     let file = sources.add(path.clone(), text);
     let ast = cove_syntax::parse_file(&sources, file).expect("the fixture parses");
     let mut modules = BTreeMap::new();
@@ -243,5 +257,55 @@ fn an_argument_the_host_s_own_schema_does_not_admit_is_refused() {
     assert!(
         reads.lock().unwrap().is_empty(),
         "a call the boundary refused must never reach the host's own implementation"
+    );
+}
+
+/// The stack a run recurses on is the last thing an embedding has to supply,
+/// and this is the one line that supplies it.
+///
+/// The runtime's depth limit is a promise that a recursive program stops with
+/// an error rather than exhausting the native stack, and the runtime keeps it
+/// by sizing every thread it creates: a spawned task's, and the one every
+/// `cove` command runs on. A thread a host created is the one it cannot size.
+/// So a host runs Cove inside `on_cove_stack`, as here, or gives a thread of
+/// its own `.stack_size(cove_runtime::STACK_SIZE)` and builds the interpreter
+/// inside it. On a smaller stack a deep enough program ends the process
+/// instead, which is a failure a host cannot catch or report.
+///
+/// The whole run happens inside the closure because nothing Cove-shaped can
+/// leave it: a `Value` is `Rc`-based and is not `Send`. Only the message comes
+/// back.
+#[test]
+fn an_embedding_runs_cove_on_a_stack_the_runtime_sized() {
+    let text = "\
+fn nest(n: Int) -> Int {
+  if n <= 0 {
+    0
+  } else {
+    nest(n - 1) + 1
+  }
+}
+
+/// Recurses far past whatever the runtime's call depth limit is.
+export fn main() -> Result<Unit, Error> {
+  let answer = nest(1000)
+  Ok(())
+}
+";
+
+    let message = cove_runtime::on_cove_stack(|| {
+        let (sources, program) = program_of(text);
+        let hosts = HostRegistry::new(Grants::new(Vec::<&str>::new()));
+        let runtime = Runtime::new(program, sources, Arc::new(hosts));
+        Interpreter::new(&runtime)
+            .run_entry("app", "main", Vec::new())
+            .expect_err("recursion past the depth limit stops the run")
+            .message
+    })
+    .expect("a thread to run Cove on");
+
+    assert!(
+        message.starts_with("call depth limit of"),
+        "the run was stopped by the depth limit rather than by the stack: {message}"
     );
 }

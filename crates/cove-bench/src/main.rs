@@ -71,6 +71,20 @@ use cove_sema::resolve::Program;
 const DEFAULT_ITERATIONS: u32 = 5;
 
 fn main() -> ExitCode {
+    // The benchmarks run Cove entries, so they run on the stack the runtime
+    // sizes for that, the same as `cove run` does. Measuring an interpreter
+    // on a stack it would not be given is measuring something else.
+    match cove_runtime::on_cove_stack(bench) {
+        Ok(code) => code,
+        Err(error) => {
+            eprintln!("cove-bench: could not start the thread the benchmarks run on: {error}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+/// Runs every benchmark and reports each one as a line of JSON.
+fn bench() -> ExitCode {
     let iterations = parse_iterations();
 
     let (sources, package, program) = match load_benches() {

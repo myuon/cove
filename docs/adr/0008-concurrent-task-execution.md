@@ -12,8 +12,13 @@
   below, which extends the absence of a scheduling policy to a task's start:
   what a spawned task has done by the time a cancellation reaches it is
   decided by neither the runtime nor the program, and is not asserted by a
-  test
-- Implemented by: PR #23; the amendment by PR #47
+  test; and [ADR 0003](0003-task-execution-and-runtime-control.md)'s
+  "Amendment (2026-08-25): the runtime sizes the stack it recurses on", which
+  decides how large the thread a task gets is, because that size is a
+  property of the interpreter's frames rather than of the thread-per-task
+  choice and any scheduler replacing this one would carry it unchanged
+- Implemented by: PR #23; the amendment by PR #47; the stack a task's thread
+  gets by the change that closed issue #67
 - Implementation status: complete — the amendment adds no code, which is the
   whole of what it decides
 

@@ -30,6 +30,7 @@ pub use host::{
     Reentry, ResourceHandle,
 };
 pub use http::{Http, ScriptedRequest, Served};
+pub use interp::{on_cove_stack, STACK_SIZE};
 pub use process::{Process, ProcessLog};
 pub use runtime::{Runtime, ENTRY_TASK};
 pub use schema::{
