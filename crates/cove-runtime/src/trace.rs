@@ -29,6 +29,8 @@
 //! {"event":"host_call","module":<string>,"op":<string>,"capability":<string>,"wait_ns":<u64>,"granted":<bool>,"args":[<value>...],"outcome":<outcome>|null}
 //! {"event":"entry_enter","module":<string>,"function":<string>}
 //! {"event":"entry_exit","module":<string>,"function":<string>,"cpu_ns":<u64>,"wait_ns":<u64>}
+//! {"event":"heap_collected","task":<u64|null>,"allocated":<u64>,"freed":<u64>,"live_objects":<u64>,"live_bytes":<u64>,"pause_ns":<u64>}
+//! {"event":"heap_summary","allocated":<u64>,"allocated_bytes":<u64>,"collections":<u64>,"live_bytes":<u64>,"peak_bytes":<u64>,"pause_ns":<u64>}
 //! ```
 //!
 //! An `<outcome>` is `null` for a call that never reached the host, and
@@ -223,6 +225,50 @@ pub enum TraceEvent {
         granted: bool,
         args: Vec<RecordedValue>,
         outcome: Option<HostOutcome>,
+    },
+    /// One task's heap was collected.
+    ///
+    /// ADR 0001 asks a trace to make allocation and memory pressure visible,
+    /// and ADR 0011 makes this the event that does it. Allocation is reported
+    /// as the count since the previous collection rather than as one event per
+    /// object: an event per allocation would be most of the trace, and would
+    /// tell a reader less about pressure than the pair of numbers that bracket
+    /// it — what was allocated, and what survived.
+    ///
+    /// A heap belongs to one task, so this event says whose it was, and two
+    /// tasks collecting at the same time produce two independent events.
+    HeapCollected {
+        /// The task whose heap this was, or `None` for the entry's own.
+        task: Option<u64>,
+        /// Objects allocated since the previous collection.
+        allocated: u64,
+        /// Objects this collection reclaimed.
+        freed: u64,
+        /// Objects live after it.
+        live_objects: u64,
+        /// Bytes live after it.
+        live_bytes: u64,
+        /// How long the task was stopped.
+        pause: Duration,
+    },
+    /// What every heap in the run did, recorded once as the run ends.
+    HeapSummary {
+        /// Collectable objects allocated over the whole run, by every task.
+        allocated: u64,
+        /// Bytes those allocations asked for.
+        allocated_bytes: u64,
+        /// How many collections ran, over every task.
+        collections: u64,
+        /// Bytes live when the run ended. Every heap is swept once more as it
+        /// is retired, so this is what the entry was still holding after its
+        /// own last sweep — usually nothing.
+        live_bytes: u64,
+        /// The largest live set any one collection measured.
+        peak_bytes: u64,
+        /// Total time tasks were stopped for collection, summed over threads,
+        /// so a run with four tasks collecting at once can report more pause
+        /// than it took wall-clock time.
+        pause: Duration,
     },
     /// A host-selected entry function began running.
     EntryEnter { module: String, function: String },
@@ -525,6 +571,34 @@ fn to_json_line(event: &TraceEvent, capture: ValueCapture) -> String {
                 encode_outcome(outcome.as_ref(), capture),
             )
         }
+        TraceEvent::HeapCollected {
+            task,
+            allocated,
+            freed,
+            live_objects,
+            live_bytes,
+            pause,
+        } => {
+            let task = match task {
+                Some(id) => id.to_string(),
+                None => "null".to_string(),
+            };
+            format!(
+                "{{\"event\":\"heap_collected\",\"task\":{task},\"allocated\":{allocated},\"freed\":{freed},\"live_objects\":{live_objects},\"live_bytes\":{live_bytes},\"pause_ns\":{}}}",
+                json_ns(*pause)
+            )
+        }
+        TraceEvent::HeapSummary {
+            allocated,
+            allocated_bytes,
+            collections,
+            live_bytes,
+            peak_bytes,
+            pause,
+        } => format!(
+            "{{\"event\":\"heap_summary\",\"allocated\":{allocated},\"allocated_bytes\":{allocated_bytes},\"collections\":{collections},\"live_bytes\":{live_bytes},\"peak_bytes\":{peak_bytes},\"pause_ns\":{}}}",
+            json_ns(*pause)
+        ),
         TraceEvent::EntryEnter { module, function } => format!(
             "{{\"event\":\"entry_enter\",\"module\":{},\"function\":{}}}",
             json_string(module),
@@ -898,6 +972,51 @@ mod tests {
                 function: "main".to_string(),
             }),
             r#"{"event":"entry_enter","module":"hello","function":"main"}"#
+        );
+    }
+
+    #[test]
+    fn heap_collected() {
+        assert_eq!(
+            record_one(TraceEvent::HeapCollected {
+                task: Some(2),
+                allocated: 64,
+                freed: 60,
+                live_objects: 4,
+                live_bytes: 512,
+                pause: Duration::from_micros(9),
+            }),
+            r#"{"event":"heap_collected","task":2,"allocated":64,"freed":60,"live_objects":4,"live_bytes":512,"pause_ns":9000}"#
+        );
+    }
+
+    #[test]
+    fn heap_collected_for_the_entry_names_no_task() {
+        assert_eq!(
+            record_one(TraceEvent::HeapCollected {
+                task: None,
+                allocated: 1,
+                freed: 0,
+                live_objects: 1,
+                live_bytes: 8,
+                pause: Duration::ZERO,
+            }),
+            r#"{"event":"heap_collected","task":null,"allocated":1,"freed":0,"live_objects":1,"live_bytes":8,"pause_ns":0}"#
+        );
+    }
+
+    #[test]
+    fn heap_summary() {
+        assert_eq!(
+            record_one(TraceEvent::HeapSummary {
+                allocated: 128,
+                allocated_bytes: 4096,
+                collections: 2,
+                live_bytes: 96,
+                peak_bytes: 1024,
+                pause: Duration::from_micros(31),
+            }),
+            r#"{"event":"heap_summary","allocated":128,"allocated_bytes":4096,"collections":2,"live_bytes":96,"peak_bytes":1024,"pause_ns":31000}"#
         );
     }
 

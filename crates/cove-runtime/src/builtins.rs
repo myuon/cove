@@ -19,6 +19,14 @@ use crate::value::{InvalidKey, MapKey, RangeBounds, Value, VectorStorage};
 /// Higher-order builtins such as `Result.mapError` invoke a Cove callback, so
 /// they need the interpreter that owns the call stack.
 pub trait Callable {
+    /// Allocates growable vector storage in the running task's heap.
+    ///
+    /// Every `Vector` a program can reach is created through this, so the
+    /// collector's table of objects is the complete set of values that can
+    /// form a cycle. A builtin that makes one asks its caller rather than
+    /// calling [`VectorStorage::new`] directly.
+    fn allocate_vector(&mut self, elements: Vec<Value>) -> Value;
+
     /// Calls a closure value with already evaluated arguments.
     fn call_value(
         &mut self,
@@ -159,13 +167,14 @@ pub fn call_constructor(name: &str, args: Vec<Value>, span: Span) -> Result<Valu
 
 /// `Vector.of(...)` and `Int.parse(...)`.
 pub fn call_associated(
+    host: &mut dyn Callable,
     type_name: &str,
     name: &str,
     args: Vec<Value>,
     span: Span,
 ) -> Result<Value, RuntimeError> {
     match (type_name, name) {
-        ("Vector", "of") => Ok(Value::Vector(VectorStorage::new(args))),
+        ("Vector", "of") => Ok(host.allocate_vector(args)),
         // `Map.of` takes the `MapEntry` values `MapEntry(key:, value:)`
         // builds. A literal with two identical keys is a mistake, not an
         // intent, so a duplicate key is rejected rather than resolved by

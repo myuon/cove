@@ -11,11 +11,12 @@
 //! handle to the same program, the same hosts, and the same trace.
 
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use cove_diag::SourceMap;
 use cove_sema::resolve::Program;
 
+use crate::heap::HeapStats;
 use crate::host::HostRegistry;
 use crate::trace::{NullSink, TraceEvent, TraceSink};
 
@@ -31,6 +32,12 @@ pub struct Runtime {
     /// tasks spawned at the same time on different threads still get
     /// different ids.
     next_task_id: Arc<AtomicU64>,
+    /// What every heap of this run has done, folded in as each one is retired.
+    ///
+    /// A heap belongs to one thread and is never shared, so nothing is
+    /// contended here while a task runs: a thread accumulates locally and
+    /// takes this lock once, when its heap ends.
+    heap: Arc<Mutex<HeapStats>>,
 }
 
 impl Runtime {
@@ -43,6 +50,7 @@ impl Runtime {
             hosts,
             trace: Arc::new(NullSink),
             next_task_id: Arc::new(AtomicU64::new(1)),
+            heap: Arc::new(Mutex::new(HeapStats::default())),
         }
     }
 
@@ -75,5 +83,31 @@ impl Runtime {
     /// The next task id, unique across every thread of this run.
     pub fn next_task_id(&self) -> u64 {
         self.next_task_id.fetch_add(1, Ordering::Relaxed)
+    }
+
+    /// Folds a finished heap's totals into the run's.
+    ///
+    /// Only the counters are folded. What a retired heap last measured as live
+    /// went with the thread that owned it, so summing those would report
+    /// memory that no longer exists; see [`Interpreter::heap_stats`] for where
+    /// the live figure comes from instead.
+    ///
+    /// [`Interpreter::heap_stats`]: crate::interp::Interpreter::heap_stats
+    pub fn retire_heap(&self, stats: &HeapStats) {
+        self.locked_heap().merge(stats);
+    }
+
+    /// What every heap retired so far has done.
+    pub fn heap_stats(&self) -> HeapStats {
+        *self.locked_heap()
+    }
+
+    /// A poisoned lock means a thread panicked while folding its totals in.
+    /// Statistics are not a state anything recovers from, so the numbers are
+    /// taken back rather than turned into a second, unrelated failure.
+    fn locked_heap(&self) -> std::sync::MutexGuard<'_, HeapStats> {
+        self.heap
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 }

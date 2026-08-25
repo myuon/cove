@@ -7677,6 +7677,7 @@ export fn main() -> Result<Unit, Error> {
                 fuel: None,
                 deadline: None,
                 max_host_calls: None,
+                max_memory: None,
                 trace: None,
                 generates: None,
             },

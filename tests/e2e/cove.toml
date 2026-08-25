@@ -38,6 +38,10 @@ allow = ["console"]
 entry = "fail_entry_error.main"
 allow = ["console"]
 
+[run.fail_max_memory_flag]
+entry = "fail_max_memory_flag.main"
+allow = ["console"]
+
 [run.fail_files_escape]
 entry = "fail_files_escape.main"
 allow = ["files", "console"]
@@ -108,6 +112,14 @@ allow = ["console"]
 
 [run.fn_variadic]
 entry = "fn_variadic.main"
+allow = ["console"]
+
+[run.gc_cycles]
+entry = "gc_cycles.main"
+allow = ["console"]
+
+[run.gc_tasks]
+entry = "gc_tasks.main"
 allow = ["console"]
 
 [run.host_clock]

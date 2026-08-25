@@ -1,0 +1,4 @@
+a vector that holds itself has length 1
+a cycle through a struct field has length 1
+a cycle through a closure capture reports 1
+what is still named survives [1, 2, 3] of length 3

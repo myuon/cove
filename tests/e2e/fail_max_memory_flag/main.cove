@@ -1,0 +1,8 @@
+use console.println
+
+/// Never runs: this case exists to pin how `--max-memory` rejects a value
+/// that is not a byte count.
+export fn main() -> Result<Unit, Error> {
+  println("unreachable")?
+  Ok(())
+}

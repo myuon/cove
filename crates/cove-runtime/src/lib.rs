@@ -7,6 +7,7 @@ pub mod database;
 pub mod embed;
 pub mod error;
 pub mod files;
+pub mod heap;
 pub mod host;
 pub mod interp;
 pub mod process;
@@ -22,6 +23,7 @@ pub use clock::{Clock, VirtualTime};
 pub use database::Database;
 pub use error::RuntimeError;
 pub use files::Files;
+pub use heap::{Collection, Heap, HeapStats, Roots};
 pub use host::{
     shipped_schema, Console, Documents, Env, GrantSource, Grants, HostApi, HostRegistry,
     ModuleSchema,

@@ -1,0 +1,43 @@
+use console.println
+
+/// A node that reaches its own container, so a `Node` inside `next` is a
+/// cycle: the vector holds the struct, and the struct holds the vector.
+struct Node {
+  next: Vector<Node>
+}
+
+/// Builds and abandons `count` cycles. `Rc` alone can free none of them.
+fn churn(count: Int) {
+  var i = 0
+  while i < count {
+    var v: Vector<Node> = Vector.of()
+    v.push(Node(next: v))
+    i = i + 1
+  }
+}
+
+/// Builds cycles of every shape the value model allows, abandons them, and
+/// shows that everything still named survives the collections that reclaimed
+/// them.
+export fn main() -> Result<Unit, Error> {
+  var kept = Vector.of(1, 2, 3)
+
+  var direct = Vector.of()
+  direct.push(direct)
+  println("a vector that holds itself has length {direct.length()}")?
+
+  var through: Vector<Node> = Vector.of()
+  through.push(Node(next: through))
+  println("a cycle through a struct field has length {through.length()}")?
+
+  var captured: Vector<fn() -> Int> = Vector.of()
+  let count = fn() {
+    captured.length()
+  }
+  captured.push(count)
+  println("a cycle through a closure capture reports {count()}")?
+
+  churn(500)
+  println("what is still named survives {kept} of length {kept.length()}")?
+  Ok(())
+}

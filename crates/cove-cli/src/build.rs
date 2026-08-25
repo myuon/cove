@@ -66,6 +66,7 @@ flags:
   --fuel <n>            bake in a limit of <n> fuel
   --deadline <duration>  bake in a deadline, e.g. `500ms`, `5s`, `1h`
   --max-host-calls <n>  bake in a limit of <n> host calls
+  --max-memory <bytes>  bake in a limit of <bytes> of live heap
   --files-root <path>   the one directory the `files` host may reach, baked in
                         as an absolute path; without it the binary uses
                         `files/` in the directory it is run from, as it uses
@@ -113,6 +114,7 @@ struct BuildFlags {
     fuel: Option<u64>,
     deadline: Option<Duration>,
     max_host_calls: Option<u64>,
+    max_memory: Option<u64>,
     files_root: Option<PathBuf>,
     allow_exec: Vec<PathBuf>,
 }
@@ -130,6 +132,7 @@ fn parse_build_flags(args: &[String]) -> Result<BuildFlags, CliError> {
         fuel: None,
         deadline: None,
         max_host_calls: None,
+        max_memory: None,
         files_root: None,
         allow_exec: Vec::new(),
     };
@@ -157,6 +160,14 @@ fn parse_build_flags(args: &[String]) -> Result<BuildFlags, CliError> {
                 flags.max_host_calls = Some(value.parse().map_err(|_| {
                     CliError::Message(format!(
                         "`--max-host-calls` must be a non-negative integer, found `{value}`"
+                    ))
+                })?);
+            }
+            "--max-memory" => {
+                let value = flag_value(args, &mut i, "--max-memory")?;
+                flags.max_memory = Some(value.parse().map_err(|_| {
+                    CliError::Message(format!(
+                        "`--max-memory` must be a non-negative integer number of bytes, found `{value}`"
                     ))
                 })?);
             }
@@ -218,6 +229,7 @@ pub(crate) struct BuildPlan {
     pub(crate) fuel: Option<u64>,
     pub(crate) deadline: Option<Duration>,
     pub(crate) max_host_calls: Option<u64>,
+    pub(crate) max_memory: Option<u64>,
     pub(crate) trace: Option<String>,
     pub(crate) files_root: Option<PathBuf>,
     pub(crate) allow_exec: Vec<PathBuf>,
@@ -292,6 +304,7 @@ fn plan(
         fuel: flags.fuel.or(run.fuel),
         deadline: flags.deadline.or(run.deadline),
         max_host_calls: flags.max_host_calls.or(run.max_host_calls),
+        max_memory: flags.max_memory.or(run.max_memory),
         trace: run.trace.clone(),
         files_root: flags.files_root.clone(),
         allow_exec: flags.allow_exec.clone(),
@@ -478,6 +491,7 @@ fn main() -> std::process::ExitCode {{
             fuel: {fuel},
             deadline_nanos: {deadline},
             max_host_calls: {max_host_calls},
+            max_memory: {max_memory},
             trace: {trace},
             files_root: {files_root},
             allow_exec: &[{allow_exec}],
@@ -493,6 +507,7 @@ fn main() -> std::process::ExitCode {{
         fuel = rust_option(plan.fuel.map(|f| f.to_string())),
         deadline = rust_option(plan.deadline.map(|d| format!("{}", d.as_nanos()))),
         max_host_calls = rust_option(plan.max_host_calls.map(|n| n.to_string())),
+        max_memory = rust_option(plan.max_memory.map(|n| n.to_string())),
         trace = rust_option(plan.trace.as_deref().map(rust_string)),
         files_root = rust_option(
             plan.files_root
@@ -619,6 +634,9 @@ pub(crate) fn build_summary(plan: &BuildPlan) -> String {
     if let Some(max) = plan.max_host_calls {
         limits.push(format!("max host calls {max}"));
     }
+    if let Some(max) = plan.max_memory {
+        limits.push(format!("max memory {max} bytes"));
+    }
     format!(
         "built `{name}` from {files} file(s) into `{out}`\n  \
          entry:  {entry}\n  \
@@ -671,6 +689,7 @@ export fn main(args: Array<String>) -> Result<Unit, Error> {
             fuel: None,
             deadline: None,
             max_host_calls: None,
+            max_memory: None,
             files_root: None,
             allow_exec: Vec::new(),
         }
