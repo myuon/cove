@@ -10,7 +10,7 @@
   below, which adds the one control [ADR 0001](0001-mvp-language-design.md)
   asked for and phase 1 did not build
 - Implemented by: PR #6 (phase 1); PR #23 replaced phase 1's execution model;
-  the amendment by PR #PR_NUMBER
+  the amendment by PR #45
 - Implementation status: complete — phase 1 shipped whole, phase 2 became an
   ADR of its own rather than a later commit against this one, and the
   concurrency limit the amendment adds is imposed
