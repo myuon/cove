@@ -516,11 +516,14 @@ of them. `HostType`, `Effect`, `OperationSchema`, `FieldSchema`, `TypeSchema`,
 shipped hosts' own tables; `cove_runtime::schema` re-exports every one of them,
 so a host written against the runtime still names one crate.
 
-The crate has since gained a second table on the same argument.
+The crate has since gained two more tables on the same argument.
 [ADR 0004](0004-static-type-checking.md)'s "Amendment (2026-08-25): one builtin
 table" moves the builtin methods and associated functions there as well, and
 says why they needed a vocabulary of their own rather than `HostType`: a host
-signature is monomorphic and a builtin's is not.
+signature is monomorphic and a builtin's is not. Its second amendment, "the
+builtins that are called on nothing", moves the constructors and the
+assertions, which have no receiver to be keyed by and so are a table of their
+own rather than an entry in that one.
 
 What did not move is `HostType::admits`, which is about values and needs one.
 It stays beside `Value` as the `Admits` trait. The schema describes types; the

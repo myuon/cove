@@ -31,6 +31,17 @@
 //! not look inside a value and means nothing for a method the language itself
 //! defines.
 //!
+//! # Two tables, because a builtin is not always called on something
+//!
+//! [`BUILTINS`] is keyed by a receiver, and most builtins have one:
+//! `items.length()` and `Vector.of(1)` are both reached through a type.
+//! `Ok(1)`, `Error("boom")`, and `assert(true)` are not — they are written
+//! bare, the way a declared function is — so [`FREE_BUILTINS`] is the second
+//! table, holding the five constructors and the two assertions with a name,
+//! a kind, and a signature each. They were the last builtins written out in
+//! both `cove-sema` and `cove-runtime`; [issue #50](https://github.com/myuon/cove/issues/50)
+//! is why they are here.
+//!
 //! # What is here and what is not
 //!
 //! The signatures are here; the implementations are not, and cannot be. A
@@ -38,14 +49,16 @@
 //! `cove_runtime::builtins` beside the value model it walks. What this table
 //! removes is the *second description* of those bodies: `cove-sema` reads
 //! every signature from here rather than restating it, and the runtime reads
-//! from here the two questions it can answer from a name alone — which type
-//! names are namespaces, and which methods take a `var self` receiver.
+//! from here every question it can answer from a name alone — which type
+//! names are namespaces, which methods take a `var self` receiver, which
+//! names are constructors, which are assertions, how many arguments each
+//! takes, and which receivers are told that `count()` is spelled `length()`.
 //! `crates/cove-runtime/tests/builtin_schema.rs` closes the loop by driving
-//! every entry in this table through a real interpreter, so an entry added
+//! every entry in both tables through a real interpreter, so an entry added
 //! here with no implementation behind it fails a test rather than a program.
 //!
-//! The variants of [`BuiltinType`] cover exactly the types the table below
-//! uses, on the same rule the host vocabulary follows: add one when a builtin
+//! The variants of [`BuiltinType`] cover exactly the types the tables below
+//! use, on the same rule the host vocabulary follows: add one when a builtin
 //! needs it, because an unused variant is a type nobody can produce.
 
 use std::fmt;
@@ -84,6 +97,8 @@ pub enum BuiltinType {
     Result(&'static BuiltinType, &'static BuiltinType),
     /// `Task<T>`, the handle `scope.spawn { ... }` hands back.
     Task(&'static BuiltinType),
+    /// `Shared<T>`, the synchronized value `Shared(...)` wraps one in.
+    Shared(&'static BuiltinType),
     /// `fn(A, B) -> R`: what a builtin that takes a callback declares, such
     /// as `Shared<T>.lock` or `Scope.spawn`.
     Fn(&'static [BuiltinType], &'static BuiltinType),
@@ -120,6 +135,7 @@ impl fmt::Display for BuiltinType {
             BuiltinType::Option(some) => write!(f, "Option<{some}>"),
             BuiltinType::Result(ok, error) => write!(f, "Result<{ok}, {error}>"),
             BuiltinType::Task(inner) => write!(f, "Task<{inner}>"),
+            BuiltinType::Shared(inner) => write!(f, "Shared<{inner}>"),
             BuiltinType::Fn(params, ret) => {
                 let params: Vec<String> = params.iter().map(BuiltinType::to_string).collect();
                 write!(f, "fn({}) -> {ret}", params.join(", "))
@@ -236,6 +252,81 @@ impl BuiltinSchema {
     }
 }
 
+/// What a builtin that is called on nothing *is*.
+///
+/// The two kinds are not variations of one thing — a constructor makes a
+/// value and an assertion checks one — and both ends of the toolchain ask
+/// which is which before anything else: the interpreter dispatches an
+/// assertion through the one path that carries the source text of its
+/// arguments, and the checker gives an assertion's arity a different sentence
+/// than a constructor's. So the kind is in the table rather than derived from
+/// the name.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FreeBuiltinKind {
+    /// `Ok(value)`, `Err(error)`, `Some(value)`, `Error("message")`, and
+    /// `Shared(value)`: a name that builds a builtin value out of one
+    /// payload.
+    Constructor,
+    /// `assert(condition)` and `assertEqual(actual, expected)`: a name a test
+    /// calls, which reports failure as an ordinary `Err`.
+    Assertion,
+}
+
+/// One builtin that is called on nothing.
+///
+/// A [`BuiltinSchema`] is keyed by a receiver, and these have none: `Ok(1)`
+/// and `assert(true)` are written bare, like a declared function and unlike
+/// `items.length()` or `Vector.of(1)`. Straining the receiver-keyed table to
+/// hold them would have meant inventing a receiver they do not have, so they
+/// have a table of their own, and it is close to the plainest thing that lets
+/// both ends stop restating each other: a name, which kind it is, and the
+/// parameters it takes.
+///
+/// The result is here too, because the checker reads it in both directions.
+/// A constructor's result is generic — `Ok(value: T) -> Result<T, E>` — and
+/// the type a call site expects is what settles `T` and `E`, so the one
+/// declaration that says what `Ok` produces is also the one that says what
+/// its payload must be. That is why this carries a signature rather than only
+/// an arity: the arity is what the runtime needs, and the signature is what
+/// stops the checker from writing the same five names out again to say what
+/// each of them makes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FreeBuiltinSchema {
+    /// The name Cove source calls, such as `Ok`.
+    pub name: &'static str,
+    /// Whether this builds a value or checks one.
+    pub kind: FreeBuiltinKind,
+    /// The type parameters this signature binds.
+    ///
+    /// Every type parameter a free builtin names is one it binds itself:
+    /// there is no receiver to read one off. A call site settles them from
+    /// the type it expects, and from the arguments where it expects nothing
+    /// in particular.
+    pub generics: &'static [&'static str],
+    /// Parameters in declaration order, labelled as a diagnostic names them.
+    pub params: &'static [ParamSchema],
+    /// The type the call produces.
+    pub result: BuiltinType,
+}
+
+impl FreeBuiltinSchema {
+    /// How many arguments a call must supply.
+    pub fn arity(&self) -> usize {
+        self.params.len()
+    }
+
+    /// The signature, in the form it would be written in Cove source:
+    /// `assertEqual(actual: T, expected: T) -> Result<Unit, Error>`.
+    pub fn signature(&self) -> String {
+        let params: Vec<String> = self
+            .params
+            .iter()
+            .map(|param| format!("{}: {}", param.name, param.ty))
+            .collect();
+        format!("{}({}) -> {}", self.name, params.join(", "), self.result)
+    }
+}
+
 /// Every builtin type the language defines.
 ///
 /// The order is the order the associated functions read out in a diagnostic
@@ -278,6 +369,155 @@ pub fn is_mutating_method(name: &str) -> bool {
             .any(|method| method.mutating && method.name == name)
     })
 }
+
+/// Whether the builtin type `name` reports how many elements it holds.
+///
+/// This is the audience for the one diagnostic that teaches a spelling: a
+/// receiver that answers `length()` is a receiver a program might have
+/// written `count()` on, so `Array`, `Vector`, `String`, `Range`, `Map`, and
+/// `Set` are told what the spelling is and everything else is told it has no
+/// such method. Deriving the set from the table is the point — it used to be
+/// written out at both ends, and the two had drifted by two types.
+pub fn declares_length(name: &str) -> bool {
+    builtin(name).is_some_and(|entry| entry.method("length").is_some())
+}
+
+/// Every builtin that is called on nothing: the constructors, then the
+/// assertions.
+///
+/// A name belongs to one kind or the other and never to both, so the order
+/// settles nothing at a call site. It is the order a reader meets them in:
+/// `Ok` and its neighbours are in every program, and `assert` is in every
+/// test.
+pub static FREE_BUILTINS: &[FreeBuiltinSchema] =
+    &[OK, ERR, SOME, ERROR_OF, SHARED_OF, ASSERT, ASSERT_EQUAL];
+
+/// Every builtin that is called on nothing.
+pub fn free_builtins() -> &'static [FreeBuiltinSchema] {
+    FREE_BUILTINS
+}
+
+/// The free builtin `name` describes itself with, if there is one.
+pub fn free_builtin(name: &str) -> Option<&'static FreeBuiltinSchema> {
+    FREE_BUILTINS.iter().find(|entry| entry.name == name)
+}
+
+// ------------------------------------------- the builtins called on nothing
+
+/// `Ok(value: T) -> Result<T, E>`.
+///
+/// The error type is the one thing a payload cannot say, so `E` is settled by
+/// the type the call site expects and is unknown when it expects nothing.
+pub const OK: FreeBuiltinSchema = FreeBuiltinSchema {
+    name: "Ok",
+    kind: FreeBuiltinKind::Constructor,
+    generics: &["T", "E"],
+    params: &[ParamSchema {
+        name: "value",
+        ty: BuiltinType::Param("T"),
+    }],
+    result: BuiltinType::Result(&BuiltinType::Param("T"), &BuiltinType::Param("E")),
+};
+
+/// `Err(error: E) -> Result<T, E>`, the mirror of [`OK`].
+pub const ERR: FreeBuiltinSchema = FreeBuiltinSchema {
+    name: "Err",
+    kind: FreeBuiltinKind::Constructor,
+    generics: &["T", "E"],
+    params: &[ParamSchema {
+        name: "error",
+        ty: BuiltinType::Param("E"),
+    }],
+    result: BuiltinType::Result(&BuiltinType::Param("T"), &BuiltinType::Param("E")),
+};
+
+/// `Some(value: T) -> Option<T>`.
+///
+/// `None` has no entry here because it is not a call: it is the empty case
+/// written as a bare name, and writing `None(...)` is a mistake both ends
+/// name as one.
+pub const SOME: FreeBuiltinSchema = FreeBuiltinSchema {
+    name: "Some",
+    kind: FreeBuiltinKind::Constructor,
+    generics: &["T"],
+    params: &[ParamSchema {
+        name: "value",
+        ty: BuiltinType::Param("T"),
+    }],
+    result: BuiltinType::Option(&BuiltinType::Param("T")),
+};
+
+/// `Error(message: String) -> Error`, the one constructor whose payload has a
+/// type of its own rather than one the call site settles.
+///
+/// The constant is not called `ERROR` because [`BuiltinType::Error`]'s type
+/// table already is.
+pub const ERROR_OF: FreeBuiltinSchema = FreeBuiltinSchema {
+    name: "Error",
+    kind: FreeBuiltinKind::Constructor,
+    generics: &[],
+    params: &[ParamSchema {
+        name: "message",
+        ty: BuiltinType::String,
+    }],
+    result: BuiltinType::Error,
+};
+
+/// `Shared(value: T) -> Shared<T>`.
+///
+/// This is the one constructor that can refuse its payload: what a `Shared`
+/// wraps is reachable from every task it is given to, so it must be able to
+/// cross a task boundary. That rule is not in this table — it is about what a
+/// type *is*, not what a call takes — so the checker and the runtime each
+/// enforce it with what they have, a type and a value.
+pub const SHARED_OF: FreeBuiltinSchema = FreeBuiltinSchema {
+    name: "Shared",
+    kind: FreeBuiltinKind::Constructor,
+    generics: &["T"],
+    params: &[ParamSchema {
+        name: "value",
+        ty: BuiltinType::Param("T"),
+    }],
+    result: BuiltinType::Shared(&BuiltinType::Param("T")),
+};
+
+/// `assert(condition: Bool) -> Result<Unit, Error>`.
+///
+/// A failing assertion is an expected failure rather than a broken invariant,
+/// so it answers `Err` and `?` works on it inside a test.
+pub const ASSERT: FreeBuiltinSchema = FreeBuiltinSchema {
+    name: "assert",
+    kind: FreeBuiltinKind::Assertion,
+    generics: &[],
+    params: &[ParamSchema {
+        name: "condition",
+        ty: BuiltinType::Bool,
+    }],
+    result: BuiltinType::Result(&BuiltinType::Unit, &BuiltinType::Error),
+};
+
+/// `assertEqual(actual: T, expected: T) -> Result<Unit, Error>`.
+///
+/// One type parameter named twice is the whole rule: `assertEqual` compares
+/// two values of one type, and comparing values of two types is the mistake
+/// it catches. Both ends read that off the repeated `T` — the checker as
+/// unification, the runtime as two values whose type names must agree.
+pub const ASSERT_EQUAL: FreeBuiltinSchema = FreeBuiltinSchema {
+    name: "assertEqual",
+    kind: FreeBuiltinKind::Assertion,
+    generics: &["T"],
+    params: &[
+        ParamSchema {
+            name: "actual",
+            ty: BuiltinType::Param("T"),
+        },
+        ParamSchema {
+            name: "expected",
+            ty: BuiltinType::Param("T"),
+        },
+    ],
+    result: BuiltinType::Result(&BuiltinType::Unit, &BuiltinType::Error),
+};
 
 // ----------------------------------------------------- the shared signatures
 
@@ -981,7 +1221,8 @@ mod tests {
                 | BuiltinType::Vector(inner)
                 | BuiltinType::Set(inner)
                 | BuiltinType::Option(inner)
-                | BuiltinType::Task(inner) => named(inner, found),
+                | BuiltinType::Task(inner)
+                | BuiltinType::Shared(inner) => named(inner, found),
                 BuiltinType::Map(left, right)
                 | BuiltinType::MapEntry(left, right)
                 | BuiltinType::Result(left, right) => {
@@ -1020,6 +1261,90 @@ mod tests {
                 }
             }
         }
+
+        // A free builtin has no receiver, so every name it uses is one it
+        // binds itself.
+        for entry in FREE_BUILTINS {
+            let mut found = Vec::new();
+            for param in entry.params {
+                named(&param.ty, &mut found);
+            }
+            named(&entry.result, &mut found);
+            for name in found {
+                assert!(
+                    entry.generics.contains(&name),
+                    "`{}` names `{name}`, which nothing binds",
+                    entry.name
+                );
+            }
+        }
+    }
+
+    /// The two kinds of builtin that are called on nothing, in the order
+    /// both ends ask about them.
+    #[test]
+    fn the_free_builtins_are_five_constructors_and_two_assertions() {
+        let constructors: Vec<&str> = FREE_BUILTINS
+            .iter()
+            .filter(|entry| entry.kind == FreeBuiltinKind::Constructor)
+            .map(|entry| entry.name)
+            .collect();
+        assert_eq!(constructors, ["Ok", "Err", "Some", "Error", "Shared"]);
+        let assertions: Vec<&str> = FREE_BUILTINS
+            .iter()
+            .filter(|entry| entry.kind == FreeBuiltinKind::Assertion)
+            .map(|entry| entry.name)
+            .collect();
+        assert_eq!(assertions, ["assert", "assertEqual"]);
+        // `None` is the one name that reads like a constructor and is not:
+        // it is the empty case written bare, and a call is a mistake both
+        // ends name as one.
+        assert!(free_builtin("None").is_none());
+    }
+
+    /// A constructor carries one value; an assertion takes what it compares.
+    #[test]
+    fn a_free_builtin_reads_like_source_and_knows_its_arity() {
+        assert_eq!(
+            free_builtin("Ok").unwrap().signature(),
+            "Ok(value: T) -> Result<T, E>"
+        );
+        assert_eq!(
+            free_builtin("Error").unwrap().signature(),
+            "Error(message: String) -> Error"
+        );
+        assert_eq!(
+            free_builtin("Shared").unwrap().signature(),
+            "Shared(value: T) -> Shared<T>"
+        );
+        assert_eq!(
+            free_builtin("assertEqual").unwrap().signature(),
+            "assertEqual(actual: T, expected: T) -> Result<Unit, Error>"
+        );
+        for entry in FREE_BUILTINS {
+            assert_eq!(entry.arity(), entry.params.len(), "`{}`", entry.name);
+            if entry.kind == FreeBuiltinKind::Constructor {
+                assert_eq!(entry.arity(), 1, "`{}` carries one value", entry.name);
+            }
+        }
+    }
+
+    /// The receivers a `count()` call is taught the spelling on are the ones
+    /// that answer `length()`, which is what closed the drift between the
+    /// checker's list and the runtime's.
+    #[test]
+    fn the_sequences_are_the_builtin_types_that_declare_length() {
+        let sequences: Vec<&str> = BUILTINS
+            .iter()
+            .filter(|entry| declares_length(entry.name))
+            .map(|entry| entry.name)
+            .collect();
+        assert_eq!(
+            sequences,
+            ["Array", "Vector", "Map", "Set", "String", "Range"]
+        );
+        assert!(!declares_length("Option"));
+        assert!(!declares_length("Nothing"));
     }
 
     /// An associated function is called on the type, so there is no receiver

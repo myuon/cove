@@ -5,14 +5,17 @@
 - Amended by: [ADR 0005](0005-module-to-module-imports.md), which gave the
   checker the import environment "Checking is per-module" said it would need,
   [ADR 0006](0006-traits-and-dispatch.md), which turned "parametric and
-  unbounded" into parametric with bounds, and this ADR's own
-  "Amendment (2026-08-25): one builtin table" below, which unmirrors the
-  builtin method table "What is not checked yet" recorded
+  unbounded" into parametric with bounds, and this ADR's own two amendments
+  below — "Amendment (2026-08-25): one builtin table", which unmirrors the
+  builtin method table "What is not checked yet" recorded, and
+  "Amendment (2026-08-25): the builtins that are called on nothing", which
+  unmirrors the three lists the first one left
 - Implemented by: PR #12; the declaration-parameter rule by PR #43; the Host
-  API schema by PR #48; the amendment by PR #51
+  API schema by PR #48; the first amendment by PR #51; the second by PR #54
 - Implementation status: partial — see "What is not checked yet" below, which
-  is now shorter than it was: the checker reads the Host API schema (#44) and
-  the builtin table it used to mirror (#49)
+  is now shorter than it was: the checker reads the Host API schema (#44), the
+  builtin table it used to mirror (#49), and the constructors, assertions, and
+  sequence names it mirrored after that (#50)
 
 ## Context
 
@@ -229,9 +232,51 @@ through resolve, check, and a real run. A signature the schema gains with no
 body behind it fails a test; a body the schema does not declare is unreachable,
 because `cove check` refuses to call a name the table does not have.
 
-What is left mirrored, and stated so a reader does not have to derive it:
+What was left mirrored, and stated so a reader did not have to derive it:
 `assert` and `assertEqual`'s arities, the constructor names `Ok`, `Err`,
 `Some`, `Error`, and `Shared`, and which receivers are told that `count()` is
 spelled `length()`. None of those is a method or an associated function, so
-none is in this table;
-[issue #50](https://github.com/myuon/cove/issues/50) tracks them.
+none was in this table. [Issue #50](https://github.com/myuon/cove/issues/50)
+tracked them, and the amendment below closes it.
+
+## Amendment (2026-08-25): the builtins that are called on nothing
+
+The amendment above moved what a builtin *type* declares and left three
+smaller lists behind, for a stated reason: `BuiltinSchema` is keyed by a
+receiver, and a constructor and an assertion have none. `Ok(1)` and
+`assert(true)` are written bare, the way a call to a declared function is.
+Reasoning from the shape of the existing table is what kept them mirrored, and
+the third of them had already drifted — the runtime taught `map.count()` the
+`length()` spelling and `cove check` did not — which is the usual sign that
+two lists cannot see each other.
+
+**They get a table of their own rather than a receiver they do not have.**
+`cove_schema::builtins::FREE_BUILTINS` is seven entries — five constructors
+and two assertions — each a name, which of the two kinds it is, the type
+parameters it binds, the parameters it takes, and what it produces. The kind
+is in the table because both ends ask it before anything else: the interpreter
+dispatches an assertion through the one path that carries its arguments'
+source text, and the checker gives an assertion's wrong argument count a
+different sentence than a constructor's.
+
+**The signature is in it, and not only the arity, because the arity alone
+would have left the five names written out twice anyway.** A constructor's
+result is generic and its payload is read off it — `Ok(value: T) ->
+Result<T, E>` — so the declaration that says what `Ok` produces is also the
+one that says what it carries, and the checker opens both against the type the
+call site expects rather than restating either. That is what makes `Ok`'s
+error type come from the place the value is going, which is the only thing
+that can know it. `Shared`'s task-safety rule is deliberately *not* in the
+table: it is about what a type is, not what a call takes, so the checker
+enforces it on a type and the runtime on a value, as they always did.
+
+**`count()` is derived rather than declared.** The receivers told that the
+element count is spelled `length()` are the builtin types that declare
+`length` — six of them — read off the same table at both ends. That closes the
+drift by construction rather than by agreement, and it changes one diagnostic:
+`cove check` now teaches the spelling on a `Map` and a `Set`, which the
+runtime already did.
+
+`crates/cove-runtime/tests/builtin_schema.rs` covers the new table the way it
+covers the old one, with one program per entry driven through resolve, check,
+and a real run.

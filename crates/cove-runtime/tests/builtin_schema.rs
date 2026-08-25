@@ -325,6 +325,52 @@ static EXERCISES: &[Exercise] = &[
     },
 ];
 
+/// One entry of the table of builtins that are called on nothing, with a
+/// program that calls it.
+struct FreeExercise {
+    /// The constructor or assertion the program calls.
+    name: &'static str,
+    /// The body of `export fn main() -> Int`, as [`Exercise::body`].
+    body: &'static str,
+}
+
+/// A call to every constructor and assertion
+/// `cove_schema::builtins::FREE_BUILTINS` declares.
+///
+/// An assertion's result is bound rather than answered, because `main` here
+/// answers an `Int`; what matters is that the call checks and runs, which is
+/// the only thing the two ends can still disagree about.
+static FREE_EXERCISES: &[FreeExercise] = &[
+    FreeExercise {
+        name: "Ok",
+        body: "  let outcome = Ok(1)\n  0",
+    },
+    FreeExercise {
+        name: "Err",
+        body: "  let outcome = Err(Error(\"boom\"))\n  0",
+    },
+    FreeExercise {
+        name: "Some",
+        body: "  Some(3).unwrapOr(0)",
+    },
+    FreeExercise {
+        name: "Error",
+        body: "  let failure = Error(\"boom\")\n  0",
+    },
+    FreeExercise {
+        name: "Shared",
+        body: "  let counts = Shared(7)\n  counts.lock(fn(value) { value })",
+    },
+    FreeExercise {
+        name: "assert",
+        body: "  let checked = assert(1 == 1)\n  0",
+    },
+    FreeExercise {
+        name: "assertEqual",
+        body: "  let checked = assertEqual(1 + 1, 2)\n  0",
+    },
+];
+
 /// The exercise for `type.name`, if this file has one.
 fn exercise(ty: &str, name: &str) -> Option<&'static Exercise> {
     EXERCISES
@@ -413,30 +459,76 @@ fn every_exercise_names_something_the_schema_declares() {
 #[test]
 fn every_builtin_the_schema_declares_checks_and_runs() {
     for entry in EXERCISES {
-        let (package, sources) = package(entry.body);
-        let program = cove_sema::resolve::resolve(&package)
-            .unwrap_or_else(|errors| panic!("`{}.{}` resolves: {errors:?}", entry.ty, entry.name));
-        let diagnostics = cove_sema::typeck::check(&package, &program);
-        assert!(
-            diagnostics.is_empty(),
-            "`{}.{}` is declared by the schema but the checker refused it: {:?}",
-            entry.ty,
-            entry.name,
-            diagnostics
-                .iter()
-                .map(|diagnostic| diagnostic.message.clone())
-                .collect::<Vec<_>>()
-        );
-
-        let hosts = HostRegistry::new(Grants::new(Vec::<String>::new()));
-        let runtime = Runtime::new(Arc::new(program), sources, Arc::new(hosts));
-        Interpreter::new(&runtime)
-            .run_entry("app", "main", Vec::new())
-            .unwrap_or_else(|error| {
-                panic!(
-                    "`{}.{}` is declared by the schema but the runtime refused it: {}",
-                    entry.ty, entry.name, error.message
-                )
-            });
+        check_and_run(&format!("{}.{}", entry.ty, entry.name), entry.body);
     }
+}
+
+/// The constructors and the assertions, held to the same thing: the arity the
+/// table declares is the arity `cove check` reports on and the arity the
+/// interpreter enforces.
+#[test]
+fn every_free_builtin_the_schema_declares_is_exercised() {
+    let missing: Vec<String> = cove_schema::builtins::free_builtins()
+        .iter()
+        .filter(|entry| {
+            !FREE_EXERCISES
+                .iter()
+                .any(|exercise| exercise.name == entry.name)
+        })
+        .map(|entry| format!("`{}`", entry.name))
+        .collect();
+    assert!(
+        missing.is_empty(),
+        "the builtin schema declares {} that nothing in this file calls",
+        missing.join(", ")
+    );
+}
+
+/// The other direction, as above: an exercise for a name the table does not
+/// declare is a name no program can write.
+#[test]
+fn every_free_exercise_names_something_the_schema_declares() {
+    for entry in FREE_EXERCISES {
+        assert!(
+            cove_schema::free_builtin(entry.name).is_some(),
+            "`{}` is not in the builtin schema",
+            entry.name
+        );
+    }
+}
+
+/// What the free table declares, the compiler accepts and the runtime runs.
+#[test]
+fn every_free_builtin_the_schema_declares_checks_and_runs() {
+    for entry in FREE_EXERCISES {
+        check_and_run(entry.name, entry.body);
+    }
+}
+
+/// Resolves, checks, and runs one exercise, and says which one it was when
+/// any of the three refuses it.
+fn check_and_run(what: &str, body: &str) {
+    let (package, sources) = package(body);
+    let program = cove_sema::resolve::resolve(&package)
+        .unwrap_or_else(|errors| panic!("`{what}` resolves: {errors:?}"));
+    let diagnostics = cove_sema::typeck::check(&package, &program);
+    assert!(
+        diagnostics.is_empty(),
+        "`{what}` is declared by the schema but the checker refused it: {:?}",
+        diagnostics
+            .iter()
+            .map(|diagnostic| diagnostic.message.clone())
+            .collect::<Vec<_>>()
+    );
+
+    let hosts = HostRegistry::new(Grants::new(Vec::<String>::new()));
+    let runtime = Runtime::new(Arc::new(program), sources, Arc::new(hosts));
+    Interpreter::new(&runtime)
+        .run_entry("app", "main", Vec::new())
+        .unwrap_or_else(|error| {
+            panic!(
+                "`{what}` is declared by the schema but the runtime refused it: {}",
+                error.message
+            )
+        });
 }

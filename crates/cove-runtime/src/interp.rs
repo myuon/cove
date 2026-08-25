@@ -23,6 +23,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use cove_diag::{SourceMap, Span};
+use cove_schema::builtins::FreeBuiltinKind;
 use cove_sema::resolve::{Program, ResolvedModule};
 use cove_syntax::ast::{
     Arg, BinaryOp, Block, EnumDecl, Expr, ExprKind, FnDecl, Ident, ItemKind, Param, Pattern,
@@ -2321,13 +2322,21 @@ impl<'a> Interpreter<'a> {
                     let args = self.eval_args(env, args, trailing)?;
                     return Ok(init_map_entry(args, span)?);
                 }
-                if builtins::is_assertion(name) {
-                    return self.assertion(env, name, args, trailing, span);
-                }
-                if builtins::is_constructor(name) {
-                    let args = self.eval_args(env, args, trailing)?;
-                    let values = plain_values(args, name)?;
-                    return Ok(builtins::call_constructor(name, values, span)?);
+                // The builtins that are called on nothing, asked of the
+                // shared table once: an assertion goes through the path that
+                // keeps its arguments' source text, and a constructor
+                // through the one that only needs their values.
+                if let Some(schema) = builtins::free_builtin(name) {
+                    return match schema.kind {
+                        FreeBuiltinKind::Assertion => {
+                            self.assertion(env, name, args, trailing, span)
+                        }
+                        FreeBuiltinKind::Constructor => {
+                            let args = self.eval_args(env, args, trailing)?;
+                            let values = plain_values(args, name)?;
+                            Ok(builtins::call_constructor(name, values, span)?)
+                        }
+                    };
                 }
                 if name == "None" {
                     return Err(RuntimeError::new("`None` is a value, not a call")
