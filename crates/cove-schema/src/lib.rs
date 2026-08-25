@@ -1,6 +1,18 @@
-//! The machine-readable Host API schema.
+//! The machine-readable schemas the compiler and the runtime both read.
 //!
-//! ADR 0001 states what this crate has to carry:
+//! There are two of them, and they are here for the same reason. The Host API
+//! schema, below, is what a host module declares about itself; [`builtins`] is
+//! what the language declares about its own types. Neither could live in
+//! `cove-runtime` or in `cove-sema`, because each is read by both and the
+//! dependency between those two runs one way.
+//!
+//! The two keep separate vocabularies on purpose. A host operation's
+//! signature is monomorphic, so [`HostType`] has no type parameters and needs
+//! none; a builtin's is generic, receiver-relative, and sometimes
+//! higher-order, so [`builtins::BuiltinType`] has all three and a host
+//! signature would have no use for them. [`builtins`] argues that at length.
+//!
+//! ADR 0001 states what the Host API half has to carry:
 //!
 //! > A machine-readable Host API schema is shared by the compiler, runtime,
 //! > and CLI. Each operation describes its argument, result, and error types;
@@ -46,8 +58,10 @@
 
 use std::fmt;
 
+pub mod builtins;
 pub mod hosts;
 
+pub use builtins::{builtin, is_builtin_type};
 pub use hosts::{module, shipped};
 
 /// A type in a Host API signature, written in Cove's source vocabulary.

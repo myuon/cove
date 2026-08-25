@@ -4,6 +4,16 @@
 //! or a constructor name. The MVP has no method table derived from types yet,
 //! so an arity or type mismatch is an ordinary [`RuntimeError`] that names the
 //! method it came from.
+//!
+//! What each builtin *is* — its parameters, its result, and whether its
+//! receiver is `var self` — is [`cove_schema::builtins`], one table below
+//! both this crate and the compiler. This module is the other half: the
+//! bodies, which have to be here because a body reaches into a [`Value`] and
+//! `cove-schema` has no values. The two questions a name alone can answer
+//! are asked of the schema rather than answered twice, and
+//! `tests/builtin_schema.rs` drives every entry in that table through a real
+//! interpreter, so a signature declared with no body behind it fails a test
+//! rather than a program.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::rc::Rc;
@@ -13,6 +23,19 @@ use cove_diag::Span;
 use crate::error::RuntimeError;
 use crate::shared::SharedCell;
 use crate::value::{InvalidKey, MapKey, RangeBounds, Value, VectorStorage};
+
+/// Type names a program may write as a namespace, such as `Vector.of`.
+///
+/// This is [`cove_schema::builtins::is_builtin_type`], re-exported so that
+/// the interpreter still asks one module about builtins.
+pub use cove_schema::builtins::is_builtin_type;
+
+/// The methods that take a `var self` receiver and therefore need a mutable
+/// place at the call site.
+///
+/// This is [`cove_schema::builtins::is_mutating_method`]: `push` and `freeze`
+/// declare `mutating` in the shared table, and nothing here restates them.
+pub use cove_schema::builtins::is_mutating_method;
 
 /// How the builtins call back into the evaluator.
 ///
@@ -37,24 +60,6 @@ pub trait Callable {
 
     /// The number of parameters `callee` declares, when it is a closure.
     fn arity(&self, callee: &Value) -> Option<usize>;
-}
-
-/// Type names that carry builtin associated functions, such as `Vector.of`.
-pub fn is_builtin_type(name: &str) -> bool {
-    matches!(
-        name,
-        "Array"
-            | "Vector"
-            | "String"
-            | "Int"
-            | "Float"
-            | "Bool"
-            | "Map"
-            | "Set"
-            | "Option"
-            | "Result"
-            | "Error"
-    )
 }
 
 /// The assertion builtins a test calls: `assert` and `assertEqual`.
@@ -135,12 +140,6 @@ fn source_of<'a>(sources: &[&'a str], index: usize) -> &'a str {
 /// Names usable as bare constructor calls, such as `Ok(value)`.
 pub fn is_constructor(name: &str) -> bool {
     matches!(name, "Ok" | "Err" | "Some" | "Error" | "Shared")
-}
-
-/// The methods that take a `var self` receiver and therefore need a mutable
-/// place at the call site.
-pub fn is_mutating_method(name: &str) -> bool {
-    matches!(name, "push" | "freeze")
 }
 
 /// `Ok(v)`, `Err(e)`, `Some(v)`, `Error("message")`, `Shared(value)`.
