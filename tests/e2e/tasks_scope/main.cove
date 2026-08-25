@@ -1,0 +1,28 @@
+use console.println
+use clock.now
+use clock.sleep
+
+/// Waits, then reports what the caller asked for.
+fn wait(value: Int) -> Int {
+  sleep(300ms)
+  value
+}
+
+/// Runs two waiting tasks in one scope.
+///
+/// Concurrent work belongs to a task scope, and each task waits on a thread
+/// of its own, so the two waits overlap: the scope finishes in about one
+/// wait rather than in their sum. The bound is halfway between the two, so
+/// what it reports is which of them happened, not how fast the machine is.
+export fn main() -> Result<Unit, Error> {
+  let startedAt = now()
+
+  scope waits {
+    let first = waits.spawn { wait(1) }
+    let second = waits.spawn { wait(2) }
+    println("{await first} {await second}")?
+  }
+
+  println("both waits overlapped {now() - startedAt < 550ms}")?
+  Ok(())
+}

@@ -62,10 +62,24 @@
 //! a vector, a closure, a task handle — leaves behind. Both are readable and
 //! neither can be replayed, which is exactly the distinction `cove replay`
 //! reports.
+//!
+//! # What an event may carry
+//!
+//! An event is produced by whichever task made the call and written by the
+//! one sink the run shares, so every event crosses a thread boundary. What
+//! may cross one is what the Language Card's task-safety rule allows, which
+//! `cove_runtime::task::Transfer` both decides and carries — so that is the
+//! form a [`RecordedValue`] keeps a value in. A value that may not cross
+//! keeps instead what a trace could have said about it anyway: what it was
+//! and what it printed as, which is the `opaque` the format already writes
+//! for a vector. The two features agree by construction: a value a task
+//! could not have carried is a value a replay could not have reproduced.
 
 use std::io::Write;
+use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
+use crate::task::Transfer;
 use crate::value::Value;
 
 /// The version of the JSONL trace format this build writes, and the only one
@@ -125,12 +139,47 @@ pub struct TraceHeader {
     pub args: Vec<String>,
 }
 
+/// One value as a trace records it.
+///
+/// A trace event crosses from the task that produced it to the sink that
+/// writes it, so the values it carries are exactly the values that may cross
+/// a task boundary: a [`Transfer`], which is what the task-safety rule
+/// produces. Everything else is kept as the `opaque` marker the format
+/// already writes for it.
+#[derive(Clone, Debug)]
+pub enum RecordedValue {
+    /// A value the trace carries whole.
+    Carried(Transfer),
+    /// A value no task boundary may carry — a vector, a task, a task scope —
+    /// kept as the type it had and the text it printed as.
+    Opaque {
+        /// The type name, which is also all a redacted trace records.
+        of: String,
+        /// What the value printed as.
+        shown: String,
+    },
+}
+
+impl RecordedValue {
+    /// Records `value`: whole when it may cross a boundary, and as what it
+    /// was when it may not.
+    pub fn of(value: &Value) -> RecordedValue {
+        match Transfer::of(value) {
+            Ok(transfer) => RecordedValue::Carried(transfer),
+            Err(_) => RecordedValue::Opaque {
+                of: value.type_name(),
+                shown: value.to_string(),
+            },
+        }
+    }
+}
+
 /// What a host call produced, when the trace records it.
 #[derive(Clone, Debug)]
 pub enum HostOutcome {
     /// The host answered with a value. A Cove `Err(...)` is a value like any
     /// other and arrives here, not in [`HostOutcome::Error`].
-    Value(Value),
+    Value(RecordedValue),
     /// The host refused the call with a runtime error, which is not an
     /// ordinary Cove failure.
     Error(String),
@@ -172,7 +221,7 @@ pub enum TraceEvent {
         capability: String,
         wait: Duration,
         granted: bool,
-        args: Vec<Value>,
+        args: Vec<RecordedValue>,
         outcome: Option<HostOutcome>,
     },
     /// A host-selected entry function began running.
@@ -188,27 +237,54 @@ pub enum TraceEvent {
 }
 
 /// Where trace events go.
-pub trait TraceSink {
+///
+/// A sink records through a shared reference and is `Send + Sync` because
+/// every task thread traces into the same one: ADR 0008 runs each spawned
+/// task on its own thread, and a trace that each thread wrote to separately
+/// would not be one trace. A sink that needs mutable state of its own
+/// synchronizes it, which is also what keeps two threads from interleaving
+/// halves of a line.
+pub trait TraceSink: Send + Sync {
     /// Records one event. Must not panic: a broken trace sink should degrade
     /// the trace, not the program being traced.
-    fn record(&mut self, event: TraceEvent);
+    fn record(&self, event: TraceEvent);
+
+    /// Whether anything will read what is recorded.
+    ///
+    /// Describing a host call's values costs a copy of each of them, and a
+    /// value no boundary may carry costs printing it. A run that is not being
+    /// traced should not pay for a trace nobody keeps, so a sink that
+    /// discards everything says so and [`crate::host::HostRegistry::call`]
+    /// skips the description. The default is `true`: a sink that does
+    /// something with an event needs the event to be complete.
+    fn is_recording(&self) -> bool {
+        true
+    }
 }
 
 /// Discards every event. The default when a run is not being traced.
 pub struct NullSink;
 
 impl TraceSink for NullSink {
-    fn record(&mut self, _event: TraceEvent) {}
+    fn record(&self, _event: TraceEvent) {}
+
+    fn is_recording(&self) -> bool {
+        false
+    }
 }
 
 /// Writes one JSON object per line to `W`, flushing after every event so a
 /// trace is visible as it happens rather than only at exit.
-pub struct JsonlSink<W: Write> {
-    writer: W,
+///
+/// The writer is behind a lock so that a line written from a task thread is
+/// written whole: concurrent tasks produce events at the same time, and half
+/// a JSON object is not a trace line.
+pub struct JsonlSink<W: Write + Send> {
+    writer: Mutex<W>,
     values: ValueCapture,
 }
 
-impl<W: Write> JsonlSink<W> {
+impl<W: Write + Send> JsonlSink<W> {
     /// Writes trace lines to `writer`, starting with the header line that
     /// declares the format version, the value capture mode, and the entry the
     /// run started.
@@ -229,17 +305,23 @@ impl<W: Write> JsonlSink<W> {
         );
         let _ = writer.flush();
         JsonlSink {
-            writer,
+            writer: Mutex::new(writer),
             values: header.values,
         }
     }
 }
 
-impl<W: Write> TraceSink for JsonlSink<W> {
-    fn record(&mut self, event: TraceEvent) {
+impl<W: Write + Send> TraceSink for JsonlSink<W> {
+    fn record(&self, event: TraceEvent) {
         let line = to_json_line(&event, self.values);
-        let _ = writeln!(self.writer, "{line}");
-        let _ = self.writer.flush();
+        // A trace sink degrades silently: losing a trace line must never fail
+        // the run it is observing, and that includes a lock another thread
+        // poisoned by panicking.
+        let Ok(mut writer) = self.writer.lock() else {
+            return;
+        };
+        let _ = writeln!(writer, "{line}");
+        let _ = writer.flush();
     }
 }
 
@@ -341,13 +423,36 @@ fn encode_value(value: &Value) -> String {
     }
 }
 
+/// Renders one [`RecordedValue`], honouring `capture`.
+///
+/// A carried value is rebuilt before it is written: that is the far side of
+/// the boundary the event crossed, and rebuilding it is the same copy the
+/// rule already demands. What it produces is one [`Value`] again, so the
+/// encoding below is the one encoding, whichever side of a boundary a value
+/// reached it from.
+fn recorded_to_json(recorded: &RecordedValue, capture: ValueCapture) -> String {
+    match recorded {
+        RecordedValue::Carried(transfer) => value_to_json(&transfer.clone().into_value(), capture),
+        RecordedValue::Opaque { of, shown } => match capture {
+            ValueCapture::Full => format!(
+                "{{\"type\":\"opaque\",\"of\":{},\"shown\":{}}}",
+                json_string(of),
+                json_string(shown)
+            ),
+            ValueCapture::Redacted => {
+                format!("{{\"type\":\"redacted\",\"of\":{}}}", json_string(of))
+            }
+        },
+    }
+}
+
 /// Renders one [`HostOutcome`], or `null` when a call never reached a host.
 fn encode_outcome(outcome: Option<&HostOutcome>, capture: ValueCapture) -> String {
     match outcome {
         None => "null".to_string(),
         Some(HostOutcome::Value(value)) => format!(
             "{{\"kind\":\"value\",\"value\":{}}}",
-            value_to_json(value, capture)
+            recorded_to_json(value, capture)
         ),
         // A runtime error is the host refusing, not data the host holds, so
         // it stays readable even in a redacted trace.
@@ -391,7 +496,7 @@ fn to_json_line(event: &TraceEvent, capture: ValueCapture) -> String {
         } => {
             let args = args
                 .iter()
-                .map(|arg| value_to_json(arg, capture))
+                .map(|arg| recorded_to_json(arg, capture))
                 .collect::<Vec<_>>()
                 .join(",");
             format!(
@@ -426,13 +531,13 @@ fn to_json_line(event: &TraceEvent, capture: ValueCapture) -> String {
 /// Accumulates wait time separately from total elapsed time, so a caller can
 /// report CPU as `elapsed - wait`.
 ///
-/// "CPU" here means "not waiting on a host call". Under ADR 0003 Phase 1,
-/// with sequential task execution and one task running at a time, this is
-/// not yet a concurrency measurement: it separates a single execution's own
-/// compute time from the time it spent blocked on a host call, but it cannot
-/// show CPU work on one task overlapping wait on another, because nothing
-/// overlaps yet. That distinction becomes a concurrency measurement only
-/// once Phase 2 replaces sequential execution with real interleaving.
+/// "CPU" here means "not waiting": neither on a host call nor for a task to
+/// finish. Each task thread keeps its own timing, so with ADR 0008's thread
+/// per task the separation is a concurrency measurement — one task's CPU work
+/// and another's wait are recorded against different contexts and can overlap
+/// in wall-clock time, which is what ADR 0001 asks a trace to make
+/// attributable. It is also why the two no longer sum to the run's elapsed
+/// time: several tasks can be waiting at once.
 pub struct Timing {
     started_at: Instant,
     wait: Duration,
@@ -494,9 +599,9 @@ mod tests {
 
     /// Records `event` and returns the lines after the header.
     fn record_with(values: ValueCapture, event: TraceEvent) -> String {
-        let mut sink = JsonlSink::new(Buffer(Vec::new()), header(values));
+        let sink = JsonlSink::new(Buffer(Vec::new()), header(values));
         sink.record(event);
-        let text = String::from_utf8(sink.writer.0).unwrap();
+        let text = String::from_utf8(sink.writer.into_inner().unwrap().0).unwrap();
         assert!(text.ends_with('\n'), "line should end with a newline");
         let mut lines = text.trim_end_matches('\n').split('\n');
         lines.next().expect("the header line");
@@ -507,6 +612,17 @@ mod tests {
         record_with(ValueCapture::Full, event)
     }
 
+    /// A recorded value, written the way a host call's argument arrives:
+    /// as the value itself.
+    fn recorded(value: Value) -> RecordedValue {
+        RecordedValue::of(&value)
+    }
+
+    /// The recorded form of a host's answer.
+    fn answered(value: Value) -> Option<HostOutcome> {
+        Some(HostOutcome::Value(recorded(value)))
+    }
+
     fn host_call(args: Vec<Value>, outcome: Option<HostOutcome>) -> TraceEvent {
         TraceEvent::HostCall {
             module: "documents".to_string(),
@@ -514,7 +630,7 @@ mod tests {
             capability: "documents".to_string(),
             wait: Duration::from_nanos(900),
             granted: true,
-            args,
+            args: args.into_iter().map(recorded).collect(),
             outcome,
         }
     }
@@ -530,7 +646,7 @@ mod tests {
             },
         );
         assert_eq!(
-            String::from_utf8(sink.writer.0).unwrap(),
+            String::from_utf8(sink.writer.into_inner().unwrap().0).unwrap(),
             "{\"event\":\"trace_header\",\"version\":1,\"values\":\"full\",\"entry\":\"restricted.main\",\"args\":[\"one\",\"two\"]}\n"
         );
     }
@@ -538,7 +654,7 @@ mod tests {
     #[test]
     fn the_header_names_the_redacted_mode_when_that_is_what_was_asked_for() {
         let sink = JsonlSink::new(Buffer(Vec::new()), header(ValueCapture::Redacted));
-        let text = String::from_utf8(sink.writer.0).unwrap();
+        let text = String::from_utf8(sink.writer.into_inner().unwrap().0).unwrap();
         assert!(text.contains("\"values\":\"redacted\""), "{text}");
     }
 
@@ -590,7 +706,7 @@ mod tests {
         assert_eq!(
             record_one(host_call(
                 vec![Value::Str("input".into())],
-                Some(HostOutcome::Value(Value::ok(Value::Str("text".into())))),
+                answered(Value::ok(Value::Str("text".into()))),
             )),
             r#"{"event":"host_call","module":"documents","op":"read","capability":"documents","wait_ns":900,"granted":true,"args":[{"type":"string","value":"input"}],"outcome":{"kind":"value","value":{"type":"enum","name":"Result","case":"Ok","payload":[{"type":"string","value":"text"}]}}}"#
         );
@@ -605,7 +721,7 @@ mod tests {
                 capability: "network".to_string(),
                 wait: Duration::ZERO,
                 granted: false,
-                args: vec![Value::Str("https://example.test".into())],
+                args: vec![recorded(Value::Str("https://example.test".into()))],
                 outcome: None,
             }),
             r#"{"event":"host_call","module":"network","op":"fetch","capability":"network","wait_ns":0,"granted":false,"args":[{"type":"string","value":"https://example.test"}],"outcome":null}"#
@@ -643,9 +759,7 @@ mod tests {
                 ValueCapture::Redacted,
                 host_call(
                     vec![Value::Str("PASSWORD".into())],
-                    Some(HostOutcome::Value(Value::some(Value::Str(
-                        "hunter2".into()
-                    )))),
+                    answered(Value::some(Value::Str("hunter2".into()))),
                 )
             ),
             r#"{"event":"host_call","module":"documents","op":"read","capability":"documents","wait_ns":900,"granted":true,"args":[{"type":"redacted","of":"String"}],"outcome":{"kind":"value","value":{"type":"redacted","of":"Option"}}}"#
@@ -706,6 +820,39 @@ mod tests {
         assert_eq!(
             encoded(Value::error("broken")),
             r#"{"type":"struct","name":"Error","fields":[{"name":"message","value":{"type":"string","value":"broken"}}]}"#
+        );
+    }
+
+    /// A value that may not cross a task boundary is recorded as what it was
+    /// and what it printed as, which is the same `opaque` the encoding
+    /// already writes for it — so a trace says the same thing whether the
+    /// call was made by the entry or by a task.
+    #[test]
+    fn a_value_that_may_not_cross_a_boundary_is_recorded_as_opaque() {
+        let vector = Value::Vector(crate::value::VectorStorage::new(vec![Value::Int(1)]));
+        let recorded = RecordedValue::of(&vector);
+        assert!(
+            matches!(&recorded, RecordedValue::Opaque { of, shown } if of == "Vector" && shown == "[1]")
+        );
+        assert_eq!(
+            recorded_to_json(&recorded, ValueCapture::Full),
+            r#"{"type":"opaque","of":"Vector","shown":"[1]"}"#
+        );
+        assert_eq!(
+            recorded_to_json(&recorded, ValueCapture::Redacted),
+            r#"{"type":"redacted","of":"Vector"}"#
+        );
+    }
+
+    /// A value that may cross is carried whole, and rebuilding it on the
+    /// writing side produces the encoding it would have had all along.
+    #[test]
+    fn a_value_that_may_cross_a_boundary_is_carried_whole() {
+        let recorded = RecordedValue::of(&Value::ok(Value::Str("text".into())));
+        assert!(matches!(recorded, RecordedValue::Carried(_)));
+        assert_eq!(
+            recorded_to_json(&recorded, ValueCapture::Full),
+            r#"{"type":"enum","name":"Result","case":"Ok","payload":[{"type":"string","value":"text"}]}"#
         );
     }
 
@@ -782,7 +929,7 @@ mod tests {
 
     #[test]
     fn null_sink_records_nothing_observable() {
-        let mut sink = NullSink;
+        let sink = NullSink;
         sink.record(TraceEvent::TaskCancelled { id: 1 });
         // No assertion beyond "does not panic": NullSink has no observable
         // state.

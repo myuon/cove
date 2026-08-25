@@ -10,9 +10,11 @@ use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::rc::Rc;
+use std::sync::Arc;
 
 use cove_syntax::ast::{FnDecl, Param};
 
+use crate::shared::SharedCell;
 use crate::task::{Task, TaskScope};
 
 /// A Cove value.
@@ -78,6 +80,13 @@ pub enum Value {
     /// A handle to a spawned task. The task's value is reachable only through
     /// `await` or through the scope settling it on exit.
     Task(Rc<Task>),
+    /// `Shared(value)`: mutable state more than one task may reach.
+    ///
+    /// This is the one value whose storage is an [`Arc`] rather than an
+    /// [`Rc`]: a `Shared` crosses a task boundary by sharing its cell, so two
+    /// task threads address the same one. Its contents are reachable only
+    /// through `lock`; see [`crate::shared`].
+    Shared(Arc<SharedCell>),
 }
 
 /// The half-open bounds of a [`Value::Range`], widened to `i128` so that an
@@ -197,8 +206,8 @@ pub struct Closure {
     pub is_async: bool,
     pub params: Vec<Param>,
     /// `None` for lambdas, which have no declaration of their own.
-    pub decl: Option<Rc<FnDecl>>,
-    pub body: Rc<cove_syntax::ast::Block>,
+    pub decl: Option<Arc<FnDecl>>,
+    pub body: Arc<cove_syntax::ast::Block>,
     /// The module a closure body resolves names in.
     pub module: Rc<str>,
     pub captures: Vec<(Rc<str>, Value)>,
@@ -497,6 +506,7 @@ impl Value {
             Value::Range { .. } => "Range".into(),
             Value::TaskScope(_) => "TaskScope".into(),
             Value::Task(_) => "Task".into(),
+            Value::Shared(_) => "Shared".into(),
         }
     }
 
@@ -674,6 +684,10 @@ impl fmt::Display for Value {
             // A task prints as a handle, never as the value it will produce:
             // that value is observable only through `await` or scope exit.
             Value::Task(_) => f.write_str("<task>"),
+            // A `Shared` prints as the handle it is. Showing what it holds
+            // would be a read outside a `lock`, which is the one thing the
+            // type exists to prevent.
+            Value::Shared(_) => f.write_str("<shared>"),
         }
     }
 }

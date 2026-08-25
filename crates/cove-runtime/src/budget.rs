@@ -90,15 +90,23 @@ impl Cancellation {
 /// Tracks one run against its [`Limits`].
 ///
 /// A `Budget` is not `Clone`: it holds the one authoritative count of fuel
-/// spent, host calls made, and calls entered for a single run. Share a
-/// [`Cancellation`] instead when another thread needs to stop the run.
+/// spent and host calls made for a single run, and ADR 0008 draws a task's
+/// fuel from the run's budget rather than giving each task one of its own, so
+/// every task thread charges this one through
+/// [`crate::host::HostRegistry::with_budget`]. Share a [`Cancellation`]
+/// instead when another thread needs to stop the run.
+///
+/// `max_call_depth` is the one limit a budget does not itself enforce. Call
+/// depth is a property of one stack, and with a thread per task there is a
+/// stack per task, so the interpreter checks its own depth against
+/// [`Limits::max_call_depth`]; counting every task's frames into one number
+/// would stop a shallow task because a sibling was deep.
 pub struct Budget {
     limits: Limits,
     cancellation: Cancellation,
     started_at: Instant,
     fuel_spent: u64,
     host_calls: u64,
-    call_depth: usize,
     safepoints_since_deadline_check: u64,
 }
 
@@ -117,7 +125,6 @@ impl Budget {
             started_at: Instant::now(),
             fuel_spent: 0,
             host_calls: 0,
-            call_depth: 0,
             safepoints_since_deadline_check: 0,
         }
     }
@@ -162,26 +169,6 @@ impl Budget {
         }
 
         Ok(())
-    }
-
-    /// Enters a call, failing if it would exceed the call-depth limit.
-    /// Balance with [`Budget::leave_call`] on every path out of the call,
-    /// including error paths — but not when `enter_call` itself failed,
-    /// since then the call was never entered.
-    pub fn enter_call(&mut self) -> Result<(), Stopped> {
-        self.call_depth += 1;
-        if let Some(limit) = self.limits.max_call_depth {
-            if self.call_depth > limit {
-                self.call_depth -= 1;
-                return Err(Stopped::CallDepth);
-            }
-        }
-        Ok(())
-    }
-
-    /// Leaves a call previously entered with [`Budget::enter_call`].
-    pub fn leave_call(&mut self) {
-        self.call_depth = self.call_depth.saturating_sub(1);
     }
 
     /// Charges one host call against the budget, failing before the call is
@@ -314,48 +301,19 @@ mod tests {
     }
 
     #[test]
-    fn max_call_depth_fires_when_exceeded() {
-        let mut budget = Budget::new(Limits {
+    fn the_call_depth_limit_is_reported_but_not_counted_here() {
+        // Depth belongs to one stack and a task has a stack of its own, so
+        // the interpreter counts frames and the budget only carries the
+        // limit and names it in the error.
+        let budget = Budget::new(Limits {
             max_call_depth: Some(2),
             ..Limits::default()
         });
-        assert_eq!(budget.enter_call(), Ok(()));
-        assert_eq!(budget.enter_call(), Ok(()));
-        assert_eq!(budget.enter_call(), Err(Stopped::CallDepth));
-    }
-
-    #[test]
-    fn max_call_depth_absent_never_stops() {
-        let mut budget = Budget::new(Limits::default());
-        for _ in 0..10_000 {
-            assert_eq!(budget.enter_call(), Ok(()));
-        }
-    }
-
-    #[test]
-    fn enter_and_leave_call_balance() {
-        let mut budget = Budget::new(Limits {
-            max_call_depth: Some(1),
-            ..Limits::default()
-        });
-        assert_eq!(budget.enter_call(), Ok(()));
-        assert_eq!(budget.enter_call(), Err(Stopped::CallDepth));
-        budget.leave_call();
-        assert_eq!(budget.enter_call(), Ok(()));
-    }
-
-    #[test]
-    fn failed_enter_call_does_not_require_a_matching_leave_call() {
-        let mut budget = Budget::new(Limits {
-            max_call_depth: Some(1),
-            ..Limits::default()
-        });
-        assert_eq!(budget.enter_call(), Ok(()));
-        assert_eq!(budget.enter_call(), Err(Stopped::CallDepth));
-        // The failed enter_call left depth unchanged; one more successful
-        // enter_call is possible after leaving the one that succeeded.
-        budget.leave_call();
-        assert_eq!(budget.enter_call(), Ok(()));
+        assert_eq!(budget.limits().max_call_depth, Some(2));
+        assert_eq!(
+            budget.to_runtime_error(Stopped::CallDepth).message,
+            "execution stopped: call-depth limit of 2 exceeded"
+        );
     }
 
     #[test]

@@ -1,0 +1,3 @@
+[run.fail_shared_vector]
+entry = "main.main"
+allow = ["console"]

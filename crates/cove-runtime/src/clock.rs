@@ -13,8 +13,7 @@
 //! time of a piece of work, and no program can accidentally depend on the
 //! origin itself.
 
-use std::cell::Cell;
-use std::rc::Rc;
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use cove_sema::Capability;
@@ -28,9 +27,11 @@ use crate::value::Value;
 /// moves it.
 ///
 /// Cloning shares the same counter: advancing one handle advances every clone,
-/// including the one already given to a [`Clock`].
+/// including the one already given to a [`Clock`]. The counter is
+/// synchronized because a host is reachable from every task of a run, so two
+/// tasks may read or advance this clock at the same time.
 #[derive(Clone, Debug, Default)]
-pub struct VirtualTime(Rc<Cell<i64>>);
+pub struct VirtualTime(Arc<Mutex<i64>>);
 
 impl VirtualTime {
     /// A clock sitting at its origin.
@@ -40,7 +41,10 @@ impl VirtualTime {
 
     /// Nanoseconds since the origin.
     pub fn nanos(&self) -> i64 {
-        self.0.get()
+        *self
+            .0
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
     /// Moves time forward by `nanos`.
@@ -51,7 +55,11 @@ impl VirtualTime {
     /// reported.
     pub fn advance(&self, nanos: i64) {
         if nanos > 0 {
-            self.0.set(self.0.get().saturating_add(nanos));
+            let mut now = self
+                .0
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            *now = now.saturating_add(nanos);
         }
     }
 }
@@ -71,10 +79,10 @@ enum ClockSource {
 /// The operations `clock` exposes.
 ///
 /// `every` is deliberately absent. `examples/callbacks/main.cove` calls it,
-/// but a repeating timer needs a scheduler that keeps running beside the
-/// program, and ADR 0003 phase 1 settles tasks sequentially at the call site.
-/// A host that answered `every` today would either run the handler once or
-/// block forever, and neither is what the program asked for.
+/// but a repeating timer needs something that keeps firing beside the
+/// program, and ADR 0008 adds a thread per task rather than a scheduler with
+/// timers. A host that answered `every` today would either run the handler
+/// once or block forever, and neither is what the program asked for.
 ///
 /// `timeout` is absent for a different reason: it takes the work to bound as
 /// a trailing closure, and [`HostApi::call`] receives values but has no way to
@@ -101,7 +109,8 @@ static CLOCK_SCHEMA: &[OperationSchema] = &[
         // clock rather than writing anything.
         effect: Effect::Read,
         // Nothing has happened yet while a wait is in flight, so abandoning
-        // one is safe. ADR 0003 phase 2 is what will actually do it.
+        // one is safe. A cancelled task stops at its next safepoint, which is
+        // after the wait it is already inside returns.
         cancellable: true,
         recordable: true,
         result_is_task_safe: true,
@@ -173,7 +182,7 @@ impl HostApi for Clock {
         CLOCK_SCHEMA
     }
 
-    fn call(&mut self, op: &str, args: Vec<Value>) -> Result<Value, RuntimeError> {
+    fn call(&self, op: &str, args: Vec<Value>) -> Result<Value, RuntimeError> {
         match op {
             "now" => Ok(Value::Duration(self.now_nanos())),
             "sleep" => {
@@ -222,7 +231,7 @@ mod tests {
     #[test]
     fn a_virtual_clock_starts_at_its_origin_and_stands_still() {
         let time = VirtualTime::new();
-        let mut clock = Clock::virtual_clock(time.clone());
+        let clock = Clock::virtual_clock(time.clone());
 
         assert_eq!(nanos(clock.call("now", Vec::new()).unwrap()), 0);
         assert_eq!(nanos(clock.call("now", Vec::new()).unwrap()), 0);
@@ -232,7 +241,7 @@ mod tests {
     #[test]
     fn a_virtual_clock_moves_only_when_the_host_moves_it() {
         let time = VirtualTime::new();
-        let mut clock = Clock::virtual_clock(time.clone());
+        let clock = Clock::virtual_clock(time.clone());
 
         time.advance(1_500_000_000);
         assert_eq!(nanos(clock.call("now", Vec::new()).unwrap()), 1_500_000_000);
@@ -252,7 +261,7 @@ mod tests {
     #[test]
     fn sleeping_a_virtual_clock_advances_it_instead_of_waiting() {
         let time = VirtualTime::new();
-        let mut clock = Clock::virtual_clock(time.clone());
+        let clock = Clock::virtual_clock(time.clone());
 
         let started = Instant::now();
         let slept = clock
@@ -265,7 +274,7 @@ mod tests {
 
     #[test]
     fn sleeping_a_negative_duration_is_an_error_on_either_clock() {
-        for mut clock in [Clock::real(), Clock::virtual_clock(VirtualTime::new())] {
+        for clock in [Clock::real(), Clock::virtual_clock(VirtualTime::new())] {
             let slept = clock.call("sleep", vec![Value::Duration(-1)]).unwrap();
             assert_eq!(
                 err_message(slept),
@@ -276,7 +285,7 @@ mod tests {
 
     #[test]
     fn a_real_clock_never_reports_an_earlier_time_than_it_already_did() {
-        let mut clock = Clock::real();
+        let clock = Clock::real();
 
         let first = nanos(clock.call("now", Vec::new()).unwrap());
         let second = nanos(clock.call("now", Vec::new()).unwrap());
@@ -286,7 +295,7 @@ mod tests {
 
     #[test]
     fn a_real_clock_observes_its_own_sleep() {
-        let mut clock = Clock::real();
+        let clock = Clock::real();
 
         let before = nanos(clock.call("now", Vec::new()).unwrap());
         let slept = clock

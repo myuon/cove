@@ -1,0 +1,8 @@
+error[cove::type::task_safety]: `Shared` cannot wrap a `Vector<Int>`, which cannot cross a task boundary
+  --> <e2e>/fail_shared_vector/main/main.cove:10:15
+   |
+10 |   let counts: Shared<Vector<Int>> = Shared(Vector.of(1, 2))
+   |               ^^^^^^^^^^^^^^^^^^^
+  rule: Immutable task-safe values such as arrays may cross task boundaries. A vector cannot cross, even through `let`; finish it as an array or wrap mutable state in `Shared` or another synchronized type. Closures are task-safe only when every capture is.
+  help: wrap an `Array` instead, or finish the vector with `freeze()` before wrapping it
+1 error(s)

@@ -33,7 +33,7 @@
 //! import the other, which is the cycle ADR 0005 forbids.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::rc::Rc;
+use std::sync::Arc;
 
 use cove_diag::{Diagnostic, Span, Spanned};
 use cove_syntax::ast::{
@@ -47,7 +47,7 @@ use crate::package::Package;
 /// A declaration that belongs to a module, with the facts derived from it.
 #[derive(Debug)]
 pub struct FnEntry {
-    pub decl: Rc<FnDecl>,
+    pub decl: Arc<FnDecl>,
     pub exported: bool,
     /// `test fn`: a declaration only the test runner calls.
     ///
@@ -94,14 +94,14 @@ pub struct FnEntry {
 
 #[derive(Debug)]
 pub struct StructEntry {
-    pub decl: Rc<StructDecl>,
+    pub decl: Arc<StructDecl>,
     pub exported: bool,
     pub doc: Option<String>,
 }
 
 #[derive(Debug)]
 pub struct EnumEntry {
-    pub decl: Rc<EnumDecl>,
+    pub decl: Arc<EnumDecl>,
     pub exported: bool,
     pub doc: Option<String>,
 }
@@ -109,7 +109,7 @@ pub struct EnumEntry {
 /// A trait a module declares.
 #[derive(Debug)]
 pub struct TraitEntry {
-    pub decl: Rc<TraitDecl>,
+    pub decl: Arc<TraitDecl>,
     pub exported: bool,
     pub doc: Option<String>,
 }
@@ -146,7 +146,7 @@ pub struct Conformance {
 
 #[derive(Debug)]
 pub struct AliasEntry {
-    pub decl: Rc<TypeAlias>,
+    pub decl: Arc<TypeAlias>,
     pub exported: bool,
     pub doc: Option<String>,
 }
@@ -528,7 +528,7 @@ fn resolve_module(
                     resolved.functions.insert(
                         decl.name.node.clone(),
                         FnEntry {
-                            decl: Rc::new(decl.clone()),
+                            decl: Arc::new(decl.clone()),
                             exported: item.exported,
                             is_test: item.is_test,
                             doc: item.doc.clone(),
@@ -555,7 +555,7 @@ fn resolve_module(
                     resolved.structs.insert(
                         decl.name.node.clone(),
                         StructEntry {
-                            decl: Rc::new(decl.clone()),
+                            decl: Arc::new(decl.clone()),
                             exported: item.exported,
                             doc: item.doc.clone(),
                         },
@@ -577,7 +577,7 @@ fn resolve_module(
                     resolved.enums.insert(
                         decl.name.node.clone(),
                         EnumEntry {
-                            decl: Rc::new(decl.clone()),
+                            decl: Arc::new(decl.clone()),
                             exported: item.exported,
                             doc: item.doc.clone(),
                         },
@@ -611,7 +611,7 @@ fn resolve_module(
                     resolved.traits.insert(
                         decl.name.node.clone(),
                         TraitEntry {
-                            decl: Rc::new(decl.clone()),
+                            decl: Arc::new(decl.clone()),
                             exported: item.exported,
                             doc: item.doc.clone(),
                         },
@@ -633,7 +633,7 @@ fn resolve_module(
                     resolved.aliases.insert(
                         decl.name.node.clone(),
                         AliasEntry {
-                            decl: Rc::new(decl.clone()),
+                            decl: Arc::new(decl.clone()),
                             exported: item.exported,
                             doc: item.doc.clone(),
                         },
@@ -820,7 +820,7 @@ fn resolve_module(
                     resolved.methods.insert(
                         key,
                         FnEntry {
-                            decl: Rc::new(decl.clone()),
+                            decl: Arc::new(decl.clone()),
                             exported: inner.exported,
                             // A method is reached through its type, never
                             // through the test runner; the parser rejects a
@@ -889,7 +889,7 @@ struct Surface {
     declarations: BTreeMap<String, Declared>,
     /// The traits this module declares, whose method lists an
     /// `impl Trait for Type` in another module has to read.
-    traits: BTreeMap<String, Rc<TraitDecl>>,
+    traits: BTreeMap<String, Arc<TraitDecl>>,
 }
 
 #[derive(Debug)]
@@ -912,13 +912,13 @@ enum DeclKind {
 impl Surface {
     fn of(module: &crate::package::Module) -> Surface {
         let mut declarations: BTreeMap<String, Declared> = BTreeMap::new();
-        let mut traits: BTreeMap<String, Rc<TraitDecl>> = BTreeMap::new();
+        let mut traits: BTreeMap<String, Arc<TraitDecl>> = BTreeMap::new();
         for unit in &module.units {
             for item in &unit.ast.items {
                 if let ItemKind::Trait(decl) = &item.kind {
                     traits
                         .entry(decl.name.node.clone())
-                        .or_insert_with(|| Rc::new(decl.clone()));
+                        .or_insert_with(|| Arc::new(decl.clone()));
                 }
                 let (name, kind) = match &item.kind {
                     ItemKind::Fn(decl) => (&decl.name, DeclKind::Function),
@@ -1479,8 +1479,8 @@ const BUILTIN_SNAPSHOT_TRAIT: &str = "Snapshot";
 /// downstream needs it to be: `check_conformance` only checks method names,
 /// not their types, and each conformance declares its own concrete return
 /// type exactly like any other trait method.
-fn builtin_snapshot_trait(span: Span) -> Rc<TraitDecl> {
-    Rc::new(TraitDecl {
+fn builtin_snapshot_trait(span: Span) -> Arc<TraitDecl> {
+    Arc::new(TraitDecl {
         name: Spanned::new(BUILTIN_SNAPSHOT_TRAIT.to_string(), span),
         methods: vec![TraitMethod {
             doc: Some(
@@ -1517,7 +1517,7 @@ fn check_conformance(
     module: &str,
     impl_block: &cove_syntax::ast::ImplBlock,
     conformance: Conformance,
-    trait_decl: Rc<TraitDecl>,
+    trait_decl: Arc<TraitDecl>,
     method_spans: &mut BTreeMap<(String, String), Span>,
     call_sites: &mut BTreeMap<FnKey, Vec<CallShape>>,
     errors: &mut Vec<Diagnostic>,
@@ -1575,7 +1575,7 @@ fn check_conformance(
             resolved,
             module,
             &type_name,
-            Rc::new(decl.clone()),
+            Arc::new(decl.clone()),
             trait_exported,
             declared.doc.clone().or_else(|| inner.doc.clone()),
             None,
@@ -1628,7 +1628,7 @@ fn check_conformance(
             continue;
         };
         methods.insert(method.name.node.clone());
-        let decl = Rc::new(FnDecl {
+        let decl = Arc::new(FnDecl {
             name: method.name.clone(),
             is_async: method.is_async,
             generics: Vec::new(),
@@ -1670,7 +1670,7 @@ fn record_method(
     resolved: &mut ResolvedModule,
     module: &str,
     type_name: &str,
-    decl: Rc<FnDecl>,
+    decl: Arc<FnDecl>,
     exported: bool,
     doc: Option<String>,
     from_trait_default: Option<String>,
@@ -4718,5 +4718,20 @@ export struct Booking {
         assert!(errs
             .iter()
             .any(|d| d.code == "cove::resolve::break_outside_loop"));
+    }
+}
+
+#[cfg(test)]
+mod send_sync {
+    use super::Program;
+
+    /// A task thread runs the same resolved program as the thread that
+    /// spawned it, reached by reference, so the program must be shareable
+    /// across threads (ADR 0008). Nothing in a resolved program is mutable,
+    /// so this holds as long as no reference-counted handle in it is `Rc`.
+    #[test]
+    fn a_resolved_program_is_shareable_across_task_threads() {
+        fn assert_send_sync<T: Send + Sync>() {}
+        assert_send_sync::<Program>();
     }
 }

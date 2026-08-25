@@ -14,6 +14,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::Write;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use cove_sema::Capability;
@@ -21,11 +23,18 @@ use cove_sema::Capability;
 use crate::budget::Budget;
 use crate::error::RuntimeError;
 use crate::schema::{Effect, HostType, OperationSchema};
-use crate::trace::{HostOutcome, NullSink, TraceEvent, TraceSink};
+use crate::trace::{HostOutcome, NullSink, RecordedValue, TraceEvent, TraceSink};
 use crate::value::Value;
 
 /// One host-provided module, such as `console` or `env`.
-pub trait HostApi {
+///
+/// A host is shared by every task of a run, so an operation is invoked
+/// through a shared reference and a host is `Send + Sync`. A host that needs
+/// mutable state of its own says so with a lock it owns, which is also what
+/// decides how much of it two tasks may do at once: `console` serializes its
+/// writes so a line is never torn, while `clock.sleep` holds nothing, so two
+/// tasks can wait at the same time instead of queueing behind each other.
+pub trait HostApi: Send + Sync {
     /// The name Cove source uses, such as `console`.
     fn name(&self) -> &str;
 
@@ -42,7 +51,7 @@ pub trait HostApi {
     fn schema(&self) -> &[OperationSchema];
 
     /// Invokes one operation.
-    fn call(&mut self, op: &str, args: Vec<Value>) -> Result<Value, RuntimeError>;
+    fn call(&self, op: &str, args: Vec<Value>) -> Result<Value, RuntimeError>;
 }
 
 /// The set of capabilities granted at the execution boundary.
@@ -78,9 +87,12 @@ impl Grants {
 pub struct HostRegistry {
     modules: Vec<Box<dyn HostApi>>,
     grants: Grants,
-    trace: Box<dyn TraceSink>,
-    budget: Option<Budget>,
-    irreversible_writes: u64,
+    trace: Arc<dyn TraceSink>,
+    /// The run's budget, shared by every task: ADR 0008 draws a task's fuel
+    /// from the run's budget rather than giving each task one of its own, so
+    /// there is still exactly one authoritative count of what the run spent.
+    budget: Mutex<Option<Budget>>,
+    irreversible_writes: AtomicU64,
 }
 
 impl HostRegistry {
@@ -88,9 +100,9 @@ impl HostRegistry {
         HostRegistry {
             modules: Vec::new(),
             grants,
-            trace: Box::new(NullSink),
-            budget: None,
-            irreversible_writes: 0,
+            trace: Arc::new(NullSink),
+            budget: Mutex::new(None),
+            irreversible_writes: AtomicU64::new(0),
         }
     }
 
@@ -108,7 +120,7 @@ impl HostRegistry {
 
     /// Installs where trace events go. Replaces any sink installed earlier;
     /// the default is [`NullSink`], which discards everything.
-    pub fn set_trace(&mut self, sink: Box<dyn TraceSink>) {
+    pub fn set_trace(&mut self, sink: Arc<dyn TraceSink>) {
         self.trace = sink;
     }
 
@@ -117,20 +129,24 @@ impl HostRegistry {
     /// host-call limit here (the interpreter's own safepoints still apply
     /// its other limits).
     pub fn set_budget(&mut self, budget: Budget) {
-        self.budget = Some(budget);
+        *self
+            .budget
+            .get_mut()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(budget);
     }
 
-    /// The installed budget, if any, so a caller can report its counters
-    /// after a run finishes.
-    pub fn budget(&self) -> Option<&Budget> {
-        self.budget.as_ref()
-    }
-
-    /// The installed budget, if any, so the interpreter can charge it at its
-    /// own safepoints (loop back edges, calls, `await`) through the same
-    /// registry it already holds.
-    pub fn budget_mut(&mut self) -> Option<&mut Budget> {
-        self.budget.as_mut()
+    /// Runs `f` against the run's budget, if the host installed one.
+    ///
+    /// This is how the interpreter charges its own safepoints — loop back
+    /// edges, calls, and `await` — and how a caller reads the counters after
+    /// a run. Every task thread reaches the one budget through here, so the
+    /// lock is held for the charge and nothing else.
+    pub fn with_budget<R>(&self, f: impl FnOnce(&mut Budget) -> R) -> Option<R> {
+        let mut budget = self
+            .budget
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        budget.as_mut().map(f)
     }
 
     /// How many calls this run dispatched whose schema declares them
@@ -144,7 +160,7 @@ impl HostRegistry {
     /// call the host answered with `Err` is still counted: the registry knows
     /// only that a program asked for something irreversible.
     pub fn irreversible_writes(&self) -> u64 {
-        self.irreversible_writes
+        self.irreversible_writes.load(Ordering::Relaxed)
     }
 
     /// Looks up which host module exposes `op`, for unqualified `use` imports.
@@ -175,15 +191,23 @@ impl HostRegistry {
         Some(self.schema_for(module, op)?.result_is_task_safe)
     }
 
+    /// Describes `args` for a trace, or hands back nothing when no sink will
+    /// read them.
+    ///
+    /// A [`RecordedValue`] is a copy, and one of a value no boundary may
+    /// carry is also a rendering of it, so an untraced run makes neither: an
+    /// event nothing keeps has nothing worth describing.
+    fn record_args(&self, args: &[Value]) -> Vec<RecordedValue> {
+        if !self.trace.is_recording() {
+            return Vec::new();
+        }
+        args.iter().map(RecordedValue::of).collect()
+    }
+
     /// Dispatches a Host API call after checking the grant, the schema, and
     /// the budget, tracing the outcome either way.
-    pub fn call(
-        &mut self,
-        module: &str,
-        op: &str,
-        args: Vec<Value>,
-    ) -> Result<Value, RuntimeError> {
-        let Some(entry) = self.modules.iter_mut().find(|m| m.name() == module) else {
+    pub fn call(&self, module: &str, op: &str, args: Vec<Value>) -> Result<Value, RuntimeError> {
+        let Some(entry) = self.modules.iter().find(|m| m.name() == module) else {
             return Err(RuntimeError::new(format!("unknown host module `{module}`")));
         };
         let declared = entry
@@ -206,7 +230,7 @@ impl HostRegistry {
                 capability: capability.to_string(),
                 wait: std::time::Duration::ZERO,
                 granted: false,
-                args,
+                args: self.record_args(&args),
                 outcome: None,
             });
             return Err(RuntimeError::new(format!(
@@ -247,31 +271,31 @@ impl HostRegistry {
             )));
         }
 
-        if let Some(budget) = self.budget.as_mut() {
-            if let Err(stopped) = budget.charge_host_call() {
-                let error = budget.to_runtime_error(stopped);
-                self.trace.record(TraceEvent::HostCall {
-                    module: module.to_string(),
-                    op: op.to_string(),
-                    capability: capability.to_string(),
-                    wait: std::time::Duration::ZERO,
-                    granted: false,
-                    args,
-                    outcome: None,
-                });
-                return Err(error);
-            }
+        if let Some(Err(error)) = self.with_budget(|budget| {
+            budget
+                .charge_host_call()
+                .map_err(|stopped| budget.to_runtime_error(stopped))
+        }) {
+            self.trace.record(TraceEvent::HostCall {
+                module: module.to_string(),
+                op: op.to_string(),
+                capability: capability.to_string(),
+                wait: std::time::Duration::ZERO,
+                granted: false,
+                args: self.record_args(&args),
+                outcome: None,
+            });
+            return Err(error);
         }
 
         if schema.effect == Effect::IrreversibleWrite {
-            self.irreversible_writes += 1;
+            self.irreversible_writes.fetch_add(1, Ordering::Relaxed);
         }
 
         // A trace has to carry the arguments to be replayable, and the host
-        // takes ownership of them, so they are cloned before dispatch rather
-        // than reconstructed afterwards. Cloning a `Value` is the shallow
-        // copy Cove's own assignment performs.
-        let recorded_args = args.clone();
+        // takes ownership of them, so they are recorded before dispatch
+        // rather than reconstructed afterwards.
+        let recorded_args = self.record_args(&args);
         let started = Instant::now();
         let result = entry.call(op, args);
         let wait = started.elapsed();
@@ -279,23 +303,25 @@ impl HostRegistry {
         // that is not recordable has its call recorded and its result left
         // out: replaying `process.exit` by handing back a value would keep
         // running a program that had ended.
-        let outcome = if schema.recordable {
-            match &result {
-                Ok(value) => HostOutcome::Value(value.clone()),
-                Err(error) => HostOutcome::Error(error.message.clone()),
-            }
-        } else {
-            HostOutcome::NotRecordable
-        };
-        self.trace.record(TraceEvent::HostCall {
-            module: module.to_string(),
-            op: op.to_string(),
-            capability: capability.to_string(),
-            wait,
-            granted: true,
-            args: recorded_args,
-            outcome: Some(outcome),
-        });
+        if self.trace.is_recording() {
+            let outcome = if schema.recordable {
+                match &result {
+                    Ok(value) => HostOutcome::Value(RecordedValue::of(value)),
+                    Err(error) => HostOutcome::Error(error.message.clone()),
+                }
+            } else {
+                HostOutcome::NotRecordable
+            };
+            self.trace.record(TraceEvent::HostCall {
+                module: module.to_string(),
+                op: op.to_string(),
+                capability: capability.to_string(),
+                wait,
+                granted: true,
+                args: recorded_args,
+                outcome: Some(outcome),
+            });
+        }
         result
     }
 }
@@ -374,17 +400,21 @@ static CONSOLE_SCHEMA: &[OperationSchema] = &[
 ];
 
 /// `console`: line-oriented output.
-pub struct Console<W: Write> {
-    out: W,
+pub struct Console<W: Write + Send> {
+    /// Held under a lock so that one task's line is written whole: two tasks
+    /// printing at once must interleave lines, never halves of a line.
+    out: Mutex<W>,
 }
 
-impl<W: Write> Console<W> {
+impl<W: Write + Send> Console<W> {
     pub fn new(out: W) -> Self {
-        Console { out }
+        Console {
+            out: Mutex::new(out),
+        }
     }
 }
 
-impl<W: Write> HostApi for Console<W> {
+impl<W: Write + Send> HostApi for Console<W> {
     fn name(&self) -> &str {
         "console"
     }
@@ -397,18 +427,22 @@ impl<W: Write> HostApi for Console<W> {
         CONSOLE_SCHEMA
     }
 
-    fn call(&mut self, op: &str, args: Vec<Value>) -> Result<Value, RuntimeError> {
+    fn call(&self, op: &str, args: Vec<Value>) -> Result<Value, RuntimeError> {
         let text = args
             .iter()
             .map(|v| v.to_string())
             .collect::<Vec<_>>()
             .join(" ");
+        let mut out = self
+            .out
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let result = match op {
-            "println" => writeln!(self.out, "{text}"),
-            "print" => write!(self.out, "{text}"),
+            "println" => writeln!(out, "{text}"),
+            "print" => write!(out, "{text}"),
             _ => unreachable!("checked by HostRegistry::call"),
         };
-        match result.and_then(|_| self.out.flush()) {
+        match result.and_then(|_| out.flush()) {
             Ok(()) => Ok(Value::ok(Value::Unit)),
             Err(e) => Ok(Value::err(Value::error(format!("console: {e}")))),
         }
@@ -464,7 +498,7 @@ impl HostApi for Env {
         ENV_SCHEMA
     }
 
-    fn call(&mut self, op: &str, args: Vec<Value>) -> Result<Value, RuntimeError> {
+    fn call(&self, op: &str, args: Vec<Value>) -> Result<Value, RuntimeError> {
         match op {
             "get" => {
                 let [Value::Str(name)] = args.as_slice() else {
@@ -570,7 +604,7 @@ impl HostApi for Documents {
         DOCUMENTS_SCHEMA
     }
 
-    fn call(&mut self, op: &str, args: Vec<Value>) -> Result<Value, RuntimeError> {
+    fn call(&self, op: &str, args: Vec<Value>) -> Result<Value, RuntimeError> {
         match op {
             "read" => {
                 let [Value::Str(name)] = args.as_slice() else {
@@ -652,7 +686,7 @@ mod tests {
 
     #[test]
     fn in_memory_read_hits_and_misses() {
-        let mut documents = Documents::in_memory(BTreeMap::from([(
+        let documents = Documents::in_memory(BTreeMap::from([(
             "input".to_string(),
             "hello world".to_string(),
         )]));
@@ -672,7 +706,7 @@ mod tests {
     fn rooted_reads_a_real_file() {
         let dir = TempDir::new("rooted-read");
         std::fs::write(dir.path().join("input.txt"), "five little words here").unwrap();
-        let mut documents = Documents::rooted(dir.path().to_path_buf());
+        let documents = Documents::rooted(dir.path().to_path_buf());
 
         let read = documents
             .call("read", vec![Value::Str("input".into())])
@@ -683,7 +717,7 @@ mod tests {
     #[test]
     fn rooted_rejects_a_missing_document() {
         let dir = TempDir::new("rooted-missing");
-        let mut documents = Documents::rooted(dir.path().to_path_buf());
+        let documents = Documents::rooted(dir.path().to_path_buf());
 
         let read = documents
             .call("read", vec![Value::Str("absent".into())])
@@ -694,7 +728,7 @@ mod tests {
     #[test]
     fn rooted_rejects_path_traversal() {
         let dir = TempDir::new("rooted-traversal");
-        let mut documents = Documents::rooted(dir.path().to_path_buf());
+        let documents = Documents::rooted(dir.path().to_path_buf());
 
         let read = documents
             .call("read", vec![Value::Str("..".into())])
@@ -705,7 +739,7 @@ mod tests {
     #[test]
     fn rooted_rejects_a_nested_path() {
         let dir = TempDir::new("rooted-nested");
-        let mut documents = Documents::rooted(dir.path().to_path_buf());
+        let documents = Documents::rooted(dir.path().to_path_buf());
 
         let read = documents
             .call("read", vec![Value::Str("a/b".into())])
@@ -716,7 +750,7 @@ mod tests {
     #[test]
     fn rooted_rejects_an_empty_name() {
         let dir = TempDir::new("rooted-empty");
-        let mut documents = Documents::rooted(dir.path().to_path_buf());
+        let documents = Documents::rooted(dir.path().to_path_buf());
 
         let read = documents
             .call("read", vec![Value::Str("".into())])
@@ -751,11 +785,37 @@ mod tests {
 
     /// Collects every event recorded into it, for assertions.
     #[derive(Clone, Default)]
-    struct RecordingSink(std::rc::Rc<std::cell::RefCell<Vec<TraceEvent>>>);
+    struct RecordingSink(Arc<Mutex<Vec<TraceEvent>>>);
+
+    impl RecordingSink {
+        fn events(&self) -> Vec<TraceEvent> {
+            self.0
+                .lock()
+                .expect("no test panics while recording")
+                .clone()
+        }
+    }
 
     impl TraceSink for RecordingSink {
-        fn record(&mut self, event: TraceEvent) {
-            self.0.borrow_mut().push(event);
+        fn record(&self, event: TraceEvent) {
+            self.0
+                .lock()
+                .expect("no test panics while recording")
+                .push(event);
+        }
+    }
+
+    /// What a recorded value shows as, which is the value it carried on the
+    /// far side of the boundary the event crossed.
+    fn shown(recorded: &RecordedValue) -> String {
+        recorded_value(recorded).to_string()
+    }
+
+    /// The value a recorded value carried.
+    fn recorded_value(recorded: &RecordedValue) -> Value {
+        match recorded {
+            RecordedValue::Carried(transfer) => transfer.clone().into_value(),
+            RecordedValue::Opaque { shown, .. } => Value::Str(shown.as_str().into()),
         }
     }
 
@@ -778,33 +838,33 @@ mod tests {
             ..Limits::default()
         }));
         let sink = RecordingSink::default();
-        hosts.set_trace(Box::new(sink.clone()));
+        hosts.set_trace(Arc::new(sink.clone()));
 
         let error = hosts
             .call("documents", "read", vec![Value::Str("input".into())])
             .expect_err("the call should be stopped by the budget");
         assert!(error.rule.is_some(), "{error:?}");
 
-        let events = sink.0.borrow();
+        let events = sink.events();
         assert_eq!(events.len(), 1, "{events:?}");
         match &events[0] {
             TraceEvent::HostCall { granted, .. } => assert!(!granted),
             other => panic!("expected a HostCall event, found {other:?}"),
         }
-        assert_eq!(hosts.budget().unwrap().host_calls(), 1);
+        assert_eq!(hosts.with_budget(|budget| budget.host_calls()), Some(1));
     }
 
     #[test]
     fn a_granted_call_produces_one_event_with_a_plausible_wait() {
         let mut hosts = registry_with_documents();
         let sink = RecordingSink::default();
-        hosts.set_trace(Box::new(sink.clone()));
+        hosts.set_trace(Arc::new(sink.clone()));
 
         hosts
             .call("documents", "read", vec![Value::Str("input".into())])
             .expect("the call should be allowed");
 
-        let events = sink.0.borrow();
+        let events = sink.events();
         assert_eq!(events.len(), 1, "{events:?}");
         match &events[0] {
             TraceEvent::HostCall {
@@ -825,10 +885,10 @@ mod tests {
                 // it, so the event carries the call's arguments and its
                 // result too.
                 assert_eq!(args.len(), 1);
-                assert_eq!(args[0].to_string(), "input");
+                assert_eq!(shown(&args[0]), "input");
                 match outcome {
                     Some(HostOutcome::Value(value)) => {
-                        assert_eq!(ok_str(value.clone()), "hello world")
+                        assert_eq!(ok_str(recorded_value(value)), "hello world")
                     }
                     other => panic!("expected a recorded value, found {other:?}"),
                 }
@@ -850,21 +910,21 @@ mod tests {
             crate::process::ProcessLog::new(),
         )));
         let sink = RecordingSink::default();
-        hosts.set_trace(Box::new(sink.clone()));
+        hosts.set_trace(Arc::new(sink.clone()));
 
         hosts.call("process", "args", Vec::new()).expect("granted");
         hosts
             .call("process", "exit", vec![Value::Int(2)])
             .expect("granted");
 
-        let events = sink.0.borrow();
+        let events = sink.events();
         assert_eq!(events.len(), 2, "{events:?}");
         match &events[0] {
             // `process.args` is recordable, so its result is recorded.
             TraceEvent::HostCall {
                 outcome: Some(HostOutcome::Value(value)),
                 ..
-            } => assert_eq!(value.to_string(), "[one]"),
+            } => assert_eq!(shown(value), "[one]"),
             other => panic!("expected a recorded value, found {other:?}"),
         }
         match &events[1] {
@@ -878,10 +938,41 @@ mod tests {
                 // The call itself is still recorded, arguments and all: what
                 // the program asked for is exactly the part worth knowing.
                 assert_eq!(args.len(), 1);
-                assert_eq!(args[0].to_string(), "2");
+                assert_eq!(shown(&args[0]), "2");
             }
             other => panic!("expected `not recordable`, found {other:?}"),
         }
+    }
+
+    /// A sink that reads nothing is asked for nothing: describing a call's
+    /// values costs a copy of each, and an untraced run — whose sink is
+    /// [`NullSink`] — should not pay for a description nobody keeps.
+    #[test]
+    fn a_sink_that_is_not_recording_is_given_no_events() {
+        /// Records every event it is given, while saying it will not read
+        /// them, exactly as `NullSink` does.
+        #[derive(Clone, Default)]
+        struct Deaf(RecordingSink);
+
+        impl TraceSink for Deaf {
+            fn record(&self, event: TraceEvent) {
+                self.0.record(event);
+            }
+
+            fn is_recording(&self) -> bool {
+                false
+            }
+        }
+
+        let mut hosts = registry_with_documents();
+        let sink = Deaf::default();
+        hosts.set_trace(Arc::new(sink.clone()));
+
+        hosts
+            .call("documents", "read", vec![Value::Str("input".into())])
+            .expect("the call should be allowed");
+
+        assert!(sink.0.events().is_empty(), "{:?}", sink.0.events());
     }
 
     /// A call the run was not granted never reaches a host, so there is no
@@ -891,13 +982,13 @@ mod tests {
         let mut hosts = HostRegistry::new(Grants::new(Vec::<String>::new()));
         hosts.register(Box::new(Documents::in_memory(BTreeMap::new())));
         let sink = RecordingSink::default();
-        hosts.set_trace(Box::new(sink.clone()));
+        hosts.set_trace(Arc::new(sink.clone()));
 
         hosts
             .call("documents", "read", vec![Value::Str("input".into())])
             .expect_err("the call should be rejected");
 
-        let events = sink.0.borrow();
+        let events = sink.events();
         match &events[0] {
             TraceEvent::HostCall {
                 granted,
@@ -915,7 +1006,7 @@ mod tests {
 
     #[test]
     fn an_unknown_operation_lists_the_operations_that_exist() {
-        let mut hosts = registry_with_documents();
+        let hosts = registry_with_documents();
 
         let error = hosts
             .call("documents", "write", Vec::new())
@@ -929,7 +1020,7 @@ mod tests {
 
     #[test]
     fn too_many_arguments_are_rejected_before_the_host_sees_them() {
-        let mut hosts = registry_with_documents();
+        let hosts = registry_with_documents();
 
         let error = hosts
             .call(
@@ -950,7 +1041,7 @@ mod tests {
 
     #[test]
     fn too_few_arguments_are_rejected_too() {
-        let mut hosts = registry_with_documents();
+        let hosts = registry_with_documents();
 
         let error = hosts
             .call("documents", "read", Vec::new())
@@ -1070,13 +1161,13 @@ mod tests {
         let mut hosts = HostRegistry::new(Grants::new(Vec::<String>::new()));
         hosts.register(Box::new(Documents::in_memory(BTreeMap::new())));
         let sink = RecordingSink::default();
-        hosts.set_trace(Box::new(sink.clone()));
+        hosts.set_trace(Arc::new(sink.clone()));
 
         hosts
             .call("documents", "read", vec![Value::Str("input".into())])
             .expect_err("the call should be rejected for the missing grant");
 
-        let events = sink.0.borrow();
+        let events = sink.events();
         assert_eq!(events.len(), 1, "{events:?}");
         match &events[0] {
             TraceEvent::HostCall {

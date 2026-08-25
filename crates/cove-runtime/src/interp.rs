@@ -17,9 +17,10 @@
 //! enforced.
 
 use std::cell::RefCell;
-use std::collections::{BTreeSet, HashMap};
+use std::collections::BTreeSet;
 use std::rc::Rc;
-use std::time::Instant;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use cove_diag::{SourceMap, Span};
 use cove_sema::resolve::{Program, ResolvedModule};
@@ -28,11 +29,13 @@ use cove_syntax::ast::{
     PatternKind, Receiver, StmtKind, StrPart, StructDecl, Type, TypeKind, UnaryOp,
 };
 
+use crate::budget::{Cancellation, Stopped};
 use crate::builtins::{self, Callable};
 use crate::error::RuntimeError;
 use crate::host::HostRegistry;
-use crate::task::{self, Task, TaskScope, TaskState};
-use crate::trace::{NullSink, Timing, TraceEvent, TraceSink};
+use crate::runtime::Runtime;
+use crate::task::{Task, TaskOutcome, TaskScope, TaskState, Transfer};
+use crate::trace::{Timing, TraceEvent};
 use crate::value::{Closure, DynValue, EnumValue, RangeBounds, StructValue, Value, VectorStorage};
 
 /// How deep Cove calls may nest before the runtime reports a limit instead of
@@ -73,6 +76,14 @@ enum Control {
 impl From<RuntimeError> for Control {
     fn from(error: RuntimeError) -> Self {
         Control::Error(error)
+    }
+}
+
+impl Control {
+    /// Returns `Err(error)` from the enclosing function, which is what a task
+    /// whose value is a failed `Result` does to the scope that waited for it.
+    fn error_value(error: Value) -> Control {
+        Control::Return(Value::err(error))
     }
 }
 
@@ -268,35 +279,44 @@ struct Target<'t> {
 
 /// Executes a resolved program.
 ///
+/// One interpreter runs one body on one thread: the entry, or the body of a
+/// spawned task. Everything shared with the rest of the run is reached
+/// through the [`Runtime`] it borrows, which is what a `spawn` hands to the
+/// thread it starts.
+///
 /// # Ownership of the run's [`crate::budget::Budget`]
 ///
 /// The `Budget` is owned by the [`HostRegistry`] this interpreter borrows,
 /// not by `Interpreter` itself: a host installs it once with
-/// `HostRegistry::set_budget`, and the interpreter reaches it through
-/// `self.hosts.budget_mut()` at every safepoint. There is exactly one
-/// `Budget` per run either way, so this is a choice of which existing owner
-/// keeps it, not a second copy — fuel, call depth, and host-call counters are
-/// each charged from exactly one place.
+/// `HostRegistry::set_budget`, and every task thread reaches that one budget
+/// through `HostRegistry::with_budget` at its own safepoints. ADR 0008 draws
+/// a task's fuel from the run's budget, so there is exactly one authoritative
+/// count of what the run spent, whichever thread spent it. Call depth is the
+/// exception and is counted here, because a task has a stack of its own.
 pub struct Interpreter<'a> {
     pub program: &'a Program,
     pub sources: &'a SourceMap,
-    pub hosts: &'a mut HostRegistry,
+    pub hosts: &'a HostRegistry,
+    /// What every thread of this run shares, so a `spawn` can hand a task
+    /// thread everything it needs to run a body.
+    runtime: &'a Runtime,
     depth: usize,
-    trace: Box<dyn TraceSink>,
-    /// The next id [`Interpreter::spawn`] assigns to a spawned task. Task ids
-    /// are a trace identity, unrelated to a task's spawn-order `position`.
-    next_task_id: u64,
-    /// Maps a task's address (stable for the `Rc<Task>`'s lifetime) to the id
-    /// assigned when it was spawned, so `settle` and cancellation can trace
-    /// the same id `spawn` announced.
-    task_ids: HashMap<usize, u64>,
-    /// Ids of the tasks whose bodies are currently running, innermost last,
+    /// This task's own cancellation flag, when this interpreter is running a
+    /// spawned task's body rather than the entry.
+    ///
+    /// Cancelling the *run* is the budget's flag, which every safepoint
+    /// already observes through the shared budget. This is the second flag a
+    /// safepoint checks: it stops one task without stopping the run, which is
+    /// what leaving a scope early asks for.
+    cancellation: Option<Cancellation>,
+    /// Ids of the tasks whose bodies this thread is running, innermost last,
     /// so a nested `spawn` can name its immediate parent.
     task_stack: Vec<u64>,
-    /// Active timing contexts, one for the entry and one more for each task
-    /// currently running its body. A host call's wait is charged against
-    /// every context on this stack, so both the task and the entry that
-    /// (directly or transitively) awaits it see the same wait.
+    /// Active timing contexts: one for the body this thread is running, and
+    /// one more for each nested context inside it. A host call's wait is
+    /// charged against every context on this stack. Each task thread has a
+    /// stack of its own, which is what makes one task's CPU work and
+    /// another's wait separately attributable.
     timings: Vec<Timing>,
     /// Where the most recent assertion failed, and the message it produced.
     ///
@@ -312,15 +332,15 @@ pub struct Interpreter<'a> {
 }
 
 impl<'a> Interpreter<'a> {
-    pub fn new(program: &'a Program, sources: &'a SourceMap, hosts: &'a mut HostRegistry) -> Self {
+    /// An interpreter for the entry of `runtime`'s run.
+    pub fn new(runtime: &'a Runtime) -> Self {
         Interpreter {
-            program,
-            sources,
-            hosts,
+            program: runtime.program(),
+            sources: runtime.sources(),
+            hosts: runtime.hosts(),
+            runtime,
             depth: 0,
-            trace: Box::new(NullSink),
-            next_task_id: 1,
-            task_ids: HashMap::new(),
+            cancellation: None,
             task_stack: Vec::new(),
             timings: Vec::new(),
             assertion_failure: None,
@@ -348,10 +368,13 @@ impl<'a> Interpreter<'a> {
             .unwrap_or("?")
     }
 
-    /// Installs where trace events go. Replaces any sink installed earlier;
-    /// the default is [`NullSink`], which discards everything.
-    pub fn set_trace(&mut self, sink: Box<dyn TraceSink>) {
-        self.trace = sink;
+    /// An interpreter for the body of the spawned task `id`, which stops when
+    /// `cancellation` is raised.
+    fn for_task(runtime: &'a Runtime, id: u64, cancellation: Cancellation) -> Self {
+        let mut interpreter = Interpreter::new(runtime);
+        interpreter.cancellation = Some(cancellation);
+        interpreter.task_stack.push(id);
+        interpreter
     }
 
     /// Calls the host-selected entry function.
@@ -392,7 +415,7 @@ impl<'a> Interpreter<'a> {
             }
         };
 
-        self.trace.record(TraceEvent::EntryEnter {
+        self.runtime.trace(TraceEvent::EntryEnter {
             module: module.to_string(),
             function: name.to_string(),
         });
@@ -426,7 +449,7 @@ impl<'a> Interpreter<'a> {
             .timings
             .pop()
             .expect("run_entry pushes exactly the one timing it pops");
-        self.trace.record(TraceEvent::EntryExit {
+        self.runtime.trace(TraceEvent::EntryExit {
             module: module.to_string(),
             function: name.to_string(),
             cpu: timing.cpu(),
@@ -463,7 +486,7 @@ impl<'a> Interpreter<'a> {
         select(owner, name).map(|found| (owner_name.as_str().into(), found))
     }
 
-    fn find_function(&self, module: &str, name: &str) -> Option<(Rc<str>, Rc<FnDecl>)> {
+    fn find_function(&self, module: &str, name: &str) -> Option<(Rc<str>, Arc<FnDecl>)> {
         self.find_declared(module, name, |resolved, name| {
             Some(resolved.functions.get(name)?.decl.clone())
         })
@@ -484,7 +507,7 @@ impl<'a> Interpreter<'a> {
         type_module: &str,
         type_name: &str,
         name: &str,
-    ) -> Option<(Rc<str>, Rc<FnDecl>)> {
+    ) -> Option<(Rc<str>, Arc<FnDecl>)> {
         let key = (type_name.to_string(), name.to_string());
         if let Some(entry) = self.resolved(type_module).and_then(|m| m.methods.get(&key)) {
             return Some((type_module.into(), entry.decl.clone()));
@@ -505,13 +528,13 @@ impl<'a> Interpreter<'a> {
         None
     }
 
-    fn find_struct(&self, module: &str, name: &str) -> Option<(Rc<str>, Rc<StructDecl>)> {
+    fn find_struct(&self, module: &str, name: &str) -> Option<(Rc<str>, Arc<StructDecl>)> {
         self.find_declared(module, name, |resolved, name| {
             Some(resolved.structs.get(name)?.decl.clone())
         })
     }
 
-    fn find_enum(&self, module: &str, name: &str) -> Option<(Rc<str>, Rc<EnumDecl>)> {
+    fn find_enum(&self, module: &str, name: &str) -> Option<(Rc<str>, Arc<EnumDecl>)> {
         self.find_declared(module, name, |resolved, name| {
             Some(resolved.enums.get(name)?.decl.clone())
         })
@@ -562,7 +585,7 @@ impl<'a> Interpreter<'a> {
     }
 
     /// The exported function of `owner` named `name`.
-    fn exported_function(&self, owner: &str, name: &str) -> Option<Rc<FnDecl>> {
+    fn exported_function(&self, owner: &str, name: &str) -> Option<Arc<FnDecl>> {
         self.find_exported(owner, name, |resolved| {
             Some(resolved.functions.get(name)?.decl.clone())
         })
@@ -576,7 +599,7 @@ impl<'a> Interpreter<'a> {
             return Ok(Value::Closure(Rc::new(Closure {
                 is_async: decl.is_async,
                 params: decl.params.clone(),
-                body: Rc::new(decl.body.clone()),
+                body: Arc::new(decl.body.clone()),
                 decl: Some(decl),
                 module: owner.into(),
                 captures: Vec::new(),
@@ -647,12 +670,28 @@ impl<'a> Interpreter<'a> {
     /// `match` in Cove source, so it terminates the run rather than failing
     /// one function of it.
     fn charge_safepoint(&mut self, span: Span) -> Result<(), RuntimeError> {
-        if let Some(budget) = self.hosts.budget_mut() {
-            if let Err(stopped) = budget.safepoint(SAFEPOINT_FUEL) {
-                return Err(budget.to_runtime_error(stopped).at(span));
+        if let Some(cancellation) = &self.cancellation {
+            if cancellation.is_cancelled() {
+                return Err(task_cancelled(span));
             }
         }
+        if let Some(Err(error)) = self.hosts.with_budget(|budget| {
+            budget
+                .safepoint(SAFEPOINT_FUEL)
+                .map_err(|stopped| budget.to_runtime_error(stopped))
+        }) {
+            return Err(error.at(span));
+        }
         Ok(())
+    }
+
+    /// Records `wait` against every active [`Timing`] context, so a trace can
+    /// separate the work a body did from the time it spent waiting for
+    /// something else to finish — a host call, or a task.
+    fn charge_wait(&mut self, wait: Duration) {
+        for timing in &mut self.timings {
+            timing.add_wait(wait);
+        }
     }
 
     /// Dispatches a host call and records its wait against every active
@@ -667,10 +706,7 @@ impl<'a> Interpreter<'a> {
     ) -> Result<Value, RuntimeError> {
         let started = Instant::now();
         let result = self.hosts.call(module, op, values);
-        let wait = started.elapsed();
-        for timing in &mut self.timings {
-            timing.add_wait(wait);
-        }
+        self.charge_wait(started.elapsed());
         result.map_err(|e| e.at(span))
     }
 
@@ -692,37 +728,37 @@ impl<'a> Interpreter<'a> {
             .with_rule("Recursion depth is a runtime control, not a proof obligation."));
         }
 
-        // Every call is a safepoint: `enter_call` bounds recursion against a
-        // host-configured `max_call_depth` (in addition to the unconditional
-        // `MAX_CALL_DEPTH` above), and the fuel charge counts the call itself.
-        // Both are undone on every path out of this call, including the error
-        // path from the fuel charge, so depth never leaks.
-        if let Some(budget) = self.hosts.budget_mut() {
-            if let Err(stopped) = budget.enter_call() {
-                return Err(budget.to_runtime_error(stopped).at(span));
-            }
+        // A host-configured `max_call_depth` bounds one stack, and ADR 0008
+        // gives each task a stack of its own, so it is checked against this
+        // interpreter's own depth rather than against a count shared with
+        // every other task: a shallow task must not be stopped because a
+        // sibling is deep.
+        let depth = self.depth + 1;
+        let hosts = self.hosts;
+        if let Some(Some(error)) =
+            hosts.with_budget(|budget| match budget.limits().max_call_depth {
+                Some(limit) if depth > limit => Some(budget.to_runtime_error(Stopped::CallDepth)),
+                _ => None,
+            })
+        {
+            return Err(error.at(span));
         }
-        if let Err(error) = self.charge_safepoint(span) {
-            if let Some(budget) = self.hosts.budget_mut() {
-                budget.leave_call();
-            }
-            return Err(error);
-        }
+        // Every call is also a safepoint, so the fuel charge counts the call
+        // itself.
+        self.charge_safepoint(span)?;
 
         self.depth += 1;
         let result = self.invoke_body(target, receiver, args, span);
         self.depth -= 1;
-        if let Some(budget) = self.hosts.budget_mut() {
-            budget.leave_call();
-        }
         if target.is_async {
             // An `async fn` is called like any other function and produces a
             // task, so its value is reachable only through `await`.
             //
-            // ADR 0003 phase 1 runs the body here, at the call, and returns a
-            // handle that is already settled. A scheduler is free to start it
-            // anywhere between the call and the `await`, so nothing may depend
-            // on when the body ran; a body that is never awaited has still run.
+            // The body runs here, at the call, and the handle it returns is
+            // already settled. ADR 0008 gives a thread to `spawn`, which is
+            // where the language says concurrency begins; nothing may depend
+            // on when an `async fn` body ran, only on the value `await`
+            // produces, so a body that is never awaited has still run.
             return Ok(Value::Task(Task::settled(result?)));
         }
         result
@@ -1151,7 +1187,7 @@ impl<'a> Interpreter<'a> {
                 self.charge_safepoint(span)?;
                 Ok(self.settle_value(value, span)?)
             }
-            ExprKind::Scope { name, body } => self.eval_scope(env, name, body, span),
+            ExprKind::Scope { name, body } => self.eval_scope(env, name, body),
             ExprKind::Block(block) => self.eval_block(env, block),
             ExprKind::If {
                 condition,
@@ -1316,7 +1352,7 @@ impl<'a> Interpreter<'a> {
             is_async,
             params,
             decl: None,
-            body: Rc::new(body),
+            body: Arc::new(body),
             module: env.module.clone(),
             captures,
         })))
@@ -1329,7 +1365,7 @@ impl<'a> Interpreter<'a> {
     /// The Language Card's rule is the whole of this function: leaving the
     /// scope waits for or cancels its child tasks. The scope's value is the
     /// value of its block, so a scope is an expression like any other block.
-    fn eval_scope(&mut self, env: &mut Env, name: &Ident, body: &Block, span: Span) -> Eval {
+    fn eval_scope(&mut self, env: &mut Env, name: &Ident, body: &Block) -> Eval {
         let scope = TaskScope::new(name.node.as_str().into());
         env.push();
         env.declare(
@@ -1338,26 +1374,28 @@ impl<'a> Interpreter<'a> {
         );
         let result = self.eval_block(env, body);
         env.pop();
-        let left = self.leave_scope(&scope, result, span);
+        let left = self.leave_scope(&scope, result);
         scope.close();
         left
     }
 
     /// Waits for or cancels the children of a scope that is being left.
     ///
-    /// A normal exit settles every task the body did not await, in spawn
+    /// A normal exit waits for every task the body did not await, in spawn
     /// order, and discards its value: a scope waits for its children, it does
     /// not collect them. A task that fails is not swallowed — a `RuntimeError`
     /// propagates as itself, and a task whose value is `Err(error)` returns
-    /// that error from the enclosing function, exactly as `?` would. Either
-    /// way the tasks that have not run are cancelled, as they are when the
-    /// body itself leaves early through `return`, `?`, or an error.
+    /// that error from the enclosing function, exactly as `?` would. A task
+    /// the program itself cancelled is neither: the program asked for that
+    /// stop, so leaving the scope is not the place to complain about it.
+    /// Either way the tasks still running are cancelled and waited for, as
+    /// they are when the body itself leaves early through `return`, `?`, or
+    /// an error.
     ///
-    /// ADR 0003: spawn order is phase 1's choice, not the language's. A
-    /// scheduler may settle unawaited children in any order, or have already
-    /// settled them before the body finished, so only the set of effects a
-    /// scope produces is defined, never their sequence.
-    fn leave_scope(&mut self, scope: &Rc<TaskScope>, result: Eval, span: Span) -> Eval {
+    /// Waiting happens in spawn order, which is an order of *observation*
+    /// only: the tasks ran at the same time on threads of their own, so only
+    /// the set of effects a scope produces is defined, never their sequence.
+    fn leave_scope(&mut self, scope: &Rc<TaskScope>, result: Eval) -> Eval {
         let value = match result {
             Ok(value) => value,
             early => {
@@ -1366,101 +1404,87 @@ impl<'a> Interpreter<'a> {
             }
         };
 
-        // Settling reads the scope's children by index rather than from a
-        // snapshot, so a scope that grows while it is being left is still
-        // settled to the end.
+        // Waiting reads the scope's children by index rather than from a
+        // snapshot, so a scope that grew while it was being left is still
+        // waited for to the end.
         let mut index = 0;
         while let Some(task) = scope.task_at(index) {
             index += 1;
-            if !task.is_pending() {
+            if !task.is_running() {
                 continue;
             }
-            match self.settle(&task, span) {
-                Ok(settled) => {
-                    if let Some(error) = failure_of(&settled) {
-                        self.cancel_scope(scope);
-                        return Err(Control::Return(Value::err(error)));
-                    }
-                }
-                Err(error) => {
-                    self.cancel_scope(scope);
-                    return Err(Control::Error(error));
-                }
+            self.join_task(&task);
+            // The state is read and released before anything else runs, so
+            // cancelling the rest of the scope can borrow these same tasks.
+            let outcome = match &*task.state.borrow() {
+                TaskState::Settled(value) => failure_of(value).map(Control::error_value),
+                TaskState::Failed(error) => Some(Control::Error(error.clone())),
+                TaskState::Cancelled | TaskState::Running => None,
+            };
+            if let Some(control) = outcome {
+                self.cancel_scope(scope);
+                return Err(control);
             }
         }
         Ok(value)
     }
 
-    /// Cancels every pending child of `scope`, the hook point for
-    /// `TaskCancelled`.
+    /// Cancels every running child of `scope` and waits for it to stop.
     ///
-    /// `TaskScope::cancel_pending` lives in `task.rs` and has no tracing of
-    /// its own, so this walks the same tasks first to trace exactly the ones
-    /// that were pending (and so are the ones cancellation actually stops),
-    /// then applies the real cancellation the same way `task.rs` already
-    /// does.
+    /// Every child is asked first and waited for afterwards, so they stop at
+    /// the same time rather than one after another. Leaving a scope waits for
+    /// or cancels its children, so this does both: a scope never outlives a
+    /// thread it started.
     fn cancel_scope(&mut self, scope: &Rc<TaskScope>) {
+        scope.cancel_running();
         let mut index = 0;
         while let Some(task) = scope.task_at(index) {
             index += 1;
-            self.trace_cancel_if_pending(&task);
+            self.join_task(&task);
         }
-        scope.cancel_pending();
     }
 
-    /// Traces `TaskCancelled` for `task` if it is still pending, i.e. if
-    /// cancelling it now would actually stop it rather than being a no-op.
-    fn trace_cancel_if_pending(&mut self, task: &Rc<Task>) {
-        if task.is_pending() {
-            if let Some(&id) = self.task_ids.get(&task_key(task)) {
-                self.trace.record(TraceEvent::TaskCancelled { id });
+    /// Waits for a task's thread, charging the time against this body's
+    /// [`Timing`] as wait rather than as work.
+    ///
+    /// A body blocked on `await` is doing nothing, exactly as a body blocked
+    /// on a host call is. Counting it as CPU would report a scope that waits
+    /// for two tasks as having computed for as long as they ran, which is the
+    /// attribution ADR 0001 asks a trace to get right.
+    ///
+    /// This is also the one place that learns whether a cancellation actually
+    /// stopped a task, so it is where `TaskCancelled` is traced. A task is
+    /// waited for once, so the event is recorded once; a task that had
+    /// already finished is unaffected by cancellation, and tracing it as
+    /// cancelled would say work was stopped that in fact happened.
+    fn join_task(&mut self, task: &Rc<Task>) {
+        if !task.is_running() {
+            return;
+        }
+        let started = Instant::now();
+        task.join();
+        self.charge_wait(started.elapsed());
+        if matches!(&*task.state.borrow(), TaskState::Cancelled) {
+            self.runtime
+                .trace(TraceEvent::TaskCancelled { id: task.id });
+        }
+    }
+
+    /// Waits for a task's thread and returns the value its body produced.
+    ///
+    /// A task's body runs at most once and is waited for at most once, so
+    /// awaiting the same handle twice returns the same value and repeats no
+    /// effect.
+    fn settle(&mut self, task: &Rc<Task>, span: Span) -> Result<Value, RuntimeError> {
+        self.join_task(task);
+        match &*task.state.borrow() {
+            TaskState::Settled(value) => Ok(value.clone()),
+            TaskState::Failed(error) => Err(error.clone()),
+            TaskState::Cancelled => Err(awaiting_a_cancelled_task(task, span)),
+            TaskState::Running => {
+                unreachable!("joining a task leaves it settled, failed, or cancelled")
             }
         }
-    }
-
-    /// Runs a task's body unless it has already settled, and returns its
-    /// value.
-    ///
-    /// A task's body runs at most once, so awaiting the same handle twice
-    /// returns the same value and repeats no effect.
-    fn settle(&mut self, task: &Rc<Task>, span: Span) -> Result<Value, RuntimeError> {
-        let body = match &*task.state.borrow() {
-            TaskState::Settled(value) => return Ok(value.clone()),
-            TaskState::Failed(error) => return Err(error.clone()),
-            TaskState::Cancelled => return Err(awaiting_a_cancelled_task(task, span)),
-            TaskState::Running => return Err(awaiting_a_running_task(task, span)),
-            TaskState::Pending => task.body.clone(),
-        };
-        *task.state.borrow_mut() = TaskState::Running;
-
-        // A task reaching this point was spawned through `Interpreter::spawn`,
-        // which is the only caller of `TaskScope::spawn`, so it always has an
-        // id here.
-        let id = self.task_ids.get(&task_key(task)).copied();
-        if let Some(id) = id {
-            self.task_stack.push(id);
-        }
-        self.timings.push(Timing::start());
-
-        let result = self.call_value_slots(body, Vec::new(), span);
-
-        let timing = self
-            .timings
-            .pop()
-            .expect("settle pushes exactly the one timing it pops");
-        if let Some(id) = id {
-            self.task_stack.pop();
-            self.trace.record(TraceEvent::TaskCompleted {
-                id,
-                cpu: timing.cpu(),
-            });
-        }
-
-        *task.state.borrow_mut() = match &result {
-            Ok(value) => TaskState::Settled(value.clone()),
-            Err(error) => TaskState::Failed(error.clone()),
-        };
-        result
     }
 
     /// `await expr`, and the postfix `expr.await()` that means the same thing.
@@ -1479,11 +1503,12 @@ impl<'a> Interpreter<'a> {
         }
     }
 
-    /// `scope.spawn { ... }`.
+    /// `scope.spawn { ... }`, which starts a thread for the body.
     ///
-    /// The trailing closure is checked against the task-safety rule before the
-    /// task exists, so a value that may not cross the boundary is reported at
-    /// the `spawn` that would have carried it.
+    /// Converting the closure for the new thread *is* the task-safety check:
+    /// what may cross a task boundary is exactly what a thread can own, so a
+    /// capture that may not cross is reported at the `spawn` that would have
+    /// carried it, before any thread exists.
     fn spawn(
         &mut self,
         scope: &Rc<TaskScope>,
@@ -1506,25 +1531,43 @@ impl<'a> Interpreter<'a> {
             .at(span)
             .with_help(format!("write `{}.spawn {{ ... }}`", scope.name)));
         }
-        if let Err(found) = task::task_safety("", &body) {
-            return Err(RuntimeError::new(format!(
+        let body = Transfer::of(&body).map_err(|found| {
+            RuntimeError::new(format!(
                 "`spawn` cannot capture `{}`, which is a `{}`",
                 found.path, found.type_name
             ))
             .at(span)
-            .with_rule(task::TASK_SAFETY_RULE)
-            .with_help(found.help()));
-        }
-        let task = scope.spawn(body);
-        let id = self.next_task_id;
-        self.next_task_id += 1;
-        self.task_ids.insert(task_key(&task), id);
-        self.trace.record(TraceEvent::TaskSpawned {
+            .with_rule(crate::task::TASK_SAFETY_RULE)
+            .with_help(found.help("spawning"))
+        })?;
+
+        let id = self.runtime.next_task_id();
+        // Traced before the thread starts, so a task is never seen completing
+        // before it was seen spawning.
+        self.runtime.trace(TraceEvent::TaskSpawned {
             id,
             parent: self.task_stack.last().copied(),
             scope: scope.name.to_string(),
         });
-        Ok(Value::Task(task))
+
+        let cancellation = Cancellation::new();
+        let runtime = self.runtime.clone();
+        let flag = cancellation.clone();
+        let thread = std::thread::Builder::new()
+            .name(format!("cove task {id}"))
+            .spawn(move || run_task(&runtime, id, flag, body, span))
+            .map_err(|e| {
+                RuntimeError::new(format!("this task could not be given a thread: {e}")).at(span)
+            })?;
+
+        let task = Task::running(
+            id,
+            scope.name.clone(),
+            scope.next_position(),
+            cancellation,
+            thread,
+        );
+        Ok(Value::Task(scope.adopt(task)))
     }
 
     /// Dispatches the operations of a task scope and of a task handle.
@@ -1559,10 +1602,11 @@ impl<'a> Interpreter<'a> {
             }
             (Value::Task(task), "cancel") => {
                 expect_no_arguments("cancel", &values, span)?;
-                // Cancelling a task that already ran changes nothing:
-                // cancellation stops work that has not happened. Trace only
-                // the tasks this call actually cancels.
-                self.trace_cancel_if_pending(task);
+                // Asking is all this does. A cancelled task stops at its next
+                // safepoint, and whether it stopped or had already finished is
+                // known only once something waits for it — which is what
+                // `await` and leaving the scope do, and where `TaskCancelled`
+                // is traced.
                 task.cancel();
                 Ok(Value::Unit)
             }
@@ -1577,6 +1621,86 @@ impl<'a> Interpreter<'a> {
             .at(span)
             .into()),
         }
+    }
+
+    /// Dispatches the one operation of a `Shared`: `lock`.
+    ///
+    /// There is no `get` and no `set`, by design. Every access is scoped, so
+    /// a read-modify-write cannot be written as two operations that race;
+    /// see [`crate::shared`].
+    fn call_shared_method(
+        &mut self,
+        env: &mut Env,
+        receiver: Value,
+        name: &str,
+        args: &[Arg],
+        trailing: Option<&Expr>,
+        span: Span,
+    ) -> Eval {
+        let Value::Shared(cell) = receiver else {
+            unreachable!("only a `Shared` receiver reaches this dispatch");
+        };
+        if name != "lock" {
+            return Err(RuntimeError::new(format!("`Shared` has no method `{name}`"))
+                .at(span)
+                .with_rule(
+                    "`lock` is a `Shared`'s only operation: every access to the value it holds is scoped, so there is no `get` and no `set`.",
+                )
+                .with_help("write `shared.lock(fn(var value) { ... })`")
+                .into());
+        }
+        let arguments = self.eval_args(env, args, trailing)?;
+        let mut values = plain_values(arguments, name)?;
+        if values.len() != 1 {
+            return Err(RuntimeError::new(format!(
+                "`lock` takes one closure, but {} argument(s) were given",
+                values.len()
+            ))
+            .at(span)
+            .with_help("write `shared.lock(fn(var value) { ... })`")
+            .into());
+        }
+        let body = values.remove(0);
+        let Value::Closure(closure) = &body else {
+            return Err(RuntimeError::new(format!(
+                "`lock` takes the work to run as a closure, but found `{}`",
+                body.type_name()
+            ))
+            .at(span)
+            .with_help("write `shared.lock(fn(var value) { ... })`")
+            .into());
+        };
+        let Some(param) = closure.params.first() else {
+            return Err(RuntimeError::new(
+                "`lock` gives the wrapped value to its closure, but this closure takes no parameter",
+            )
+            .at(span)
+            .with_help("write `shared.lock(fn(var value) { ... })`")
+            .into());
+        };
+        // A closure declaring `var` receives the wrapped value as an alias and
+        // mutates it where it lies; one that does not receives a copy, exactly
+        // as an ordinary parameter does anywhere else in the language.
+        let wants_alias = param.is_var;
+        Ok(cell.lock(span, |value| {
+            let place = Place::binding(value, true);
+            let slot = match wants_alias {
+                true => ArgSlot::Alias(place.clone()),
+                false => ArgSlot::Value(place.read(span)?),
+            };
+            let result = self.call_value_slots(
+                body.clone(),
+                vec![EvaluatedArg {
+                    label: None,
+                    spread: false,
+                    slot,
+                    span,
+                }],
+                span,
+            )?;
+            let updated = place.read(span)?;
+            Ok((result, updated))
+        })?)
     }
 
     fn iterable_items(&mut self, env: &mut Env, expr: &Expr) -> Result<Vec<Value>, Control> {
@@ -1627,7 +1751,7 @@ impl<'a> Interpreter<'a> {
             return Ok(Value::Closure(Rc::new(Closure {
                 is_async: decl.is_async,
                 params: decl.params.clone(),
-                body: Rc::new(decl.body.clone()),
+                body: Arc::new(decl.body.clone()),
                 decl: Some(decl),
                 module: owner,
                 captures: Vec::new(),
@@ -1724,7 +1848,7 @@ impl<'a> Interpreter<'a> {
     }
 
     /// The cases and associated functions `Enum.name` could have meant.
-    fn known_members(&self, module: &str, decl: &Rc<EnumDecl>) -> String {
+    fn known_members(&self, module: &str, decl: &Arc<EnumDecl>) -> String {
         let cases: Vec<&str> = decl
             .cases
             .iter()
@@ -1750,7 +1874,7 @@ impl<'a> Interpreter<'a> {
     fn enum_case(
         &mut self,
         module: &str,
-        decl: &Rc<EnumDecl>,
+        decl: &Arc<EnumDecl>,
         case: &str,
         payload: Vec<Value>,
         span: Span,
@@ -2121,6 +2245,18 @@ impl<'a> Interpreter<'a> {
             return Ok(self.snapshot(&receiver_value, span)?);
         }
 
+        // `Shared` is a runtime value rather than a declared type, and `lock`
+        // takes the closure itself rather than the closure's value, so it is
+        // dispatched here.
+        if type_name == "Shared" {
+            let receiver_value = match (&place, &temporary) {
+                (Some(place), _) => place.read(span)?,
+                (_, Some(value)) => value.clone(),
+                _ => unreachable!("a receiver is either a place or a temporary"),
+            };
+            return self.call_shared_method(env, receiver_value, name, args, trailing, span);
+        }
+
         // A task scope and a task handle are runtime values rather than
         // declared types, so their operations are dispatched here.
         // `examples/tasks/load.cove` writes the await as a postfix call, and
@@ -2181,7 +2317,7 @@ impl<'a> Interpreter<'a> {
     fn init_struct(
         &mut self,
         module: &str,
-        decl: &Rc<StructDecl>,
+        decl: &Arc<StructDecl>,
         args: Vec<EvaluatedArg>,
         span: Span,
     ) -> Result<Value, RuntimeError> {
@@ -2930,8 +3066,52 @@ fn mention_pattern(pattern: &Pattern, out: &mut BTreeSet<String>) {
 /// A stable key for a task's trace id, valid for as long as some `Rc<Task>`
 /// keeps the task alive — which every task the interpreter still holds a
 /// handle to does.
-fn task_key(task: &Rc<Task>) -> usize {
-    Rc::as_ptr(task) as usize
+/// Runs one spawned task's body on its own thread.
+///
+/// The body arrives as a [`Transfer`] and the value leaves as one: both
+/// directions are a task boundary, so both are the copy the task-safety rule
+/// demands. A task that produces a value no boundary may carry is reported
+/// here rather than handing the value to a thread that cannot own it.
+fn run_task(
+    runtime: &Runtime,
+    id: u64,
+    cancellation: Cancellation,
+    body: Transfer,
+    span: Span,
+) -> TaskOutcome {
+    let mut interpreter = Interpreter::for_task(runtime, id, cancellation.clone());
+    interpreter.timings.push(Timing::start());
+    let result = interpreter.call_value_slots(body.into_value(), Vec::new(), span);
+    let timing = interpreter
+        .timings
+        .pop()
+        .expect("a task pushes exactly the one timing it pops");
+    // A task stopped by its own cancellation did not run to completion, so it
+    // is traced as cancelled — by whoever waits for it, which is the only
+    // place that knows it stopped rather than finished — and not here.
+    if !(result.is_err() && cancellation.is_cancelled()) {
+        runtime.trace(TraceEvent::TaskCompleted {
+            id,
+            cpu: timing.cpu(),
+        });
+    }
+    let value = result?;
+    Transfer::of(&value).map_err(|found| {
+        RuntimeError::new(format!(
+            "this task produced {}, which cannot leave a task",
+            found.subject()
+        ))
+        .at(span)
+        .with_rule(crate::task::TASK_SAFETY_RULE)
+        .with_help(found.help("returning it from a task"))
+    })
+}
+
+/// A task that stopped because its own cancellation was requested.
+fn task_cancelled(span: Span) -> RuntimeError {
+    RuntimeError::new("this task was cancelled")
+        .at(span)
+        .with_rule("Leaving a task scope waits for or cancels its child tasks.")
 }
 
 /// The error a `Result` carries, when the value is one and it failed.
@@ -2963,15 +3143,6 @@ fn awaiting_a_cancelled_task(task: &Task, span: Span) -> RuntimeError {
     .at(span)
     .with_rule("Leaving a task scope waits for or cancels its child tasks, and a cancelled task never runs.")
     .with_help("await the task before cancelling it, and before leaving its scope early")
-}
-
-fn awaiting_a_running_task(task: &Task, span: Span) -> RuntimeError {
-    RuntimeError::new(format!(
-        "{} is already running, so awaiting it here cannot make progress",
-        task.describe()
-    ))
-    .at(span)
-    .with_rule("A task's value is observable only once its body has completed.")
 }
 
 // ------------------------------------------------------------ diagnostics
@@ -3131,18 +3302,25 @@ mod tests {
     use std::io::Write;
     use std::path::{Path, PathBuf};
 
+    use std::sync::Mutex;
+    use std::time::Duration;
+
     use cove_sema::config::Config;
     use cove_sema::package::{Module, Package, Unit};
 
+    use crate::budget::{Budget, Limits};
     use crate::host::{Console, Documents, Env as EnvHost, Grants, HostRegistry};
 
     /// A `console` sink the tests can read back.
+    ///
+    /// Synchronized because a host is reachable from every task of a run, and
+    /// a test that spawns tasks prints from more than one thread.
     #[derive(Clone, Default)]
-    struct Buffer(Rc<RefCell<Vec<u8>>>);
+    struct Buffer(Arc<Mutex<Vec<u8>>>);
 
     impl Write for Buffer {
         fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-            self.0.borrow_mut().extend_from_slice(buf);
+            self.written().extend_from_slice(buf);
             Ok(buf.len())
         }
 
@@ -3152,13 +3330,17 @@ mod tests {
     }
 
     impl Buffer {
+        fn written(&self) -> std::sync::MutexGuard<'_, Vec<u8>> {
+            self.0.lock().expect("no test panics while printing")
+        }
+
         fn text(&self) -> String {
-            String::from_utf8(self.0.borrow().clone()).expect("console output is UTF-8")
+            String::from_utf8(self.written().clone()).expect("console output is UTF-8")
         }
     }
 
     /// Parses `source` as the single unit of module `test`.
-    fn program_of(source: &str) -> (SourceMap, Program) {
+    fn program_of(source: &str) -> (Arc<SourceMap>, Arc<Program>) {
         let mut sources = SourceMap::new();
         let path = PathBuf::from("test/main.cove");
         let file = sources.add(path.clone(), source);
@@ -3178,11 +3360,11 @@ mod tests {
             modules,
         };
         let program = cove_sema::resolve::resolve(&package).expect("test source resolves");
-        (sources, program)
+        (Arc::new(sources), Arc::new(program))
     }
 
     /// Parses several modules, so one can `use` another.
-    fn program_of_modules(modules: &[(&str, &str)]) -> (SourceMap, Program) {
+    fn program_of_modules(modules: &[(&str, &str)]) -> (Arc<SourceMap>, Arc<Program>) {
         let mut sources = SourceMap::new();
         let mut map = BTreeMap::new();
         for (name, source) in modules {
@@ -3204,7 +3386,7 @@ mod tests {
             modules: map,
         };
         let program = cove_sema::resolve::resolve(&package).expect("test package resolves");
-        (sources, program)
+        (Arc::new(sources), Arc::new(program))
     }
 
     /// Runs `app.main` of a package written inline, with `console` granted.
@@ -3240,8 +3422,8 @@ mod tests {
     }
 
     fn run_in(
-        program: &Program,
-        sources: &SourceMap,
+        program: &Arc<Program>,
+        sources: &Arc<SourceMap>,
         module: &str,
         entry: &str,
         args: &[&str],
@@ -3252,7 +3434,8 @@ mod tests {
         let mut hosts = HostRegistry::new(Grants::new(grants.to_vec()));
         hosts.register(Box::new(Console::new(buffer.clone())));
         hosts.register(Box::new(EnvHost::new(env)));
-        let value = Interpreter::new(program, sources, &mut hosts).run_entry(
+        let runtime = Runtime::new(program.clone(), sources.clone(), Arc::new(hosts));
+        let value = Interpreter::new(&runtime).run_entry(
             module,
             entry,
             args.iter().map(|a| (*a).into()).collect(),
@@ -3357,8 +3540,9 @@ mod tests {
     fn a_failed_assertion_records_where_it_was_written() {
         let source = "test fn check() -> Result<Unit, Error> {\n  assert(1 == 2)\n}\n";
         let (sources, program) = program_of(source);
-        let mut hosts = HostRegistry::new(Grants::default());
-        let mut interpreter = Interpreter::new(&program, &sources, &mut hosts);
+        let hosts = HostRegistry::new(Grants::default());
+        let runtime = Runtime::new(program, sources.clone(), Arc::new(hosts));
+        let mut interpreter = Interpreter::new(&runtime);
         interpreter
             .run_entry("test", "check", Vec::new())
             .expect("the assertion fails as an `Err`, not a runtime error");
@@ -3373,8 +3557,9 @@ mod tests {
     fn a_holding_assertion_records_nothing() {
         let source = "test fn check() -> Result<Unit, Error> {\n  assert(1 == 1)\n}\n";
         let (sources, program) = program_of(source);
-        let mut hosts = HostRegistry::new(Grants::default());
-        let mut interpreter = Interpreter::new(&program, &sources, &mut hosts);
+        let hosts = HostRegistry::new(Grants::default());
+        let runtime = Runtime::new(program, sources, Arc::new(hosts));
+        let mut interpreter = Interpreter::new(&runtime);
         interpreter.run_entry("test", "check", Vec::new()).unwrap();
         assert!(interpreter.assertion_failure().is_none());
     }
@@ -5395,10 +5580,10 @@ export fn main(first: String, second: String) -> Result<Unit, Error> {
 
     // ------------------------------------------------------------- tasks
     //
-    // ADR 0003 phase 1 settles tasks sequentially, so these tests assert what
-    // `await` and scope exit produce, and never the order in which two
-    // independent tasks happen to run. Where phase 1 makes a choice a
-    // scheduler could make differently, the test says so.
+    // Tasks run on threads of their own, so these tests assert what `await`
+    // and scope exit produce, and never the order in which two independent
+    // tasks happen to run. A test that depended on that order would be
+    // pinning a race rather than the language.
 
     const TASKS: &str = r#"
 use console.println
@@ -5416,6 +5601,18 @@ async fn load(ok: Bool) -> Result<Int, Error> {
 }
 "#;
 
+    /// A task body that cannot finish before a cancellation reaches it, and
+    /// prints only if it does.
+    ///
+    /// With ADR 0008 a spawned task starts at once on a thread of its own, so
+    /// a test that asserts a cancelled task "never ran" has to give it work
+    /// to be stopped in the middle of. The loop stops at its next back-edge
+    /// safepoint once the task is cancelled; the bound is there only so that
+    /// a runtime which never delivers the cancellation fails the test instead
+    /// of hanging.
+    const SPINNING_TASK: &str =
+        "      var i = 0\n      while i < 1000000000 {\n        i += 1\n      }\n      println(\"this must not run\")?";
+
     /// Runs `body` inside a `main` that returns `Result<Unit, Error>`, with
     /// the `async fn` helpers of [`TASKS`] in scope.
     fn run_task_body(body: &str) -> Run {
@@ -5432,10 +5629,10 @@ async fn load(ok: Bool) -> Result<Int, Error> {
         assert_eq!(run.output, "7\n");
     }
 
-    /// ADR 0003: phase 1 runs an `async fn` body at the call site, so a call
-    /// that is never awaited has still run by the time the call returns. A
-    /// scheduler may start that body at any point up to the `await` instead,
-    /// so the assertion is that the effect happened, not when.
+    /// An `async fn` runs its body at the call site, so a call that is never
+    /// awaited has still run by the time the call returns. ADR 0008 gives a
+    /// thread to `spawn` rather than to every `async fn`, so the assertion
+    /// here is that the effect happened, not when.
     #[test]
     fn an_async_fn_that_is_never_awaited_still_runs() {
         let source = r#"
@@ -5532,12 +5729,14 @@ export fn main() -> Result<Int, Error> {{
     }
 
     #[test]
-    fn returning_from_a_scope_cancels_a_task_that_never_ran() {
+    fn returning_from_a_scope_cancels_a_task_that_is_still_running() {
         let source = format!(
             "{TASKS}
 export fn main() -> Result<Unit, Error> {{
   scope tasks {{
-    let ignored = tasks.spawn {{ println(\"this must not run\")? }}
+    let ignored = tasks.spawn {{
+{SPINNING_TASK}
+    }}
     return Ok(())
   }}
 }}
@@ -5549,12 +5748,14 @@ export fn main() -> Result<Unit, Error> {{
     }
 
     #[test]
-    fn an_error_inside_a_scope_cancels_a_task_that_never_ran() {
+    fn an_error_inside_a_scope_cancels_a_task_that_is_still_running() {
         let source = format!(
             "{TASKS}
 export fn main() -> Result<Int, Error> {{
   scope tasks {{
-    let ignored = tasks.spawn {{ println(\"this must not run\")? }}
+    let ignored = tasks.spawn {{
+{SPINNING_TASK}
+    }}
     let value = load(false).await()?
     Ok(value)
   }}
@@ -5587,9 +5788,9 @@ export fn main() -> Result<Unit, Error> {{
 
     #[test]
     fn awaiting_a_cancelled_task_is_rejected() {
-        let run = run_task_body(
-            "  scope tasks {\n    let timer = tasks.spawn { println(\"this must not run\")? }\n    timer.cancel()\n    let value = await timer\n  }",
-        );
+        let run = run_task_body(&format!(
+            "  scope tasks {{\n    let timer = tasks.spawn {{\n{SPINNING_TASK}\n    }}\n    timer.cancel()\n    let value = await timer\n  }}"
+        ));
         assert_eq!(run.output, "");
         let error = run.error();
         assert!(error.message.contains("was cancelled"), "{}", error.message);
@@ -5702,6 +5903,450 @@ export fn main() -> Result<Unit, Error> {
         );
     }
 
+    // --------------------------------------------------- real concurrency
+
+    /// Runs `source`'s `main` with `console` and a real `clock` granted, and
+    /// reports how long the whole run took.
+    fn run_timed(source: &str) -> (Run, Duration) {
+        let (sources, program) = program_of(source);
+        let buffer = Buffer::default();
+        let mut hosts = HostRegistry::new(Grants::new(["console", "clock"]));
+        hosts.register(Box::new(Console::new(buffer.clone())));
+        hosts.register(Box::new(crate::clock::Clock::real()));
+        let runtime = Runtime::new(program, sources, Arc::new(hosts));
+        let started = Instant::now();
+        let value = Interpreter::new(&runtime).run_entry("test", "main", Vec::new());
+        let elapsed = started.elapsed();
+        (
+            Run {
+                value,
+                output: buffer.text(),
+            },
+            elapsed,
+        )
+    }
+
+    /// Collects every event a run traced, for assertions.
+    #[derive(Clone, Default)]
+    struct RecordingSink(Arc<Mutex<Vec<TraceEvent>>>);
+
+    impl RecordingSink {
+        fn events(&self) -> Vec<TraceEvent> {
+            self.0.lock().expect("no test panics while tracing").clone()
+        }
+    }
+
+    impl crate::trace::TraceSink for RecordingSink {
+        fn record(&self, event: TraceEvent) {
+            self.0
+                .lock()
+                .expect("no test panics while tracing")
+                .push(event);
+        }
+    }
+
+    /// Runs `source`'s `main` with `console` and a real `clock` granted,
+    /// reporting what it traced and how long it took.
+    fn run_traced(source: &str) -> (Run, Vec<TraceEvent>, Duration) {
+        let (sources, program) = program_of(source);
+        let buffer = Buffer::default();
+        let sink = RecordingSink::default();
+        let mut hosts = HostRegistry::new(Grants::new(["console", "clock"]));
+        hosts.register(Box::new(Console::new(buffer.clone())));
+        hosts.register(Box::new(crate::clock::Clock::real()));
+        hosts.set_trace(Arc::new(sink.clone()));
+        let runtime =
+            Runtime::new(program, sources, Arc::new(hosts)).with_trace(Arc::new(sink.clone()));
+        let started = Instant::now();
+        let value = Interpreter::new(&runtime).run_entry("test", "main", Vec::new());
+        let elapsed = started.elapsed();
+        (
+            Run {
+                value,
+                output: buffer.text(),
+            },
+            sink.events(),
+            elapsed,
+        )
+    }
+
+    #[test]
+    fn a_task_can_spawn_tasks_of_its_own() {
+        let run = run_task_body(
+            "  scope outer {\n    let parent = outer.spawn {\n      scope inner {\n        let a = inner.spawn { 1 }\n        let b = inner.spawn { 2 }\n        await a + await b\n      }\n    }\n    println(\"{await parent}\")?\n  }",
+        );
+        assert_eq!(run.output, "3\n");
+    }
+
+    /// A value leaving a task crosses the same boundary its body crossed to
+    /// get there, so it answers to the same rule: a vector cannot come back
+    /// out of a task any more than it could go in.
+    #[test]
+    fn a_task_cannot_produce_a_value_that_may_not_cross() {
+        let source = r#"
+export fn main() -> Result<Unit, Error> {
+  scope tasks {
+    let building = tasks.spawn { Vector.of(1, 2) }
+    let items = await building
+  }
+  Ok(())
+}
+"#;
+        let error = run_entry_of(source, "main", &[]).error();
+        assert_eq!(
+            error.message,
+            "this task produced a `Vector`, which cannot leave a task"
+        );
+    }
+
+    /// The success criterion itself, read off a trace: each task's wait is
+    /// attributed to that task, and the waits add up to more than the run
+    /// took, which is only possible if they happened at the same time.
+    #[test]
+    fn a_trace_attributes_each_task_s_wait_to_that_task() {
+        let source = r#"
+use clock.sleep
+
+export fn main() -> Result<Unit, Error> {
+  scope waits {
+    let first = waits.spawn { sleep(300ms) }
+    let second = waits.spawn { sleep(300ms) }
+    await first
+    await second
+  }
+  Ok(())
+}
+"#;
+        let (run, events, elapsed) = run_traced(source);
+        run.value();
+
+        // Every one of these events was produced on a task's own thread and
+        // written by the sink the run shares, so reading them back is also
+        // the evidence that an event, and the values it carries, may cross a
+        // task boundary.
+        let sleeps: Vec<&TraceEvent> = events
+            .iter()
+            .filter(|event| matches!(event, TraceEvent::HostCall { op, .. } if op == "sleep"))
+            .collect();
+        assert_eq!(sleeps.len(), 2);
+        for event in &sleeps {
+            let TraceEvent::HostCall { args, .. } = event else {
+                unreachable!("filtered to host calls")
+            };
+            assert_eq!(args.len(), 1);
+            assert_eq!(
+                crate::trace::value_to_json(
+                    &match &args[0] {
+                        crate::trace::RecordedValue::Carried(transfer) =>
+                            transfer.clone().into_value(),
+                        other => panic!("expected a carried duration, found {other:?}"),
+                    },
+                    crate::trace::ValueCapture::Full
+                ),
+                r#"{"type":"duration","ns":300000000}"#
+            );
+        }
+        let waited: Duration = sleeps
+            .iter()
+            .filter_map(|event| match event {
+                TraceEvent::HostCall { wait, .. } => Some(*wait),
+                _ => None,
+            })
+            .sum();
+        assert!(
+            waited > elapsed,
+            "the two waits total {waited:?}, which is not more than the {elapsed:?} the run took"
+        );
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(event, TraceEvent::TaskCompleted { .. }))
+                .count(),
+            2
+        );
+    }
+
+    /// Cancellation reaches a task that is already running: it stops at its
+    /// next safepoint, and the trace says it was cancelled rather than that
+    /// it completed.
+    #[test]
+    fn cancelling_a_running_task_stops_it_and_traces_it() {
+        let source = format!(
+            "{TASKS}
+export fn main() -> Result<Unit, Error> {{
+  scope tasks {{
+    let ignored = tasks.spawn {{
+{SPINNING_TASK}
+    }}
+    return Ok(())
+  }}
+}}
+"
+        );
+        let (run, events, _) = run_traced(&source);
+        assert_eq!(run.output, "");
+        assert!(events
+            .iter()
+            .any(|event| matches!(event, TraceEvent::TaskCancelled { id: 1 })));
+        assert!(!events
+            .iter()
+            .any(|event| matches!(event, TraceEvent::TaskCompleted { .. })));
+    }
+
+    /// ADR 0001 lists "CPU time and I/O wait are accurately attributable in
+    /// traces" as a success criterion, and ADR 0003 records that phase 1
+    /// could not validate it, because with one task running at a time nothing
+    /// overlapped. This is the smallest observation that it now does: two
+    /// tasks that each wait 300ms finish in about 300ms, not 600ms.
+    #[test]
+    fn two_tasks_wait_at_the_same_time() {
+        let source = r#"
+use clock.sleep
+
+export fn main() -> Result<Unit, Error> {
+  scope waits {
+    let first = waits.spawn { sleep(300ms) }
+    let second = waits.spawn { sleep(300ms) }
+    await first
+    await second
+  }
+  Ok(())
+}
+"#;
+        let (run, elapsed) = run_timed(source);
+        run.value();
+        assert!(
+            elapsed >= Duration::from_millis(250),
+            "both tasks really waited, but the run took {elapsed:?}"
+        );
+        assert!(
+            elapsed < Duration::from_millis(550),
+            "the waits overlapped, but the run took {elapsed:?}, which is closer to their sum"
+        );
+    }
+
+    #[test]
+    fn a_scope_with_two_tasks_produces_both_values() {
+        let run = run_task_body(
+            "  scope tasks {\n    let first = tasks.spawn { 1 }\n    let second = tasks.spawn { 2 }\n    println(\"{await first} {await second}\")?\n  }",
+        );
+        assert_eq!(run.output, "1 2\n");
+    }
+
+    /// A task draws its fuel from the run's budget, so exhausting it inside a
+    /// task stops the run exactly as exhausting it in the entry would.
+    #[test]
+    fn a_budget_exhausted_inside_a_task_stops_the_run() {
+        let source = r#"
+export fn main() -> Result<Unit, Error> {
+  scope tasks {
+    let spinning = tasks.spawn {
+      var i = 0
+      while i < 1000000000 {
+        i += 1
+      }
+      i
+    }
+    await spinning
+  }
+  Ok(())
+}
+"#;
+        let (sources, program) = program_of(source);
+        let mut hosts = HostRegistry::new(Grants::new(["console"]));
+        hosts.register(Box::new(Console::new(Buffer::default())));
+        hosts.set_budget(Budget::new(Limits {
+            fuel: Some(10_000),
+            ..Limits::default()
+        }));
+        let runtime = Runtime::new(program, sources, Arc::new(hosts));
+        let error = Interpreter::new(&runtime)
+            .run_entry("test", "main", Vec::new())
+            .expect_err("the fuel budget stops the run");
+        assert!(error.message.contains("fuel budget"), "{}", error.message);
+        assert!(
+            runtime
+                .hosts()
+                .with_budget(|budget| budget.fuel_spent())
+                .unwrap_or_default()
+                >= 10_000
+        );
+    }
+
+    // ---------------------------------------------------------- `Shared`
+
+    /// Mutable state of the kind the Language Card says belongs in a
+    /// `Shared`.
+    const METRICS: &str = r#"
+use console.println
+
+struct Metrics {
+  requests: Int
+  failures: Int
+}
+
+impl Metrics {
+  /// Records one completed request.
+  fn record(var self, failed: Bool) {
+    self.requests += 1
+    if failed {
+      self.failures += 1
+    }
+  }
+}
+"#;
+
+    /// Runs `body` inside a `main` with [`METRICS`] in scope.
+    fn run_shared_body(body: &str) -> Run {
+        run_entry_of(
+            &format!(
+                "{METRICS}\nexport fn main() -> Result<Unit, Error> {{\n{body}\n  Ok(())\n}}\n"
+            ),
+            "main",
+            &[],
+        )
+    }
+
+    #[test]
+    fn a_lock_gives_a_var_alias_to_the_wrapped_value() {
+        let run = run_shared_body(
+            "  let metrics = Shared(Metrics(requests: 0, failures: 0))\n  metrics.lock(fn(var value) {\n    value.record(true)\n    value.record(false)\n  })\n  metrics.lock(fn(value) {\n    println(\"{value.requests} {value.failures}\")\n  })?",
+        );
+        assert_eq!(run.output, "2 1\n");
+    }
+
+    #[test]
+    fn a_lock_produces_the_value_its_closure_produces() {
+        let run = run_shared_body(
+            "  let metrics = Shared(Metrics(requests: 4, failures: 1))\n  let doubled = metrics.lock(fn(var value) {\n    value.requests = value.requests * 2\n    value.requests\n  })\n  println(\"{doubled}\")?",
+        );
+        assert_eq!(run.output, "8\n");
+    }
+
+    /// A closure that does not declare `var` receives a copy, exactly as an
+    /// ordinary parameter does anywhere else in the language: it can read the
+    /// wrapped value, and the `var self` method that would change it is
+    /// refused, because a copy is not the place the value lives in.
+    #[test]
+    fn a_lock_closure_without_var_receives_a_read_only_copy() {
+        let run = run_shared_body(
+            "  let metrics = Shared(Metrics(requests: 1, failures: 0))\n  metrics.lock(fn(value) {\n    println(\"{value.requests}\")\n  })?",
+        );
+        assert_eq!(run.output, "1\n");
+
+        let error = run_shared_body(
+            "  let metrics = Shared(Metrics(requests: 1, failures: 0))\n  metrics.lock(fn(value) {\n    value.record(true)\n  })",
+        )
+        .error();
+        assert_eq!(
+            error.message,
+            "`record` takes a `var self` receiver, but `value` is a read-only place"
+        );
+    }
+
+    /// The whole reason the type exists: a `Shared` crosses a task boundary
+    /// by sharing rather than by copying, so every task sees one value, and
+    /// `lock` is what keeps their read-modify-writes from racing.
+    #[test]
+    fn tasks_share_one_value_through_a_shared() {
+        let source = format!(
+            "{METRICS}
+export fn main() -> Result<Unit, Error> {{
+  let metrics = Shared(Metrics(requests: 0, failures: 0))
+  scope requests {{
+    let first = requests.spawn {{
+      for i in 0..<100 {{
+        metrics.lock(fn(var value) {{ value.record(false) }})
+      }}
+    }}
+    let second = requests.spawn {{
+      for i in 0..<100 {{
+        metrics.lock(fn(var value) {{ value.record(true) }})
+      }}
+    }}
+    await first
+    await second
+  }}
+  metrics.lock(fn(value) {{
+    println(\"{{value.requests}} {{value.failures}}\")
+  }})?
+  Ok(())
+}}
+"
+        );
+        let run = run_entry_of(&source, "main", &[]);
+        assert_eq!(run.output, "200 100\n");
+    }
+
+    #[test]
+    fn a_shared_refuses_a_payload_that_cannot_cross_a_task_boundary() {
+        let error = run_shared_body("  let counts = Shared(Vector.of(1, 2))").error();
+        assert_eq!(
+            error.message,
+            "`Shared` cannot wrap a `Vector`, which cannot cross a task boundary"
+        );
+        assert!(error
+            .rule
+            .unwrap()
+            .contains("A vector cannot cross, even through `let`"));
+    }
+
+    #[test]
+    fn a_shared_refuses_a_struct_holding_a_vector() {
+        let source = r#"
+struct Draft {
+  guests: Vector<String>
+}
+
+export fn main() -> Result<Unit, Error> {
+  let draft = Shared(Draft(guests: Vector.of("Alice")))
+  Ok(())
+}
+"#;
+        let error = run_entry_of(source, "main", &[]).error();
+        assert_eq!(
+            error.message,
+            "`Shared` cannot wrap a `Vector` in `guests`, which cannot cross a task boundary"
+        );
+    }
+
+    /// A `lock` inside a `lock` on the same value can never be granted, so
+    /// the runtime says so rather than waiting for itself for ever.
+    #[test]
+    fn a_reentrant_lock_is_reported_rather_than_deadlocking() {
+        let error = run_shared_body(
+            "  let metrics = Shared(Metrics(requests: 0, failures: 0))\n  metrics.lock(fn(var value) {\n    metrics.lock(fn(var inner) {\n      inner.record(false)\n    })\n  })",
+        )
+        .error();
+        assert_eq!(
+            error.message,
+            "this task already holds this `Shared`, so `lock` would wait for itself"
+        );
+        assert!(error.help.unwrap().contains("one `lock`"));
+    }
+
+    /// Two different `Shared` values are two different locks, so holding one
+    /// while taking the other is ordinary nesting rather than a deadlock.
+    #[test]
+    fn a_lock_inside_a_lock_on_another_shared_is_allowed() {
+        let run = run_shared_body(
+            "  let left = Shared(Metrics(requests: 1, failures: 0))\n  let right = Shared(Metrics(requests: 2, failures: 0))\n  let total = left.lock(fn(value) {\n    right.lock(fn(other) {\n      value.requests + other.requests\n    })\n  })\n  println(\"{total}\")?",
+        );
+        assert_eq!(run.output, "3\n");
+    }
+
+    #[test]
+    fn a_shared_has_no_operation_but_lock() {
+        let error =
+            run_shared_body("  let metrics = Shared(Metrics(requests: 0, failures: 0))\n  let value = metrics.get()")
+                .error();
+        assert_eq!(error.message, "`Shared` has no method `get`");
+        assert!(error
+            .rule
+            .unwrap()
+            .contains("there is no `get` and no `set`"));
+    }
+
     // ------------------------------------------------- acceptance tests
 
     fn examples_root() -> PathBuf {
@@ -5709,12 +6354,12 @@ export fn main() -> Result<Unit, Error> {
     }
 
     /// Loads the repository's real `examples/` package.
-    fn examples_program() -> (SourceMap, Program) {
+    fn examples_program() -> (Arc<SourceMap>, Arc<Program>) {
         let root = examples_root();
         let mut sources = SourceMap::new();
         let package = cove_sema::package::load(&root, &mut sources).expect("examples load");
         let program = cove_sema::resolve::resolve(&package).expect("examples resolve");
-        (sources, program)
+        (Arc::new(sources), Arc::new(program))
     }
 
     #[test]
@@ -5831,7 +6476,8 @@ export fn main() -> Result<Unit, Error> {
         hosts.register(Box::new(Documents::rooted(
             examples_root().join("documents"),
         )));
-        let value = Interpreter::new(&program, &sources, &mut hosts)
+        let runtime = Runtime::new(program, sources, Arc::new(hosts));
+        let value = Interpreter::new(&runtime)
             .run_entry("restricted", "main", Vec::new())
             .expect("the program ran without a runtime error");
 

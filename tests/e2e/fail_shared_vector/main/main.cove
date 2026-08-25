@@ -1,0 +1,13 @@
+use console.println
+
+/// Wraps a vector in a `Shared`, which no task boundary may carry.
+///
+/// A `Shared` is reachable from every task it was given to, so a
+/// `Shared<Vector<T>>` would let a vector be reached from two tasks — the
+/// reach the sentence naming `Shared` forbids. This case lives in its own
+/// package so that a check-time failure cannot take down every other case.
+export fn main() -> Result<Unit, Error> {
+  let counts: Shared<Vector<Int>> = Shared(Vector.of(1, 2))
+  println("{counts}")?
+  Ok(())
+}
