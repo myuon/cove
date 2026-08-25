@@ -7390,6 +7390,59 @@ export fn main() -> Result<Unit, Error> {
         assert_eq!(run.output, "3\n");
     }
 
+    /// ADR 0011's amendment: nothing reclaims an `Arc` cycle among `Shared`
+    /// cells, so `lock` rejects the one shape of that cycle it can see for
+    /// free — a cell ending up holding a handle to itself — rather than
+    /// leaving it to leak silently. This is the ADR's own example.
+    #[test]
+    fn a_lock_refuses_a_closure_that_stores_a_handle_to_its_own_cell() {
+        let source = r#"
+struct Node {
+  cell: Option<Shared<Node>>
+}
+
+export fn main() -> Result<Unit, Error> {
+  let n = Shared(Node(cell: None))
+  n.lock(fn(var value) {
+    value = Node(cell: Some(n))
+  })
+  Ok(())
+}
+"#;
+        let error = run_entry_of(source, "main", &[]).error();
+        assert_eq!(
+            error.message,
+            "this `lock` would leave the cell holding a handle to itself, and no collector reclaims that cycle"
+        );
+        assert!(error
+            .rule
+            .unwrap()
+            .contains("`Shared` ownership must stay acyclic"));
+    }
+
+    /// The check only catches a cell reaching *itself*: a cell that ends up
+    /// holding a handle to a *different* cell is an ordinary, permitted
+    /// `Shared` graph, not the direct cycle `lock` refuses.
+    #[test]
+    fn a_lock_allows_a_closure_that_stores_a_handle_to_a_different_cell() {
+        let source = r#"
+struct Node {
+  cell: Option<Shared<Node>>
+}
+
+export fn main() -> Result<Unit, Error> {
+  let a = Shared(Node(cell: None))
+  let b = Shared(Node(cell: None))
+  b.lock(fn(var value) {
+    value = Node(cell: Some(a))
+  })
+  Ok(())
+}
+"#;
+        let run = run_entry_of(source, "main", &[]);
+        assert!(run.value.is_ok());
+    }
+
     #[test]
     fn a_shared_has_no_operation_but_lock() {
         let error =
