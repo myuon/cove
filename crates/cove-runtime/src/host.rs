@@ -4,6 +4,12 @@
 //! databases are explicit capabilities with replaceable real, fake, filtered,
 //! or denied implementations. The runtime rejects Host API calls that were not
 //! granted.
+//!
+//! This module holds the boundary itself — [`HostApi`], [`Grants`], and
+//! [`HostRegistry`] — together with the three small modules that have nothing
+//! else to say: [`Console`], [`Env`], and [`Documents`]. A host with rules of
+//! its own gets a module of its own: [`crate::clock`], [`crate::files`],
+//! [`crate::process`], and [`crate::database`].
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::Write;
@@ -74,6 +80,7 @@ pub struct HostRegistry {
     grants: Grants,
     trace: Box<dyn TraceSink>,
     budget: Option<Budget>,
+    irreversible_writes: u64,
 }
 
 impl HostRegistry {
@@ -83,6 +90,7 @@ impl HostRegistry {
             grants,
             trace: Box::new(NullSink),
             budget: None,
+            irreversible_writes: 0,
         }
     }
 
@@ -123,6 +131,20 @@ impl HostRegistry {
     /// registry it already holds.
     pub fn budget_mut(&mut self) -> Option<&mut Budget> {
         self.budget.as_mut()
+    }
+
+    /// How many calls this run dispatched whose schema declares them
+    /// [`Effect::IrreversibleWrite`].
+    ///
+    /// This is what reads the `effect` an operation declares. Cove makes
+    /// irreversible operations require visible intent, so a run is able to
+    /// say how many of the things it did cannot be taken back; `cove run
+    /// --stats` prints the count. Whether each call actually reached the
+    /// outside world is the host's business rather than the registry's, so a
+    /// call the host answered with `Err` is still counted: the registry knows
+    /// only that a program asked for something irreversible.
+    pub fn irreversible_writes(&self) -> u64 {
+        self.irreversible_writes
     }
 
     /// Looks up which host module exposes `op`, for unqualified `use` imports.
@@ -235,6 +257,10 @@ impl HostRegistry {
                 });
                 return Err(error);
             }
+        }
+
+        if schema.effect == Effect::IrreversibleWrite {
+            self.irreversible_writes += 1;
         }
 
         let started = Instant::now();
@@ -814,6 +840,9 @@ mod tests {
             Box::new(Env::new(BTreeMap::new())),
             Box::new(Documents::in_memory(BTreeMap::new())),
             Box::new(crate::clock::Clock::real()),
+            Box::new(crate::files::Files::in_memory(BTreeMap::new())),
+            Box::new(crate::process::Process::real(Vec::new(), Vec::new())),
+            Box::new(crate::database::Database::denied()),
         ];
         for module in &modules {
             for entry in module.schema() {
@@ -826,6 +855,50 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// The counter behind `cove run --stats`, and the one thing that reads
+    /// an operation's declared `effect`.
+    #[test]
+    fn only_the_calls_the_schema_calls_irreversible_are_counted() {
+        let mut hosts = HostRegistry::new(Grants::new(["console", "files"]));
+        hosts.register(Box::new(Console::new(Vec::new())));
+        hosts.register(Box::new(crate::files::Files::in_memory(BTreeMap::new())));
+        assert_eq!(hosts.irreversible_writes(), 0);
+
+        hosts
+            .call("files", "exists", vec![Value::Str("a.txt".into())])
+            .expect("the call should be allowed");
+        assert_eq!(hosts.irreversible_writes(), 0);
+
+        hosts
+            .call(
+                "files",
+                "write",
+                vec![Value::Str("a.txt".into()), Value::Str("x".into())],
+            )
+            .expect("the call should be allowed");
+        hosts
+            .call("console", "println", vec![Value::Str("a".into())])
+            .expect("the call should be allowed");
+        assert_eq!(hosts.irreversible_writes(), 2);
+    }
+
+    /// A call the run was not granted never reaches the host, so it never
+    /// changed anything to count.
+    #[test]
+    fn an_ungranted_irreversible_call_is_not_counted() {
+        let mut hosts = HostRegistry::new(Grants::new(Vec::<String>::new()));
+        hosts.register(Box::new(crate::files::Files::in_memory(BTreeMap::new())));
+
+        hosts
+            .call(
+                "files",
+                "write",
+                vec![Value::Str("a.txt".into()), Value::Str("x".into())],
+            )
+            .expect_err("the call should be rejected");
+        assert_eq!(hosts.irreversible_writes(), 0);
     }
 
     #[test]

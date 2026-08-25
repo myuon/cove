@@ -1,0 +1,20 @@
+use console.println
+use files
+
+/// Writes a file inside the root this host grants, reads it back, lists the
+/// root, and removes what it wrote, so the run leaves nothing behind.
+export fn main() -> Result<Unit, Error> {
+  println("exists before {files.exists("scratch.txt")}")?
+  files.write("scratch.txt", "five little words here")?
+  println("exists after {files.exists("scratch.txt")}")?
+
+  let text = files.read("scratch.txt")?
+  println("read {text}")?
+
+  let entries = files.list(".")?
+  println("list {entries}")?
+
+  files.delete("scratch.txt")?
+  println("exists at end {files.exists("scratch.txt")}")?
+  Ok(())
+}

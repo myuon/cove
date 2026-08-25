@@ -1,0 +1,9 @@
+use console.println
+use files
+
+/// Reads a path that leaves the root this host grants.
+export fn main() -> Result<Unit, Error> {
+  let text = files.read("../cove.toml")?
+  println("read {text}")?
+  Ok(())
+}

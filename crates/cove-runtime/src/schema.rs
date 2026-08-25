@@ -41,12 +41,18 @@ use std::fmt;
 pub enum HostType {
     /// `Unit`, the value an operation returns when it returns nothing.
     Unit,
+    /// `Bool`.
+    Bool,
+    /// `Int`, a signed 64-bit integer.
+    Int,
     /// `String`.
     String,
     /// `Duration`, a signed count of nanoseconds.
     Duration,
     /// `Error`, the builtin error struct.
     Error,
+    /// `Array<T>`, the fixed-length immutable sequence.
+    Array(&'static HostType),
     /// `Option<T>`.
     Option(&'static HostType),
     /// `Result<T, E>`. Expected failure is part of an operation's result
@@ -59,9 +65,12 @@ impl fmt::Display for HostType {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             HostType::Unit => f.write_str("Unit"),
+            HostType::Bool => f.write_str("Bool"),
+            HostType::Int => f.write_str("Int"),
             HostType::String => f.write_str("String"),
             HostType::Duration => f.write_str("Duration"),
             HostType::Error => f.write_str("Error"),
+            HostType::Array(inner) => write!(f, "Array<{inner}>"),
             HostType::Option(inner) => write!(f, "Option<{inner}>"),
             HostType::Result(ok, error) => write!(f, "Result<{ok}, {error}>"),
         }
@@ -220,7 +229,13 @@ mod tests {
     #[test]
     fn types_render_in_cove_source_form() {
         assert_eq!(HostType::Unit.to_string(), "Unit");
+        assert_eq!(HostType::Bool.to_string(), "Bool");
+        assert_eq!(HostType::Int.to_string(), "Int");
         assert_eq!(HostType::Duration.to_string(), "Duration");
+        assert_eq!(
+            HostType::Array(&HostType::String).to_string(),
+            "Array<String>"
+        );
         assert_eq!(
             HostType::Option(&HostType::String).to_string(),
             "Option<String>"

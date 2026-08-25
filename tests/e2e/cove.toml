@@ -26,12 +26,24 @@ allow = ["console"]
 entry = "fail_assign_let.main"
 allow = ["console"]
 
+[run.fail_database_denied]
+entry = "fail_database_denied.main"
+allow = ["database", "console"]
+
 [run.fail_divide_by_zero]
 entry = "fail_divide_by_zero.main"
 allow = ["console"]
 
 [run.fail_entry_error]
 entry = "fail_entry_error.main"
+allow = ["console"]
+
+[run.fail_files_escape]
+entry = "fail_files_escape.main"
+allow = ["files", "console"]
+
+[run.fail_files_no_capability]
+entry = "fail_files_no_capability.main"
 allow = ["console"]
 
 [run.fail_freeze_aliased]
@@ -113,6 +125,14 @@ allow = ["console", "documents"]
 [run.host_env]
 entry = "host_env.main"
 allow = ["console", "env"]
+
+[run.host_files]
+entry = "host_files.main"
+allow = ["files", "console"]
+
+[run.host_process]
+entry = "host_process.main"
+allow = ["process", "console"]
 
 [run.module_conformance]
 entry = "module_conformance.main"

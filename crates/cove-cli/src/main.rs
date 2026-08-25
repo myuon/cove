@@ -11,8 +11,11 @@ use std::time::Duration;
 
 use cove_diag::{render, Diagnostic, SourceMap, Span};
 use cove_runtime::clock::Clock;
+use cove_runtime::database::Database;
+use cove_runtime::files::Files;
 use cove_runtime::host::{Console, Documents, Env, Grants, HostRegistry};
 use cove_runtime::interp::Interpreter;
+use cove_runtime::process::Process;
 use cove_runtime::{Budget, Cancellation, JsonlSink, Limits, NullSink, TraceEvent, TraceSink};
 use cove_sema::package::Package;
 use cove_sema::resolve::{
@@ -45,7 +48,9 @@ literal `--` is a program argument, even if it looks like a flag):
   --deadline <duration>  stop the run after <duration> has elapsed, e.g. `500ms`, `5s`, `1h`
   --max-host-calls <n>  stop the run after <n> host calls
   --trace <path>        write a JSONL trace to <path>, or `-` for stderr
-  --stats               print fuel spent, host calls, elapsed time, and host-call wait to stderr
+  --stats               print fuel spent, host calls, irreversible writes, elapsed time, and host-call wait to stderr
+  --files-root <path>   the one directory the `files` host may reach; defaults to `files/` in the package
+  --allow-exec <path>   an absolute path `process.run` may start; repeat to allow more, and omit to allow none
 ";
 
 fn main() -> ExitCode {
@@ -770,6 +775,33 @@ fn cmd_run(args: &[String]) -> Result<(), CliError> {
     // Registering a module does not grant it: `HostRegistry::call` rejects
     // every call whose capability is missing from `[run.<name>] allow`.
     hosts.register(Box::new(Clock::real()));
+    // Granting `files` must not hand over the machine, so this host picks one
+    // directory and the runtime refuses every path outside it. `files/` in the
+    // package is the narrow default, next to the `documents/` the reader host
+    // already uses; `--files-root` is how a host that means something else
+    // says so.
+    hosts.register(Box::new(Files::rooted(
+        flags
+            .files_root
+            .clone()
+            .unwrap_or_else(|| package.root.join("files")),
+    )));
+    // A program that can start any other program has every authority the
+    // machine has, so `process.run` is filtered, not merely granted. This host
+    // knows nothing about what a package is entitled to start, so it allows
+    // nothing until `--allow-exec` names an executable. `process.args` passes
+    // on exactly the arguments the entry function receives, and nothing of
+    // `cove`'s own command line.
+    hosts.register(Box::new(Process::real(
+        flags.program_args.clone(),
+        flags.allow_exec.clone(),
+    )));
+    // There is no real `database`: connecting to one means speaking a wire
+    // protocol, and this toolchain depends on nothing but the standard
+    // library. A denied implementation is one of the four the Language Card
+    // names, and it tells a run what is missing instead of telling it that
+    // `database` is not a host module.
+    hosts.register(Box::new(Database::denied()));
 
     let limits = Limits {
         fuel: flags.fuel.or(run.fuel),
@@ -835,10 +867,18 @@ fn cmd_run(args: &[String]) -> Result<(), CliError> {
     }
 }
 
-/// A `--fuel`, `--deadline`, `--max-host-calls`, `--trace`, or `--stats` flag
-/// to `cove run`, parsed from anywhere after the run name.
+/// A `--fuel`, `--deadline`, `--max-host-calls`, `--trace`, `--stats`,
+/// `--files-root`, or `--allow-exec` flag to `cove run`, parsed from anywhere
+/// after the run name.
 ///
-/// This is deliberately not hooked up: Rust's standard library has no signal
+/// The last two are the authority a `cove.toml` cannot yet express: a
+/// `[run.<name>]` table grants coarse capabilities by name, and neither the
+/// root the `files` host is confined to nor the executables `process.run` may
+/// start is a capability name. They are flags rather than config keys because
+/// the flag lives here, where the CLI already decides what to register, and
+/// `cove.toml`'s parser belongs to the compiler.
+///
+/// `Cancellation` is deliberately not hooked up: Rust's standard library has no signal
 /// handling API, so installing a SIGINT handler would need a crate (such as
 /// `signal-hook` or `ctrlc`) or unsafe, platform-specific `extern "C"` FFI
 /// duplicating one. Neither fits "if it is not straightforward with std
@@ -850,6 +890,10 @@ struct RunFlags {
     max_host_calls: Option<u64>,
     trace: Option<TraceTarget>,
     stats: bool,
+    /// The one directory the `files` host may reach.
+    files_root: Option<PathBuf>,
+    /// The executables `process.run` may start. Empty allows none.
+    allow_exec: Vec<PathBuf>,
     program_args: Vec<String>,
 }
 
@@ -882,6 +926,8 @@ fn parse_run_flags(args: &[String]) -> Result<RunFlags, CliError> {
         max_host_calls: None,
         trace: None,
         stats: false,
+        files_root: None,
+        allow_exec: Vec::new(),
         program_args: Vec::new(),
     };
     let mut passthrough = false;
@@ -922,6 +968,23 @@ fn parse_run_flags(args: &[String]) -> Result<RunFlags, CliError> {
                 flags.trace = Some(TraceTarget::from_flag(&value));
             }
             "--stats" => flags.stats = true,
+            "--files-root" => {
+                let value = flag_value(args, &mut i, "--files-root")?;
+                flags.files_root = Some(PathBuf::from(value));
+            }
+            // Repeating the flag adds one executable rather than replacing
+            // the list: an allow-list a later flag could silently empty would
+            // be a filter that is hard to be sure of.
+            "--allow-exec" => {
+                let value = flag_value(args, &mut i, "--allow-exec")?;
+                let path = PathBuf::from(&value);
+                if !path.is_absolute() {
+                    return Err(CliError::Message(format!(
+                        "`--allow-exec` takes an absolute path, found `{value}`"
+                    )));
+                }
+                flags.allow_exec.push(path);
+            }
             other => flags.program_args.push(other.to_string()),
         }
         i += 1;
@@ -1029,12 +1092,16 @@ impl TraceSink for CompositeSink {
 
 /// Prints fuel spent, host calls, elapsed time, and host-call wait to
 /// stderr, for `--stats`.
+///
+/// `irreversible_writes` is the count of calls whose Host API schema declares
+/// them irreversible: how much of what this run did cannot be taken back.
 fn print_stats(hosts: &HostRegistry, wait_total: &WaitTotal) {
     if let Some(budget) = hosts.budget() {
         eprintln!(
-            "stats: fuel_spent={} host_calls={} elapsed={:?} wait={:?}",
+            "stats: fuel_spent={} host_calls={} irreversible_writes={} elapsed={:?} wait={:?}",
             budget.fuel_spent(),
             budget.host_calls(),
+            hosts.irreversible_writes(),
             budget.elapsed(),
             wait_total.get(),
         );
@@ -1388,6 +1455,56 @@ module kitchen
 module private
 ";
         assert_eq!(out, expected);
+    }
+
+    fn flags(args: &[&str]) -> RunFlags {
+        parse_run_flags(&args.iter().map(|a| a.to_string()).collect::<Vec<_>>())
+            .unwrap_or_else(|_| panic!("`{args:?}` should parse"))
+    }
+
+    #[test]
+    fn a_run_with_no_host_flags_leaves_the_defaults_alone() {
+        let flags = flags(&["input.txt"]);
+        assert_eq!(flags.files_root, None);
+        assert!(flags.allow_exec.is_empty());
+        assert_eq!(flags.program_args, ["input.txt"]);
+    }
+
+    #[test]
+    fn files_root_and_allow_exec_are_read_from_anywhere_after_the_name() {
+        let flags = flags(&[
+            "first",
+            "--files-root",
+            "/tmp/scratch",
+            "--allow-exec",
+            "/bin/echo",
+            "--allow-exec",
+            "/bin/cat",
+            "second",
+        ]);
+        assert_eq!(flags.files_root, Some(PathBuf::from("/tmp/scratch")));
+        assert_eq!(
+            flags.allow_exec,
+            [PathBuf::from("/bin/echo"), PathBuf::from("/bin/cat")]
+        );
+        assert_eq!(flags.program_args, ["first", "second"]);
+    }
+
+    /// A relative name would be resolved against `PATH` or the working
+    /// directory, so the executable that ran would be chosen by the
+    /// environment rather than by the host.
+    #[test]
+    fn allow_exec_refuses_a_path_that_is_not_absolute() {
+        let error = parse_run_flags(&["--allow-exec".to_string(), "echo".to_string()])
+            .err()
+            .expect("a relative path should be refused");
+        match error {
+            CliError::Message(message) => assert_eq!(
+                message,
+                "`--allow-exec` takes an absolute path, found `echo`"
+            ),
+            _ => panic!("expected a message"),
+        }
     }
 
     #[test]

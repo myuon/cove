@@ -1,0 +1,5 @@
+exists before false
+exists after true
+read five little words here
+list [scratch.txt]
+exists at end false
