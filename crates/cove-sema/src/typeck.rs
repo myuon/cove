@@ -149,6 +149,7 @@ use std::fmt;
 use std::rc::Rc;
 
 use cove_diag::{Diagnostic, Span};
+use cove_schema::builtins::{BuiltinSchema, BuiltinType, MethodSchema};
 use cove_schema::{HostType, OperationSchema, ResourceSchema, TypeSchema};
 use cove_syntax::ast::{
     Arg, BinaryOp, Block, EnumDecl, Expr, ExprKind, FnDecl, GenericParam, Ident, ItemKind,
@@ -2206,7 +2207,7 @@ impl<'a> Checker<'a> {
         if self.module.structs.contains_key(name)
             || self.module.enums.contains_key(name)
             || self.is_imported(name)
-            || is_builtin_type(name)
+            || cove_schema::is_builtin_type(name)
             || name == "MapEntry"
             || self.module.host_uses.contains(name)
             || self.module.host_items.contains_key(name)
@@ -3526,7 +3527,7 @@ impl<'a> Checker<'a> {
             self.check_args_freely(args, trailing);
             return Some(Ty::Unknown);
         }
-        if is_builtin_type(head) {
+        if cove_schema::is_builtin_type(head) {
             return Some(self.builtin_associated(head, name, args, trailing, span));
         }
         None
@@ -3887,11 +3888,9 @@ impl<'a> Checker<'a> {
 
     /// `Vector.of(...)`, `Map.of(...)`, `Set.of(...)`, `Int.parse(...)`.
     ///
-    /// This table is the static half of
-    /// `cove_runtime::builtins::call_associated`: every associated function
-    /// the runtime dispatches appears here with a type, and nothing else
-    /// does. A spread argument is left to the runtime, which rejects one in
-    /// any of these calls.
+    /// The signatures come from [`cove_schema::builtins`], the same table the
+    /// runtime's `call_associated` dispatches out of. A spread argument is
+    /// left to the runtime, which rejects one in any of these calls.
     fn builtin_associated(
         &mut self,
         type_name: &str,
@@ -3900,63 +3899,31 @@ impl<'a> Checker<'a> {
         trailing: Option<&Expr>,
         span: Span,
     ) -> Ty {
-        let element = |name: &'static str, param: Ty, ret: Ty, generics: Vec<Rc<str>>| BuiltinSig {
-            generics,
-            params: vec![(name, param)],
-            variadic: true,
-            ret,
+        // An associated function is called on the type, so nothing binds the
+        // receiver's parameters: the `T` of `Vector.of(items: T...)` is the
+        // signature's own, unified at the call site.
+        let declared = cove_schema::builtin(type_name)
+            .and_then(|schema| schema.associated_function(&name.node));
+        let Some(declared) = declared else {
+            self.diagnostics.push(
+                Diagnostic::error(
+                    UNKNOWN_ASSOCIATED,
+                    format!("`{type_name}` has no associated function `{}`", name.node),
+                )
+                .at(span)
+                .rule(format!(
+                    "A builtin type's associated functions are {}.",
+                    builtin_associated_functions()
+                ))
+                .help(format!(
+                    "`{type_name}` has no `{}`; construct the value another way",
+                    name.node
+                )),
+            );
+            self.check_args_freely(args, trailing);
+            return Ty::Unknown;
         };
-        let sig = match (type_name, name.node.as_str()) {
-            ("Vector", "of") => element(
-                "items",
-                Ty::Param("T".into()),
-                Ty::Vector(Box::new(Ty::Param("T".into()))),
-                vec!["T".into()],
-            ),
-            // `Map.of` collects the pairs `MapEntry(key:, value:)` builds.
-            ("Map", "of") => element(
-                "entries",
-                Ty::MapEntry(
-                    Box::new(Ty::Param("K".into())),
-                    Box::new(Ty::Param("V".into())),
-                ),
-                Ty::Map(
-                    Box::new(Ty::Param("K".into())),
-                    Box::new(Ty::Param("V".into())),
-                ),
-                vec!["K".into(), "V".into()],
-            ),
-            ("Set", "of") => element(
-                "items",
-                Ty::Param("T".into()),
-                Ty::Set(Box::new(Ty::Param("T".into()))),
-                vec!["T".into()],
-            ),
-            ("Int", "parse") => BuiltinSig {
-                generics: Vec::new(),
-                params: vec![("text", Ty::Str)],
-                variadic: false,
-                ret: Ty::Result(Box::new(Ty::Int), Box::new(Ty::Error)),
-            },
-            _ => {
-                self.diagnostics.push(
-                    Diagnostic::error(
-                        UNKNOWN_ASSOCIATED,
-                        format!("`{type_name}` has no associated function `{}`", name.node),
-                    )
-                    .at(span)
-                    .rule(
-                        "A builtin type's associated functions are `Vector.of`, `Map.of`, `Set.of`, and `Int.parse`.",
-                    )
-                    .help(format!(
-                        "`{type_name}` has no `{}`; construct the value another way",
-                        name.node
-                    )),
-                );
-                self.check_args_freely(args, trailing);
-                return Ty::Unknown;
-            }
-        };
+        let sig = builtin_sig(declared, &[], &[], None);
         let what = format!("`{type_name}.{}`", name.node);
         self.call_builtin(&sig, &what, args, trailing, span)
     }
@@ -5390,182 +5357,164 @@ fn unchecked_host_type(shown: &str, span: Span) -> Diagnostic {
     .help("the checker treats this type as unknown; every operation on it is left to the runtime, which holds the host to the schema it registered with")
 }
 
-/// Whether `name` is a builtin type usable as a namespace.
+/// The builtin type `receiver` is one of, when it is one.
 ///
-/// This is `cove_runtime::builtins::is_builtin_type`, which cannot be called
-/// from here: the compiler does not depend on the runtime.
-fn is_builtin_type(name: &str) -> bool {
-    matches!(
-        name,
-        "Array"
-            | "Vector"
-            | "String"
-            | "Int"
-            | "Float"
-            | "Bool"
-            | "Map"
-            | "Set"
-            | "Option"
-            | "Result"
-            | "Error"
-    )
+/// `MapEntry` is deliberately absent: it is a builtin *struct* rather than a
+/// builtin type with a table of its own, built by a synthesized labeled call
+/// and read by its two fields, so it answers no methods and declares no
+/// associated functions.
+fn builtin_schema_of(receiver: &Ty) -> Option<&'static BuiltinSchema> {
+    let name = match receiver {
+        Ty::Unit => "Unit",
+        Ty::Bool => "Bool",
+        Ty::Int => "Int",
+        Ty::Float => "Float",
+        Ty::Str => "String",
+        Ty::Duration => "Duration",
+        Ty::Error => "Error",
+        Ty::Range => "Range",
+        Ty::Array(_) => "Array",
+        Ty::Vector(_) => "Vector",
+        Ty::Map(_, _) => "Map",
+        Ty::Set(_) => "Set",
+        Ty::Option(_) => "Option",
+        Ty::Result(_, _) => "Result",
+        Ty::Task(_) => "Task",
+        Ty::Shared(_) => "Shared",
+        Ty::Scope => "Scope",
+        _ => return None,
+    };
+    cove_schema::builtin(name)
+}
+
+/// The type arguments `receiver` was written with, in the order the schema
+/// declares its parameters.
+///
+/// This is what binds the `T` of `Array<T>.get` to the element type of the
+/// array the call was made on.
+fn receiver_arguments(receiver: &Ty) -> Vec<Ty> {
+    match receiver {
+        Ty::Array(item)
+        | Ty::Vector(item)
+        | Ty::Set(item)
+        | Ty::Option(item)
+        | Ty::Task(item)
+        | Ty::Shared(item) => vec![(**item).clone()],
+        Ty::Map(left, right) | Ty::Result(left, right) => {
+            vec![(**left).clone(), (**right).clone()]
+        }
+        _ => Vec::new(),
+    }
+}
+
+/// The type a builtin schema's type is, here.
+///
+/// The scalars translate the way [`host_ty`] translates a host's, and the
+/// three variants the host vocabulary does not have are the whole reason
+/// there are two vocabularies. [`BuiltinType::Param`] is a name the receiver
+/// binds -- read off `bound`, so `Array<Int>.get` answers `Option<Int>` -- or,
+/// when the signature binds it itself, a [`Ty::Param`] for the call site to
+/// unify like any other. [`BuiltinType::SelfType`] is the receiver, which is
+/// what `snapshot` answers. [`BuiltinType::Fn`] is an ordinary function type,
+/// since a builtin that takes a callback takes an ordinary closure.
+fn builtin_ty(declared: &BuiltinType, bound: &BTreeMap<&str, Ty>, receiver: Option<&Ty>) -> Ty {
+    let nested = |inner: &BuiltinType| Box::new(builtin_ty(inner, bound, receiver));
+    match declared {
+        BuiltinType::Unit => Ty::Unit,
+        BuiltinType::Bool => Ty::Bool,
+        BuiltinType::Int => Ty::Int,
+        BuiltinType::String => Ty::Str,
+        BuiltinType::Error => Ty::Error,
+        BuiltinType::Array(item) => Ty::Array(nested(item)),
+        BuiltinType::Vector(item) => Ty::Vector(nested(item)),
+        BuiltinType::Set(item) => Ty::Set(nested(item)),
+        BuiltinType::Map(key, value) => Ty::Map(nested(key), nested(value)),
+        BuiltinType::MapEntry(key, value) => Ty::MapEntry(nested(key), nested(value)),
+        BuiltinType::Option(some) => Ty::Option(nested(some)),
+        BuiltinType::Result(ok, error) => Ty::Result(nested(ok), nested(error)),
+        BuiltinType::Task(inner) => Ty::Task(nested(inner)),
+        BuiltinType::Fn(params, ret) => Ty::func(
+            false,
+            params
+                .iter()
+                .map(|param| builtin_ty(param, bound, receiver))
+                .collect(),
+            builtin_ty(ret, bound, receiver),
+        ),
+        BuiltinType::Param(name) => bound
+            .get(name)
+            .cloned()
+            .unwrap_or_else(|| Ty::Param((*name).into())),
+        // Only an associated function is opened with no receiver, and the
+        // schema's own tests hold one to naming no `Self`.
+        BuiltinType::SelfType => receiver.cloned().unwrap_or(Ty::Unknown),
+    }
+}
+
+/// One schema signature, opened for the receiver it was reached through.
+///
+/// `parameters` and `arguments` are the receiver's, paired positionally; an
+/// associated function is called on the type and passes both empty.
+fn builtin_sig(
+    method: &'static MethodSchema,
+    parameters: &'static [&'static str],
+    arguments: &[Ty],
+    receiver: Option<&Ty>,
+) -> BuiltinSig {
+    let bound: BTreeMap<&str, Ty> = parameters
+        .iter()
+        .copied()
+        .zip(arguments.iter().cloned())
+        .collect();
+    BuiltinSig {
+        generics: method
+            .generics
+            .iter()
+            .map(|generic| Rc::from(*generic))
+            .collect(),
+        params: method
+            .params
+            .iter()
+            .map(|param| (param.name, builtin_ty(&param.ty, &bound, receiver)))
+            .collect(),
+        variadic: method.variadic,
+        ret: builtin_ty(&method.result, &bound, receiver),
+    }
 }
 
 /// The signature of a builtin method, or `None` when the receiver has no such
 /// method.
 ///
-/// This table is the static half of `cove_runtime::builtins`: every method the
-/// runtime dispatches appears here with a type, and nothing else does.
+/// The table is [`cove_schema::builtins`], which the runtime dispatches out of
+/// as well: there is one list of what a builtin type answers to, and this is
+/// the compiler reading it.
 fn builtin_method(receiver: &Ty, name: &str) -> Option<BuiltinSig> {
-    let sig = |params: Vec<(&'static str, Ty)>, ret: Ty| {
-        Some(BuiltinSig {
-            generics: Vec::new(),
-            params,
-            variadic: false,
-            ret,
+    let schema = builtin_schema_of(receiver)?;
+    let method = schema.method(name)?;
+    Some(builtin_sig(
+        method,
+        schema.parameters,
+        &receiver_arguments(receiver),
+        Some(receiver),
+    ))
+}
+
+/// Every associated function the builtin types declare, qualified, as a
+/// diagnostic reads them out.
+fn builtin_associated_functions() -> String {
+    let names: Vec<String> = cove_schema::builtins::builtins()
+        .iter()
+        .flat_map(|entry| {
+            entry
+                .associated
+                .iter()
+                .map(|method| format!("`{}.{}`", entry.name, method.name))
         })
-    };
-    let generic = |name: &'static str, params: Vec<(&'static str, Ty)>, ret: Ty| {
-        Some(BuiltinSig {
-            generics: vec![name.into()],
-            params,
-            variadic: false,
-            ret,
-        })
-    };
-    // `snapshot` is the builtin `Snapshot` trait's one method. Every builtin
-    // value type is immutable, so it returns itself; `Vector` is the one
-    // builtin type with an independent mutable graph to copy, so its static
-    // return type is `Vector` again, and the runtime is what recursively
-    // snapshots its elements. A struct or enum conforms the ordinary way,
-    // with an explicit `impl Snapshot for Type`, so it is not listed here.
-    if name == "snapshot"
-        && matches!(
-            receiver,
-            Ty::Unit
-                | Ty::Bool
-                | Ty::Int
-                | Ty::Float
-                | Ty::Duration
-                | Ty::Str
-                | Ty::Range
-                | Ty::Array(_)
-                | Ty::Map(_, _)
-                | Ty::Set(_)
-                | Ty::Vector(_)
-        )
-    {
-        return sig(Vec::new(), receiver.clone());
-    }
-    match receiver {
-        Ty::Array(element) => match name {
-            "get" => sig(
-                vec![("index", Ty::Int)],
-                Ty::Option(Box::new((**element).clone())),
-            ),
-            "length" => sig(Vec::new(), Ty::Int),
-            "isEmpty" => sig(Vec::new(), Ty::Bool),
-            _ => None,
-        },
-        Ty::Vector(element) => match name {
-            "push" => sig(vec![("value", (**element).clone())], Ty::Unit),
-            "get" => sig(
-                vec![("index", Ty::Int)],
-                Ty::Option(Box::new((**element).clone())),
-            ),
-            "length" => sig(Vec::new(), Ty::Int),
-            "isEmpty" => sig(Vec::new(), Ty::Bool),
-            "freeze" | "toArray" => sig(Vec::new(), Ty::Array(element.clone())),
-            _ => None,
-        },
-        // `Map` and `Set` are immutable, so `inserted` and `removed` return a
-        // new collection rather than change this one; their past-participle
-        // names say so. Which values may be keys or elements is a runtime
-        // rule — a key's equality must not be able to change — and stating it
-        // here would need bounds, which the MVP does not have.
-        Ty::Map(key, value) => match name {
-            "get" => sig(vec![("key", (**key).clone())], Ty::Option(value.clone())),
-            "contains" => sig(vec![("key", (**key).clone())], Ty::Bool),
-            "length" => sig(Vec::new(), Ty::Int),
-            "isEmpty" => sig(Vec::new(), Ty::Bool),
-            "keys" => sig(Vec::new(), Ty::Array(key.clone())),
-            "values" => sig(Vec::new(), Ty::Array(value.clone())),
-            "inserted" => sig(
-                vec![("key", (**key).clone()), ("value", (**value).clone())],
-                Ty::Map(key.clone(), value.clone()),
-            ),
-            "removed" => sig(
-                vec![("key", (**key).clone())],
-                Ty::Map(key.clone(), value.clone()),
-            ),
-            _ => None,
-        },
-        Ty::Set(element) => match name {
-            "contains" => sig(vec![("element", (**element).clone())], Ty::Bool),
-            "length" => sig(Vec::new(), Ty::Int),
-            "isEmpty" => sig(Vec::new(), Ty::Bool),
-            "toArray" => sig(Vec::new(), Ty::Array(element.clone())),
-            "inserted" | "removed" => sig(
-                vec![("element", (**element).clone())],
-                Ty::Set(element.clone()),
-            ),
-            _ => None,
-        },
-        Ty::Str => match name {
-            "length" => sig(Vec::new(), Ty::Int),
-            "isEmpty" => sig(Vec::new(), Ty::Bool),
-            "words" => sig(Vec::new(), Ty::Array(Box::new(Ty::Str))),
-            _ => None,
-        },
-        Ty::Range => match name {
-            "length" => sig(Vec::new(), Ty::Int),
-            "isEmpty" => sig(Vec::new(), Ty::Bool),
-            "contains" => sig(vec![("value", Ty::Int)], Ty::Bool),
-            _ => None,
-        },
-        Ty::Option(inner) => match name {
-            "isSome" | "isNone" => sig(Vec::new(), Ty::Bool),
-            "unwrapOr" => sig(vec![("fallback", (**inner).clone())], (**inner).clone()),
-            _ => None,
-        },
-        Ty::Result(_ok, _error) => match name {
-            "isOk" | "isError" => sig(Vec::new(), Ty::Bool),
-            // `mapError` is checked by `Checker::map_error`: the Language Card
-            // writes it with a trailing closure that may ignore the error it
-            // replaces, so its callback takes either the error or nothing.
-            _ => None,
-        },
-        Ty::Task(inner) => match name {
-            "await" => sig(Vec::new(), (**inner).clone()),
-            "cancel" => sig(Vec::new(), Ty::Unit),
-            _ => None,
-        },
-        Ty::Shared(inner) => match name {
-            // `lock` is a `Shared`'s only operation. Its closure receives the
-            // wrapped value and `lock` produces whatever that closure does,
-            // so a read-modify-write is one expression and cannot be split
-            // into two that race.
-            "lock" => generic(
-                "R",
-                vec![(
-                    "body",
-                    Ty::func(false, vec![(**inner).clone()], Ty::Param("R".into())),
-                )],
-                Ty::Param("R".into()),
-            ),
-            _ => None,
-        },
-        Ty::Scope => match name {
-            // `scope.spawn { ... }` takes the trailing closure as its body and
-            // hands back a handle to the value that body produces.
-            "spawn" => generic(
-                "T",
-                vec![("body", Ty::func(false, Vec::new(), Ty::Param("T".into())))],
-                Ty::Task(Box::new(Ty::Param("T".into()))),
-            ),
-            _ => None,
-        },
-        _ => None,
+        .collect();
+    match names.split_last() {
+        Some((last, [])) => last.clone(),
+        Some((last, rest)) => format!("{}, and {last}", rest.join(", ")),
+        None => "nothing".to_string(),
     }
 }
 
@@ -5631,17 +5580,23 @@ fn unknown_builtin_method(receiver: &Ty, name: &str, span: Span) -> Diagnostic {
 }
 
 /// Every method name a builtin receiver answers to, for a diagnostic's help.
+///
+/// This used to be a hand-written list of candidate names filtered through
+/// [`builtin_method`], which is a third copy of the table and had drifted
+/// like the other two: it had never gained `mapError`, `cancel`, `lock`, or
+/// `spawn`, so a `Result` whose method was misspelled was told it had two
+/// methods when it has three. Reading the schema's own order removes both the
+/// copy and the omission.
 fn builtin_methods_of(receiver: &Ty) -> Vec<String> {
-    const CANDIDATES: [&str; 20] = [
-        "get", "length", "isEmpty", "push", "freeze", "toArray", "words", "contains", "keys",
-        "values", "inserted", "removed", "isSome", "isNone", "unwrapOr", "isOk", "isError",
-        "mapError", "await", "snapshot",
-    ];
-    CANDIDATES
-        .iter()
-        .filter(|name| builtin_method(receiver, name).is_some())
-        .map(|name| (*name).to_string())
-        .collect()
+    builtin_schema_of(receiver)
+        .map(|schema| {
+            schema
+                .methods
+                .iter()
+                .map(|method| method.name.to_string())
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 // ------------------------------------------------------------------- prose
@@ -6576,6 +6531,41 @@ fn run() -> Counter {
         assert_eq!(
             error.help.unwrap(),
             "`String` has `length`, `isEmpty`, `words`, `snapshot`"
+        );
+    }
+
+    /// The help lists what the shared table declares, all of it. The
+    /// hand-written candidate list it replaced had never gained `mapError`,
+    /// so a `Result` used to be told it had two methods when it has three.
+    #[test]
+    fn the_methods_a_diagnostic_lists_are_the_ones_the_table_declares() {
+        let error = rejects_body("  let outcome = Ok(1)\n  println(\"{outcome.unwrap()}\")?");
+        assert_eq!(error.code, UNKNOWN_METHOD);
+        assert_eq!(error.message, "`Result` has no method `unwrap`");
+        assert_eq!(
+            error.help.unwrap(),
+            "`Result` has `isOk`, `isError`, `mapError`"
+        );
+    }
+
+    /// `lock` is a `Shared`'s only operation, and the help says so rather
+    /// than claiming a `Shared` has no methods at all.
+    #[test]
+    fn a_shared_is_told_that_lock_is_what_it_has() {
+        let error = rejects_body("  let counts = Shared(1)\n  let value = counts.get()");
+        assert_eq!(error.help.unwrap(), "`Shared` has `lock`");
+    }
+
+    /// The rule sentence reads the associated functions out of the table
+    /// rather than restating them, so a new one cannot go unmentioned.
+    #[test]
+    fn an_unknown_associated_function_names_the_ones_that_exist() {
+        let error = rejects_body("  let items = Array.of(1)");
+        assert_eq!(error.code, UNKNOWN_ASSOCIATED);
+        assert_eq!(error.message, "`Array` has no associated function `of`");
+        assert_eq!(
+            error.rule.unwrap(),
+            "A builtin type's associated functions are `Vector.of`, `Map.of`, `Set.of`, and `Int.parse`."
         );
     }
 
