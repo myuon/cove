@@ -83,9 +83,11 @@
 //!
 //! - **Host APIs.** `console.println(...)`, `http.Request`, and every other
 //!   operation or type reached through a host module. ADR 0001 promises a
-//!   typed Host API schema and there is none yet, so the checker has nothing
-//!   to check a host call against. It warns ([`HOST_TYPE`]) at a host *type*
-//!   so the gap is visible in `cove check`.
+//!   typed Host API schema shared by the compiler, runtime, and CLI; the
+//!   runtime reads it — a host is held to the result it declares — and this
+//!   crate cannot see it, so the checker still has nothing to check a host
+//!   call against. It warns ([`HOST_TYPE`]) at a host *type* so the gap is
+//!   visible in `cove check`.
 //! - **Names nothing in scope explains.** A capitalized name a module
 //!   neither declares nor imports cannot be resolved by any means the
 //!   language offers; it is assumed to come from the host and warns
