@@ -21,7 +21,7 @@ use cove_sema::Capability;
 use crate::budget::Budget;
 use crate::error::RuntimeError;
 use crate::schema::{Effect, HostType, OperationSchema};
-use crate::trace::{NullSink, TraceEvent, TraceSink};
+use crate::trace::{HostOutcome, NullSink, TraceEvent, TraceSink};
 use crate::value::Value;
 
 /// One host-provided module, such as `console` or `env`.
@@ -206,6 +206,8 @@ impl HostRegistry {
                 capability: capability.to_string(),
                 wait: std::time::Duration::ZERO,
                 granted: false,
+                args,
+                outcome: None,
             });
             return Err(RuntimeError::new(format!(
                 "`{module}.{op}` requires the `{capability}` capability, which this run was not granted"
@@ -254,6 +256,8 @@ impl HostRegistry {
                     capability: capability.to_string(),
                     wait: std::time::Duration::ZERO,
                     granted: false,
+                    args,
+                    outcome: None,
                 });
                 return Err(error);
             }
@@ -263,18 +267,80 @@ impl HostRegistry {
             self.irreversible_writes += 1;
         }
 
+        // A trace has to carry the arguments to be replayable, and the host
+        // takes ownership of them, so they are cloned before dispatch rather
+        // than reconstructed afterwards. Cloning a `Value` is the shallow
+        // copy Cove's own assignment performs.
+        let recorded_args = args.clone();
         let started = Instant::now();
         let result = entry.call(op, args);
         let wait = started.elapsed();
+        // The schema decides whether the result is written down. An operation
+        // that is not recordable has its call recorded and its result left
+        // out: replaying `process.exit` by handing back a value would keep
+        // running a program that had ended.
+        let outcome = if schema.recordable {
+            match &result {
+                Ok(value) => HostOutcome::Value(value.clone()),
+                Err(error) => HostOutcome::Error(error.message.clone()),
+            }
+        } else {
+            HostOutcome::NotRecordable
+        };
         self.trace.record(TraceEvent::HostCall {
             module: module.to_string(),
             op: op.to_string(),
             capability: capability.to_string(),
             wait,
             granted: true,
+            args: recorded_args,
+            outcome: Some(outcome),
         });
         result
     }
+}
+
+/// The name, capability, and operations of one host module, without the
+/// module itself.
+///
+/// [`HostApi::schema`] borrows from a live module, and a tool that reads a
+/// recorded trace has no live module to borrow from. The entries are
+/// [`Copy`], so this is the same table, detached.
+#[derive(Clone, Debug)]
+pub struct ModuleSchema {
+    /// The name Cove source uses, such as `console`.
+    pub name: String,
+    /// The capability a host must grant for this module.
+    pub capability: Capability,
+    /// Every operation the module exposes.
+    pub operations: Vec<OperationSchema>,
+}
+
+/// The schema of every host module the toolchain ships.
+///
+/// `cove trace` and `cove replay` read a trace without a host to ask, and
+/// both need what the schema says: which calls the trace recorded are
+/// irreversible, which capability each one needs, and whether a result was
+/// recordable. Building the modules to ask them keeps that answer the same
+/// one `cove run` enforces, rather than a second copy that can drift.
+pub fn shipped_schema() -> Vec<ModuleSchema> {
+    let modules: Vec<Box<dyn HostApi>> = vec![
+        Box::new(Console::new(std::io::sink())),
+        Box::new(Env::new(BTreeMap::new())),
+        Box::new(Documents::in_memory(BTreeMap::new())),
+        Box::new(crate::clock::Clock::real()),
+        Box::new(crate::files::Files::in_memory(BTreeMap::new())),
+        Box::new(crate::process::Process::real(Vec::new(), Vec::new())),
+        Box::new(crate::database::Database::denied()),
+    ];
+    modules
+        .iter()
+        .map(|module| ModuleSchema {
+            name: module.name().to_string(),
+            capability: module.capability(),
+            operations: module.schema().to_vec(),
+        })
+        .collect()
 }
 
 /// The operations `console` exposes.
@@ -747,12 +813,101 @@ mod tests {
                 capability,
                 wait,
                 granted,
+                args,
+                outcome,
             } => {
                 assert_eq!(module, "documents");
                 assert_eq!(op, "read");
                 assert_eq!(capability, "documents");
                 assert!(*granted);
                 assert!(*wait < std::time::Duration::from_secs(1), "{wait:?}");
+                // A trace that says only that a call happened cannot replay
+                // it, so the event carries the call's arguments and its
+                // result too.
+                assert_eq!(args.len(), 1);
+                assert_eq!(args[0].to_string(), "input");
+                match outcome {
+                    Some(HostOutcome::Value(value)) => {
+                        assert_eq!(ok_str(value.clone()), "hello world")
+                    }
+                    other => panic!("expected a recorded value, found {other:?}"),
+                }
+            }
+            other => panic!("expected a HostCall event, found {other:?}"),
+        }
+    }
+
+    /// The schema's `recordable` flag decides whether a result is written
+    /// down, and `process.exit` is the one shipped operation it decides
+    /// against: replaying it by handing back a value would keep running a
+    /// program that had ended.
+    #[test]
+    fn a_result_is_recorded_only_when_the_schema_says_it_may_be() {
+        let mut hosts = HostRegistry::new(Grants::new(["process"]));
+        hosts.register(Box::new(crate::process::Process::recorded(
+            vec!["one".to_string()],
+            BTreeMap::new(),
+            crate::process::ProcessLog::new(),
+        )));
+        let sink = RecordingSink::default();
+        hosts.set_trace(Box::new(sink.clone()));
+
+        hosts.call("process", "args", Vec::new()).expect("granted");
+        hosts
+            .call("process", "exit", vec![Value::Int(2)])
+            .expect("granted");
+
+        let events = sink.0.borrow();
+        assert_eq!(events.len(), 2, "{events:?}");
+        match &events[0] {
+            // `process.args` is recordable, so its result is recorded.
+            TraceEvent::HostCall {
+                outcome: Some(HostOutcome::Value(value)),
+                ..
+            } => assert_eq!(value.to_string(), "[one]"),
+            other => panic!("expected a recorded value, found {other:?}"),
+        }
+        match &events[1] {
+            TraceEvent::HostCall {
+                op,
+                args,
+                outcome: Some(HostOutcome::NotRecordable),
+                ..
+            } => {
+                assert_eq!(op, "exit");
+                // The call itself is still recorded, arguments and all: what
+                // the program asked for is exactly the part worth knowing.
+                assert_eq!(args.len(), 1);
+                assert_eq!(args[0].to_string(), "2");
+            }
+            other => panic!("expected `not recordable`, found {other:?}"),
+        }
+    }
+
+    /// A call the run was not granted never reaches a host, so there is no
+    /// result to record — but there is still a request worth recording.
+    #[test]
+    fn a_refused_call_records_its_arguments_and_no_result() {
+        let mut hosts = HostRegistry::new(Grants::new(Vec::<String>::new()));
+        hosts.register(Box::new(Documents::in_memory(BTreeMap::new())));
+        let sink = RecordingSink::default();
+        hosts.set_trace(Box::new(sink.clone()));
+
+        hosts
+            .call("documents", "read", vec![Value::Str("input".into())])
+            .expect_err("the call should be rejected");
+
+        let events = sink.0.borrow();
+        match &events[0] {
+            TraceEvent::HostCall {
+                granted,
+                args,
+                outcome,
+                ..
+            } => {
+                assert!(!granted);
+                assert_eq!(args.len(), 1);
+                assert!(outcome.is_none(), "{outcome:?}");
             }
             other => panic!("expected a HostCall event, found {other:?}"),
         }
@@ -835,26 +990,35 @@ mod tests {
     /// would make the grant check and the schema tell different stories.
     #[test]
     fn every_operation_declares_its_module_capability() {
-        let modules: Vec<Box<dyn HostApi>> = vec![
-            Box::new(Console::new(Vec::new())),
-            Box::new(Env::new(BTreeMap::new())),
-            Box::new(Documents::in_memory(BTreeMap::new())),
-            Box::new(crate::clock::Clock::real()),
-            Box::new(crate::files::Files::in_memory(BTreeMap::new())),
-            Box::new(crate::process::Process::real(Vec::new(), Vec::new())),
-            Box::new(crate::database::Database::denied()),
-        ];
-        for module in &modules {
-            for entry in module.schema() {
+        for module in shipped_schema() {
+            for entry in &module.operations {
                 assert_eq!(
                     entry.capability,
-                    module.capability().as_str(),
+                    module.capability.as_str(),
                     "`{}.{}`",
-                    module.name(),
+                    module.name,
                     entry.name
                 );
             }
         }
+    }
+
+    /// What `cove trace` and `cove replay` read instead of a live host.
+    #[test]
+    fn the_shipped_schema_names_every_module_a_run_registers() {
+        let names: Vec<String> = shipped_schema().into_iter().map(|m| m.name).collect();
+        assert_eq!(
+            names,
+            [
+                "console",
+                "env",
+                "documents",
+                "clock",
+                "files",
+                "process",
+                "database"
+            ]
+        );
     }
 
     /// The counter behind `cove run --stats`, and the one thing that reads
