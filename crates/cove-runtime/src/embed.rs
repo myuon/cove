@@ -148,6 +148,21 @@ impl Embedded {
     /// flags of its own, because a flag it honoured would be a way to ask it
     /// for something its `[run.<name>]` table did not.
     pub fn main(&self) -> ExitCode {
+        // On a thread this runtime sized, for the reason `on_cove_stack`
+        // gives: a built binary's `main` runs on whatever stack the platform
+        // gave the process, and the interpreter's depth limit is calibrated
+        // against a stack the runtime chose.
+        match crate::on_cove_stack(|| self.run_and_report()) {
+            Ok(code) => code,
+            Err(error) => {
+                eprintln!("error: this program could not start the thread it runs on: {error}");
+                ExitCode::FAILURE
+            }
+        }
+    }
+
+    /// The run itself, and how its outcome is reported.
+    fn run_and_report(&self) -> ExitCode {
         let args: Vec<String> = std::env::args().skip(1).collect();
         match self.run(args) {
             Ok(()) => ExitCode::SUCCESS,

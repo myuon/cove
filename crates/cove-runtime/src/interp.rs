@@ -50,7 +50,148 @@ use crate::value::{Closure, DynValue, EnumValue, RangeBounds, StructValue, Value
 /// recursion must still be stopped before it exhausts the native stack. A host
 /// that configures a stricter `max_call_depth` is stopped by that limit first;
 /// this constant is the fallback when it does not.
+///
+/// The limit is calibrated against [`STACK_SIZE`], which is the stack the
+/// runtime gives every thread it runs Cove on. That is what makes the promise
+/// above a relationship rather than a coincidence: the number here bounds
+/// frames, the number there bounds bytes, and neither may be changed without
+/// reading the other. See [`STACK_SIZE`] for the measured per-frame cost the
+/// two are derived from.
 const MAX_CALL_DEPTH: usize = 256;
+
+/// The native stack one Cove frame costs, so that [`STACK_SIZE`] can be
+/// derived from [`MAX_CALL_DEPTH`] instead of chosen beside it.
+///
+/// Measured on macOS by lifting the depth limit, giving a task thread a known
+/// stack, and binary-searching the deepest recursion that runs cleanly; the
+/// figure is the slope between two stack sizes, so whatever the interpreter
+/// spends before the recursion starts cancels out. Four shapes were measured
+/// at 4 MiB and 16 MiB in a debug build and at 1 MiB and 4 MiB in a release
+/// build, and the figures here are the worst of the four rounded up to a
+/// whole number of kibibytes:
+///
+/// | recursion through          | debug   | release |
+/// |----------------------------|---------|---------|
+/// | a free function            | 123 KiB | 9.6 KiB |
+/// | a method on a struct       | 135 KiB | 9.6 KiB |
+/// | a `dyn` trait conformance  | 95 KiB  | 7.3 KiB |
+/// | a `match` with live locals | 101 KiB | 8.2 KiB |
+///
+/// A debug frame costs fourteen times a release one, which is why the two
+/// profiles cannot share a stack size: one number would be absurd in release
+/// or useless in debug.
+///
+/// This is a measurement of ordinary shapes and not a bound on every shape.
+/// The interpreter recurses once more for each level of expression nesting,
+/// so a program that writes its recursive call inside a long chain of nested
+/// expressions spends more per Cove frame than any of these, and no constant
+/// can be the worst case for a program the compiler has not seen. That is
+/// what the margin in [`STACK_SIZE`] is for.
+#[cfg(debug_assertions)]
+const STACK_PER_FRAME: usize = 136 * 1024;
+
+/// The native stack one Cove frame costs. See the debug-build definition
+/// above for how both figures were measured.
+#[cfg(not(debug_assertions))]
+const STACK_PER_FRAME: usize = 10 * 1024;
+
+/// The native stack one reentry level costs, measured the same way with
+/// [`MAX_REENTRY_DEPTH`] lifted and `clock.timeout` nested into itself: 163.8
+/// KiB in a debug build and 16.1 KiB in a release one, rounded up here as
+/// above. That confirms the figure [`MAX_REENTRY_DEPTH`] was calibrated
+/// against, which was thirteen levels in a 2 MiB task thread.
+///
+/// [`MAX_CALL_DEPTH`] already counts the Cove frames inside a reentry level,
+/// so what this adds to the budget is counted twice on purpose: a host's own
+/// native frames are a host's business and nothing measures them, and eight
+/// levels of the shipped hosts are cheap enough next to 256 Cove frames that
+/// paying for them twice costs less than reasoning about it.
+#[cfg(debug_assertions)]
+const STACK_PER_REENTRY: usize = 164 * 1024;
+
+/// The native stack one reentry level costs. See the debug-build definition
+/// above.
+#[cfg(not(debug_assertions))]
+const STACK_PER_REENTRY: usize = 17 * 1024;
+
+/// How much more stack a thread gets than the limits above can spend on it.
+///
+/// Three, because the per-frame figures are measured shapes rather than a
+/// worst case: a deeply nested expression costs more per frame than anything
+/// measured, another platform's calling convention or another compiler's
+/// inlining will not reproduce these numbers exactly, and a host that runs a
+/// callback spends stack nothing here counts. A margin is what stands in for
+/// all of that, and it is cheap: see [`STACK_SIZE`].
+const STACK_MARGIN: usize = 3;
+
+/// How much stack the runtime gives every thread it runs Cove on.
+///
+/// A tree-walking interpreter spends native stack per Cove frame, so
+/// [`MAX_CALL_DEPTH`] keeps its promise only on a stack big enough to hold
+/// that many frames. Nothing gave the runtime such a stack before: a spawned
+/// task took the platform default of 2 MiB, and the entry took whatever the
+/// process main thread happened to have, which is 8 MiB on macOS and Linux
+/// and 1 MiB on Windows. In a debug build 8 MiB held 65 frames of the
+/// cheapest recursion Cove can write, so the limit of 256 was reached only on
+/// a release build's main thread, and everywhere else an ordinary program
+/// with no capability granted at all could end the process by recursing.
+///
+/// So the size is derived from the limits rather than chosen beside them.
+/// Raising [`MAX_CALL_DEPTH`] raises this, which is the relationship the
+/// limit's promise rests on, and it is now arithmetic rather than a
+/// coincidence that held on one thread of one profile. It works out at about
+/// 106 MiB in a debug build and about 8 MiB in a release one.
+///
+/// A number that large in a debug build is affordable because a thread stack
+/// is reserved address space that commits a page at a time as it is touched.
+/// That was checked rather than assumed: a debug run holding a hundred tasks
+/// alive at once reached a maximum resident set of 14.9 to 15.1 MB under this
+/// size and 15.07 MB under the old platform default of 2 MiB — a difference
+/// smaller than the variation between runs — while reserving over 10 GiB of
+/// address space. What the size costs is address space per live task and not
+/// memory per live task, which is a trade a 64-bit host does not notice, and
+/// `max_tasks` is the control for how many live tasks a run may hold in any
+/// case.
+///
+/// An embedder that calls [`Interpreter::run_entry`] on a thread of its own
+/// is the one case the runtime cannot size, and the one case where the
+/// promise is the embedder's to keep; see that method for what to do about
+/// it.
+pub const STACK_SIZE: usize =
+    STACK_MARGIN * (MAX_CALL_DEPTH * STACK_PER_FRAME + MAX_REENTRY_DEPTH * STACK_PER_REENTRY);
+
+/// Runs `body` on a thread the runtime sized, and hands back what it
+/// produced.
+///
+/// This is how a host runs Cove on a stack [`MAX_CALL_DEPTH`] fits on. The
+/// process main thread is not one: its size is the platform's business, it is
+/// 1 MiB on Windows, and no `main` can change it after the fact. So every
+/// path the toolchain has into a Cove program — `cove run`, `cove test`,
+/// `cove generate`, `cove replay`, a `cove build` binary, and `cove-bench` —
+/// does its whole run inside one of these, and [`Interpreter::spawn`] gives a
+/// task thread the same size, so no thread this runtime evaluates Cove on has
+/// a stack it did not choose.
+///
+/// The thread is scoped, so `body` may borrow, and everything Cove-shaped can
+/// be built inside it: a [`Value`] is `Rc`-based and could not cross the
+/// boundary in either direction. Only `T` crosses, which is why it is `Send`.
+///
+/// A panic inside `body` is resumed on the calling thread rather than
+/// swallowed, so a bug reports itself exactly as it did when the same work
+/// ran inline. The `Err` is the machine refusing a thread, which is the one
+/// failure this adds.
+pub fn on_cove_stack<T: Send>(body: impl FnOnce() -> T + Send) -> std::io::Result<T> {
+    std::thread::scope(|scope| {
+        let thread = std::thread::Builder::new()
+            .name("cove entry".to_string())
+            .stack_size(STACK_SIZE)
+            .spawn_scoped(scope, body)?;
+        match thread.join() {
+            Ok(value) => Ok(value),
+            Err(panic) => std::panic::resume_unwind(panic),
+        }
+    })
+}
 
 /// How many host calls that are running a Cove callback may be stacked on one
 /// thread before the runtime refuses the next one.
@@ -573,6 +714,47 @@ impl<'a> Interpreter<'a> {
     /// [`Interpreter::enter`] rather than living inside it so that a run that
     /// never reached its entry — one that named a function this package does
     /// not declare, say — still ends with an event saying so.
+    ///
+    /// # Run this on a thread with at least [`STACK_SIZE`] bytes
+    ///
+    /// The interpreter is a recursive tree walker, so a Cove program spends
+    /// native stack as it nests calls, and [`MAX_CALL_DEPTH`] stops it before
+    /// that stack runs out. What "before" means depends on how much stack
+    /// there is. The runtime sizes every thread it creates itself, so a
+    /// spawned task and everything the toolchain runs are covered; a thread
+    /// an embedder created is the one it cannot size, and on it the limit is
+    /// only as good as the stack underneath.
+    ///
+    /// So an embedder calls this from inside [`on_cove_stack`], building the
+    /// interpreter there too. A [`Value`] is `Rc`-based and cannot cross a
+    /// thread boundary in either direction, so the whole run happens inside
+    /// the closure and only what the embedder wants to keep comes back:
+    ///
+    /// ```no_run
+    /// # use cove_runtime::interp::Interpreter;
+    /// # use cove_runtime::Runtime;
+    /// # fn example(runtime: Runtime) -> Result<(), String> {
+    /// let failure: Option<String> = cove_runtime::on_cove_stack(|| {
+    ///     Interpreter::new(&runtime)
+    ///         .run_entry("app", "main", Vec::new())
+    ///         .err()
+    ///         .map(|error| error.message)
+    /// })
+    /// .map_err(|e| format!("no thread to run Cove on: {e}"))?;
+    /// # let _ = failure;
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// An embedder that would rather manage the thread itself gives it
+    /// `.stack_size(cove_runtime::STACK_SIZE)` and builds the interpreter
+    /// inside it, which is the same arrangement by hand.
+    ///
+    /// On a smaller stack than that, a deep enough Cove program ends the
+    /// process with a stack overflow instead of returning the depth limit as
+    /// an error. That is a boundary of what this runtime can promise rather
+    /// than a bug in it: the size of a thread somebody else created is not
+    /// something the interpreter can read or change.
     pub fn run_entry(
         &mut self,
         module: &str,
@@ -1922,6 +2104,12 @@ impl<'a> Interpreter<'a> {
         let flag = cancellation.clone();
         let thread = std::thread::Builder::new()
             .name(format!("cove task {id}"))
+            // A task evaluates Cove, so it gets the stack the depth limit is
+            // calibrated against rather than whatever the platform hands a
+            // thread by default. Without this a task overflows its stack long
+            // before `MAX_CALL_DEPTH` stops it, which ends the process and
+            // takes every sibling task with it.
+            .stack_size(STACK_SIZE)
             .spawn(move || run_task(&runtime, id, flag, body, span))
             .map_err(|e| {
                 // A task the machine refused is not a task the run holds, so
@@ -7829,6 +8017,59 @@ export fn main() -> Result<Unit, Error> {{
         );
         assert!(error.span.is_some(), "the stop points at the host call");
         assert!(error.rule.is_some());
+    }
+
+    /// The depth limit is a promise about the native stack, so it holds only
+    /// on a stack big enough for the frames it allows. Every thread the
+    /// runtime runs Cove on is one it sized, and a spawned task's thread is
+    /// the one that used to be a platform default: the same recursion that
+    /// the entry reported a limit for overflowed a task's 2 MiB and ended the
+    /// process, taking every sibling task with it.
+    ///
+    /// Both halves run inside `on_cove_stack`, which is what a host outside
+    /// this crate does too, because the test harness's threads are not the
+    /// runtime's to size. Only the message comes back: a `Value` is `Rc`-based
+    /// and cannot cross a thread boundary.
+    #[test]
+    fn the_depth_limit_stops_a_spawned_task_the_way_it_stops_the_entry() {
+        let recursing = r#"
+fn nest(n: Int) -> Int {
+  if n <= 0 {
+    0
+  } else {
+    nest(n - 1) + 1
+  }
+}
+"#;
+        let depth = MAX_CALL_DEPTH + 16;
+        let stop = |source: String| {
+            crate::on_cove_stack(move || run_entry_of(&source, "main", &[]).error().message)
+                .expect("a thread to run Cove on")
+        };
+
+        let on_the_entry = format!(
+            r#"{recursing}
+export fn main() -> Result<Unit, Error> {{
+  let answer = nest({depth})
+  Ok(())
+}}
+"#
+        );
+        let in_a_task = format!(
+            r#"{recursing}
+export fn main() -> Result<Unit, Error> {{
+  scope tasks {{
+    let task = tasks.spawn {{ nest({depth}) }}
+    let answer = task.await()
+    Ok(())
+  }}
+}}
+"#
+        );
+
+        let expected = format!("call depth limit of {MAX_CALL_DEPTH} reached while calling `nest`");
+        assert_eq!(stop(on_the_entry), expected);
+        assert_eq!(stop(in_a_task), expected);
     }
 
     /// Fuel is the run's, and a callback is the run's work: the interpreter
