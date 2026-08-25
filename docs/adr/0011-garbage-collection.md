@@ -141,3 +141,58 @@ collecting cycles among them needs a collector that stops every thread —
 which this ADR rules out under "no concurrent collection". It is a real leak,
 narrower than the one this ADR closes, and closing it is a decision for
 whenever `Shared` grows enough use to make it worth stopping the world for.
+
+## Amendment (2026-08-25): a policy for cycles among cells
+
+The section above states the leak and defers a decision on it to whenever
+`Shared` grows enough use to make stopping the world worth it. Issue #32 asks
+for the decision now, without waiting for that use to arrive: an acknowledged
+gap that lives only in ADR prose is not something a programmer, or a
+long-running server's operator, can act on.
+
+The candidates were: accept the leak and say so on the Language Card; reject
+a detectable direct cycle; count suspected cycles in `--stats`; give `Shared`
+a weak handle; or the stop-the-world collector this ADR already defers.
+
+### What is decided
+
+`SharedCell::lock` rejects the one cycle it can see for free. Committing a
+`lock` already walks the whole value the closure leaves, once, to convert it
+to a `Transfer` and confirm every part of it is task-safe — `Transfer::of`,
+in `task.rs`. Asking that same walk whether it names the cell being locked
+costs nothing beyond a pointer comparison at each `Shared` it passes through,
+so `lock` now refuses a closure whose result would leave the cell holding a
+handle to itself: the example above, `n.lock(fn(var value) { value =
+Node(cell: Some(n)) })`, becomes a runtime error instead of a silent leak.
+
+That is as far as cheap goes. The check never opens a *second* cell to see
+what it already holds — doing that would mean taking another cell's `Mutex`
+while this cell's own is still held, exactly the reentrancy `lock` elsewhere
+refuses to risk — so a cycle closed through two or more cells stays invisible
+to it. That wider case keeps the policy the section above already gave it: an
+accepted, documented leak. The Language Card now says so directly: `Shared`
+ownership must stay acyclic, and only the direct case is enforced.
+
+### What stays rejected, and why
+
+A stats counter for suspected cycles was the next cheapest-looking option,
+and it is not cheap. The per-task heap does not track cells at all — a
+`Shared` is a leaf to it, by design, see "What the heap owns" above — so a
+count of live cells would need a registry this ADR does not otherwise need,
+and the number would not mean what it claimed to. A `Shared` held by every
+task for the run's whole lifetime, a metrics cell say, looks identical to one
+stuck in a cycle when the only thing measured is how many are alive; telling
+them apart needs a reachability pass, and that pass is the stop-the-world
+collector this ADR already defers. A counter that cannot tell a leak from
+ordinary long-lived sharing would misinform an operator rather than help one.
+
+A weak `Shared` reference was the other option raised, and ADR 0001's scope
+list already says no weak references, for the heap's own `Rc`s; a weak
+`Shared` handle would be new surface for the same reason. Nothing in Cove
+today needs to observe a cell without keeping it alive, and "earn complexity
+through use" (`PHILOSOPHY.md`) asks for a program that wants one before the
+language grows it.
+
+The stop-the-world collector for cells stays exactly where the section above
+left it: worth building once `Shared` sees enough real use that an indirect,
+multi-cell cycle is a problem programs actually hit, not before.
