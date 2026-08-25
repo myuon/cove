@@ -2,6 +2,20 @@
 
 - Status: Accepted
 - Date: 2026-08-25
+- Amends: [ADR 0001](0001-mvp-language-design.md), whose success criterion
+  about competitive execution performance becomes a measured gate rather than a
+  hypothesis, and with it
+  [ADR 0002](0002-implementation-language-and-backend.md) and
+  [ADR 0009](0009-cove-build.md) — both of which stand exactly as written; what
+  changes is that the criterion they deferred is now measured, and the deferral
+  has gates
+- Implemented by: PR #34
+- Implementation status: complete — `crates/cove-bench`, the `benches/`
+  package, and the CI step that runs it all exist, and gates 2 through 4 are
+  met. That gate 1 is not askable until a reference native program exists, and
+  gate 5 not until a compile stage does, is this ADR's finding rather than a
+  gap in it; so is the absence of a CI threshold, argued for under "Why this is
+  hermetic, not a fixed baseline".
 
 ## Context
 

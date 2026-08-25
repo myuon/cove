@@ -2,6 +2,15 @@
 
 - Status: Accepted
 - Date: 2026-08-25
+- Amends: [ADR 0001](0001-mvp-language-design.md), whose Host API schema gains
+  the "serialization and resource ownership" it asks for, and whose Host API
+  boundary gains a second direction: a call may now run a Cove closure
+- Implemented by: PR #35
+- Implementation status: complete — the boundary is built in both directions.
+  What sits behind it is a separate question this ADR states rather than
+  answers: `database` still ships only a fake and a denied host, `http` speaks
+  no TLS, and nothing checks a Host result against the type its schema declares
+  ([issue #38](https://github.com/myuon/cove/issues/38)).
 
 ## Context
 

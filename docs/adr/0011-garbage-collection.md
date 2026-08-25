@@ -2,6 +2,15 @@
 
 - Status: Accepted
 - Date: 2026-08-25
+- Amends: [ADR 0001](0001-mvp-language-design.md), whose memory management is
+  narrowed to the interpreter until a native backend exists, and
+  [ADR 0002](0002-implementation-language-and-backend.md), which deferred a
+  collector until "cyclic structures and tasks exist"
+- Amended by: this ADR's own "Amendment (2026-08-25): a policy for cycles among
+  cells" below, which decides what "What this leaves uncollected" defers
+- Implemented by: PR #26; the amendment by PR #33
+- Implementation status: complete — with one accepted, documented leak: a cycle
+  closed through two or more `Shared` cells
 
 ## Context
 

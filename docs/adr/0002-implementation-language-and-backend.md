@@ -2,6 +2,14 @@
 
 - Status: Accepted
 - Date: 2026-08-25
+- Amended by: [ADR 0011](0011-garbage-collection.md), which built the collector
+  this ADR deferred, and
+  [ADR 0012](0012-performance-gate-and-native-backend.md), which measured the
+  execution speed this ADR left unmeasured
+- Implemented by: PR #3
+- Implementation status: complete — Rust, the tree-walking interpreter, and the
+  crate layout below are what the workspace is. Native code generation stays
+  deferred, which is this ADR's decision rather than a gap in it.
 
 ## Context
 
@@ -49,6 +57,12 @@ The precise, non-moving mark-and-sweep collector described in ADR 0001 remains
 the target once cyclic structures and tasks exist. Keeping allocation behind a
 value abstraction now is what makes that replacement possible later.
 
+Both arrived, and so did the collector:
+[ADR 0011](0011-garbage-collection.md) added a per-task heap that reclaims the
+cycles `Rc` cannot. `Rc` did not go away — it still reclaims every acyclic
+value, which is nearly all of them — so this section is now a description of
+the larger half of how memory is managed rather than of all of it.
+
 ## Crate layout
 
 ```text
@@ -69,6 +83,13 @@ Execution speed is not measured by the MVP, so the ADR 0001 success criterion
 about competitive performance cannot be evaluated until a native backend
 exists. Accepting that gap is the point of the decision: the MVP tests whether
 the language and its host boundary are worth compiling.
+
+That last sentence stood for three ADRs and no longer does.
+[ADR 0012](0012-performance-gate-and-native-backend.md) built a harness that
+measures the interpreter and wrote down five gates saying what would have to be
+true before a compiled backend is worth building. The criterion is still not
+*met* — nothing has been compared against a native reference — but "not
+measured" has stopped being why.
 
 Because the interpreter is the reference for semantics, its behaviour must stay
 traceable to the Language Card. Where the Language Card and ADR 0001 disagree,

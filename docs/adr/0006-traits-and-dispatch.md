@@ -2,6 +2,14 @@
 
 - Status: Accepted
 - Date: 2026-08-25
+- Amends: [ADR 0004](0004-static-type-checking.md), whose "parametric and
+  unbounded" generics become parametric with bounds
+- Implemented by: PR #13; the `Snapshot` conformance this ADR makes definable,
+  by PR #18
+- Implementation status: complete — with one thing worth saying plainly: the
+  MVP restrictions below are enforced by there being no grammar for what they
+  forbid, so writing a supertrait or an associated type is an ordinary parse
+  error rather than a diagnostic naming the restriction
 
 ## Context
 
