@@ -214,6 +214,9 @@ pub const UNKNOWN_MEMBER: &str = "cove::type::unknown_member";
 pub const TEST: &str = "cove::type::test";
 /// A type that may not cross a task boundary was written where one must.
 pub const TASK_SAFETY: &str = "cove::type::task_safety";
+/// A declaration's parameter has no written type. Unlike a lambda's, it has
+/// no expected type at a call site to infer from.
+pub const MISSING_PARAMETER_TYPE: &str = "cove::type::missing_parameter_type";
 
 /// The Language Card sentence a task-safety diagnostic quotes.
 ///
@@ -1445,6 +1448,26 @@ impl<'a> Checker<'a> {
         let generics = self.enter_generics(&names);
         let bounds = self.bounds_of(&decl.generics);
         let owner_arity = type_generics.len();
+
+        // ADR 0004: a declaration's parameters are written, not inferred —
+        // unlike a lambda's, which shares this same `Param` node but takes
+        // its types from the expected type at its call site, a declaration
+        // has no call site to infer from. `param_sig` still maps the missing
+        // type to `Ty::Unknown` below, so this is one error rather than a
+        // cascade through every call the parameter appears in.
+        for param in &decl.params {
+            if param.ty.is_none() {
+                self.diagnostics.push(
+                    Diagnostic::error(
+                        MISSING_PARAMETER_TYPE,
+                        format!("parameter `{}` has no declared type", param.name.node),
+                    )
+                    .at(param.span)
+                    .rule("A declaration's parameters are written: only a lambda's infer, from the expected type at its call site.")
+                    .help(format!("write `{}: <type>`", param.name.node)),
+                );
+            }
+        }
 
         let params = decl
             .params
@@ -6166,6 +6189,37 @@ fn run() -> Int {
         );
         assert_eq!(error.code, MISMATCH);
         assert_eq!(error.message, "expected `String`, found `Int`");
+    }
+
+    #[test]
+    fn a_declaration_parameter_without_a_type_is_refused() {
+        // ADR 0004: a declaration's parameters are written, not inferred.
+        // `x` has no expected type to fall back on the way a lambda's would.
+        let error = rejects(
+            "\
+fn double(x) -> Int {
+  x + x
+}
+",
+        );
+        assert_eq!(error.code, MISSING_PARAMETER_TYPE);
+        assert_eq!(error.message, "parameter `x` has no declared type");
+        assert_eq!(
+            error.rule.unwrap(),
+            "A declaration's parameters are written: only a lambda's infer, from the expected type at its call site."
+        );
+        assert_eq!(error.help.unwrap(), "write `x: <type>`");
+    }
+
+    #[test]
+    fn a_lambda_parameter_without_a_type_still_infers() {
+        // The same `Param` node, and the same missing `: Type`, is not
+        // refused here: a lambda has an expected type to infer from, and
+        // `checks_a_lambda_...` tests already cover it, but this pins the
+        // point next to the declaration it is not: a lambda passed where no
+        // type is expected still checks, inferring nothing about `n` rather
+        // than reporting `MISSING_PARAMETER_TYPE`.
+        accepts_body("  let double = fn(n) { n + n }\n  println(\"{double(1)}\")?");
     }
 
     #[test]

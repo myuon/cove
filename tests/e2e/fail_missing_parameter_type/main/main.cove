@@ -1,0 +1,17 @@
+use console.println
+
+/// Declares a parameter with no type.
+///
+/// ADR 0004 requires a declaration's parameters to be written; only a
+/// lambda's infer, from the expected type at its call site. This case lives
+/// in its own package so that check-time failure cannot take down every
+/// other case.
+export fn double(x) -> Int {
+  x + x
+}
+
+/// Never runs.
+export fn main() -> Result<Unit, Error> {
+  println("{double(1)}")?
+  Ok(())
+}
