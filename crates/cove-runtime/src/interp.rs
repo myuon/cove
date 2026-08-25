@@ -298,6 +298,17 @@ pub struct Interpreter<'a> {
     /// every context on this stack, so both the task and the entry that
     /// (directly or transitively) awaits it see the same wait.
     timings: Vec<Timing>,
+    /// Where the most recent assertion failed, and the message it produced.
+    ///
+    /// A failed assertion is an ordinary `Err`, which carries a message and
+    /// no source position, and that is the right shape for the language: a
+    /// test propagates it with `?` like any other expected failure. The test
+    /// runner still wants to point at the assertion the way every other
+    /// error points at source, so the one party that saw the assertion —
+    /// this evaluator — records where it was. The message is kept alongside
+    /// so a caller can tell that the `Err` it is holding is that assertion's
+    /// and not some later, unrelated failure.
+    assertion_failure: Option<(Span, String)>,
 }
 
 impl<'a> Interpreter<'a> {
@@ -312,7 +323,29 @@ impl<'a> Interpreter<'a> {
             task_ids: HashMap::new(),
             task_stack: Vec::new(),
             timings: Vec::new(),
+            assertion_failure: None,
         }
+    }
+
+    /// Where the most recent failed assertion was written, together with the
+    /// message it produced, or `None` when no assertion has failed.
+    ///
+    /// A caller compares the message against the error it is reporting: an
+    /// assertion that failed and was then handled inside the program is not
+    /// the reason a later error was returned.
+    pub fn assertion_failure(&self) -> Option<(Span, &str)> {
+        self.assertion_failure
+            .as_ref()
+            .map(|(span, message)| (*span, message.as_str()))
+    }
+
+    /// The source text `span` covers, for a diagnostic that quotes the code
+    /// it is about.
+    fn source_text(&self, span: Span) -> &str {
+        let file = self.sources.get(span.file);
+        file.text
+            .get(span.start as usize..span.end as usize)
+            .unwrap_or("?")
     }
 
     /// Installs where trace events go. Replaces any sink installed earlier;
@@ -1806,6 +1839,9 @@ impl<'a> Interpreter<'a> {
                     let args = self.eval_args(env, args, trailing)?;
                     return Ok(init_map_entry(args, span)?);
                 }
+                if builtins::is_assertion(name) {
+                    return self.assertion(env, name, args, trailing, span);
+                }
                 if builtins::is_constructor(name) {
                     let args = self.eval_args(env, args, trailing)?;
                     let values = plain_values(args, name)?;
@@ -1951,6 +1987,37 @@ impl<'a> Interpreter<'a> {
                 Ok(self.call_value_slots(value, args, span)?)
             }
         }
+    }
+
+    /// `assert(condition)` and `assertEqual(actual, expected)`.
+    ///
+    /// The source text of each argument is read back out of the
+    /// [`SourceMap`] with the expression's own span, so a failure message
+    /// names the condition in the words the test was written in. That is
+    /// what makes these builtins rather than library functions.
+    fn assertion(
+        &mut self,
+        env: &mut Env,
+        name: &str,
+        args: &[Arg],
+        trailing: Option<&Expr>,
+        span: Span,
+    ) -> Eval {
+        let spans: Vec<Span> = args
+            .iter()
+            .map(|arg| arg.value.span)
+            .chain(trailing.map(|expr| expr.span))
+            .collect();
+        let evaluated = self.eval_args(env, args, trailing)?;
+        let values = plain_values(evaluated, name)?;
+        let sources: Vec<&str> = spans.iter().map(|span| self.source_text(*span)).collect();
+        let outcome = builtins::call_assertion(name, values, &sources, span)?;
+        if let Value::Enum(result) = &outcome {
+            if &*result.case == "Err" {
+                self.assertion_failure = Some((span, result.payload[0].to_string()));
+            }
+        }
+        Ok(outcome)
     }
 
     fn eval_method_call(
@@ -3224,6 +3291,118 @@ mod tests {
 
     fn error_of(body: &str) -> RuntimeError {
         run_body(body).error()
+    }
+
+    // ---------------------------------------------------- assertions
+
+    /// Runs `test.check`, a test-shaped function holding `body`, and returns
+    /// the `Result` it produced.
+    fn run_assertion(body: &str) -> Run {
+        let source = format!("test fn check() -> Result<Unit, Error> {{\n{body}\n}}\n");
+        let (sources, program) = program_of(&source);
+        run_in(
+            &program,
+            &sources,
+            "test",
+            "check",
+            &[],
+            &[],
+            BTreeMap::new(),
+        )
+    }
+
+    /// The message a failed assertion reported, or `None` when it held.
+    fn assertion_message(body: &str) -> Option<String> {
+        match run_assertion(body).value() {
+            Value::Enum(result) if &*result.case == "Err" => Some(result.payload[0].to_string()),
+            _ => None,
+        }
+    }
+
+    #[test]
+    fn a_holding_assertion_produces_ok() {
+        assert!(matches!(
+            run_assertion("  assert(1 + 1 == 2)").value(),
+            Value::Enum(result) if &*result.case == "Ok"
+        ));
+    }
+
+    #[test]
+    fn a_failing_assertion_names_the_conditions_source_text() {
+        assert_eq!(
+            assertion_message("  assert(1 + 1 == 3)").as_deref(),
+            Some("assertion failed: `1 + 1 == 3`")
+        );
+    }
+
+    #[test]
+    fn a_failing_assertion_is_an_err_rather_than_a_panic() {
+        // `?` propagates it, so the test's own `Err` is the assertion's.
+        assert_eq!(
+            assertion_message("  assert(false)?\n  Ok(())").as_deref(),
+            Some("assertion failed: `false`")
+        );
+    }
+
+    #[test]
+    fn assert_equal_reports_both_values_and_the_actual_expressions_source() {
+        assert_eq!(assertion_message("  assertEqual(2 + 2, 4)"), None);
+        assert_eq!(
+            assertion_message("  assertEqual(2 + 2, 5)").as_deref(),
+            Some("assertion failed: `2 + 2` is `4`, expected `5`")
+        );
+    }
+
+    #[test]
+    fn a_failed_assertion_records_where_it_was_written() {
+        let source = "test fn check() -> Result<Unit, Error> {\n  assert(1 == 2)\n}\n";
+        let (sources, program) = program_of(source);
+        let mut hosts = HostRegistry::new(Grants::default());
+        let mut interpreter = Interpreter::new(&program, &sources, &mut hosts);
+        interpreter
+            .run_entry("test", "check", Vec::new())
+            .expect("the assertion fails as an `Err`, not a runtime error");
+        let (span, message) = interpreter
+            .assertion_failure()
+            .expect("the failure was recorded");
+        assert_eq!(message, "assertion failed: `1 == 2`");
+        assert_eq!(sources.get(span.file).line_col(span.start).0, 2);
+    }
+
+    #[test]
+    fn a_holding_assertion_records_nothing() {
+        let source = "test fn check() -> Result<Unit, Error> {\n  assert(1 == 1)\n}\n";
+        let (sources, program) = program_of(source);
+        let mut hosts = HostRegistry::new(Grants::default());
+        let mut interpreter = Interpreter::new(&program, &sources, &mut hosts);
+        interpreter.run_entry("test", "check", Vec::new()).unwrap();
+        assert!(interpreter.assertion_failure().is_none());
+    }
+
+    #[test]
+    fn assert_equal_refuses_the_comparison_that_equality_refuses() {
+        let error = run_assertion("  assertEqual(1, \"1\")").error();
+        assert!(
+            error.message.contains("cannot compare `Int` with `String`"),
+            "{}",
+            error.message
+        );
+    }
+
+    #[test]
+    fn a_module_declaration_wins_over_the_assertion_builtin() {
+        let source = "fn assert(value: Int) -> Int {\n  value\n}\n\n                      export fn main() -> Int {\n  assert(7)\n}\n";
+        let (sources, program) = program_of(source);
+        let run = run_in(
+            &program,
+            &sources,
+            "test",
+            "main",
+            &[],
+            &[],
+            BTreeMap::new(),
+        );
+        assert!(matches!(run.value(), Value::Int(7)));
     }
 
     // -------------------------------------------------------- traits

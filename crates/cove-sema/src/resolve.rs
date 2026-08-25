@@ -49,6 +49,13 @@ use crate::package::Package;
 pub struct FnEntry {
     pub decl: Rc<FnDecl>,
     pub exported: bool,
+    /// `test fn`: a declaration only the test runner calls.
+    ///
+    /// A test is module-private by construction — `export` and `test` cannot
+    /// both apply — so it sees its module's private declarations, and its
+    /// required capabilities are derived from its call graph exactly as any
+    /// other function's are.
+    pub is_test: bool,
     pub doc: Option<String>,
     /// The type this function is a method of, when it came from an `impl`.
     pub receiver_type: Option<String>,
@@ -286,6 +293,27 @@ impl Program {
         self.modules.get(module)?.functions.get(name)
     }
 
+    /// Every `test fn` the package declares, in module then name order.
+    ///
+    /// This is what `cove test` runs. A test is an ordinary declaration of
+    /// its module, so its required capabilities are already derived and its
+    /// body already checked; the runner only has to find it.
+    pub fn tests(&self) -> Vec<DeclaredTest<'_>> {
+        let mut found = Vec::new();
+        for (module, resolved) in &self.modules {
+            for (name, entry) in &resolved.functions {
+                if entry.is_test {
+                    found.push(DeclaredTest {
+                        module: module.as_str(),
+                        name: name.as_str(),
+                        entry,
+                    });
+                }
+            }
+        }
+        found
+    }
+
     /// Every conformance declared for the type `type_module.type_name`,
     /// paired with the module whose source declares it, in trait order.
     ///
@@ -357,6 +385,25 @@ impl Program {
             }
         }
         found.into_values().collect()
+    }
+}
+
+/// One `test fn`, and the module that declares it.
+#[derive(Clone, Copy, Debug)]
+pub struct DeclaredTest<'a> {
+    /// The module the test belongs to, whose private declarations it sees.
+    pub module: &'a str,
+    /// The test's own name.
+    pub name: &'a str,
+    /// The declaration itself, with the capabilities its call graph requires.
+    pub entry: &'a FnEntry,
+}
+
+impl DeclaredTest<'_> {
+    /// The name the runner reports and `--filter` matches, such as
+    /// `text.countsWords`.
+    pub fn qualified_name(&self) -> String {
+        format!("{}.{}", self.module, self.name)
     }
 }
 
@@ -483,6 +530,7 @@ fn resolve_module(
                         FnEntry {
                             decl: Rc::new(decl.clone()),
                             exported: item.exported,
+                            is_test: item.is_test,
                             doc: item.doc.clone(),
                             receiver_type: None,
                             from_trait_default: None,
@@ -774,6 +822,10 @@ fn resolve_module(
                         FnEntry {
                             decl: Rc::new(decl.clone()),
                             exported: inner.exported,
+                            // A method is reached through its type, never
+                            // through the test runner; the parser rejects a
+                            // `test fn` written in an `impl` block.
+                            is_test: false,
                             doc: inner.doc.clone(),
                             receiver_type: Some(type_name.clone()),
                             from_trait_default: None,
@@ -1658,6 +1710,8 @@ fn record_method(
         FnEntry {
             decl,
             exported,
+            // A method is never a test; see the `is_test` field.
+            is_test: false,
             doc,
             receiver_type: Some(type_name.to_string()),
             from_trait_default,
@@ -2808,6 +2862,73 @@ mod tests {
             .into_iter()
             .find(|d| d.code == code)
             .unwrap_or_else(|| panic!("expected a `{code}` diagnostic"))
+    }
+
+    #[test]
+    fn records_a_test_and_leaves_it_module_private() {
+        let program = resolve_ok(&[(
+            "text",
+            "fn wordCount(text: String) -> Int {\n  text.words().length()\n}\n\n             test fn countsWords() -> Result<Unit, Error> {\n  Ok(())\n}\n",
+        )]);
+        let entry = &program.modules["text"].functions["countsWords"];
+        assert!(entry.is_test);
+        assert!(!entry.exported);
+        assert!(!program.modules["text"]
+            .exports()
+            .contains(&"countsWords".to_string()));
+
+        let tests = program.tests();
+        assert_eq!(tests.len(), 1);
+        assert_eq!(tests[0].qualified_name(), "text.countsWords");
+    }
+
+    #[test]
+    fn lists_every_test_of_the_package_in_module_then_name_order() {
+        let program = resolve_ok(&[
+            (
+                "second",
+                "test fn b() -> Result<Unit, Error> {\n  Ok(())\n}\n\n                 test fn a() -> Result<Unit, Error> {\n  Ok(())\n}\n",
+            ),
+            (
+                "first",
+                "test fn c() -> Result<Unit, Error> {\n  Ok(())\n}\n",
+            ),
+        ]);
+        let names: Vec<String> = program
+            .tests()
+            .iter()
+            .map(DeclaredTest::qualified_name)
+            .collect();
+        assert_eq!(names, ["first.c", "second.a", "second.b"]);
+    }
+
+    #[test]
+    fn a_test_requires_the_capabilities_its_call_graph_reaches() {
+        let program = resolve_ok(&[(
+            "text",
+            "use console.println\n\n             fn report(text: String) -> Result<Unit, Error> {\n  println(text)\n}\n\n             test fn reports() -> Result<Unit, Error> {\n  report(\"a\")?\n  Ok(())\n}\n\n             test fn countsNothing() -> Result<Unit, Error> {\n  Ok(())\n}\n",
+        )]);
+        let required = |name: &str| -> Vec<String> {
+            program.modules["text"].functions[name]
+                .required_capabilities
+                .iter()
+                .map(Capability::to_string)
+                .collect()
+        };
+        // Derived from the call graph exactly as any other function's are:
+        // the test names no host module itself.
+        assert_eq!(required("reports"), ["console".to_string()]);
+        assert!(required("countsNothing").is_empty());
+    }
+
+    #[test]
+    fn a_test_may_call_its_modules_private_declarations() {
+        let program = resolve_ok(&[(
+            "text",
+            "fn secret() -> Int {\n  7\n}\n\n             test fn seesSecret() -> Result<Unit, Error> {\n  secret()\n  Ok(())\n}\n",
+        )]);
+        let edges = &program.call_graph[&("text".to_string(), FnKey::Fn("seesSecret".to_string()))];
+        assert!(edges.contains_key(&("text".to_string(), FnKey::Fn("secret".to_string()))));
     }
 
     #[test]

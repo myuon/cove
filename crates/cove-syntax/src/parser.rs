@@ -63,6 +63,12 @@ pub fn parse(
 /// abandoned. Recovery happens at the nearest declaration or statement.
 struct Bail;
 
+/// The modifiers written in front of a declaration.
+struct ItemModifiers {
+    exported: bool,
+    is_test: bool,
+}
+
 type PResult<T> = Result<T, Bail>;
 
 struct Parser<'a> {
@@ -452,6 +458,7 @@ impl<'a> Parser<'a> {
         match self.peek() {
             TokenKind::Keyword(
                 Keyword::Export
+                | Keyword::Test
                 | Keyword::Struct
                 | Keyword::Enum
                 | Keyword::Trait
@@ -597,7 +604,7 @@ impl Parser<'_> {
 
     fn parse_item(&mut self, doc: Option<String>) -> PResult<Item> {
         let start = self.span();
-        let exported = self.eat_keyword(Keyword::Export);
+        let modifiers = self.parse_item_modifiers();
         let keyword = match self.peek() {
             TokenKind::Keyword(keyword) => Some(*keyword),
             _ => None,
@@ -611,12 +618,100 @@ impl Parser<'_> {
             Some(Keyword::Type) => ItemKind::TypeAlias(self.parse_type_alias()?),
             _ => return Err(self.unexpected("a declaration")),
         };
+        let span = start.to(self.prev_span());
+        if modifiers.is_test && !matches!(kind, ItemKind::Fn(_)) {
+            self.error(
+                Diagnostic::error(
+                    "cove::parse::test_not_a_function",
+                    "`test` marks a function, not this declaration",
+                )
+                .at(span)
+                .rule("`test` marks a `fn` the test runner calls; no other declaration is a test.")
+                .help("Remove `test`, or move the behaviour into a `test fn`."),
+            );
+        }
         Ok(Item {
             doc,
-            exported,
+            exported: modifiers.exported,
+            is_test: modifiers.is_test,
             kind,
-            span: start.to(self.prev_span()),
+            span,
         })
+    }
+
+    /// Reads the `export` or `test` in front of a declaration.
+    ///
+    /// The two occupy one position and answer one question — who may call
+    /// this — so a declaration carries at most one of them, written once.
+    /// Every modifier is read before anything is reported, rather than
+    /// stopping at the first, so recovery continues at the declaration
+    /// itself however the mistake was written.
+    fn parse_item_modifiers(&mut self) -> ItemModifiers {
+        let mut exported: Option<Span> = None;
+        let mut is_test: Option<Span> = None;
+        loop {
+            let span = self.span();
+            let (seen, keyword) = if self.at_keyword(Keyword::Export) {
+                (&mut exported, Keyword::Export)
+            } else if self.at_keyword(Keyword::Test) {
+                (&mut is_test, Keyword::Test)
+            } else {
+                break;
+            };
+            self.bump();
+            let repeated = seen.is_some();
+            seen.get_or_insert(span);
+            if repeated {
+                self.error(
+                    Diagnostic::error(
+                        "cove::parse::repeated_modifier",
+                        format!("`{}` is written twice", keyword.as_str()),
+                    )
+                    .at(span)
+                    .rule("A declaration carries each modifier at most once.")
+                    .help(format!("Remove the second `{}`.", keyword.as_str())),
+                );
+            }
+        }
+        if let (Some(exported), Some(is_test)) = (exported, is_test) {
+            self.error(
+                Diagnostic::error(
+                    "cove::parse::exported_test",
+                    "a `test fn` may not be exported",
+                )
+                .at(exported.to(is_test))
+                .rule(
+                    "A test's whole contract is that the test runner is its only caller, so `test` and `export` cannot both apply to one declaration.",
+                )
+                .help("Remove `export`, or remove `test` and call it like any other declaration."),
+            );
+        }
+        ItemModifiers {
+            // A rejected `export` is dropped rather than kept, so nothing
+            // downstream sees a declaration that is both.
+            exported: exported.is_some() && is_test.is_none(),
+            is_test: is_test.is_some(),
+        }
+    }
+
+    /// Reports a `test fn` written anywhere but at the top level of a file.
+    ///
+    /// A test belongs to a module, which is what lets it see the module's
+    /// private declarations; a method or a local function is reached through
+    /// something else, and the runner cannot call it.
+    fn reject_nested_test(&mut self, item: &Item, place: &str) {
+        if !item.is_test {
+            return;
+        }
+        self.error(
+            Diagnostic::error(
+                "cove::parse::nested_test",
+                format!("a `test fn` may not be declared {place}"),
+            )
+            .at(item.span)
+            .rule("A test is a top-level declaration of its module, which is what the test runner calls.")
+            .help("Move the `test fn` to the top level of the file."),
+        );
     }
 
     fn parse_fn_decl(&mut self) -> PResult<FnDecl> {
@@ -950,7 +1045,10 @@ impl Parser<'_> {
                 continue;
             }
             match self.parse_item(doc.map(|(text, _)| text)) {
-                Ok(item) => items.push(item),
+                Ok(item) => {
+                    self.reject_nested_test(&item, "inside an `impl` block");
+                    items.push(item);
+                }
                 Err(Bail) => self.recover_to_item(true),
             }
         }
@@ -1182,6 +1280,7 @@ impl Parser<'_> {
 
         if self.at_item_start() {
             let item = self.parse_item(doc.map(|(text, _)| text))?;
+            self.reject_nested_test(&item, "inside a block");
             let span = item.span;
             return Ok(Stmt {
                 kind: StmtKind::Item(Box::new(item)),
@@ -2087,6 +2186,79 @@ mod tests {
             .tail
             .clone()
             .unwrap_or_else(|| panic!("`{source}` produced no tail expression"))
+    }
+
+    #[test]
+    fn parses_a_test_declaration() {
+        let unit = ok("test fn greetsByName() -> Result<Unit, Error> { Ok(()) }");
+        let item = &unit.items[0];
+        assert!(item.is_test);
+        assert!(!item.exported);
+        assert_eq!(fn_decl(item).name.node, "greetsByName");
+    }
+
+    #[test]
+    fn rejects_an_exported_test_written_either_way_round() {
+        for source in [
+            "export test fn t() -> Result<Unit, Error> { Ok(()) }",
+            "test export fn t() -> Result<Unit, Error> { Ok(()) }",
+        ] {
+            let diagnostics = errors(source);
+            assert_eq!(
+                codes(&diagnostics),
+                ["cove::parse::exported_test"],
+                "{source}"
+            );
+            assert!(diagnostics[0].message.contains("may not be exported"));
+            assert!(diagnostics[0]
+                .rule
+                .as_ref()
+                .expect("the diagnostic states its rule")
+                .contains("only caller"));
+        }
+    }
+
+    #[test]
+    fn rejects_a_modifier_written_twice() {
+        let diagnostics = errors("export export fn f() {}");
+        assert_eq!(codes(&diagnostics), ["cove::parse::repeated_modifier"]);
+        assert!(diagnostics[0].message.contains("`export` is written twice"));
+    }
+
+    #[test]
+    fn rejects_test_on_a_declaration_that_is_not_a_function() {
+        let diagnostics = errors("test struct Point { x: Int }");
+        assert_eq!(codes(&diagnostics), ["cove::parse::test_not_a_function"]);
+    }
+
+    #[test]
+    fn rejects_a_test_declared_inside_an_impl_block() {
+        let diagnostics = errors(
+            "impl Point {
+  test fn t() -> Result<Unit, Error> { Ok(()) }
+}",
+        );
+        assert_eq!(codes(&diagnostics), ["cove::parse::nested_test"]);
+        assert!(diagnostics[0].message.contains("`impl` block"));
+    }
+
+    #[test]
+    fn rejects_a_test_declared_inside_a_block() {
+        let diagnostics = errors(
+            "fn main() {
+  test fn t() -> Result<Unit, Error> { Ok(()) }
+}",
+        );
+        assert_eq!(codes(&diagnostics), ["cove::parse::nested_test"]);
+    }
+
+    #[test]
+    fn test_is_a_keyword_only_in_front_of_a_declaration() {
+        // `test` after `.` names an ordinary member, as every keyword does.
+        let unit = ok("fn main() {
+  suite.test()
+}");
+        assert_eq!(unit.items.len(), 1);
     }
 
     #[test]

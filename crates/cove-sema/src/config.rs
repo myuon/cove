@@ -13,6 +13,8 @@ pub struct Config {
     pub runs: BTreeMap<String, RunConfig>,
     /// The `[check]` table, controlling `cove check` for the whole package.
     pub check: CheckConfig,
+    /// The `[test]` table, controlling `cove test` for the whole package.
+    pub test: TestConfig,
 }
 
 /// The `[check]` table.
@@ -30,16 +32,34 @@ pub struct CheckConfig {
     pub deny_warnings: bool,
 }
 
+/// The `[test]` table.
+///
+/// Like `[check]`, this is one setting per package rather than per run: a
+/// test declares no capabilities of its own, so there is no per-test table
+/// for this to live in.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct TestConfig {
+    /// The capabilities `cove test` grants with their real implementation
+    /// instead of their fake one.
+    ///
+    /// Defaulting to fakes is what makes a suite deterministic and safe to
+    /// run anywhere, so naming a capability here is how a package says it
+    /// means the real thing for that one.
+    pub allow_real: Vec<String>,
+}
+
 /// Parses the text of a `cove.toml`.
 ///
 /// Cove prefers explicit configuration over silently ignored settings, so
 /// unknown top-level tables, unknown keys inside a `[run.<name>]` table, and
-/// unknown keys inside `[check]` are rejected rather than skipped.
+/// unknown keys inside `[check]` or `[test]` are rejected rather than
+/// skipped.
 pub fn parse(text: &str) -> Result<Config, String> {
     let table: toml::Table = text.parse().map_err(|e| format!("cove.toml: {e}"))?;
 
     let mut runs = BTreeMap::new();
     let mut check = CheckConfig::default();
+    let mut test = TestConfig::default();
     for (key, value) in &table {
         match key.as_str() {
             "run" => {
@@ -53,11 +73,39 @@ pub fn parse(text: &str) -> Result<Config, String> {
             "check" => {
                 check = parse_check(value)?;
             }
+            "test" => {
+                test = parse_test(value)?;
+            }
             other => return Err(format!("cove.toml: unknown top-level key `{other}`")),
         }
     }
 
-    Ok(Config { runs, check })
+    Ok(Config { runs, check, test })
+}
+
+fn parse_test(value: &toml::Value) -> Result<TestConfig, String> {
+    let table = value
+        .as_table()
+        .ok_or_else(|| "cove.toml: `test` must be a table".to_string())?;
+
+    let mut allow_real = Vec::new();
+    for (key, value) in table {
+        match key.as_str() {
+            "allow_real" => {
+                let items = value.as_array().ok_or_else(|| {
+                    "cove.toml: `test.allow_real` must be an array of strings".to_string()
+                })?;
+                for item in items {
+                    let item = item.as_str().ok_or_else(|| {
+                        "cove.toml: `test.allow_real` must be an array of strings".to_string()
+                    })?;
+                    allow_real.push(item.to_string());
+                }
+            }
+            other => return Err(format!("cove.toml: unknown key `test.{other}`")),
+        }
+    }
+    Ok(TestConfig { allow_real })
 }
 
 fn parse_check(value: &toml::Value) -> Result<CheckConfig, String> {
@@ -411,6 +459,42 @@ mod tests {
     fn rejects_unknown_key_in_check_table() {
         let err = parse("[check]\ndeny_warning = true\n").unwrap_err();
         assert_eq!(err, "cove.toml: unknown key `check.deny_warning`");
+    }
+
+    #[test]
+    fn allow_real_defaults_to_empty() {
+        let config = parse("[run.hello]\nentry = \"hello.main\"\n").unwrap();
+        assert!(config.test.allow_real.is_empty());
+    }
+
+    #[test]
+    fn parses_allow_real() {
+        let config = parse("[test]\nallow_real = [\"clock\", \"files\"]\n").unwrap();
+        assert_eq!(
+            config.test.allow_real,
+            vec!["clock".to_string(), "files".to_string()]
+        );
+    }
+
+    #[test]
+    fn rejects_non_string_allow_real_item() {
+        let err = parse("[test]\nallow_real = [1]\n").unwrap_err();
+        assert_eq!(
+            err,
+            "cove.toml: `test.allow_real` must be an array of strings"
+        );
+    }
+
+    #[test]
+    fn rejects_unknown_key_in_test_table() {
+        let err = parse("[test]\nallow_fake = [\"clock\"]\n").unwrap_err();
+        assert_eq!(err, "cove.toml: unknown key `test.allow_fake`");
+    }
+
+    #[test]
+    fn rejects_non_table_test() {
+        let err = parse("test = true\n").unwrap_err();
+        assert_eq!(err, "cove.toml: `test` must be a table");
     }
 
     #[test]

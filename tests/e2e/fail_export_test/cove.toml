@@ -1,0 +1,3 @@
+[run.fail_export_test]
+entry = "main.main"
+allow = []

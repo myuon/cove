@@ -1,0 +1,20 @@
+use console.println
+
+/// Returns a greeting for `name`.
+export fn greeting(name: String) -> String {
+  "Hello, {name}!"
+}
+
+/// A greeting names the person it greets.
+test fn greetsByName() -> Result<Unit, Error> {
+  assertEqual(greeting("Ada"), "Hello, Ada!")?
+  Ok(())
+}
+
+/// Printing reaches `console`, which the runner grants this test because its
+/// call graph requires it -- with the fake implementation, so nothing this
+/// test prints reaches the report.
+test fn printsTheGreeting() -> Result<Unit, Error> {
+  println(greeting("Ada"))?
+  Ok(())
+}

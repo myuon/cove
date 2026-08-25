@@ -29,6 +29,10 @@ $ cove check
 checked 7 module(s), 7 file(s)
 $ cove run hello
 Hello, world!
+$ cove test
+ok    text.countsWordsSeparatedBySpaces
+ok    text.reportsOnTheConsole
+ran 2 test(s), 2 passed
 $ cove fmt --check
 ```
 
@@ -39,9 +43,11 @@ scopes, and runtime budgets for fuel, deadlines, and host calls with tracing.
 The `console`, `env`, `documents`, `clock`, `files`, and `process` hosts each
 ship a real and a fake implementation; `database` ships a fake and a denied
 one, because connecting to a real database needs more than the standard
-library. Not yet implemented: static type checking, concurrent task
-execution, the `http` host, host resource handles such as a database
-connection, `cove build`, `cove test`, and the garbage collector.
+library. `cove test` runs every `test fn` in a package, granting each test
+the fake implementation of every capability its call graph requires unless
+`cove.toml`'s `[test] allow_real` names one. Not yet implemented: static type
+checking, concurrent task execution, the `http` host, host resource handles
+such as a database connection, `cove build`, and the garbage collector.
 
 The implementation direction is recorded in
 [ADR 0002](docs/adr/0002-implementation-language-and-backend.md), and how

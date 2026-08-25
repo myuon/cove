@@ -29,6 +29,8 @@ tests/e2e/
   <case>/expected.out       exact expected stdout
   <case>/expected.err       present only when the case must fail
   <case>/args               optional: one program argument per line
+  <case>/command            optional: the `cove` subcommand and flags to run
+                            instead of `run <case>`, one per line
   <case>/env                optional: KEY=VALUE per line, or a bare KEY to
                             remove that variable from the child process
 ```
@@ -50,6 +52,14 @@ Diagnostics contain absolute paths, so stderr is normalised before it is
 compared: the absolute path of this directory becomes the literal `<e2e>`.
 Nothing else is normalised, so line and column numbers stay pinned and a
 diagnostic that moves is a visible change.
+
+## A case that runs another command
+
+Most cases run `cove run <case>`. A case that holds a `command` file runs
+that command instead — `test`, for `cove test` — with its arguments one per
+line. Such a case looks up no `[run.<case>]` table and so does not need one,
+but it does need to be its own package: `cove test` runs every test it can
+see, and the shared package's tests are not this case's.
 
 ## Shared cases vs. a case that is its own package
 
@@ -82,14 +92,15 @@ that most of the suite still lives together.
 
 ## Adding a case
 
-1. Decide whether the case needs its own package (see above). For a shared
-   case, create `<case>/main.cove`; for an own-package case, create
+1. Decide whether the case runs a program or another command, and whether it
+   needs its own package (see above). For a shared case, create
+   `<case>/main.cove`; for an own-package case, create
    `<case>/cove.toml` and `<case>/main/main.cove`. Give every exported
    declaration a `///` doc comment, and print results with `console.println`
    so the behaviour is observable.
 2. Add a `[run.<case>]` table — to `cove.toml` for a shared case, or to
    `<case>/cove.toml` for an own-package case — granting exactly the
-   capabilities the program needs.
+   capabilities the program needs. A case with a `command` file needs none.
 3. Generate the golden files, then read the diff before committing it.
 
 ## Updating the golden files

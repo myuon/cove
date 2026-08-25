@@ -28,6 +28,13 @@ pub struct Use {
 pub struct Item {
     pub doc: Option<String>,
     pub exported: bool,
+    /// `test fn name() -> Result<Unit, Error>`: a declaration the test
+    /// runner calls and nothing else does.
+    ///
+    /// `test` occupies the position `export` occupies and says the
+    /// comparable thing — who may call this — so a declaration carries at
+    /// most one of the two, and only a `fn` carries `test` at all.
+    pub is_test: bool,
     pub kind: ItemKind,
     pub span: Span,
 }
