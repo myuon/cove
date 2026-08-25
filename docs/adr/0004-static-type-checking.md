@@ -4,12 +4,15 @@
 - Date: 2026-08-25
 - Amended by: [ADR 0005](0005-module-to-module-imports.md), which gave the
   checker the import environment "Checking is per-module" said it would need,
-  and [ADR 0006](0006-traits-and-dispatch.md), which turned "parametric and
-  unbounded" into parametric with bounds
+  [ADR 0006](0006-traits-and-dispatch.md), which turned "parametric and
+  unbounded" into parametric with bounds, and this ADR's own
+  "Amendment (2026-08-25): one builtin table" below, which unmirrors the
+  builtin method table "What is not checked yet" recorded
 - Implemented by: PR #12; the declaration-parameter rule by PR #43; the Host
-  API schema by PR #48
+  API schema by PR #48; the amendment by PR #51
 - Implementation status: partial — see "What is not checked yet" below, which
-  is now shorter than it was: the checker reads the Host API schema (#44)
+  is now shorter than it was: the checker reads the Host API schema (#44) and
+  the builtin table it used to mirror (#49)
 
 ## Context
 
@@ -95,7 +98,9 @@ Builtin method signatures should live in one table that the checker and the
 interpreter's builtins both read, so a method cannot exist at run time without
 a type. They cannot literally share one today: `cove-sema` does not depend on
 `cove-runtime` and must not, so the checker mirrors the table and says so.
-Unifying them needs a crate both can depend on.
+Unifying them needs a crate both can depend on. That crate now exists and the
+mirroring is over; the amendment below says how, and what the shared table had
+to be able to say that the Host API schema cannot.
 
 ### Two types no program can write
 
@@ -171,12 +176,62 @@ passing the wrong thing checked clean. That is now refused
 (`cove::type::missing_parameter_type`), closing
 [issue #41](https://github.com/myuon/cove/issues/41).
 
-Two smaller things are worth stating because they read as gaps and are not. A
+One smaller thing is worth stating because it reads as a gap and is not: a
 bound written on a `struct`, `enum`, or `type` parameter is rejected outright,
 because a bound is checked where its parameter is instantiated and only a call
-site instantiates one. And the builtin method table is still mirrored between
-`cove-sema` and `cove-runtime` rather than shared — but the crate both can
-depend on, which this ADR said that would have to wait for, now exists:
-`cove-schema` carries the Host API schema, and the builtin table is the
-obvious second thing to move into it
-([issue #49](https://github.com/myuon/cove/issues/49)).
+site instantiates one.
+
+The builtin method table used to be listed here too, as still mirrored between
+`cove-sema` and `cove-runtime` rather than shared. It is not any more; the
+amendment below says where it went.
+
+## Amendment (2026-08-25): one builtin table
+
+This ADR wrote the builtin methods and associated functions out twice — once
+in `cove-sema` with types attached and once in `cove-runtime` with bodies
+attached — and said the duplication would stand "until a crate both can depend
+on exists". [ADR 0013](0013-host-resource-handles.md)'s second amendment built
+that crate for the Host API schema. The same argument moves the builtins into
+it, and [issue #49](https://github.com/myuon/cove/issues/49) asks for exactly
+that: two lists that must agree and cannot see each other drift silently, and
+the builtin pair had no cross-crate test at all, so a method added to one side
+and not the other was either an error `cove check` reported on a program that
+ran or a program that checked and then failed at run time.
+
+`cove_schema::builtins` is the table now, and `cove-sema` has none of its own:
+`builtin_method`, `builtin_associated`, and `is_builtin_type` read it, and so
+does the help line that lists what a receiver does have — which had quietly
+become a third copy of the same list, and had drifted, never gaining
+`mapError`, `cancel`, `lock`, or `spawn`.
+
+**It needs a vocabulary of its own, and that is the part worth arguing.** The
+Host API schema's `HostType` is deliberately monomorphic, because a boundary
+has nothing to instantiate a type parameter with. A builtin is the opposite of
+that: `Array<T>.get` answers in the element type of the receiver it was called
+on, `snapshot` answers in the receiver's own type, `Shared<T>.lock` answers in
+whatever its callback produces, and `Vector.of(items: T...)` binds a parameter
+of its own. So `cove-schema` carries two vocabularies rather than one widened
+one — `HostType` for what crosses the boundary, `BuiltinType` for what the
+language says about itself — and they diverge exactly where the two kinds of
+signature do. Widening `HostType` would have put generics into every host
+signature that has no use for them, and `HostType::Any` — a boundary's way of
+saying it does not look inside a value — means nothing for a method the
+language itself defines.
+
+**The runtime reads it where reading it is free, and no further.** The
+`is_builtin_type` and `is_mutating_method` predicates are the two questions
+the interpreter answers from a name alone, and both are the shared table's
+now. Dispatch is not: a builtin's body reaches into a runtime `Value`, so it
+stays beside the value model, and `call_method` is the hottest path in a
+tree-walking interpreter. What holds the `match` to the table is
+`crates/cove-runtime/tests/builtin_schema.rs`, which drives every entry
+through resolve, check, and a real run. A signature the schema gains with no
+body behind it fails a test; a body the schema does not declare is unreachable,
+because `cove check` refuses to call a name the table does not have.
+
+What is left mirrored, and stated so a reader does not have to derive it:
+`assert` and `assertEqual`'s arities, the constructor names `Ok`, `Err`,
+`Some`, `Error`, and `Shared`, and which receivers are told that `count()` is
+spelled `length()`. None of those is a method or an associated function, so
+none is in this table;
+[issue #50](https://github.com/myuon/cove/issues/50) tracks them.
