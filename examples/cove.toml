@@ -29,3 +29,8 @@ allow = ["console"]
 [run.callbacks]
 entry = "callbacks.main"
 allow = ["network", "database", "clock", "console"]
+
+[run.statusCodes]
+entry = "codegen.statusCodes"
+allow = ["files"]
+generates = "httpstatus/status_code.cove"

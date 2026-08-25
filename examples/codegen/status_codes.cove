@@ -1,0 +1,28 @@
+use files.read
+
+/// Builds the `httpstatus.StatusCode` module from `files/status_codes.txt`,
+/// which pairs each numeric code with a `PascalCase` case name as
+/// alternating whitespace-separated tokens: `200 Ok 404 NotFound ...`. One
+/// data file driving both the enum's cases and its `code()` accessor is what
+/// keeps them from drifting apart the way two hand-written lists would.
+export fn statusCodes() -> Result<String, Error> {
+  let tokens = files.read("status_codes.txt")?.words()
+
+  var cases = ""
+  var arms = ""
+  for i in 0..<tokens.length() {
+    if i % 2 == 0 {
+      continue
+    }
+    let code = tokens.get(i - 1).unwrapOr("0")
+    let name = tokens.get(i).unwrapOr("Unknown")
+    cases = "{cases}  {name}\n"
+    arms = "{arms}      StatusCode.{name} => {code}\n"
+  }
+
+  let head = "/// HTTP status codes this package recognizes, derived from\n/// `files/status_codes.txt` by `codegen.statusCodes`.\nexport enum StatusCode \{\n"
+  let mid = "\}\n\nimpl StatusCode \{\n  /// The numeric HTTP status code.\n  export fn code(self) -> Int \{\n    match self \{\n"
+  let tail = "    \}\n  \}\n\}\n"
+
+  Ok("{head}{cases}{mid}{arms}{tail}")
+}

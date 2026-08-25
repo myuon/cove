@@ -1,0 +1,4 @@
+/// Builds a tiny generated module, needing no capability at all.
+export fn build() -> Result<String, Error> {
+  Ok("/// A generated constant.\nexport fn answer() -> Int \{\n42\n\}\n")
+}

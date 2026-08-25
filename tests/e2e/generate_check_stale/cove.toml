@@ -1,0 +1,6 @@
+# `out/hello.cove` is checked in stale on purpose, so `cove generate --check`
+# has something to refuse.
+
+[run.build]
+entry = "gen.build"
+generates = "out/hello.cove"

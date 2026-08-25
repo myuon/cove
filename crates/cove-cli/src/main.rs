@@ -17,6 +17,7 @@ use cove_runtime::{
     create_trace_file, Budget, Cancellation, JsonlSink, Limits, NullSink, Runtime, TraceEvent,
     TraceHeader, TraceSink, ValueCapture,
 };
+use cove_sema::config::RunConfig;
 use cove_sema::package::Package;
 use cove_sema::resolve::{
     AliasEntry, EnumEntry, FnEntry, Program, ResolvedModule, StructEntry, TraitEntry,
@@ -27,6 +28,7 @@ mod api;
 mod build;
 #[cfg(test)]
 mod fixture;
+mod generate;
 mod impact;
 mod json;
 mod replay;
@@ -41,6 +43,8 @@ usage:
   cove check [path] [--deny-warnings]  parse, resolve, and type-check the package
   cove run <name> [flags] [args]       run the entry selected by `[run.<name>]` in cove.toml
   cove build <name> [--out <path>]     package that run as a native executable
+  cove generate <name>                 run <name>'s entry and write its source to `generates`
+  cove generate --check                fail if any `generates` file is stale
   cove test [path] [--filter <sub>]    run every `test fn` the package declares
   cove outline [path]                  show modules and their exported declarations
   cove api snapshot [path]             record the package's derived public interface
@@ -91,6 +95,18 @@ does not grant. Name it as `name`, `module.name`, or `module.Type.method`.
 A caller marked `(approximate)` is reached only through a call whose
 receiver type the compiler cannot narrow yet.
 
+`cove generate <name>` runs `[run.<name>]`'s entry under the capabilities and
+budgets that table grants, exactly as `cove run` does, except the entry must
+return `Result<String, Error>`. The source it returns is written to the
+package-relative path `generates` names, formatted, and the package is then
+checked; a generator whose output does not parse fails pointing at that file.
+The written file carries a header marking it generated and naming the run
+that made it. `cove build`, `cove run`, `cove check`, and `cove test` never
+generate: `cove generate` is the only command that runs project code besides
+an explicit `run`. `cove generate --check` regenerates every run that sets
+`generates` into memory, compares it against what is on disk, and exits
+non-zero on the first file that differs, which is the form to run in CI.
+
 `cove trace` reads a JSONL trace written by `cove run --trace` and prints a
 summary and a timeline. It reports which of the distinctions ADR 0001 asks a
 trace to make the events actually carry, and which they do not.
@@ -123,6 +139,7 @@ fn main() -> ExitCode {
         "check" => cmd_check(&args[1..]),
         "run" => cmd_run(&args[1..]),
         "build" => build::cmd_build(&args[1..]),
+        "generate" => generate::cmd_generate(&args[1..]),
         "test" => test::cmd_test(&args[1..]),
         "outline" => cmd_outline(args.get(1).map(Path::new)),
         "api" => api::cmd_api(&args[1..]),
@@ -163,7 +180,8 @@ fn main() -> ExitCode {
         | Err(CliError::Unformatted)
         | Err(CliError::BreakingChange)
         | Err(CliError::TestsFailed)
-        | Err(CliError::Diverged) => ExitCode::FAILURE,
+        | Err(CliError::Diverged)
+        | Err(CliError::GenerateStale) => ExitCode::FAILURE,
     }
 }
 
@@ -190,6 +208,10 @@ pub(crate) enum CliError {
     /// `cove replay` could not reproduce the recorded run. The divergence
     /// report was already printed, so there is nothing left to say.
     Diverged,
+    /// `cove generate --check` found a `generates` file that would change if
+    /// regenerated. Which files and how to fix them were already printed, so
+    /// there is nothing left to say.
+    GenerateStale,
 }
 
 impl From<String> for CliError {
@@ -863,17 +885,47 @@ fn cmd_run(args: &[String]) -> Result<(), CliError> {
     };
 
     let (sources, package, program) = load(None)?;
-    let Some(run) = package.config.runs.get(name.as_str()) else {
+    let run = lookup_run(&package, name)?;
+    let (module, entry) = lookup_entry(&program, name, run)?;
+
+    let flags = parse_run_flags(&args[1..])?;
+
+    let program = Arc::new(program);
+    let sources = Arc::new(sources);
+    match execute_entry(&package, &program, &sources, run, module, entry, flags) {
+        Ok(value) => report_exit(value),
+        Err(ExecuteError::Setup(message)) => Err(CliError::Message(message)),
+        Err(ExecuteError::Runtime(error)) => Err(CliError::Diagnostics {
+            sources,
+            items: vec![error.to_diagnostic()],
+        }),
+    }
+}
+
+/// Looks up `[run.<name>]`, reporting every known run name when there is no
+/// such table.
+pub(crate) fn lookup_run<'a>(package: &'a Package, name: &str) -> Result<&'a RunConfig, CliError> {
+    package.config.runs.get(name).ok_or_else(|| {
         let known: Vec<&str> = package.config.runs.keys().map(String::as_str).collect();
-        return Err(CliError::Message(format!(
+        CliError::Message(format!(
             "cove.toml has no `[run.{name}]` table\n  known runs: {}",
             if known.is_empty() {
                 "(none)".to_string()
             } else {
                 known.join(", ")
             }
-        )));
-    };
+        ))
+    })
+}
+
+/// Splits `run.entry` into its module and function name and checks the
+/// package declares it, which `cove run` and `cove generate` both need
+/// before they can invoke it.
+pub(crate) fn lookup_entry<'a>(
+    program: &Program,
+    name: &str,
+    run: &'a RunConfig,
+) -> Result<(&'a str, &'a str), CliError> {
     let Some((module, entry)) = run.entry_parts() else {
         return Err(CliError::Message(format!(
             "`[run.{name}] entry` must be a qualified function such as `hello.main`, found `{}`",
@@ -886,14 +938,41 @@ fn cmd_run(args: &[String]) -> Result<(), CliError> {
             run.entry
         )));
     }
+    Ok((module, entry))
+}
 
-    let flags = parse_run_flags(&args[1..])?;
+/// How [`execute_entry`] can fail: setting up its execution -- such as
+/// creating the file `--trace` names -- or the entry itself failing.
+///
+/// These are kept apart because only the second carries a [`SourceMap`]
+/// span: a setup failure is the CLI's own message, while a runtime failure
+/// is a diagnostic pointing into the program that ran.
+pub(crate) enum ExecuteError {
+    Setup(String),
+    Runtime(cove_runtime::RuntimeError),
+}
 
-    // `cove build` registers the same hosts through the same call, so a run
-    // and the binary built from it face one boundary rather than two that
-    // have to be kept in step. `files/` in the package is the narrow default,
-    // next to the `documents/` the reader host already uses; `--files-root`
-    // is how a run that means something else says so.
+/// Runs `run`'s entry under the capabilities `[run.<name>] allow` grants and
+/// the budgets `flags` and `run` set.
+///
+/// Shared by `cove run` and `cove generate`: ADR 0010 makes a generator "an
+/// ordinary capability-controlled Cove entry", so nothing about how it is
+/// invoked may differ from any other run. Host registration itself goes
+/// through `register_hosts`, the same call `cove build`'s embedded binary
+/// uses, so a run, a generator, and the binary built from a run all face one
+/// boundary rather than several that could drift apart.
+pub(crate) fn execute_entry(
+    package: &Package,
+    program: &Arc<Program>,
+    sources: &Arc<SourceMap>,
+    run: &RunConfig,
+    module: &str,
+    entry: &str,
+    flags: RunFlags,
+) -> Result<cove_runtime::Value, ExecuteError> {
+    // `files/` in the package is the narrow default, next to the
+    // `documents/` the reader host already uses; `--files-root` is how a run
+    // that means something else says so.
     let mut hosts = register_hosts(HostSetup {
         grants: run.allow.clone(),
         documents_root: package.root.join("documents"),
@@ -930,7 +1009,7 @@ fn cmd_run(args: &[String]) -> Result<(), CliError> {
         Some(TraceTarget::Stderr) => Box::new(JsonlSink::new(std::io::stderr(), header)),
         Some(TraceTarget::File(path)) => {
             let file = create_trace_file(path).map_err(|e| {
-                CliError::Message(format!(
+                ExecuteError::Setup(format!(
                     "cannot create trace file `{}`: {e}",
                     path.display()
                 ))
@@ -974,22 +1053,15 @@ fn cmd_run(args: &[String]) -> Result<(), CliError> {
         .map(|a| a.as_str().into())
         .collect();
 
-    let sources = Arc::new(sources);
     let runtime =
-        Runtime::new(Arc::new(program), sources.clone(), Arc::new(hosts)).with_trace(sink);
+        Runtime::new(Arc::clone(program), Arc::clone(sources), Arc::new(hosts)).with_trace(sink);
     let outcome = Interpreter::new(&runtime).run_entry(module, entry, program_args);
 
     if flags.stats {
         print_stats(runtime.hosts(), &wait_total);
     }
 
-    match outcome {
-        Ok(value) => report_exit(value),
-        Err(error) => Err(CliError::Diagnostics {
-            sources,
-            items: vec![error.to_diagnostic()],
-        }),
-    }
+    outcome.map_err(ExecuteError::Runtime)
 }
 
 /// A `--fuel`, `--deadline`, `--max-host-calls`, `--trace`, `--stats`,
@@ -1009,7 +1081,7 @@ fn cmd_run(args: &[String]) -> Result<(), CliError> {
 /// duplicating one. Neither fits "if it is not straightforward with std
 /// alone, skip it," so `cove run` cannot yet be interrupted through
 /// `Cancellation` from outside; only the limits below can stop a run.
-struct RunFlags {
+pub(crate) struct RunFlags {
     fuel: Option<u64>,
     deadline: Option<Duration>,
     max_host_calls: Option<u64>,
@@ -1022,6 +1094,26 @@ struct RunFlags {
     /// The executables `process.run` may start. Empty allows none.
     allow_exec: Vec<PathBuf>,
     program_args: Vec<String>,
+}
+
+impl RunFlags {
+    /// No CLI overrides at all: capabilities and budgets come entirely from
+    /// `[run.<name>]`, which is what `cove generate` uses so a generator
+    /// runs under exactly the authority its config table grants, nothing
+    /// more and nothing a flag could add.
+    pub(crate) fn none() -> RunFlags {
+        RunFlags {
+            fuel: None,
+            deadline: None,
+            max_host_calls: None,
+            trace: None,
+            trace_values: ValueCapture::Full,
+            stats: false,
+            files_root: None,
+            allow_exec: Vec::new(),
+            program_args: Vec::new(),
+        }
+    }
 }
 
 /// Where `--trace` (or the config's `trace` key) sends trace lines.
@@ -1390,7 +1482,7 @@ module hello
     requires console
 ";
         assert!(
-            out.contains(&format!("{expected_hello}module restricted\n")),
+            out.contains(&format!("{expected_hello}module httpstatus\n")),
             "unexpected outline:\n{out}"
         );
 

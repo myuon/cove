@@ -1,0 +1,6 @@
+# A package generated into by `cove generate build`, run by `cove generate`
+# rather than by `cove run`.
+
+[run.build]
+entry = "gen.build"
+generates = "out/hello.cove"
