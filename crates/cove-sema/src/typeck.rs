@@ -39,10 +39,6 @@
 //!   ([`UNRESOLVED_NAME`], [`UNKNOWN_TYPE`]). A lowercase name has no such
 //!   excuse — locals, parameters, module functions and `use`d host items are
 //!   all in scope — so an unresolved one is an error ([`UNKNOWN_NAME`]).
-//! - **`Map` and `Set`.** They are immutable in the MVP and the runtime gives
-//!   them no methods and no constructors at all, so there is no signature to
-//!   check a call on one against. Such a call warns ([`UNCHECKED_OPERATION`])
-//!   and yields `Unknown`.
 //! - **A type used as a value.** `Vector` in `Vector.of(1, 2)` is understood
 //!   as part of the call; a bare `Vector`, `console`, or `Counter` used as a
 //!   value is not a form with a type in this system.
@@ -142,8 +138,6 @@ pub const RECEIVER: &str = "cove::type::receiver";
 pub const NOT_A_PLACE: &str = "cove::type::not_a_place";
 /// An entry function's shape does not fit the host boundary.
 pub const ENTRY: &str = "cove::type::entry";
-/// A call the MVP gives no signature to (warning).
-pub const UNCHECKED_OPERATION: &str = "cove::type::unchecked_operation";
 
 /// Type-checks a resolved program.
 ///
@@ -186,6 +180,9 @@ pub enum Ty {
     Vector(Box<Ty>),
     Set(Box<Ty>),
     Map(Box<Ty>, Box<Ty>),
+    /// One `key`/`value` pair: what `Map.of` collects and what `for` binds
+    /// over a `Map`.
+    MapEntry(Box<Ty>, Box<Ty>),
     Option(Box<Ty>),
     Result(Box<Ty>, Box<Ty>),
     Task(Box<Ty>),
@@ -237,9 +234,9 @@ impl Ty {
             | (Ty::Set(a), Ty::Set(b))
             | (Ty::Option(a), Ty::Option(b))
             | (Ty::Task(a), Ty::Task(b)) => a.matches(b),
-            (Ty::Map(ak, av), Ty::Map(bk, bv)) | (Ty::Result(ak, av), Ty::Result(bk, bv)) => {
-                ak.matches(bk) && av.matches(bv)
-            }
+            (Ty::Map(ak, av), Ty::Map(bk, bv))
+            | (Ty::MapEntry(ak, av), Ty::MapEntry(bk, bv))
+            | (Ty::Result(ak, av), Ty::Result(bk, bv)) => ak.matches(bk) && av.matches(bv),
             (Ty::Struct(a, aargs), Ty::Struct(b, bargs))
             | (Ty::Enum(a, aargs), Ty::Enum(b, bargs)) => {
                 a == b
@@ -281,6 +278,9 @@ impl Ty {
             Ty::Option(inner) => Ty::Option(Box::new(inner.substitute(subst))),
             Ty::Task(inner) => Ty::Task(Box::new(inner.substitute(subst))),
             Ty::Map(k, v) => Ty::Map(Box::new(k.substitute(subst)), Box::new(v.substitute(subst))),
+            Ty::MapEntry(k, v) => {
+                Ty::MapEntry(Box::new(k.substitute(subst)), Box::new(v.substitute(subst)))
+            }
             Ty::Result(t, e) => {
                 Ty::Result(Box::new(t.substitute(subst)), Box::new(e.substitute(subst)))
             }
@@ -307,7 +307,9 @@ impl Ty {
 impl fmt::Display for Ty {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Ty::Unknown => f.write_str("?"),
+            // An unknown type reads as `_` because that is how an
+            // unconstrained position is written in Cove source.
+            Ty::Unknown => f.write_str("_"),
             Ty::Never => f.write_str("!"),
             Ty::Unit => f.write_str("()"),
             Ty::Bool => f.write_str("Bool"),
@@ -324,6 +326,7 @@ impl fmt::Display for Ty {
             Ty::Option(inner) => write!(f, "Option<{inner}>"),
             Ty::Task(inner) => write!(f, "Task<{inner}>"),
             Ty::Map(k, v) => write!(f, "Map<{k}, {v}>"),
+            Ty::MapEntry(k, v) => write!(f, "MapEntry<{k}, {v}>"),
             Ty::Result(t, e) => write!(f, "Result<{t}, {e}>"),
             Ty::Param(name) => f.write_str(name),
             Ty::Struct(name, args) | Ty::Enum(name, args) => {
@@ -829,7 +832,7 @@ impl<'a> Checker<'a> {
         let arity = match name {
             "Unit" | "Bool" | "Int" | "Float" | "String" | "Duration" | "Error" | "Range" => 0,
             "Array" | "Vector" | "Set" | "Option" | "Task" => 1,
-            "Map" | "Result" => 2,
+            "Map" | "MapEntry" | "Result" => 2,
             _ => return None,
         };
         self.check_type_arity(name, arity, args.len(), span);
@@ -850,6 +853,7 @@ impl<'a> Checker<'a> {
             "Option" => Ty::Option(Box::new(first)),
             "Task" => Ty::Task(Box::new(first)),
             "Map" => Ty::Map(Box::new(first), Box::new(second)),
+            "MapEntry" => Ty::MapEntry(Box::new(first), Box::new(second)),
             _ => Ty::Result(Box::new(first), Box::new(second)),
         })
     }
@@ -1153,11 +1157,12 @@ impl<'a> Checker<'a> {
             return sig.as_value();
         }
         // A type or a host module used as a value has no type in this system;
-        // the forms that give it meaning (`Vector.of`, `console.println`) are
-        // understood at the call itself.
+        // the forms that give it meaning (`Vector.of`, `MapEntry(key:,
+        // value:)`, `console.println`) are understood at the call itself.
         if self.module.structs.contains_key(name)
             || self.module.enums.contains_key(name)
             || is_builtin_type(name)
+            || name == "MapEntry"
             || self.module.host_uses.contains(name)
             || self.module.host_items.contains_key(name)
         {
@@ -1269,6 +1274,22 @@ impl<'a> Checker<'a> {
                     }
                 }
             }
+            Ty::MapEntry(key, value) => match name.node.as_str() {
+                "key" => (**key).clone(),
+                "value" => (**value).clone(),
+                other => {
+                    self.diagnostics.push(
+                        Diagnostic::error(
+                            UNKNOWN_FIELD,
+                            format!("`MapEntry` has no field `{other}`"),
+                        )
+                        .at(span)
+                        .rule("A `MapEntry` carries exactly a `key` and a `value`.")
+                        .help("write `.key` or `.value`"),
+                    );
+                    Ty::Unknown
+                }
+            },
             other => {
                 self.diagnostics.push(
                     Diagnostic::error(
@@ -1902,13 +1923,18 @@ impl<'a> Checker<'a> {
         let ty = self.expr(iterable, None);
         let element = match &ty {
             Ty::Unknown | Ty::Never => Ty::Unknown,
-            Ty::Array(inner) | Ty::Vector(inner) => (**inner).clone(),
+            Ty::Array(inner) | Ty::Vector(inner) | Ty::Set(inner) => (**inner).clone(),
             Ty::Range => Ty::Int,
+            // A `Map` iterates in ascending key order, binding each pair as
+            // the same `MapEntry` shape `Map.of` accepts.
+            Ty::Map(key, value) => Ty::MapEntry(key.clone(), value.clone()),
             other => {
                 self.diagnostics.push(
                     Diagnostic::error(
                         ITERABLE,
-                        format!("`for` iterates an `Array`, a `Vector`, or a `Range`, but found `{other}`"),
+                        format!(
+                            "`for` iterates an `Array`, a `Vector`, a `Range`, a `Set`, or a `Map`, but found `{other}`"
+                        ),
                     )
                     .at(iterable.span)
                     .rule("`for` iterates a sequence; iteration order is defined by each collection type.")
@@ -2062,6 +2088,9 @@ impl<'a> Checker<'a> {
         if self.module.host_items.contains_key(name) {
             self.check_args_freely(args, trailing);
             return Ty::Unknown;
+        }
+        if name == "MapEntry" {
+            return self.map_entry(args, trailing, span);
         }
         if let Some(ty) = self.constructor(name, args, trailing, span, expected) {
             return ty;
@@ -2236,7 +2265,13 @@ impl<'a> Checker<'a> {
         None
     }
 
-    /// `Vector.of(...)`, `Int.parse(...)`.
+    /// `Vector.of(...)`, `Map.of(...)`, `Set.of(...)`, `Int.parse(...)`.
+    ///
+    /// This table is the static half of
+    /// `cove_runtime::builtins::call_associated`: every associated function
+    /// the runtime dispatches appears here with a type, and nothing else
+    /// does. A spread argument is left to the runtime, which rejects one in
+    /// any of these calls.
     fn builtin_associated(
         &mut self,
         type_name: &str,
@@ -2245,29 +2280,44 @@ impl<'a> Checker<'a> {
         trailing: Option<&Expr>,
         span: Span,
     ) -> Ty {
-        match (type_name, name.node.as_str()) {
-            ("Vector", "of") => {
-                let mut element = Ty::Unknown;
-                for arg in args {
-                    let ty = self.expr(&arg.value, None);
-                    element = element.join(&ty);
-                }
-                if let Some(trailing) = trailing {
-                    self.expr(trailing, None);
-                }
-                Ty::Vector(Box::new(element))
-            }
-            ("Int", "parse") => {
-                let sig = BuiltinSig {
-                    generics: Vec::new(),
-                    params: vec![("text", Ty::Str)],
-                    ret: Ty::Result(Box::new(Ty::Int), Box::new(Ty::Error)),
-                };
-                self.call_builtin(&sig, "`Int.parse`", args, trailing, span)
-            }
-            ("Map" | "Set", _) => {
-                self.unchecked_collection(type_name, &name.node, args, trailing, span)
-            }
+        let element = |name: &'static str, param: Ty, ret: Ty, generics: Vec<Rc<str>>| BuiltinSig {
+            generics,
+            params: vec![(name, param)],
+            variadic: true,
+            ret,
+        };
+        let sig = match (type_name, name.node.as_str()) {
+            ("Vector", "of") => element(
+                "items",
+                Ty::Param("T".into()),
+                Ty::Vector(Box::new(Ty::Param("T".into()))),
+                vec!["T".into()],
+            ),
+            // `Map.of` collects the pairs `MapEntry(key:, value:)` builds.
+            ("Map", "of") => element(
+                "entries",
+                Ty::MapEntry(
+                    Box::new(Ty::Param("K".into())),
+                    Box::new(Ty::Param("V".into())),
+                ),
+                Ty::Map(
+                    Box::new(Ty::Param("K".into())),
+                    Box::new(Ty::Param("V".into())),
+                ),
+                vec!["K".into(), "V".into()],
+            ),
+            ("Set", "of") => element(
+                "items",
+                Ty::Param("T".into()),
+                Ty::Set(Box::new(Ty::Param("T".into()))),
+                vec!["T".into()],
+            ),
+            ("Int", "parse") => BuiltinSig {
+                generics: Vec::new(),
+                params: vec![("text", Ty::Str)],
+                variadic: false,
+                ret: Ty::Result(Box::new(Ty::Int), Box::new(Ty::Error)),
+            },
             _ => {
                 self.diagnostics.push(
                     Diagnostic::error(
@@ -2275,16 +2325,40 @@ impl<'a> Checker<'a> {
                         format!("`{type_name}` has no associated function `{}`", name.node),
                     )
                     .at(span)
-                    .rule("A builtin type's associated functions are `Vector.of` and `Int.parse`.")
+                    .rule(
+                        "A builtin type's associated functions are `Vector.of`, `Map.of`, `Set.of`, and `Int.parse`.",
+                    )
                     .help(format!(
                         "`{type_name}` has no `{}`; construct the value another way",
                         name.node
                     )),
                 );
                 self.check_args_freely(args, trailing);
-                Ty::Unknown
+                return Ty::Unknown;
             }
-        }
+        };
+        let what = format!("`{type_name}.{}`", name.node);
+        self.call_builtin(&sig, &what, args, trailing, span)
+    }
+
+    /// `MapEntry(key: ..., value: ...)`, the one builtin struct: a
+    /// synthesized labeled call, exactly like a declared struct's
+    /// initializer, that exists so `Map.of` has a call-shaped way to write
+    /// the pairs it collects.
+    fn map_entry(&mut self, args: &[Arg], trailing: Option<&Expr>, span: Span) -> Ty {
+        let sig = BuiltinSig {
+            generics: vec!["K".into(), "V".into()],
+            params: vec![
+                ("key", Ty::Param("K".into())),
+                ("value", Ty::Param("V".into())),
+            ],
+            variadic: false,
+            ret: Ty::MapEntry(
+                Box::new(Ty::Param("K".into())),
+                Box::new(Ty::Param("V".into())),
+            ),
+        };
+        self.call_builtin(&sig, "`MapEntry`", args, trailing, span)
     }
 
     /// `Type(field: value, ...)`, the synthesized labeled call the card
@@ -2847,14 +2921,6 @@ impl<'a> Checker<'a> {
                 self.check_args_freely(args, trailing);
                 return Ty::Unknown;
             }
-            Ty::Map(_, _) | Ty::Set(_) => {
-                let type_name = if matches!(receiver, Ty::Set(_)) {
-                    "Set"
-                } else {
-                    "Map"
-                };
-                return self.unchecked_collection(type_name, &name.node, args, trailing, span);
-            }
             _ => {}
         }
 
@@ -2931,31 +2997,6 @@ impl<'a> Checker<'a> {
         Ty::Result(Box::new(ok.clone()), Box::new(replacement))
     }
 
-    /// A call on a `Map` or a `Set`, which the MVP gives no operations at
-    /// all, so there is nothing to check it against.
-    fn unchecked_collection(
-        &mut self,
-        type_name: &str,
-        name: &str,
-        args: &[Arg],
-        trailing: Option<&Expr>,
-        span: Span,
-    ) -> Ty {
-        self.diagnostics.push(
-            Diagnostic::warning(
-                UNCHECKED_OPERATION,
-                format!("`{type_name}.{name}` has no signature, so this call is unchecked"),
-            )
-            .at(span)
-            .rule("`Map` and `Set` are immutable in the MVP and declare no operations.")
-            .help(format!(
-                "the runtime will reject `{type_name}.{name}` as well; use an `Array` or a `Vector` until `{type_name}` has operations"
-            )),
-        );
-        self.check_args_freely(args, trailing);
-        Ty::Unknown
-    }
-
     /// Checks a call against a builtin signature, which binds no generics of
     /// its own beyond those already substituted into it.
     fn call_builtin(
@@ -2966,13 +3007,15 @@ impl<'a> Checker<'a> {
         trailing: Option<&Expr>,
         span: Span,
     ) -> Ty {
+        let last = sig.params.len().saturating_sub(1);
         let params: Vec<ParamSig> = sig
             .params
             .iter()
-            .map(|(name, ty)| ParamSig {
+            .enumerate()
+            .map(|(index, (name, ty))| ParamSig {
                 name: (*name).to_string(),
                 ty: ty.clone(),
-                variadic: false,
+                variadic: sig.variadic && index == last,
                 has_default: false,
                 span,
             })
@@ -3174,7 +3217,9 @@ fn unify(
         | (Ty::Set(a), Ty::Set(b))
         | (Ty::Option(a), Ty::Option(b))
         | (Ty::Task(a), Ty::Task(b)) => unify(a, b, generics, subst),
-        (Ty::Map(ak, av), Ty::Map(bk, bv)) | (Ty::Result(ak, av), Ty::Result(bk, bv)) => {
+        (Ty::Map(ak, av), Ty::Map(bk, bv))
+        | (Ty::MapEntry(ak, av), Ty::MapEntry(bk, bv))
+        | (Ty::Result(ak, av), Ty::Result(bk, bv)) => {
             unify(ak, bk, generics, subst) && unify(av, bv, generics, subst)
         }
         (Ty::Struct(a, aargs), Ty::Struct(b, bargs)) | (Ty::Enum(a, aargs), Ty::Enum(b, bargs)) => {
@@ -3224,6 +3269,9 @@ struct BuiltinSig {
     /// like a declared function's.
     generics: Vec<Rc<str>>,
     params: Vec<(&'static str, Ty)>,
+    /// Whether the last parameter takes the rest of the arguments, as
+    /// `Vector.of(items: T...)` does.
+    variadic: bool,
     ret: Ty,
 }
 
@@ -3258,6 +3306,7 @@ fn builtin_method(receiver: &Ty, name: &str) -> Option<BuiltinSig> {
         Some(BuiltinSig {
             generics: Vec::new(),
             params,
+            variadic: false,
             ret,
         })
     };
@@ -3265,6 +3314,7 @@ fn builtin_method(receiver: &Ty, name: &str) -> Option<BuiltinSig> {
         Some(BuiltinSig {
             generics: vec![name.into()],
             params,
+            variadic: false,
             ret,
         })
     };
@@ -3287,6 +3337,39 @@ fn builtin_method(receiver: &Ty, name: &str) -> Option<BuiltinSig> {
             "length" => sig(Vec::new(), Ty::Int),
             "isEmpty" => sig(Vec::new(), Ty::Bool),
             "freeze" | "toArray" => sig(Vec::new(), Ty::Array(element.clone())),
+            _ => None,
+        },
+        // `Map` and `Set` are immutable, so `inserted` and `removed` return a
+        // new collection rather than change this one; their past-participle
+        // names say so. Which values may be keys or elements is a runtime
+        // rule — a key's equality must not be able to change — and stating it
+        // here would need bounds, which the MVP does not have.
+        Ty::Map(key, value) => match name {
+            "get" => sig(vec![("key", (**key).clone())], Ty::Option(value.clone())),
+            "contains" => sig(vec![("key", (**key).clone())], Ty::Bool),
+            "length" => sig(Vec::new(), Ty::Int),
+            "isEmpty" => sig(Vec::new(), Ty::Bool),
+            "keys" => sig(Vec::new(), Ty::Array(key.clone())),
+            "values" => sig(Vec::new(), Ty::Array(value.clone())),
+            "inserted" => sig(
+                vec![("key", (**key).clone()), ("value", (**value).clone())],
+                Ty::Map(key.clone(), value.clone()),
+            ),
+            "removed" => sig(
+                vec![("key", (**key).clone())],
+                Ty::Map(key.clone(), value.clone()),
+            ),
+            _ => None,
+        },
+        Ty::Set(element) => match name {
+            "contains" => sig(vec![("element", (**element).clone())], Ty::Bool),
+            "length" => sig(Vec::new(), Ty::Int),
+            "isEmpty" => sig(Vec::new(), Ty::Bool),
+            "toArray" => sig(Vec::new(), Ty::Array(element.clone())),
+            "inserted" | "removed" => sig(
+                vec![("element", (**element).clone())],
+                Ty::Set(element.clone()),
+            ),
             _ => None,
         },
         Ty::Str => match name {
@@ -3340,6 +3423,9 @@ fn builtin_name(ty: &Ty) -> String {
         Ty::Option(_) => "Option".to_string(),
         Ty::Result(_, _) => "Result".to_string(),
         Ty::Task(_) => "Task".to_string(),
+        Ty::Map(_, _) => "Map".to_string(),
+        Ty::Set(_) => "Set".to_string(),
+        Ty::MapEntry(_, _) => "MapEntry".to_string(),
         other => other.to_string(),
     }
 }
@@ -3371,9 +3457,10 @@ fn unknown_builtin_method(receiver: &Ty, name: &str, span: Span) -> Diagnostic {
 
 /// Every method name a builtin receiver answers to, for a diagnostic's help.
 fn builtin_methods_of(receiver: &Ty) -> Vec<String> {
-    const CANDIDATES: [&str; 15] = [
-        "get", "length", "isEmpty", "push", "freeze", "toArray", "words", "contains", "isSome",
-        "isNone", "unwrapOr", "isOk", "isError", "mapError", "await",
+    const CANDIDATES: [&str; 19] = [
+        "get", "length", "isEmpty", "push", "freeze", "toArray", "words", "contains", "keys",
+        "values", "inserted", "removed", "isSome", "isNone", "unwrapOr", "isOk", "isError",
+        "mapError", "await",
     ];
     CANDIDATES
         .iter()
@@ -3475,9 +3562,8 @@ fn iterable_help(ty: &Ty) -> String {
             format!("match the `Option`, or write `for x in [value.unwrapOr(<{inner}>)]`")
         }
         Ty::Int => "write a range, as in `0..<n`".to_string(),
-        Ty::Map(_, _) | Ty::Set(_) => {
-            "`Map` and `Set` declare no operations in the MVP; use an `Array` or a `Vector`"
-                .to_string()
+        Ty::MapEntry(_, _) => {
+            "iterate the `Map` itself; `for` already binds each pair as a `MapEntry`".to_string()
         }
         _ => format!("build an `Array`, a `Vector`, or a `Range` from the `{ty}` first"),
     }
@@ -3678,6 +3764,109 @@ fn build() -> Array<Int> {
 }
 ",
         );
+        assert_eq!(error.code, MISMATCH);
+        assert_eq!(error.message, "expected `Int`, found `String`");
+    }
+
+    #[test]
+    fn checks_every_map_operation() {
+        accepts_body(
+            "  let ages = Map.of(MapEntry(key: \"Alice\", value: 30))\n\
+             \x20 let found: Option<Int> = ages.get(\"Alice\")\n\
+             \x20 let has: Bool = ages.contains(\"Bob\")\n\
+             \x20 let n: Int = ages.length()\n\
+             \x20 let empty: Bool = ages.isEmpty()\n\
+             \x20 let names: Array<String> = ages.keys()\n\
+             \x20 let numbers: Array<Int> = ages.values()\n\
+             \x20 let more: Map<String, Int> = ages.inserted(\"Carol\", 41)\n\
+             \x20 let fewer: Map<String, Int> = ages.removed(\"Alice\")",
+        );
+        let error =
+            rejects_body("  let ages = Map.of(MapEntry(key: \"Alice\", value: 30))\n  ages.get(1)");
+        assert_eq!(error.code, MISMATCH);
+        assert_eq!(error.message, "expected `String`, found `Int`");
+    }
+
+    #[test]
+    fn checks_every_set_operation() {
+        accepts_body(
+            "  let tags = Set.of(\"a\", \"b\")\n\
+             \x20 let has: Bool = tags.contains(\"a\")\n\
+             \x20 let n: Int = tags.length()\n\
+             \x20 let empty: Bool = tags.isEmpty()\n\
+             \x20 let items: Array<String> = tags.toArray()\n\
+             \x20 let bigger: Set<String> = tags.inserted(\"c\")\n\
+             \x20 let smaller: Set<String> = tags.removed(\"a\")",
+        );
+        let error = rejects_body("  let tags = Set.of(\"a\")\n  tags.contains(1)");
+        assert_eq!(error.code, MISMATCH);
+        assert_eq!(error.message, "expected `String`, found `Int`");
+    }
+
+    #[test]
+    fn map_of_collects_map_entries() {
+        let error = rejects_body("  let ages = Map.of(1)");
+        assert_eq!(error.code, MISMATCH);
+        assert_eq!(error.message, "expected `MapEntry<_, _>`, found `Int`");
+
+        let error = rejects_body(
+            "  let ages = Map.of(MapEntry(key: \"a\", value: 1), MapEntry(key: 2, value: 3))",
+        );
+        assert_eq!(error.code, MISMATCH);
+        assert_eq!(
+            error.message,
+            "expected `MapEntry<String, Int>`, found `MapEntry<Int, Int>`"
+        );
+    }
+
+    #[test]
+    fn a_map_entry_carries_a_key_and_a_value() {
+        accepts_body(
+            "  let entry = MapEntry(key: \"a\", value: 1)\n\
+             \x20 let key: String = entry.key\n\
+             \x20 let value: Int = entry.value",
+        );
+        let error = rejects_body("  let entry = MapEntry(key: \"a\", value: 1)\n  entry.other");
+        assert_eq!(error.code, UNKNOWN_FIELD);
+        assert_eq!(error.message, "`MapEntry` has no field `other`");
+        assert_eq!(
+            error.rule.unwrap(),
+            "A `MapEntry` carries exactly a `key` and a `value`."
+        );
+        assert_eq!(error.help.unwrap(), "write `.key` or `.value`");
+    }
+
+    #[test]
+    fn a_map_iterates_map_entries_and_a_set_its_elements() {
+        accepts_body(
+            "  let ages = Map.of(MapEntry(key: \"a\", value: 1))\n\
+             \x20 for entry in ages {\n\
+             \x20   let key: String = entry.key\n\
+             \x20   let value: Int = entry.value\n\
+             \x20 }\n\
+             \x20 for tag in Set.of(\"a\") {\n\
+             \x20   let element: String = tag\n\
+             \x20 }",
+        );
+        let error = rejects_body(
+            "  let ages = Map.of(MapEntry(key: \"a\", value: 1))\n\
+             \x20 for entry in ages {\n\
+             \x20   let key: Int = entry.key\n\
+             \x20 }",
+        );
+        assert_eq!(error.code, MISMATCH);
+        assert_eq!(error.message, "expected `Int`, found `String`");
+    }
+
+    #[test]
+    fn checks_every_range_operation() {
+        accepts_body(
+            "  let range = 0..<3\n\
+             \x20 let n: Int = range.length()\n\
+             \x20 let empty: Bool = range.isEmpty()\n\
+             \x20 let has: Bool = range.contains(1)",
+        );
+        let error = rejects_body("  let range = 0..<3\n  range.contains(\"one\")");
         assert_eq!(error.code, MISMATCH);
         assert_eq!(error.message, "expected `Int`, found `String`");
     }
@@ -4708,7 +4897,7 @@ fn total(items: Array<String>) -> Int {
         assert_eq!(error.code, ITERABLE);
         assert_eq!(
             error.message,
-            "`for` iterates an `Array`, a `Vector`, or a `Range`, but found `Int`"
+            "`for` iterates an `Array`, a `Vector`, a `Range`, a `Set`, or a `Map`, but found `Int`"
         );
         assert_eq!(
             error.rule.unwrap(),
@@ -5093,21 +5282,6 @@ fn handle(request: http.Request) -> Int {
         assert_eq!(
             warnings[0].message,
             "`Missing` names no type this module declares"
-        );
-    }
-
-    #[test]
-    fn a_map_operation_is_unchecked_because_the_mvp_gives_map_none() {
-        let diagnostics = diagnostics_of("fn run() -> Int {\n  Map.of()\n  1\n}\n");
-        assert_eq!(diagnostics.len(), 1);
-        assert_eq!(diagnostics[0].code, UNCHECKED_OPERATION);
-        assert_eq!(
-            diagnostics[0].message,
-            "`Map.of` has no signature, so this call is unchecked"
-        );
-        assert_eq!(
-            diagnostics[0].rule.as_deref().unwrap(),
-            "`Map` and `Set` are immutable in the MVP and declare no operations."
         );
     }
 
