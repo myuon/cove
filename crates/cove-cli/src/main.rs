@@ -3,10 +3,10 @@
 //! The CLI does not invent semantics: the compiler derives facts, the runtime
 //! enforces and records them, and the CLI explains them.
 
-use std::cell::RefCell;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::rc::Rc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use cove_diag::{render, Diagnostic, SourceMap, Span};
@@ -17,7 +17,7 @@ use cove_runtime::host::{Console, Documents, Env, Grants, HostRegistry};
 use cove_runtime::interp::Interpreter;
 use cove_runtime::process::Process;
 use cove_runtime::{
-    Budget, Cancellation, JsonlSink, Limits, NullSink, TraceEvent, TraceHeader, TraceSink,
+    Budget, Cancellation, JsonlSink, Limits, NullSink, Runtime, TraceEvent, TraceHeader, TraceSink,
     ValueCapture,
 };
 use cove_sema::package::Package;
@@ -161,7 +161,9 @@ fn main() -> ExitCode {
 pub(crate) enum CliError {
     Message(String),
     Diagnostics {
-        sources: SourceMap,
+        /// Shared because a run holds the same source map for as long as it
+        /// lasts, and a diagnostic points into it afterwards.
+        sources: Arc<SourceMap>,
         items: Vec<Diagnostic>,
     },
     /// `cove check --deny-warnings` found warnings. The warnings and summary
@@ -204,11 +206,21 @@ pub(crate) fn load(start: Option<&Path>) -> Result<(SourceMap, Package, Program)
     let mut sources = SourceMap::new();
     let package = match cove_sema::package::load(&root, &mut sources) {
         Ok(package) => package,
-        Err(items) => return Err(CliError::Diagnostics { sources, items }),
+        Err(items) => {
+            return Err(CliError::Diagnostics {
+                sources: sources.into(),
+                items,
+            })
+        }
     };
     let mut program = match cove_sema::resolve::resolve(&package) {
         Ok(program) => program,
-        Err(items) => return Err(CliError::Diagnostics { sources, items }),
+        Err(items) => {
+            return Err(CliError::Diagnostics {
+                sources: sources.into(),
+                items,
+            })
+        }
     };
 
     // `cove check` type-checks, and `cove run` refuses to execute a package
@@ -221,7 +233,10 @@ pub(crate) fn load(start: Option<&Path>) -> Result<(SourceMap, Package, Program)
     if !errors.is_empty() {
         let mut items = errors;
         items.extend(warnings);
-        return Err(CliError::Diagnostics { sources, items });
+        return Err(CliError::Diagnostics {
+            sources: sources.into(),
+            items,
+        });
     }
     program.warnings.extend(warnings);
 
@@ -943,16 +958,24 @@ fn cmd_run(args: &[String]) -> Result<(), CliError> {
         }
         None => Box::new(NullSink),
     };
-    // `HostRegistry::call` and the interpreter's own task and entry events
-    // both need to reach the one trace destination `--trace` selected. A
-    // `SharedSink` lets each hold a handle to that one destination, rather
-    // than each opening or wrapping it separately — two independent sinks
-    // writing the same file would race for it.
-    let sink = SharedSink::new(Box::new(CompositeSink {
-        primary: primary_sink,
-        wait_total: wait_total.clone(),
-    }));
-    hosts.set_trace(Box::new(sink.clone()));
+    // `HostRegistry::call` and the task and entry events the interpreter
+    // traces both reach the one destination `--trace` selected, from whichever
+    // thread produced them: two independent sinks writing the same file would
+    // race for it.
+    //
+    // A run that asked for neither a trace nor statistics installs no sink at
+    // all rather than a composite over `NullSink`. Recording an event
+    // describes every value the call carried, and `NullSink` is what tells
+    // the registry that nothing will read the description.
+    let sink: Arc<dyn TraceSink> = if trace_target.is_some() || flags.stats {
+        Arc::new(CompositeSink {
+            primary: primary_sink,
+            wait_total: wait_total.clone(),
+        })
+    } else {
+        Arc::new(NullSink)
+    };
+    hosts.set_trace(sink.clone());
     hosts.set_budget(budget);
 
     let program_args: Vec<Rc<str>> = flags
@@ -961,12 +984,13 @@ fn cmd_run(args: &[String]) -> Result<(), CliError> {
         .map(|a| a.as_str().into())
         .collect();
 
-    let mut interpreter = Interpreter::new(&program, &sources, &mut hosts);
-    interpreter.set_trace(Box::new(sink));
-    let outcome = interpreter.run_entry(module, entry, program_args);
+    let sources = Arc::new(sources);
+    let runtime =
+        Runtime::new(Arc::new(program), sources.clone(), Arc::new(hosts)).with_trace(sink);
+    let outcome = Interpreter::new(&runtime).run_entry(module, entry, program_args);
 
     if flags.stats {
-        print_stats(&hosts, &wait_total);
+        print_stats(runtime.hosts(), &wait_total);
     }
 
     match outcome {
@@ -1179,41 +1203,24 @@ fn parse_duration_flag(text: &str) -> Result<Duration, String> {
 /// Total host-call wait time, shared with the trace sink that measures it,
 /// so `--stats` can report it even when no trace file was requested.
 #[derive(Clone, Default)]
-struct WaitTotal(Rc<RefCell<Duration>>);
+struct WaitTotal(Arc<Mutex<Duration>>);
 
 impl WaitTotal {
     fn get(&self) -> Duration {
-        *self.0.borrow()
+        *self
+            .0
+            .lock()
+            .expect("the wait total is never held across a panic")
     }
 }
 
 impl TraceSink for WaitTotal {
-    fn record(&mut self, event: TraceEvent) {
+    fn record(&self, event: TraceEvent) {
         if let TraceEvent::HostCall { wait, .. } = event {
-            *self.0.borrow_mut() += wait;
+            if let Ok(mut total) = self.0.lock() {
+                *total += wait;
+            }
         }
-    }
-}
-
-/// Lets two independent owners — the `HostRegistry` and the `Interpreter` —
-/// each hold a handle to the one real trace destination.
-///
-/// `HostRegistry::call` traces `HostCall`, and the interpreter traces task
-/// and entry events; both need to land in the same JSONL stream, in the
-/// order the single-threaded run produced them. Cloning shares the same
-/// underlying sink rather than opening or wrapping the destination twice.
-#[derive(Clone)]
-struct SharedSink(Rc<RefCell<Box<dyn TraceSink>>>);
-
-impl SharedSink {
-    fn new(sink: Box<dyn TraceSink>) -> Self {
-        SharedSink(Rc::new(RefCell::new(sink)))
-    }
-}
-
-impl TraceSink for SharedSink {
-    fn record(&mut self, event: TraceEvent) {
-        self.0.borrow_mut().record(event);
     }
 }
 
@@ -1226,7 +1233,7 @@ struct CompositeSink {
 }
 
 impl TraceSink for CompositeSink {
-    fn record(&mut self, event: TraceEvent) {
+    fn record(&self, event: TraceEvent) {
         self.wait_total.record(event.clone());
         self.primary.record(event);
     }
@@ -1238,13 +1245,15 @@ impl TraceSink for CompositeSink {
 /// `irreversible_writes` is the count of calls whose Host API schema declares
 /// them irreversible: how much of what this run did cannot be taken back.
 fn print_stats(hosts: &HostRegistry, wait_total: &WaitTotal) {
-    if let Some(budget) = hosts.budget() {
+    let counters =
+        hosts.with_budget(|budget| (budget.fuel_spent(), budget.host_calls(), budget.elapsed()));
+    if let Some((fuel_spent, host_calls, elapsed)) = counters {
         eprintln!(
             "stats: fuel_spent={} host_calls={} irreversible_writes={} elapsed={:?} wait={:?}",
-            budget.fuel_spent(),
-            budget.host_calls(),
+            fuel_spent,
+            host_calls,
             hosts.irreversible_writes(),
-            budget.elapsed(),
+            elapsed,
             wait_total.get(),
         );
     }

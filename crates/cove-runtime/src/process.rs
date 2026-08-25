@@ -16,10 +16,9 @@
 //! [`ProcessLog`] instead of ending the process, so a test can observe what a
 //! program asked the host to do without the host doing it.
 
-use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-use std::rc::Rc;
+use std::sync::{Arc, Mutex, MutexGuard};
 
 use cove_sema::Capability;
 
@@ -32,9 +31,10 @@ use crate::value::Value;
 /// whoever inspects it.
 ///
 /// Cloning shares the same record, including the clone already given to a
-/// [`Process`].
+/// [`Process`]. The record is synchronized because a host is reachable from
+/// every task of a run.
 #[derive(Clone, Debug, Default)]
-pub struct ProcessLog(Rc<RefCell<Recorded>>);
+pub struct ProcessLog(Arc<Mutex<Recorded>>);
 
 #[derive(Debug, Default)]
 struct Recorded {
@@ -54,13 +54,22 @@ impl ProcessLog {
     /// request is recorded: a fake that kept the last one would report an
     /// exit that a real host could never have reached.
     pub fn exit_code(&self) -> Option<i64> {
-        self.0.borrow().exit
+        self.recorded().exit
     }
 
     /// Every subprocess the program asked to start, in order, as the program
     /// and its arguments.
     pub fn runs(&self) -> Vec<(String, Vec<String>)> {
-        self.0.borrow().runs.clone()
+        self.recorded().runs.clone()
+    }
+
+    /// The record, taken back from a lock a panicking run may have poisoned:
+    /// a broken invariant in one task must not turn every later `process`
+    /// call in another into a second, unrelated failure.
+    fn recorded(&self) -> MutexGuard<'_, Recorded> {
+        self.0
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 }
 
@@ -173,11 +182,11 @@ impl Process {
     /// small integer everywhere Cove runs, and reporting failure is closer to
     /// what a program asking for an impossible code meant than truncating the
     /// number into an unrelated one.
-    fn exit(&mut self, code: i64) -> Value {
-        match &mut self.control {
+    fn exit(&self, code: i64) -> Value {
+        match &self.control {
             Control::Real => std::process::exit(i32::try_from(code).unwrap_or(1)),
             Control::Recorded { log, .. } => {
-                let mut recorded = log.0.borrow_mut();
+                let mut recorded = log.recorded();
                 if recorded.exit.is_none() {
                     recorded.exit = Some(code);
                 }
@@ -193,13 +202,13 @@ impl Process {
     /// reaches an allowed executable by another name — through `..`, a
     /// symbolic link, or a directory that is one — is still allowed, and one
     /// that reaches anything else is not.
-    fn run(&mut self, program: &str, arguments: Vec<String>) -> Result<String, String> {
+    fn run(&self, program: &str, arguments: Vec<String>) -> Result<String, String> {
         if !self.is_allowed(program) {
             return Err(format!(
                 "process: `{program}` is not an executable this host allows"
             ));
         }
-        match &mut self.control {
+        match &self.control {
             Control::Real => {
                 let output = std::process::Command::new(program)
                     .args(&arguments)
@@ -214,10 +223,7 @@ impl Process {
                 Ok(String::from_utf8_lossy(&output.stdout).into_owned())
             }
             Control::Recorded { outputs, log } => {
-                log.0
-                    .borrow_mut()
-                    .runs
-                    .push((program.to_string(), arguments));
+                log.recorded().runs.push((program.to_string(), arguments));
                 Ok(outputs.get(program).cloned().unwrap_or_default())
             }
         }
@@ -258,7 +264,7 @@ impl HostApi for Process {
         PROCESS_SCHEMA
     }
 
-    fn call(&mut self, op: &str, args: Vec<Value>) -> Result<Value, RuntimeError> {
+    fn call(&self, op: &str, args: Vec<Value>) -> Result<Value, RuntimeError> {
         match op {
             "args" => Ok(Value::Array(
                 self.args
@@ -352,7 +358,7 @@ mod tests {
 
     #[test]
     fn args_answers_what_the_host_passed_on() {
-        let (mut process, _) = fake(BTreeMap::new());
+        let (process, _) = fake(BTreeMap::new());
 
         let args = process.call("args", Vec::new()).unwrap();
         assert_eq!(strings(args), ["--name", "cove"]);
@@ -360,7 +366,7 @@ mod tests {
 
     #[test]
     fn args_of_a_run_given_nothing_is_empty() {
-        let mut process = Process::real(Vec::new(), Vec::new());
+        let process = Process::real(Vec::new(), Vec::new());
 
         let args = process.call("args", Vec::new()).unwrap();
         assert!(strings(args).is_empty());
@@ -368,7 +374,7 @@ mod tests {
 
     #[test]
     fn a_fake_records_the_exit_code_instead_of_ending_the_process() {
-        let (mut process, log) = fake(BTreeMap::new());
+        let (process, log) = fake(BTreeMap::new());
         assert_eq!(log.exit_code(), None);
 
         let exited = process.call("exit", vec![Value::Int(3)]).unwrap();
@@ -381,7 +387,7 @@ mod tests {
     /// have reached.
     #[test]
     fn only_the_first_exit_is_recorded() {
-        let (mut process, log) = fake(BTreeMap::new());
+        let (process, log) = fake(BTreeMap::new());
 
         process.call("exit", vec![Value::Int(3)]).unwrap();
         process.call("exit", vec![Value::Int(0)]).unwrap();
@@ -390,7 +396,7 @@ mod tests {
 
     #[test]
     fn a_fake_answers_run_from_its_table_and_records_the_call() {
-        let (mut process, log) = fake(BTreeMap::from([(
+        let (process, log) = fake(BTreeMap::from([(
             "/bin/echo".to_string(),
             "hello\n".to_string(),
         )]));
@@ -448,7 +454,7 @@ mod tests {
     /// default the CLI installs.
     #[test]
     fn a_host_with_an_empty_allow_list_starts_nothing() {
-        let mut process = Process::real(Vec::new(), Vec::new());
+        let process = Process::real(Vec::new(), Vec::new());
 
         let outcome = process
             .call("run", vec![str_arg("/bin/echo"), array_arg(&[])])
@@ -467,7 +473,7 @@ mod tests {
         if !Path::new("/bin/echo").exists() {
             return;
         }
-        let mut process = Process::real(Vec::new(), vec![PathBuf::from("/bin/echo")]);
+        let process = Process::real(Vec::new(), vec![PathBuf::from("/bin/echo")]);
 
         let output = process
             .call(
@@ -484,7 +490,7 @@ mod tests {
         if !Path::new("/bin/echo").exists() {
             return;
         }
-        let mut process = Process::real(Vec::new(), vec![PathBuf::from("/bin/echo")]);
+        let process = Process::real(Vec::new(), vec![PathBuf::from("/bin/echo")]);
 
         let output = process
             .call(
@@ -501,7 +507,7 @@ mod tests {
         if !Path::new("/bin/sh").exists() {
             return;
         }
-        let mut process = Process::real(Vec::new(), vec![PathBuf::from("/bin/sh")]);
+        let process = Process::real(Vec::new(), vec![PathBuf::from("/bin/sh")]);
 
         let outcome = process
             .call(

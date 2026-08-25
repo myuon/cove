@@ -1,0 +1,50 @@
+use console.println
+
+/// Counters that two tasks record into.
+struct Metrics {
+  requests: Int
+  failures: Int
+}
+
+impl Metrics {
+  /// Records one completed request.
+  fn record(var self, failed: Bool) {
+    self.requests += 1
+    if failed {
+      self.failures += 1
+    }
+  }
+}
+
+/// Counts requests recorded from two tasks through one `Shared`.
+///
+/// A `Shared` crosses a task boundary by sharing rather than by copying, so
+/// both tasks record into one value; `lock` holds it for the whole of the
+/// closure, so no count is lost to a read-modify-write that raced.
+export fn main() -> Result<Unit, Error> {
+  let metrics = Shared(Metrics(requests: 0, failures: 0))
+
+  scope requests {
+    let succeeding = requests.spawn {
+      for attempt in 0..<50 {
+        metrics.lock(fn(var value) {
+          value.record(false)
+        })
+      }
+    }
+    let failing = requests.spawn {
+      for attempt in 0..<50 {
+        metrics.lock(fn(var value) {
+          value.record(true)
+        })
+      }
+    }
+    await succeeding
+    await failing
+  }
+
+  metrics.lock(fn(value) {
+    println("requests={value.requests} failures={value.failures}")
+  })?
+  Ok(())
+}

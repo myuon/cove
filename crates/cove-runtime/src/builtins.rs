@@ -11,6 +11,7 @@ use std::rc::Rc;
 use cove_diag::Span;
 
 use crate::error::RuntimeError;
+use crate::shared::SharedCell;
 use crate::value::{InvalidKey, MapKey, RangeBounds, Value, VectorStorage};
 
 /// How the builtins call back into the evaluator.
@@ -125,7 +126,7 @@ fn source_of<'a>(sources: &[&'a str], index: usize) -> &'a str {
 
 /// Names usable as bare constructor calls, such as `Ok(value)`.
 pub fn is_constructor(name: &str) -> bool {
-    matches!(name, "Ok" | "Err" | "Some" | "Error")
+    matches!(name, "Ok" | "Err" | "Some" | "Error" | "Shared")
 }
 
 /// The methods that take a `var self` receiver and therefore need a mutable
@@ -134,7 +135,7 @@ pub fn is_mutating_method(name: &str) -> bool {
     matches!(name, "push" | "freeze")
 }
 
-/// `Ok(v)`, `Err(e)`, `Some(v)`, `Error("message")`.
+/// `Ok(v)`, `Err(e)`, `Some(v)`, `Error("message")`, `Shared(value)`.
 pub fn call_constructor(name: &str, args: Vec<Value>, span: Span) -> Result<Value, RuntimeError> {
     let mut args = expect_args(name, args, 1, span)?;
     let value = args.remove(0);
@@ -142,6 +143,10 @@ pub fn call_constructor(name: &str, args: Vec<Value>, span: Span) -> Result<Valu
         "Ok" => Value::ok(value),
         "Err" => Value::err(value),
         "Some" => Value::some(value),
+        // `Shared` is the one constructor that can refuse its payload: what
+        // it wraps must be task-safe, since a `Shared` is reachable from
+        // every task it was given to.
+        "Shared" => Value::Shared(SharedCell::wrap(&value, span)?),
         "Error" => match value {
             Value::Str(message) => Value::error(message.to_string()),
             other => {

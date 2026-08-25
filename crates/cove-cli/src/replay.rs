@@ -12,14 +12,24 @@
 //! asked for it in a different order — because a divergence is the program
 //! saying it would behave differently than it did. [`Divergence::report`] is
 //! the part of this module that matters most.
+//!
+//! One order is not the program's to choose. ADR 0008 runs each spawned task
+//! on a thread of its own, so the order in which two concurrent tasks reach
+//! the host is the scheduler's, and a trace records the order one run
+//! happened to take. Replaying a program whose tasks call hosts concurrently
+//! can therefore diverge on order alone; that is the truth about the program
+//! rather than a defect in the replay, and it is why a scope's contract is
+//! the set of effects it produces and never their sequence.
 
-use std::cell::RefCell;
 use std::path::Path;
 use std::rc::Rc;
+use std::sync::{Arc, Mutex};
 
 use cove_runtime::host::{HostApi, HostRegistry};
 use cove_runtime::interp::Interpreter;
+use cove_runtime::runtime::Runtime;
 use cove_runtime::schema::OperationSchema;
+use cove_runtime::Transfer;
 use cove_runtime::{
     value_to_json, Budget, Cancellation, Grants, Limits, RuntimeError, Value, ValueCapture,
 };
@@ -43,7 +53,11 @@ struct Step {
 /// What a replay hands back for one recorded call.
 enum Answer {
     /// The value the host produced.
-    Value(Value),
+    ///
+    /// Held as a `Transfer` rather than a `Value` because a host is shared
+    /// across task threads, and a `Transfer` is precisely the form of a value
+    /// that may cross a task boundary.
+    Value(Transfer),
     /// The runtime error the host refused with, reproduced as itself.
     Error(String),
     /// Nothing, and why.
@@ -55,7 +69,16 @@ impl Step {
     fn of(call: &trace::HostCall) -> Step {
         let answer = match &call.outcome {
             Some(Outcome::Value(value)) => match &value.value {
-                Ok(value) => Answer::Value(value.clone()),
+                // The trace format encodes only values that may cross a task
+                // boundary, so this conversion holds for every trace this
+                // build writes. It is checked rather than assumed because the
+                // trace is a file, and a file can say anything.
+                Ok(value) => match Transfer::of(value) {
+                    Ok(transfer) => Answer::Value(transfer),
+                    Err(_) => Answer::None(
+                        "the trace records a value that cannot cross a task boundary".to_string(),
+                    ),
+                },
                 Err(missing) => Answer::None(missing.reason()),
             },
             Some(Outcome::Error(message)) => Answer::Error(message.clone()),
@@ -117,7 +140,7 @@ impl Tape {
         self.unchecked_args += step.args.iter().filter(|arg| arg.is_none()).count();
         self.next += 1;
         match &self.steps[self.next - 1].answer {
-            Answer::Value(value) => Ok(value.clone()),
+            Answer::Value(transfer) => Ok(transfer.clone().into_value()),
             Answer::Error(message) => Err(RuntimeError::new(message.clone()).with_rule(
                 "`cove replay` reproduces what the host answered, including a refusal.",
             )),
@@ -276,7 +299,7 @@ struct ReplayHost {
     name: String,
     capability: Capability,
     operations: Vec<OperationSchema>,
-    tape: Rc<RefCell<Tape>>,
+    tape: Arc<Mutex<Tape>>,
 }
 
 impl HostApi for ReplayHost {
@@ -292,9 +315,12 @@ impl HostApi for ReplayHost {
         &self.operations
     }
 
-    fn call(&mut self, op: &str, args: Vec<Value>) -> Result<Value, RuntimeError> {
+    fn call(&self, op: &str, args: Vec<Value>) -> Result<Value, RuntimeError> {
         let name = self.name.clone();
-        self.tape.borrow_mut().answer(&name, op, &args)
+        self.tape
+            .lock()
+            .expect("the replay tape is not shared across threads that panic")
+            .answer(&name, op, &args)
     }
 }
 
@@ -359,7 +385,7 @@ pub(crate) fn cmd_replay(args: &[String]) -> Result<(), CliError> {
 
     let steps: Vec<Step> = trace.dispatched_calls().into_iter().map(Step::of).collect();
     let recorded_calls = steps.len();
-    let tape = Rc::new(RefCell::new(Tape::new(steps)));
+    let tape = Arc::new(Mutex::new(Tape::new(steps)));
 
     let mut hosts = HostRegistry::new(Grants::new(run.allow.clone()));
     for module in cove_runtime::shipped_schema() {
@@ -367,7 +393,7 @@ pub(crate) fn cmd_replay(args: &[String]) -> Result<(), CliError> {
             name: module.name,
             capability: module.capability,
             operations: module.operations,
-            tape: Rc::clone(&tape),
+            tape: Arc::clone(&tape),
         }));
     }
     // The run's own configured limits still apply: a replay is that run,
@@ -388,13 +414,14 @@ pub(crate) fn cmd_replay(args: &[String]) -> Result<(), CliError> {
         .iter()
         .map(|arg| arg.as_str().into())
         .collect();
-    let outcome = {
-        let mut interpreter = Interpreter::new(&program, &sources, &mut hosts);
-        interpreter.run_entry(module, entry, program_args)
-    };
+    let sources = Arc::new(sources);
+    let runtime = Runtime::new(Arc::new(program), sources.clone(), Arc::new(hosts));
+    let outcome = Interpreter::new(&runtime).run_entry(module, entry, program_args);
 
     let (used, unchecked, divergence) = {
-        let mut tape = tape.borrow_mut();
+        let mut tape = tape
+            .lock()
+            .expect("the replay tape is not shared across threads that panic");
         let divergence = tape.divergence.take().or_else(|| {
             // The other direction: the program finished having made fewer
             // calls than the trace recorded. Only a run that finished can be
@@ -454,24 +481,24 @@ mod tests {
         )
     }
 
-    fn tape_of(lines: &[String]) -> Rc<RefCell<Tape>> {
+    fn tape_of(lines: &[String]) -> Arc<Mutex<Tape>> {
         let mut text = vec![HEADER.to_string()];
         text.extend(lines.iter().cloned());
         let trace = Trace::read_str(&text.join("\n")).expect("the trace reads");
         let steps = trace.dispatched_calls().into_iter().map(Step::of).collect();
-        Rc::new(RefCell::new(Tape::new(steps)))
+        Arc::new(Mutex::new(Tape::new(steps)))
     }
 
     /// A registry whose `console` answers from `tape`, gated exactly as a
     /// real run's registry is.
-    fn registry(tape: &Rc<RefCell<Tape>>) -> HostRegistry {
+    fn registry(tape: &Arc<Mutex<Tape>>) -> HostRegistry {
         let mut hosts = HostRegistry::new(Grants::new(["console"]));
         for module in cove_runtime::shipped_schema() {
             hosts.register(Box::new(ReplayHost {
                 name: module.name,
                 capability: module.capability,
                 operations: module.operations,
-                tape: Rc::clone(tape),
+                tape: Arc::clone(tape),
             }));
         }
         hosts
@@ -480,13 +507,22 @@ mod tests {
     #[test]
     fn a_matching_call_is_answered_from_the_trace_without_calling_a_host() {
         let tape = tape_of(&[println_line("hi")]);
-        let mut hosts = registry(&tape);
+        let hosts = registry(&tape);
         let value = hosts
             .call("console", "println", vec![Value::Str("hi".into())])
             .expect("the recorded call is answered");
         assert_eq!(trace::show_value(&value), "Ok(())");
-        assert_eq!(tape.borrow().next, 1);
-        assert!(tape.borrow().divergence.is_none());
+        assert_eq!(
+            tape.lock()
+                .expect("the replay tape is not shared across threads that panic")
+                .next,
+            1
+        );
+        assert!(tape
+            .lock()
+            .expect("the replay tape is not shared across threads that panic")
+            .divergence
+            .is_none());
         // The real `Console` would have written to its output; this one has
         // no output to write to, which is the point.
         assert!(Console::new(Vec::new())
@@ -500,12 +536,18 @@ mod tests {
     #[test]
     fn asking_for_a_call_the_trace_does_not_have_diverges() {
         let tape = tape_of(&[]);
-        let mut hosts = registry(&tape);
+        let hosts = registry(&tape);
         let error = hosts
             .call("console", "println", vec![Value::Str("hi".into())])
             .expect_err("an unrecorded call diverges");
         assert!(error.message.contains("were all used"), "{}", error.message);
-        let report = tape.borrow().divergence.as_ref().unwrap().report();
+        let report = tape
+            .lock()
+            .expect("the replay tape is not shared across threads that panic")
+            .divergence
+            .as_ref()
+            .unwrap()
+            .report();
         assert!(report.contains("the trace records  0 call(s)"), "{report}");
         assert!(
             report.contains(r#"the program asked  console.println("hi")"#),
@@ -516,11 +558,17 @@ mod tests {
     #[test]
     fn asking_with_different_arguments_diverges_and_shows_both_calls() {
         let tape = tape_of(&[println_line("hi")]);
-        let mut hosts = registry(&tape);
+        let hosts = registry(&tape);
         hosts
             .call("console", "println", vec![Value::Str("bye".into())])
             .expect_err("a different argument diverges");
-        let report = tape.borrow().divergence.as_ref().unwrap().report();
+        let report = tape
+            .lock()
+            .expect("the replay tape is not shared across threads that panic")
+            .divergence
+            .as_ref()
+            .unwrap()
+            .report();
         assert!(report.contains("at recorded call   1"), "{report}");
         assert!(
             report.contains(r#"the trace records  console.println("hi")"#),
@@ -535,11 +583,17 @@ mod tests {
     #[test]
     fn asking_out_of_order_diverges_against_the_call_the_trace_expected_next() {
         let tape = tape_of(&[println_line("one"), println_line("two")]);
-        let mut hosts = registry(&tape);
+        let hosts = registry(&tape);
         hosts
             .call("console", "println", vec![Value::Str("two".into())])
             .expect_err("the recorded order is `one` first");
-        let report = tape.borrow().divergence.as_ref().unwrap().report();
+        let report = tape
+            .lock()
+            .expect("the replay tape is not shared across threads that panic")
+            .divergence
+            .as_ref()
+            .unwrap()
+            .report();
         assert!(
             report.contains(r#"the trace records  console.println("one")"#),
             "{report}"
@@ -550,11 +604,13 @@ mod tests {
     #[test]
     fn leaving_recorded_calls_unused_is_the_other_direction_of_divergence() {
         let tape = tape_of(&[println_line("one"), println_line("two")]);
-        let mut hosts = registry(&tape);
+        let hosts = registry(&tape);
         hosts
             .call("console", "println", vec![Value::Str("one".into())])
             .expect("the first recorded call is answered");
-        let tape = tape.borrow();
+        let tape = tape
+            .lock()
+            .expect("the replay tape is not shared across threads that panic");
         assert_eq!(tape.next, 1);
         let divergence = Divergence::Unused {
             used: tape.next,
@@ -581,13 +637,19 @@ mod tests {
                 name: module.name,
                 capability: module.capability,
                 operations: module.operations,
-                tape: Rc::clone(&tape),
+                tape: Arc::clone(&tape),
             }));
         }
         hosts
             .call("process", "exit", vec![Value::Int(0)])
             .expect_err("a call with no recorded result cannot be answered");
-        let report = tape.borrow().divergence.as_ref().unwrap().report();
+        let report = tape
+            .lock()
+            .expect("the replay tape is not shared across threads that panic")
+            .divergence
+            .as_ref()
+            .unwrap()
+            .report();
         assert!(report.contains("not recordable"), "{report}");
         assert!(
             report.contains("would keep running a program that had ended"),
@@ -598,13 +660,16 @@ mod tests {
     #[test]
     fn a_recorded_runtime_error_is_reproduced_as_the_same_error() {
         let tape = tape_of(&[r#"{"event":"host_call","module":"console","op":"println","capability":"console","wait_ns":0,"granted":true,"args":[],"outcome":{"kind":"error","message":"console: broken pipe"}}"#.to_string()]);
-        let mut hosts = registry(&tape);
+        let hosts = registry(&tape);
         let error = hosts
             .call("console", "println", Vec::new())
             .expect_err("the recorded refusal is reproduced");
         assert_eq!(error.message, "console: broken pipe");
         assert!(
-            tape.borrow().divergence.is_none(),
+            tape.lock()
+                .expect("the replay tape is not shared across threads that panic")
+                .divergence
+                .is_none(),
             "a refusal is not a divergence"
         );
     }
@@ -612,11 +677,16 @@ mod tests {
     #[test]
     fn a_redacted_argument_cannot_be_compared_and_is_counted_instead() {
         let tape = tape_of(&[r#"{"event":"host_call","module":"console","op":"println","capability":"console","wait_ns":0,"granted":true,"args":[{"type":"redacted","of":"String"}],"outcome":{"kind":"value","value":{"type":"enum","name":"Result","case":"Ok","payload":[{"type":"unit"}]}}}"#.to_string()]);
-        let mut hosts = registry(&tape);
+        let hosts = registry(&tape);
         hosts
             .call("console", "println", vec![Value::Str("anything".into())])
             .expect("a redacted argument cannot disagree");
-        assert_eq!(tape.borrow().unchecked_args, 1);
+        assert_eq!(
+            tape.lock()
+                .expect("the replay tape is not shared across threads that panic")
+                .unchecked_args,
+            1
+        );
     }
 
     #[test]
@@ -631,11 +701,20 @@ mod tests {
     #[test]
     fn an_ungranted_call_is_refused_by_the_registry_not_by_the_tape() {
         let tape = tape_of(&[println_line("hi")]);
-        let mut hosts = registry(&tape);
+        let hosts = registry(&tape);
         hosts
             .call("files", "read", vec![Value::Str("a.txt".into())])
             .expect_err("`files` was not granted");
-        assert!(tape.borrow().divergence.is_none());
-        assert_eq!(tape.borrow().next, 0);
+        assert!(tape
+            .lock()
+            .expect("the replay tape is not shared across threads that panic")
+            .divergence
+            .is_none());
+        assert_eq!(
+            tape.lock()
+                .expect("the replay tape is not shared across threads that panic")
+                .next,
+            0
+        );
     }
 }

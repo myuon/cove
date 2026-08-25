@@ -22,6 +22,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
+use std::sync::Arc;
 
 use cove_diag::{render, Diagnostic, SourceMap, Span};
 use cove_runtime::clock::{Clock, VirtualTime};
@@ -30,6 +31,7 @@ use cove_runtime::files::Files;
 use cove_runtime::host::{Console, Documents, Env, Grants, HostRegistry};
 use cove_runtime::interp::Interpreter;
 use cove_runtime::process::{Process, ProcessLog};
+use cove_runtime::runtime::Runtime;
 use cove_runtime::value::Value;
 use cove_sema::resolve::DeclaredTest;
 
@@ -69,6 +71,8 @@ pub(crate) fn cmd_test(args: &[String]) -> Result<(), CliError> {
         .map(String::as_str)
         .collect();
 
+    let sources = Arc::new(sources);
+    let program = Arc::new(program);
     let all = program.tests();
     let selected = select(&all, filter);
 
@@ -118,8 +122,8 @@ fn run_test(
     test: &DeclaredTest,
     root: &Path,
     allow_real: &BTreeSet<&str>,
-    sources: &SourceMap,
-    program: &cove_sema::resolve::Program,
+    sources: &Arc<SourceMap>,
+    program: &Arc<cove_sema::resolve::Program>,
 ) -> Option<Diagnostic> {
     let required: Vec<&str> = test
         .entry
@@ -154,7 +158,8 @@ fn run_test(
         );
     }
 
-    let mut interpreter = Interpreter::new(program, sources, &mut hosts);
+    let runtime = Runtime::new(Arc::clone(program), Arc::clone(sources), Arc::new(hosts));
+    let mut interpreter = Interpreter::new(&runtime);
     let outcome = interpreter.run_entry(test.module, test.name, Vec::new());
     let assertion = interpreter
         .assertion_failure()
@@ -317,6 +322,7 @@ mod tests {
     /// one's name and the message it failed with.
     fn run_all(root: &Path, allow_real: &[&str]) -> Vec<(String, Option<String>)> {
         let (sources, _, program) = load_fixture(root);
+        let (sources, program) = (Arc::new(sources), Arc::new(program));
         let allow_real: BTreeSet<&str> = allow_real.iter().copied().collect();
         program
             .tests()
@@ -376,6 +382,7 @@ mod tests {
         let source = "test fn fails() -> Result<Unit, Error> {\n  assert(1 == 2)?\n  Ok(())\n}\n";
         let dir = package("assert-span", "", source);
         let (sources, _, program) = load_fixture(dir.path());
+        let (sources, program) = (Arc::new(sources), Arc::new(program));
         let test = program.tests()[0];
         let diagnostic = run_test(&test, dir.path(), &BTreeSet::new(), &sources, &program)
             .expect("the test fails");

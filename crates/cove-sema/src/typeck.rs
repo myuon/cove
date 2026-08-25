@@ -212,6 +212,15 @@ pub const UNSUPPORTED_BOUND: &str = "cove::type::unsupported_bound";
 pub const UNKNOWN_MEMBER: &str = "cove::type::unknown_member";
 /// A `test fn` does not have the shape the test runner calls.
 pub const TEST: &str = "cove::type::test";
+/// A type that may not cross a task boundary was written where one must.
+pub const TASK_SAFETY: &str = "cove::type::task_safety";
+
+/// The Language Card sentence a task-safety diagnostic quotes.
+///
+/// `cove_runtime::task` states the same rule for values; the compiler does
+/// not depend on the runtime, so the sentence appears in both places, and it
+/// is the card's own words in both.
+const TASK_SAFETY_RULE: &str = "Immutable task-safe values such as arrays may cross task boundaries. A vector cannot cross, even through `let`; finish it as an array or wrap mutable state in `Shared` or another synchronized type. Closures are task-safe only when every capture is.";
 
 /// Type-checks a resolved program.
 ///
@@ -397,6 +406,28 @@ struct ImportEnv {
     conformances: BTreeSet<(String, String)>,
 }
 
+/// The first part of `ty` that may not cross a task boundary, if there is
+/// one.
+///
+/// A `Vector` may not cross even through `let`, and neither may a task or a
+/// task scope, which belong to the task that holds them. Everything else is
+/// task-safe exactly when what it contains is — except a `Shared`, which
+/// crosses by sharing rather than by copying and so answers for itself.
+fn not_task_safe(ty: &Ty) -> Option<&Ty> {
+    match ty {
+        Ty::Vector(_) | Ty::Task(_) | Ty::Scope => Some(ty),
+        Ty::Shared(_) => None,
+        Ty::Array(inner) | Ty::Set(inner) | Ty::Option(inner) => not_task_safe(inner),
+        Ty::Map(key, value) | Ty::MapEntry(key, value) | Ty::Result(key, value) => {
+            not_task_safe(key).or_else(|| not_task_safe(value))
+        }
+        Ty::Struct(_, args) | Ty::Enum(_, args) => args.iter().find_map(not_task_safe),
+        // A closure is task-safe when every capture is, which is a fact about
+        // the values it closed over rather than about its type.
+        _ => None,
+    }
+}
+
 /// Rewrites the nominal names `module` declares into the canonical
 /// `module.Name` form.
 ///
@@ -412,6 +443,7 @@ fn qualify(ty: &Ty, module: &str) -> Ty {
         Ty::Set(inner) => Ty::Set(Box::new(qualify(inner, module))),
         Ty::Option(inner) => Ty::Option(Box::new(qualify(inner, module))),
         Ty::Task(inner) => Ty::Task(Box::new(qualify(inner, module))),
+        Ty::Shared(inner) => Ty::Shared(Box::new(qualify(inner, module))),
         Ty::Map(k, v) => Ty::Map(Box::new(qualify(k, module)), Box::new(qualify(v, module))),
         Ty::MapEntry(k, v) => {
             Ty::MapEntry(Box::new(qualify(k, module)), Box::new(qualify(v, module)))
@@ -465,6 +497,14 @@ pub enum Ty {
     Option(Box<Ty>),
     Result(Box<Ty>, Box<Ty>),
     Task(Box<Ty>),
+    /// `Shared<T>`: mutable state more than one task may reach.
+    ///
+    /// The Language Card names it in the sentence that keeps a vector out of
+    /// a task, and ADR 0008 makes it the one value that crosses a task
+    /// boundary by sharing rather than by copying. Its argument must
+    /// therefore be task-safe itself: a `Shared<Vector<T>>` would let a
+    /// vector be reached from two tasks, which is what that sentence forbids.
+    Shared(Box<Ty>),
     /// The value `scope name { ... }` binds.
     Scope,
     /// A struct this module declares, with its type arguments.
@@ -519,7 +559,8 @@ impl Ty {
             | (Ty::Vector(a), Ty::Vector(b))
             | (Ty::Set(a), Ty::Set(b))
             | (Ty::Option(a), Ty::Option(b))
-            | (Ty::Task(a), Ty::Task(b)) => a.matches(b),
+            | (Ty::Task(a), Ty::Task(b))
+            | (Ty::Shared(a), Ty::Shared(b)) => a.matches(b),
             (Ty::Map(ak, av), Ty::Map(bk, bv))
             | (Ty::MapEntry(ak, av), Ty::MapEntry(bk, bv))
             | (Ty::Result(ak, av), Ty::Result(bk, bv)) => ak.matches(bk) && av.matches(bv),
@@ -563,6 +604,7 @@ impl Ty {
             Ty::Set(inner) => Ty::Set(Box::new(inner.substitute(subst))),
             Ty::Option(inner) => Ty::Option(Box::new(inner.substitute(subst))),
             Ty::Task(inner) => Ty::Task(Box::new(inner.substitute(subst))),
+            Ty::Shared(inner) => Ty::Shared(Box::new(inner.substitute(subst))),
             Ty::Map(k, v) => Ty::Map(Box::new(k.substitute(subst)), Box::new(v.substitute(subst))),
             Ty::MapEntry(k, v) => {
                 Ty::MapEntry(Box::new(k.substitute(subst)), Box::new(v.substitute(subst)))
@@ -611,6 +653,7 @@ impl fmt::Display for Ty {
             Ty::Set(inner) => write!(f, "Set<{inner}>"),
             Ty::Option(inner) => write!(f, "Option<{inner}>"),
             Ty::Task(inner) => write!(f, "Task<{inner}>"),
+            Ty::Shared(inner) => write!(f, "Shared<{inner}>"),
             Ty::Map(k, v) => write!(f, "Map<{k}, {v}>"),
             Ty::MapEntry(k, v) => write!(f, "MapEntry<{k}, {v}>"),
             Ty::Result(t, e) => write!(f, "Result<{t}, {e}>"),
@@ -1717,7 +1760,7 @@ impl<'a> Checker<'a> {
     fn builtin_type(&mut self, name: &str, args: &[Ty], span: Span) -> Option<Ty> {
         let arity = match name {
             "Unit" | "Bool" | "Int" | "Float" | "String" | "Duration" | "Error" | "Range" => 0,
-            "Array" | "Vector" | "Set" | "Option" | "Task" => 1,
+            "Array" | "Vector" | "Set" | "Option" | "Task" | "Shared" => 1,
             "Map" | "MapEntry" | "Result" => 2,
             _ => return None,
         };
@@ -1738,6 +1781,7 @@ impl<'a> Checker<'a> {
             "Set" => Ty::Set(Box::new(first)),
             "Option" => Ty::Option(Box::new(first)),
             "Task" => Ty::Task(Box::new(first)),
+            "Shared" => Ty::Shared(Box::new(self.task_safe_argument(first, span))),
             "Map" => Ty::Map(Box::new(first), Box::new(second)),
             "MapEntry" => Ty::MapEntry(Box::new(first), Box::new(second)),
             _ => Ty::Result(Box::new(first), Box::new(second)),
@@ -1764,6 +1808,43 @@ impl<'a> Checker<'a> {
                 )
             }),
         );
+    }
+
+    /// Checks the argument of a `Shared<T>` and returns it, reporting the
+    /// first part of it that may not cross a task boundary.
+    ///
+    /// A `Shared` is reachable from every task it was given to, so what it
+    /// wraps must be able to cross a boundary itself. The Language Card names
+    /// `Shared` in the sentence that keeps a vector out of a task, and a
+    /// `Shared<Vector<T>>` would be exactly the reach that sentence forbids.
+    ///
+    /// This is the static half of the rule, and a type is all it sees, so it
+    /// answers for the type arguments a program writes. A struct whose
+    /// *field* holds a vector is refused too, by the walk over the value
+    /// itself in `cove_runtime::task`, which is where the whole rule lives.
+    fn task_safe_argument(&mut self, ty: Ty, span: Span) -> Ty {
+        if let Some(offending) = not_task_safe(&ty) {
+            let offending = offending.to_string();
+            let message = if offending == ty.to_string() {
+                format!("`Shared` cannot wrap a `{offending}`, which cannot cross a task boundary")
+            } else {
+                format!(
+                    "`Shared` cannot wrap `{ty}`: the `{offending}` in it cannot cross a task boundary"
+                )
+            };
+            self.diagnostics.push(
+                Diagnostic::error(TASK_SAFETY, message)
+                .at(span)
+                .rule(TASK_SAFETY_RULE)
+                .help(if offending.starts_with("Vector") {
+                    "wrap an `Array` instead, or finish the vector with `freeze()` before wrapping it"
+                        .to_string()
+                } else {
+                    format!("wrap a value that may cross a task boundary; a `{offending}` may not")
+                }),
+            );
+        }
+        ty
     }
 
     /// Expands a type alias, once per module.
@@ -3158,7 +3239,7 @@ impl<'a> Checker<'a> {
         Some(Ty::Result(Box::new(Ty::Unit), Box::new(Ty::Error)))
     }
 
-    /// `Ok(v)`, `Err(e)`, `Some(v)`, and `Error("message")`.
+    /// `Ok(v)`, `Err(e)`, `Some(v)`, `Error("message")`, and `Shared(value)`.
     fn constructor(
         &mut self,
         name: &str,
@@ -3194,6 +3275,13 @@ impl<'a> Checker<'a> {
                 (vec![inner.clone()], Ty::Option(Box::new(inner)))
             }
             "Error" => (vec![Ty::Str], Ty::Error),
+            "Shared" => {
+                let inner = match hint {
+                    Some(Ty::Shared(inner)) => (**inner).clone(),
+                    _ => Ty::Unknown,
+                };
+                (vec![inner.clone()], Ty::Shared(Box::new(inner)))
+            }
             _ => return None,
         };
         let mut supplied: Vec<&Expr> = args.iter().map(|arg| &arg.value).collect();
@@ -3231,6 +3319,12 @@ impl<'a> Checker<'a> {
                             ("Ok", Ty::Result(_, error)) => Ty::Result(Box::new(ty), error),
                             ("Err", Ty::Result(ok, _)) => Ty::Result(ok, Box::new(ty)),
                             ("Some", Ty::Option(_)) => Ty::Option(Box::new(ty)),
+                            // What `Shared` wraps must be task-safe, so the
+                            // payload is checked here as well as where a
+                            // `Shared<T>` is written as a type.
+                            ("Shared", Ty::Shared(_)) => {
+                                Ty::Shared(Box::new(self.task_safe_argument(ty, span)))
+                            }
                             (_, ret) => ret,
                         };
                     }
@@ -4226,11 +4320,17 @@ impl<'a> Checker<'a> {
             return self.map_error(ok, error, args, trailing, span);
         }
 
-        // `Snapshot` is the one trait a closure, a task, and a task scope
-        // never conform to: none has an independent mutable graph to copy.
-        // `builtin_method` would otherwise report this as an ordinary
-        // unknown method, which does not say why.
-        if name.node == "snapshot" && matches!(receiver, Ty::Fn(_) | Ty::Task(_) | Ty::Scope) {
+        // `Snapshot` is the one trait a closure, a task, a task scope, and a
+        // synchronized value never conform to: none has an independent
+        // mutable graph this side of a lock to copy. `builtin_method` would
+        // otherwise report this as an ordinary unknown method, which does not
+        // say why.
+        if name.node == "snapshot"
+            && matches!(
+                receiver,
+                Ty::Fn(_) | Ty::Task(_) | Ty::Scope | Ty::Shared(_)
+            )
+        {
             self.diagnostics
                 .push(no_snapshot_conformance(receiver, span));
             self.check_args_freely(args, trailing);
@@ -4529,7 +4629,8 @@ fn unify(
         | (Ty::Vector(a), Ty::Vector(b))
         | (Ty::Set(a), Ty::Set(b))
         | (Ty::Option(a), Ty::Option(b))
-        | (Ty::Task(a), Ty::Task(b)) => unify(a, b, generics, subst, view),
+        | (Ty::Task(a), Ty::Task(b))
+        | (Ty::Shared(a), Ty::Shared(b)) => unify(a, b, generics, subst, view),
         (Ty::Map(ak, av), Ty::Map(bk, bv))
         | (Ty::MapEntry(ak, av), Ty::MapEntry(bk, bv))
         | (Ty::Result(ak, av), Ty::Result(bk, bv)) => {
@@ -4887,6 +4988,21 @@ fn builtin_method(receiver: &Ty, name: &str) -> Option<BuiltinSig> {
             "cancel" => sig(Vec::new(), Ty::Unit),
             _ => None,
         },
+        Ty::Shared(inner) => match name {
+            // `lock` is a `Shared`'s only operation. Its closure receives the
+            // wrapped value and `lock` produces whatever that closure does,
+            // so a read-modify-write is one expression and cannot be split
+            // into two that race.
+            "lock" => generic(
+                "R",
+                vec![(
+                    "body",
+                    Ty::func(false, vec![(**inner).clone()], Ty::Param("R".into())),
+                )],
+                Ty::Param("R".into()),
+            ),
+            _ => None,
+        },
         Ty::Scope => match name {
             // `scope.spawn { ... }` takes the trailing closure as its body and
             // hands back a handle to the value that body produces.
@@ -4909,6 +5025,7 @@ fn builtin_name(ty: &Ty) -> String {
         Ty::Option(_) => "Option".to_string(),
         Ty::Result(_, _) => "Result".to_string(),
         Ty::Task(_) => "Task".to_string(),
+        Ty::Shared(_) => "Shared".to_string(),
         Ty::Map(_, _) => "Map".to_string(),
         Ty::Set(_) => "Set".to_string(),
         Ty::MapEntry(_, _) => "MapEntry".to_string(),
@@ -4922,6 +5039,7 @@ fn no_snapshot_conformance(receiver: &Ty, span: Span) -> Diagnostic {
     let what = match receiver {
         Ty::Fn(_) => "closures",
         Ty::Task(_) => "tasks",
+        Ty::Shared(_) => "synchronized values",
         _ => "task scopes",
     };
     Diagnostic::error(
@@ -7293,6 +7411,118 @@ async fn run() -> Result<Int, Error> {
         );
     }
 
+    // ------------------------------------------------- `Shared`
+
+    /// The Language Card's own example: mutable state wrapped in a `Shared`,
+    /// reached through a scoped `lock`.
+    const METRICS: &str = "\
+struct Metrics {
+  requests: Int
+  failures: Int
+}
+
+impl Metrics {
+  fn record(var self, failed: Bool) {
+    self.requests += 1
+    if failed {
+      self.failures += 1
+    }
+  }
+}
+";
+
+    #[test]
+    fn a_lock_gives_its_closure_the_wrapped_type_and_carries_its_result() {
+        accepts(&format!(
+            "{METRICS}
+fn run() -> Int {{
+  let metrics = Shared(Metrics(requests: 0, failures: 0))
+  metrics.lock(fn(var value) {{
+    value.record(true)
+  }})
+  metrics.lock(fn(value) {{
+    value.requests
+  }})
+}}
+"
+        ));
+    }
+
+    #[test]
+    fn a_lock_result_has_the_closure_s_type() {
+        let error = rejects(&format!(
+            "{METRICS}
+fn run() -> String {{
+  let metrics = Shared(Metrics(requests: 0, failures: 0))
+  metrics.lock(fn(value) {{
+    value.requests
+  }})
+}}
+"
+        ));
+        assert_eq!(error.message, "expected `String`, found `Int`");
+    }
+
+    /// The closure's parameter type is derived from what the `Shared` wraps,
+    /// so the closure sees that type and nothing else.
+    #[test]
+    fn a_lock_closure_takes_the_wrapped_type() {
+        let error = rejects(&format!(
+            "{METRICS}
+fn run() -> Int {{
+  let metrics = Shared(Metrics(requests: 0, failures: 0))
+  metrics.lock(fn(value) {{
+    value.attempts
+  }})
+}}
+"
+        ));
+        assert_eq!(error.code, UNKNOWN_FIELD);
+        assert_eq!(error.message, "`Metrics` has no field `attempts`");
+    }
+
+    /// A `Shared<Vector<T>>` would let a vector be reached from two tasks,
+    /// which is what the sentence naming `Shared` forbids.
+    #[test]
+    fn a_shared_vector_is_refused_where_the_type_is_written() {
+        let error = rejects_body("  let counts: Shared<Vector<Int>> = Shared(Vector.of(1))");
+        assert_eq!(error.code, TASK_SAFETY);
+        assert_eq!(
+            error.message,
+            "`Shared` cannot wrap a `Vector<Int>`, which cannot cross a task boundary"
+        );
+        assert!(error.rule.unwrap().contains("A vector cannot cross"));
+    }
+
+    #[test]
+    fn a_shared_vector_is_refused_where_it_is_constructed() {
+        let error = rejects_body("  let counts = Shared(Vector.of(1))");
+        assert_eq!(error.code, TASK_SAFETY);
+    }
+
+    #[test]
+    fn a_shared_of_an_array_of_vectors_names_the_vector() {
+        let error = rejects_body("  let counts: Shared<Array<Vector<Int>>> = Shared([])");
+        assert_eq!(
+            error.message,
+            "`Shared` cannot wrap `Array<Vector<Int>>`: the `Vector<Int>` in it cannot cross a task boundary"
+        );
+    }
+
+    #[test]
+    fn a_shared_does_not_conform_to_snapshot() {
+        let error = rejects_body("  let counts = Shared(1)\n  let copy = counts.snapshot()");
+        assert_eq!(error.message, "`Shared<Int>` does not implement `Snapshot`");
+        assert!(error.rule.unwrap().contains("synchronized values"));
+    }
+
+    #[test]
+    fn a_shared_has_no_operation_but_lock() {
+        let error = rejects_body("  let counts = Shared(1)\n  let value = counts.get()");
+        assert_eq!(error.code, UNKNOWN_METHOD);
+        assert_eq!(error.message, "`Shared` has no method `get`");
+    }
+
     // ------------------------------------------------- aliases
 
     #[test]
@@ -7383,12 +7613,12 @@ fn handle(request: http.Request) -> Int {
 
     #[test]
     fn a_capitalized_name_no_module_declares_warns_rather_than_failing() {
-        let warnings = warnings_of("fn run() -> Int {\n  Shared(1)\n  1\n}\n");
+        let warnings = warnings_of("fn run() -> Int {\n  Sensor(1)\n  1\n}\n");
         assert_eq!(warnings.len(), 1);
         assert_eq!(warnings[0].code, UNRESOLVED_NAME);
         assert_eq!(
             warnings[0].message,
-            "`Shared` is not declared in this module, so it is unchecked"
+            "`Sensor` is not declared in this module, so it is unchecked"
         );
     }
 

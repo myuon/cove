@@ -24,6 +24,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::ErrorKind;
 use std::path::{Component, Path, PathBuf};
+use std::sync::{Mutex, MutexGuard};
 
 use cove_sema::Capability;
 
@@ -42,7 +43,11 @@ enum FileSource {
     Rooted(PathBuf),
     /// A tree that lives only in this process, keyed by `/`-separated
     /// relative path.
-    InMemory(BTreeMap<String, String>),
+    ///
+    /// The real filesystem is the operating system's to synchronize; this
+    /// tree is the host's own state, so the host locks it. Two tasks writing
+    /// at once therefore take turns here exactly as they do on disk.
+    InMemory(Mutex<BTreeMap<String, String>>),
 }
 
 /// The operations `files` exposes.
@@ -142,7 +147,7 @@ impl Files {
     /// its own but with keys below it is a directory.
     pub fn in_memory(files: BTreeMap<String, String>) -> Self {
         Files {
-            source: FileSource::InMemory(files),
+            source: FileSource::InMemory(Mutex::new(files)),
         }
     }
 
@@ -154,13 +159,16 @@ impl Files {
             }
             FileSource::InMemory(files) => {
                 let key = relative_key(path)?;
-                files.get(&key).cloned().ok_or_else(|| missing(path))
+                stored(files)
+                    .get(&key)
+                    .cloned()
+                    .ok_or_else(|| missing(path))
             }
         }
     }
 
-    fn write(&mut self, path: &str, contents: &str) -> Result<(), String> {
-        match &mut self.source {
+    fn write(&self, path: &str, contents: &str) -> Result<(), String> {
+        match &self.source {
             FileSource::Rooted(root) => {
                 // A path this host refuses must not reach the filesystem at
                 // all, so the lexical rules are applied before anything is
@@ -170,7 +178,7 @@ impl Files {
                 // never an escape. It has to exist before the containment
                 // check below, which resolves symbolic links and therefore
                 // needs a real directory to resolve against.
-                std::fs::create_dir_all(&*root)
+                std::fs::create_dir_all(root)
                     .map_err(|e| format!("files: cannot create the root directory: {e}"))?;
                 let full = rooted_path(root, path)?;
                 // `rooted_path` refused every component that could climb out,
@@ -188,7 +196,7 @@ impl Files {
                 if key.is_empty() {
                     return Err(format!("files: `{path}` is a directory"));
                 }
-                files.insert(key, contents.to_string());
+                stored(files).insert(key, contents.to_string());
                 Ok(())
             }
         }
@@ -210,6 +218,7 @@ impl Files {
                 Ok(key) if key.is_empty() => true,
                 Ok(key) => {
                     let prefix = format!("{key}/");
+                    let files = stored(files);
                     files.contains_key(&key) || files.keys().any(|k| k.starts_with(&prefix))
                 }
                 Err(_) => false,
@@ -242,8 +251,8 @@ impl Files {
                     key.split('/').count()
                 };
                 let mut names = BTreeSet::new();
-                for stored in files.keys() {
-                    let parts: Vec<&str> = stored.split('/').collect();
+                for path in stored(files).keys() {
+                    let parts: Vec<&str> = path.split('/').collect();
                     if parts.len() <= depth {
                         continue;
                     }
@@ -260,21 +269,30 @@ impl Files {
         }
     }
 
-    fn delete(&mut self, path: &str) -> Result<(), String> {
-        match &mut self.source {
+    fn delete(&self, path: &str) -> Result<(), String> {
+        match &self.source {
             FileSource::Rooted(root) => {
                 let full = rooted_path(root, path)?;
                 std::fs::remove_file(&full).map_err(|e| read_error(path, &e))
             }
             FileSource::InMemory(files) => {
                 let key = relative_key(path)?;
-                match files.remove(&key) {
+                match stored(files).remove(&key) {
                     Some(_) => Ok(()),
                     None => Err(missing(path)),
                 }
             }
         }
     }
+}
+
+/// The in-memory tree, taken back from a lock a panicking run may have
+/// poisoned: a broken invariant in one task must not turn every later
+/// `files` call in another into a second, unrelated failure.
+fn stored(files: &Mutex<BTreeMap<String, String>>) -> MutexGuard<'_, BTreeMap<String, String>> {
+    files
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
 /// The message for a path that names nothing this host can reach.
@@ -409,7 +427,7 @@ impl HostApi for Files {
         FILES_SCHEMA
     }
 
-    fn call(&mut self, op: &str, args: Vec<Value>) -> Result<Value, RuntimeError> {
+    fn call(&self, op: &str, args: Vec<Value>) -> Result<Value, RuntimeError> {
         match op {
             "read" => {
                 let path = one_path(op, &args)?;
@@ -539,7 +557,7 @@ mod tests {
     #[test]
     fn writing_then_reading_answers_what_was_written() {
         let dir = TempDir::new("round-trip");
-        for mut files in both(&dir) {
+        for files in both(&dir) {
             let written = files
                 .call("write", vec![str_arg("notes.txt"), str_arg("five words")])
                 .unwrap();
@@ -553,7 +571,7 @@ mod tests {
     #[test]
     fn writing_twice_keeps_only_the_second_contents() {
         let dir = TempDir::new("overwrite");
-        for mut files in both(&dir) {
+        for files in both(&dir) {
             files
                 .call("write", vec![str_arg("notes.txt"), str_arg("first")])
                 .unwrap();
@@ -569,7 +587,7 @@ mod tests {
     #[test]
     fn a_nested_path_is_created_along_with_its_directories() {
         let dir = TempDir::new("nested");
-        for mut files in both(&dir) {
+        for files in both(&dir) {
             files
                 .call("write", vec![str_arg("a/b/c.txt"), str_arg("deep")])
                 .unwrap();
@@ -587,7 +605,7 @@ mod tests {
     #[test]
     fn reading_a_path_that_is_not_there_reports_it() {
         let dir = TempDir::new("missing");
-        for mut files in both(&dir) {
+        for files in both(&dir) {
             let read = files.call("read", vec![str_arg("absent.txt")]).unwrap();
             assert_eq!(err_message(read), "files: `absent.txt` does not exist");
         }
@@ -596,7 +614,7 @@ mod tests {
     #[test]
     fn exists_answers_before_and_after_a_write() {
         let dir = TempDir::new("exists");
-        for mut files in both(&dir) {
+        for files in both(&dir) {
             assert!(!is_true(
                 files.call("exists", vec![str_arg("notes.txt")]).unwrap()
             ));
@@ -612,7 +630,7 @@ mod tests {
     #[test]
     fn listing_the_root_answers_its_entries_in_order() {
         let dir = TempDir::new("list-root");
-        for mut files in both(&dir) {
+        for files in both(&dir) {
             for name in ["b.txt", "a.txt", "c.txt"] {
                 files
                     .call("write", vec![str_arg(name), str_arg("x")])
@@ -627,7 +645,7 @@ mod tests {
     #[test]
     fn listing_a_directory_that_is_not_there_reports_it() {
         let dir = TempDir::new("list-missing");
-        for mut files in both(&dir) {
+        for files in both(&dir) {
             let listed = files.call("list", vec![str_arg("nowhere")]).unwrap();
             assert_eq!(err_message(listed), "files: `nowhere` does not exist");
         }
@@ -636,7 +654,7 @@ mod tests {
     #[test]
     fn deleting_removes_the_file_and_then_reports_it_gone() {
         let dir = TempDir::new("delete");
-        for mut files in both(&dir) {
+        for files in both(&dir) {
             files
                 .call("write", vec![str_arg("notes.txt"), str_arg("x")])
                 .unwrap();
@@ -681,7 +699,7 @@ mod tests {
 
         let dir = TempDir::new("escape");
         for (path, expected) in cases {
-            for mut files in both(&dir) {
+            for files in both(&dir) {
                 for op in ["read", "list", "delete"] {
                     let refused = files.call(op, vec![str_arg(path)]).unwrap();
                     assert_eq!(err_message(refused), expected, "`{op}` of `{path}`");
@@ -706,7 +724,7 @@ mod tests {
         let outside = dir.path().join("outside.txt");
         let root = dir.path().join("root");
         std::fs::create_dir_all(&root).unwrap();
-        let mut files = Files::rooted(root);
+        let files = Files::rooted(root);
 
         let refused = files
             .call("write", vec![str_arg("../outside.txt"), str_arg("payload")])
@@ -731,7 +749,7 @@ mod tests {
         std::os::unix::fs::symlink(&secret, root.join("link.txt")).unwrap();
         std::os::unix::fs::symlink(dir.path(), root.join("up")).unwrap();
 
-        let mut files = Files::rooted(root);
+        let files = Files::rooted(root);
         for path in ["link.txt", "up/secret.txt"] {
             let refused = files.call("read", vec![str_arg(path)]).unwrap();
             assert_eq!(
@@ -759,7 +777,7 @@ mod tests {
         std::os::unix::fs::symlink(dir.path().join("real.txt"), dir.path().join("link.txt"))
             .unwrap();
 
-        let mut files = Files::rooted(dir.path().to_path_buf());
+        let files = Files::rooted(dir.path().to_path_buf());
         let read = files.call("read", vec![str_arg("link.txt")]).unwrap();
         assert_eq!(ok_value(read).to_string(), "inside");
     }
@@ -770,7 +788,7 @@ mod tests {
     fn a_root_that_does_not_exist_yet_is_empty_until_the_first_write() {
         let dir = TempDir::new("absent-root");
         let root = dir.path().join("not-created-yet");
-        let mut files = Files::rooted(root.clone());
+        let files = Files::rooted(root.clone());
 
         let read = files.call("read", vec![str_arg("notes.txt")]).unwrap();
         assert_eq!(err_message(read), "files: `notes.txt` does not exist");

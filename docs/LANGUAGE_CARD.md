@@ -185,6 +185,17 @@ or wrap mutable state in `Shared` or another synchronized type. Closures are
 task-safe only when every capture is. Host resources declare task-safety in
 their Host API schema.
 
+`Shared(value)` wraps task-safe mutable state, and `lock` is its only
+operation: it holds the value for the whole of the closure it is given and
+produces that closure's value, so a read-modify-write is one operation rather
+than two that can race. A `Shared` crosses a task boundary by sharing rather
+than by copying, which is the one exception to the copy rule.
+
+```cove
+let metrics = Shared(Metrics(requests: 0, failures: 0))
+metrics.lock(fn(var value) { value.record(failed) })
+```
+
 Memory is managed by a precise, non-moving mark-and-sweep collector. CPU,
 memory, time, concurrency, and Host-call limits are runtime controls, not
 termination proofs.

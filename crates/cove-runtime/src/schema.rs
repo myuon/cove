@@ -113,8 +113,10 @@ impl fmt::Display for Effect {
 /// `result_is_task_safe` answers the Language Card's rule for values leaving
 /// a host call for a task. `effect`, `cancellable`, and `recordable` are the
 /// three ADR 0001 facts whose consumers are named but not yet built —
-/// `cove replay` for `recordable`, ADR 0003 phase 2 cancellation for
-/// `cancellable`, and `cove impact` for `effect`.
+/// `cove replay` for `recordable`, `cove impact` for `effect`, and for
+/// `cancellable`, a host that could abandon a call in flight: a cancelled
+/// task stops at its next safepoint, which is after the call it is already
+/// inside returns.
 #[derive(Clone, Copy, Debug)]
 pub struct OperationSchema {
     /// The name Cove source calls, such as `println`.

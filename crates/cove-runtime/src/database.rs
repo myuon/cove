@@ -136,7 +136,7 @@ impl HostApi for Database {
         DATABASE_SCHEMA
     }
 
-    fn call(&mut self, op: &str, args: Vec<Value>) -> Result<Value, RuntimeError> {
+    fn call(&self, op: &str, args: Vec<Value>) -> Result<Value, RuntimeError> {
         match op {
             "query" => {
                 let [Value::Str(sql)] = args.as_slice() else {
@@ -199,7 +199,7 @@ mod tests {
 
     #[test]
     fn a_recorded_query_answers_its_rows() {
-        let mut database = recorded();
+        let database = recorded();
 
         let answer = database
             .call("query", vec![str_arg("select id from bookings")])
@@ -209,7 +209,7 @@ mod tests {
 
     #[test]
     fn a_query_the_fake_has_no_answer_for_says_so() {
-        let mut database = recorded();
+        let database = recorded();
 
         let answer = database
             .call("query", vec![str_arg("select id from invoices")])
@@ -222,7 +222,7 @@ mod tests {
 
     #[test]
     fn a_denied_host_refuses_every_query() {
-        let mut database = Database::denied();
+        let database = Database::denied();
 
         for sql in ["select 1", "select id from bookings"] {
             let answer = database.call("query", vec![str_arg(sql)]).unwrap();
