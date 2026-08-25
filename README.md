@@ -32,7 +32,7 @@ implementation to give.
 ```console
 $ cd examples
 $ cove check
-checked 11 module(s), 11 file(s), 8 warning(s)
+checked 11 module(s), 11 file(s)
 $ cove run hello
 Hello, world!
 $ cove test
@@ -51,10 +51,13 @@ Hello, world!
 ```
 
 Implemented: lexer, parser, directory modules, `export` visibility, derived
-outlines and capability requirements, a deterministic formatter, a tree-walking
-interpreter, Host API dispatch with grant enforcement, task scopes with a
-thread per task, a per-task mark-and-sweep collector, and runtime budgets for
-fuel, deadlines, memory, host calls, and concurrency with tracing. A host
+outlines and capability requirements, a deterministic formatter, a
+tree-walking interpreter, Host API dispatch with grant enforcement, task
+scopes with a thread per task, a per-task mark-and-sweep collector, and
+runtime budgets for fuel, deadlines, memory, host calls, and concurrency with
+tracing. A Host API call is checked against the schema its operation declares
+at both ends: `cove check` checks its arguments where they are written, and
+the boundary checks them again, along with what the host answered. A host
 resource handle is a name for something the host owns -- a module, a resource
 kind, an identity number, and the task-safety its schema declares -- never the
 resource itself, and every operation called on one goes through the same
@@ -95,11 +98,7 @@ mutable state across them.
 Still missing, and each of these is a documented gap rather than an oversight:
 a real `database` implementation, because connecting to one means speaking a
 wire protocol the standard library cannot; TLS in the `http` host, where an
-`https` URL is refused rather than downgraded; anything that checks a Host API
-call's arguments against the types its schema declares — the checker reports
-`http.Request` and its neighbors as unchecked host types, and the runtime
-holds a host to the result it declared and leaves the arguments to the host
-([#44](https://github.com/myuon/cove/issues/44)); a trace event for task
+`https` URL is refused rather than downgraded; a trace event for task
 suspension or for a cache, and a task id on a host call, which is why `cove
 trace` ends its summary with what it cannot tell you; and native code
 generation, still ADR 0002's open decision, which

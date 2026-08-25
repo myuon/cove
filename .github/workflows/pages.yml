@@ -40,7 +40,7 @@ jobs:
             ${{ runner.os }}-cargo-doc-
             ${{ runner.os }}-cargo-
 
-      # `--no-deps` keeps the five crates that matter from being buried under
+      # `--no-deps` keeps the workspace's own crates from being buried under
       # `toml` and its transitive dependencies. `-D warnings` makes a broken
       # intra-doc link fail the build instead of shipping a dead link.
       - name: cargo doc
