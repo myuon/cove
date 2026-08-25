@@ -17,6 +17,7 @@ use std::io::{BufRead, BufReader, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use cove_diag::SourceMap;
@@ -29,15 +30,25 @@ use cove_runtime::value::Value;
 /// A temporary package directory that removes itself when the test ends.
 struct TempDir(PathBuf);
 
+/// Distinguishes two directories asked for in the same nanosecond.
+///
+/// The tests below run on threads of one process, and the clock is coarse
+/// enough that two of them can read the same instant. Two `TempDir`s that
+/// agreed on a name would share one package -- so both programs would fetch
+/// whichever URL was written last, and the first to finish would delete the
+/// directory out from under the other.
+static NEXT_TEMP_DIR: AtomicU64 = AtomicU64::new(0);
+
 impl TempDir {
     fn new(name: &str) -> Self {
         let dir = std::env::temp_dir().join(format!(
-            "cove-real-http-{name}-{}-{}",
+            "cove-real-http-{name}-{}-{}-{}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap()
-                .as_nanos()
+                .as_nanos(),
+            NEXT_TEMP_DIR.fetch_add(1, Ordering::Relaxed)
         ));
         std::fs::create_dir_all(&dir).unwrap();
         TempDir(dir)

@@ -15,6 +15,15 @@
 //! moves it, and a database of canned rows. Cove code cannot tell any of them
 //! from the real thing, and every one of them is deterministic, which is what
 //! lets these be assertions rather than smoke tests.
+//!
+//! A fake being deterministic does not make a *program* deterministic. Three
+//! of these programs spawn tasks, ADR 0008 gives each one a thread, and the
+//! order in which two threads reach the console is the scheduler's. So an
+//! assertion here has to be about something the program decides: the order
+//! within one task, the set of effects a scope produced, the value an entry
+//! returned. Where the program decides nothing — most sharply, how many times
+//! a repeating timer fires before its own cancellation reaches it — the test
+//! says so rather than pinning whichever answer this machine happens to give.
 
 use std::collections::BTreeMap;
 use std::io::Write;
@@ -94,16 +103,19 @@ struct Ran {
 }
 
 impl Ran {
-    /// Whether some line of the console output is exactly `line`.
-    fn printed(&self, line: &str) -> bool {
-        self.console.iter().any(|printed| printed == line)
-    }
-
-    /// Whether some line of the console output starts with `prefix`.
-    fn printed_starting(&self, prefix: &str) -> bool {
+    /// The console output with the lines starting `prefix` taken out, and
+    /// those lines returned beside it.
+    ///
+    /// Every task of a run prints to one console, so what a test reads back is
+    /// one interleaving of several tasks' output and which interleaving it is
+    /// belongs to the scheduler. Separating the lines by who printed them is
+    /// what lets an assertion pin the order *within* a task, which the program
+    /// decides, without pinning an order *between* tasks, which it does not.
+    fn split_off(&self, prefix: &str) -> (Vec<String>, Vec<String>) {
         self.console
             .iter()
-            .any(|printed| printed.starts_with(prefix))
+            .cloned()
+            .partition(|line| !line.starts_with(prefix))
     }
 }
 
@@ -226,7 +238,17 @@ fn the_dashboard_loads_both_inputs_within_its_timeout() {
 }
 
 /// A fetch the fake has no answer for fails the whole load, since the
-/// dashboard needs both.
+/// dashboard needs both — and the failure it reports is the one the scope
+/// surfaced, not the one the body tripped over.
+///
+/// Both fetches fail here. The body awaits `bookings` first, so its `?` ends
+/// the block and `prices` is never awaited at all; leaving the scope waits for
+/// it anyway, finds it settled on an `Err`, and returns *that* from the
+/// enclosing function, exactly as ADR 0008 says a scope does with a child
+/// whose failure nobody collected. So the answer names `/prices`, and it does
+/// so every time: which task goes unawaited is decided by the order the
+/// initializer's arguments are written in, not by which thread finished
+/// first.
 #[test]
 fn the_dashboard_reports_a_fetch_the_host_could_not_answer() {
     let ran = run("tasks.loadDashboard", &["http", "clock"], Fakes::default());
@@ -235,21 +257,71 @@ fn the_dashboard_reports_a_fetch_the_host_could_not_answer() {
         panic!("expected a `Result`, found {}", ran.value);
     };
     assert_eq!(&*result.case, "Err");
-    assert!(
-        result.payload[0]
-            .to_string()
-            .starts_with("http: no recorded answer for"),
-        "{}",
-        result.payload[0]
+    assert_eq!(
+        result.payload[0].to_string(),
+        "http: no recorded answer for `http://127.0.0.1:8080/prices`"
+    );
+}
+
+/// A failure the body *did* await is the body's own value, and the scope has
+/// nothing left to surface over it.
+///
+/// This is the same program as above with one fetch answered, which is what
+/// makes the pair readable: the only difference is whether a task was left
+/// unawaited, and that is what decides which failure comes back.
+#[test]
+fn the_dashboard_reports_an_awaited_failure_as_the_bodys_own_value() {
+    let ran = run(
+        "tasks.loadDashboard",
+        &["http", "clock"],
+        Fakes {
+            bodies: BTreeMap::from([(
+                "http://127.0.0.1:8080/prices".to_string(),
+                "[\"p-1\"]".to_string(),
+            )]),
+            ..Fakes::default()
+        },
+    );
+
+    let Value::Enum(result) = ok(&ran.value) else {
+        panic!("expected a `Result`, found {}", ran.value);
+    };
+    assert_eq!(&*result.case, "Err");
+    assert_eq!(
+        result.payload[0].to_string(),
+        "http: no recorded answer for `http://127.0.0.1:8080/bookings`"
     );
 }
 
 /// `callbacks` opens a connection, serves both routes through its middleware,
-/// and closes what it opened.
+/// emits an event, and closes what it opened.
 ///
-/// The console is asserted line by line rather than as a whole: the repeating
-/// timer runs in a task of its own, so where its line lands among the
-/// request lines is the scheduler's business and not the program's.
+/// Everything the request-serving task prints is asserted in order, because
+/// that task is what decides that order: the middleware prints after the
+/// handler it wraps has returned, so the event line precedes the `Post` line.
+///
+/// The report timer is a different matter, and the reason this comment is
+/// long. `main` spawns it and cancels it once the listener runs dry, so
+/// whether it fires at all is a race between `reportTimer.cancel()` and the
+/// operating system getting round to starting the timer's thread —
+/// `clock.every` reads its task's cancellation flag before it does anything
+/// else, so a `cancel` that lands first means no round at all. A virtual clock
+/// does not settle that race, because the clock is not what decides it.
+/// Measured on one machine, the same program fired the timer in 60 of 60 runs
+/// with two requests to serve first and in 0 of 40 with none: what changed was
+/// only how much work `main` did before it cancelled. CI, which is slower and
+/// more contended, found the zero.
+///
+/// That is a property of the program rather than of the fake, and it is the
+/// same property under a real clock, where a sixty-second timer cancelled
+/// after two requests fires zero times. So this asserts what is actually
+/// decided: the fake offers one round at most, so at most one line may appear,
+/// and if one does it is the line the program prints. `clock.every`'s own
+/// behaviour — one round on a virtual clock, an `Err` handed back rather than
+/// retried, nothing run at all when the task is already cancelled — is pinned
+/// exactly by the unit tests in `crates/cove-runtime/src/clock.rs`, which
+/// drive it directly and have no second thread to race. Issue #39 records what
+/// would have to change for the count to be decidable here too.
 #[test]
 fn the_callback_server_serves_both_routes_through_its_middleware() {
     let ran = run(
@@ -273,17 +345,30 @@ fn the_callback_server_serves_both_routes_through_its_middleware() {
         ran.served,
         ["200 {\"status\":\"ok\"}", "201 {\"id\":\"b-1\"}"]
     );
-    assert!(ran.printed("listening on :8080"), "{:?}", ran.console);
-    assert!(ran.printed("Get /health"), "{:?}", ran.console);
-    assert!(ran.printed("Post /bookings"), "{:?}", ran.console);
-    assert!(
-        ran.printed("event: BookingCreated(b-1)"),
+
+    let (serving, timer) = ran.split_off("requests=");
+    assert_eq!(
+        serving,
+        [
+            "listening on :8080",
+            "Get /health",
+            "event: BookingCreated(b-1)",
+            "Post /bookings",
+        ],
         "{:?}",
         ran.console
     );
-    // The timer fired once: a virtual clock has no time of its own, so one
-    // round is all a repeating timer gets from it.
-    assert!(ran.printed_starting("requests="), "{:?}", ran.console);
+
+    assert!(
+        timer.len() <= 1,
+        "a virtual clock gives a repeating timer one round at most: {timer:?}"
+    );
+    for line in &timer {
+        assert!(
+            line.starts_with("requests=") && line.contains(" failures="),
+            "{line}"
+        );
+    }
 }
 
 /// `hello` greets whoever it was given, and the world when it was given
