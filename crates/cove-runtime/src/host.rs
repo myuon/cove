@@ -1563,4 +1563,300 @@ mod tests {
             other => panic!("expected a HostCall event, found {other:?}"),
         }
     }
+
+    // ----------------------------------------------- a host and its schema
+    //
+    // ADR 0001 makes the schema shared property: "A machine-readable Host API
+    // schema is shared by the compiler, runtime, and CLI. Each operation
+    // describes its argument, result, and error types". Every shipped host is
+    // written to obey its own, which is what makes them useless for asking
+    // what happens when one does not. These tests register a host that can be
+    // told to disagree with its declaration, and pin which disagreements the
+    // boundary catches.
+
+    /// The operation [`Wayward`] declares.
+    static WAYWARD_SCHEMA: &[OperationSchema] = &[
+        OperationSchema {
+            name: "read",
+            params: &[HostType::String],
+            variadic: false,
+            result: HostType::Result(&HostType::String, &HostType::Error),
+            capability: "wayward",
+            effect: Effect::Read,
+            cancellable: false,
+            recordable: true,
+            result_is_task_safe: true,
+        },
+        OperationSchema {
+            name: "open",
+            params: &[],
+            variadic: false,
+            result: HostType::Named("wayward.Handle"),
+            capability: "wayward",
+            effect: Effect::Read,
+            cancellable: false,
+            recordable: true,
+            result_is_task_safe: true,
+        },
+    ];
+
+    /// The one kind of resource [`Wayward`] declares it can open.
+    static WAYWARD_RESOURCES: &[ResourceSchema] = &[ResourceSchema {
+        name: "Handle",
+        task_safe: true,
+        operations: &[OperationSchema {
+            name: "close",
+            params: &[],
+            variadic: false,
+            result: HostType::Result(&HostType::Unit, &HostType::Error),
+            capability: "wayward",
+            effect: Effect::ReversibleWrite,
+            cancellable: false,
+            recordable: true,
+            result_is_task_safe: true,
+        }],
+    }];
+
+    /// A kind of resource [`Wayward`] does *not* declare, which it mints a
+    /// handle for anyway.
+    static UNDECLARED_RESOURCE: ResourceSchema = ResourceSchema {
+        name: "Ghost",
+        task_safe: true,
+        operations: &[],
+    };
+
+    /// What [`Wayward`] answers a `read` with.
+    ///
+    /// A host holds data and builds its answer at the call, because a
+    /// [`Value`] is reference-counted and belongs to the thread that built it
+    /// while a host is shared by every task of a run. So this says which
+    /// answer to build rather than holding one.
+    #[derive(Clone, Copy)]
+    enum Answer {
+        /// `Ok("what was declared")`, which is the declared result type.
+        Declared,
+        /// An `Int`, which the declared result type does not admit.
+        Undeclared,
+    }
+
+    /// A host whose behaviour can be made to disagree with its schema.
+    ///
+    /// It counts how often it was reached, so a test can tell a call the
+    /// registry refused from one it dispatched: "before the host sees them"
+    /// is a claim about where the check happens, not only about what it says.
+    struct Wayward {
+        answer: Answer,
+        calls: Arc<AtomicU64>,
+    }
+
+    impl Wayward {
+        fn answering(answer: Answer) -> (Wayward, Arc<AtomicU64>) {
+            let calls = Arc::new(AtomicU64::new(0));
+            (
+                Wayward {
+                    answer,
+                    calls: Arc::clone(&calls),
+                },
+                calls,
+            )
+        }
+    }
+
+    impl HostApi for Wayward {
+        fn name(&self) -> &str {
+            "wayward"
+        }
+
+        fn capability(&self) -> Capability {
+            Capability::new("wayward")
+        }
+
+        fn schema(&self) -> &[OperationSchema] {
+            WAYWARD_SCHEMA
+        }
+
+        fn resources(&self) -> &[ResourceSchema] {
+            WAYWARD_RESOURCES
+        }
+
+        fn call(&self, op: &str, _args: Vec<Value>) -> Result<Value, RuntimeError> {
+            self.calls.fetch_add(1, Ordering::Relaxed);
+            if op == "open" {
+                // A handle naming a resource this module's schema does not
+                // declare: the value is well formed and the name is a lie.
+                return Ok(Value::Resource(ResourceHandle::new(
+                    "wayward",
+                    &UNDECLARED_RESOURCE,
+                    1,
+                )));
+            }
+            Ok(match self.answer {
+                Answer::Declared => Value::ok(Value::Str("what was declared".into())),
+                Answer::Undeclared => Value::Int(3),
+            })
+        }
+
+        fn call_resource(
+            &self,
+            _handle: &ResourceHandle,
+            _op: &str,
+            _args: Vec<Value>,
+            _back: &mut dyn Reentry,
+        ) -> Result<Value, RuntimeError> {
+            self.calls.fetch_add(1, Ordering::Relaxed);
+            Ok(Value::ok(Value::Unit))
+        }
+    }
+
+    /// A registry holding one [`Wayward`], with its capability granted and
+    /// its trace recorded.
+    fn registry_with_wayward(answer: Answer) -> (HostRegistry, Arc<AtomicU64>, RecordingSink) {
+        let (host, calls) = Wayward::answering(answer);
+        let mut hosts = HostRegistry::new(Grants::new(["wayward"]));
+        hosts.register(Box::new(host));
+        let sink = RecordingSink::default();
+        hosts.set_trace(Arc::new(sink.clone()));
+        (hosts, calls, sink)
+    }
+
+    /// The success half: a host that answers what it declared is dispatched,
+    /// its value reaches the caller unchanged, and the trace records it.
+    #[test]
+    fn a_host_that_answers_what_its_schema_declares_is_dispatched_and_recorded() {
+        let (hosts, calls, sink) = registry_with_wayward(Answer::Declared);
+
+        let value = hosts
+            .call("wayward", "read", vec![Value::Str("input".into())])
+            .expect("a conforming call is dispatched");
+
+        assert_eq!(ok_str(value), "what was declared");
+        assert_eq!(calls.load(Ordering::Relaxed), 1);
+        let events = sink.events();
+        assert_eq!(events.len(), 1, "{events:?}");
+        match &events[0] {
+            TraceEvent::HostCall {
+                op,
+                granted,
+                outcome,
+                ..
+            } => {
+                assert_eq!(op, "read");
+                assert!(granted);
+                match outcome {
+                    Some(HostOutcome::Value(recorded)) => {
+                        assert_eq!(shown(recorded), "Ok(what was declared)")
+                    }
+                    other => panic!("expected a recorded value, found {other:?}"),
+                }
+            }
+            other => panic!("expected a HostCall event, found {other:?}"),
+        }
+    }
+
+    /// A handle is a name, and the boundary trusts no name a host hands back:
+    /// `wayward.open` answers a `wayward.Ghost`, which the module's own
+    /// `resources()` does not declare, so the first operation on it is
+    /// refused without the host being asked.
+    #[test]
+    fn a_handle_naming_a_resource_the_module_never_declared_is_refused() {
+        let (hosts, calls, _) = registry_with_wayward(Answer::Declared);
+
+        let opened = hosts
+            .call("wayward", "open", Vec::new())
+            .expect("the host answers a handle");
+        let Value::Resource(handle) = opened else {
+            panic!("expected a resource handle, found {opened}");
+        };
+        assert_eq!(handle.qualified_type(), "wayward.Ghost");
+        assert_eq!(calls.load(Ordering::Relaxed), 1);
+
+        let error = hosts
+            .call_resource(&handle, "close", Vec::new(), &mut NoReentry)
+            .expect_err("a handle the schema does not declare is refused");
+        assert_eq!(
+            error.message,
+            "host module `wayward` issues no `Ghost` handles"
+        );
+        assert_eq!(
+            calls.load(Ordering::Relaxed),
+            1,
+            "the host was not asked to act on a handle its schema disowns"
+        );
+    }
+
+    /// An operation the schema does not declare is refused at the boundary,
+    /// and the diagnostic lists what the module does declare rather than
+    /// leaving the caller to guess.
+    #[test]
+    fn an_operation_the_schema_does_not_declare_is_refused_before_the_host_sees_it() {
+        let (hosts, calls, _) = registry_with_wayward(Answer::Declared);
+
+        let error = hosts
+            .call("wayward", "write", vec![Value::Str("input".into())])
+            .expect_err("an undeclared operation is refused");
+
+        assert_eq!(
+            error.message,
+            "host module `wayward` has no operation `write`"
+        );
+        let help = error.help.expect("the diagnostic lists what does exist");
+        assert!(help.contains("`read`"), "{help}");
+        assert!(help.contains("`open`"), "{help}");
+        assert_eq!(calls.load(Ordering::Relaxed), 0);
+    }
+
+    /// Arity is the one part of an operation's declared shape the boundary
+    /// enforces, and it enforces it before the host is reached.
+    #[test]
+    fn arguments_the_schema_does_not_accept_are_refused_before_the_host_sees_them() {
+        let (hosts, calls, _) = registry_with_wayward(Answer::Declared);
+
+        let error = hosts
+            .call("wayward", "read", Vec::new())
+            .expect_err("a call with too few arguments is refused");
+
+        assert_eq!(
+            error.message,
+            "`wayward.read` takes 1 argument, but 0 were given"
+        );
+        let help = error.help.expect("the diagnostic quotes the schema");
+        assert!(
+            help.contains("wayward.read(String) -> Result<String, Error>"),
+            "{help}"
+        );
+        assert_eq!(calls.load(Ordering::Relaxed), 0);
+    }
+
+    /// A host whose *result* violates its declared type is not refused, and
+    /// nothing anywhere notices.
+    ///
+    /// `wayward.read` declares `Result<String, Error>` and answers `3`.
+    /// [`HostRegistry::dispatch`] checks the grant, that the operation
+    /// exists, its arity, and the budget, and then returns whatever the host
+    /// produced: `OperationSchema::result` is read only to render a signature
+    /// in a diagnostic. `cove-sema`'s checker says the same of itself — "ADR
+    /// 0001 promises a typed Host API schema and there is none yet, so the
+    /// checker has nothing to check a host call against" — so an `Int` where
+    /// a `Result<String, Error>` was declared flows into the program and
+    /// fails somewhere else, or not at all.
+    ///
+    /// ADR 0001 asks the schema to describe "argument, result, and error
+    /// types" and to be "shared by the compiler, runtime, and CLI". This test
+    /// is what that promise looks like when it is kept; it is ignored because
+    /// today it is not. See issue #38.
+    #[test]
+    #[ignore = "no host result is checked against its declared type: see issue #38"]
+    fn a_result_that_violates_its_declared_type_is_refused() {
+        let (hosts, _, _) = registry_with_wayward(Answer::Undeclared);
+
+        let error = hosts
+            .call("wayward", "read", vec![Value::Str("input".into())])
+            .expect_err("a host that breaks its own schema is refused");
+
+        assert!(
+            error.message.contains("Result<String, Error>"),
+            "{}",
+            error.message
+        );
+    }
 }
