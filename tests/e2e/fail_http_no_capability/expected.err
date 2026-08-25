@@ -1,0 +1,8 @@
+error[cove::runtime]: `http.listen` requires the `http` capability, which this run was not granted
+ --> <e2e>/fail_http_no_capability/main.cove:5:3
+  |
+5 |   http.listen(8080)?
+  |   ^^^^^^^^^^^^^^^^^
+  rule: Cove code has no ambient authority; the host grants capabilities at the execution boundary.
+  help: add `http` to `allow` in the run's `cove.toml` table
+1 error(s)

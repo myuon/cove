@@ -1,0 +1,10 @@
+use database
+
+/// Connects to a host that has no database at all.
+///
+/// The grant passes and the operation exists, so the run is told what is
+/// missing rather than that `database` is not a host module.
+export fn main() -> Result<Unit, Error> {
+  database.connect("bookings")?
+  Ok(())
+}

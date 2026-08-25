@@ -303,6 +303,12 @@ struct Callee {
     /// The operation as the trace records it: `query` for a module's, and
     /// `Connection.query` for a handle's.
     op: String,
+    /// The handle the call was made on, for a handle's operation.
+    ///
+    /// A trace records it as the call's first argument, so a run holding two
+    /// connections records which one each query went to — and a replay can
+    /// tell them apart.
+    receiver: Option<Value>,
     /// What has the operation, as a diagnostic names it.
     owner: String,
     /// Every operation the owner has, for the help when this one is not among
@@ -452,17 +458,24 @@ impl HostRegistry {
         Some(self.schema_for(module, op)?.result_is_task_safe)
     }
 
-    /// Describes `args` for a trace, or hands back nothing when no sink will
-    /// read them.
+    /// Describes one call for a trace, or hands back nothing when no sink
+    /// will read it.
     ///
-    /// A [`RecordedValue`] is a copy, and one of a value no boundary may
-    /// carry is also a rendering of it, so an untraced run makes neither: an
-    /// event nothing keeps has nothing worth describing.
-    fn record_args(&self, args: &[Value]) -> Vec<RecordedValue> {
+    /// The handle a resource operation was called on comes first, so a run
+    /// holding two connections records which one each query went to. A
+    /// [`RecordedValue`] is a copy, and one of a value no boundary may carry
+    /// is also a rendering of it, so an untraced run makes neither: an event
+    /// nothing keeps has nothing worth describing.
+    fn record_call(&self, callee: &Callee, args: &[Value]) -> Vec<RecordedValue> {
         if !self.trace.is_recording() {
             return Vec::new();
         }
-        args.iter().map(RecordedValue::of).collect()
+        callee
+            .receiver
+            .iter()
+            .chain(args)
+            .map(RecordedValue::of)
+            .collect()
     }
 
     /// Dispatches a Host API call after checking the grant, the schema, and
@@ -503,6 +516,7 @@ impl HostRegistry {
         let callee = Callee {
             module: module.to_string(),
             op: op.to_string(),
+            receiver: None,
             owner: format!("host module `{module}`"),
             known: entry.schema().iter().map(|e| e.name).collect(),
         };
@@ -555,6 +569,7 @@ impl HostRegistry {
             // resource answered it, so a trace of a run holding two kinds of
             // handle does not read as one flat list of `query` calls.
             op: format!("{}.{op}", handle.type_name),
+            receiver: Some(Value::Resource(Arc::new(handle.clone()))),
             owner: format!("`{qualified}`"),
             known: resource.operations.iter().map(|e| e.name).collect(),
         };
@@ -585,7 +600,7 @@ impl HostRegistry {
             outcome: None,
         };
         if !self.grants.allows(&capability) {
-            self.trace.record(refused(self.record_args(&args)));
+            self.trace.record(refused(self.record_call(callee, &args)));
             return Err(RuntimeError::new(format!(
                 "`{shown}` requires the `{capability}` capability, which this run was not granted"
             ))
@@ -640,7 +655,7 @@ impl HostRegistry {
                 .charge_host_call()
                 .map_err(|stopped| budget.to_runtime_error(stopped))
         }) {
-            self.trace.record(refused(self.record_args(&args)));
+            self.trace.record(refused(self.record_call(callee, &args)));
             return Err(error);
         }
 
@@ -651,7 +666,7 @@ impl HostRegistry {
         // A trace has to carry the arguments to be replayable, and the host
         // takes ownership of them, so they are recorded before dispatch
         // rather than reconstructed afterwards.
-        let recorded_args = self.record_args(&args);
+        let recorded_args = self.record_call(callee, &args);
         let started = Instant::now();
         let result = invoke(args);
         let wait = started.elapsed();

@@ -43,11 +43,21 @@ impl Drop for TempDir {
     }
 }
 
+/// The `tests/e2e` package at the repository root.
+fn e2e() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/e2e")
+}
+
 /// Runs `cove` with the working directory set to `examples/`.
 fn cove(args: &[&str]) -> Output {
+    cove_in(&examples(), args)
+}
+
+/// Runs `cove` with the working directory set to `dir`.
+fn cove_in(dir: &Path, args: &[&str]) -> Output {
     Command::new(env!("CARGO_BIN_EXE_cove"))
         .args(args)
-        .current_dir(examples())
+        .current_dir(dir)
         .output()
         .expect("the `cove` binary runs")
 }
@@ -280,4 +290,50 @@ fn the_timeline_can_be_filtered_by_capability() {
     let timeline = report.split("timeline").nth(1).expect("a timeline");
     assert!(timeline.contains("console.println"), "{report}");
     assert!(!timeline.contains("documents.read"), "{report}");
+}
+
+/// A resource handle is recorded and replayed like any other value, because
+/// that is all it is: a name.
+///
+/// `tests/e2e/host_http_resource` opens a listener, asks it for its port, and
+/// closes it — creation, use, and closure, which is the whole life of a
+/// handle. The replay opens no socket at all: `http.listen` is answered with
+/// the identity the trace recorded, and the two calls made on that identity
+/// are matched against the recorded ones, handle included.
+#[test]
+fn a_resource_handle_is_recorded_and_replayed_by_the_name_it_is() {
+    let dir = TempDir::new("resource");
+    let path = dir.join("t.jsonl");
+    let trace = path.display().to_string();
+
+    let run = cove_in(&e2e(), &["run", "host_http_resource", "--trace", &trace]);
+    assert!(run.status.success(), "the run failed: {}", stderr(&run));
+    let recorded = std::fs::read_to_string(&path).expect("the trace was written");
+
+    // Creation records the identity the host issued, and the calls made on it
+    // record that identity as their first argument.
+    assert!(
+        recorded.contains(r#""op":"listen""#)
+            && recorded.contains(r#"{"type":"resource","name":"http.Server","id":1}"#),
+        "{recorded}"
+    );
+    assert!(recorded.contains(r#""op":"Server.port""#), "{recorded}");
+    assert!(recorded.contains(r#""op":"Server.close""#), "{recorded}");
+
+    let inspect = cove_in(&e2e(), &["trace", &trace]);
+    assert!(inspect.status.success(), "{}", stderr(&inspect));
+    let report = stdout(&inspect);
+    assert!(report.contains("http.Server.close"), "{report}");
+
+    let replay = cove_in(&e2e(), &["replay", &trace, "host_http_resource"]);
+    assert!(
+        replay.status.success(),
+        "the replay diverged: {}",
+        stderr(&replay)
+    );
+    assert!(
+        stdout(&replay).contains("host calls  5 of 5 recorded call(s), answered from the trace"),
+        "{}",
+        stdout(&replay)
+    );
 }

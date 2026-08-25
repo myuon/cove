@@ -1,0 +1,14 @@
+use console.println
+use http
+
+/// Opens a listener, uses the handle it was given, and closes it again.
+///
+/// The port is the host's choice, so what this prints are the facts about the
+/// handle that do not depend on which port that turned out to be.
+export fn main() -> Result<Unit, Error> {
+  let server = http.listen(0)?
+
+  println("listening {server.port() > 0}")?
+  println("closed {server.close().isOk()}")?
+  Ok(())
+}
