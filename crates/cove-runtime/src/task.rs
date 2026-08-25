@@ -352,6 +352,10 @@ impl Transfer {
     /// deadlock or unbounded work that chasing into another cell could
     /// cause. A cycle through two or more cells is invisible to this check;
     /// that is the wider, deferred problem the ADR's amendment names.
+    ///
+    /// A [`Transfer::Resource`] is a leaf here for the reason ADR 0013 gives
+    /// for it being a leaf everywhere: a handle is a name, and a name holds
+    /// nothing a walk could descend into.
     pub(crate) fn reaches(&self, target: *const SharedCell) -> bool {
         match self {
             Transfer::Shared(cell) => std::ptr::eq(Arc::as_ptr(cell), target),
@@ -374,6 +378,7 @@ impl Transfer {
             | Transfer::HostModule(_)
             | Transfer::HostFn { .. }
             | Transfer::Type(_)
+            | Transfer::Resource(_)
             | Transfer::Range { .. } => false,
         }
     }
