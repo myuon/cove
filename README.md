@@ -91,6 +91,34 @@ tasks execute in
 
 Syntax is still provisional and may change.
 
+## MVP execution profiles
+
+[ADR 0001](docs/adr/0001-mvp-language-design.md) names four execution
+profiles: native, embedded, sandboxed, and Wasm. They are not equally weighted
+MVP obligations, so completeness is judged against this checklist rather than
+against the profile list on its own:
+
+- [x] **Native — MVP required.** `cove run` and `cove build` execute a
+  representative program end to end; see `examples/` and `cove-cli`'s own
+  tests.
+- [x] **Sandboxed — MVP required.** An ungranted Host API call is refused and
+  a run is stopped by its fuel, deadline, host-call, or memory limits; see the
+  tests in `crates/cove-runtime/src/host.rs` and
+  `crates/cove-runtime/src/budget.rs`.
+- [x] **Embedded — MVP required.** A host outside `cove-runtime` can supply
+  its own capability implementation and its own limits, and see both a
+  successful run and a denial; see
+  `crates/cove-runtime/tests/embedding.rs`, which `cargo test --workspace`
+  (and CI) runs.
+- [ ] **Wasm — deferred.** No crate in this workspace builds for or runs on
+  Wasm. For the MVP, Wasm is only a semantic-portability constraint on the
+  language and backend design, not a working target; a production Wasm
+  backend is explicitly deferred in the roadmap.
+
+A profile checked above is backed by a passing test, not only a description;
+an unchecked profile is not implemented, whatever the Product boundary section
+of ADR 0001 might suggest on its own.
+
 ## Name
 
 A cove is a small, sheltered inlet. The name reflects code that can run inside
