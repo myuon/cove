@@ -31,8 +31,8 @@ use cove_runtime::runtime::Runtime;
 use cove_runtime::schema::{ModuleSchema, OperationSchema, ResourceSchema, TypeSchema};
 use cove_runtime::Transfer;
 use cove_runtime::{
-    value_to_json, Budget, Cancellation, Grants, Limits, ResourceHandle, RuntimeError, Value,
-    ValueCapture,
+    value_to_json, Budget, Cancellation, Grants, Limits, ResourceHandle, RunOutcome, RuntimeError,
+    Value, ValueCapture,
 };
 use cove_sema::Capability;
 
@@ -220,6 +220,14 @@ pub(crate) enum Divergence {
         total: usize,
         next: String,
     },
+    /// The program made every recorded call and then ended differently than
+    /// the run that was recorded did.
+    Ended {
+        recorded: RunOutcome,
+        recorded_message: Option<String>,
+        replayed: RunOutcome,
+        replayed_message: Option<String>,
+    },
 }
 
 impl Divergence {
@@ -237,6 +245,13 @@ impl Divergence {
             }
             Divergence::Unused { used, total, .. } => format!(
                 "replay diverged: the program made {used} of the trace's {total} recorded call(s)"
+            ),
+            Divergence::Ended {
+                recorded, replayed, ..
+            } => format!(
+                "replay diverged: the recorded run ended `{}` and this one ended `{}`",
+                recorded.as_str(),
+                replayed.as_str()
             ),
         }
     }
@@ -280,6 +295,22 @@ impl Divergence {
                 out.push_str(&format!("  the program made   {used}\n"));
                 out.push_str(&format!("  the next recorded  {next}\n"));
             }
+            Divergence::Ended {
+                recorded,
+                recorded_message,
+                replayed,
+                replayed_message,
+            } => {
+                out.push_str("divergence: the program ended differently than it did\n");
+                out.push_str(&format!(
+                    "  the trace records  {}\n",
+                    ended(*recorded, recorded_message.as_deref())
+                ));
+                out.push_str(&format!(
+                    "  the program ended  {}\n",
+                    ended(*replayed, replayed_message.as_deref())
+                ));
+            }
         }
         out.push_str(
             "  rule               a replay answers every Host API call from the trace, in the\n\
@@ -287,6 +318,51 @@ impl Divergence {
              \x20                    so a divergence means it took a different path than it did\n",
         );
         out
+    }
+}
+
+/// The one thing a replay keeps from its own trace: how the run it just made
+/// ended.
+///
+/// A replay writes no trace file, but the runtime records a run's terminal
+/// event whether anyone is listening or not — so listening for that one event
+/// is how the replayed ending is classified by exactly the rule that
+/// classified the recorded one, rather than by a second copy of the rule kept
+/// in step by hand.
+#[derive(Default)]
+struct EndingSink(Mutex<Option<(RunOutcome, Option<String>)>>);
+
+impl cove_runtime::TraceSink for EndingSink {
+    fn record(&self, event: cove_runtime::TraceEvent) {
+        let cove_runtime::TraceEvent::RunEnded { outcome, message } = event else {
+            return;
+        };
+        // A sink must not panic, and a poisoned lock is not a reason to fail
+        // the replay it is only observing.
+        if let Ok(mut ending) = self.0.lock() {
+            *ending = Some((outcome, message));
+        }
+    }
+
+    /// Nothing here reads a host call, so the boundary need not describe the
+    /// values one carried.
+    fn is_recording(&self) -> bool {
+        false
+    }
+}
+
+impl EndingSink {
+    fn ending(&self) -> Option<(RunOutcome, Option<String>)> {
+        self.0.lock().ok().and_then(|ending| ending.clone())
+    }
+}
+
+/// How a run ended, for a divergence report: the classification, and what it
+/// said if it said anything.
+fn ended(outcome: RunOutcome, message: Option<&str>) -> String {
+    match message {
+        Some(message) => format!("{} — {message}", outcome.as_str()),
+        None => outcome.as_str().to_string(),
     }
 }
 
@@ -444,7 +520,9 @@ pub(crate) fn cmd_replay(args: &[String]) -> Result<(), CliError> {
         .map(|arg| arg.as_str().into())
         .collect();
     let sources = Arc::new(sources);
-    let runtime = Runtime::new(Arc::new(program), sources.clone(), Arc::new(hosts));
+    let ending = Arc::new(EndingSink::default());
+    let runtime = Runtime::new(Arc::new(program), sources.clone(), Arc::new(hosts))
+        .with_trace(ending.clone());
     let outcome = Interpreter::new(&runtime).run_entry(module, entry, program_args);
 
     let (used, unchecked, divergence) = {
@@ -467,6 +545,24 @@ pub(crate) fn cmd_replay(args: &[String]) -> Result<(), CliError> {
         });
         (tape.next, tape.unchecked_args, divergence)
     };
+
+    // The last thing compared, because it is the last thing that happens: a
+    // run that diverged earlier has already been reported for the call it
+    // diverged on, and reporting its ending too would bury that cause under a
+    // consequence of it. Only the classification is compared. A message is
+    // the runtime's own sentence about a stop, and a replay held to its exact
+    // wording would call a reworded diagnostic a divergence; the report
+    // prints both so a reader can see what each run said.
+    let divergence = divergence.or_else(|| {
+        let (recorded, recorded_message) = trace.run_outcome()?;
+        let (replayed, replayed_message) = ending.ending()?;
+        (recorded != replayed).then(|| Divergence::Ended {
+            recorded,
+            recorded_message: recorded_message.map(str::to_string),
+            replayed,
+            replayed_message,
+        })
+    });
 
     if let Some(divergence) = divergence {
         eprint!("{}", divergence.report());
@@ -501,12 +597,12 @@ mod tests {
     use cove_runtime::host::Console;
 
     const HEADER: &str =
-        r#"{"event":"trace_header","version":1,"values":"full","entry":"a.b","args":[]}"#;
+        r#"{"event":"trace_header","version":2,"values":"full","entry":"a.b","args":[]}"#;
 
     /// A `console.println("hi")` that answered `Ok(())`.
     fn println_line(text: &str) -> String {
         format!(
-            r#"{{"event":"host_call","module":"console","op":"println","capability":"console","wait_ns":0,"granted":true,"args":[{{"type":"string","value":"{text}"}}],"outcome":{{"kind":"value","value":{{"type":"enum","name":"Result","case":"Ok","payload":[{{"type":"unit"}}]}}}}}}"#
+            r#"{{"event":"host_call","task":0,"module":"console","op":"println","capability":"console","wait_ns":0,"granted":true,"args":[{{"type":"string","value":"{text}"}}],"outcome":{{"kind":"value","value":{{"type":"enum","name":"Result","case":"Ok","payload":[{{"type":"unit"}}]}}}}}}"#
         )
     }
 
@@ -657,7 +753,7 @@ mod tests {
     /// recordable, and a replay must say so rather than invent a `Unit`.
     #[test]
     fn a_call_the_trace_could_not_record_a_result_for_cannot_be_answered() {
-        let tape = tape_of(&[r#"{"event":"host_call","module":"process","op":"exit","capability":"process","wait_ns":0,"granted":true,"args":[{"type":"int","value":0}],"outcome":{"kind":"not_recordable"}}"#.to_string()]);
+        let tape = tape_of(&[r#"{"event":"host_call","task":0,"module":"process","op":"exit","capability":"process","wait_ns":0,"granted":true,"args":[{"type":"int","value":0}],"outcome":{"kind":"not_recordable"}}"#.to_string()]);
         let mut hosts = HostRegistry::new(Grants::new(["process"]));
         for module in cove_runtime::shipped_schema() {
             hosts.register(Box::new(ReplayHost {
@@ -684,7 +780,7 @@ mod tests {
 
     #[test]
     fn a_recorded_runtime_error_is_reproduced_as_the_same_error() {
-        let tape = tape_of(&[r#"{"event":"host_call","module":"console","op":"println","capability":"console","wait_ns":0,"granted":true,"args":[],"outcome":{"kind":"error","message":"console: broken pipe"}}"#.to_string()]);
+        let tape = tape_of(&[r#"{"event":"host_call","task":0,"module":"console","op":"println","capability":"console","wait_ns":0,"granted":true,"args":[],"outcome":{"kind":"error","message":"console: broken pipe"}}"#.to_string()]);
         let hosts = registry(&tape);
         let error = hosts
             .call("console", "println", Vec::new())
@@ -701,7 +797,7 @@ mod tests {
 
     #[test]
     fn a_redacted_argument_cannot_be_compared_and_is_counted_instead() {
-        let tape = tape_of(&[r#"{"event":"host_call","module":"console","op":"println","capability":"console","wait_ns":0,"granted":true,"args":[{"type":"redacted","of":"String"}],"outcome":{"kind":"value","value":{"type":"enum","name":"Result","case":"Ok","payload":[{"type":"unit"}]}}}"#.to_string()]);
+        let tape = tape_of(&[r#"{"event":"host_call","task":0,"module":"console","op":"println","capability":"console","wait_ns":0,"granted":true,"args":[{"type":"redacted","of":"String"}],"outcome":{"kind":"value","value":{"type":"enum","name":"Result","case":"Ok","payload":[{"type":"unit"}]}}}"#.to_string()]);
         let hosts = registry(&tape);
         hosts
             .call("console", "println", vec![Value::Str("anything".into())])

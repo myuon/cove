@@ -10,10 +10,15 @@
 //! What a summary reports is limited by what the events carry. ADR 0001 asks
 //! traces to distinguish CPU execution, I/O wait, allocation and memory
 //! pressure, host calls and capability use, task lifecycle, and cache hits
-//! and misses. Four of those have events today and two do not, and
+//! and misses. Five of those have events today and one does not, and
 //! [`render_summary`] says so rather than printing a zero that reads like a
 //! measurement. Allocation and memory pressure joined the four when ADR 0011
-//! added a collector for them to be measured by.
+//! added a collector for them to be measured by, and a host call's wait became
+//! attributable to the task that waited when the call gained that task's id.
+//!
+//! Two questions a summary can now answer that it could not: whose each host
+//! call was, which is what the `by task` block and `--task` report, and how
+//! the run ended, which is the one thing no event carried at all.
 
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
@@ -21,7 +26,9 @@ use std::path::Path;
 use std::time::Duration;
 
 use cove_runtime::schema::{Effect, OperationSchema};
-use cove_runtime::{value_to_json, Value, ValueCapture, TRACE_FORMAT_VERSION};
+use cove_runtime::{
+    value_to_json, RunOutcome, Value, ValueCapture, ENTRY_TASK, TRACE_FORMAT_VERSION,
+};
 
 use crate::json::{self, Json};
 use crate::CliError;
@@ -72,7 +79,7 @@ pub(crate) enum Event {
         wait: Duration,
     },
     HeapCollected {
-        task: Option<u64>,
+        task: u64,
         allocated: u64,
         freed: u64,
         live_objects: u64,
@@ -87,10 +94,18 @@ pub(crate) enum Event {
         peak_bytes: u64,
         pause: Duration,
     },
+    /// How the run ended, which is the last line of every trace.
+    RunEnded {
+        outcome: RunOutcome,
+        message: Option<String>,
+    },
 }
 
 /// One recorded Host API call.
 pub(crate) struct HostCall {
+    /// The task that made the call: a spawned task's id, or [`ENTRY_TASK`]
+    /// for a call the entry made itself.
+    pub(crate) task: u64,
     pub(crate) module: String,
     pub(crate) op: String,
     pub(crate) capability: String,
@@ -205,6 +220,19 @@ impl Trace {
         Ok(Trace { header, events })
     }
 
+    /// How the run this trace recorded ended, or `None` for a trace that
+    /// carries no `run_ended` line.
+    ///
+    /// Every trace this build writes carries one, so `None` means a file
+    /// somebody assembled by hand or truncated — which is worth reporting as
+    /// such rather than reading as a run that succeeded.
+    pub(crate) fn run_outcome(&self) -> Option<(RunOutcome, Option<&str>)> {
+        self.events.iter().rev().find_map(|event| match event {
+            Event::RunEnded { outcome, message } => Some((*outcome, message.as_deref())),
+            _ => None,
+        })
+    }
+
     /// Every recorded call that reached a host, in order. These are the calls
     /// a replay answers from.
     pub(crate) fn dispatched_calls(&self) -> Vec<&HostCall> {
@@ -306,14 +334,7 @@ fn parse_event(line: &str) -> Result<Event, String> {
             wait: nanos_field(&json, "wait_ns")?,
         }),
         "heap_collected" => Ok(Event::HeapCollected {
-            task: match field(&json, "task")? {
-                Json::Null => None,
-                other => Some(
-                    other
-                        .as_u64()
-                        .ok_or_else(|| "`task` must be an integer or null".to_string())?,
-                ),
-            },
+            task: u64_field(&json, "task")?,
             allocated: u64_field(&json, "allocated")?,
             freed: u64_field(&json, "freed")?,
             live_objects: u64_field(&json, "live_objects")?,
@@ -328,6 +349,23 @@ fn parse_event(line: &str) -> Result<Event, String> {
             peak_bytes: u64_field(&json, "peak_bytes")?,
             pause: nanos_field(&json, "pause_ns")?,
         }),
+        "run_ended" => {
+            let name = string_field(&json, "outcome")?;
+            let outcome = RunOutcome::parse(&name)
+                .ok_or_else(|| format!("unknown run outcome `{name}`"))?;
+            Ok(Event::RunEnded {
+                outcome,
+                message: match field(&json, "message")? {
+                    Json::Null => None,
+                    other => Some(
+                        other
+                            .as_str()
+                            .map(str::to_string)
+                            .ok_or_else(|| "`message` must be a string or null".to_string())?,
+                    ),
+                },
+            })
+        }
         other => Err(format!(
             "unknown event `{other}`; this build of `cove` reads trace format version {TRACE_FORMAT_VERSION}"
         )),
@@ -353,6 +391,7 @@ fn parse_host_call(json: &Json) -> Result<HostCall, String> {
         }),
     };
     Ok(HostCall {
+        task: u64_field(json, "task")?,
         module: string_field(json, "module")?,
         op: string_field(json, "op")?,
         capability: string_field(json, "capability")?,
@@ -729,7 +768,8 @@ pub(crate) fn render_summary(path: &Path, trace: &Trace) -> String {
     let (mut dispatched, mut refused, mut irreversible) = (0usize, 0usize, 0usize);
     let mut wait_total = Duration::ZERO;
     let (mut collections, mut collected_allocated, mut freed_objects) = (0usize, 0u64, 0u64);
-    let mut collected_by: BTreeMap<Option<u64>, usize> = BTreeMap::new();
+    let mut collected_by: BTreeMap<u64, usize> = BTreeMap::new();
+    let mut by_task: BTreeMap<u64, CapabilityCounts> = BTreeMap::new();
     let mut heap: Option<HeapTotals> = None;
     for event in &trace.events {
         match event {
@@ -766,7 +806,7 @@ pub(crate) fn render_summary(path: &Path, trace: &Trace) -> String {
                     pause: *pause,
                 });
             }
-            Event::EntryEnter { .. } => {}
+            Event::EntryEnter { .. } | Event::RunEnded { .. } => {}
             Event::EntryExit {
                 module,
                 function,
@@ -775,19 +815,24 @@ pub(crate) fn render_summary(path: &Path, trace: &Trace) -> String {
             } => entries.push((format!("{module}.{function}"), *cpu, *wait)),
             Event::HostCall(call) => {
                 let counts = by_capability.entry(&call.capability).or_default();
+                let whose = by_task.entry(call.task).or_default();
                 counts.wait += call.wait;
+                whose.wait += call.wait;
                 wait_total += call.wait;
                 if call.granted {
                     counts.dispatched += 1;
+                    whose.dispatched += 1;
                     dispatched += 1;
                 } else {
                     counts.refused += 1;
+                    whose.refused += 1;
                     refused += 1;
                 }
                 match schema.get(call) {
                     Some(operation) => {
                         if call.granted && operation.effect == Effect::IrreversibleWrite {
                             counts.irreversible += 1;
+                            whose.irreversible += 1;
                             irreversible += 1;
                         }
                     }
@@ -857,6 +902,16 @@ pub(crate) fn render_summary(path: &Path, trace: &Trace) -> String {
             unknown.join(", ")
         );
     }
+    let _ = writeln!(
+        out,
+        "  outcome      {}",
+        match trace.run_outcome() {
+            Some((outcome, Some(message))) => format!("{} — {message}", outcome.as_str()),
+            Some((outcome, None)) => outcome.as_str().to_string(),
+            None =>
+                "no `run_ended` event, so this trace does not say how the run ended".to_string(),
+        }
+    );
 
     if !by_capability.is_empty() {
         let width = by_capability
@@ -877,13 +932,41 @@ pub(crate) fn render_summary(path: &Path, trace: &Trace) -> String {
         }
     }
 
+    // One task's calls are the whole of what a single-task run made, so a
+    // table of one row would repeat the totals above under a heading. It is
+    // worth printing when there is something to compare.
+    if by_task.len() > 1 {
+        let _ = writeln!(out, "\nby task");
+        for (task, counts) in &by_task {
+            let _ = writeln!(
+                out,
+                "  {:9}  {} dispatched, {} refused, {} irreversible, wait {}",
+                whose_task(*task),
+                counts.dispatched,
+                counts.refused,
+                counts.irreversible,
+                pretty(counts.wait)
+            );
+        }
+    }
+
     out.push_str(
         "\nnot carried by these events\n\
          \x20 task suspension and resumption   only spawn, completion, and cancellation are recorded\n\
-         \x20 cache hits and misses            no event records either\n\
-         \x20 which task made a host call      `host_call` carries no task id\n",
+         \x20 cache hits and misses            no event records either\n",
     );
     out
+}
+
+/// Which task an event belongs to, in the words a report uses: the entry runs
+/// under an id like any other task, and naming it is clearer than printing
+/// the number and leaving a reader to know that 0 is not a spawned task.
+fn whose_task(task: u64) -> String {
+    if task == ENTRY_TASK {
+        "the entry".to_string()
+    } else {
+        format!("task {task}")
+    }
 }
 
 /// Renders the timeline, honouring a `--capability` or `--task` filter.
@@ -897,7 +980,8 @@ pub(crate) fn render_timeline(trace: &Trace, filter: &Filter) -> String {
         Filter::Task(id) => {
             let _ = writeln!(
                 out,
-                "\ntimeline (task {id}; `host_call` carries no task id, so no host call can match)"
+                "\ntimeline ({}: its lifecycle, its collections, and the host calls it made)",
+                whose_task(*id)
             );
         }
     }
@@ -927,10 +1011,7 @@ pub(crate) fn render_timeline(trace: &Trace, filter: &Filter) -> String {
                 live_bytes,
                 pause,
             } => {
-                let whose = match task {
-                    Some(id) => format!("task {id}"),
-                    None => "the entry".to_string(),
-                };
+                let whose = whose_task(*task);
                 let _ = writeln!(
                     out,
                     "{at:>4}  heap_collected  {whose}: {allocated} allocated, {freed} freed, {live_objects} live in {live_bytes} bytes, pause {}",
@@ -970,10 +1051,16 @@ pub(crate) fn render_timeline(trace: &Trace, filter: &Filter) -> String {
                     pretty(*wait)
                 );
             }
+            Event::RunEnded { outcome, message } => {
+                let _ = writeln!(out, "{at:>4}  run_ended       {}", outcome.as_str());
+                if let Some(message) = message {
+                    let _ = writeln!(out, "        {message}");
+                }
+            }
             Event::HostCall(call) => {
                 let _ = writeln!(
                     out,
-                    "{at:>4}  host_call       {} [{}] {}, wait {}",
+                    "{at:>4}  host_call       {} [{}] {}, by {}, wait {}",
                     call.shown(),
                     call.capability,
                     if call.granted {
@@ -981,6 +1068,7 @@ pub(crate) fn render_timeline(trace: &Trace, filter: &Filter) -> String {
                     } else {
                         "refused"
                     },
+                    whose_task(call.task),
                     pretty(call.wait)
                 );
                 match &call.outcome {
@@ -1027,13 +1115,16 @@ impl Filter {
                 Event::HostCall(call) => &call.capability == name,
                 _ => false,
             },
-            // A collection belongs to the task whose heap it swept, and that
-            // task's id is the one thing this event does carry.
+            // Everything a task did that an event records: it starting and
+            // stopping, the collections of the heap that was its own, and the
+            // host calls it made. The entry is a task here like any other, so
+            // `--task 0` is how a reader asks what the entry did itself.
             Filter::Task(wanted) => match event {
                 Event::TaskSpawned { id, .. }
                 | Event::TaskCompleted { id, .. }
                 | Event::TaskCancelled { id } => id == wanted,
-                Event::HeapCollected { task: Some(id), .. } => id == wanted,
+                Event::HeapCollected { task, .. } => task == wanted,
+                Event::HostCall(call) => call.task == *wanted,
                 _ => false,
             },
         }
@@ -1096,7 +1187,7 @@ pub(crate) fn cmd_trace(args: &[String]) -> Result<(), CliError> {
 mod tests {
     use super::*;
 
-    const HEADER: &str = r#"{"event":"trace_header","version":1,"values":"full","entry":"restricted.main","args":[]}"#;
+    const HEADER: &str = r#"{"event":"trace_header","version":2,"values":"full","entry":"restricted.main","args":[]}"#;
 
     fn read(lines: &[&str]) -> Trace {
         Trace::read_str(&lines.join("\n")).expect("the trace reads")
@@ -1114,9 +1205,9 @@ mod tests {
         let trace = read(&[
             HEADER,
             r#"{"event":"entry_enter","module":"restricted","function":"main"}"#,
-            r#"{"event":"host_call","module":"documents","op":"read","capability":"documents","wait_ns":900,"granted":true,"args":[{"type":"string","value":"input"}],"outcome":{"kind":"value","value":{"type":"enum","name":"Result","case":"Ok","payload":[{"type":"string","value":"text"}]}}}"#,
+            r#"{"event":"host_call","task":0,"module":"documents","op":"read","capability":"documents","wait_ns":900,"granted":true,"args":[{"type":"string","value":"input"}],"outcome":{"kind":"value","value":{"type":"enum","name":"Result","case":"Ok","payload":[{"type":"string","value":"text"}]}}}"#,
         ]);
-        assert_eq!(trace.header.version, 1);
+        assert_eq!(trace.header.version, 2);
         assert_eq!(trace.header.values, ValueCapture::Full);
         assert_eq!(trace.header.entry, "restricted.main");
         assert_eq!(trace.events.len(), 2);
@@ -1135,15 +1226,25 @@ mod tests {
 
     /// A reader that does not know a version must reject the trace rather
     /// than read it as though it were one it does know.
+    /// Version 1 is the version this reader used to be, and a trace of it can
+    /// answer none of the three questions this one now asks: it carries no
+    /// task on a host call, no terminal event, and a null where the entry's
+    /// own heap events now name a task. It is refused for its version, which
+    /// says exactly that, rather than half-read.
     #[test]
     fn a_version_this_build_does_not_know_is_rejected() {
-        let message = error(&[
-            r#"{"event":"trace_header","version":2,"values":"full","entry":"a.b","args":[]}"#,
-        ]);
-        assert!(
-            message.contains("is version 2, and this build of `cove` reads version 1"),
-            "{message}"
-        );
+        for version in [1, 3] {
+            let header = format!(
+                r#"{{"event":"trace_header","version":{version},"values":"full","entry":"a.b","args":[]}}"#
+            );
+            let message = error(&[&header]);
+            assert!(
+                message.contains(&format!(
+                    "is version {version}, and this build of `cove` reads version 2"
+                )),
+                "{message}"
+            );
+        }
     }
 
     /// A future version may add fields this build has never heard of, so the
@@ -1175,7 +1276,7 @@ mod tests {
     fn an_unknown_recorded_value_type_is_rejected() {
         let message = error(&[
             HEADER,
-            r#"{"event":"host_call","module":"a","op":"b","capability":"c","wait_ns":0,"granted":true,"args":[{"type":"vector"}],"outcome":null}"#,
+            r#"{"event":"host_call","task":0,"module":"a","op":"b","capability":"c","wait_ns":0,"granted":true,"args":[{"type":"vector"}],"outcome":null}"#,
         ]);
         assert!(
             message.contains("unknown recorded value type `vector`"),
@@ -1192,8 +1293,8 @@ mod tests {
     #[test]
     fn a_redacted_value_reads_back_as_missing_rather_than_as_a_value() {
         let trace = read(&[
-            r#"{"event":"trace_header","version":1,"values":"redacted","entry":"a.b","args":[]}"#,
-            r#"{"event":"host_call","module":"env","op":"get","capability":"env","wait_ns":0,"granted":true,"args":[{"type":"redacted","of":"String"}],"outcome":{"kind":"value","value":{"type":"redacted","of":"Option"}}}"#,
+            r#"{"event":"trace_header","version":2,"values":"redacted","entry":"a.b","args":[]}"#,
+            r#"{"event":"host_call","task":0,"module":"env","op":"get","capability":"env","wait_ns":0,"granted":true,"args":[{"type":"redacted","of":"String"}],"outcome":{"kind":"value","value":{"type":"redacted","of":"Option"}}}"#,
         ]);
         let call = trace.dispatched_calls()[0];
         assert_eq!(call.shown(), "env.get(<redacted String>)");
@@ -1210,7 +1311,7 @@ mod tests {
     fn a_container_holding_a_missing_part_carries_the_reason_upward() {
         let trace = read(&[
             HEADER,
-            r#"{"event":"host_call","module":"a","op":"b","capability":"c","wait_ns":0,"granted":true,"args":[{"type":"array","items":[{"type":"int","value":1},{"type":"opaque","of":"Vector","shown":"[2]"}]}],"outcome":null}"#,
+            r#"{"event":"host_call","task":0,"module":"a","op":"b","capability":"c","wait_ns":0,"granted":true,"args":[{"type":"array","items":[{"type":"int","value":1},{"type":"opaque","of":"Vector","shown":"[2]"}]}],"outcome":null}"#,
         ]);
         let call = trace.dispatched_calls()[0];
         assert_eq!(call.args[0].shown, "[1, <Vector [2]>]");
@@ -1221,7 +1322,7 @@ mod tests {
     fn a_not_recordable_result_reads_back_as_that_and_not_as_a_value() {
         let trace = read(&[
             HEADER,
-            r#"{"event":"host_call","module":"process","op":"exit","capability":"process","wait_ns":0,"granted":true,"args":[{"type":"int","value":0}],"outcome":{"kind":"not_recordable"}}"#,
+            r#"{"event":"host_call","task":0,"module":"process","op":"exit","capability":"process","wait_ns":0,"granted":true,"args":[{"type":"int","value":0}],"outcome":{"kind":"not_recordable"}}"#,
         ]);
         assert!(matches!(
             trace.dispatched_calls()[0].outcome,
@@ -1233,9 +1334,9 @@ mod tests {
         read(&[
             HEADER,
             r#"{"event":"entry_enter","module":"restricted","function":"main"}"#,
-            r#"{"event":"host_call","module":"documents","op":"read","capability":"documents","wait_ns":1000,"granted":true,"args":[{"type":"string","value":"input"}],"outcome":{"kind":"value","value":{"type":"enum","name":"Result","case":"Ok","payload":[{"type":"string","value":"text"}]}}}"#,
-            r#"{"event":"host_call","module":"console","op":"println","capability":"console","wait_ns":2000,"granted":true,"args":[{"type":"string","value":"text"}],"outcome":{"kind":"value","value":{"type":"enum","name":"Result","case":"Ok","payload":[{"type":"unit"}]}}}"#,
-            r#"{"event":"host_call","module":"files","op":"read","capability":"files","wait_ns":0,"granted":false,"args":[{"type":"string","value":"a.txt"}],"outcome":null}"#,
+            r#"{"event":"host_call","task":0,"module":"documents","op":"read","capability":"documents","wait_ns":1000,"granted":true,"args":[{"type":"string","value":"input"}],"outcome":{"kind":"value","value":{"type":"enum","name":"Result","case":"Ok","payload":[{"type":"string","value":"text"}]}}}"#,
+            r#"{"event":"host_call","task":0,"module":"console","op":"println","capability":"console","wait_ns":2000,"granted":true,"args":[{"type":"string","value":"text"}],"outcome":{"kind":"value","value":{"type":"enum","name":"Result","case":"Ok","payload":[{"type":"unit"}]}}}"#,
+            r#"{"event":"host_call","task":0,"module":"files","op":"read","capability":"files","wait_ns":0,"granted":false,"args":[{"type":"string","value":"a.txt"}],"outcome":null}"#,
             r#"{"event":"entry_exit","module":"restricted","function":"main","cpu_ns":5000,"wait_ns":3000}"#,
         ])
     }
@@ -1271,15 +1372,62 @@ mod tests {
     #[test]
     fn the_summary_says_which_distinctions_the_events_do_not_carry() {
         let text = render_summary(Path::new("t.jsonl"), &example_trace());
-        for missing in [
-            "task suspension and resumption",
-            "cache hits and misses",
-            "which task made a host call",
-        ] {
+        for missing in ["task suspension and resumption", "cache hits and misses"] {
             assert!(text.contains(missing), "{missing} is not reported: {text}");
         }
-        // ADR 0011 added the events for this one, so it left the list.
+        // ADR 0011 added the events for this one, so it left the list, and a
+        // `host_call` now carries the id of the task that made it, so that
+        // left too.
         assert!(!text.contains("allocation and memory pressure"), "{text}");
+        assert!(!text.contains("which task made a host call"), "{text}");
+    }
+
+    /// A run's ending is the one thing a summary could not report at all, and
+    /// the classification is what a reader groups runs by.
+    #[test]
+    fn the_summary_says_how_the_run_ended() {
+        let succeeded = read(&[
+            HEADER,
+            r#"{"event":"run_ended","outcome":"success","message":null}"#,
+        ]);
+        let text = render_summary(Path::new("t.jsonl"), &succeeded);
+        assert!(text.contains("outcome      success"), "{text}");
+
+        let stopped = read(&[
+            HEADER,
+            r#"{"event":"run_ended","outcome":"deadline","message":"execution stopped: wall-clock deadline of 1ms exceeded"}"#,
+        ]);
+        let text = render_summary(Path::new("t.jsonl"), &stopped);
+        assert!(
+            text.contains(
+                "outcome      deadline — execution stopped: wall-clock deadline of 1ms exceeded"
+            ),
+            "{text}"
+        );
+        assert!(
+            render_timeline(&stopped, &Filter::All).contains("run_ended       deadline"),
+            "{text}"
+        );
+    }
+
+    /// A trace with no terminal event is one somebody assembled or truncated,
+    /// and reading it as a run that succeeded would be inventing an answer.
+    #[test]
+    fn a_trace_without_a_terminal_event_says_so_rather_than_guessing() {
+        let text = render_summary(Path::new("t.jsonl"), &example_trace());
+        assert!(text.contains("no `run_ended` event"), "{text}");
+    }
+
+    #[test]
+    fn an_unknown_run_outcome_is_rejected_rather_than_read_as_a_known_one() {
+        let message = error(&[
+            HEADER,
+            r#"{"event":"run_ended","outcome":"exploded","message":null}"#,
+        ]);
+        assert!(
+            message.contains("unknown run outcome `exploded`"),
+            "{message}"
+        );
     }
 
     /// A trace with no `heap_summary` says so, rather than printing zeroes
@@ -1345,7 +1493,7 @@ mod tests {
     fn an_operation_the_shipped_schema_does_not_know_is_reported_as_unknown() {
         let trace = read(&[
             HEADER,
-            r#"{"event":"host_call","module":"network","op":"fetch","capability":"network","wait_ns":0,"granted":true,"args":[],"outcome":null}"#,
+            r#"{"event":"host_call","task":0,"module":"network","op":"fetch","capability":"network","wait_ns":0,"granted":true,"args":[],"outcome":null}"#,
         ]);
         let text = render_summary(Path::new("t.jsonl"), &trace);
         assert!(text.contains("unknown      network.fetch"), "{text}");
@@ -1374,21 +1522,83 @@ mod tests {
         assert!(!text.contains("entry_enter"), "{text}");
     }
 
-    /// Host calls carry no task id, so filtering by task cannot pretend to
-    /// select the calls a task made.
+    /// A `println` one task made, written the way a trace records it.
+    fn task_println(task: u64, text: &str) -> String {
+        format!(
+            r#"{{"event":"host_call","task":{task},"module":"console","op":"println","capability":"console","wait_ns":{},"granted":true,"args":[{{"type":"string","value":"{text}"}}],"outcome":null}}"#,
+            task * 1000
+        )
+    }
+
+    /// A host call names the task that made it, so filtering by task selects
+    /// the calls that task made along with its lifecycle.
     #[test]
-    fn filtering_by_task_says_that_host_calls_carry_no_task_id() {
-        let trace = read(&[
-            HEADER,
-            r#"{"event":"task_spawned","id":1,"parent":null,"scope":"main"}"#,
-            r#"{"event":"task_completed","id":1,"cpu_ns":10}"#,
-            r#"{"event":"task_spawned","id":2,"parent":1,"scope":"main"}"#,
-        ]);
+    fn filtering_by_task_keeps_the_host_calls_that_task_made() {
+        let lines = [
+            HEADER.to_string(),
+            r#"{"event":"task_spawned","id":1,"parent":null,"scope":"main"}"#.to_string(),
+            task_println(1, "one"),
+            r#"{"event":"task_completed","id":1,"cpu_ns":10}"#.to_string(),
+            r#"{"event":"task_spawned","id":2,"parent":1,"scope":"main"}"#.to_string(),
+            task_println(2, "two"),
+            task_println(0, "entry"),
+        ];
+        let borrowed: Vec<&str> = lines.iter().map(String::as_str).collect();
+        let trace = read(&borrowed);
+
         let text = render_timeline(&trace, &Filter::Task(1));
-        assert!(text.contains("`host_call` carries no task id"), "{text}");
+        assert!(text.contains("timeline (task 1"), "{text}");
         assert!(text.contains("task_spawned    1 in `main`, root"), "{text}");
         assert!(text.contains("task_completed  1"), "{text}");
+        assert!(text.contains(r#"console.println("one")"#), "{text}");
+        assert!(text.contains("by task 1"), "{text}");
         assert!(!text.contains("task_spawned    2"), "{text}");
+        assert!(!text.contains(r#"console.println("two")"#), "{text}");
+        assert!(!text.contains(r#"console.println("entry")"#), "{text}");
+
+        // The entry is a task like any other here, and `--task 0` is how a
+        // reader asks what it did itself.
+        let entry = render_timeline(&trace, &Filter::Task(0));
+        assert!(entry.contains("timeline (the entry"), "{entry}");
+        assert!(entry.contains(r#"console.println("entry")"#), "{entry}");
+        assert!(entry.contains("by the entry"), "{entry}");
+        assert!(!entry.contains(r#"console.println("one")"#), "{entry}");
+    }
+
+    /// Two tasks that both called a host are separable in the summary, which
+    /// is the question a concurrent trace could not answer before.
+    #[test]
+    fn the_summary_groups_host_calls_by_the_task_that_made_them() {
+        let lines = [
+            HEADER.to_string(),
+            task_println(1, "one"),
+            task_println(2, "two"),
+            r#"{"event":"host_call","task":2,"module":"files","op":"read","capability":"files","wait_ns":0,"granted":false,"args":[],"outcome":null}"#.to_string(),
+        ];
+        let borrowed: Vec<&str> = lines.iter().map(String::as_str).collect();
+        let text = render_summary(Path::new("t.jsonl"), &read(&borrowed));
+        let row = |name: &str| {
+            text.lines()
+                .find(|line| line.trim_start().starts_with(name))
+                .unwrap_or_else(|| panic!("no `{name}` row in:\n{text}"))
+                .to_string()
+        };
+        assert!(
+            row("task 1").contains("1 dispatched, 0 refused, 1 irreversible, wait 1µs"),
+            "{text}"
+        );
+        assert!(
+            row("task 2").contains("1 dispatched, 1 refused, 1 irreversible, wait 2µs"),
+            "{text}"
+        );
+    }
+
+    /// One task's calls are the totals over again, so the table that would
+    /// say nothing new is not printed.
+    #[test]
+    fn a_run_whose_calls_all_came_from_one_task_prints_no_table_of_one_row() {
+        let text = render_summary(Path::new("t.jsonl"), &example_trace());
+        assert!(!text.contains("by task"), "{text}");
     }
 
     #[test]
@@ -1400,7 +1610,7 @@ mod tests {
     #[test]
     fn a_redacted_trace_says_it_cannot_be_replayed() {
         let trace = read(&[
-            r#"{"event":"trace_header","version":1,"values":"redacted","entry":"a.b","args":[]}"#,
+            r#"{"event":"trace_header","version":2,"values":"redacted","entry":"a.b","args":[]}"#,
         ]);
         let text = render_summary(Path::new("t.jsonl"), &trace);
         assert!(text.contains("cannot be replayed"), "{text}");

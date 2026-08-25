@@ -8,16 +8,20 @@
   not validate"
 - Amended by: this ADR's own "Amendment (2026-08-25): a concurrency limit"
   below, which adds the one control [ADR 0001](0001-mvp-language-design.md)
-  asked for and phase 1 did not build; and its "Amendment (2026-08-25): a
+  asked for and phase 1 did not build; its "Amendment (2026-08-25): a
   blocking Host call must cooperate", which closes the hole a host call leaves
-  in the chain of safepoints those controls are checked at
+  in the chain of safepoints those controls are checked at; and its
+  "Amendment (2026-08-25): a run ends with an event, and a call names its
+  task", which makes what these controls do to a run visible in the trace
 - Implemented by: PR #6 (phase 1); PR #23 replaced phase 1's execution model;
   the concurrency limit by PR #45; the blocking-Host-call contract by the
-  change that closed issue #57
+  change that closed issue #57; the terminal event and the task on a Host call
+  by the change that closed issue #61
 - Implementation status: complete — phase 1 shipped whole, phase 2 became an
   ADR of its own rather than a later commit against this one, the concurrency
-  limit the first amendment adds is imposed, and the blocking operations the
-  toolchain's own hosts perform keep the second amendment's contract
+  limit the first amendment adds is imposed, the blocking operations the
+  toolchain's own hosts perform keep the second amendment's contract, and every
+  run the toolchain starts records how it ended
 
 ## Context
 
@@ -270,3 +274,90 @@ embedder who does not know has a deadline that quietly means nothing, which is
 worse than having no deadline at all. The rule this amendment adds is
 therefore not "a host must never block" — some things genuinely cannot be
 interrupted — but "a host must never block silently".
+
+## Amendment (2026-08-25): a run ends with an event, and a call names its task
+
+Everything above is about stopping a run: what the controls are, where they
+are checked, and what a host owes them. None of it says how a reader learns
+which one fired. [ADR 0001](0001-mvp-language-design.md) asks a trace to
+record "host calls, capability use, and errors", and until this amendment the
+trace could report the first two and not the third: a host's own failure was a
+`host_call` outcome, but a program that divided by zero, broke a task-safety
+rule, or ran out of fuel left no event at all — the run simply stopped
+producing them. A trace that ends because the file ends cannot be told from
+one that ends because the process was killed.
+
+The same gap had a second half. `host_call` said what was called and what it
+answered but not who called it, so a trace of a run with concurrent tasks
+could not say whose I/O any of it was. ADR 0008 gives each task a thread and
+this ADR's controls charge them all to one budget, which is exactly the
+arrangement that makes the question worth asking:
+[issue #61](https://github.com/myuon/cove/issues/61) asked for both halves
+together, and they are one change because both are answers to "which".
+
+**Every run ends with one `run_ended` event.** It is written where every path
+into a Cove program already funnels — `Interpreter::run_entry`, which `cove
+run`, `cove test`, `cove generate`, `cove replay`, a sealed `cove build`
+binary, and a host embedding the runtime all call — and it is written outside
+the entry rather than inside it, so a run that never found its entry to run
+still ends with an event saying so. Writing it at one place is what makes
+"every run has one" a property of the code rather than a claim about the
+callers somebody remembered.
+
+**The classification.** Ten names, and they divide the way the runtime already
+divides these cases rather than the way a reporting tool might prefer. `success`
+and `error` are the program answering: Cove's entry returns `Result<Unit,
+Error>`, so a returned `Err` is a program saying what it was written to say,
+and collapsing it into "the run failed" would lose the distinction the return
+type exists to draw. `invariant` is Cove execution breaking one — a failed
+assertion, a division by zero, a violated task-safety rule. `host_boundary` is
+the Host API boundary refusing: an ungranted capability, an operation that does
+not exist, or an argument or result the operation's schema does not admit,
+which are the checks [ADR 0013](0013-host-resource-handles.md)'s two schema
+amendments added. And `fuel`, `deadline`, `cancelled`, `call_depth`,
+`host_calls`, and `concurrency` are this ADR's own controls, one name each,
+because a run out of fuel and a run past its deadline are not the same report
+however alike the two look from inside the budget.
+
+Those names are a compatibility surface. A trace consumer groups runs by them,
+so they are as much of the format as its keys are, and they are written down
+here for the same reason the keys are written down in `trace.rs`.
+
+**What makes it derivable.** A `RuntimeError` now carries which of the three
+it is, rather than the classification being recovered by reading a message
+back. `error.rs` already said a `RuntimeError` is "a broken invariant, an
+ungranted capability, or a limit the host imposed"; the field is that sentence
+made into data. The default is the broken invariant, which is what most of them
+are and the honest answer from code that knows nothing about limits or
+boundaries; the two parties that do know set it — the budget when it names the
+limit it stopped for, and the Host API boundary when it is the boundary that
+refused. A classification set once is kept, because the innermost party to a
+failure is the one that knows what it was.
+
+One distinction the runtime still cannot make, and the event says so rather
+than pretending otherwise: a host that failed on its own terms is reported as
+`invariant`. An error raised inside a host and an error raised by a Cove
+callback that host was running come back out of the same call, and nothing at
+the boundary can tell them apart — the callback's error is Cove's, and
+relabelling it on the way out would be worse than leaving both where the
+default puts them.
+
+**The task on a Host call.** A `HostRegistry` is shared by every thread of a
+run and knows nothing about who is calling. The one thing at the boundary that
+does belong to one task is the way back the host was handed, because it borrows
+that task's interpreter — so `Reentry` gained `task()`, beside the
+`is_cancelled` and `time_left` the amendment above added, and the boundary asks
+it once per call and writes the answer on the event. The entry is task 0: it is
+not a spawned task, so it takes the one id the run's counter never hands out,
+which is the convention `heap_collected` now shares rather than writing a null
+of its own. `cove trace --task <id>` selects one task's lifecycle, its
+collections, and its calls, and `--task 0` is how a reader asks what the entry
+did itself.
+
+**What is deliberately not done.** A task does not get a terminal event of its
+own. It already has three — spawned, completed, cancelled — and a task's
+failure does not decide the run's: it reaches whoever joined it, and either
+stops the run, which `run_ended` then reports with that task's own message, or
+is handled, in which case no terminal classification would have been true of
+it. A fourth per-task event would duplicate the run's without being able to say
+anything the run's could not.

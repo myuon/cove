@@ -13,6 +13,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crate::error::RuntimeError;
+use crate::trace::RunOutcome;
 
 /// The rule this module implements, quoted for every error it raises.
 const RULE: &str =
@@ -74,6 +75,26 @@ pub enum Stopped {
     /// A `spawn` would have left more tasks alive at once than the
     /// concurrency limit allows.
     Concurrency,
+}
+
+impl Stopped {
+    /// How a run stopped this way is classified in its terminal trace event.
+    ///
+    /// One [`RunOutcome`] per [`Stopped`], because each of these is a
+    /// different control and a reader deciding what to do about a stopped run
+    /// wants to know which one: a run out of fuel and a run past its deadline
+    /// are not the same report, however alike the two stops look from inside
+    /// the budget.
+    pub fn outcome(self) -> RunOutcome {
+        match self {
+            Stopped::Fuel => RunOutcome::Fuel,
+            Stopped::Deadline => RunOutcome::Deadline,
+            Stopped::Cancelled => RunOutcome::Cancelled,
+            Stopped::CallDepth => RunOutcome::CallDepth,
+            Stopped::HostCalls => RunOutcome::HostCalls,
+            Stopped::Concurrency => RunOutcome::Concurrency,
+        }
+    }
 }
 
 /// A cancellation flag shared with whoever may cancel the run.
@@ -301,7 +322,9 @@ impl Budget {
                 self.live_tasks,
             ),
         };
-        RuntimeError::new(message).with_rule(RULE)
+        RuntimeError::new(message)
+            .with_rule(RULE)
+            .with_outcome(stopped.outcome())
     }
 }
 
@@ -319,7 +342,9 @@ impl From<Stopped> for RuntimeError {
             Stopped::HostCalls => "execution stopped: host-call limit exceeded",
             Stopped::Concurrency => "execution stopped: concurrency limit exceeded",
         };
-        RuntimeError::new(message).with_rule(RULE)
+        RuntimeError::new(message)
+            .with_rule(RULE)
+            .with_outcome(stopped.outcome())
     }
 }
 

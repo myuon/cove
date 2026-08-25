@@ -33,7 +33,7 @@ use crate::error::RuntimeError;
 use crate::schema::{
     Admits, Effect, Mismatch, ModuleSchema, OperationSchema, Part, ResourceSchema, TypeSchema,
 };
-use crate::trace::{HostOutcome, NullSink, RecordedValue, TraceEvent, TraceSink};
+use crate::trace::{HostOutcome, NullSink, RecordedValue, RunOutcome, TraceEvent, TraceSink};
 use crate::value::Value;
 
 /// One host-provided module, such as `console` or `env`.
@@ -181,6 +181,13 @@ pub trait HostApi: Send + Sync {
 /// questions an operation that waits has to keep asking, and they are the
 /// only way to ask them: a host holds no budget and no interpreter of its
 /// own. [`HostApi`] says what a host owes them.
+///
+/// And it is what the boundary itself asks one question of.
+/// [`Reentry::task`] says which task is calling, which nothing else at the
+/// boundary knows: a [`HostRegistry`] is shared by every thread of a run,
+/// while the way back borrows the interpreter of exactly one task. The answer
+/// goes on the call's trace event, so a trace of a run with concurrent tasks
+/// can be grouped by whose I/O each call was.
 ///
 /// # For the current call, and no longer
 ///
@@ -362,6 +369,23 @@ pub trait Reentry {
     /// zero — and because a run's deadline is measured from when the run
     /// started, which is the budget's business and not the host's.
     fn time_left(&self) -> Option<Duration>;
+
+    /// Which task made this host call: the innermost spawned task's id, or
+    /// [`crate::runtime::ENTRY_TASK`] when the call came from the entry.
+    ///
+    /// Nothing else can answer it. A [`HostRegistry`] is shared by every
+    /// thread of a run and knows nothing about who is calling; the way back is
+    /// the one thing at the boundary that belongs to one task, because it
+    /// borrows that task's interpreter. So the boundary asks it, and writes
+    /// the answer on the call's trace event — which is what lets a trace of a
+    /// run with concurrent tasks be grouped by whose I/O each call was.
+    ///
+    /// A host is not expected to do anything with this. It is asked once per
+    /// call, before the operation is dispatched, and a host that reads it is
+    /// reading an identity rather than a capability: knowing which task is
+    /// calling grants nothing, and two calls from one task are as unrelated
+    /// as any other two.
+    fn task(&self) -> u64;
 }
 
 /// A [`Reentry`] for a caller that has no interpreter to reenter.
@@ -398,6 +422,12 @@ impl Reentry for NoReentry {
     /// allow and no less.
     fn time_left(&self) -> Option<Duration> {
         None
+    }
+
+    /// A caller with no program behind it made the call the way an entry
+    /// makes one: outside any spawned task.
+    fn task(&self) -> u64 {
+        crate::runtime::ENTRY_TASK
     }
 }
 
@@ -716,8 +746,10 @@ impl HostRegistry {
         args: Vec<Value>,
         back: &mut dyn Reentry,
     ) -> Result<Value, RuntimeError> {
+        let task = back.task();
         let Some(entry) = self.modules.iter().find(|m| m.name() == module) else {
-            return Err(RuntimeError::new(format!("unknown host module `{module}`")));
+            return Err(RuntimeError::new(format!("unknown host module `{module}`"))
+                .with_outcome(RunOutcome::HostBoundary));
         };
         let declared = entry
             .schema()
@@ -739,7 +771,7 @@ impl HostRegistry {
             owner: format!("host module `{module}`"),
             known: entry.schema().iter().map(|e| e.name).collect(),
         };
-        self.dispatch(&callee, declared, capability, args, |args| {
+        self.dispatch(task, &callee, declared, capability, args, |args| {
             entry.call_with(op, args, back)
         })
     }
@@ -759,12 +791,15 @@ impl HostRegistry {
         args: Vec<Value>,
         back: &mut dyn Reentry,
     ) -> Result<Value, RuntimeError> {
+        let task = back.task();
         let qualified = handle.qualified_type();
         let Some(entry) = self.modules.iter().find(|m| m.name() == handle.module) else {
             return Err(
-                RuntimeError::new(format!("unknown host module `{}`", handle.module)).with_help(
-                    format!("`{qualified}` names a resource of a host module this run has none of"),
-                ),
+                RuntimeError::new(format!("unknown host module `{}`", handle.module))
+                    .with_help(format!(
+                        "`{qualified}` names a resource of a host module this run has none of"
+                    ))
+                    .with_outcome(RunOutcome::HostBoundary),
             );
         };
         let Some(resource) = entry
@@ -775,7 +810,8 @@ impl HostRegistry {
             return Err(RuntimeError::new(format!(
                 "host module `{}` issues no `{}` handles",
                 handle.module, handle.type_name
-            )));
+            ))
+            .with_outcome(RunOutcome::HostBoundary));
         };
         let declared = resource.operation(op).copied();
         let capability = match &declared {
@@ -792,7 +828,7 @@ impl HostRegistry {
             owner: format!("`{qualified}`"),
             known: resource.operations.iter().map(|e| e.name).collect(),
         };
-        self.dispatch(&callee, declared, capability, args, |args| {
+        self.dispatch(task, &callee, declared, capability, args, |args| {
             entry.call_resource(handle, op, args, back)
         })
     }
@@ -807,6 +843,7 @@ impl HostRegistry {
     /// the result must be what `result` says before it is handed on.
     fn dispatch(
         &self,
+        task: u64,
         callee: &Callee,
         declared: Option<OperationSchema>,
         capability: Capability,
@@ -815,6 +852,7 @@ impl HostRegistry {
     ) -> Result<Value, RuntimeError> {
         let shown = callee.shown();
         let refused = |args: Vec<RecordedValue>| TraceEvent::HostCall {
+            task,
             module: callee.module.clone(),
             op: callee.op.clone(),
             capability: capability.to_string(),
@@ -838,7 +876,8 @@ impl HostRegistry {
                 GrantSource::Sealed => format!(
                     "this binary carries the capabilities it was built with; add `{capability}` to `allow` in the run's `cove.toml` table and build it again"
                 ),
-            }));
+            })
+            .with_outcome(RunOutcome::HostBoundary));
         }
         let Some(schema) = declared else {
             return Err(RuntimeError::new(format!(
@@ -859,7 +898,8 @@ impl HostRegistry {
                         .collect::<Vec<_>>()
                         .join(", ")
                 }
-            )));
+            ))
+            .with_outcome(RunOutcome::HostBoundary));
         };
         if !schema.accepts(args.len()) {
             return Err(RuntimeError::new(format!(
@@ -871,7 +911,8 @@ impl HostRegistry {
                 "the Host API schema declares `{}.{}`",
                 callee.module,
                 callee.signature(&schema)
-            )));
+            ))
+            .with_outcome(RunOutcome::HostBoundary));
         }
         // Arity and types are the same check on the same declaration, so they
         // are made together and in the same place: before the host is
@@ -895,7 +936,8 @@ impl HostRegistry {
                 "the Host API schema declares `{}.{}`",
                 callee.module,
                 callee.signature(&schema)
-            )));
+            ))
+            .with_outcome(RunOutcome::HostBoundary));
         }
 
         if let Some(Err(error)) = self.with_budget(|budget| {
@@ -932,6 +974,7 @@ impl HostRegistry {
                 HostOutcome::NotRecordable
             };
             self.trace.record(TraceEvent::HostCall {
+                task,
                 module: callee.module.clone(),
                 op: callee.op.clone(),
                 capability: capability.to_string(),
@@ -960,7 +1003,8 @@ impl HostRegistry {
                         "the Host API schema declares `{}.{}`",
                         callee.module,
                         callee.signature(&schema)
-                    )));
+                    ))
+                    .with_outcome(RunOutcome::HostBoundary));
             }
         }
         result
@@ -1475,6 +1519,7 @@ mod tests {
         assert_eq!(events.len(), 1, "{events:?}");
         match &events[0] {
             TraceEvent::HostCall {
+                task,
                 module,
                 op,
                 capability,
@@ -1483,6 +1528,10 @@ mod tests {
                 args,
                 outcome,
             } => {
+                // Nothing ran a program here, so the call belongs to the
+                // entry's own id, which is what a call made outside a task
+                // reports.
+                assert_eq!(*task, crate::runtime::ENTRY_TASK);
                 assert_eq!(module, "documents");
                 assert_eq!(op, "read");
                 assert_eq!(capability, "documents");

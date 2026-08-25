@@ -336,7 +336,14 @@ harness and `cove test` already register — and diff two things. First, the
 returned `Value`. Second, the sequence of recorded trace events, compared on
 everything but wall-clock-derived fields (`wait_ns`, `cpu_ns`, `pause_ns`),
 which are expected to differ; call shape — module, operation, capability,
-arguments, outcome — must match exactly. A mismatch in either is presumptively
+arguments, outcome — must match exactly, and so must the task id a call
+carries, since which task did which I/O is a property of the program and not of
+the backend that ran it. The terminal `run_ended` event participates on its
+classification alone: a run that succeeds under one backend and hits a broken
+invariant under the other is exactly the mismatch this test exists to find,
+while the message beside the classification is the runtime's own prose about
+what happened, and holding a backend to word a diagnostic identically would
+make rephrasing one a false alarm. A mismatch in either is presumptively
 a compilation bug, and the presumption is strong enough to debug from: look at
 the backend first. The rarer reading is the one "The specification, the oracle,
 and the backends" above leaves room for — the backend matches the Language

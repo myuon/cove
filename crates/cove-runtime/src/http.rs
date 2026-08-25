@@ -1450,6 +1450,12 @@ mod tests {
             self.expires_at
                 .map(|at| at.saturating_duration_since(Instant::now()))
         }
+
+        /// A stub stands in for the entry's own way back, which is the task a
+        /// call made outside any spawned task belongs to.
+        fn task(&self) -> u64 {
+            crate::runtime::ENTRY_TASK
+        }
     }
 
     #[test]

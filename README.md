@@ -95,18 +95,17 @@ formats what it returns to the package-relative `generates` path, and checks
 the package; `cove generate --check` regenerates every such run into memory and
 fails on the first file that differs from what is on disk, which is what CI
 runs. Tasks spawned in a scope run on threads, so waits genuinely overlap and a
-trace records each task's own CPU time and each host call's wait, and `Shared`
-holds mutable state across them.
+trace records each task's own CPU time, each host call's wait and the task that
+made it, and how the run itself ended; `Shared` holds mutable state across them.
 
 Still missing, and each of these is a documented gap rather than an oversight:
 a real `database` implementation, because connecting to one means speaking a
 wire protocol the standard library cannot; TLS in the `http` host, where an
 `https` URL is refused rather than downgraded; a trace event for task
-suspension or for a cache, and a task id on a host call, which is why `cove
-trace` ends its summary with what it cannot tell you; and native code
-generation, still ADR 0002's open decision, which
-[ADR 0012](docs/adr/0012-performance-gate-and-native-backend.md) has since
-attached five gates to.
+suspension or for a cache, which is why `cove trace` still ends its summary
+with what it cannot tell you; and native code generation, still ADR 0002's open
+decision, which [ADR 0012](docs/adr/0012-performance-gate-and-native-backend.md)
+has since attached five gates to.
 
 `cove build` is not a code generator. The executable it writes embeds the
 program's sources and the interpreter, so it delivers a program without
