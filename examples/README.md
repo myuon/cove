@@ -4,9 +4,10 @@ These programs are executable design tests for Cove. The syntax is still
 provisional.
 
 `hello`, `config`, `values`, `restricted`, and `traits` run today. `server`,
-`tasks`, and `callbacks` parse, resolve, and report their required
-capabilities, but stop at execution because asynchronous functions are not
-implemented yet.
+`tasks`, and `callbacks` parse, resolve, type-check, and report their required
+capabilities, but stop at execution on a host that does not exist: `http`,
+`clock.timeout`, and a database connection handle. Asynchronous execution is
+no longer what blocks them -- tasks run on threads.
 
 Together they test the core product hypotheses:
 

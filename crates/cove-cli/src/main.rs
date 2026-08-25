@@ -10,15 +10,12 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use cove_diag::{render, Diagnostic, SourceMap, Span};
-use cove_runtime::clock::Clock;
-use cove_runtime::database::Database;
-use cove_runtime::files::Files;
-use cove_runtime::host::{Console, Documents, Env, Grants, HostRegistry};
+use cove_runtime::embed::{register_hosts, HostSetup};
+use cove_runtime::host::HostRegistry;
 use cove_runtime::interp::Interpreter;
-use cove_runtime::process::Process;
 use cove_runtime::{
-    Budget, Cancellation, JsonlSink, Limits, NullSink, Runtime, TraceEvent, TraceHeader, TraceSink,
-    ValueCapture,
+    create_trace_file, Budget, Cancellation, JsonlSink, Limits, NullSink, Runtime, TraceEvent,
+    TraceHeader, TraceSink, ValueCapture,
 };
 use cove_sema::package::Package;
 use cove_sema::resolve::{
@@ -27,6 +24,7 @@ use cove_sema::resolve::{
 use cove_syntax::ast::ItemKind;
 
 mod api;
+mod build;
 #[cfg(test)]
 mod fixture;
 mod impact;
@@ -42,6 +40,7 @@ usage:
   cove fmt [path] [--check]            format every `.cove` file in the package
   cove check [path] [--deny-warnings]  parse, resolve, and type-check the package
   cove run <name> [flags] [args]       run the entry selected by `[run.<name>]` in cove.toml
+  cove build <name> [--out <path>]     package that run as a native executable
   cove test [path] [--filter <sub>]    run every `test fn` the package declares
   cove outline [path]                  show modules and their exported declarations
   cove api snapshot [path]             record the package's derived public interface
@@ -60,6 +59,15 @@ not parse is reported and never rewritten.
 `--deny-warnings` fails `cove check` when the package has any warnings, as
 does setting `deny_warnings = true` in `cove.toml`'s `[check]` table; either
 one is enough to deny.
+
+`cove build` writes a native executable that embeds the program and the
+runtime, so what it produces runs with no toolchain, no `cove` on the path,
+and no source tree. It is not a code generator: the binary interprets the
+same program `cove run` does. Its entry, its granted capabilities, and its
+limits are the ones `[run.<name>]` recorded when it was built, and a
+`cove.toml` placed beside it grants it nothing. Building one needs `cargo`
+and this toolchain's own source, because an executable has to link the
+runtime; `cove build --help` says so in full, and ADR 0009 says why.
 
 `cove test` runs every `test fn` in the package, reports each one, and exits
 non-zero when any failed. `--filter` runs only the tests whose qualified name
@@ -114,6 +122,7 @@ fn main() -> ExitCode {
         "fmt" => cmd_fmt(&args[1..]),
         "check" => cmd_check(&args[1..]),
         "run" => cmd_run(&args[1..]),
+        "build" => build::cmd_build(&args[1..]),
         "test" => test::cmd_test(&args[1..]),
         "outline" => cmd_outline(args.get(1).map(Path::new)),
         "api" => api::cmd_api(&args[1..]),
@@ -880,40 +889,21 @@ fn cmd_run(args: &[String]) -> Result<(), CliError> {
 
     let flags = parse_run_flags(&args[1..])?;
 
-    let mut hosts = HostRegistry::new(Grants::new(run.allow.clone()));
-    hosts.register(Box::new(Console::new(std::io::stdout())));
-    hosts.register(Box::new(Env::from_process()));
-    hosts.register(Box::new(Documents::rooted(package.root.join("documents"))));
-    // Registering a module does not grant it: `HostRegistry::call` rejects
-    // every call whose capability is missing from `[run.<name>] allow`.
-    hosts.register(Box::new(Clock::real()));
-    // Granting `files` must not hand over the machine, so this host picks one
-    // directory and the runtime refuses every path outside it. `files/` in the
-    // package is the narrow default, next to the `documents/` the reader host
-    // already uses; `--files-root` is how a host that means something else
-    // says so.
-    hosts.register(Box::new(Files::rooted(
-        flags
+    // `cove build` registers the same hosts through the same call, so a run
+    // and the binary built from it face one boundary rather than two that
+    // have to be kept in step. `files/` in the package is the narrow default,
+    // next to the `documents/` the reader host already uses; `--files-root`
+    // is how a run that means something else says so.
+    let mut hosts = register_hosts(HostSetup {
+        grants: run.allow.clone(),
+        documents_root: package.root.join("documents"),
+        files_root: flags
             .files_root
             .clone()
             .unwrap_or_else(|| package.root.join("files")),
-    )));
-    // A program that can start any other program has every authority the
-    // machine has, so `process.run` is filtered, not merely granted. This host
-    // knows nothing about what a package is entitled to start, so it allows
-    // nothing until `--allow-exec` names an executable. `process.args` passes
-    // on exactly the arguments the entry function receives, and nothing of
-    // `cove`'s own command line.
-    hosts.register(Box::new(Process::real(
-        flags.program_args.clone(),
-        flags.allow_exec.clone(),
-    )));
-    // There is no real `database`: connecting to one means speaking a wire
-    // protocol, and this toolchain depends on nothing but the standard
-    // library. A denied implementation is one of the four the Language Card
-    // names, and it tells a run what is missing instead of telling it that
-    // `database` is not a host module.
-    hosts.register(Box::new(Database::denied()));
+        program_args: flags.program_args.clone(),
+        allow_exec: flags.allow_exec.clone(),
+    });
 
     let limits = Limits {
         fuel: flags.fuel.or(run.fuel),
@@ -1032,23 +1022,6 @@ struct RunFlags {
     /// The executables `process.run` may start. Empty allows none.
     allow_exec: Vec<PathBuf>,
     program_args: Vec<String>,
-}
-
-/// Creates the file `--trace` names, readable only by its owner where the
-/// platform can say so.
-///
-/// A full-capture trace holds whatever the host answered with, so it is not a
-/// file to leave world-readable by default. The mode applies to a file this
-/// call creates; one that already exists keeps the permissions it has.
-fn create_trace_file(path: &Path) -> std::io::Result<std::fs::File> {
-    let mut options = std::fs::OpenOptions::new();
-    options.write(true).create(true).truncate(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.mode(0o600);
-    }
-    options.open(path)
 }
 
 /// Where `--trace` (or the config's `trace` key) sends trace lines.
@@ -1172,7 +1145,7 @@ pub(crate) fn flag_value(args: &[String], i: &mut usize, flag: &str) -> Result<S
 /// Parses a `--deadline` value such as `"500ms"`, using the same unit
 /// meanings as `cove.toml`'s `deadline` key and the lexer's duration
 /// literals: `ns`, `us`, `ms`, `s`, `m`, and `h`.
-fn parse_duration_flag(text: &str) -> Result<Duration, String> {
+pub(crate) fn parse_duration_flag(text: &str) -> Result<Duration, String> {
     let accepted = "the accepted units are `ns`, `us`, `ms`, `s`, `m`, and `h`";
     let invalid = || format!("`{text}` is not a valid duration; {accepted}");
 

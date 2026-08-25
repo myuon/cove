@@ -36,6 +36,11 @@ jobs:
           cargo clippy --version
           cargo fmt --version
 
+      # The two package target directories are cached alongside the
+      # workspace's own: `cove build`'s end-to-end test compiles a generated
+      # crate under each package it builds from, in a target directory of its
+      # own, and without the cache that is a cold release build of the runtime
+      # on every run.
       - name: Cache cargo registry and target
         uses: actions/cache@v4
         with:
@@ -44,6 +49,8 @@ jobs:
             ~/.cargo/registry/cache
             ~/.cargo/git/db
             target
+            examples/target
+            tests/e2e/target
           key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
             ${{ runner.os }}-cargo-
