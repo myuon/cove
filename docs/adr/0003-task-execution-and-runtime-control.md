@@ -15,11 +15,13 @@
   task", which makes what these controls do to a run visible in the trace;
   and its "Amendment (2026-08-25): the runtime sizes the stack it recurses
   on", which gives the call-depth control the one thing it measures against
+  and whose closing section was answered by the parser's own nesting limit
 - Implemented by: PR #6 (phase 1); PR #23 replaced phase 1's execution model;
   the concurrency limit by PR #45; the blocking-Host-call contract by the
   change that closed issue #57; the terminal event and the task on a Host call
   by the change that closed issue #61; the stack the depth limit is measured
-  against by the change that closed issue #67
+  against by the change that closed issue #67, and the parser-side limit its
+  last section asked for by the change that closed issue #70
 - Implementation status: complete — phase 1 shipped whole, phase 2 became an
   ADR of its own rather than a later commit against this one, the concurrency
   limit the first amendment adds is imposed, the blocking operations the
@@ -497,3 +499,26 @@ any run begins. Sizing the thread every `cove` command runs on moved that
 from a few hundred levels to a few thousand, which is a side effect and not a
 fix: the fix is a nesting limit in the parser, and it is a separate defect
 from this one.
+
+That defect is now closed.
+[Issue #70](https://github.com/myuon/cove/issues/70) took it, and the fix is
+the nesting limit the paragraph above asks for: `MAX_NESTING_DEPTH` in
+`cove_syntax::parser`, reported as an ordinary parse diagnostic with a span, a
+rule, and a help, so a file that nests too deeply is refused the way any other
+malformed file is. The two limits are calibrated in opposite directions, and
+the difference is worth stating, because it is the same question answered from
+two positions. The runtime owns the thread it evaluates on, so it fixes the
+limit and sizes the stack to fit it. The parser does not: `parse` is a library
+entry point and whoever calls it chooses the thread, so it fixes the stack it
+is willing to promise — the platform default of 2 MiB, which is what an unsized
+thread has — and derives the limit from what a level of nesting costs on it.
+Sixty-four levels, measured, against 256 frames here.
+
+The parser's limit also bounds what runs after it. The resolver, the type
+checker, and the formatter each recurse over the tree the parser built, and
+measurement says they spend less per level of it than the parser did building
+it, so none of them needs a limit of its own. The one shape that does not
+follow from this is a left-associative chain — `a.b.c`, `1 + 2 + 3` — which
+the parser builds with a loop while everything downstream still walks it by
+recursing; the parser therefore counts a chain link as a level too, which is
+why the number bounds the tree and not only the recursion that produced it.

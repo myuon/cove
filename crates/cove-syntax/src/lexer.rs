@@ -9,6 +9,13 @@ use cove_diag::{Diagnostic, FileId, SourceMap, Span};
 
 use crate::token::{Keyword, StringPart, Token, TokenKind};
 
+/// One level of the nesting [`Lexer::skip_interpolation_body`] steps over: a
+/// `{` that opened an interpolation, or a `"` that opened a string literal.
+enum Unclosed {
+    Brace,
+    Quote,
+}
+
 /// Lexes `file` out of `sources` into a token stream.
 ///
 /// The returned stream always ends with exactly one [`TokenKind::Eof`] whose
@@ -562,41 +569,26 @@ impl<'a> Lexer<'a> {
     }
 
     /// Consumes source text up to and including the `}` matching the `{`
-    /// that was just consumed by the caller, recursing into nested `{ }`
-    /// blocks and skipping over any nested string literals (so that a `}`
-    /// inside a nested string does not end the interpolation early).
+    /// that was just consumed by the caller, stepping over any nested `{ }`
+    /// blocks and any nested string literals, so that a `}` inside a nested
+    /// string does not end the interpolation early.
+    ///
+    /// A string may hold an interpolation, an interpolation may hold a
+    /// string, and either may hold more of itself, so what is stepped over is
+    /// a nesting. It is held in a `Vec` rather than in the call stack on
+    /// purpose. This runs before the parser, and therefore before
+    /// [`crate::parser`]'s nesting limit can refuse anything, so a recursive
+    /// scan here would let a string literal of nothing but `{` end the
+    /// process — which is the failure that limit exists to prevent. What this
+    /// spends instead is one byte of heap per unclosed level, bounded by the
+    /// length of the file.
     fn skip_interpolation_body(&mut self) -> Result<(), ()> {
-        loop {
+        let mut unclosed = vec![Unclosed::Brace];
+        while let Some(innermost) = unclosed.last() {
+            let inside_string = matches!(innermost, Unclosed::Quote);
             match self.peek_char() {
                 None => return Err(()),
-                Some('}') => {
-                    self.bump();
-                    return Ok(());
-                }
-                Some('{') => {
-                    self.bump();
-                    self.skip_interpolation_body()?;
-                }
-                Some('"') => {
-                    self.bump();
-                    self.skip_string_body()?;
-                }
-                Some(_) => {
-                    self.bump();
-                }
-            }
-        }
-    }
-
-    /// Consumes source text up to and including the `"` matching the `"`
-    /// that was just consumed by the caller, recursing into any nested
-    /// interpolations so their braces and strings are not mistaken for this
-    /// string's terminator.
-    fn skip_string_body(&mut self) -> Result<(), ()> {
-        loop {
-            match self.peek_char() {
-                None => return Err(()),
-                Some('\\') => {
+                Some('\\') if inside_string => {
                     self.bump();
                     if self.peek_char().is_none() {
                         return Err(());
@@ -605,17 +597,26 @@ impl<'a> Lexer<'a> {
                 }
                 Some('"') => {
                     self.bump();
-                    return Ok(());
+                    if inside_string {
+                        unclosed.pop();
+                    } else {
+                        unclosed.push(Unclosed::Quote);
+                    }
                 }
                 Some('{') => {
                     self.bump();
-                    self.skip_interpolation_body()?;
+                    unclosed.push(Unclosed::Brace);
+                }
+                Some('}') if !inside_string => {
+                    self.bump();
+                    unclosed.pop();
                 }
                 Some(_) => {
                     self.bump();
                 }
             }
         }
+        Ok(())
     }
 
     /// Matches punctuation and operators, longest match first. `/` and

@@ -32,6 +32,18 @@
 //! expression) while an operator at the *start* of a line does not (`a` /
 //! `+ b` is two statements).
 //!
+//! # The nesting limit
+//!
+//! Recursive descent spends native stack per level of nesting, so the parser
+//! bounds nesting rather than discovering the bound when the stack runs out.
+//! Source that nests deeper than `MAX_NESTING_DEPTH` levels is a
+//! `cove::parse::nesting_too_deep` diagnostic like any other and the file is
+//! refused, instead of the process ending in a stack overflow that no caller
+//! can catch. A level is any construct written inside another, and also each
+//! link of a left-associative chain, because the tree such a chain builds is
+//! as deep as the chain is long and everything downstream walks that tree by
+//! recursing. See the constant for what the number is calibrated against.
+//!
 //! Parsing never stops at the first error. Every diagnostic is collected and
 //! the parser resynchronises at the next plausible declaration or statement,
 //! so a single run reports as many independent problems as it can find.
@@ -71,6 +83,126 @@ struct ItemModifiers {
 
 type PResult<T> = Result<T, Bail>;
 
+/// The smallest native stack the parser promises to read a file on.
+///
+/// Recursive descent spends stack per level of nesting in the file it reads,
+/// so a bound on nesting is only worth as much as the stack it is calibrated
+/// against. The toolchain gives the parser a generous one — every `cove`
+/// command runs its whole dispatch on `cove_runtime::STACK_SIZE`, which is
+/// about 106 MiB in a debug build — but that number is unreachable from here
+/// and must stay so: `cove-runtime` depends on `cove-syntax`, not the other
+/// way round, and [`parse`] is a library entry point that an editor plugin, a
+/// language server, or a test may call on any thread it likes.
+///
+/// So the promise is made against the smallest stack such a caller plausibly
+/// has: the platform default for a thread nobody sized, which is 2 MiB on
+/// macOS, Linux, and Windows alike, and is also what Rust's test harness
+/// gives each test. A process main thread is larger than that everywhere
+/// except Windows, where it is 1 MiB — the one stack this figure does not
+/// cover, and only in a debug build, since a release build spends a fifth as
+/// much per level and fits the limit into 400 KiB. No `cove` command parses on a main thread, because
+/// `main` hands the whole dispatch to `cove_runtime::on_cove_stack`, so what
+/// is left uncovered is an embedder that both builds without optimizations
+/// and parses on the main thread of a Windows process.
+const NESTING_STACK: usize = 2 * 1024 * 1024;
+
+/// The native stack one level of nesting costs the parser in a debug build.
+///
+/// Measured on macOS the way `cove_runtime::STACK_PER_FRAME` was: files of
+/// increasing nesting are parsed on threads of two known sizes and the
+/// deepest that parses cleanly is binary-searched on each, so the figure is
+/// the slope between the two sizes and whatever the parser spends before the
+/// nesting starts cancels out. Eighteen shapes were measured, at 4 MiB and 16
+/// MiB in a debug build and at 1 MiB and 4 MiB in a release one. Per level of
+/// [`Parser::depth`], which is what [`MAX_NESTING_DEPTH`] counts, the worst of
+/// them were:
+///
+/// | nesting                       | debug    | release |
+/// |-------------------------------|----------|---------|
+/// | `"a{"a{ ... }"}"`             | 28.8 KiB | 5.3 KiB |
+/// | `match x { _ => ... }`        | 28.6 KiB | 6.2 KiB |
+/// | `[[[ ... ]]]`                 | 26.4 KiB | 5.3 KiB |
+/// | `((( ... )))`                 | 25.7 KiB | 5.3 KiB |
+/// | `g(g( ... ))`                 | 21.7 KiB | 4.4 KiB |
+/// | `if true { ... } else { 0 }`  | 16.4 KiB | 3.7 KiB |
+/// | `fn g() { fn g() { ... } }`   | 12.0 KiB | 3.7 KiB |
+/// | `Some(Some( ... ))`           |  3.4 KiB | 0.8 KiB |
+/// | `Array<Array< ... >>`         |  2.8 KiB | 0.6 KiB |
+///
+/// The cheap shapes at the bottom are the ones whose level is a single frame:
+/// a type argument list or a pattern payload re-enters one function, while a
+/// parenthesised expression re-enters the whole precedence chain from
+/// `parse_expr` down to `parse_primary`. The braced forms look cheap per
+/// source level and are not: a block raises the depth twice per level, once
+/// for the block and once for the expression it is the body of, so the figure
+/// per level of nesting a reader would count is double what this table shows.
+///
+/// The figure is the parser's, and the parser is the most expensive stage of
+/// the toolchain per level: measured the same way, `cove check` and `cove
+/// fmt` over the same files show the same slope to within a fifth of a
+/// kibibyte, so what the resolver, the type checker, and the formatter spend
+/// walking a tree of a given depth is less than what the parser spent
+/// building it. That is why one limit here bounds the whole pipeline and none
+/// of them needs a limit of its own. A chain link is cheaper still — it costs
+/// the parser nothing, because a chain is parsed by a loop, and the walkers
+/// about 2 KiB — and [`MAX_NESTING_DEPTH`] charges it a whole level anyway,
+/// which is margin rather than measurement.
+///
+/// The number here is 32 KiB, the worst measured figure rounded up, and it is
+/// deliberately not `#[cfg(debug_assertions)]`-conditional as its runtime
+/// counterpart is. [`MAX_NESTING_DEPTH`] is derived from it and is visible to
+/// whoever writes the file, so a file that parses in a release build must
+/// parse in a debug build; taking the worse profile for both is what makes
+/// that true, and it leaves a release build five times the headroom it needs.
+const STACK_PER_LEVEL: usize = 32 * 1024;
+
+/// How deeply source may nest before the parser reports a limit instead of
+/// exhausting its native stack.
+///
+/// Sixty-four, and derived rather than chosen: [`NESTING_STACK`] is the stack
+/// the parser promises to work on and [`STACK_PER_LEVEL`] is what a level of
+/// it costs, so this is how many levels fit.
+///
+/// A level is anything that puts one construct inside another, counted in one
+/// place — [`Parser::depth`] — rather than once per construct, because
+/// expressions, blocks, types, and patterns all spend the same stack and a
+/// file that alternates between them would pass four separate limits while
+/// exhausting the stack anyway. Two things raise it. Every point at which the
+/// parser re-enters itself raises it through [`Parser::nested`], which is
+/// what bounds the parser's own recursion. And every link of a
+/// left-associative chain raises it through [`Parser::link`], which is not
+/// recursion at all — `a.b.c` and `1 + 2 + 3` are parsed by a loop — but
+/// builds a tree as deep as the chain is long, and the resolver, the type
+/// checker, the formatter, and the interpreter all recurse over that tree
+/// afterwards. Counting both in one number is what makes the bound hold along
+/// a path: a chain hanging off a nested expression is as deep as its links
+/// plus the nesting above it, and that is the sum this counter carries.
+///
+/// So the limit is spent by more than parentheses, and this is the one place
+/// where it is a constraint on source anyone would write: a chain of more
+/// than sixty-four operands, `1 + 2 + ... + 65`, is refused, as is a method
+/// chain of more than thirty-two calls, since a call is a `.` and a `(`. The
+/// deepest file in this repository reaches twenty-four levels —
+/// `examples/callbacks/main.cove`, whose server loop nests a `scope`, a
+/// spawned closure, a callback given to `clock.every`, a `lock` closure, and
+/// an interpolated string inside a call, with the field and call links of
+/// those chains counted in. Sixty-four is not a lot of room above that, and
+/// the alternative was worse: the number is what a 2 MiB stack holds, and
+/// raising it means promising a stack no unsized thread has. Raising it later
+/// is a compatible change and lowering it is not, which is the direction to
+/// err in.
+///
+/// Past the limit the parser reports `cove::parse::nesting_too_deep` and
+/// recovers as it does from any other parse error, so a file that nests a
+/// million parentheses produces a diagnostic rather than ending the process.
+///
+/// This is the parser's half of the promise `cove_runtime::MAX_CALL_DEPTH`
+/// makes at run time, and the two are calibrated in opposite directions for
+/// the same reason. The runtime owns the thread it evaluates on, so it sizes
+/// the stack to fit the limit; the parser is handed a thread by whoever calls
+/// it, so it fits the limit to the stack.
+const MAX_NESTING_DEPTH: u32 = (NESTING_STACK / STACK_PER_LEVEL) as u32;
+
 struct Parser<'a> {
     sources: &'a SourceMap,
     file: FileId,
@@ -84,7 +216,25 @@ struct Parser<'a> {
     /// How many `(`, `[`, or `<` groups enclose the cursor. A newline inside
     /// such a group never ends a statement, so argument lists, array
     /// literals, and generic argument lists may span lines.
+    ///
+    /// This is not [`Parser::depth`] and the two must not be merged. This one
+    /// answers a question about the language — whether a line break here ends
+    /// a statement — and so it counts only the three bracket kinds the
+    /// newline rule names, and [`Parser::ungrouped`] resets it to zero inside
+    /// a `{ }` block because the rule says a block's statements do end at
+    /// newlines. The other answers a question about the machine, counts every
+    /// kind of nesting there is, and may never be reset. A counter that did
+    /// both jobs would have to be wrong about one of them.
     group_depth: u32,
+    /// How deep the tree under construction is at the cursor, bounded by
+    /// [`MAX_NESTING_DEPTH`].
+    ///
+    /// One counter serves every construct that can contain another —
+    /// expressions, blocks, types, and patterns alike, and the links of a
+    /// chain besides — because they all end up on the same native stack, and
+    /// a counter for each would let a file that alternates between them pass
+    /// every limit while exhausting that stack anyway.
+    depth: u32,
 }
 
 fn expr(kind: ExprKind, span: Span) -> Expr {
@@ -213,6 +363,7 @@ impl<'a> Parser<'a> {
             diagnostics: Vec::new(),
             no_trailing_closure: false,
             group_depth: 0,
+            depth: 0,
         }
     }
 
@@ -398,6 +549,68 @@ impl<'a> Parser<'a> {
         let result = parse(self);
         self.group_depth = saved;
         result
+    }
+
+    /// Runs `parse` one level of nesting deeper, refusing to descend past
+    /// [`MAX_NESTING_DEPTH`].
+    ///
+    /// Every place the parser re-enters itself goes through here, which is
+    /// what bounds the native stack a file can spend: [`Parser::depth`] is
+    /// raised before `parse` runs and lowered after it, and the two cannot
+    /// come apart because a parser that gives up returns `Err(Bail)` as an
+    /// ordinary value rather than unwinding, so the failing path leaves
+    /// through the same line as the succeeding one.
+    fn nested<T>(&mut self, parse: impl FnOnce(&mut Self) -> PResult<T>) -> PResult<T> {
+        if self.depth >= MAX_NESTING_DEPTH {
+            return Err(self.nesting_too_deep());
+        }
+        self.depth += 1;
+        let result = parse(self);
+        self.depth -= 1;
+        result
+    }
+
+    /// Raises the depth for one more link of a left-associative chain.
+    ///
+    /// A chain is built by a loop rather than by recursion, so it costs the
+    /// parser nothing, but the tree it builds is as deep as the chain is
+    /// long and everything that walks that tree afterwards recurses over it.
+    /// A link therefore costs a level exactly as nesting does, and it is held
+    /// for as long as the chain is being built: the loop runs inside
+    /// [`Parser::chained`], which puts the depth back when the chain is done.
+    fn link(&mut self) -> PResult<()> {
+        if self.depth >= MAX_NESTING_DEPTH {
+            return Err(self.nesting_too_deep());
+        }
+        self.depth += 1;
+        Ok(())
+    }
+
+    /// Runs `parse`, which builds a left-associative chain by repeated
+    /// [`Parser::link`], and restores the depth those links raised.
+    fn chained<T>(&mut self, parse: impl FnOnce(&mut Self) -> PResult<T>) -> PResult<T> {
+        let saved = self.depth;
+        let result = parse(self);
+        self.depth = saved;
+        result
+    }
+
+    /// Reports source that nests deeper than the parser will descend.
+    fn nesting_too_deep(&mut self) -> Bail {
+        let span = self.span();
+        self.error(
+            Diagnostic::error(
+                "cove::parse::nesting_too_deep",
+                format!("this nests more than {MAX_NESTING_DEPTH} levels deep"),
+            )
+            .at(span)
+            .rule(format!(
+                "Source nests no more than {MAX_NESTING_DEPTH} levels deep, counting each link \
+                 of a chain such as `a.b.c` or `1 + 2 + 3` as a level of its own."
+            ))
+            .help("Give an inner part a name of its own with `let`, or lift it into a function."),
+        );
+        Bail
     }
 
     /// Whether a line break at the cursor ends the current statement.
@@ -1078,6 +1291,10 @@ impl Parser<'_> {
 /// Types.
 impl Parser<'_> {
     fn parse_type(&mut self) -> PResult<Type> {
+        self.nested(Parser::parse_type_inner)
+    }
+
+    fn parse_type_inner(&mut self) -> PResult<Type> {
         let start = self.span();
         let kind = match self.peek() {
             TokenKind::LParen => {
@@ -1193,6 +1410,10 @@ impl Parser<'_> {
     /// Parses `{ ... }`. The last statement, when it is an expression,
     /// becomes the block's value.
     fn parse_block(&mut self) -> PResult<Block> {
+        self.nested(Parser::parse_block_inner)
+    }
+
+    fn parse_block_inner(&mut self) -> PResult<Block> {
         let start = self.span();
         self.expect(&TokenKind::LBrace, "`{`")?;
 
@@ -1327,7 +1548,7 @@ impl Parser<'_> {
 /// Expressions.
 impl Parser<'_> {
     fn parse_expr(&mut self) -> PResult<Expr> {
-        self.parse_assign()
+        self.nested(Parser::parse_assign)
     }
 
     fn parse_assign(&mut self) -> PResult<Expr> {
@@ -1345,7 +1566,7 @@ impl Parser<'_> {
             _ => return Ok(target),
         };
         self.bump();
-        let value = self.parse_assign()?;
+        let value = self.nested(Parser::parse_assign)?;
 
         if !is_place_expr(&target) {
             self.error(
@@ -1371,49 +1592,58 @@ impl Parser<'_> {
     }
 
     fn parse_or(&mut self) -> PResult<Expr> {
-        let mut lhs = self.parse_and()?;
-        while self.at(&TokenKind::PipePipe) && !self.at_statement_break() {
-            self.bump();
-            let rhs = self.parse_and()?;
-            lhs = binary(BinaryOp::Or, lhs, rhs);
-        }
-        Ok(lhs)
+        self.chained(|parser| {
+            let mut lhs = parser.parse_and()?;
+            while parser.at(&TokenKind::PipePipe) && !parser.at_statement_break() {
+                parser.bump();
+                parser.link()?;
+                let rhs = parser.parse_and()?;
+                lhs = binary(BinaryOp::Or, lhs, rhs);
+            }
+            Ok(lhs)
+        })
     }
 
     fn parse_and(&mut self) -> PResult<Expr> {
-        let mut lhs = self.parse_comparison()?;
-        while self.at(&TokenKind::AmpAmp) && !self.at_statement_break() {
-            self.bump();
-            let rhs = self.parse_comparison()?;
-            lhs = binary(BinaryOp::And, lhs, rhs);
-        }
-        Ok(lhs)
+        self.chained(|parser| {
+            let mut lhs = parser.parse_comparison()?;
+            while parser.at(&TokenKind::AmpAmp) && !parser.at_statement_break() {
+                parser.bump();
+                parser.link()?;
+                let rhs = parser.parse_comparison()?;
+                lhs = binary(BinaryOp::And, lhs, rhs);
+            }
+            Ok(lhs)
+        })
     }
 
     fn parse_comparison(&mut self) -> PResult<Expr> {
-        let mut lhs = self.parse_range()?;
-        loop {
-            if self.at_statement_break() {
-                return Ok(lhs);
+        self.chained(|parser| {
+            let mut lhs = parser.parse_range()?;
+            loop {
+                if parser.at_statement_break() {
+                    return Ok(lhs);
+                }
+                let op = match parser.peek() {
+                    TokenKind::EqEq => BinaryOp::Eq,
+                    TokenKind::BangEq => BinaryOp::Ne,
+                    TokenKind::Lt => BinaryOp::Lt,
+                    TokenKind::LtEq => BinaryOp::Le,
+                    TokenKind::Gt => BinaryOp::Gt,
+                    TokenKind::GtEq => BinaryOp::Ge,
+                    // `is` compares identity at the same precedence as `==`: the
+                    // Language Card lists it alongside value equality, and giving
+                    // it a different tier would make `a == b is c` guess which
+                    // question is asked first.
+                    TokenKind::Keyword(Keyword::Is) => BinaryOp::Is,
+                    _ => return Ok(lhs),
+                };
+                parser.bump();
+                parser.link()?;
+                let rhs = parser.parse_range()?;
+                lhs = binary(op, lhs, rhs);
             }
-            let op = match self.peek() {
-                TokenKind::EqEq => BinaryOp::Eq,
-                TokenKind::BangEq => BinaryOp::Ne,
-                TokenKind::Lt => BinaryOp::Lt,
-                TokenKind::LtEq => BinaryOp::Le,
-                TokenKind::Gt => BinaryOp::Gt,
-                TokenKind::GtEq => BinaryOp::Ge,
-                // `is` compares identity at the same precedence as `==`: the
-                // Language Card lists it alongside value equality, and giving
-                // it a different tier would make `a == b is c` guess which
-                // question is asked first.
-                TokenKind::Keyword(Keyword::Is) => BinaryOp::Is,
-                _ => return Ok(lhs),
-            };
-            self.bump();
-            let rhs = self.parse_range()?;
-            lhs = binary(op, lhs, rhs);
-        }
+        })
     }
 
     /// `0..<attempts` excludes its end; `0..n` includes it.
@@ -1441,38 +1671,44 @@ impl Parser<'_> {
     }
 
     fn parse_additive(&mut self) -> PResult<Expr> {
-        let mut lhs = self.parse_multiplicative()?;
-        loop {
-            if self.at_statement_break() {
-                return Ok(lhs);
+        self.chained(|parser| {
+            let mut lhs = parser.parse_multiplicative()?;
+            loop {
+                if parser.at_statement_break() {
+                    return Ok(lhs);
+                }
+                let op = match parser.peek() {
+                    TokenKind::Plus => BinaryOp::Add,
+                    TokenKind::Minus => BinaryOp::Sub,
+                    _ => return Ok(lhs),
+                };
+                parser.bump();
+                parser.link()?;
+                let rhs = parser.parse_multiplicative()?;
+                lhs = binary(op, lhs, rhs);
             }
-            let op = match self.peek() {
-                TokenKind::Plus => BinaryOp::Add,
-                TokenKind::Minus => BinaryOp::Sub,
-                _ => return Ok(lhs),
-            };
-            self.bump();
-            let rhs = self.parse_multiplicative()?;
-            lhs = binary(op, lhs, rhs);
-        }
+        })
     }
 
     fn parse_multiplicative(&mut self) -> PResult<Expr> {
-        let mut lhs = self.parse_unary()?;
-        loop {
-            if self.at_statement_break() {
-                return Ok(lhs);
+        self.chained(|parser| {
+            let mut lhs = parser.parse_unary()?;
+            loop {
+                if parser.at_statement_break() {
+                    return Ok(lhs);
+                }
+                let op = match parser.peek() {
+                    TokenKind::Star => BinaryOp::Mul,
+                    TokenKind::Slash => BinaryOp::Div,
+                    TokenKind::Percent => BinaryOp::Rem,
+                    _ => return Ok(lhs),
+                };
+                parser.bump();
+                parser.link()?;
+                let rhs = parser.parse_unary()?;
+                lhs = binary(op, lhs, rhs);
             }
-            let op = match self.peek() {
-                TokenKind::Star => BinaryOp::Mul,
-                TokenKind::Slash => BinaryOp::Div,
-                TokenKind::Percent => BinaryOp::Rem,
-                _ => return Ok(lhs),
-            };
-            self.bump();
-            let rhs = self.parse_unary()?;
-            lhs = binary(op, lhs, rhs);
-        }
+        })
     }
 
     /// `await` binds tighter than any binary operator and tighter than a
@@ -1493,7 +1729,7 @@ impl Parser<'_> {
         match op {
             Some(op) => {
                 self.bump();
-                let operand = self.parse_unary()?;
+                let operand = self.nested(Parser::parse_unary)?;
                 let span = start.to(operand.span);
                 Ok(expr(
                     ExprKind::Unary {
@@ -1520,57 +1756,68 @@ impl Parser<'_> {
     }
 
     fn parse_postfix(&mut self) -> PResult<Expr> {
-        let mut value = self.parse_primary()?;
-        loop {
-            // `(`, `<`, and `{` continue the expression only optionally, so a
-            // line break before them ends the statement instead. `.` and `?`
-            // can never start one, so they always continue.
-            let stop = self.at_statement_break();
-            match self.peek() {
-                TokenKind::Dot => {
-                    self.bump();
-                    let name = self.expect_member_name()?;
-                    let span = value.span.to(name.span);
-                    value = expr(
-                        ExprKind::Field {
-                            base: Box::new(value),
-                            name,
-                        },
-                        span,
-                    );
+        self.chained(|parser| {
+            let mut value = parser.parse_primary()?;
+            loop {
+                // `(`, `<`, and `{` continue the expression only optionally, so a
+                // line break before them ends the statement instead. `.` and `?`
+                // can never start one, so they always continue.
+                let stop = parser.at_statement_break();
+                match parser.peek() {
+                    TokenKind::Dot => {
+                        parser.link()?;
+                        parser.bump();
+                        let name = parser.expect_member_name()?;
+                        let span = value.span.to(name.span);
+                        value = expr(
+                            ExprKind::Field {
+                                base: Box::new(value),
+                                name,
+                            },
+                            span,
+                        );
+                    }
+                    TokenKind::LParen if !stop => {
+                        parser.link()?;
+                        parser.bump();
+                        let args = parser.parse_args()?;
+                        value = parser.finish_call(value, Vec::new(), args)?;
+                    }
+                    TokenKind::Question => {
+                        parser.link()?;
+                        let span = value.span.to(parser.span());
+                        parser.bump();
+                        value = expr(ExprKind::Try(Box::new(value)), span);
+                    }
+                    TokenKind::Lt if !stop => {
+                        parser.link()?;
+                        match parser.try_generic_call(value)? {
+                            Ok(call) => value = call,
+                            Err(unchanged) => return Ok(unchanged),
+                        }
+                    }
+                    TokenKind::LBrace
+                        if !stop
+                            && !parser.no_trailing_closure
+                            && can_take_trailing_closure(&value) =>
+                    {
+                        parser.link()?;
+                        let closure = parser.parse_trailing_closure()?;
+                        let span = value.span.to(closure.span);
+                        value = expr(
+                            ExprKind::Call {
+                                callee: Box::new(value),
+                                generics: Vec::new(),
+                                args: Vec::new(),
+                                trailing: Some(Box::new(closure)),
+                            },
+                            span,
+                        );
+                    }
+                    _ => return Ok(value),
                 }
-                TokenKind::LParen if !stop => {
-                    self.bump();
-                    let args = self.parse_args()?;
-                    value = self.finish_call(value, Vec::new(), args)?;
-                }
-                TokenKind::Question => {
-                    let span = value.span.to(self.span());
-                    self.bump();
-                    value = expr(ExprKind::Try(Box::new(value)), span);
-                }
-                TokenKind::Lt if !stop => match self.try_generic_call(value)? {
-                    Ok(call) => value = call,
-                    Err(unchanged) => return Ok(unchanged),
-                },
-                TokenKind::LBrace
-                    if !stop && !self.no_trailing_closure && can_take_trailing_closure(&value) =>
-                {
-                    let closure = self.parse_trailing_closure()?;
-                    let span = value.span.to(closure.span);
-                    value = expr(
-                        ExprKind::Call {
-                            callee: Box::new(value),
-                            generics: Vec::new(),
-                            args: Vec::new(),
-                            trailing: Some(Box::new(closure)),
-                        },
-                        span,
-                    );
-                }
-                _ => return Ok(value),
             }
-        }
+        })
     }
 
     /// Builds a call, attaching `f(x) { ... }`-style trailing closures.
@@ -1977,6 +2224,10 @@ impl Parser<'_> {
     /// A lone name that begins with a lowercase letter binds the scrutinee
     /// (`other`), and `_` matches without binding.
     fn parse_pattern(&mut self) -> PResult<Pattern> {
+        self.nested(Parser::parse_pattern_inner)
+    }
+
+    fn parse_pattern_inner(&mut self) -> PResult<Pattern> {
         let start = self.span();
         match self.peek() {
             TokenKind::Underscore => {
@@ -2103,6 +2354,12 @@ impl Parser<'_> {
             .collect();
 
         let mut inner = Parser::new(self.sources, self.file, tokens);
+        // The interpolation gets a parser of its own, but it is nested inside
+        // this file and spends the same stack, so it starts from the depth
+        // this parser has reached rather than from zero. Otherwise a string
+        // interpolating a string interpolating a string would reset the limit
+        // at every level and never reach it.
+        inner.depth = self.depth;
         let value = inner.parse_expr().ok();
         if value.is_some() && !inner.is_eof() {
             let found = inner.peek().describe();
@@ -3266,6 +3523,104 @@ mod tests {
                 ..
             }
         ));
+    }
+    /// A block and the expression that is its body each raise the depth, so
+    /// `fn main() { ... }` costs two levels before the parentheses start.
+    const OUTER_LEVELS: usize = 2;
+
+    #[test]
+    fn nesting_up_to_the_limit_parses() {
+        let depth = MAX_NESTING_DEPTH as usize - OUTER_LEVELS;
+        ok(&format!(
+            "fn main() {{\n{}1{}\n}}",
+            "(".repeat(depth),
+            ")".repeat(depth)
+        ));
+    }
+
+    /// Every shape that nests, one level past the limit, in a debug build on
+    /// whatever stack the test harness supplies — which is the case the
+    /// limit exists for, since an overflow here would abort the test binary
+    /// rather than fail this test.
+    #[test]
+    fn nesting_past_the_limit_is_a_diagnostic() {
+        let past = MAX_NESTING_DEPTH as usize + 1;
+        let sources = [
+            format!(
+                "fn main() {{\n{}1{}\n}}",
+                "(".repeat(past),
+                ")".repeat(past)
+            ),
+            format!(
+                "fn main() {{\n{}1{}\n}}",
+                "{".repeat(past),
+                "}".repeat(past)
+            ),
+            format!(
+                "fn main() {{\n{}1{}\n}}",
+                "[".repeat(past),
+                "]".repeat(past)
+            ),
+            format!("fn main() {{\n{}1\n}}", "-".repeat(past)),
+            format!("fn main() {{\n  a = {}1\n}}", "a = ".repeat(past)),
+            format!(
+                "fn f(a: {}Int{}) {{}}",
+                "Array<".repeat(past),
+                ">".repeat(past)
+            ),
+            format!(
+                "fn main() {{\n  match x {{\n    {}y{} => 1\n  }}\n}}",
+                "Some(".repeat(past),
+                ")".repeat(past)
+            ),
+            // Chains are parsed by a loop rather than by recursion, and are
+            // counted because the tree they build is as deep as they are long.
+            format!("fn main() {{\n  1{}\n}}", " + 1".repeat(past)),
+            format!("fn main() {{\n  a{}\n}}", ".b".repeat(past)),
+            format!("fn main() {{\n  a{}\n}}", "?".repeat(past)),
+        ];
+        for source in sources {
+            let diagnostics = errors(&source);
+            let first = &diagnostics[0];
+            assert_eq!(first.code, "cove::parse::nesting_too_deep");
+            assert!(first.message.contains("64"), "{}", first.message);
+            assert!(
+                first.primary.is_some(),
+                "the limit reports where it was passed"
+            );
+            assert!(
+                first.rule.is_some(),
+                "the limit states the rule it enforces"
+            );
+            assert!(first.help.is_some(), "the limit says what to do instead");
+        }
+    }
+
+    /// A file whose nesting is three orders of magnitude past the limit is
+    /// still one diagnostic and still finishes, because the parser recovers
+    /// from this error the way it recovers from any other.
+    #[test]
+    fn nesting_far_past_the_limit_still_reports_and_returns() {
+        let past = 100_000;
+        let source = format!(
+            "fn main() {{\n{}1{}\n}}",
+            "(".repeat(past),
+            ")".repeat(past)
+        );
+        let diagnostics = errors(&source);
+        assert_eq!(codes(&diagnostics), vec!["cove::parse::nesting_too_deep"]);
+    }
+
+    /// The nesting a string literal may contain is scanned before the parser
+    /// runs, so the lexer must not recurse over it either.
+    #[test]
+    fn a_string_of_nothing_but_open_braces_is_a_lexical_error() {
+        let source = format!("fn main() {{\n  \"{}\"\n}}", "{".repeat(100_000));
+        let diagnostics = errors(&source);
+        assert_eq!(
+            codes(&diagnostics),
+            vec!["cove::lex::unterminated_interpolation"]
+        );
     }
 
     fn collect_cove_files(dir: &Path, out: &mut Vec<PathBuf>) {
