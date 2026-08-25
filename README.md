@@ -75,26 +75,28 @@ host answering from the trace -- reproducing a resource handle by handing back
 the recorded name -- and reports a divergence when the program asks for
 something the trace does not have. The `console`, `env`, `documents`, `clock`,
 `files`, and `process` hosts each ship a real and a fake implementation; `http`
-ships a real implementation speaking a deliberately small HTTP/1.1 over TCP, a
-recorded fake, and a denied one; `database` ships a fake and a denied one,
-because connecting to a real database needs more than the standard library.
-`clock.timeout` bounds a block against a watchdog on a real clock, and against
-how far the block pushed a virtual one that has no time of its own;
-`clock.every` repeats a callback until its task is cancelled or the callback
-fails, firing exactly once on a virtual clock, because one round is all a clock
-that moves only when the host moves it can honestly give. `cove test` runs
-every `test fn` in a package, granting each test the fake implementation of
-every capability its call graph requires unless `cove.toml`'s `[test]
-allow_real` names one. `cove build` packages a run as a single native
-executable that runs with no toolchain, no `cove` on the path, and no source
-tree. `cove generate <name>` runs a `[run.<name>]` entry that returns
-`Result<String, Error>` under its granted capabilities, writes and formats what
-it returns to the package-relative `generates` path, and checks the package;
-`cove generate --check` regenerates every such run into memory and fails on the
-first file that differs from what is on disk, which is what CI runs. Tasks
-spawned in a scope run on threads, so waits genuinely overlap and a trace
-records each task's own CPU time and each host call's wait, and `Shared` holds
-mutable state across them.
+ships a real implementation speaking a deliberately small HTTP/1.1 over TCP --
+one request per connection, loopback only, and fixed bounds on the request
+line, on the headers, and on the body it will read, so that a peer cannot
+choose how much of the process it occupies -- a recorded fake, and a denied
+one; `database` ships a fake and a denied one, because connecting to a real
+database needs more than the standard library. `clock.timeout` bounds a block
+against a watchdog on a real clock, and against how far the block pushed a
+virtual one that has no time of its own; `clock.every` repeats a callback until
+its task is cancelled or the callback fails, firing exactly once on a virtual
+clock, because one round is all a clock that moves only when the host moves it
+can honestly give. `cove test` runs every `test fn` in a package, granting each
+test the fake implementation of every capability its call graph requires unless
+`cove.toml`'s `[test] allow_real` names one. `cove build` packages a run as a
+single native executable that runs with no toolchain, no `cove` on the path,
+and no source tree. `cove generate <name>` runs a `[run.<name>]` entry that
+returns `Result<String, Error>` under its granted capabilities, writes and
+formats what it returns to the package-relative `generates` path, and checks
+the package; `cove generate --check` regenerates every such run into memory and
+fails on the first file that differs from what is on disk, which is what CI
+runs. Tasks spawned in a scope run on threads, so waits genuinely overlap and a
+trace records each task's own CPU time and each host call's wait, and `Shared`
+holds mutable state across them.
 
 Still missing, and each of these is a documented gap rather than an oversight:
 a real `database` implementation, because connecting to one means speaking a

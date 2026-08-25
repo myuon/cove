@@ -262,10 +262,15 @@ implementation refuses it by name.
 A filtered host is a host that narrows what a handle can address, and the real
 `http` is already one in the direction that matters: `listen` binds loopback
 only, because granting a run the network should not publish a port on every
-interface the machine has. A remote host is a host whose table lives in another
-process; the handle is unchanged, since an identity is exactly what an RPC can
-carry, and that is the case this design was shaped to leave open rather than
-one it implements.
+interface the machine has. It narrows in a second direction as well. The
+bounds it holds a request to — how much of a request line, of one header, of
+the headers together, and of a body it will read — are constants in the host,
+not something a run configures, because the memory a request costs is spent on
+the host's side of the boundary where the run's own limits do not reach, and
+the peer that decides how big a request is was never a party to the run. A
+remote host is a host whose table lives in another process; the handle is
+unchanged, since an identity is exactly what an RPC can carry, and that is the
+case this design was shaped to leave open rather than one it implements.
 
 ### Inside a sealed `cove build` artifact
 

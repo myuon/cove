@@ -42,7 +42,21 @@
 //! is deliberately small: one request per connection, `Connection: close`, no
 //! keep-alive, no chunked transfer, and a listener that binds loopback only,
 //! because granting `http` should not publish a port to the network the
-//! machine is on. [`Http::recorded`] is the fake: `fetch` answers from a
+//! machine is on.
+//!
+//! It is small in what it will hold, too, and a reader should know where the
+//! lines are before finding one. A request line longer than eight kibibytes
+//! is answered `414`; a header line longer than eight kibibytes, more than a
+//! hundred headers, or more than thirty-two kibibytes of them together are
+//! answered `431`; a body over one mebibyte is answered `413`. Each bound is
+//! applied while the request is being read rather than after, so what a peer
+//! claims never decides what this host allocates. A `Content-Length` that is
+//! not a plain count of bytes is answered `400`, as are two that disagree,
+//! and a `Transfer-Encoding` of any kind is answered `501`, because a body
+//! whose end this host cannot find is one it will not start. The bounds are
+//! constants, not configuration: this host answers JSON on loopback, and
+//! nothing about that job is served by letting a peer choose how much of this
+//! process it occupies. [`Http::recorded`] is the fake: `fetch` answers from a
 //! table of canned bodies and a listener replays a scripted queue of
 //! requests, so a program that serves is testable without a socket.
 //! [`Http::denied`] refuses everything and says why.
@@ -81,6 +95,49 @@ const READ_TIMEOUT: Duration = Duration::from_secs(30);
 /// nothing measurable, and a loop with no sleep in it would burn a core to
 /// learn the same thing.
 const ACCEPT_POLL_INTERVAL: Duration = Duration::from_millis(2);
+
+/// The most of a request line the real host will read.
+///
+/// Eight kibibytes is the figure the common servers settled on, and it is
+/// generous for what it has to hold: a method, a target, and a version. A
+/// peer that needs more of a URL than this has a problem this host cannot
+/// help with, and a peer sending an endless first line is the case the bound
+/// exists for — the read stops here rather than at the end of what the peer
+/// felt like sending.
+const MAX_REQUEST_LINE: usize = 8 * 1024;
+
+/// The most of one header line the real host will read.
+///
+/// The same eight kibibytes, for the same reason. One header is a name and a
+/// value, and a value that does not fit in eight kibibytes is not a value
+/// this host has any use for.
+const MAX_HEADER_BYTES: usize = 8 * 1024;
+
+/// The most the real host will read of all the header lines together.
+///
+/// A bound on each line alone bounds nothing: a peer can send a great many
+/// short ones. So the lines are counted as they arrive and the total is what
+/// stops them, at four full-size headers' worth, which is more than any
+/// ordinary client sends and far less than a peer with time on its hands
+/// would like to send.
+const MAX_HEADERS_BYTES: usize = 32 * 1024;
+
+/// How many header lines the real host will read.
+///
+/// The byte total already bounds the memory; this bounds the work, since a
+/// hundred thousand empty headers cost almost no bytes and still have to be
+/// looked at one at a time. A hundred is several times what a browser sends.
+const MAX_HEADER_COUNT: usize = 100;
+
+/// The most body the real host will hold.
+///
+/// One mebibyte, because this host answers JSON on loopback and is not a
+/// place to upload a file to. The number is the whole of the promise: a peer
+/// cannot make this process hold more than this per request no matter what
+/// its `Content-Length` says, since the claim is checked against this bound
+/// before a byte of body is read and the bytes are collected as they arrive
+/// rather than reserved against the claim.
+const MAX_BODY_BYTES: usize = 1024 * 1024;
 
 /// What `http` declares about itself.
 ///
@@ -887,7 +944,11 @@ fn reason(status: i64) -> &'static str {
         400 => "Bad Request",
         404 => "Not Found",
         408 => "Request Timeout",
+        413 => "Payload Too Large",
+        414 => "URI Too Long",
+        431 => "Request Header Fields Too Large",
         500 => "Internal Server Error",
+        501 => "Not Implemented",
         _ => "Status",
     }
 }
@@ -895,7 +956,9 @@ fn reason(status: i64) -> &'static str {
 /// One request that could not be read, and what the peer is told about it.
 struct Unread {
     /// What this becomes on the wire: `400` for a request this host could not
-    /// make sense of, `408` for one whose time ran out.
+    /// make sense of, `408` for one whose time ran out, `413`, `414`, or
+    /// `431` for one bigger than a bound, and `501` for one that asks for
+    /// something this host does not do.
     status: i64,
     /// What went wrong, which is also the response body.
     message: String,
@@ -906,6 +969,25 @@ impl Unread {
     fn malformed(message: String) -> Unread {
         Unread {
             status: 400,
+            message,
+        }
+    }
+
+    /// A request that passed one of the bounds this host holds itself to.
+    ///
+    /// The status is what says which bound, and saying so is the whole reason
+    /// these are not all `400`: a client told `413` knows to send less body,
+    /// and a client told `431` knows to send fewer headers, where a client
+    /// told "bad request" knows only that this host was unhappy.
+    fn too_large(status: i64, message: String) -> Unread {
+        Unread { status, message }
+    }
+
+    /// A request that is well formed and asks for something this host does
+    /// not do, which is a different admission from refusing it.
+    fn unsupported(message: String) -> Unread {
+        Unread {
+            status: 501,
             message,
         }
     }
@@ -962,39 +1044,211 @@ fn allow_until(stream: &TcpStream, until: Instant) -> Result<(), Unread> {
 /// nothing left gives up.
 fn read_request(stream: &TcpStream, until: Instant) -> Result<(String, String, String), Unread> {
     let mut reader = BufReader::new(stream);
-    let mut line = String::new();
-    allow_until(stream, until)?;
-    reader
-        .read_line(&mut line)
-        .map_err(|e| Unread::from_read("the request line", e))?;
+    let line = match line_within(&mut reader, stream, until, MAX_REQUEST_LINE, "the request line")? {
+        Line::Read(line) => line,
+        // Nothing at all arrived, which is a connection that opened and
+        // closed rather than a request to complain about.
+        Line::Ended => String::new(),
+        Line::TooLong => {
+            return Err(Unread::too_large(
+                414,
+                format!(
+                    "http: this request line is longer than the {MAX_REQUEST_LINE} bytes this host reads"
+                ),
+            ))
+        }
+    };
     let mut parts = line.split_whitespace();
     let method = parts.next().unwrap_or_default().to_string();
     let target = parts.next().unwrap_or_default().to_string();
-    let mut length = 0usize;
+
+    let mut headers = 0usize;
+    let mut header_bytes = 0usize;
+    // The text of `Content-Length` as it was sent, kept rather than parsed so
+    // that a second one can be compared with it before either is trusted.
+    let mut claimed: Option<String> = None;
+    let mut coding: Option<String> = None;
     loop {
-        let mut header = String::new();
-        allow_until(stream, until)?;
-        let read = reader
-            .read_line(&mut header)
-            .map_err(|e| Unread::from_read("a header", e))?;
-        if read == 0 || header.trim().is_empty() {
+        let header = match line_within(&mut reader, stream, until, MAX_HEADER_BYTES, "a header")? {
+            Line::Read(header) => header,
+            Line::Ended => break,
+            Line::TooLong => {
+                return Err(Unread::too_large(
+                    431,
+                    format!(
+                        "http: this request has a header longer than the {MAX_HEADER_BYTES} bytes this host reads"
+                    ),
+                ))
+            }
+        };
+        if header.trim().is_empty() {
             break;
         }
-        if let Some((name, value)) = header.split_once(':') {
-            if name.trim().eq_ignore_ascii_case("content-length") {
-                length = value.trim().parse().unwrap_or(0);
+        headers += 1;
+        header_bytes += header.len();
+        if headers > MAX_HEADER_COUNT {
+            return Err(Unread::too_large(
+                431,
+                format!("http: this request has more than the {MAX_HEADER_COUNT} headers this host reads"),
+            ));
+        }
+        if header_bytes > MAX_HEADERS_BYTES {
+            return Err(Unread::too_large(
+                431,
+                format!(
+                    "http: this request's headers are longer than the {MAX_HEADERS_BYTES} bytes this host reads"
+                ),
+            ));
+        }
+        let Some((name, value)) = header.split_once(':') else {
+            continue;
+        };
+        let (name, value) = (name.trim(), value.trim());
+        if name.eq_ignore_ascii_case("content-length") {
+            // RFC 9110 lets a repeated `Content-Length` stand only when every
+            // one of them says the same thing. Two that disagree are two
+            // requests as far as anything downstream is concerned, and
+            // picking one of them is how a proxy and a server come to
+            // disagree about where a body ended.
+            match &claimed {
+                Some(first) if first != value => {
+                    return Err(Unread::malformed(format!(
+                        "http: this request gives `Content-Length` as both `{first}` and `{value}`"
+                    )))
+                }
+                _ => claimed = Some(value.to_string()),
             }
+        } else if name.eq_ignore_ascii_case("transfer-encoding") {
+            coding = Some(value.to_string());
         }
     }
-    let mut body = vec![0u8; length];
-    if length > 0 {
-        allow_until(stream, until)?;
-        reader
-            .read_exact(&mut body)
-            .map_err(|e| Unread::from_read("the body", e))?;
+    // A transfer coding is where the body ends, and this host knows only the
+    // one that `Content-Length` describes. Reading a chunked body as if it
+    // were empty would leave its chunks on the socket and answer as though
+    // there had been no body, which is a worse answer than saying no.
+    if let Some(coding) = coding {
+        return Err(Unread::unsupported(format!(
+            "http: this host does not speak `Transfer-Encoding: {coding}`, so it cannot tell where this body ends"
+        )));
     }
+
+    let length = match &claimed {
+        Some(value) => content_length(value)?,
+        None => 0,
+    };
+    let body = body_within(&mut reader, stream, until, length)?;
     let path = target.split('?').next().unwrap_or("/").to_string();
     Ok((method, path, String::from_utf8_lossy(&body).into_owned()))
+}
+
+/// How reading one bounded line ended.
+enum Line {
+    /// A whole line, as it was sent, with whatever ended it still on it.
+    Read(String),
+    /// The peer said nothing more, which ends the headers as surely as a
+    /// blank line does.
+    Ended,
+    /// The bound was reached with no end of line in sight. What is past it
+    /// was never read, which is the point: a line is refused for its length
+    /// without this host first finding out how long it really was.
+    TooLong,
+}
+
+/// Reads one line, no longer than `limit` bytes and no later than `until`.
+///
+/// The limit is a [`Read::take`] around the reader rather than a length
+/// checked afterwards, so the bound governs what is read and not merely what
+/// is kept. A peer that opens a connection and sends one enormous line gets
+/// `limit` bytes of this host's attention and no more.
+fn line_within(
+    reader: &mut BufReader<&TcpStream>,
+    stream: &TcpStream,
+    until: Instant,
+    limit: usize,
+    what: &str,
+) -> Result<Line, Unread> {
+    allow_until(stream, until)?;
+    let mut bytes = Vec::new();
+    reader
+        .by_ref()
+        .take(limit as u64)
+        .read_until(b'\n', &mut bytes)
+        .map_err(|e| Unread::from_read(what, e))?;
+    match bytes.last() {
+        None => Ok(Line::Ended),
+        Some(b'\n') => Ok(Line::Read(String::from_utf8_lossy(&bytes).into_owned())),
+        Some(_) if bytes.len() >= limit => Ok(Line::TooLong),
+        // Short of the bound and short of a newline is a peer that stopped
+        // talking in the middle of a line, which is a request that will never
+        // be whole rather than one that is too big.
+        Some(_) => Err(Unread::malformed(format!(
+            "http: this connection ended in the middle of {what}"
+        ))),
+    }
+}
+
+/// The body length a `Content-Length` claims, if this host will read it.
+///
+/// The old reading of this header was `parse().unwrap_or(0)`, which turned
+/// every unreadable length into "there is no body" — so a malformed request
+/// was served as though it were a whole one, with its body still sitting on
+/// the socket. A length is either a number this host will read or a reason to
+/// refuse the request.
+fn content_length(value: &str) -> Result<usize, Unread> {
+    if value.is_empty() || !value.bytes().all(|b| b.is_ascii_digit()) {
+        return Err(Unread::malformed(format!(
+            "http: `Content-Length: {value}` is not a count of bytes"
+        )));
+    }
+    match value.parse::<usize>() {
+        Ok(length) if length <= MAX_BODY_BYTES => Ok(length),
+        // A length past `MAX_BODY_BYTES` and one past what a `usize` can
+        // count are the same refusal. Both are digits this host will not read
+        // that many of, and neither is allocated for in order to find out.
+        _ => Err(Unread::too_large(
+            413,
+            format!(
+                "http: this request claims {value} bytes of body, and this host reads at most {MAX_BODY_BYTES}"
+            ),
+        )),
+    }
+}
+
+/// Reads the `length` bytes of body the headers claimed, until `until`.
+///
+/// `length` has already been checked against [`MAX_BODY_BYTES`], and the
+/// bytes are gathered as they arrive rather than into a buffer sized from the
+/// claim, so a peer that says a mebibyte and sends nothing costs this host
+/// nothing. The deadline is re-armed each time round for the reason
+/// [`read_request`] gives: one request has one allowance, and a peer that
+/// dribbles its body must not renew it a chunk at a time.
+fn body_within(
+    reader: &mut BufReader<&TcpStream>,
+    stream: &TcpStream,
+    until: Instant,
+    length: usize,
+) -> Result<Vec<u8>, Unread> {
+    let mut body = Vec::new();
+    let mut chunk = [0u8; 8 * 1024];
+    while body.len() < length {
+        allow_until(stream, until)?;
+        let want = chunk.len().min(length - body.len());
+        match reader.read(&mut chunk[..want]) {
+            Ok(0) => break,
+            Ok(read) => body.extend_from_slice(&chunk[..read]),
+            // A signal says nothing about the socket, so the socket is asked
+            // again with what is left of the same allowance.
+            Err(e) if e.kind() == ErrorKind::Interrupted => {}
+            Err(e) => return Err(Unread::from_read("the body", e)),
+        }
+    }
+    if body.len() < length {
+        return Err(Unread::malformed(format!(
+            "http: this request claims {length} bytes of body and sent {}",
+            body.len()
+        )));
+    }
+    Ok(body)
 }
 
 /// Writes one response and closes the connection.
@@ -1017,6 +1271,7 @@ mod tests {
     use crate::budget::Cancellation;
     use crate::host::NoReentry;
     use crate::value::MapKey;
+    use std::cell::RefCell;
     use std::rc::Rc;
     use std::sync::atomic::AtomicUsize;
 
@@ -1121,6 +1376,9 @@ mod tests {
     struct StubReentry {
         calls: usize,
         respond: Box<dyn FnMut() -> Result<Value, RuntimeError>>,
+        /// Every request the host handed a handler, so a test can ask what
+        /// arrived rather than only what went back.
+        seen: Rc<RefCell<Vec<Value>>>,
         /// The flag standing in for everything a safepoint would stop on.
         stop: Cancellation,
         /// When the run this stub stands for runs out of time, if a test gave
@@ -1137,6 +1395,7 @@ mod tests {
             StubReentry {
                 calls: 0,
                 respond: Box::new(respond),
+                seen: Rc::new(RefCell::new(Vec::new())),
                 stop: Cancellation::new(),
                 expires_at: None,
                 looks: Arc::new(AtomicUsize::new(0)),
@@ -1159,11 +1418,17 @@ mod tests {
         fn looks(&self) -> Arc<AtomicUsize> {
             Arc::clone(&self.looks)
         }
+
+        /// The requests the host handed a handler, in order.
+        fn seen(&self) -> Rc<RefCell<Vec<Value>>> {
+            Rc::clone(&self.seen)
+        }
     }
 
     impl Reentry for StubReentry {
-        fn call(&mut self, _callee: &Value, _args: Vec<Value>) -> Result<Value, RuntimeError> {
+        fn call(&mut self, _callee: &Value, args: Vec<Value>) -> Result<Value, RuntimeError> {
             self.calls += 1;
+            self.seen.borrow_mut().extend(args);
             (self.respond)()
         }
 
@@ -1744,6 +2009,302 @@ mod tests {
             READ_TIMEOUT
         );
         assert_eq!(bounded(READ_TIMEOUT, Some(Duration::ZERO)), Duration::ZERO);
+    }
+
+    /// What one raw request at a real listener came to.
+    struct Exchange {
+        /// What `handle` answered: whether a request arrived at all.
+        served: bool,
+        /// What the peer read back, status line first.
+        received: String,
+        /// How long `handle` took, so a refusal that had to read the whole
+        /// oversized thing first can be told from one that did not.
+        took: Duration,
+        /// The requests that reached a handler, which for a refused one is
+        /// none.
+        seen: Vec<Value>,
+    }
+
+    /// Sends `request` to a real listener byte for byte and reports what came
+    /// of it.
+    ///
+    /// The bytes go out exactly as written, which is the point: these tests
+    /// are about requests no client library would let anyone send. The write
+    /// is allowed to fail, because a host that refuses a request it has not
+    /// finished reading closes a socket with bytes still in it, and the peer
+    /// learns about that as an error on whichever call is in flight.
+    fn serve_raw(request: Vec<u8>) -> Exchange {
+        let http = Http::real();
+        let handle = listen(&http, 0);
+        let port = match http
+            .call_resource(&handle, "port", Vec::new(), &mut NoReentry)
+            .unwrap()
+        {
+            Value::Int(port) => port,
+            other => panic!("expected an `Int` port, found {other}"),
+        };
+
+        let client = std::thread::spawn(move || {
+            let mut stream = TcpStream::connect(("127.0.0.1", port as u16))
+                .expect("connecting to the loopback listener should succeed");
+            // A peer that is never answered must not hang this test; the
+            // answer, or the lack of one, is what is asserted on.
+            stream
+                .set_read_timeout(Some(PROMPTLY))
+                .expect("bounding the client's own read should succeed");
+            let _ = stream.write_all(&request);
+            let mut answer = Vec::new();
+            let _ = stream.read_to_end(&mut answer);
+            String::from_utf8_lossy(&answer).into_owned()
+        });
+
+        let routes = Value::Array(vec![route("Get", "/health"), route("Post", "/echo")].into());
+        let mut back = StubReentry::new(|| Ok(response(200, "healthy")));
+        let seen = back.seen();
+        let started = Instant::now();
+        let served = bool_ok(
+            http.call_resource(&handle, "handle", vec![routes], &mut back)
+                .unwrap(),
+        );
+        let took = started.elapsed();
+        let received = client.join().expect("the client thread should not panic");
+        http.call_resource(&handle, "close", Vec::new(), &mut NoReentry)
+            .unwrap();
+        let seen = seen.borrow().clone();
+        Exchange {
+            served,
+            received,
+            took,
+            seen,
+        }
+    }
+
+    /// The status line of what the peer read back.
+    fn status_line(exchange: &Exchange) -> &str {
+        exchange
+            .received
+            .lines()
+            .next()
+            .unwrap_or_else(|| panic!("the peer was told nothing at all"))
+    }
+
+    /// Asserts that a request was refused with `status`, told nobody about
+    /// it, and did not have to be read to its end first.
+    fn refused(exchange: &Exchange, status: &str) {
+        assert_eq!(
+            status_line(exchange),
+            status,
+            "the peer was told: {}",
+            exchange.received
+        );
+        assert!(
+            exchange.served,
+            "a request that arrived and was refused is still one that arrived"
+        );
+        assert!(
+            exchange.seen.is_empty(),
+            "a refused request must not reach a handler"
+        );
+        assert!(
+            exchange.took < PROMPTLY,
+            "the refusal took {:?}, which is long enough to have read the whole thing",
+            exchange.took
+        );
+    }
+
+    #[test]
+    fn a_request_line_past_the_bound_is_refused_with_414() {
+        let target = "/".to_string() + &"a".repeat(MAX_REQUEST_LINE);
+        let request = format!("GET {target} HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n");
+        refused(
+            &serve_raw(request.into_bytes()),
+            "HTTP/1.1 414 URI Too Long",
+        );
+    }
+
+    #[test]
+    fn a_header_past_the_bound_is_refused_with_431() {
+        let request = format!(
+            "GET /health HTTP/1.1\r\nHost: 127.0.0.1\r\nX-Long: {}\r\n\r\n",
+            "a".repeat(MAX_HEADER_BYTES)
+        );
+        refused(
+            &serve_raw(request.into_bytes()),
+            "HTTP/1.1 431 Request Header Fields Too Large",
+        );
+    }
+
+    #[test]
+    fn more_headers_than_the_bound_are_refused_with_431() {
+        let mut request = "GET /health HTTP/1.1\r\n".to_string();
+        // Short enough that no number of them reaches the byte total first,
+        // so this test is about the count and nothing else.
+        for n in 0..=MAX_HEADER_COUNT {
+            request.push_str(&format!("X-{n}: 1\r\n"));
+        }
+        request.push_str("\r\n");
+        assert!(
+            request.len() < MAX_HEADERS_BYTES,
+            "this request should pass the count bound, not the byte one"
+        );
+        refused(
+            &serve_raw(request.into_bytes()),
+            "HTTP/1.1 431 Request Header Fields Too Large",
+        );
+    }
+
+    #[test]
+    fn more_header_bytes_than_the_bound_are_refused_with_431() {
+        let mut request = "GET /health HTTP/1.1\r\n".to_string();
+        // Each one is well inside the single-header bound, and there are
+        // fewer than the count allows, so only their total can refuse this.
+        let padding = "a".repeat(4 * 1024);
+        for n in 0..16 {
+            request.push_str(&format!("X-{n}: {padding}\r\n"));
+        }
+        request.push_str("\r\n");
+        refused(
+            &serve_raw(request.into_bytes()),
+            "HTTP/1.1 431 Request Header Fields Too Large",
+        );
+    }
+
+    #[test]
+    fn a_body_past_the_bound_is_refused_with_413() {
+        let request = format!(
+            "POST /echo HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Length: {}\r\n\r\n",
+            MAX_BODY_BYTES + 1
+        );
+        refused(
+            &serve_raw(request.into_bytes()),
+            "HTTP/1.1 413 Payload Too Large",
+        );
+    }
+
+    /// A claim nobody could honour is refused on the claim.
+    ///
+    /// The peer sends no body at all — only a header saying it is about to
+    /// send nine hundred and ninety-nine terabytes of one. A host that sized
+    /// a buffer from the claim would fail here in a way this process would
+    /// not survive; a host that checked the claim first answers `413` in the
+    /// time it takes to read one header, which is what the timing asserts.
+    #[test]
+    fn a_preposterous_content_length_is_refused_before_any_of_it_is_read() {
+        let request =
+            "POST /echo HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Length: 999999999999999\r\n\r\n";
+        refused(
+            &serve_raw(request.as_bytes().to_vec()),
+            "HTTP/1.1 413 Payload Too Large",
+        );
+    }
+
+    #[test]
+    fn a_content_length_that_is_not_a_number_is_refused_with_400() {
+        let request = "POST /echo HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Length: some\r\n\r\n";
+        refused(
+            &serve_raw(request.as_bytes().to_vec()),
+            "HTTP/1.1 400 Bad Request",
+        );
+    }
+
+    #[test]
+    fn two_content_lengths_that_disagree_are_refused_with_400() {
+        let request =
+            "POST /echo HTTP/1.1\r\nContent-Length: 3\r\nContent-Length: 4\r\n\r\nabc\r\n\r\n";
+        refused(
+            &serve_raw(request.as_bytes().to_vec()),
+            "HTTP/1.1 400 Bad Request",
+        );
+    }
+
+    /// RFC 9110 lets a repeated `Content-Length` stand when they agree, so
+    /// this one is served rather than refused.
+    #[test]
+    fn two_content_lengths_that_agree_are_served() {
+        let request = "POST /echo HTTP/1.1\r\nContent-Length: 3\r\nContent-Length: 3\r\n\r\nabc";
+        let exchange = serve_raw(request.as_bytes().to_vec());
+        assert_eq!(status_line(&exchange), "HTTP/1.1 200 OK");
+        assert_eq!(body_of(&exchange.seen), "abc");
+    }
+
+    #[test]
+    fn a_transfer_encoding_is_refused_with_501() {
+        let request =
+            "POST /echo HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n3\r\nabc\r\n0\r\n\r\n";
+        refused(
+            &serve_raw(request.as_bytes().to_vec()),
+            "HTTP/1.1 501 Not Implemented",
+        );
+    }
+
+    /// The bounds are for requests that pass them, and this one does not.
+    #[test]
+    fn a_request_with_an_ordinary_body_is_still_served() {
+        let body = "{\"name\":\"cove\"}";
+        let request = format!(
+            "POST /echo HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Length: {}\r\n\r\n{body}",
+            body.len()
+        );
+        let exchange = serve_raw(request.into_bytes());
+        assert_eq!(status_line(&exchange), "HTTP/1.1 200 OK");
+        assert!(
+            exchange.received.ends_with("healthy"),
+            "{}",
+            exchange.received
+        );
+        assert_eq!(body_of(&exchange.seen), body);
+    }
+
+    /// A body of exactly [`MAX_BODY_BYTES`] is inside the bound, not past it.
+    #[test]
+    fn a_body_of_exactly_the_bound_is_served() {
+        let body = "a".repeat(MAX_BODY_BYTES);
+        let request = format!(
+            "POST /echo HTTP/1.1\r\nContent-Length: {}\r\n\r\n{body}",
+            body.len()
+        );
+        let exchange = serve_raw(request.into_bytes());
+        assert_eq!(status_line(&exchange), "HTTP/1.1 200 OK");
+        assert_eq!(body_of(&exchange.seen).len(), MAX_BODY_BYTES);
+    }
+
+    /// The body of the one request a handler was given.
+    fn body_of(seen: &[Value]) -> String {
+        match seen {
+            [Value::Struct(request)] => match request.get("body") {
+                Some(Value::Str(body)) => body.to_string(),
+                other => panic!("expected a `String` body, found {other:?}"),
+            },
+            other => panic!("expected exactly one request, found {other:?}"),
+        }
+    }
+
+    /// The reading of `Content-Length` on its own, where a value too big for
+    /// a `usize` can be written down without a socket having to carry it.
+    #[test]
+    fn a_content_length_is_a_count_of_bytes_or_a_refusal() {
+        assert_eq!(content_length("0").ok(), Some(0));
+        assert_eq!(content_length("12").ok(), Some(12));
+        assert_eq!(
+            content_length(&MAX_BODY_BYTES.to_string()).ok(),
+            Some(MAX_BODY_BYTES)
+        );
+
+        for value in ["", "-1", "1 2", "0x10", "12kb", "+3", "one"] {
+            let refused = content_length(value).expect_err("this is not a count");
+            assert_eq!(refused.status, 400, "`{value}` is malformed, not too big");
+        }
+
+        // Past the bound, past a `usize`, and past anything at all: one
+        // refusal, and none of them reserve what they claim.
+        for value in [
+            (MAX_BODY_BYTES + 1).to_string(),
+            format!("{}", u64::MAX),
+            "9".repeat(200),
+        ] {
+            let refused = content_length(&value).expect_err("this is too big");
+            assert_eq!(refused.status, 413, "`{value}` is too big, not malformed");
+        }
     }
 
     /// A `fetch` made by a run with nothing left does not open a connection
