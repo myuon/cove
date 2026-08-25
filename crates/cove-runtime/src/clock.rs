@@ -425,6 +425,13 @@ mod tests {
         fn is_cancelled(&self) -> bool {
             self.cancelled
         }
+
+        /// Neither `timeout` nor `every` reads the run's deadline — a bound
+        /// the program wrote is the only clock either of them keeps — so this
+        /// stub has none to report.
+        fn time_left(&self) -> Option<std::time::Duration> {
+            None
+        }
     }
 
     #[test]

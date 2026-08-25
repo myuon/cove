@@ -8,12 +8,16 @@
   not validate"
 - Amended by: this ADR's own "Amendment (2026-08-25): a concurrency limit"
   below, which adds the one control [ADR 0001](0001-mvp-language-design.md)
-  asked for and phase 1 did not build
+  asked for and phase 1 did not build; and its "Amendment (2026-08-25): a
+  blocking Host call must cooperate", which closes the hole a host call leaves
+  in the chain of safepoints those controls are checked at
 - Implemented by: PR #6 (phase 1); PR #23 replaced phase 1's execution model;
-  the amendment by PR #45
+  the concurrency limit by PR #45; the blocking-Host-call contract by the
+  change that closed issue #57
 - Implementation status: complete — phase 1 shipped whole, phase 2 became an
-  ADR of its own rather than a later commit against this one, and the
-  concurrency limit the amendment adds is imposed
+  ADR of its own rather than a later commit against this one, the concurrency
+  limit the first amendment adds is imposed, and the blocking operations the
+  toolchain's own hosts perform keep the second amendment's contract
 
 ## Context
 
@@ -187,3 +191,82 @@ start or finish.
 `Limits::max_tasks` for a host embedding Cove, `--max-tasks <n>` for `cove
 run`, and `max_tasks` in a `[run.<name>]` table; `cove build` seals the
 configured value into the executable it writes, as it seals the rest.
+
+## Amendment (2026-08-25): a blocking Host call must cooperate
+
+The Decision above names where the runtime controls are checked: "loop back
+edges, calls, and `await`". Everything between two safepoints is unreachable
+by them, and a Host API call is the one thing that can sit between two
+safepoints for an unbounded length of time. `Budget::charge_host_call` checks
+cancellation and the deadline once more before it dispatches, which was
+written as a fix for exactly this and is quoted in its own comment: "a
+deadline checked only in Cove code would not bound a program that spends its
+time inside calls." But a check before dispatch bounds when a call *starts*.
+It says nothing about how long the call then runs, and there is no second
+check to reach it, because the interpreter is not running.
+
+`http.Server.handle` made this concrete. It reached `TcpListener::accept()`
+and stayed there until a client connected. A run cancelled while it waited was
+not stopped; a run whose deadline passed while it waited was not stopped; and
+the comment on the operation claimed the opposite — that a program serving
+against a real listener "runs until the run itself is stopped" — which was
+true of the intent and false of the code. Request reading had the same shape
+one level down: the socket had a thirty-second read timeout, but it was armed
+again before every read, so a peer sending a byte every twenty-nine seconds
+held the call open indefinitely while never once timing out.
+
+**The contract.** An operation that blocks must either cooperate with the
+run's controls or say in its own documentation that it cannot.
+
+Cooperating means four things. Bound the wait: never block on a call that has
+no timeout of its own when a polled equivalent exists. Poll in steps short
+enough that the granularity is a rounding error against the controls being
+observed — the `clock` watchdog's two milliseconds is the precedent, and the
+HTTP listener uses the same figure. Between steps, ask the `Reentry` the host
+was handed whether the run has been stopped and how long it has left, and give
+up when either says to. Hold no lock while waiting, since a host waiting under
+its own mutex blocks every task that wants it, which is a worse failure than
+the one being fixed.
+
+A multi-part operation gets one total allowance rather than one per part. This
+is the half that is easy to get wrong while looking correct: a per-read
+timeout bounds each read and the operation not at all.
+
+Giving up means answering whatever the operation's own "nothing happened" is,
+not raising an error. The reason the run stopped belongs to the budget, which
+holds the limit and names the configured value; a host that invented a failure
+would put a second, worse account of the same event in front of the reader,
+and would hand the program a Cove `Err` it could catch and carry on from.
+
+**What the host boundary had to gain.** Cancellation was already askable, but
+`Reentry::is_cancelled` read only the calling task's own flag: a host blocked
+inside a `clock.timeout` body, or on the entry task, which has no flag of its
+own, was told nothing was wrong. It now answers everything a safepoint would
+stop on — the task's flag, every bounded call this thread is inside, and the
+run's own cancellation. The deadline was not askable at all, so `Reentry`
+gained `time_left() -> Option<Duration>`: `None` for a run with no deadline,
+and a saturating remainder otherwise, so zero is the only value that can mean
+"no time left". A duration rather than an instant, because passing it to a
+socket timeout and comparing it against zero are the only two things a host
+does with it.
+
+**What the HTTP host does now.** It accepts by polling a nonblocking listener,
+looking at cancellation and the remaining time between polls, holding no lock,
+and answering `false` — "nothing more to serve" — when either says to stop,
+which ends the loop the program wrote and lets the run stop at its next
+safepoint with the budget's own diagnostic. One request gets one deadline
+covering its line, its headers, and its body together, no longer than what the
+run has left; a request that outlives it is answered `408` and the loop goes
+round again, because a request that arrived and could not be read is still a
+request that arrived. `fetch` clamps its read timeout the same way. Its
+connect is the one step still unbounded, and its documentation says so, which
+is the contract's other branch being used rather than avoided.
+
+**What a host that cannot cooperate must do.** Say so, where the person
+embedding Cove will read it: in the operation's own documentation. An embedder
+who knows that one call is outside the deadline can put it behind a process,
+a thread it is willing to abandon, or a capability it does not grant. An
+embedder who does not know has a deadline that quietly means nothing, which is
+worse than having no deadline at all. The rule this amendment adds is
+therefore not "a host must never block" — some things genuinely cannot be
+interrupted — but "a host must never block silently".
