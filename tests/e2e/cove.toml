@@ -154,6 +154,10 @@ allow = ["console"]
 entry = "type_impl.main"
 allow = ["console"]
 
+[run.type_is]
+entry = "type_is.main"
+allow = ["console"]
+
 [run.type_match]
 entry = "type_match.main"
 allow = ["console"]
@@ -164,6 +168,10 @@ allow = ["console"]
 
 [run.type_result]
 entry = "type_result.main"
+allow = ["console"]
+
+[run.type_snapshot]
+entry = "type_snapshot.main"
 allow = ["console"]
 
 [run.type_struct]

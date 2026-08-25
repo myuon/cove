@@ -156,6 +156,7 @@ fn continues_expression_only(kind: &TokenKind) -> bool {
             | TokenKind::PercentEq
             | TokenKind::DotDot
             | TokenKind::DotDotLt
+            | TokenKind::Keyword(Keyword::Is)
     )
 }
 
@@ -1306,6 +1307,11 @@ impl Parser<'_> {
                 TokenKind::LtEq => BinaryOp::Le,
                 TokenKind::Gt => BinaryOp::Gt,
                 TokenKind::GtEq => BinaryOp::Ge,
+                // `is` compares identity at the same precedence as `==`: the
+                // Language Card lists it alongside value equality, and giving
+                // it a different tier would make `a == b is c` guess which
+                // question is asked first.
+                TokenKind::Keyword(Keyword::Is) => BinaryOp::Is,
                 _ => return Ok(lhs),
             };
             self.bump();
@@ -2612,6 +2618,33 @@ mod tests {
             unary.kind,
             ExprKind::Unary {
                 op: UnaryOp::Not,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn parses_is_at_the_same_precedence_as_comparison() {
+        let value = tail_expr("a is b && c == d");
+        let ExprKind::Binary {
+            op: BinaryOp::And,
+            lhs,
+            rhs,
+        } = &value.kind
+        else {
+            panic!("expected `&&` at the top, binding `is` and `==` tighter");
+        };
+        assert!(matches!(
+            lhs.kind,
+            ExprKind::Binary {
+                op: BinaryOp::Is,
+                ..
+            }
+        ));
+        assert!(matches!(
+            rhs.kind,
+            ExprKind::Binary {
+                op: BinaryOp::Eq,
                 ..
             }
         ));

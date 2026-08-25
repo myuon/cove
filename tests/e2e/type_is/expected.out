@@ -1,0 +1,3 @@
+an alias is the same storage true
+a separate vector is not, even with equal elements false
+but == compares elements structurally true

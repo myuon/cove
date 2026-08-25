@@ -1,0 +1,52 @@
+use console.println
+
+/// Lifecycle state of a booking, copied by value like every enum.
+export enum BookingStatus {
+  Pending
+  Confirmed
+}
+
+/// A value whose scalar field copies and whose `Vector` field shares storage
+/// — until `snapshot()` asks for an independent graph.
+export struct BookingDraft {
+  status: BookingStatus
+  guests: Vector<String>
+}
+
+impl Snapshot for BookingDraft {
+  /// The status is already a value; the guest vector needs its own
+  /// `snapshot()` so the copy stops sharing storage with the original.
+  fn snapshot(self) -> BookingDraft {
+    BookingDraft(status: self.status, guests: self.guests.snapshot())
+  }
+}
+
+/// Contrasts an ordinary alias, which shares `Vector` storage exactly like
+/// `examples/values/main.cove`, with `snapshot()`, which does not.
+export fn main() -> Result<Unit, Error> {
+  var original = BookingDraft(
+    status: BookingStatus.Pending,
+    guests: Vector.of("Alice"),
+  )
+
+  // An ordinary copy shares the guest vector's storage.
+  var alias = original
+  alias.guests.push("Bob")
+  println(
+    "alias shares storage {original.guests.length()} {alias.guests.length()}",
+  )?
+
+  // `snapshot()` copies the whole graph: the new draft's vector is its own.
+  var copy = original.snapshot()
+  copy.guests.push("Carol")
+  println(
+    "snapshot is independent {original.guests.length()} {copy.guests.length()}",
+  )?
+  println("{copy.guests is original.guests}")?
+
+  // Immutable values return themselves: no copy is observable, but nothing
+  // aliases either, since there is nothing mutable to alias.
+  println("{5.snapshot()}")?
+  println("{[1, 2].snapshot()}")?
+  Ok(())
+}

@@ -464,6 +464,9 @@ pub enum BinaryOp {
     Le,
     Gt,
     Ge,
+    /// `a is b`: shared-storage identity, for the handful of types that have
+    /// one. Same precedence as `==`; see the Language Card.
+    Is,
     And,
     Or,
 }

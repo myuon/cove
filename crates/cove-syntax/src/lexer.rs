@@ -755,6 +755,20 @@ mod tests {
     }
 
     #[test]
+    fn is_is_a_keyword_and_maximal_munch_still_applies() {
+        assert_eq!(
+            kinds("a is b"),
+            vec![
+                TokenKind::Ident("a".into()),
+                TokenKind::Keyword(Keyword::Is),
+                TokenKind::Ident("b".into()),
+            ]
+        );
+        // `island` is one identifier, not `is` + `land`.
+        assert_eq!(kinds("island"), vec![TokenKind::Ident("island".into())]);
+    }
+
+    #[test]
     fn underscore_is_its_own_token() {
         assert_eq!(kinds("_"), vec![TokenKind::Underscore]);
         assert_eq!(kinds("_foo"), vec![TokenKind::Ident("_foo".into())]);

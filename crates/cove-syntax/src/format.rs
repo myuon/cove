@@ -345,9 +345,13 @@ fn binary_prec(op: BinaryOp) -> u8 {
     match op {
         BinaryOp::Or => prec::OR,
         BinaryOp::And => prec::AND,
-        BinaryOp::Eq | BinaryOp::Ne | BinaryOp::Lt | BinaryOp::Le | BinaryOp::Gt | BinaryOp::Ge => {
-            prec::COMPARISON
-        }
+        BinaryOp::Eq
+        | BinaryOp::Ne
+        | BinaryOp::Lt
+        | BinaryOp::Le
+        | BinaryOp::Gt
+        | BinaryOp::Ge
+        | BinaryOp::Is => prec::COMPARISON,
         BinaryOp::Add | BinaryOp::Sub => prec::ADDITIVE,
         BinaryOp::Mul | BinaryOp::Div | BinaryOp::Rem => prec::MULTIPLICATIVE,
     }
@@ -378,6 +382,7 @@ fn binary_symbol(op: BinaryOp) -> &'static str {
         BinaryOp::Le => "<=",
         BinaryOp::Gt => ">",
         BinaryOp::Ge => ">=",
+        BinaryOp::Is => "is",
         BinaryOp::And => "&&",
         BinaryOp::Or => "||",
     }
@@ -2467,6 +2472,17 @@ fn literals() {
   let unit = ()
   let text = \"escapes \\\\ \\\" \\n and {ints} interpolation\"
   text
+}
+",
+        );
+    }
+
+    #[test]
+    fn formats_is_at_the_same_precedence_as_comparison() {
+        formatted(
+            "
+fn identity(a: Vector<Int>, b: Vector<Int>) {
+  a is b && a == b
 }
 ",
         );

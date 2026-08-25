@@ -33,7 +33,7 @@ use crate::error::RuntimeError;
 use crate::host::HostRegistry;
 use crate::task::{self, Task, TaskScope, TaskState};
 use crate::trace::{NullSink, Timing, TraceEvent, TraceSink};
-use crate::value::{Closure, DynValue, EnumValue, RangeBounds, StructValue, Value};
+use crate::value::{Closure, DynValue, EnumValue, RangeBounds, StructValue, Value, VectorStorage};
 
 /// How deep Cove calls may nest before the runtime reports a limit instead of
 /// exhausting the host stack.
@@ -2031,6 +2031,29 @@ impl<'a> Interpreter<'a> {
             }
         }
 
+        // `snapshot()` is the builtin `Snapshot` trait's one method. A struct
+        // or enum conformance was already tried above like any other method;
+        // reaching here means either the receiver is a builtin value type,
+        // or it is a struct or enum with no conformance, which
+        // `Interpreter::snapshot` reports.
+        if name == "snapshot" {
+            let args = self.eval_args(env, args, trailing)?;
+            if !args.is_empty() {
+                return Err(RuntimeError::new(format!(
+                    "`snapshot` takes 0 argument(s), but {} were given",
+                    args.len()
+                ))
+                .at(span)
+                .into());
+            }
+            let receiver_value = match (place, temporary) {
+                (Some(place), _) => place.read(span)?,
+                (_, Some(value)) => value,
+                _ => unreachable!("a receiver is either a place or a temporary"),
+            };
+            return Ok(self.snapshot(&receiver_value, span)?);
+        }
+
         // A task scope and a task handle are runtime values rather than
         // declared types, so their operations are dispatched here.
         // `examples/tasks/load.cove` writes the await as a postfix call, and
@@ -2286,6 +2309,86 @@ impl<'a> Interpreter<'a> {
             }
         }
     }
+
+    /// An independent, mutable copy of `value`'s own graph, per the builtin
+    /// `Snapshot` trait.
+    ///
+    /// Immutable values return themselves, since sharing their storage is
+    /// unobservable. `Vector` is the one MVP type with an independent
+    /// mutable graph to copy: it allocates fresh storage and snapshots each
+    /// element recursively. A `dyn Trait` value snapshots the concrete value
+    /// it carries, keeping the same trait. A struct or enum dispatches
+    /// through its own `impl Snapshot for Type`, exactly like any other
+    /// method call. Closures, tasks, task scopes, and host handles have no
+    /// independent graph to copy and do not conform by default.
+    ///
+    /// The MVP's value model has no way to construct a cycle — every
+    /// container (`Struct`, `Enum`, `Array`, `Vector`) owns `Value`s by
+    /// `Rc`, and a value is built bottom-up from values that already exist,
+    /// so nothing can point back to a container still being built. Snapshots
+    /// therefore only need this straightforward structural copy; "preserves
+    /// cycles" is not yet a case the MVP can exercise.
+    fn snapshot(&mut self, value: &Value, span: Span) -> Result<Value, RuntimeError> {
+        match value {
+            Value::Unit
+            | Value::Bool(_)
+            | Value::Int(_)
+            | Value::Float(_)
+            | Value::Duration(_)
+            | Value::Str(_)
+            | Value::Array(_)
+            | Value::Map(_)
+            | Value::Set(_)
+            | Value::Range { .. } => Ok(value.clone()),
+            Value::Vector(storage) => {
+                builtins::check_live(storage, "snapshot", span)?;
+                let elements = storage.elements.borrow().clone();
+                let mut snapshotted = Vec::with_capacity(elements.len());
+                for item in &elements {
+                    snapshotted.push(self.snapshot(item, span)?);
+                }
+                Ok(Value::Vector(VectorStorage::new(snapshotted)))
+            }
+            Value::Dyn(wrapped) => Ok(Value::Dyn(Rc::new(DynValue {
+                trait_name: wrapped.trait_name.clone(),
+                value: self.snapshot(&wrapped.value, span)?,
+            }))),
+            Value::Struct(s) => self.dispatch_snapshot(&s.type_name, value.clone(), span),
+            Value::Enum(e) => self.dispatch_snapshot(&e.type_name, value.clone(), span),
+            other => Err(no_snapshot_conformance(other, span)),
+        }
+    }
+
+    /// Calls `type_name`'s own `snapshot` method, which exists exactly when
+    /// some module wrote `impl Snapshot for Type`.
+    fn dispatch_snapshot(
+        &mut self,
+        type_name: &str,
+        receiver: Value,
+        span: Span,
+    ) -> Result<Value, RuntimeError> {
+        let Some((type_module, short)) = type_name.rsplit_once('.') else {
+            return Err(no_snapshot_conformance(&receiver, span));
+        };
+        let Some((module, decl)) = self.find_method(type_module, short, "snapshot") else {
+            return Err(no_snapshot_conformance(&receiver, span));
+        };
+        self.invoke(
+            &Target {
+                name: "snapshot",
+                params: &decl.params,
+                body: &decl.body,
+                module,
+                receiver: decl.receiver,
+                is_async: decl.is_async,
+                captures: &[],
+                return_type: decl.return_type.as_ref(),
+            },
+            Some(ArgSlot::Value(receiver)),
+            Vec::new(),
+            span,
+        )
+    }
 }
 
 impl Callable for Interpreter<'_> {
@@ -2338,6 +2441,25 @@ fn binary(op: BinaryOp, lhs: Value, rhs: Value, span: Span) -> Result<Value, Run
             }
             let equal = lhs.eq_value(&rhs);
             Ok(Value::Bool(if op == BinaryOp::Eq { equal } else { !equal }))
+        }
+        // `is` is narrower than `==`: same shared storage, not same value.
+        // `Vector` is the one MVP type with storage of its own; everything
+        // else has no identity `is` can answer, which is a distinct error
+        // from a type mismatch.
+        BinaryOp::Is => {
+            if lhs.type_name() != rhs.type_name() {
+                return Err(RuntimeError::new(format!(
+                    "cannot compare the identity of `{}` with `{}`",
+                    lhs.type_name(),
+                    rhs.type_name()
+                ))
+                .at(span)
+                .with_rule("`is` compares identity between values of the same type."));
+            }
+            match (&lhs, &rhs) {
+                (Value::Vector(a), Value::Vector(b)) => Ok(Value::Bool(Rc::ptr_eq(a, b))),
+                _ => Err(identity_not_available(&lhs, span)),
+            }
         }
         BinaryOp::And | BinaryOp::Or => unreachable!("short-circuited in `eval`"),
         BinaryOp::Add | BinaryOp::Sub | BinaryOp::Mul | BinaryOp::Div | BinaryOp::Rem => {
@@ -2831,9 +2953,34 @@ fn operator_text(op: BinaryOp) -> &'static str {
         BinaryOp::Le => "<=",
         BinaryOp::Gt => ">",
         BinaryOp::Ge => ">=",
+        BinaryOp::Is => "is",
         BinaryOp::And => "&&",
         BinaryOp::Or => "||",
     }
+}
+
+/// `a is b` where `a` and `b` share a type that has no shared-storage
+/// identity to compare.
+fn identity_not_available(value: &Value, span: Span) -> RuntimeError {
+    RuntimeError::new(format!("identity is not available for `{}`", value.type_name()))
+        .at(span)
+        .with_rule("`==` means value equality. Identity, when available, is explicit.")
+        .with_help(
+            "`is` is defined for `Vector`; compare other values with `==`, or call `toArray()` for an independent copy",
+        )
+}
+
+/// `value.snapshot()` where `value` is a closure, a task, a task scope, a
+/// host handle, or a struct or enum with no `impl Snapshot for Type`.
+fn no_snapshot_conformance(value: &Value, span: Span) -> RuntimeError {
+    RuntimeError::new(format!(
+        "`{}` does not implement `Snapshot`",
+        value.type_name()
+    ))
+    .at(span)
+    .with_rule(
+        "Closures, synchronized values, and Host resources do not implement `Snapshot` by default; a struct or enum conforms explicitly with `impl Snapshot for Type`.",
+    )
 }
 
 fn no_field(type_name: &str, field: &str, span: Span) -> RuntimeError {
@@ -3822,6 +3969,97 @@ export fn main() -> Result<Unit, Error> {
 }
 "#;
         assert_eq!(run_entry_of(source, "main", &[]).output, "1 2\n");
+    }
+
+    // ------------------------------------------------------- `is` and `Snapshot`
+
+    #[test]
+    fn is_compares_vector_storage_identity() {
+        assert_eq!(
+            output_of(
+                "  var a = Vector.of(1, 2)\n  var b = a\n  var c = Vector.of(1, 2)\n  \
+                 println(\"{a is b} {a is c}\")?"
+            ),
+            "true false\n"
+        );
+    }
+
+    #[test]
+    fn is_rejects_a_type_mismatch_at_runtime() {
+        let error = error_of("  println(\"{Vector.of(1) is 1}\")?");
+        assert!(
+            error.message.contains("cannot compare the identity"),
+            "{}",
+            error.message
+        );
+    }
+
+    #[test]
+    fn is_rejects_a_value_type_at_runtime() {
+        let error = error_of("  println(\"{1 is 1}\")?");
+        assert_eq!(error.message, "identity is not available for `Int`");
+    }
+
+    #[test]
+    fn snapshot_of_a_vector_allocates_independent_storage() {
+        let source = r#"
+use console.println
+
+export fn main() -> Result<Unit, Error> {
+  var original = Vector.of(1, 2)
+  var copy = original.snapshot()
+  copy.push(3)
+  console.println("{original.length()} {copy.length()}")?
+  Ok(())
+}
+"#;
+        assert_eq!(run_entry_of(source, "main", &[]).output, "2 3\n");
+    }
+
+    #[test]
+    fn snapshot_recurses_into_a_vector_s_own_vector_elements() {
+        let source = r#"
+use console.println
+
+export fn main() -> Result<Unit, Error> {
+  var inner = Vector.of(1)
+  var outer = Vector.of(inner)
+  var copy = outer.snapshot()
+  var innerCopy = copy.get(0).unwrapOr(Vector.of())
+  innerCopy.push(2)
+  console.println("{inner.length()} {innerCopy.length()}")?
+  Ok(())
+}
+"#;
+        assert_eq!(run_entry_of(source, "main", &[]).output, "1 2\n");
+    }
+
+    #[test]
+    fn snapshot_dispatches_to_a_struct_s_own_conformance() {
+        let source = r#"
+use console.println
+
+struct Booking(id: Int)
+
+impl Snapshot for Booking {
+  fn snapshot(self) -> Booking { Booking(id: self.id) }
+}
+
+export fn main() -> Result<Unit, Error> {
+  let booking = Booking(id: 1)
+  console.println("{booking.snapshot()}")?
+  Ok(())
+}
+"#;
+        assert_eq!(run_entry_of(source, "main", &[]).output, "Booking(id: 1)\n");
+    }
+
+    #[test]
+    fn snapshot_is_not_implemented_for_a_closure() {
+        let error =
+            error_of("  let handler = fn(x: Int) { x }\n  println(\"{handler.snapshot()}\")?");
+        assert_eq!(error.message, "`fn` does not implement `Snapshot`");
+        assert!(error.rule.unwrap().contains("Closures"));
     }
 
     #[test]

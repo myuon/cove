@@ -1,0 +1,17 @@
+use console.println
+
+/// Exercises `is`, and contrasts it with `==` on the same handles.
+///
+/// `Vector` is the one MVP type with an identity `is` can answer: two
+/// aliases of the same storage `is`, but two vectors built separately do
+/// not, even when `==` says their elements are equal.
+export fn main() -> Result<Unit, Error> {
+  var first = Vector.of(1, 2)
+  var second = first
+  var third = Vector.of(1, 2)
+
+  println("an alias is the same storage {first is second}")?
+  println("a separate vector is not, even with equal elements {first is third}")?
+  println("but == compares elements structurally {first == third}")?
+  Ok(())
+}

@@ -1,0 +1,8 @@
+error[cove::type::unknown_method]: `fn(String) -> String` does not implement `Snapshot`
+  --> <e2e>/fail_snapshot_closure/main/main.cove:14:11
+   |
+14 |   println(handler.snapshot()("Alice"))?
+   |           ^^^^^^^^^^^^^^^^^^
+  rule: Closures, synchronized values, and Host resources do not implement `Snapshot` by default; closures have no independent mutable graph to copy.
+  help: a struct or enum conforms explicitly with `impl Snapshot for Type`
+1 error(s)
