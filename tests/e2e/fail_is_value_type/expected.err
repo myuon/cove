@@ -1,0 +1,8 @@
+error[cove::type::operator]: identity is not available for `Int`
+ --> <e2e>/fail_is_value_type/main/main.cove:8:13
+  |
+8 |   println("{a is b}")?
+  |             ^^^^^^
+  rule: `==` means value equality. Identity, when available, is explicit.
+  help: `is` is defined for `Vector`; compare other values with `==`, or call `toArray()` for an independent copy
+1 error(s)

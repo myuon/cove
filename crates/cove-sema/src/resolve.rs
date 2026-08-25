@@ -35,10 +35,10 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::rc::Rc;
 
-use cove_diag::{Diagnostic, Span};
+use cove_diag::{Diagnostic, Span, Spanned};
 use cove_syntax::ast::{
-    Block, EnumDecl, Expr, ExprKind, FnDecl, Item, ItemKind, MatchArm, Pattern, PatternKind, Stmt,
-    StmtKind, StrPart, StructDecl, TraitDecl, TraitMethod, TypeAlias,
+    Block, EnumDecl, Expr, ExprKind, FnDecl, Item, ItemKind, MatchArm, Pattern, PatternKind,
+    Receiver, Stmt, StmtKind, StrPart, StructDecl, TraitDecl, TraitMethod, TypeAlias,
 };
 
 use crate::capability::Capability;
@@ -629,7 +629,10 @@ fn resolve_module(
                 ));
                 continue;
             }
-            if trait_module.is_none() {
+            // `Snapshot` is a builtin trait (see `builtin_snapshot_trait`): it
+            // belongs to no module, so it never has a `trait_module`, and the
+            // check below would otherwise reject it as unknown.
+            if trait_module.is_none() && trait_name != BUILTIN_SNAPSHOT_TRAIT {
                 errors.push(
                     Diagnostic::error(
                         "cove::resolve::unknown_trait",
@@ -698,11 +701,22 @@ fn resolve_module(
                 );
                 continue;
             }
-            let trait_module =
-                declaring_module_of(surfaces, name, &uses, &trait_ident.node, DeclKind::Trait)
-                    .expect("checked above")
-                    .to_string();
-            let trait_decl = surfaces[trait_module.as_str()].traits[&trait_ident.node].clone();
+            let (trait_module, trait_decl) = match declaring_module_of(
+                surfaces,
+                name,
+                &uses,
+                &trait_ident.node,
+                DeclKind::Trait,
+            ) {
+                Some(module) => (
+                    module.to_string(),
+                    surfaces[module].traits[&trait_ident.node].clone(),
+                ),
+                // Only `Snapshot` reaches here: every other trait name was
+                // already rejected above. It belongs to no module, so it
+                // conforms wherever the type itself does.
+                None => (type_module.clone(), builtin_snapshot_trait(header)),
+            };
             check_conformance(
                 &mut resolved,
                 name,
@@ -1390,6 +1404,51 @@ fn walk_imports<'a>(
     }
     path.pop();
     settled.insert(module);
+}
+
+/// The name of Cove's builtin `Snapshot` trait.
+///
+/// Unlike every other trait, `Snapshot` is not written anywhere in Cove
+/// source: it belongs to no module, so an `impl Snapshot for Type` conforms
+/// wherever `Type` itself is declared, without a `trait Snapshot { ... }`
+/// declaration or a `use` to reach one. This is a deliberate, narrow
+/// departure from ADR 0006's "conformance is explicit... there is no
+/// blanket implementation": the alternative was extending the trait grammar
+/// with a `Self` return type solely so the compiler's own prelude could
+/// spell one trait, which the MVP's "no associated types" already rules out
+/// for user-written traits.
+const BUILTIN_SNAPSHOT_TRAIT: &str = "Snapshot";
+
+/// Synthesizes `Snapshot`'s one method, `fn snapshot(self) -> Self`, at the
+/// header span of the `impl Snapshot for Type` block that needs it.
+///
+/// `Self` is not a type the language can otherwise write — the MVP has no
+/// associated types — so this is built directly rather than parsed. Nothing
+/// downstream needs it to be: `check_conformance` only checks method names,
+/// not their types, and each conformance declares its own concrete return
+/// type exactly like any other trait method.
+fn builtin_snapshot_trait(span: Span) -> Rc<TraitDecl> {
+    Rc::new(TraitDecl {
+        name: Spanned::new(BUILTIN_SNAPSHOT_TRAIT.to_string(), span),
+        methods: vec![TraitMethod {
+            doc: Some(
+                "Returns an independent, mutable copy of this value's own graph, preserving \
+                 cycles and internal sharing where it has any."
+                    .to_string(),
+            ),
+            name: Spanned::new("snapshot".to_string(), span),
+            is_async: false,
+            receiver: Some(Receiver {
+                is_var: false,
+                span,
+            }),
+            params: Vec::new(),
+            return_type: None,
+            default: None,
+            span,
+        }],
+        span,
+    })
 }
 
 /// Checks one `impl Trait for Type` block and records the conformance it
@@ -2927,6 +2986,72 @@ export struct Receipt(total: Int)
             &["impl Display for Int {\n  fn describe(self) -> String { \"i\" }\n}\n"],
         );
         assert!(has_code(&errors, "cove::resolve::orphan_conformance"));
+    }
+
+    // ------------------------------------------------- the builtin `Snapshot`
+
+    #[test]
+    fn impl_snapshot_records_a_conformance_with_no_trait_declaration_in_source() {
+        let source = "\
+/// A booking.
+export struct Booking(id: Int)
+
+impl Snapshot for Booking {
+  /// Returns a copy of this booking.
+  fn snapshot(self) -> Booking { self }
+}
+";
+        let resolved = resolved_of("booking", &[source]);
+        let conformance = resolved
+            .conformances
+            .get(&("Snapshot".to_string(), "Booking".to_string()))
+            .expect("the conformance is recorded even though no `trait Snapshot` was written");
+        assert_eq!(
+            conformance.methods.iter().cloned().collect::<Vec<_>>(),
+            ["snapshot"]
+        );
+        assert!(resolved
+            .methods
+            .contains_key(&("Booking".to_string(), "snapshot".to_string())));
+        // `Snapshot` itself is not a declaration this module makes: it
+        // belongs to no module.
+        assert!(!resolved.traits.contains_key("Snapshot"));
+    }
+
+    #[test]
+    fn impl_snapshot_still_requires_the_snapshot_method() {
+        let source = "\
+/// A booking.
+export struct Booking(id: Int)
+
+impl Snapshot for Booking {
+}
+";
+        let errors = resolve_errors("booking", &[source]);
+        assert!(has_code(&errors, "cove::resolve::missing_trait_method"));
+        assert!(errors[0].message.contains("`snapshot`"));
+    }
+
+    #[test]
+    fn a_third_module_may_not_conform_an_imported_type_to_snapshot() {
+        // `Snapshot` belongs to no module, so the orphan rule's only way to
+        // pass is the type's own module declaring it; a module that merely
+        // imports `Booking` cannot conform it.
+        let error = resolve_err(
+            &[
+                (
+                    "booking",
+                    "/// A booking.\nexport struct Booking(id: Int)\n",
+                ),
+                (
+                    "other",
+                    "use booking.Booking\n\nimpl Snapshot for Booking {\n  fn snapshot(self) -> Booking { self }\n}\n",
+                ),
+            ],
+            "cove::resolve::orphan_conformance",
+        );
+        assert!(error.message.contains("Snapshot"));
+        assert!(error.message.contains("Booking"));
     }
 
     #[test]

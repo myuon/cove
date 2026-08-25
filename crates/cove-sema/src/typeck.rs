@@ -2368,6 +2368,44 @@ impl<'a> Checker<'a> {
                     }
                 }
             }
+            // `is` asks a narrower question than `==`: whether two operands
+            // are the same shared storage, which only a handful of types
+            // (today, only `Vector`) even have. A type mismatch is rejected
+            // exactly like `==`; a same-typed operand that is not one of
+            // those types is rejected too, since the Language Card says
+            // identity is explicit "when available" — it is not silently
+            // `false` for a type that has none.
+            BinaryOp::Is => {
+                if !left.matches(right) {
+                    self.diagnostics.push(
+                        Diagnostic::error(
+                            OPERATOR,
+                            format!("cannot compare the identity of `{left}` with `{right}`"),
+                        )
+                        .at(span)
+                        .rule("`is` compares identity between values of the same type.")
+                        .help(format!(
+                            "convert one side explicitly so both are `{left}`, or compare values that already share a type"
+                        )),
+                    );
+                    return Ty::Bool;
+                }
+                if left.is_wild() || matches!(left, Ty::Vector(_)) {
+                    return Ty::Bool;
+                }
+                self.diagnostics.push(
+                    Diagnostic::error(
+                        OPERATOR,
+                        format!("identity is not available for `{left}`"),
+                    )
+                    .at(span)
+                    .rule("`==` means value equality. Identity, when available, is explicit.")
+                    .help(
+                        "`is` is defined for `Vector`; compare other values with `==`, or call `toArray()` for an independent copy",
+                    ),
+                );
+                Ty::Bool
+            }
             BinaryOp::Lt | BinaryOp::Le | BinaryOp::Gt | BinaryOp::Ge => {
                 if left.is_wild() || right.is_wild() {
                     return Ty::Bool;
@@ -4052,6 +4090,17 @@ impl<'a> Checker<'a> {
             return self.map_error(ok, error, args, trailing, span);
         }
 
+        // `Snapshot` is the one trait a closure, a task, and a task scope
+        // never conform to: none has an independent mutable graph to copy.
+        // `builtin_method` would otherwise report this as an ordinary
+        // unknown method, which does not say why.
+        if name.node == "snapshot" && matches!(receiver, Ty::Fn(_) | Ty::Task(_) | Ty::Scope) {
+            self.diagnostics
+                .push(no_snapshot_conformance(receiver, span));
+            self.check_args_freely(args, trailing);
+            return Ty::Unknown;
+        }
+
         match builtin_method(receiver, &name.node) {
             Some(sig) => {
                 let what = format!("`{}.{}`", builtin_name(receiver), name.node);
@@ -4595,6 +4644,30 @@ fn builtin_method(receiver: &Ty, name: &str) -> Option<BuiltinSig> {
             ret,
         })
     };
+    // `snapshot` is the builtin `Snapshot` trait's one method. Every builtin
+    // value type is immutable, so it returns itself; `Vector` is the one
+    // builtin type with an independent mutable graph to copy, so its static
+    // return type is `Vector` again, and the runtime is what recursively
+    // snapshots its elements. A struct or enum conforms the ordinary way,
+    // with an explicit `impl Snapshot for Type`, so it is not listed here.
+    if name == "snapshot"
+        && matches!(
+            receiver,
+            Ty::Unit
+                | Ty::Bool
+                | Ty::Int
+                | Ty::Float
+                | Ty::Duration
+                | Ty::Str
+                | Ty::Range
+                | Ty::Array(_)
+                | Ty::Map(_, _)
+                | Ty::Set(_)
+                | Ty::Vector(_)
+        )
+    {
+        return sig(Vec::new(), receiver.clone());
+    }
     match receiver {
         Ty::Array(element) => match name {
             "get" => sig(
@@ -4707,6 +4780,25 @@ fn builtin_name(ty: &Ty) -> String {
     }
 }
 
+/// `value.snapshot()` on a type ADR 0001 excludes by name: a closure, a
+/// task, or a task scope.
+fn no_snapshot_conformance(receiver: &Ty, span: Span) -> Diagnostic {
+    let what = match receiver {
+        Ty::Fn(_) => "closures",
+        Ty::Task(_) => "tasks",
+        _ => "task scopes",
+    };
+    Diagnostic::error(
+        UNKNOWN_METHOD,
+        format!("`{receiver}` does not implement `Snapshot`"),
+    )
+    .at(span)
+    .rule(format!(
+        "Closures, synchronized values, and Host resources do not implement `Snapshot` by default; {what} have no independent mutable graph to copy."
+    ))
+    .help("a struct or enum conforms explicitly with `impl Snapshot for Type`")
+}
+
 fn unknown_builtin_method(receiver: &Ty, name: &str, span: Span) -> Diagnostic {
     let type_name = builtin_name(receiver);
     if name == "count" && matches!(receiver, Ty::Array(_) | Ty::Vector(_) | Ty::Str | Ty::Range) {
@@ -4734,10 +4826,10 @@ fn unknown_builtin_method(receiver: &Ty, name: &str, span: Span) -> Diagnostic {
 
 /// Every method name a builtin receiver answers to, for a diagnostic's help.
 fn builtin_methods_of(receiver: &Ty) -> Vec<String> {
-    const CANDIDATES: [&str; 19] = [
+    const CANDIDATES: [&str; 20] = [
         "get", "length", "isEmpty", "push", "freeze", "toArray", "words", "contains", "keys",
         "values", "inserted", "removed", "isSome", "isNone", "unwrapOr", "isOk", "isError",
-        "mapError", "await",
+        "mapError", "await", "snapshot",
     ];
     CANDIDATES
         .iter()
@@ -4761,6 +4853,7 @@ fn operator_symbol(op: BinaryOp) -> &'static str {
         BinaryOp::Le => "<=",
         BinaryOp::Gt => ">",
         BinaryOp::Ge => ">=",
+        BinaryOp::Is => "is",
         BinaryOp::And => "&&",
         BinaryOp::Or => "||",
     }
@@ -5090,6 +5183,35 @@ fn build() -> Array<String> {
             error.message,
             "expected `Array<String>`, found `Array<Int>`"
         );
+    }
+
+    #[test]
+    fn snapshot_returns_the_receiver_s_own_type_for_every_builtin_value() {
+        accepts_body(
+            "\
+  let n: Int = 1.snapshot()
+  let s: String = \"a\".snapshot()
+  let arr: Array<Int> = [1, 2].snapshot()
+  var v: Vector<Int> = Vector.of(1).snapshot()
+  println(\"{n} {s} {arr} {v}\")?
+",
+        );
+    }
+
+    #[test]
+    fn rejects_snapshot_on_a_closure() {
+        let error = rejects_body(
+            "\
+  let handler = fn(x: Int) { x }
+  println(\"{handler.snapshot()}\")?
+",
+        );
+        assert_eq!(error.code, UNKNOWN_METHOD);
+        assert_eq!(
+            error.message,
+            "`fn(Int) -> Int` does not implement `Snapshot`"
+        );
+        assert!(error.rule.unwrap().contains("Closures"));
     }
 
     #[test]
@@ -5567,7 +5689,7 @@ fn run() -> Counter {
         assert_eq!(error.message, "`String` has no method `trim`");
         assert_eq!(
             error.help.unwrap(),
-            "`String` has `length`, `isEmpty`, `words`"
+            "`String` has `length`, `isEmpty`, `words`, `snapshot`"
         );
     }
 
@@ -6440,6 +6562,42 @@ fn apply(transform: fn(Int) -> Int) -> Int {
         assert_eq!(
             error.help.unwrap(),
             "convert one side explicitly so both are `Int`, or compare values that already share a type"
+        );
+    }
+
+    #[test]
+    fn is_compares_the_identity_of_two_vectors() {
+        accepts_body(
+            "\
+  var a = Vector.of(1, 2)
+  var b = a
+  println(\"{a is b}\")?
+",
+        );
+    }
+
+    #[test]
+    fn rejects_is_between_different_types() {
+        let error = rejects_body("  println(\"{Vector.of(1) is Vector.of(\"x\")}\")?");
+        assert_eq!(error.code, OPERATOR);
+        assert_eq!(
+            error.message,
+            "cannot compare the identity of `Vector<Int>` with `Vector<String>`"
+        );
+        assert_eq!(
+            error.rule.unwrap(),
+            "`is` compares identity between values of the same type."
+        );
+    }
+
+    #[test]
+    fn rejects_is_on_a_value_type() {
+        let error = rejects_body("  println(\"{1 is 1}\")?");
+        assert_eq!(error.code, OPERATOR);
+        assert_eq!(error.message, "identity is not available for `Int`");
+        assert_eq!(
+            error.rule.unwrap(),
+            "`==` means value equality. Identity, when available, is explicit."
         );
     }
 

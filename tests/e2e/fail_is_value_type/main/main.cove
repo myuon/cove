@@ -1,0 +1,10 @@
+use console.println
+
+/// Never runs: `Int` is a value, not an identity-capable handle, so `is`
+/// is not available for it.
+export fn main() -> Result<Unit, Error> {
+  let a = 1
+  let b = 1
+  println("{a is b}")?
+  Ok(())
+}

@@ -1,0 +1,16 @@
+use console.println
+
+/// Returns a greeting for `name`.
+fn greet(name: String) -> String {
+  "Hello, {name}!"
+}
+
+/// Never runs: a closure has no independent mutable graph to copy, so it
+/// does not implement `Snapshot`.
+export fn main() -> Result<Unit, Error> {
+  let handler = fn(name: String) {
+    greet(name)
+  }
+  println(handler.snapshot()("Alice"))?
+  Ok(())
+}

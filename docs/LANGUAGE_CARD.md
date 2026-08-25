@@ -75,7 +75,9 @@ reports that rather than guessing which reading was meant.
 - `expr?` returns the error from the current function.
 - `await` binds tighter than `?`, so `await task()?` awaits and then propagates.
 - Panics are reserved for broken invariants, not ordinary errors.
-- `==` means value equality. Identity, when available, is explicit.
+- `==` means value equality. Identity, when available, is explicit: `is`
+  compares shared-storage identity, at `==`'s precedence, and is defined only
+  for identity-capable handles such as `Vector`.
 
 ## Values, collections, and mutation
 
@@ -110,8 +112,9 @@ fill(var output)
 
 `vector.freeze()` consumes a locally unique vector and returns an immutable
 array in O(1). `vector.toArray()` is the O(n) fallback when uniqueness cannot
-be proved. Other independent graph copies require an explicit `Snapshot`
-implementation.
+be proved. Other independent graph copies require an explicit
+`impl Snapshot for Type { fn snapshot(self) -> Type { ... } }`; closures,
+tasks, and Host resources do not conform by default.
 
 ## Evaluation
 

@@ -560,10 +560,15 @@ impl Value {
             (Value::Dyn(a), Value::Dyn(b)) => {
                 a.trait_name == b.trait_name && a.value.eq_value(&b.value)
             }
-            // `Vector` falls through to `false` deliberately: it is a
-            // growable shared handle, not a value, so whether `==` should
-            // compare handles or elements is the identity question the
-            // Language Card leaves to `is`, not a gap in this match.
+            // `==` means value equality regardless of mutability, so `Vector`
+            // compares its current elements structurally, exactly like
+            // `Array`. Storage identity — whether two handles are the same
+            // growable buffer — is the separate question `is` answers.
+            (Value::Vector(a), Value::Vector(b)) => {
+                let a = a.elements.borrow();
+                let b = b.elements.borrow();
+                a.len() == b.len() && a.iter().zip(b.iter()).all(|(x, y)| x.eq_value(y))
+            }
             _ => false,
         }
     }
@@ -1111,6 +1116,29 @@ mod tests {
         let c = set_of(vec![MapKey::Int(1)]);
         assert!(a.eq_value(&b));
         assert!(!a.eq_value(&c));
+    }
+
+    /// `==` means value equality regardless of mutability, so two separately
+    /// built `Vector`s with the same elements are equal; a vector with
+    /// different elements, or a different length, is not. Storage identity
+    /// is the separate question `is` answers, not `eq_value`.
+    #[test]
+    fn vectors_compare_structurally() {
+        let a = Value::Vector(VectorStorage::new(vec![Value::Int(1), Value::Int(2)]));
+        let b = Value::Vector(VectorStorage::new(vec![Value::Int(1), Value::Int(2)]));
+        let c = Value::Vector(VectorStorage::new(vec![Value::Int(1), Value::Int(3)]));
+        let d = Value::Vector(VectorStorage::new(vec![Value::Int(1)]));
+        assert!(a.eq_value(&b));
+        assert!(!a.eq_value(&c));
+        assert!(!a.eq_value(&d));
+    }
+
+    /// A vector equals itself under `==` too, even though it is a mutable
+    /// handle: `==` never asks the identity question.
+    #[test]
+    fn a_vector_equals_itself_structurally() {
+        let a = Value::Vector(VectorStorage::new(vec![Value::Int(1)]));
+        assert!(a.eq_value(&a.clone()));
     }
 
     #[test]
