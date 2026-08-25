@@ -1,0 +1,8 @@
+error[cove::runtime]: `files.read` requires the `files` capability, which this run was not granted
+ --> <e2e>/fail_files_no_capability/main.cove:7:27
+  |
+7 |   println("the notes are {files.read("notes.txt")}")?
+  |                           ^^^^^^^^^^^^^^^^^^^^^^^
+  rule: Cove code has no ambient authority; the host grants capabilities at the execution boundary.
+  help: add `files` to `allow` in the run's `cove.toml` table
+1 error(s)

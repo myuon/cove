@@ -36,9 +36,12 @@ Implemented: lexer, parser, directory modules, `export` visibility, derived
 outlines and capability requirements, a deterministic formatter, a
 tree-walking interpreter, Host API dispatch with grant enforcement, task
 scopes, and runtime budgets for fuel, deadlines, and host calls with tracing.
-Not yet implemented: static type checking, concurrent task execution, the
-`http`, `database`, and `process` hosts, `cove build`, `cove test`, and the
-garbage collector.
+The `console`, `env`, `documents`, `clock`, `files`, and `process` hosts each
+ship a real and a fake implementation; `database` ships a fake and a denied
+one, because connecting to a real database needs more than the standard
+library. Not yet implemented: static type checking, concurrent task
+execution, the `http` host, host resource handles such as a database
+connection, `cove build`, `cove test`, and the garbage collector.
 
 The implementation direction is recorded in
 [ADR 0002](docs/adr/0002-implementation-language-and-backend.md), and how

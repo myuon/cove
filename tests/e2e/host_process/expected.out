@@ -1,0 +1,2 @@
+args [one, two]
+run Err(process: `/bin/echo` is not an executable this host allows)

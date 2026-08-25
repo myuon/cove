@@ -16,6 +16,10 @@ The harness lives in `crates/cove-cli/tests/e2e.rs`.
 tests/e2e/
   cove.toml                 one [run.<name>] table per shared-package case
   documents/                documents the `documents` host may read
+  files/                    the root the `files` host is confined to; it is
+                            created by the first case that writes, and
+                            `host_files` removes what it wrote, so the
+                            directory is left empty
   <case>/main.cove          the program, for a shared-package case
   <case>/<module>/*.cove    a further module of the same package, which the
                             case may `use`; it is not a case of its own,

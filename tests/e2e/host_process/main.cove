@@ -1,0 +1,13 @@
+use console.println
+use process
+
+/// Prints the arguments this host passed on, shows that a host allowing no
+/// executables starts none, and ends the run through the host rather than by
+/// returning.
+export fn main() -> Result<Unit, Error> {
+  println("args {process.args()}")?
+  println("run {process.run("/bin/echo", ["hi"])}")?
+  process.exit(0)
+  println("this line is after the process ended")?
+  Ok(())
+}

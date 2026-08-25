@@ -1,0 +1,9 @@
+use console.println
+use database
+
+/// Queries a host that has no database at all.
+export fn main() -> Result<Unit, Error> {
+  let rows = database.query("select id from bookings")?
+  println("rows {rows}")?
+  Ok(())
+}

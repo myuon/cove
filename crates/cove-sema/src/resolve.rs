@@ -704,7 +704,15 @@ fn resolve_module(
 /// consulted to refuse a package module that would shadow a host module: a
 /// `use` naming an unknown host module is still accepted, since a host may
 /// register any module it likes.
-const HOST_MODULES: [&str; 4] = ["clock", "console", "documents", "env"];
+const HOST_MODULES: [&str; 7] = [
+    "clock",
+    "console",
+    "database",
+    "documents",
+    "env",
+    "files",
+    "process",
+];
 
 /// What one module offers a `use` in another: every top-level declaration it
 /// makes, what kind it is, whether it is exported, and where it was written.
@@ -3072,6 +3080,33 @@ impl Show for B {
             "cove::resolve::module_shadows_host",
         );
         assert!(diagnostic.help.as_deref().unwrap().contains("rename"));
+    }
+
+    /// Every host the runtime registers must be here, or a package module of
+    /// that name shadows it silently -- modules resolve first.
+    #[test]
+    fn every_registered_host_module_is_refused_as_a_package_module() {
+        for host in [
+            "clock",
+            "console",
+            "database",
+            "documents",
+            "env",
+            "files",
+            "process",
+        ] {
+            let diagnostic = resolve_err(
+                &[
+                    (host, "/// Does something.\nexport fn thing() {\n}\n"),
+                    ("app", &format!("use {host}.thing\n")),
+                ],
+                "cove::resolve::module_shadows_host",
+            );
+            assert!(
+                diagnostic.message.contains(host),
+                "`{host}` should be refused as a package module"
+            );
+        }
     }
 
     #[test]
