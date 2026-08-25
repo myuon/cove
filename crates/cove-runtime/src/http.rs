@@ -23,7 +23,20 @@
 //! never returned would be a host call outside the reach of the run's fuel,
 //! its deadline, and its cancellation; `handle` answers one request and
 //! returns, so the loop around it is ordinary Cove code with ordinary
-//! safepoints, and stopping the run stops the server.
+//! safepoints.
+//!
+//! That is only half of it, because `handle` itself waits — for a connection,
+//! and then for the request on it — and a host call is a hole in the
+//! safepoint chain for as long as it lasts. So the waiting is bounded the way
+//! [`crate::host::HostApi`] says a blocking operation must bound it. A real
+//! listener accepts by polling a nonblocking socket, looks at the run's
+//! cancellation and at what is left of its deadline between polls, and
+//! answers "nothing more to serve" when either says to stop, which ends the
+//! program's own loop and lets the run stop at its next safepoint with the
+//! diagnostic the budget owns. One request gets one deadline covering its
+//! line, its headers, and its body together, no longer than what the run has
+//! left. Stopping the run stops the server, and now that is true while it is
+//! idle as well as while it is busy.
 //!
 //! Three implementations ship. [`Http::real`] speaks HTTP/1.1 over TCP, and
 //! is deliberately small: one request per connection, `Connection: close`, no
@@ -35,11 +48,11 @@
 //! [`Http::denied`] refuses everything and says why.
 
 use std::collections::BTreeMap;
-use std::io::{BufRead, BufReader, Read, Write};
+use std::io::{BufRead, BufReader, ErrorKind, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use cove_schema::builtins::RESULT;
 use cove_sema::Capability;
@@ -49,11 +62,25 @@ use crate::host::{HostApi, Reentry, ResourceHandle};
 use crate::schema::{ModuleSchema, OperationSchema, ResourceSchema, TypeSchema};
 use crate::value::{EnumValue, StructValue, Value};
 
-/// How long the real host waits for one client to send its request line.
+/// How long the real host is willing to spend reading one whole request.
 ///
-/// A connection that opens and says nothing would otherwise hold `handle`
-/// open for as long as the peer chose to keep it.
+/// This is the allowance for the request line, the headers, and the body
+/// together, not for each read that makes them up: a connection that opens
+/// and dribbles a byte at a time would otherwise hold `handle` open for as
+/// long as the peer chose to keep it. A run with a deadline shortens it
+/// further, since waiting past the run's own end serves nobody.
 const READ_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// How long the real host sleeps between looks at a listener nobody has
+/// connected to yet.
+///
+/// The same reasoning as `clock`'s own `WATCH_INTERVAL`, and the same value:
+/// this is a granularity, so it decides only how long past a cancellation or
+/// a deadline the wait may run before it notices. Sleeping is what keeps the
+/// poll a poll rather than a spin — a few hundred wakeups a second cost
+/// nothing measurable, and a loop with no sleep in it would burn a core to
+/// learn the same thing.
+const ACCEPT_POLL_INTERVAL: Duration = Duration::from_millis(2);
 
 /// What `http` declares about itself.
 ///
@@ -225,9 +252,13 @@ impl Http {
     }
 
     /// `GET url`, answering the body a `2xx` carried.
-    fn fetch(&self, url: &str) -> Value {
+    ///
+    /// `time_left` is what the run has before its deadline, which clamps how
+    /// long the real client will wait for an answer; `None` leaves it bounded
+    /// by [`READ_TIMEOUT`] alone.
+    fn fetch(&self, url: &str, time_left: Option<Duration>) -> Value {
         match &self.source {
-            HttpSource::Real => match fetch_over_tcp(url) {
+            HttpSource::Real => match fetch_over_tcp(url, time_left) {
                 Ok(body) => Value::ok(Value::Str(body.into())),
                 Err(message) => Value::err(Value::error(message)),
             },
@@ -245,10 +276,20 @@ impl Http {
 
     /// Serves one request, and answers whether one arrived.
     ///
-    /// `false` means the listener has nothing more to serve, which is what
-    /// ends the loop the program wrote around this call. Only a fake listener
-    /// ever says it: a real one waits for a connection, so a program serving
-    /// against one runs until the run itself is stopped.
+    /// `false` means there is nothing more to serve, which is what ends the
+    /// loop the program wrote around this call. A fake listener says it when
+    /// its scripted queue is empty. A real one says it when the run was
+    /// cancelled, or ran out of time, while it was waiting for a connection:
+    /// the wait is a poll rather than a blocking `accept`, so the run's
+    /// controls reach it.
+    ///
+    /// Answering `false` rather than an error of its own is deliberate. The
+    /// program's loop is what should end, and the reason the run stopped
+    /// belongs to the budget that holds the limit — the next safepoint raises
+    /// `Cancelled` or `Deadline` naming the value that was configured. A host
+    /// that invented a failure here would put a second, worse account of the
+    /// same event in front of the reader, and would hand a program a Cove
+    /// `Err` it could catch and ignore.
     fn serve_one(
         &self,
         handle: &ResourceHandle,
@@ -287,10 +328,12 @@ impl Http {
 
         let (asked, connection) = match next {
             Next::Scripted(scripted) => (scripted, None),
-            Next::Real(listener) => match listener.accept() {
-                Ok((stream, _)) => {
-                    let _ = stream.set_read_timeout(Some(READ_TIMEOUT));
-                    match read_request(&stream) {
+            Next::Real(listener) => match accept_when_ready(&listener, back) {
+                Waited::Connected(stream) => {
+                    // One deadline for the whole request, and never more of it
+                    // than the run itself has left.
+                    let until = Instant::now() + bounded(READ_TIMEOUT, back.time_left());
+                    match read_request(&stream, until) {
                         Ok((method, path, body)) => (
                             ScriptedRequest {
                                 method: method_case(&method),
@@ -299,13 +342,21 @@ impl Http {
                             },
                             Some(stream),
                         ),
-                        Err(message) => {
-                            let _ = write_response(&stream, 400, &json_string(&message));
+                        // A request that could not be read is still a request
+                        // that arrived, so the peer is told why and the
+                        // program's loop goes round again.
+                        Err(unread) => {
+                            let _ = write_response(
+                                &stream,
+                                unread.status,
+                                &json_string(&unread.message),
+                            );
                             return Ok(Value::ok(Value::Bool(true)));
                         }
                     }
                 }
-                Err(e) => {
+                Waited::Stopped => return Ok(Value::ok(Value::Bool(false))),
+                Waited::Failed(e) => {
                     return Ok(Value::err(Value::error(format!(
                         "http: cannot accept on {handle}: {e}"
                     ))))
@@ -353,6 +404,82 @@ impl Http {
 enum Next {
     Scripted(ScriptedRequest),
     Real(TcpListener),
+}
+
+/// What waiting for a connection came to.
+enum Waited {
+    /// A client connected, and its stream is ready to be read.
+    Connected(TcpStream),
+    /// The run was cancelled or ran out of time while nothing was arriving.
+    Stopped,
+    /// The listener itself failed, which is the host's problem rather than
+    /// the run's.
+    Failed(std::io::Error),
+}
+
+/// Waits for one connection, in steps short enough for the run's controls to
+/// reach the wait.
+///
+/// A blocking `accept` is the whole of the problem this exists to solve. The
+/// runtime checks cancellation and the deadline before it dispatches a host
+/// call and cannot check either again until the call returns, so a `handle`
+/// sitting in `accept` with nobody connecting is unreachable by both: the
+/// comment that used to sit on [`Http::serve_one`], promising that such a
+/// program "runs until the run itself is stopped", described something the
+/// implementation could not do. Polling a nonblocking listener turns the wait
+/// into a loop with a place to look in it, and the looking is what makes the
+/// promise true.
+///
+/// The listener is a clone of the one the host owns and no lock is held here,
+/// which matters more than it looks: this wait is the longest thing this
+/// module ever does, and holding the host's mutex across it would queue every
+/// other task behind an idle server.
+fn accept_when_ready(listener: &TcpListener, back: &dyn Reentry) -> Waited {
+    if let Err(e) = listener.set_nonblocking(true) {
+        return Waited::Failed(e);
+    }
+    loop {
+        match listener.accept() {
+            Ok((stream, _)) => {
+                // A nonblocking listener hands back a nonblocking stream on
+                // some platforms, and reading one of those in a loop is
+                // exactly the spin this function exists to avoid. The read
+                // path wants an ordinary blocking socket with a timeout on
+                // it, so the mode goes back before anything reads.
+                return match stream.set_nonblocking(false) {
+                    Ok(()) => Waited::Connected(stream),
+                    Err(e) => Waited::Failed(e),
+                };
+            }
+            Err(e) if e.kind() == ErrorKind::WouldBlock => {
+                // A connection that is already waiting is served even by a
+                // run that is stopping, because it cost nothing to take and
+                // refusing it would leave a client with no answer at all.
+                // This is where there is nothing to lose by giving up.
+                if back.is_cancelled() || back.time_left().is_some_and(|left| left.is_zero()) {
+                    return Waited::Stopped;
+                }
+                std::thread::sleep(ACCEPT_POLL_INTERVAL);
+            }
+            // A signal delivered to this thread interrupts the call without
+            // saying anything about the socket, so the socket is asked again.
+            Err(e) if e.kind() == ErrorKind::Interrupted => {}
+            Err(e) => return Waited::Failed(e),
+        }
+    }
+}
+
+/// The shorter of what this host allows itself and what the run has left.
+///
+/// A host willing to wait thirty seconds for a peer should not wait thirty
+/// seconds on behalf of a run that had two hundred milliseconds to live. A
+/// run with no deadline is bounded by the host's own allowance alone, which
+/// is the only bound there is to apply.
+fn bounded(allowance: Duration, time_left: Option<Duration>) -> Duration {
+    match time_left {
+        Some(left) => allowance.min(left),
+        None => allowance,
+    }
 }
 
 /// The handler of the first route that matches `asked`.
@@ -471,13 +598,36 @@ impl HostApi for Http {
         SCHEMA.resources
     }
 
+    /// `fetch` is the one module-level operation that waits, so it is the one
+    /// that needs the way back: not to run a callback, but to ask how long
+    /// the run it belongs to still has. Everything else here touches only
+    /// what it was given.
+    fn call_with(
+        &self,
+        op: &str,
+        args: Vec<Value>,
+        back: &mut dyn Reentry,
+    ) -> Result<Value, RuntimeError> {
+        match op {
+            "fetch" => {
+                let [Value::Str(url)] = args.as_slice() else {
+                    unreachable!("checked by HostRegistry::call")
+                };
+                Ok(self.fetch(url, back.time_left()))
+            }
+            _ => self.call(op, args),
+        }
+    }
+
     fn call(&self, op: &str, args: Vec<Value>) -> Result<Value, RuntimeError> {
         match op {
             "fetch" => {
                 let [Value::Str(url)] = args.as_slice() else {
                     unreachable!("checked by HostRegistry::call")
                 };
-                Ok(self.fetch(url))
+                // Reached only by a caller holding the host directly, which
+                // has no run behind it and so no deadline to be clamped by.
+                Ok(self.fetch(url, None))
             }
             "json" => {
                 let [Value::Int(status), body] = args.as_slice() else {
@@ -643,12 +793,30 @@ fn json_string(s: &str) -> String {
 }
 
 /// Sends one `GET` and reads the body a `2xx` carried.
-fn fetch_over_tcp(url: &str) -> Result<String, String> {
+///
+/// The read is bounded by [`READ_TIMEOUT`], clamped by whatever the run has
+/// left, so a `fetch` cannot outlive its run's deadline by thirty seconds
+/// waiting on a server that has stopped answering. One blocking read needs
+/// one timeout; there is nothing here to poll between, so nothing here is a
+/// loop.
+///
+/// The connect is the one step this does not bound, and a reader should know
+/// it: `TcpStream::connect` resolves a name and completes a handshake with no
+/// timeout of its own, so a run whose deadline expires during either waits
+/// for the platform rather than for the budget. Loopback, which is what this
+/// host is granted authority over, makes both immediate.
+fn fetch_over_tcp(url: &str, time_left: Option<Duration>) -> Result<String, String> {
     let (authority, path) = split_url(url)?;
+    let allowance = bounded(READ_TIMEOUT, time_left);
+    if allowance.is_zero() {
+        return Err(format!(
+            "http: the run ran out of time before {authority} could be asked"
+        ));
+    }
     let mut stream = TcpStream::connect(&authority)
         .map_err(|e| format!("http: cannot connect to {authority}: {e}"))?;
     stream
-        .set_read_timeout(Some(READ_TIMEOUT))
+        .set_read_timeout(Some(allowance))
         .map_err(|e| format!("http: {e}"))?;
     let request = format!(
         "GET {path} HTTP/1.1\r\nHost: {authority}\r\nConnection: close\r\nAccept: */*\r\n\r\n"
@@ -718,27 +886,97 @@ fn reason(status: i64) -> &'static str {
         204 => "No Content",
         400 => "Bad Request",
         404 => "Not Found",
+        408 => "Request Timeout",
         500 => "Internal Server Error",
         _ => "Status",
     }
 }
 
-/// Reads one HTTP/1.1 request from `stream`.
-fn read_request(stream: &TcpStream) -> Result<(String, String, String), String> {
+/// One request that could not be read, and what the peer is told about it.
+struct Unread {
+    /// What this becomes on the wire: `400` for a request this host could not
+    /// make sense of, `408` for one whose time ran out.
+    status: i64,
+    /// What went wrong, which is also the response body.
+    message: String,
+}
+
+impl Unread {
+    /// A request this host could not read at all.
+    fn malformed(message: String) -> Unread {
+        Unread {
+            status: 400,
+            message,
+        }
+    }
+
+    /// A request whose deadline passed before it was whole.
+    ///
+    /// A peer that stopped halfway through a request and one that is being
+    /// slow on purpose look identical from here, and neither needs a
+    /// different answer: the time allowed for this request is up.
+    fn timed_out() -> Unread {
+        Unread {
+            status: 408,
+            message: "http: this request did not arrive within the time allowed for it".to_string(),
+        }
+    }
+
+    /// What one failed read means. A timeout is the request's own deadline
+    /// running out, since that is the only timeout the socket was ever given;
+    /// anything else is a connection this host cannot read.
+    fn from_read(what: &str, e: std::io::Error) -> Unread {
+        match e.kind() {
+            ErrorKind::WouldBlock | ErrorKind::TimedOut => Unread::timed_out(),
+            _ => Unread::malformed(format!("http: cannot read {what}: {e}")),
+        }
+    }
+}
+
+/// Gives `stream` whatever is left of the deadline the whole request shares.
+///
+/// `set_read_timeout(Some(Duration::ZERO))` is refused by the platform, and
+/// rightly: a zero timeout is how the socket API spells "no timeout", which
+/// is the opposite of what an exhausted allowance is asking for. So a
+/// deadline that has already passed stops here rather than being handed to
+/// the socket as permission to wait forever.
+fn allow_until(stream: &TcpStream, until: Instant) -> Result<(), Unread> {
+    let left = until.saturating_duration_since(Instant::now());
+    if left.is_zero() {
+        return Err(Unread::timed_out());
+    }
+    stream
+        .set_read_timeout(Some(left))
+        .map_err(|e| Unread::malformed(format!("http: cannot bound the read: {e}")))
+}
+
+/// Reads one HTTP/1.1 request from `stream`, giving the request line, the
+/// headers, and the body together until `until` and no longer.
+///
+/// One deadline, not a timeout per read. A timeout that started again on
+/// every successful read would bound each read and the request not at all: a
+/// peer sending one byte every twenty-nine seconds keeps the call alive for
+/// as long as it likes, and a run that meant to stop in two hundred
+/// milliseconds waits for all of it. So the socket is re-armed before each
+/// read with what remains of the one allowance, and the first read that finds
+/// nothing left gives up.
+fn read_request(stream: &TcpStream, until: Instant) -> Result<(String, String, String), Unread> {
     let mut reader = BufReader::new(stream);
     let mut line = String::new();
+    allow_until(stream, until)?;
     reader
         .read_line(&mut line)
-        .map_err(|e| format!("http: cannot read the request line: {e}"))?;
+        .map_err(|e| Unread::from_read("the request line", e))?;
     let mut parts = line.split_whitespace();
     let method = parts.next().unwrap_or_default().to_string();
     let target = parts.next().unwrap_or_default().to_string();
     let mut length = 0usize;
     loop {
         let mut header = String::new();
+        allow_until(stream, until)?;
         let read = reader
             .read_line(&mut header)
-            .map_err(|e| format!("http: cannot read a header: {e}"))?;
+            .map_err(|e| Unread::from_read("a header", e))?;
         if read == 0 || header.trim().is_empty() {
             break;
         }
@@ -750,9 +988,10 @@ fn read_request(stream: &TcpStream) -> Result<(String, String, String), String> 
     }
     let mut body = vec![0u8; length];
     if length > 0 {
+        allow_until(stream, until)?;
         reader
             .read_exact(&mut body)
-            .map_err(|e| format!("http: cannot read the body: {e}"))?;
+            .map_err(|e| Unread::from_read("the body", e))?;
     }
     let path = target.split('?').next().unwrap_or("/").to_string();
     Ok((method, path, String::from_utf8_lossy(&body).into_owned()))
@@ -779,6 +1018,7 @@ mod tests {
     use crate::host::NoReentry;
     use crate::value::MapKey;
     use std::rc::Rc;
+    use std::sync::atomic::AtomicUsize;
 
     fn err_message(value: Value) -> String {
         match value.err_payload() {
@@ -876,10 +1116,20 @@ mod tests {
 
     /// A stub [`Reentry`] for tests, standing in for the interpreter: it runs
     /// the boxed closure it was built with instead of dispatching a route's
-    /// handler into Cove code.
+    /// handler into Cove code, and answers for a run that a test controls —
+    /// one it can cancel, and one it can give a deadline to.
     struct StubReentry {
         calls: usize,
         respond: Box<dyn FnMut() -> Result<Value, RuntimeError>>,
+        /// The flag standing in for everything a safepoint would stop on.
+        stop: Cancellation,
+        /// When the run this stub stands for runs out of time, if a test gave
+        /// it a deadline. An instant rather than a duration, so the answer
+        /// shrinks while the host waits exactly as the real one does.
+        expires_at: Option<Instant>,
+        /// How many times the host asked whether the run had been stopped,
+        /// which is how a test tells a poll from a spin.
+        looks: Arc<AtomicUsize>,
     }
 
     impl StubReentry {
@@ -887,7 +1137,27 @@ mod tests {
             StubReentry {
                 calls: 0,
                 respond: Box::new(respond),
+                stop: Cancellation::new(),
+                expires_at: None,
+                looks: Arc::new(AtomicUsize::new(0)),
             }
+        }
+
+        /// The flag this stub reports, for a test to raise from a thread of
+        /// its own while the host is waiting.
+        fn stop(&self) -> Cancellation {
+            self.stop.clone()
+        }
+
+        /// Reports a run with `left` to live from now.
+        fn expiring_in(mut self, left: Duration) -> Self {
+            self.expires_at = Some(Instant::now() + left);
+            self
+        }
+
+        /// How many times the host looked at the run's state.
+        fn looks(&self) -> Arc<AtomicUsize> {
+            Arc::clone(&self.looks)
         }
     }
 
@@ -907,7 +1177,13 @@ mod tests {
         }
 
         fn is_cancelled(&self) -> bool {
-            false
+            self.looks.fetch_add(1, Ordering::Relaxed);
+            self.stop.is_cancelled()
+        }
+
+        fn time_left(&self) -> Option<Duration> {
+            self.expires_at
+                .map(|at| at.saturating_duration_since(Instant::now()))
         }
     }
 
@@ -1263,5 +1539,222 @@ mod tests {
 
         http.call_resource(&handle, "close", Vec::new(), &mut NoReentry)
             .unwrap();
+    }
+
+    /// How long a test is willing to let a `handle` that should have stopped
+    /// go on waiting.
+    ///
+    /// Generous, because the assertion is about the difference between
+    /// stopping and not stopping rather than about latency: a call that is
+    /// genuinely blocked in `accept` with nobody connecting never returns at
+    /// all, and one that polls returns within a couple of poll intervals even
+    /// on a machine with nothing to spare.
+    const PROMPTLY: Duration = Duration::from_secs(2);
+
+    /// A real listener with nobody connecting to it, and the routing table a
+    /// program would hand `handle`.
+    ///
+    /// Nothing is ever routed in these tests. The point of each of them is
+    /// what happens before a request exists.
+    fn quiet_listener() -> (Http, Arc<ResourceHandle>, Value) {
+        let http = Http::real();
+        let handle = listen(&http, 0);
+        (
+            http,
+            handle,
+            Value::Array(vec![route("Get", "/health")].into()),
+        )
+    }
+
+    /// Cancelling a run that is waiting for a connection stops the wait.
+    ///
+    /// This is the acceptance test for the whole change, and it uses the real
+    /// host: a real socket, bound to loopback, with nothing on the other end
+    /// of it. A blocking `accept` would hang here forever and the test would
+    /// have to be killed.
+    #[test]
+    fn cancelling_a_run_waiting_for_a_connection_stops_the_wait() {
+        let (http, handle, routes) = quiet_listener();
+        let mut back = StubReentry::new(|| panic!("nothing connects, so no handler runs"));
+        let stop = back.stop();
+        let raised_after = Duration::from_millis(50);
+        // The clock is read before the thread that raises the flag can exist,
+        // so the flag cannot be raised earlier than `started` plus the sleep
+        // and the lower bound below is arithmetic rather than a race.
+        let started = Instant::now();
+        std::thread::spawn(move || {
+            std::thread::sleep(raised_after);
+            stop.cancel();
+        });
+
+        let answer = http
+            .call_resource(&handle, "handle", vec![routes], &mut back)
+            .unwrap();
+        let waited = started.elapsed();
+
+        assert!(
+            !bool_ok(answer),
+            "a listener that was stopped has nothing more to serve"
+        );
+        assert!(
+            waited >= raised_after,
+            "the wait ended before there was anything to end it, after {waited:?}"
+        );
+        assert!(
+            waited < PROMPTLY,
+            "the wait outlived the cancellation by {waited:?}"
+        );
+        assert_eq!(back.calls, 0, "no request arrived, so no handler ran");
+    }
+
+    /// The same shape, with the run's deadline running out instead of a flag
+    /// being raised: a host that only watched cancellation would still sit
+    /// here until a client arrived.
+    #[test]
+    fn a_run_deadline_that_expires_while_waiting_for_a_connection_ends_the_wait() {
+        let (http, handle, routes) = quiet_listener();
+        let left = Duration::from_millis(50);
+        // The stub's deadline runs from the moment it is built, so the clock
+        // is read first: `started` is then no later than the deadline's own
+        // origin, and the lower bound below cannot be lost to a rounding.
+        let started = Instant::now();
+        let mut back =
+            StubReentry::new(|| panic!("nothing connects, so no handler runs")).expiring_in(left);
+
+        let answer = http
+            .call_resource(&handle, "handle", vec![routes], &mut back)
+            .unwrap();
+        let waited = started.elapsed();
+
+        assert!(
+            !bool_ok(answer),
+            "a listener whose run has run out of time has nothing more to serve"
+        );
+        assert!(
+            waited >= left,
+            "the wait ended before the deadline it was waiting for, after {waited:?}"
+        );
+        assert!(
+            waited < PROMPTLY,
+            "the wait outlived the deadline by {waited:?}"
+        );
+    }
+
+    /// The bound is a poll and not a spin.
+    ///
+    /// There is no portable way to ask this process how much CPU it burned,
+    /// so the test asks the thing the host itself does: how many times it
+    /// looked at the run while it waited. A loop sleeping
+    /// [`ACCEPT_POLL_INTERVAL`] looks a few hundred times a second; a loop
+    /// with no sleep in it would look millions of times over the same
+    /// interval, so the two are never in danger of being confused.
+    #[test]
+    fn waiting_for_a_connection_polls_rather_than_spinning() {
+        let (http, handle, routes) = quiet_listener();
+        let waiting = Duration::from_millis(200);
+        let mut back = StubReentry::new(|| panic!("nothing connects, so no handler runs"))
+            .expiring_in(waiting);
+        let looks = back.looks();
+
+        http.call_resource(&handle, "handle", vec![routes], &mut back)
+            .unwrap();
+
+        let looks = looks.load(Ordering::Relaxed);
+        let sleeping = (waiting.as_millis() / ACCEPT_POLL_INTERVAL.as_millis()) as usize;
+        assert!(looks >= 1, "the host never looked at the run at all");
+        assert!(
+            looks < sleeping * 20,
+            "{looks} looks in {waiting:?} is a spin, not a poll at one every {ACCEPT_POLL_INTERVAL:?}"
+        );
+    }
+
+    /// A peer that connects, says half of a request line, and then says
+    /// nothing is answered `408` on the run's own deadline rather than on
+    /// `READ_TIMEOUT`, which is thirty seconds away.
+    ///
+    /// This is the other half of the same problem. The socket had a timeout
+    /// before this change too, but it was the host's alone, and it started
+    /// again on every successful read.
+    #[test]
+    fn a_run_deadline_that_expires_while_reading_answers_408() {
+        let http = Http::real();
+        let handle = listen(&http, 0);
+        let port = match http
+            .call_resource(&handle, "port", Vec::new(), &mut NoReentry)
+            .unwrap()
+        {
+            Value::Int(port) => port,
+            other => panic!("expected an `Int` port, found {other}"),
+        };
+
+        // Half a request line, and then the peer holds the connection open
+        // and says nothing more until it is answered.
+        let client = std::thread::spawn(move || {
+            let mut stream = TcpStream::connect(("127.0.0.1", port as u16))
+                .expect("connecting to the loopback listener should succeed");
+            stream
+                .write_all(b"GET /health HTT")
+                .expect("writing half a request line should succeed");
+            let mut answer = Vec::new();
+            stream
+                .read_to_end(&mut answer)
+                .expect("reading the response should succeed");
+            String::from_utf8_lossy(&answer).into_owned()
+        });
+
+        let routes = Value::Array(vec![route("Get", "/health")].into());
+        let mut back = StubReentry::new(|| panic!("no whole request arrives, so no handler runs"))
+            .expiring_in(Duration::from_millis(150));
+        let started = Instant::now();
+        let answer = http
+            .call_resource(&handle, "handle", vec![routes], &mut back)
+            .unwrap();
+        let took = started.elapsed();
+
+        assert!(
+            bool_ok(answer),
+            "a request that arrived and could not be read is still one that arrived"
+        );
+        assert!(
+            took < PROMPTLY,
+            "the read waited on `READ_TIMEOUT` rather than on the run, for {took:?}"
+        );
+        let received = client.join().expect("the client thread should not panic");
+        assert!(
+            received.starts_with("HTTP/1.1 408 Request Timeout"),
+            "{received}"
+        );
+
+        http.call_resource(&handle, "close", Vec::new(), &mut NoReentry)
+            .unwrap();
+    }
+
+    /// The clamp itself, without a socket: a run with less time left than the
+    /// host's own allowance decides the allowance, and a run with no deadline
+    /// leaves it alone.
+    #[test]
+    fn an_allowance_is_the_shorter_of_the_hosts_and_the_runs() {
+        assert_eq!(bounded(READ_TIMEOUT, None), READ_TIMEOUT);
+        assert_eq!(
+            bounded(READ_TIMEOUT, Some(Duration::from_millis(200))),
+            Duration::from_millis(200)
+        );
+        assert_eq!(
+            bounded(READ_TIMEOUT, Some(Duration::from_secs(600))),
+            READ_TIMEOUT
+        );
+        assert_eq!(bounded(READ_TIMEOUT, Some(Duration::ZERO)), Duration::ZERO);
+    }
+
+    /// A `fetch` made by a run with nothing left does not open a connection
+    /// at all, let alone wait thirty seconds on one.
+    #[test]
+    fn a_fetch_with_no_time_left_is_refused_before_it_connects() {
+        let answer = fetch_over_tcp("http://127.0.0.1:1/", Some(Duration::ZERO))
+            .expect_err("a run with no time left cannot fetch");
+        assert_eq!(
+            answer,
+            "http: the run ran out of time before 127.0.0.1:1 could be asked"
+        );
     }
 }

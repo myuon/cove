@@ -3512,11 +3512,51 @@ impl Reentry for Callback<'_, '_> {
         result
     }
 
+    /// Everything [`Interpreter::charge_safepoint`] would stop on, asked from
+    /// outside the interpreter.
+    ///
+    /// A host that is waiting is standing where a safepoint would be, so it
+    /// is owed the same answer a safepoint gets: this task's own flag, the
+    /// flag of every bounded call this thread is inside, and the run's own
+    /// cancellation. Reading only the first would have told a host blocked
+    /// inside a `clock.timeout` body that nothing was wrong, and told a host
+    /// on the entry task — which has no flag of its own — that nothing was
+    /// ever wrong.
     fn is_cancelled(&self) -> bool {
-        self.interpreter
+        if self
+            .interpreter
             .cancellation
             .as_ref()
             .is_some_and(Cancellation::is_cancelled)
+        {
+            return true;
+        }
+        if self
+            .interpreter
+            .stops
+            .iter()
+            .any(Cancellation::is_cancelled)
+        {
+            return true;
+        }
+        self.interpreter
+            .hosts
+            .with_budget(|budget| budget.cancellation().is_cancelled())
+            .unwrap_or(false)
+    }
+
+    /// What the run's deadline leaves, read from the one budget that knows
+    /// when the run started.
+    ///
+    /// A run with no deadline answers `None`, and one whose deadline has
+    /// passed answers zero rather than wrapping: the subtraction saturates,
+    /// so a host comparing the answer against zero is comparing against the
+    /// only value that can mean "no time left".
+    fn time_left(&self) -> Option<Duration> {
+        self.interpreter.hosts.with_budget(|budget| {
+            let deadline = budget.limits().deadline?;
+            Some(deadline.saturating_sub(budget.elapsed()))
+        })?
     }
 }
 

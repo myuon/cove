@@ -24,7 +24,7 @@ use std::io::Write;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use cove_sema::Capability;
 
@@ -44,6 +44,37 @@ use crate::value::Value;
 /// decides how much of it two tasks may do at once: `console` serializes its
 /// writes so a line is never torn, while `clock.sleep` holds nothing, so two
 /// tasks can wait at the same time instead of queueing behind each other.
+///
+/// # An operation that blocks
+///
+/// A host call is a hole in the run's safepoint chain. The interpreter checks
+/// fuel, the deadline, and cancellation at loop back edges, calls, and
+/// `await`, and a program sitting inside a host reaches none of the three;
+/// [`Budget::charge_host_call`] checks the deadline and the cancellation flag
+/// once more before dispatch, but that bounds when a call *starts*, not how
+/// long it runs. Nothing in the runtime can interrupt a host that is waiting
+/// in `accept` or `read`. So this is a contract the boundary states and each
+/// host keeps, rather than something the boundary can enforce.
+///
+/// An operation that waits must bound how long it waits. It polls in steps
+/// short enough that the run's controls are still responsive, asks the
+/// [`Reentry`] it was handed whether the run has been stopped
+/// ([`Reentry::is_cancelled`]) and how long it has left
+/// ([`Reentry::time_left`]) between steps, and holds no lock while it does —
+/// a host waiting under its own mutex blocks every other task that wants it.
+/// One total allowance covers a multi-part operation: a per-read timeout that
+/// starts again on every successful read bounds nothing, because a peer that
+/// makes slow progress can hold the call open forever. `http.Server.handle`
+/// is the worked example. It accepts by polling rather than blocking, gives
+/// the whole of one request a single deadline clamped by what the run has
+/// left, and answers "nothing more to serve" when the run is stopped, so the
+/// program's own loop ends and the budget reports the stop it owns.
+///
+/// An operation that genuinely cannot cooperate — a C library call with no
+/// timeout, a syscall that cannot be interrupted — must say so in its own
+/// documentation, so an embedder knows the run's deadline does not bound that
+/// call and can decide what to do about it. What is not acceptable is a host
+/// that blocks indefinitely and says nothing.
 pub trait HostApi: Send + Sync {
     /// The name Cove source uses, such as `console`.
     fn name(&self) -> &str;
@@ -129,6 +160,12 @@ pub trait HostApi: Send + Sync {
 /// stack, charged to that task's budget. There is no second thread and no
 /// scheduler: a host that wants concurrency spawns nothing, because
 /// concurrency in Cove belongs to a task scope the program wrote.
+///
+/// It is also how a host asks about the run it is inside.
+/// [`Reentry::is_cancelled`] and [`Reentry::time_left`] answer the two
+/// questions an operation that waits has to keep asking, and they are the
+/// only way to ask them: a host holds no budget and no interpreter of its
+/// own. [`HostApi`] says what a host owes them.
 pub trait Reentry {
     /// Calls `callee` with `args` and answers what it produced.
     fn call(&mut self, callee: &Value, args: Vec<Value>) -> Result<Value, RuntimeError>;
@@ -146,12 +183,42 @@ pub trait Reentry {
         stop: &Cancellation,
     ) -> Result<Value, RuntimeError>;
 
-    /// Whether the task that made this host call has been asked to stop.
+    /// Whether the work that made this host call has been asked to stop.
     ///
-    /// A host that loops — `clock.every` is the one that does — reads this
-    /// between rounds, so cancelling the task holding the timer ends the
-    /// timer rather than leaving it running with nobody waiting.
+    /// This is everything a safepoint in Cove code would answer to: the run's
+    /// own cancellation, the task's, and the flag of any bounded call this
+    /// one is nested inside — a blocking call made from the body of a
+    /// `clock.timeout` is inside that bound as much as any Cove statement is.
+    ///
+    /// A host that loops or waits reads this between rounds and gives up when
+    /// it is raised: `clock.every` ends the timer rather than leaving it
+    /// running with nobody waiting, and `http.Server.handle` stops waiting
+    /// for a connection nobody is going to make. Giving up means answering
+    /// whatever the operation's own "nothing happened" is. The stop belongs
+    /// to the runtime, which reports it at the next safepoint with the limit
+    /// that was configured; a host that raised an error of its own would be
+    /// answering a question it was not asked.
     fn is_cancelled(&self) -> bool;
+
+    /// How long the run that made this host call has before its deadline
+    /// expires.
+    ///
+    /// `None` means the run has no deadline and nothing here bounds it.
+    /// `Some(Duration::ZERO)` means the deadline has passed, and is as much a
+    /// reason to stop as [`Reentry::is_cancelled`] answering true.
+    ///
+    /// A host that waits reads this for two things. It stops when the answer
+    /// reaches zero, the same way it stops when the run is cancelled. And it
+    /// clamps its own timeouts by it, so an operation willing to wait thirty
+    /// seconds for a peer does not sit there for thirty seconds on behalf of
+    /// a run that had two hundred milliseconds left: the shorter of the two
+    /// allowances is the one that is honest.
+    ///
+    /// The answer is a duration rather than an instant because that is what a
+    /// host does with it — pass it to a socket timeout, or compare it against
+    /// zero — and because a run's deadline is measured from when the run
+    /// started, which is the budget's business and not the host's.
+    fn time_left(&self) -> Option<Duration>;
 }
 
 /// A [`Reentry`] for a caller that has no interpreter to reenter.
@@ -181,6 +248,13 @@ impl Reentry for NoReentry {
 
     fn is_cancelled(&self) -> bool {
         false
+    }
+
+    /// A caller with no run behind it has no deadline to run out of, so a
+    /// host driven from a test or a tool waits for as long as its own limits
+    /// allow and no less.
+    fn time_left(&self) -> Option<Duration> {
+        None
     }
 }
 

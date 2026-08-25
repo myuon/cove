@@ -12,6 +12,12 @@
 //! What it proves that a fake cannot is that `http.fetch` speaks the protocol.
 //! A recorded fake answers a URL from a table and would keep answering it if
 //! the client sent nothing at all.
+//!
+//! The last test here is the other thing a fake cannot show: that a run's
+//! deadline reaches a program sitting inside `http.Server.handle` with a real
+//! socket and no client. A fake listener returns of its own accord when its
+//! queue is empty, so a program serving against one would stop whether or not
+//! the run's controls reached the host at all.
 
 use std::io::{BufRead, BufReader, Write};
 use std::net::{TcpListener, TcpStream};
@@ -19,8 +25,10 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use cove_diag::SourceMap;
+use cove_runtime::budget::{Budget, Limits};
 use cove_runtime::host::{Console, Grants, HostRegistry};
 use cove_runtime::http::Http;
 use cove_runtime::interp::Interpreter;
@@ -163,6 +171,104 @@ fn outcome(value: &Value) -> Result<String, String> {
         "Ok" => Ok(payload),
         _ => Err(payload),
     }
+}
+
+/// The program `examples/server/` is, on a port the operating system picks
+/// and with nobody ever connecting to it.
+const SERVER: &str = r#"use http
+
+/// Answers the one route this server has.
+export fn health(request: http.Request) -> http.Response {
+  http.json(200, "ok")
+}
+
+/// The routing table, built once before anything is served.
+fn routes() -> Array<http.Route> {
+  var building = Vector.of()
+
+  building.push(http.Route(
+    method: http.Method.Get,
+    path: "/health",
+    handler: health,
+  ))
+
+  building.freeze()
+}
+
+/// Serves until the listener has nothing more to serve.
+export fn main() -> Result<Unit, Error> {
+  let server = http.listen(0)?
+  let table = routes()
+
+  while server.handle(table)? {
+  }
+
+  server.close()?
+  Ok(())
+}
+"#;
+
+/// Runs a one-module package against the real host under `limits`, and
+/// answers what the run came to and how long it took.
+fn run_under(name: &str, source: &str, limits: Limits) -> (Result<Value, String>, Duration) {
+    let dir = TempDir::new(name);
+    std::fs::create_dir_all(dir.path().join("app")).unwrap();
+    std::fs::write(dir.path().join("app/main.cove"), source).unwrap();
+    std::fs::write(dir.path().join("cove.toml"), "").unwrap();
+
+    let mut sources = SourceMap::new();
+    let package = cove_sema::package::load(dir.path(), &mut sources).expect("the package loads");
+    let program = cove_sema::resolve::resolve(&package).expect("the package resolves");
+
+    let mut hosts = HostRegistry::new(Grants::new(["http", "console"]));
+    hosts.register(Box::new(Console::new(std::io::sink())));
+    hosts.register(Box::new(Http::real()));
+    hosts.set_budget(Budget::new(limits));
+
+    let runtime = Runtime::new(Arc::new(program), Arc::new(sources), Arc::new(hosts));
+    let started = Instant::now();
+    let outcome = Interpreter::new(&runtime)
+        .run_entry("app", "main", Vec::<Rc<str>>::new())
+        .map_err(|error| error.message);
+    (outcome, started.elapsed())
+}
+
+/// A run's deadline reaches a program waiting inside `http.Server.handle`.
+///
+/// This is the end-to-end half of what `cove-runtime`'s own tests check with
+/// a stub: nothing here stands in for the interpreter, so the deadline
+/// travels the whole way — from `Limits` into the run's `Budget`, out through
+/// the `Reentry` the host is handed, and into the loop that polls the
+/// listener. Without that path the program never returns and this test hangs
+/// rather than failing, which is the honest shape for it: a server waiting
+/// for a client that will never come is exactly the bug.
+#[test]
+fn a_run_deadline_stops_a_program_waiting_for_a_connection() {
+    let deadline = Duration::from_millis(300);
+    let (outcome, took) = run_under(
+        "serve-deadline",
+        SERVER,
+        Limits {
+            deadline: Some(deadline),
+            ..Limits::default()
+        },
+    );
+
+    let Err(message) = outcome else {
+        panic!("a server with no client cannot finish on its own: {outcome:?}");
+    };
+    assert!(
+        message.contains("wall-clock deadline of 300ms exceeded"),
+        "the run stops for the reason the budget holds, not one the host invented: {message}"
+    );
+    assert!(
+        took >= deadline,
+        "the run stopped before its deadline, after {took:?}"
+    );
+    assert!(
+        took < Duration::from_secs(5),
+        "the run outlived its deadline by {took:?}"
+    );
 }
 
 /// A Cove program reaching a real server, over a real socket.
