@@ -75,11 +75,6 @@ a sentence somewhere above that a reader would have to check against the code:
   execution profile means a binary that runs anywhere, which exists; it does
   not mean machine code generated from Cove, which does not.
 - **Wasm.** Deferred, as the classification below states.
-- **Written types at a declaration's parameters.** "Function and public API
-  boundaries remain explicitly typed" is a rule nothing enforces: a parameter
-  written without a type becomes the checker's `Unknown`, which is equal to
-  everything, so a call passing the wrong thing checks clean. See
-  [issue #41](https://github.com/myuon/cove/issues/41).
 - **`Mutex<T>`, `RwLock<T>`, `Atomic<T>`, `Channel<T>`, and `Once<T>`.** ADR
   0008 chose `Shared<T>` alone, and no representative program has yet shown the
   friction that would earn the rest.
