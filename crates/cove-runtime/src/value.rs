@@ -12,6 +12,10 @@ use std::fmt;
 use std::rc::Rc;
 use std::sync::Arc;
 
+use cove_schema::builtins::{
+    BuiltinSchema, CaseSchema, ERROR, ERR_CASE, MESSAGE_FIELD, NONE_CASE, OK_CASE, OPTION, RESULT,
+    SOME_CASE,
+};
 use cove_syntax::ast::{FnDecl, Param};
 
 use crate::host::ResourceHandle;
@@ -449,12 +453,21 @@ impl fmt::Display for MapKey {
     }
 }
 
+/// The builtin `Option`, `Result`, and `Error` values, built and read through
+/// the one description of what they are made of.
+///
+/// `Ok`, `Err`, `Some`, `None`, and an `Error`'s `message` are declared in
+/// [`cove_schema::builtins`], which is also where `cove-sema` reads them to
+/// check a `match` and to type a pattern's binding. Everything in this
+/// workspace that builds one of these values or asks which case a value is
+/// goes through the constructors and readers below, so the four case names
+/// are stated once and the question "is this an `Ok`?" has one answer.
 impl Value {
     /// `Ok(value)`
     pub fn ok(value: Value) -> Value {
         Value::Enum(Box::new(EnumValue {
-            type_name: "Result".into(),
-            case: "Ok".into(),
+            type_name: RESULT.name.into(),
+            case: OK_CASE.name.into(),
             payload: vec![value],
         }))
     }
@@ -462,8 +475,8 @@ impl Value {
     /// `Err(error)`
     pub fn err(error: Value) -> Value {
         Value::Enum(Box::new(EnumValue {
-            type_name: "Result".into(),
-            case: "Err".into(),
+            type_name: RESULT.name.into(),
+            case: ERR_CASE.name.into(),
             payload: vec![error],
         }))
     }
@@ -471,8 +484,8 @@ impl Value {
     /// `Some(value)`
     pub fn some(value: Value) -> Value {
         Value::Enum(Box::new(EnumValue {
-            type_name: "Option".into(),
-            case: "Some".into(),
+            type_name: OPTION.name.into(),
+            case: SOME_CASE.name.into(),
             payload: vec![value],
         }))
     }
@@ -480,8 +493,8 @@ impl Value {
     /// `None`
     pub fn none() -> Value {
         Value::Enum(Box::new(EnumValue {
-            type_name: "Option".into(),
-            case: "None".into(),
+            type_name: OPTION.name.into(),
+            case: NONE_CASE.name.into(),
             payload: Vec::new(),
         }))
     }
@@ -489,9 +502,70 @@ impl Value {
     /// The builtin `Error` struct.
     pub fn error(message: impl Into<String>) -> Value {
         Value::Struct(Box::new(StructValue {
-            type_name: "Error".into(),
-            fields: vec![("message".into(), Value::Str(message.into().into()))],
+            type_name: ERROR.name.into(),
+            fields: vec![(MESSAGE_FIELD.name.into(), Value::Str(message.into().into()))],
         }))
+    }
+
+    /// Whether this is an `Ok`, the success case of a `Result`.
+    pub fn is_ok(&self) -> bool {
+        self.builtin_case(&RESULT, &OK_CASE).is_some()
+    }
+
+    /// Whether this is an `Err`.
+    pub fn is_err(&self) -> bool {
+        self.builtin_case(&RESULT, &ERR_CASE).is_some()
+    }
+
+    /// Whether this is a `Some`.
+    pub fn is_some(&self) -> bool {
+        self.builtin_case(&OPTION, &SOME_CASE).is_some()
+    }
+
+    /// What an `Ok` carries, when this is one.
+    ///
+    /// The payload is a slice rather than a value because what a caller does
+    /// with an empty one differs: the `?` operator answers `()` and a
+    /// diagnostic answers nothing at all. The schema says an `Ok` carries
+    /// exactly one value, so an empty one is a host that broke its word.
+    pub fn ok_payload(&self) -> Option<&[Value]> {
+        self.builtin_case(&RESULT, &OK_CASE)
+            .map(|case| case.payload.as_slice())
+    }
+
+    /// What an `Err` carries, when this is one.
+    pub fn err_payload(&self) -> Option<&[Value]> {
+        self.builtin_case(&RESULT, &ERR_CASE)
+            .map(|case| case.payload.as_slice())
+    }
+
+    /// What a `Some` carries, when this is one.
+    pub fn some_payload(&self) -> Option<&[Value]> {
+        self.builtin_case(&OPTION, &SOME_CASE)
+            .map(|case| case.payload.as_slice())
+    }
+
+    /// The `message` a builtin `Error` carries, when this is one.
+    pub fn error_message(&self) -> Option<&Value> {
+        match self {
+            Value::Struct(value) if &*value.type_name == ERROR.name => {
+                value.get(MESSAGE_FIELD.name)
+            }
+            _ => None,
+        }
+    }
+
+    /// This value as `case` of the builtin enum `schema`, when it is one.
+    ///
+    /// Both halves of the question are asked here: a user enum may declare a
+    /// case called `Ok`, and it is not this one.
+    fn builtin_case(&self, schema: &BuiltinSchema, case: &CaseSchema) -> Option<&EnumValue> {
+        match self {
+            Value::Enum(value) if &*value.type_name == schema.name && &*value.case == case.name => {
+                Some(value)
+            }
+            _ => None,
+        }
     }
 
     /// The name shown in diagnostics.
@@ -651,10 +725,10 @@ impl fmt::Display for Value {
                 f.write_str("}")
             }
             Value::Struct(s) => {
-                if &*s.type_name == "Error" {
-                    return match s.get("message") {
+                if &*s.type_name == ERROR.name {
+                    return match s.get(MESSAGE_FIELD.name) {
                         Some(Value::Str(m)) => f.write_str(m),
-                        _ => f.write_str("Error"),
+                        _ => f.write_str(ERROR.name),
                     };
                 }
                 let short = s.type_name.rsplit('.').next().unwrap_or(&s.type_name);

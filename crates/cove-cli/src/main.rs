@@ -1374,7 +1374,7 @@ fn print_stats(hosts: &HostRegistry, wait_total: &WaitTotal, heap: &HeapStats) {
 pub(crate) fn report_exit(value: cove_runtime::Value) -> Result<(), CliError> {
     use cove_runtime::value::Value;
     if let Value::Enum(result) = &value {
-        if &*result.type_name == "Result" && &*result.case == "Err" {
+        if value.is_err() {
             let payload = result
                 .payload
                 .first()

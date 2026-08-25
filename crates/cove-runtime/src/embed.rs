@@ -344,7 +344,7 @@ impl Embedded {
 /// as it does under `cove run`.
 fn report_exit(value: &Value) -> Result<(), String> {
     if let Value::Enum(result) = value {
-        if &*result.type_name == "Result" && &*result.case == "Err" {
+        if value.is_err() {
             return Err(result
                 .payload
                 .first()

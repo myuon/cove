@@ -22,7 +22,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::rc::Rc;
 
 use cove_diag::Span;
-use cove_schema::builtins::{FreeBuiltinKind, FreeBuiltinSchema};
+use cove_schema::builtins::{
+    FreeBuiltinKind, FreeBuiltinSchema, MAP_ENTRY, OK_CASE, OPTION, RESULT, SOME_CASE,
+};
 
 use crate::error::RuntimeError;
 use crate::shared::SharedCell;
@@ -225,7 +227,7 @@ pub fn call_associated(
                 let Value::Struct(entry) = &arg else {
                     return Err(expects_map_entry(&arg, span));
                 };
-                if &*entry.type_name != "MapEntry" {
+                if &*entry.type_name != MAP_ENTRY.name {
                     return Err(expects_map_entry(&arg, span));
                 }
                 let key_value = entry.get("key").expect("MapEntry always has a `key` field");
@@ -468,8 +470,8 @@ pub fn call_method(
                 _ => Err(no_method("Range", name, span)),
             }
         }
-        Value::Enum(value) if &*value.type_name == "Option" => {
-            let some = &*value.case == "Some";
+        Value::Enum(value) if &*value.type_name == OPTION.name => {
+            let some = &*value.case == SOME_CASE.name;
             match name {
                 "isSome" => {
                     expect_args(name, args, 0, span)?;
@@ -489,8 +491,8 @@ pub fn call_method(
                 _ => Err(no_method("Option", name, span)),
             }
         }
-        Value::Enum(value) if &*value.type_name == "Result" => {
-            let ok = &*value.case == "Ok";
+        Value::Enum(value) if &*value.type_name == RESULT.name => {
+            let ok = &*value.case == OK_CASE.name;
             match name {
                 "isOk" => {
                     expect_args(name, args, 0, span)?;

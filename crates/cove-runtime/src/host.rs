@@ -1058,27 +1058,19 @@ mod tests {
     }
 
     fn ok_str(value: Value) -> String {
-        match value {
-            Value::Enum(result) if &*result.type_name == "Result" && &*result.case == "Ok" => {
-                match result.payload.first() {
-                    Some(Value::Str(text)) => text.to_string(),
-                    other => panic!("expected `Ok(String)`, found {other:?}"),
-                }
-            }
-            other => panic!("expected `Ok(String)`, found {other}"),
+        match value.ok_payload() {
+            Some(payload) => match payload.first() {
+                Some(Value::Str(text)) => text.to_string(),
+                other => panic!("expected `Ok(String)`, found {other:?}"),
+            },
+            None => panic!("expected `Ok(String)`, found {value}"),
         }
     }
 
     fn err_message(value: Value) -> String {
-        match value {
-            Value::Enum(result) if &*result.type_name == "Result" && &*result.case == "Err" => {
-                result
-                    .payload
-                    .first()
-                    .map(ToString::to_string)
-                    .unwrap_or_default()
-            }
-            other => panic!("expected `Err(...)`, found {other}"),
+        match value.err_payload() {
+            Some(payload) => payload.first().map(ToString::to_string).unwrap_or_default(),
+            None => panic!("expected `Err(...)`, found {value}"),
         }
     }
 

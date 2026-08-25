@@ -233,27 +233,19 @@ mod tests {
     }
 
     fn rows(value: Value) -> Vec<String> {
-        match value {
-            Value::Enum(result) if &*result.type_name == "Result" && &*result.case == "Ok" => {
-                match result.payload.into_iter().next() {
-                    Some(Value::Array(items)) => items.iter().map(ToString::to_string).collect(),
-                    other => panic!("expected `Ok(Array)`, found {other:?}"),
-                }
-            }
-            other => panic!("expected `Ok(...)`, found {other}"),
+        match value.ok_payload() {
+            Some(payload) => match payload.first() {
+                Some(Value::Array(items)) => items.iter().map(ToString::to_string).collect(),
+                other => panic!("expected `Ok(Array)`, found {other:?}"),
+            },
+            None => panic!("expected `Ok(...)`, found {value}"),
         }
     }
 
     fn err_message(value: Value) -> String {
-        match value {
-            Value::Enum(result) if &*result.type_name == "Result" && &*result.case == "Err" => {
-                result
-                    .payload
-                    .first()
-                    .map(ToString::to_string)
-                    .unwrap_or_default()
-            }
-            other => panic!("expected `Err(...)`, found {other}"),
+        match value.err_payload() {
+            Some(payload) => payload.first().map(ToString::to_string).unwrap_or_default(),
+            None => panic!("expected `Err(...)`, found {value}"),
         }
     }
 
