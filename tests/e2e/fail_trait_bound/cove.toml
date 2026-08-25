@@ -1,0 +1,3 @@
+[run.fail_trait_bound]
+entry = "main.main"
+allow = ["console"]

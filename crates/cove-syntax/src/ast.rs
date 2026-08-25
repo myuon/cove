@@ -37,16 +37,54 @@ pub enum ItemKind {
     Fn(FnDecl),
     Struct(StructDecl),
     Enum(EnumDecl),
+    /// `trait Display { fn describe(self) -> String }`
+    Trait(TraitDecl),
     Impl(ImplBlock),
     /// `export type Handler = async fn(...) -> ...`
     TypeAlias(TypeAlias),
+}
+
+/// One type parameter of a declaration, with the traits it is bounded by.
+///
+/// A bound is checked at the call site that instantiates the parameter, and
+/// it is what makes a method call on a value of that parameter resolvable.
+#[derive(Clone, Debug)]
+pub struct GenericParam {
+    pub name: Ident,
+    /// `T: Display + Ordered` binds two traits; an unbounded `T` binds none.
+    pub bounds: Vec<Ident>,
+    pub span: Span,
+}
+
+impl GenericParam {
+    /// An unbounded parameter, which is what every generic was before traits.
+    pub fn unbounded(name: Ident) -> GenericParam {
+        let span = name.span;
+        GenericParam {
+            name,
+            bounds: Vec::new(),
+            span,
+        }
+    }
+}
+
+/// Renders a type parameter back to declaration syntax: `T` or `T: A + B`.
+impl std::fmt::Display for GenericParam {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.name.node)?;
+        for (i, bound) in self.bounds.iter().enumerate() {
+            f.write_str(if i == 0 { ": " } else { " + " })?;
+            f.write_str(&bound.node)?;
+        }
+        Ok(())
+    }
 }
 
 #[derive(Clone, Debug)]
 pub struct FnDecl {
     pub name: Ident,
     pub is_async: bool,
-    pub generics: Vec<Ident>,
+    pub generics: Vec<GenericParam>,
     /// `self` / `var self`, present on methods only.
     pub receiver: Option<Receiver>,
     pub params: Vec<Param>,
@@ -79,7 +117,7 @@ pub struct Param {
 #[derive(Clone, Debug)]
 pub struct StructDecl {
     pub name: Ident,
-    pub generics: Vec<Ident>,
+    pub generics: Vec<GenericParam>,
     pub fields: Vec<Field>,
     pub span: Span,
 }
@@ -95,7 +133,7 @@ pub struct Field {
 #[derive(Clone, Debug)]
 pub struct EnumDecl {
     pub name: Ident,
-    pub generics: Vec<Ident>,
+    pub generics: Vec<GenericParam>,
     pub cases: Vec<EnumCase>,
     pub span: Span,
 }
@@ -109,10 +147,44 @@ pub struct EnumCase {
     pub span: Span,
 }
 
+/// A trait: a set of method signatures a type conforms to explicitly.
+///
+/// Conformance is only ever declared by an `impl Trait for Type` block; there
+/// is no structural conformance and no blanket implementation.
+#[derive(Clone, Debug)]
+pub struct TraitDecl {
+    pub name: Ident,
+    pub methods: Vec<TraitMethod>,
+    pub span: Span,
+}
+
+/// One method signature a trait declares, with an optional default body.
+///
+/// A method with a default body is supplied by every conformance that does
+/// not override it; one without must be supplied by every conformance.
+#[derive(Clone, Debug)]
+pub struct TraitMethod {
+    pub doc: Option<String>,
+    pub name: Ident,
+    pub is_async: bool,
+    /// `self` / `var self`. A method without one is an associated function,
+    /// which has no receiver and so cannot be called through `dyn Trait`.
+    pub receiver: Option<Receiver>,
+    pub params: Vec<Param>,
+    pub return_type: Option<Type>,
+    pub default: Option<Block>,
+    pub span: Span,
+}
+
+/// `impl Type { ... }`, or `impl Trait for Type { ... }` when `trait_name` is
+/// present.
 #[derive(Clone, Debug)]
 pub struct ImplBlock {
+    /// The trait this block declares a conformance to, for `impl Trait for
+    /// Type`.
+    pub trait_name: Option<Ident>,
     pub type_name: Ident,
-    pub generics: Vec<Ident>,
+    pub generics: Vec<GenericParam>,
     pub items: Vec<Item>,
     pub span: Span,
 }
@@ -120,7 +192,7 @@ pub struct ImplBlock {
 #[derive(Clone, Debug)]
 pub struct TypeAlias {
     pub name: Ident,
-    pub generics: Vec<Ident>,
+    pub generics: Vec<GenericParam>,
     pub ty: Type,
     pub span: Span,
 }
@@ -142,6 +214,9 @@ pub enum TypeKind {
         params: Vec<Param>,
         return_type: Option<Box<Type>>,
     },
+    /// `dyn Display`: a value of any type that conforms to the trait,
+    /// carrying its implementation with it.
+    Dyn(Ident),
     /// `()`
     Unit,
 }
@@ -153,6 +228,7 @@ impl std::fmt::Display for Type {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match &self.kind {
             TypeKind::Unit => write!(f, "()"),
+            TypeKind::Dyn(name) => write!(f, "dyn {}", name.node),
             TypeKind::Named { path, args } => {
                 let path = path
                     .iter()

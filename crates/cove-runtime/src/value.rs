@@ -44,6 +44,16 @@ pub enum Value {
     Enum(Box<EnumValue>),
     /// A callback is an ordinary handle value.
     Closure(Rc<Closure>),
+    /// A `dyn Trait` value: a concrete value together with the trait it was
+    /// used at.
+    ///
+    /// This is the one place where a Cove value's runtime representation
+    /// depends on its static type. A concrete value is wrapped here at the
+    /// point it is used where a `dyn Trait` is expected, and the wrapper
+    /// carries what a concrete value does not: the trait, so a diagnostic can
+    /// name it, and the value itself, whose own type is what dispatch finds
+    /// the implementation from.
+    Dyn(Rc<DynValue>),
     /// A bound host module such as `console`.
     HostModule(Rc<str>),
     /// A bound host operation such as `console.println`.
@@ -169,6 +179,16 @@ pub struct EnumValue {
     pub type_name: Rc<str>,
     pub case: Rc<str>,
     pub payload: Vec<Value>,
+}
+
+/// The contents of a [`Value::Dyn`].
+#[derive(Clone, Debug)]
+pub struct DynValue {
+    /// Fully qualified trait name, such as `render.Display`.
+    pub trait_name: Rc<str>,
+    /// The concrete value. Its own type is what dynamic dispatch resolves a
+    /// method against, which is exactly what makes this dispatch dynamic.
+    pub value: Value,
 }
 
 /// A closure captures its environment by value at creation time.
@@ -470,6 +490,7 @@ impl Value {
             Value::Struct(s) => s.type_name.to_string(),
             Value::Enum(e) => e.type_name.to_string(),
             Value::Closure(_) => "fn".into(),
+            Value::Dyn(d) => format!("dyn {}", d.trait_name),
             Value::HostModule(m) => format!("host module `{m}`"),
             Value::HostFn { module, op } => format!("host operation `{module}.{op}`"),
             Value::Type(t) => format!("type `{t}`"),
@@ -534,6 +555,11 @@ impl Value {
                     inclusive_end: b_inclusive,
                 },
             ) => a == c && b == d && a_inclusive == b_inclusive,
+            // Two trait objects are equal when they were taken at the same
+            // trait and hold equal values.
+            (Value::Dyn(a), Value::Dyn(b)) => {
+                a.trait_name == b.trait_name && a.value.eq_value(&b.value)
+            }
             // `Vector` falls through to `false` deliberately: it is a
             // growable shared handle, not a value, so whether `==` should
             // compare handles or elements is the identity question the
@@ -624,6 +650,9 @@ impl fmt::Display for Value {
                 }
                 Ok(())
             }
+            // A trait object shows the value it holds: the wrapper is a
+            // representation, not something the program put there.
+            Value::Dyn(d) => write!(f, "{}", d.value),
             Value::Closure(_) => f.write_str("<fn>"),
             Value::HostModule(m) => write!(f, "<host module {m}>"),
             Value::HostFn { module, op } => write!(f, "<host fn {module}.{op}>"),

@@ -1,0 +1,3 @@
+[run.fail_trait_orphan]
+entry = "main.main"
+allow = ["console"]

@@ -1,0 +1,35 @@
+use console.println
+
+/// A value that can summarise itself.
+export trait Summary {
+  /// Returns the one-line summary.
+  fn summarize(self) -> String
+}
+
+/// A room booking, which conforms.
+export struct Booking {
+  id: Int
+}
+
+/// A ticket, which does not.
+export struct Ticket {
+  seat: Int
+}
+
+impl Summary for Booking {
+  fn summarize(self) -> String {
+    "booking {self.id}"
+  }
+}
+
+/// Requires its argument's type to conform to `Summary`.
+fn headline<T: Summary>(entry: T) -> String {
+  "Latest: {entry.summarize()}"
+}
+
+/// Never runs: `Ticket` does not conform to `Summary`.
+export fn main() -> Result<Unit, Error> {
+  println(headline(Booking(id: 1)))?
+  println(headline(Ticket(seat: 2)))?
+  Ok(())
+}

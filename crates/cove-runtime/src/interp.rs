@@ -25,7 +25,7 @@ use cove_diag::{SourceMap, Span};
 use cove_sema::resolve::{Program, ResolvedModule};
 use cove_syntax::ast::{
     Arg, BinaryOp, Block, EnumDecl, Expr, ExprKind, FnDecl, Ident, ItemKind, Param, Pattern,
-    PatternKind, Receiver, StmtKind, StrPart, StructDecl, UnaryOp,
+    PatternKind, Receiver, StmtKind, StrPart, StructDecl, Type, TypeKind, UnaryOp,
 };
 
 use crate::builtins::{self, Callable};
@@ -33,7 +33,7 @@ use crate::error::RuntimeError;
 use crate::host::HostRegistry;
 use crate::task::{self, Task, TaskScope, TaskState};
 use crate::trace::{NullSink, Timing, TraceEvent, TraceSink};
-use crate::value::{Closure, EnumValue, RangeBounds, StructValue, Value};
+use crate::value::{Closure, DynValue, EnumValue, RangeBounds, StructValue, Value};
 
 /// How deep Cove calls may nest before the runtime reports a limit instead of
 /// exhausting the host stack.
@@ -260,6 +260,10 @@ struct Target<'t> {
     receiver: Option<Receiver>,
     is_async: bool,
     captures: &'t [(Rc<str>, Value)],
+    /// The written return type, when there is one. A `dyn Trait` in it is
+    /// what tells the interpreter to wrap the result; a lambda writes no
+    /// return type, so it never converts.
+    return_type: Option<&'t Type>,
 }
 
 /// Executes a resolved program.
@@ -371,6 +375,7 @@ impl<'a> Interpreter<'a> {
                     receiver: decl.receiver,
                     is_async: decl.is_async,
                     captures: &[],
+                    return_type: decl.return_type.as_ref(),
                 },
                 None,
                 arguments,
@@ -569,7 +574,64 @@ impl<'a> Interpreter<'a> {
         }
 
         self.bind_params(&mut env, target.params, args, target.name, span)?;
-        finish(self.eval_block(&mut env, target.body))
+        let value = finish(self.eval_block(&mut env, target.body))?;
+        Ok(match target.return_type {
+            Some(ty) => self.coerce(&target.module, value, ty),
+            None => value,
+        })
+    }
+
+    /// Converts `value` to the written type `ty`, which today means exactly
+    /// one thing: wrapping a concrete value as a `dyn Trait` value where a
+    /// `dyn Trait` is written.
+    ///
+    /// This is the only implicit conversion in the language, and it happens
+    /// where a type is *written*: a parameter, an annotated `let`, a struct
+    /// field, and a declared return type. The checker has already decided the
+    /// conversion is legal, so this only builds the representation. It walks
+    /// into `Array<dyn Trait>` and `Option<dyn Trait>` because those are the
+    /// forms whose elements are written as `dyn` too; every other generic
+    /// argument is left alone, since a `Vector` is a shared handle whose
+    /// elements cannot be rewritten behind its other aliases.
+    fn coerce(&self, module: &str, value: Value, ty: &Type) -> Value {
+        match &ty.kind {
+            TypeKind::Dyn(trait_name) => {
+                if matches!(value, Value::Dyn(_)) {
+                    return value;
+                }
+                let qualified: Rc<str> = match self.resolved(module) {
+                    Some(resolved) if resolved.traits.contains_key(&trait_name.node) => {
+                        format!("{module}.{}", trait_name.node).into()
+                    }
+                    _ => trait_name.node.as_str().into(),
+                };
+                Value::Dyn(Rc::new(DynValue {
+                    trait_name: qualified,
+                    value,
+                }))
+            }
+            TypeKind::Named { path, args } if args.len() == 1 => {
+                let Some(head) = path.last() else {
+                    return value;
+                };
+                match (head.node.as_str(), value) {
+                    ("Array", Value::Array(items)) => Value::Array(
+                        items
+                            .iter()
+                            .map(|item| self.coerce(module, item.clone(), &args[0]))
+                            .collect(),
+                    ),
+                    ("Option", Value::Enum(mut option)) if &*option.type_name == "Option" => {
+                        for item in &mut option.payload {
+                            *item = self.coerce(module, item.clone(), &args[0]);
+                        }
+                        Value::Enum(option)
+                    }
+                    (_, value) => value,
+                }
+            }
+            _ => value,
+        }
     }
 
     fn bind_params(
@@ -645,6 +707,10 @@ impl<'a> Interpreter<'a> {
                     // An ordinary parameter receives a shallow copy and is a
                     // read-only place inside the body.
                     (false, ArgSlot::Value(value)) => {
+                        let value = match &param.ty {
+                            Some(ty) => self.coerce(&env.module, value, ty),
+                            None => value,
+                        };
                         env.declare(name, Place::binding(value, false));
                     }
                 },
@@ -652,6 +718,10 @@ impl<'a> Interpreter<'a> {
                     // Default arguments are evaluated by the callee.
                     Some(default) => {
                         let value = finish(self.eval(env, default))?;
+                        let value = match &param.ty {
+                            Some(ty) => self.coerce(&env.module, value, ty),
+                            None => value,
+                        };
                         env.declare(name, Place::binding(value, false));
                     }
                     None => {
@@ -686,6 +756,10 @@ impl<'a> Interpreter<'a> {
                         receiver: None,
                         is_async: closure.is_async,
                         captures: &closure.captures,
+                        return_type: closure
+                            .decl
+                            .as_ref()
+                            .and_then(|decl| decl.return_type.as_ref()),
                     },
                     None,
                     args,
@@ -717,10 +791,14 @@ impl<'a> Interpreter<'a> {
                 StmtKind::Let {
                     is_var,
                     name,
-                    ty: _,
+                    ty,
                     value,
                 } => {
                     let value = self.eval(env, value)?;
+                    let value = match ty {
+                        Some(ty) => self.coerce(&env.module, value, ty),
+                        None => value,
+                    };
                     env.declare(name.node.as_str().into(), Place::binding(value, *is_var));
                 }
                 StmtKind::Expr(expr) => {
@@ -1508,6 +1586,7 @@ impl<'a> Interpreter<'a> {
                             receiver: decl.receiver,
                             is_async: decl.is_async,
                             captures: &[],
+                            return_type: decl.return_type.as_ref(),
                         },
                         None,
                         args,
@@ -1581,6 +1660,7 @@ impl<'a> Interpreter<'a> {
                                             receiver: decl.receiver,
                                             is_async: decl.is_async,
                                             captures: &[],
+                                            return_type: decl.return_type.as_ref(),
                                         },
                                         None,
                                         args,
@@ -1606,6 +1686,7 @@ impl<'a> Interpreter<'a> {
                                         receiver: decl.receiver,
                                         is_async: decl.is_async,
                                         captures: &[],
+                                        return_type: decl.return_type.as_ref(),
                                     },
                                     None,
                                     args,
@@ -1642,10 +1723,29 @@ impl<'a> Interpreter<'a> {
         // The receiver is evaluated before the arguments: evaluation is left
         // to right everywhere.
         let place = self.resolve_place_opt(env, receiver)?;
-        let temporary = match &place {
+        let mut temporary = match &place {
             Some(_) => None,
             None => Some(self.eval(env, receiver)?),
         };
+
+        // Dynamic dispatch: a `dyn Trait` receiver is unwrapped to the
+        // concrete value it carries, and the implementation is found from
+        // *that* value's type. This is what makes the dispatch dynamic — the
+        // static type says only which trait the method must come from.
+        let mut place = place;
+        let dyn_receiver = match (&place, &temporary) {
+            (Some(place), _) => place.with_ref(span, |value| match value {
+                Value::Dyn(d) => Some(d.value.clone()),
+                _ => None,
+            })?,
+            (_, Some(Value::Dyn(d))) => Some(d.value.clone()),
+            _ => None,
+        };
+        if let Some(concrete) = dyn_receiver {
+            place = None;
+            temporary = Some(concrete);
+        }
+
         let type_name = match (&place, &temporary) {
             (Some(place), _) => place.with_ref(span, Value::type_name)?,
             (_, Some(value)) => value.type_name(),
@@ -1681,6 +1781,7 @@ impl<'a> Interpreter<'a> {
                         receiver: decl.receiver,
                         is_async: decl.is_async,
                         captures: &[],
+                        return_type: decl.return_type.as_ref(),
                     },
                     Some(receiver_slot),
                     args,
@@ -1769,9 +1870,10 @@ impl<'a> Interpreter<'a> {
                     field.name.node
                 )));
             };
+            let value = value_of(&arg, &field.name.node, arg.span)?;
             fields.push((
                 field.name.node.as_str().into(),
-                value_of(&arg, &field.name.node, arg.span)?,
+                self.coerce(module, value, &field.ty),
             ));
         }
         Ok(Value::Struct(Box::new(StructValue {
@@ -2255,7 +2357,13 @@ fn mention_block(block: &Block, out: &mut BTreeSet<String>) {
                         }
                     }
                 }
-                ItemKind::Struct(_) | ItemKind::Enum(_) | ItemKind::TypeAlias(_) => {}
+                // A trait's default bodies are reached through the
+                // conformances resolution recorded them under, not through
+                // this closure's environment.
+                ItemKind::Struct(_)
+                | ItemKind::Enum(_)
+                | ItemKind::Trait(_)
+                | ItemKind::TypeAlias(_) => {}
             },
         }
     }
@@ -2688,6 +2796,120 @@ mod tests {
 
     fn error_of(body: &str) -> RuntimeError {
         run_body(body).error()
+    }
+
+    // -------------------------------------------------------- traits
+
+    /// A trait with one required and one defaulted method, two conforming
+    /// types (one of which overrides the default), and a function for each
+    /// dispatch form.
+    const TRAITS: &str = r##"
+use console.println
+
+trait Display {
+  fn describe(self) -> String
+
+  fn label(self) -> String { "<{self.describe()}>" }
+}
+
+struct Booking(id: Int)
+
+struct Receipt(total: Int)
+
+impl Display for Booking {
+  fn describe(self) -> String { "booking {self.id}" }
+  fn label(self) -> String { "#{self.id}" }
+}
+
+impl Display for Receipt {
+  fn describe(self) -> String { "receipt for {self.total}" }
+}
+
+fn render<T: Display>(value: T) -> String {
+  "{value.label()} / {value.describe()}"
+}
+
+fn renderAll(values: Array<dyn Display>) -> String {
+  var out = Vector.of("")
+  for value in values {
+    out.push(value.label())
+  }
+  "{out.toArray()}"
+}
+"##;
+
+    fn run_with_traits(body: &str) -> Run {
+        let source =
+            format!("{TRAITS}\nexport fn main() -> Result<Unit, Error> {{\n{body}\n  Ok(())\n}}\n");
+        run_entry_of(&source, "main", &[])
+    }
+
+    #[test]
+    fn a_default_body_runs_unless_the_conformance_overrides_it() {
+        let output = run_with_traits(
+            "  console.println(render(Booking(id: 7)))?\n  console.println(render(Receipt(total: 12)))?",
+        )
+        .output;
+        assert_eq!(
+            output,
+            "#7 / booking 7\n<receipt for 12> / receipt for 12\n"
+        );
+    }
+
+    #[test]
+    fn dynamic_dispatch_finds_the_implementation_from_the_value() {
+        // One call site, two concrete types, two different implementations —
+        // including one that runs the trait's default body.
+        let output = run_with_traits(
+            "  let mixed: Array<dyn Display> = [Booking(id: 1), Receipt(total: 2)]\n  console.println(renderAll(mixed))?",
+        )
+        .output;
+        assert_eq!(output, "[, #1, <receipt for 2>]\n");
+    }
+
+    #[test]
+    fn a_dyn_value_carries_its_concrete_value_and_its_trait() {
+        let (sources, program) = program_of(&format!(
+            "{TRAITS}\nexport fn main() -> dyn Display {{\n  Booking(id: 3)\n}}\n"
+        ));
+        let value = run_in(
+            &program,
+            &sources,
+            "test",
+            "main",
+            &[],
+            &["console"],
+            BTreeMap::new(),
+        )
+        .value();
+        let Value::Dyn(trait_object) = &value else {
+            panic!("expected a trait object, found {value:?}");
+        };
+        assert_eq!(&*trait_object.trait_name, "test.Display");
+        assert_eq!(trait_object.value.type_name(), "test.Booking");
+        assert_eq!(value.type_name(), "dyn test.Display");
+        // A trait object shows the value it holds: the wrapper is a
+        // representation, not something the program put there.
+        assert_eq!(value.to_string(), "Booking(id: 3)");
+    }
+
+    #[test]
+    fn static_and_dynamic_dispatch_reach_the_same_implementation() {
+        let output = run_with_traits(
+            "  let one: dyn Display = Booking(id: 5)\n  console.println(render(Booking(id: 5)))?\n  console.println(\"{one.label()} / {one.describe()}\")?",
+        )
+        .output;
+        let lines: Vec<&str> = output.lines().collect();
+        assert_eq!(lines[0], lines[1]);
+    }
+
+    #[test]
+    fn a_trait_object_is_equal_to_one_holding_an_equal_value() {
+        let output = run_with_traits(
+            "  let a: dyn Display = Booking(id: 1)\n  let b: dyn Display = Booking(id: 1)\n  let c: dyn Display = Receipt(total: 1)\n  console.println(\"{a == b} {a == c}\")?",
+        )
+        .output;
+        assert_eq!(output, "true false\n");
     }
 
     // ------------------------------------------------------------- rule 1

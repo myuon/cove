@@ -230,6 +230,9 @@ fn violation(path: &str, value: &Value) -> Option<NotTaskSafe> {
             .iter()
             .enumerate()
             .find_map(|(i, item)| violation(&format!("{path}.{}({i})", enumeration.case), item)),
+        // A trait object is task-safe exactly when the value it holds is:
+        // the wrapper adds a trait name, which is not state.
+        Value::Dyn(d) => violation(path, &d.value),
         // Closures are task-safe only when every capture is.
         Value::Closure(closure) => closure.captures.iter().find_map(|(name, captured)| {
             let path = if path.is_empty() {

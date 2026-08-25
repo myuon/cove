@@ -1,0 +1,76 @@
+use console.println
+
+/// A value that can summarise itself.
+export trait Summary {
+  /// Returns the one-line summary.
+  fn summarize(self) -> String
+
+  /// Returns this value's report line, which defaults to its summary.
+  fn line(self) -> String {
+    "- {self.summarize()}"
+  }
+}
+
+/// A room booking.
+export struct Booking {
+  id: Int
+}
+
+/// A payment against a booking.
+export struct Receipt {
+  cents: Int
+}
+
+impl Summary for Booking {
+  fn summarize(self) -> String {
+    "booking {self.id}"
+  }
+}
+
+impl Summary for Receipt {
+  fn summarize(self) -> String {
+    "receipt {self.cents}c"
+  }
+
+  fn line(self) -> String {
+    "  $ {self.summarize()}"
+  }
+}
+
+impl Booking {
+  /// The identifier, reachable on a `Booking` but not through `dyn Summary`.
+  fn identifier(self) -> Int {
+    self.id
+  }
+}
+
+/// Static dispatch: the bound is checked where `T` is chosen.
+fn headline<T: Summary>(entry: T) -> String {
+  "Latest: {entry.summarize()}"
+}
+
+/// Dynamic dispatch: each value carries its own implementation.
+fn report(entries: Array<dyn Summary>) -> String {
+  var text = "Report"
+  for entry in entries {
+    text = "{text}\n{entry.line()}"
+  }
+  text
+}
+
+/// Exercises both dispatch forms over the same two types.
+export fn main() -> Result<Unit, Error> {
+  let booking = Booking(id: 41)
+  let receipt = Receipt(cents: 12500)
+
+  println(headline(booking))?
+  println(headline(receipt))?
+  println("{booking.identifier()}")?
+
+  println(report([booking, receipt]))?
+
+  // A `dyn Summary` binding resolves through the value it holds.
+  let one: dyn Summary = receipt
+  println(one.line())?
+  Ok(())
+}

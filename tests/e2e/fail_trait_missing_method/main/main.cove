@@ -1,0 +1,30 @@
+use console.println
+
+/// A value that can summarise itself.
+export trait Summary {
+  /// Returns the one-line summary.
+  fn summarize(self) -> String
+
+  /// Returns this value's report line, which defaults to its summary.
+  fn line(self) -> String {
+    "- {self.summarize()}"
+  }
+}
+
+/// A room booking.
+export struct Booking {
+  id: Int
+}
+
+/// Supplies the defaulted method but not the required one.
+impl Summary for Booking {
+  fn line(self) -> String {
+    "- booking {self.id}"
+  }
+}
+
+/// Never runs: the conformance is incomplete.
+export fn main() -> Result<Unit, Error> {
+  println(Booking(id: 1).line())?
+  Ok(())
+}

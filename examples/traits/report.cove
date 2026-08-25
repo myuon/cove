@@ -1,0 +1,79 @@
+use console.println
+
+/// A value that can summarise itself for a human-readable report.
+export trait Summary {
+  /// Returns the one-line summary of this value.
+  fn summarize(self) -> String
+
+  /// Returns the line this value takes in a report, which defaults to its
+  /// summary as an ordinary bullet.
+  fn line(self) -> String {
+    "- {self.summarize()}"
+  }
+}
+
+/// A room booking.
+export struct Booking {
+  id: Int
+  guests: Int
+}
+
+/// A payment recorded against a booking.
+export struct Receipt {
+  bookingId: Int
+  cents: Int
+}
+
+impl Summary for Booking {
+  fn summarize(self) -> String {
+    "booking {self.id} for {self.guests} guest(s)"
+  }
+}
+
+impl Summary for Receipt {
+  fn summarize(self) -> String {
+    "receipt for booking {self.bookingId}: {self.cents}c"
+  }
+
+  fn line(self) -> String {
+    "  $ {self.summarize()}"
+  }
+}
+
+/// Headlines one entry.
+///
+/// The bound is checked at the call site, which is also where `T` is chosen,
+/// so `summarize` resolves to exactly one implementation. That is why this
+/// function takes one entry rather than a mixed collection: every value it
+/// sees has the same type.
+export fn headline<T: Summary>(entry: T) -> String {
+  "Latest: {entry.summarize()}"
+}
+
+/// Renders a report of entries whose types may differ.
+///
+/// `dyn Summary` values carry their implementation, so `line` is resolved
+/// from each value rather than from the signature. That is what lets one
+/// array hold a `Booking` and a `Receipt` at once.
+export fn report(entries: Array<dyn Summary>) -> String {
+  var text = "Report"
+  for entry in entries {
+    text = "{text}\n{entry.line()}"
+  }
+  text
+}
+
+/// Prints a report built both ways.
+export fn main() -> Result<Unit, Error> {
+  let booking = Booking(id: 41, guests: 2)
+  let receipt = Receipt(bookingId: 41, cents: 12500)
+
+  // Static dispatch: one type per call.
+  console.println(headline(booking))?
+  console.println(headline(receipt))?
+
+  // Dynamic dispatch: one call, two types, and `Booking` takes the trait's
+  // default `line` while `Receipt` overrides it.
+  console.println(report([booking, receipt]))?
+  Ok(())
+}

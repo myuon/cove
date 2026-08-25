@@ -1,0 +1,20 @@
+use console.println
+
+/// A room booking, the only declaration this module makes.
+export struct Booking {
+  id: Int
+}
+
+/// Neither `Summary` nor `String` is declared here, so this conformance has
+/// no module it belongs to.
+impl Summary for String {
+  fn summarize(self) -> String {
+    self
+  }
+}
+
+/// Never runs: the conformance breaks the orphan rule.
+export fn main() -> Result<Unit, Error> {
+  println("{Booking(id: 1).id}")?
+  Ok(())
+}

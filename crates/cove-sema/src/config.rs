@@ -232,6 +232,7 @@ mod tests {
                 "restricted",
                 "server",
                 "tasks",
+                "traits",
                 "values"
             ]
         );

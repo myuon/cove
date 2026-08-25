@@ -1,0 +1,12 @@
+error[cove::type::unsatisfied_bound]: `Ticket` does not conform to `Summary`
+  --> <e2e>/fail_trait_bound/main/main.cove:33:11
+   |
+33 |   println(headline(Ticket(seat: 2)))?
+   |           ^^^^^^^^^^^^^^^^^^^^^^^^^
+  --> <e2e>/fail_trait_bound/main/main.cove:26:16
+   |
+26 | fn headline<T: Summary>(entry: T) -> String {
+   |                ^^^^^^^ `headline` requires `T: Summary`
+  rule: A type argument must conform to every trait its type parameter is bounded by, and conformance is explicit: only an `impl Trait for Type` block declares one.
+  help: write `impl Summary for Ticket { ... }`
+1 error(s)
