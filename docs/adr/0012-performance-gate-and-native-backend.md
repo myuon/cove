@@ -11,11 +11,12 @@
   has gates
 - Implemented by: PR #34
 - Implementation status: complete — `crates/cove-bench`, the `benches/`
-  package, and the CI step that runs it all exist, and gates 2 through 4 are
-  met. That gate 1 is not askable until a reference native program exists, and
-  gate 5 not until a compile stage does, is this ADR's finding rather than a
-  gap in it; so is the absence of a CI threshold, argued for under "Why this is
-  hermetic, not a fixed baseline".
+  package, and the CI step that runs it all exist, and gates 2 and 3 are met.
+  That gate 1 is not askable until a reference native program exists, gate 4
+  not until a heap-allocating benchmark does, and gate 5 not until a compile
+  stage does, is this ADR's finding rather than a gap in it; so is the absence
+  of a CI threshold, argued for under "Why this is hermetic, not a fixed
+  baseline".
 
 ## Context
 
@@ -51,9 +52,10 @@ revisited.
 Add a benchmark harness, `crates/cove-bench`, and a small package of
 representative programs, `benches/`, and record what the interpreter does
 today as the baseline every later claim about performance is measured
-against. The interpreter remains the only backend and the only source of
-truth for what a Cove program means; nothing here proposes writing a second
-one.
+against. The interpreter remains the only backend and the only executable
+answer to what a Cove program means — an answer that stays accountable to the
+Language Card, as "The specification, the oracle, and the backends" below sets
+out; nothing here proposes writing a second one.
 
 ### The benchmark suite
 
@@ -131,10 +133,12 @@ baseline" below for why no golden number is checked in.
 pure (fib(20), zero Host calls)
   debug:    95.0 ms mean,  2.30M fuel/sec, ~230K calls/sec, 1.01x traced
   release:  17.5 ms mean, 12.54M fuel/sec, ~1.25M calls/sec, 1.00x traced
+  heap_peak_bytes: 0 (min, mean, and max) in both profiles
 
 hostheavy (4,001 Host calls through console and clock)
   debug:    18.1 ms mean,  1.11M fuel/sec, 2.23x traced
   release:   3.4 ms mean,  5.81M fuel/sec, 2.80x traced
+  heap_peak_bytes: 0 (min, mean, and max) in both profiles
 
 startup (process spawn of `cove run startup`, warm)
   debug:     5.3 ms mean
@@ -144,6 +148,14 @@ startup (process spawn of `cove run startup`, warm)
 ("calls/sec" is `fib`'s own call count divided by wall time; fuel is charged
 per safepoint, not per call, so the two numbers measure related but different
 things and neither substitutes for the other.)
+
+The heap figures are quoted from the same runs as the times beside them, not
+recalled separately: `heap_peak_bytes` is printed on the same JSON line as the
+wall time and the fuel rate, so every run that produced a figure above
+produced a zero next to it, and a `cove-bench --iterations 3` on this machine
+still prints `{"min":0,"mean":0,"max":0}` for both interpreter benchmarks.
+They are recorded here because gate 4 below turns on them, and a reader should
+be able to see that baseline rather than be told about it.
 
 These numbers set five gates. Crossing one is what would make building a
 compiled backend a decision worth making, rather than a hypothesis worth
@@ -173,31 +185,85 @@ stating a fourth time:
    technically emits every event.
 4. **Memory.** Peak live heap bytes for the same workload must not exceed
    roughly 2x the interpreter's own recorded baseline for it. `pure` and
-   `hostheavy` both baseline at zero, so any future comparison needs a
-   heap-allocating benchmark added first — noted here as a gap this ADR does
-   not fill, because neither existing benchmark exercises the collector.
+   `hostheavy` both baseline at zero, and twice zero is zero: a relative
+   threshold measured against a zero baseline is not a threshold, and no
+   backend can pass or fail it. This gate is therefore not evaluable today
+   rather than met. Making it evaluable means adding a benchmark that
+   allocates a collectable object, which neither existing one does — but that
+   is not a reason to add one. The memory *budget* these numbers were once
+   compared against no longer exists: ADR 0011's "Amendment (2026-08-25): the
+   memory budget is removed" retracted `Limits::max_memory` and left the
+   collector's measurements as observability rather than an enforced bound, so
+   there is no live claim here that a heap-allocating benchmark would rescue.
+   What such a benchmark would buy is a performance observation about the
+   collector — which is a perfectly good reason to add one when someone
+   actually wants to measure the collector, and no reason at all to add one
+   merely so that this gate has something to report.
 5. **Compile time.** Undefined until a compile stage exists, per above. The
    placeholder bar, to be revisited when it does: compiling a representative
    package should stay within the same order of magnitude as `cove build`'s
    existing link-dominated cost, so that a compile step does not turn `cove
    run`'s edit-run loop into a build tool's.
 
-Gates 2 through 4 are met today, comfortably. That is consistent with ADR
-0002's original reasoning: nothing about Host dispatch, budgets, or tracing
-was ever expected to be the bottleneck, because none of it changes shape
-under a different backend. If a bottleneck exists, gate 1 is where it would
-show up, and gate 1 is the one this ADR cannot evaluate without a workload
-and a native reference program that do not exist yet. Building those is the
-next real step in this direction, not a backend.
+Of the five, two are met, none is failed, and three are not evaluable. Gates
+2 and 3 — startup and trace overhead — are met today, comfortably, on the
+evidence recorded above. Nothing is over a threshold this ADR states, so no
+gate is failed. Gates 1, 4, and 5 cannot be evaluated at all, each for its own
+reason and none of them a fact about the interpreter: gate 1 has no reference
+native program to compare a representative workload against, gate 4 has no
+heap-allocating benchmark to give it a baseline that a multiple means anything
+against, and gate 5 has no compile stage to time. A gate that cannot be asked
+is not a gate that has been passed, and this ADR counts it as neither.
 
-### The interpreter as the semantic oracle
+That the two gates which can be answered are answered comfortably is
+consistent with ADR 0002's original reasoning: nothing about Host dispatch,
+budgets, or tracing was ever expected to be the bottleneck, because none of it
+changes shape under a different backend. If a bottleneck exists, gate 1 is
+where it would show up, and gate 1 is the one this ADR cannot evaluate without
+a workload and a native reference program that do not exist yet. Building
+those is the next real step in this direction, not a backend.
 
-`crates/cove-runtime/src/interp.rs` defines what a Cove program does. It
-always will, even after a compiled backend exists: a backend's output is
-correct exactly when it agrees with the interpreter's, not when it agrees
-with the Language Card directly, because the interpreter is what makes the
-Language Card's prose into a checkable fact. Where the two disagree, ADR
-0002 already settled which one is wrong.
+### The specification, the oracle, and the backends
+
+Three things have a say in what a Cove program means, and they do not have the
+same say. Ranked by authority: the Language Card and the tests that execute
+its claims; then the reference interpreter; then any compiled backend.
+
+The Language Card, together with the executable semantic tests that check it —
+the `tests/e2e/` cases and the `test fn` suites that assert a documented
+behaviour by running it — is the specification. Conformance here means a
+program conforming to the Card, not a type conforming to a trait; it is the
+Card that a disagreement is ultimately a disagreement about.
+
+`crates/cove-runtime/src/interp.rs` is the reference interpreter, and its role
+is to be the executable oracle: the thing that turns the Card's prose into a
+fact a machine can check. That role is real and load-bearing — for almost any
+question about what a program does, running it is the only practical way to
+ask — but being the oracle does not make the interpreter the specification.
+Where the interpreter disagrees with the Card, or with a semantic test, the
+interpreter is what is wrong: the finding is an interpreter bug, and if no
+test caught it, a missing test as well. ADR 0002 says as much in the same
+breath as it names the interpreter the reference — "Because the interpreter is
+the reference for semantics, its behaviour must stay traceable to the Language
+Card" — and the sentence after it, "Where the Language Card and ADR 0001
+disagree, the Language Card wins," is about the Card against another ADR
+rather than the Card against an implementation, but it fixes the direction of
+authority all the same. The Card is what the rest is answerable to.
+
+A compiled backend, should one ever exist, sits below the interpreter and is
+checked differentially against it, as the section below describes. The default
+reading of a mismatch is that the backend is wrong, and that default is worth
+committing to, because it is right nearly always: the interpreter is the code
+every program in this repository has already run through, and it has no
+lowering, no register allocation, and no code generator to get subtly wrong.
+But it is a presumption, not a definition. Two implementations can agree with
+each other and both be wrong about the Card — a shared misreading of the same
+sentence, or a lowering that faithfully preserves an interpreter bug — and no
+amount of agreement between them turns that into correctness. Agreeing with
+the interpreter makes a backend consistent, which is exactly what a
+differential test can establish and all it can establish. Being correct is a
+claim about the Language Card, and only the Card and the tests that execute it
+can settle it.
 
 ### The incremental path: typed IR, then AOT or adaptive compilation
 
@@ -270,9 +336,16 @@ harness and `cove test` already register — and diff two things. First, the
 returned `Value`. Second, the sequence of recorded trace events, compared on
 everything but wall-clock-derived fields (`wait_ns`, `cpu_ns`, `pause_ns`),
 which are expected to differ; call shape — module, operation, capability,
-arguments, outcome — must match exactly. A mismatch in either is a
-compilation bug, full stop, because "The interpreter as the semantic oracle"
-above already settled which of the two programs is right.
+arguments, outcome — must match exactly. A mismatch in either is presumptively
+a compilation bug, and the presumption is strong enough to debug from: look at
+the backend first. The rarer reading is the one "The specification, the oracle,
+and the backends" above leaves room for — the backend matches the Language
+Card and the interpreter does not — and a mismatch that turns out that way is
+an interpreter bug plus a conformance test nobody had written, both of which
+get fixed before the backend's behaviour is called a regression. What the test
+never licenses is treating a mismatch as a difference of opinion between two
+equally good answers: one of the two programs is wrong about the Card, and the
+differential test exists to make sure somebody finds out which.
 
 ### Why this is hermetic, not a fixed baseline
 
@@ -303,7 +376,11 @@ itself keeps working. No runtime behavior changes: this ADR adds
 ADR 0002 and ADR 0009 stand exactly as written. What changes is that their
 open question — whether a compiled backend is worth building — now has a
 harness that could answer it, and five gates stating what an answer would
-have to show. Today it shows gates 2 through 4 comfortably met and gate 1
-not yet askable, because nothing has been measured against it. That is not
-this ADR failing to decide; deciding correctly, on the evidence available, is
-recording that the interpreter has not been shown to need help.
+have to show. Today it shows two of them comfortably met, startup and trace
+overhead; none failed; and three not evaluable — gate 1 because nothing has
+been measured against a native reference, gate 4 because both benchmarks
+baseline at zero live heap bytes, and gate 5 because there is nothing yet to
+compile. That is not this ADR failing to decide; deciding correctly, on the
+evidence available, is recording that the interpreter has not been shown to
+need help, and saying which of the questions cannot honestly be asked yet
+instead of counting them as answers.
