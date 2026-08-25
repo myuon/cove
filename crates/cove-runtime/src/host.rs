@@ -31,7 +31,7 @@ use cove_sema::Capability;
 use crate::budget::{Budget, Cancellation};
 use crate::error::RuntimeError;
 use crate::schema::{
-    Admits, Effect, ModuleSchema, OperationSchema, Part, ResourceSchema, TypeSchema,
+    Admits, Effect, Mismatch, ModuleSchema, OperationSchema, Part, ResourceSchema, TypeSchema,
 };
 use crate::trace::{HostOutcome, NullSink, RecordedValue, TraceEvent, TraceSink};
 use crate::value::Value;
@@ -667,21 +667,18 @@ impl HostRegistry {
         // time and named in no table the compiler reads, so this is the only
         // thing standing between such a host and an argument its schema does
         // not admit.
-        for (index, argument) in args.iter().enumerate() {
-            let Some(declared) = schema.param(index) else {
-                break;
-            };
-            if let Err(mismatch) = declared.admits(argument) {
-                return Err(RuntimeError::new(
-                    mismatch.describe(&shown, Part::Argument(index + 1)),
-                )
-                .with_rule(A_CALL_KEEPS_THE_SCHEMA)
-                .with_help(format!(
-                    "the Host API schema declares `{}.{}`",
-                    callee.module,
-                    callee.signature(&schema)
-                )));
-            }
+        if let Some(mismatch) = undeclared_argument(&schema, &args) {
+            return Err(RuntimeError::new(
+                mismatch
+                    .what
+                    .describe(&shown, Part::Argument(mismatch.position)),
+            )
+            .with_rule(A_CALL_KEEPS_THE_SCHEMA)
+            .with_help(format!(
+                "the Host API schema declares `{}.{}`",
+                callee.module,
+                callee.signature(&schema)
+            )));
         }
 
         if let Some(Err(error)) = self.with_budget(|budget| {
@@ -751,6 +748,37 @@ impl HostRegistry {
         }
         result
     }
+}
+
+/// The first argument the operation's declaration does not admit, if there is
+/// one.
+///
+/// A loop of its own rather than one more paragraph inside
+/// [`HostRegistry::dispatch`], which carries six checks already. A call that
+/// keeps its declaration pays one walk of its own arguments and allocates
+/// nothing: the description of a disagreement is built on the way out of a
+/// failure.
+fn undeclared_argument(schema: &OperationSchema, args: &[Value]) -> Option<UndeclaredArgument> {
+    for (index, argument) in args.iter().enumerate() {
+        // Arity was checked first, so an index past a fixed operation's
+        // parameters cannot happen; a variadic one answers for the rest.
+        let declared = schema.param(index)?;
+        if let Err(what) = declared.admits(argument) {
+            return Some(UndeclaredArgument {
+                position: index + 1,
+                what,
+            });
+        }
+    }
+    None
+}
+
+/// One argument that is not what its operation declared, and which one it was.
+struct UndeclaredArgument {
+    /// Which argument, counted from one as a diagnostic counts.
+    position: usize,
+    /// Where it stopped agreeing with the declared type.
+    what: Mismatch,
 }
 
 /// The rule a host breaks by answering something its own declaration does not
