@@ -270,6 +270,14 @@ pub struct Program {
     /// Non-fatal diagnostics, such as missing doc comments on exported
     /// declarations.
     pub warnings: Vec<Diagnostic>,
+    /// The package's call graph: for each declaration, every declaration it
+    /// may call, and how precisely the call site named it.
+    ///
+    /// This is the graph [`FnEntry::required_capabilities`] is the fixed
+    /// point over. It is kept rather than discarded because reachability
+    /// between declarations is a derived fact in its own right: it is what
+    /// answers which declarations a change can affect.
+    pub call_graph: BTreeMap<Node, BTreeMap<Node, CallPrecision>>,
 }
 
 impl Program {
@@ -277,6 +285,91 @@ impl Program {
     pub fn lookup_fn(&self, module: &str, name: &str) -> Option<&FnEntry> {
         self.modules.get(module)?.functions.get(name)
     }
+
+    /// Every conformance declared for the type `type_module.type_name`,
+    /// paired with the module whose source declares it, in trait order.
+    ///
+    /// The declaring module is not always the type's own. ADR 0006's orphan
+    /// rule only requires that the module declaring an `impl Trait for Type`
+    /// block declares one of the two, so a conformance may be written where
+    /// the *trait* is. A type's conformances are therefore a fact about the
+    /// package, and asking one module for them under-reports the type's
+    /// interface.
+    pub fn conformances_of(&self, type_module: &str, type_name: &str) -> Vec<(&str, &Conformance)> {
+        let mut found: Vec<(&str, &Conformance)> = Vec::new();
+        for (module, resolved) in &self.modules {
+            for conformance in resolved.conformances.values() {
+                if conformance.type_module == type_module && conformance.type_name == type_name {
+                    found.push((module.as_str(), conformance));
+                }
+            }
+        }
+        found.sort_by(|(_, a), (_, b)| {
+            (&a.trait_module, &a.trait_name).cmp(&(&b.trait_module, &b.trait_name))
+        });
+        found
+    }
+
+    /// Every method of the type `type_module.type_name`, wherever it is
+    /// declared, in method-name order.
+    ///
+    /// A type's methods usually live in the module that declares the type. A
+    /// conformance is the exception, for the reason [`Self::conformances_of`]
+    /// gives: a method of this type can be declared by any module that
+    /// conforms it to a trait of its own.
+    ///
+    /// One name answers to one method, whichever module declares it:
+    /// [`check_method_collisions`] rejects a package where two modules
+    /// declare a method of one name for one type.
+    pub fn methods_of(&self, type_module: &str, type_name: &str) -> Vec<DeclaredMethod<'_>> {
+        let mut found: BTreeMap<&str, DeclaredMethod<'_>> = BTreeMap::new();
+        if let Some(owner) = self.modules.get(type_module) {
+            for ((owner_type, method), entry) in &owner.methods {
+                if owner_type == type_name {
+                    found.insert(
+                        method.as_str(),
+                        DeclaredMethod {
+                            module: owner.name.as_str(),
+                            name: method.as_str(),
+                            entry,
+                        },
+                    );
+                }
+            }
+        }
+        for (module, conformance) in self.conformances_of(type_module, type_name) {
+            let Some(owner) = self.modules.get(module) else {
+                continue;
+            };
+            for method in &conformance.methods {
+                let key = (type_name.to_string(), method.clone());
+                let Some(entry) = owner.methods.get(&key) else {
+                    continue;
+                };
+                found.insert(
+                    method.as_str(),
+                    DeclaredMethod {
+                        module: owner.name.as_str(),
+                        name: method.as_str(),
+                        entry,
+                    },
+                );
+            }
+        }
+        found.into_values().collect()
+    }
+}
+
+/// One method of a type, and the module whose source declares it.
+#[derive(Clone, Copy, Debug)]
+pub struct DeclaredMethod<'a> {
+    /// The module that declares this method: the type's own, or one that
+    /// conforms the type to a trait of its own.
+    pub module: &'a str,
+    /// The method's name.
+    pub name: &'a str,
+    /// The method itself, with the facts derived from it.
+    pub entry: &'a FnEntry,
 }
 
 /// Resolves every module of `package` into the flat program the runtime
@@ -326,6 +419,7 @@ pub fn resolve(package: &Package) -> Result<Program, Vec<Diagnostic>> {
     check_method_collisions(&program, &mut errors);
     let call_graph = package_call_graph(&program, &call_sites);
     propagate_capabilities(&mut program, &call_graph);
+    program.call_graph = call_graph;
     check_bodies(&program, &mut errors, &mut warnings);
 
     if errors.is_empty() {
@@ -1723,8 +1817,10 @@ enum CallShape {
 
 /// A node in a module's call graph: a free function or an `impl` method.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
-enum FnKey {
+pub enum FnKey {
+    /// A free function, by its name.
     Fn(String),
+    /// A method or associated function, by `(type name, function name)`.
     Method(String, String),
 }
 
@@ -2267,14 +2363,31 @@ fn call_shape(callee: &Expr) -> Option<CallShape> {
 
 /// One node of the package's call graph: a declaration, and the module that
 /// declares it.
-type Node = (String, FnKey);
+pub type Node = (String, FnKey);
+
+/// How precisely a call site named the callee an edge leads to.
+///
+/// Both kinds of edge are sound for the capability fixed point, which only
+/// ever unions more in. They differ for anything that reports an edge to a
+/// person: an approximate edge may not exist in any real execution.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum CallPrecision {
+    /// The call site names the callee: a free function, a module-qualified
+    /// export, or a method of a receiver whose type is written at the call
+    /// site.
+    Exact,
+    /// The receiver's type is not known without a type checker, so the call
+    /// site was resolved to every same-named method reachable through
+    /// imports. See [`FnEntry::required_capabilities`].
+    Approximate,
+}
 
 /// Resolves every call site recorded while the modules were resolved to the
 /// declarations it may reach, anywhere in the package.
 fn package_call_graph(
     program: &Program,
     call_sites: &BTreeMap<Node, Vec<CallShape>>,
-) -> BTreeMap<Node, BTreeSet<Node>> {
+) -> BTreeMap<Node, BTreeMap<Node, CallPrecision>> {
     let reachable: BTreeMap<&str, BTreeSet<&str>> = program
         .modules
         .keys()
@@ -2338,20 +2451,20 @@ fn resolve_calls(
     module: &str,
     calls: &[CallShape],
     reachable: &BTreeSet<&str>,
-) -> BTreeSet<Node> {
+) -> BTreeMap<Node, CallPrecision> {
     let Some(resolved) = program.modules.get(module) else {
-        return BTreeSet::new();
+        return BTreeMap::new();
     };
-    let mut targets = BTreeSet::new();
+    let mut targets: BTreeMap<Node, CallPrecision> = BTreeMap::new();
     for call in calls {
         match call {
             CallShape::Ident(name) => {
                 if resolved.functions.contains_key(name) {
-                    targets.insert((module.to_string(), FnKey::Fn(name.clone())));
+                    exact(&mut targets, (module.to_string(), FnKey::Fn(name.clone())));
                 } else if let Some(owner) = declaring_module(program, resolved, name, |owner| {
                     owner.functions.contains_key(name)
                 }) {
-                    targets.insert((owner, FnKey::Fn(name.clone())));
+                    exact(&mut targets, (owner, FnKey::Fn(name.clone())));
                 }
             }
             CallShape::Field {
@@ -2365,7 +2478,9 @@ fn resolve_calls(
                     .map(|owner| (owner, head.clone()))
                 });
                 if let Some((owner, type_name)) = owner {
-                    targets.extend(type_methods(program, &owner, &type_name, method));
+                    for node in type_methods(program, &owner, &type_name, method) {
+                        exact(&mut targets, node);
+                    }
                     continue;
                 }
                 if let Some(target) = receiver_ident
@@ -2378,7 +2493,7 @@ fn resolve_calls(
                             .get(method)
                             .is_some_and(|entry| entry.exported)
                         {
-                            targets.insert((target.clone(), FnKey::Fn(method.clone())));
+                            exact(&mut targets, (target.clone(), FnKey::Fn(method.clone())));
                             continue;
                         }
                     }
@@ -2389,10 +2504,12 @@ fn resolve_calls(
                     };
                     for (type_name, method_name) in candidate.methods.keys() {
                         if method_name == method {
-                            targets.insert((
-                                (*name).to_string(),
-                                FnKey::Method(type_name.clone(), method_name.clone()),
-                            ));
+                            targets
+                                .entry((
+                                    (*name).to_string(),
+                                    FnKey::Method(type_name.clone(), method_name.clone()),
+                                ))
+                                .or_insert(CallPrecision::Approximate);
                         }
                     }
                 }
@@ -2402,39 +2519,35 @@ fn resolve_calls(
     targets
 }
 
+/// Records an edge whose callee the call site named, replacing an
+/// approximate edge to the same callee: one call site naming it is enough to
+/// make the edge real, whatever another site in the same body guessed.
+fn exact(targets: &mut BTreeMap<Node, CallPrecision>, node: Node) {
+    targets.insert(node, CallPrecision::Exact);
+}
+
 /// The declarations `type_module.type_name`'s method `method` may reach.
 ///
-/// A type's methods usually live in the module that declares the type. A
-/// conformance is the exception: ADR 0006 allows `impl Trait for Type` in the
-/// module that declares the *trait*, so a method of this type can live in any
-/// module that conforms it to a trait of its own.
+/// [`Program::methods_of`] knows where a type's methods live, including the
+/// ones a conformance declared in another module supplies, so this is a
+/// filter over it rather than a second search.
 fn type_methods(
     program: &Program,
     type_module: &str,
     type_name: &str,
     method: &str,
 ) -> BTreeSet<Node> {
-    let key = (type_name.to_string(), method.to_string());
-    let mut found = BTreeSet::new();
-    if let Some(owner) = program.modules.get(type_module) {
-        if owner.methods.contains_key(&key) {
-            found.insert((
-                type_module.to_string(),
-                FnKey::Method(key.0.clone(), key.1.clone()),
-            ));
-        }
-    }
-    for (name, resolved) in &program.modules {
-        let conforms = resolved.conformances.values().any(|conformance| {
-            conformance.type_module == type_module
-                && conformance.type_name == type_name
-                && conformance.methods.contains(method)
-        });
-        if conforms && resolved.methods.contains_key(&key) {
-            found.insert((name.clone(), FnKey::Method(key.0.clone(), key.1.clone())));
-        }
-    }
-    found
+    program
+        .methods_of(type_module, type_name)
+        .into_iter()
+        .filter(|declared| declared.name == method)
+        .map(|declared| {
+            (
+                declared.module.to_string(),
+                FnKey::Method(type_name.to_string(), method.to_string()),
+            )
+        })
+        .collect()
 }
 
 /// The module that declares `name` as `resolved` sees it, when the
@@ -2466,7 +2579,10 @@ fn declaring_module(
 /// Module imports may not form a cycle, but calls within a module still may.
 /// Each round only ever adds capabilities to a finite set, so the loop is
 /// guaranteed to terminate.
-fn propagate_capabilities(program: &mut Program, call_graph: &BTreeMap<Node, BTreeSet<Node>>) {
+fn propagate_capabilities(
+    program: &mut Program,
+    call_graph: &BTreeMap<Node, BTreeMap<Node, CallPrecision>>,
+) {
     let mut required: BTreeMap<Node, BTreeSet<Capability>> = BTreeMap::new();
     for (module, resolved) in &program.modules {
         for (name, entry) in &resolved.functions {
@@ -2494,7 +2610,7 @@ fn propagate_capabilities(program: &mut Program, call_graph: &BTreeMap<Node, BTr
                 continue;
             };
             let mut additions = BTreeSet::new();
-            for callee in callees {
+            for callee in callees.keys() {
                 let Some(callee_caps) = required.get(callee) else {
                     continue;
                 };

@@ -1,0 +1,150 @@
+# The public interface of this package, derived from source.
+#
+# Written by `cove api snapshot`. `cove api diff` compares this recording
+# against the interface the current source derives, so check it in and let a
+# reviewer read the difference. Do not edit it by hand.
+cove-api 1
+hash fnv1a64:3ccd68df1316d03a
+
+module callbacks
+  /// Task-safe application dependencies captured by request handlers.
+  export struct App
+    field repository: BookingRepository
+    field metrics: Shared<Metrics>
+  /// Immutable event subscriptions shared by request tasks.
+  export struct EventBus
+    field subscribers: Map<String, Array<EventHandler>>
+  /// A callback stored by the event bus.
+  export type EventHandler = async fn(event: Event) -> Result<Unit, Error>
+  /// A callback stored by the router and invoked for each request.
+  export type Handler = async fn(request: http.Request) -> Result<http.Response, Error>
+  /// Mutable counters shared across request tasks.
+  export struct Metrics
+    field requests: Int
+    field failures: Int
+  /// Immutable routes shared by all request tasks.
+  export struct Router
+    field routes: Array<Route>
+  /// Runs a server with immutable routes and structured background work.
+  export async fn main() -> Result<Unit, Error>
+    requires clock, console, http
+
+module config
+  /// Validated application configuration.
+  export struct Config
+    field port: Int
+    field logLevel: LogLevel
+  /// Configuration validation failures.
+  export enum ConfigError
+    case InvalidPort(String)
+    case InvalidLogLevel(String)
+  /// Supported logging levels.
+  export enum LogLevel
+    case Debug
+    case Info
+    case Warn
+    case Error
+  /// Loads configuration from the host environment.
+  export fn loadConfig() -> Result<Config, ConfigError>
+    requires env
+
+module hello
+  /// Returns a greeting for `name`.
+  export fn greeting(name: String) -> String
+  /// Runs the command-line program.
+  export fn main(args: Array<String>) -> Result<Unit, Error>
+    requires console
+
+module restricted
+  /// Reads only through the document capability supplied by the host.
+  ///
+  /// `console` is reached only through `text.report`, so this module requires
+  /// the console capability without naming a host module for it.
+  export fn main() -> Result<Unit, Error>
+    requires console, documents
+
+module server
+  /// JSON body returned by the health endpoint.
+  export struct HealthResponse
+    field status: String
+  /// Returns a stable health response without external I/O.
+  export fn health(request: http.Request) -> http.Response<HealthResponse>
+    requires http
+  /// Runs the HTTP server.
+  export fn main() -> Result<Unit, Error>
+    requires console, http
+
+module tasks
+  /// Data needed to render the dashboard.
+  export struct Dashboard
+    field bookings: Array<Booking>
+    field prices: Array<Price>
+  /// Loads independent dashboard inputs concurrently.
+  export async fn loadDashboard() -> Result<Dashboard, Error>
+    requires api, clock
+
+module text
+  /// Reports the word count of `text` on the console the host granted.
+  export fn report(text: String) -> Result<Unit, Error>
+    requires console
+  /// Counts words in `text`.
+  export fn wordCount(text: String) -> Int
+
+module traits
+  /// A room booking.
+  export struct Booking
+    field id: Int
+    field guests: Int
+    conforms traits.Summary
+    /// Returns the line this value takes in a report, which defaults to its
+    /// summary as an ordinary bullet.
+    export fn line(self) -> String
+    /// Returns the one-line summary of this value.
+    export fn summarize(self) -> String
+  /// A payment recorded against a booking.
+  export struct Receipt
+    field bookingId: Int
+    field cents: Int
+    conforms traits.Summary
+    /// Returns the line this value takes in a report, which defaults to its
+    /// summary as an ordinary bullet.
+    export fn line(self) -> String
+    /// Returns the one-line summary of this value.
+    export fn summarize(self) -> String
+  /// A value that can summarise itself for a human-readable report.
+  export trait Summary
+    fn summarize(self) -> String
+    fn line(self) -> String (default)
+  /// Headlines one entry.
+  ///
+  /// The bound is checked at the call site, which is also where `T` is chosen,
+  /// so `summarize` resolves to exactly one implementation. That is why this
+  /// function takes one entry rather than a mixed collection: every value it
+  /// sees has the same type.
+  export fn headline<T: Summary>(entry: T) -> String
+  /// Prints a report built both ways.
+  export fn main() -> Result<Unit, Error>
+    requires console
+  /// Renders a report of entries whose types may differ.
+  ///
+  /// `dyn Summary` values carry their implementation, so `line` is resolved
+  /// from each value rather than from the signature. That is what lets one
+  /// array hold a `Booking` and a `Receipt` at once.
+  export fn report(entries: Array<dyn Summary>) -> String
+
+module values
+  /// Completed immutable booking data.
+  export struct Booking
+    field status: BookingStatus
+    field guests: Array<String>
+  /// A value whose scalar field copies and whose Vector field shares storage.
+  export struct BookingDraft
+    field status: BookingStatus
+    field guests: Vector<String>
+  /// Lifecycle state of a booking.
+  export enum BookingStatus
+    case Pending
+    case Confirmed
+  /// Exercises Cove's value copies, Vector aliases, and freeze transition.
+  export fn main() -> Result<Unit, Error>
+    requires console

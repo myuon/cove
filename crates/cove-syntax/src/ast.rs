@@ -288,6 +288,12 @@ impl std::fmt::Display for Param {
         if self.variadic {
             write!(f, "...")?;
         }
+        // A default is part of the signature: adding one is a compatible
+        // change, and removing one is not, so a rendering that dropped it
+        // could not tell the two apart.
+        if let Some(default) = &self.default {
+            write!(f, " = {}", crate::format::format_expr(default))?;
+        }
         Ok(())
     }
 }
@@ -654,5 +660,61 @@ mod tests {
     #[test]
     fn displays_a_lambda_param_with_no_type() {
         assert_eq!(param("x", None).to_string(), "x");
+    }
+}
+
+#[cfg(test)]
+mod param_tests {
+    use super::*;
+    use cove_diag::SourceMap;
+
+    fn parse_one(source: &str) -> SourceUnit {
+        let mut sources = SourceMap::new();
+        let file = sources.add("test.cove", source.to_string());
+        crate::parse_file(&sources, file).expect("source parses")
+    }
+
+    fn signature(source: &str) -> String {
+        let unit = parse_one(source);
+        let ItemKind::Fn(decl) = &unit.items[0].kind else {
+            panic!("expected a function");
+        };
+        decl.params
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join(", ")
+    }
+
+    #[test]
+    fn a_parameter_renders_its_default() {
+        assert_eq!(
+            signature("export fn f(name: String = \"world\") {\n}\n"),
+            "name: String = \"world\""
+        );
+        assert_eq!(
+            signature("export fn f(count: Int = 1) {\n}\n"),
+            "count: Int = 1"
+        );
+    }
+
+    #[test]
+    fn a_parameter_without_a_default_renders_without_one() {
+        assert_eq!(
+            signature("export fn f(name: String) {\n}\n"),
+            "name: String"
+        );
+    }
+
+    #[test]
+    fn var_and_variadic_survive_alongside_a_default() {
+        assert_eq!(
+            signature("export fn f(var out: Int) {\n}\n"),
+            "var out: Int"
+        );
+        assert_eq!(
+            signature("export fn f(items: Int...) {\n}\n"),
+            "items: Int..."
+        );
     }
 }
