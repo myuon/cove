@@ -7,6 +7,6 @@ error[cove::type::mismatch]: expected `String`, found `Int`
   |
 4 | fn greeting(name: String) -> String {
   |             ^^^^^^^^^^^^ the parameter `name` is `String`
-  rule: Types are nominal and there are no implicit conversions: a value must already have the type its place asks for.
+  rule: Types are nominal and the only implicit conversion is to `dyn Trait`: a value must otherwise already have the type its place asks for.
   help: interpolate the `Int`, as in "{value}", to make a `String`
 1 error(s)

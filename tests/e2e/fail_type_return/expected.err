@@ -7,6 +7,6 @@ error[cove::type::mismatch]: expected `Int`, found `String`
   |
 8 | fn total(items: Array<Int>) -> Int {
   |                                ^^^ the declared return type is `Int`
-  rule: Types are nominal and there are no implicit conversions: a value must already have the type its place asks for.
+  rule: Types are nominal and the only implicit conversion is to `dyn Trait`: a value must otherwise already have the type its place asks for.
   help: parse the `String` with `Int.parse(text)`, which returns a `Result<Int, Error>`
 1 error(s)

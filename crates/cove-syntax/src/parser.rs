@@ -450,7 +450,12 @@ impl<'a> Parser<'a> {
     fn at_item_start(&self) -> bool {
         match self.peek() {
             TokenKind::Keyword(
-                Keyword::Export | Keyword::Struct | Keyword::Enum | Keyword::Impl | Keyword::Type,
+                Keyword::Export
+                | Keyword::Struct
+                | Keyword::Enum
+                | Keyword::Trait
+                | Keyword::Impl
+                | Keyword::Type,
             ) => true,
             TokenKind::Keyword(Keyword::Fn) => matches!(self.peek_at(1), TokenKind::Ident(_)),
             TokenKind::Keyword(Keyword::Async) => {
@@ -600,6 +605,7 @@ impl Parser<'_> {
             Some(Keyword::Fn | Keyword::Async) => ItemKind::Fn(self.parse_fn_decl()?),
             Some(Keyword::Struct) => ItemKind::Struct(self.parse_struct_decl()?),
             Some(Keyword::Enum) => ItemKind::Enum(self.parse_enum_decl()?),
+            Some(Keyword::Trait) => ItemKind::Trait(self.parse_trait_decl()?),
             Some(Keyword::Impl) => ItemKind::Impl(self.parse_impl_block()?),
             Some(Keyword::Type) => ItemKind::TypeAlias(self.parse_type_alias()?),
             _ => return Err(self.unexpected("a declaration")),
@@ -638,21 +644,44 @@ impl Parser<'_> {
         })
     }
 
-    /// `<T, U>`, or nothing.
-    fn parse_generic_params(&mut self) -> PResult<Vec<Ident>> {
+    /// `<T, U: Display + Ordered>`, or nothing.
+    ///
+    /// A bound names a trait the type argument must conform to, and is
+    /// checked at the call site that instantiates the parameter.
+    fn parse_generic_params(&mut self) -> PResult<Vec<GenericParam>> {
         if !self.eat(&TokenKind::Lt) {
             return Ok(Vec::new());
         }
         self.grouped(|parser| {
             let mut generics = Vec::new();
             while !parser.at(&TokenKind::Gt) && !parser.is_eof() {
-                generics.push(parser.expect_ident()?);
+                generics.push(parser.parse_generic_param()?);
                 if !parser.eat(&TokenKind::Comma) {
                     break;
                 }
             }
             parser.expect(&TokenKind::Gt, "`>`")?;
             Ok(generics)
+        })
+    }
+
+    /// `T`, or `T: Display`, or `T: Display + Ordered`.
+    fn parse_generic_param(&mut self) -> PResult<GenericParam> {
+        let start = self.span();
+        let name = self.expect_ident()?;
+        let mut bounds = Vec::new();
+        if self.eat(&TokenKind::Colon) {
+            loop {
+                bounds.push(self.expect_ident()?);
+                if !self.eat(&TokenKind::Plus) {
+                    break;
+                }
+            }
+        }
+        Ok(GenericParam {
+            name,
+            bounds,
+            span: start.to(self.prev_span()),
         })
     }
 
@@ -829,9 +858,80 @@ impl Parser<'_> {
         })
     }
 
+    /// `trait Name { fn method(self) -> T ... }`.
+    ///
+    /// A method may end at its signature, which makes it required, or carry a
+    /// `{ ... }` default body, which makes it optional for a conformance.
+    fn parse_trait_decl(&mut self) -> PResult<TraitDecl> {
+        let start = self.expect_keyword(Keyword::Trait, "`trait`")?;
+        let name = self.expect_ident()?;
+        self.expect(&TokenKind::LBrace, "`{`")?;
+
+        let mut methods = Vec::new();
+        while !self.at(&TokenKind::RBrace) && !self.is_eof() {
+            let doc = self.collect_doc();
+            if self.at(&TokenKind::RBrace) {
+                if let Some((_, span)) = doc {
+                    self.dangling_doc(span);
+                }
+                break;
+            }
+            match self.parse_trait_method(doc.map(|(text, _)| text)) {
+                Ok(method) => methods.push(method),
+                Err(Bail) => self.recover_to_item(true),
+            }
+        }
+        self.expect(&TokenKind::RBrace, "`}`")?;
+
+        Ok(TraitDecl {
+            name,
+            methods,
+            span: start.to(self.prev_span()),
+        })
+    }
+
+    /// One method of a trait. A trait declares no generic methods in the MVP,
+    /// so a method binds no type parameters of its own.
+    fn parse_trait_method(&mut self, doc: Option<String>) -> PResult<TraitMethod> {
+        let start = self.span();
+        let is_async = self.eat_keyword(Keyword::Async);
+        self.expect_keyword(Keyword::Fn, "`fn`")?;
+        let name = self.expect_ident()?;
+        self.expect(&TokenKind::LParen, "`(`")?;
+        let (receiver, params) = self.parse_param_list()?;
+        let return_type = if self.eat(&TokenKind::Arrow) {
+            Some(self.parse_type()?)
+        } else {
+            None
+        };
+        // A `{` on the same logical line opens a default body; a signature
+        // that ends at the line break declares the method without one.
+        let default = if self.at(&TokenKind::LBrace) && !self.at_statement_break() {
+            Some(self.parse_block()?)
+        } else {
+            None
+        };
+        Ok(TraitMethod {
+            doc,
+            name,
+            is_async,
+            receiver,
+            params,
+            return_type,
+            default,
+            span: start.to(self.prev_span()),
+        })
+    }
+
+    /// `impl Type { ... }`, or `impl Trait for Type { ... }`.
     fn parse_impl_block(&mut self) -> PResult<ImplBlock> {
         let start = self.expect_keyword(Keyword::Impl, "`impl`")?;
-        let type_name = self.expect_ident()?;
+        let mut trait_name = None;
+        let mut type_name = self.expect_ident()?;
+        if self.eat_keyword(Keyword::For) {
+            trait_name = Some(type_name);
+            type_name = self.expect_ident()?;
+        }
         let generics = self.parse_generic_params()?;
         self.expect(&TokenKind::LBrace, "`{`")?;
 
@@ -856,6 +956,7 @@ impl Parser<'_> {
         self.expect(&TokenKind::RBrace, "`}`")?;
 
         Ok(ImplBlock {
+            trait_name,
             type_name,
             generics,
             items,
@@ -889,6 +990,10 @@ impl Parser<'_> {
                 TypeKind::Unit
             }
             TokenKind::Keyword(Keyword::Async | Keyword::Fn) => self.parse_fn_type()?,
+            TokenKind::Keyword(Keyword::Dyn) => {
+                self.bump();
+                TypeKind::Dyn(self.expect_ident()?)
+            }
             TokenKind::Ident(_) => {
                 let mut path = vec![self.expect_ident()?];
                 while self.at(&TokenKind::Dot) && matches!(self.peek_at(1), TokenKind::Ident(_)) {
@@ -2045,6 +2150,79 @@ mod tests {
         assert!(first.receiver.expect("receiver").is_var);
         assert_eq!(first.params.len(), 1);
         assert!(!fn_decl(&block.items[1]).receiver.expect("receiver").is_var);
+    }
+
+    #[test]
+    fn parses_a_trait_with_required_and_defaulted_methods() {
+        let unit = ok(
+            "/// Renders itself.\nexport trait Display {\n  /// The full form.\n  fn describe(self) -> String\n\n  /// A short form.\n  fn label(self) -> String { self.describe() }\n\n  fn make(width: Int) -> Int\n}",
+        );
+        let item = &unit.items[0];
+        assert!(item.exported);
+        assert_eq!(item.doc.as_deref(), Some("Renders itself."));
+        let ItemKind::Trait(decl) = &item.kind else {
+            panic!("expected a trait");
+        };
+        assert_eq!(decl.name.node, "Display");
+        assert_eq!(decl.methods.len(), 3);
+        assert_eq!(decl.methods[0].doc.as_deref(), Some("The full form."));
+        assert!(decl.methods[0].receiver.is_some());
+        assert!(decl.methods[0].default.is_none());
+        assert!(decl.methods[1].default.is_some());
+        // A method with no `self` is an associated function.
+        assert!(decl.methods[2].receiver.is_none());
+        assert_eq!(decl.methods[2].params.len(), 1);
+    }
+
+    #[test]
+    fn parses_a_conformance_and_an_inherent_impl() {
+        let unit = ok("impl Display for Booking {\n  fn describe(self) -> String { \"b\" }\n}\n\nimpl Booking {\n  fn id(self) -> Int { 1 }\n}");
+        let ItemKind::Impl(conformance) = &unit.items[0].kind else {
+            panic!("expected an impl");
+        };
+        assert_eq!(
+            conformance.trait_name.as_ref().map(|n| n.node.as_str()),
+            Some("Display")
+        );
+        assert_eq!(conformance.type_name.node, "Booking");
+        let ItemKind::Impl(inherent) = &unit.items[1].kind else {
+            panic!("expected an impl");
+        };
+        assert!(inherent.trait_name.is_none());
+        assert_eq!(inherent.type_name.node, "Booking");
+    }
+
+    #[test]
+    fn parses_one_bound_and_several_bounds_on_a_type_parameter() {
+        let unit = ok("fn render<T: Display, U, V: Display + Ordered>(value: T) { }");
+        let decl = fn_decl(&unit.items[0]);
+        assert_eq!(decl.generics.len(), 3);
+        assert_eq!(decl.generics[0].name.node, "T");
+        assert_eq!(decl.generics[0].bounds.len(), 1);
+        assert_eq!(decl.generics[0].bounds[0].node, "Display");
+        assert!(decl.generics[1].bounds.is_empty());
+        assert_eq!(decl.generics[2].bounds.len(), 2);
+        assert_eq!(decl.generics[2].bounds[1].node, "Ordered");
+    }
+
+    #[test]
+    fn parses_dyn_as_a_type() {
+        let unit = ok("fn renderAll(values: Array<dyn Display>) -> dyn Display { values }");
+        let decl = fn_decl(&unit.items[0]);
+        let ty = decl.params[0].ty.as_ref().expect("a written type");
+        assert_eq!(ty.to_string(), "Array<dyn Display>");
+        let TypeKind::Dyn(name) = &decl.return_type.as_ref().expect("a return type").kind else {
+            panic!("expected a `dyn` return type");
+        };
+        assert_eq!(name.node, "Display");
+    }
+
+    #[test]
+    fn rejects_dyn_without_a_trait_name() {
+        assert_eq!(
+            codes(&errors("fn go(value: dyn) { }")),
+            ["cove::parse::unexpected_token"]
+        );
     }
 
     #[test]

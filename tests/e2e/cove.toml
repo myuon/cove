@@ -146,6 +146,10 @@ allow = ["console"]
 entry = "type_struct_copy.main"
 allow = ["console"]
 
+[run.type_trait]
+entry = "type_trait.main"
+allow = ["console"]
+
 [run.values_bool]
 entry = "values_bool.main"
 allow = ["console"]

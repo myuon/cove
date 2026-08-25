@@ -1,17 +1,52 @@
 //! Static type checking, between resolution and execution.
 //!
 //! ADR 0004 decides what this checks and how: annotations are mandatory at
-//! boundaries and inferred inside, types are nominal with no subtyping and no
-//! coercion, generics are parametric and unbounded, and checking is
-//! per-module. A module sees its own declarations plus the builtins.
+//! boundaries and inferred inside, types are nominal with no subtyping, and
+//! checking is per-module. A module sees its own declarations plus the
+//! builtins. ADR 0006 replaces that ADR's "parametric and unbounded" with
+//! "parametric with bounds", which is the change it anticipated.
+//!
+//! # Traits and the two dispatch forms
+//!
+//! A bound (`fn render<T: Display>(value: T)`) is checked at the call site
+//! that instantiates `T`, because that is the only place a type parameter is
+//! given a type. Inside the body the parameter is rigid and its bound is a
+//! fact: a method call on a value of type `T` resolves through `T`'s bounds,
+//! and a parameter with no bound has no methods at all.
+//!
+//! `dyn Display` is a type of its own, not a type parameter. Only the
+//! trait's plain `self`-taking methods can be called on it: an associated
+//! function has no receiver to dispatch on, and a `var self` method needs the
+//! caller's own place, which a converted value is not. It never satisfies a
+//! bound either — not even its own trait's — because it is not a type
+//! parameter.
+//!
+//! # The one implicit conversion
+//!
+//! A concrete value is accepted where a `dyn Trait` is expected, exactly when
+//! it conforms to that trait. That is the language's only implicit
+//! conversion, and it is deliberately narrow:
+//!
+//! - it runs one way only: a `dyn Trait` value is never a concrete type, and
+//!   never converts to another `dyn Trait`;
+//! - it never reaches inside a generic argument. `Array<Booking>` is not an
+//!   `Array<dyn Display>`, because generic arguments are invariant here like
+//!   everywhere else. `[booking, receipt]` *is* an `Array<dyn Display>`,
+//!   because each element is checked against `dyn Display` on its own;
+//! - it satisfies no bound. `render(someDyn)` is an error even when
+//!   `render<T: Display>` and the value is a `dyn Display`.
+//!
+//! It is spelled out here, in [`coerces`], and nowhere else: every place that
+//! compares a found type against an expected one goes through
+//! [`Checker::expect`] or [`unify`], and both consult it.
 //!
 //! # The type representation
 //!
 //! [`Ty`] is a closed enum of the builtin types, the structs and enums the
-//! module declares, function types, and rigid type parameters. Two types are
-//! equal when they name the same declaration and their arguments are equal:
-//! there is no subtyping, no coercion, and no variance, so `Array<Int>` is
-//! not an `Array<Any>` — there is no `Any`.
+//! module declares, function types, rigid type parameters, and `dyn Trait`.
+//! Two types are equal when they name the same declaration and their
+//! arguments are equal: there is no subtyping and no variance, so
+//! `Array<Int>` is not an `Array<Any>` — there is no `Any`.
 //!
 //! Two variants are not types a program can write:
 //!
@@ -76,8 +111,9 @@ use std::rc::Rc;
 
 use cove_diag::{Diagnostic, Span};
 use cove_syntax::ast::{
-    Arg, BinaryOp, Block, EnumDecl, Expr, ExprKind, FnDecl, Ident, ItemKind, MatchArm, Param,
-    Pattern, PatternKind, Stmt, StmtKind, StrPart, StructDecl, Type, TypeKind, UnaryOp,
+    Arg, BinaryOp, Block, EnumDecl, Expr, ExprKind, FnDecl, GenericParam, Ident, ItemKind,
+    MatchArm, Param, Pattern, PatternKind, Stmt, StmtKind, StrPart, StructDecl, TraitMethod, Type,
+    TypeKind, UnaryOp,
 };
 
 use crate::package::Package;
@@ -138,6 +174,20 @@ pub const RECEIVER: &str = "cove::type::receiver";
 pub const NOT_A_PLACE: &str = "cove::type::not_a_place";
 /// An entry function's shape does not fit the host boundary.
 pub const ENTRY: &str = "cove::type::entry";
+/// A `dyn` or a bound names something that is not a trait this module declares.
+pub const UNKNOWN_TRAIT: &str = "cove::type::unknown_trait";
+/// A type argument does not conform to the bound its type parameter declares.
+pub const UNSATISFIED_BOUND: &str = "cove::type::unsatisfied_bound";
+/// A method was called on a type parameter that declares no bound.
+pub const UNBOUNDED_PARAMETER: &str = "cove::type::unbounded_parameter";
+/// A conformance's method does not have the signature its trait declares.
+pub const CONFORMANCE_SIGNATURE: &str = "cove::type::conformance_signature";
+/// A trait method with no `self` was called through `dyn Trait`.
+pub const DYN_ASSOCIATED: &str = "cove::type::dyn_associated_function";
+/// A `var self` trait method was called through `dyn Trait`.
+pub const DYN_MUTATING: &str = "cove::type::dyn_mutating_method";
+/// A bound was written where the MVP does not check one.
+pub const UNSUPPORTED_BOUND: &str = "cove::type::unsupported_bound";
 
 /// Type-checks a resolved program.
 ///
@@ -195,6 +245,13 @@ pub enum Ty {
     Fn(Rc<FnTy>),
     /// A type parameter, rigid inside the body that declares it.
     Param(Rc<str>),
+    /// `dyn Display`: a value of some type that conforms to the named trait,
+    /// carrying its implementation with it.
+    ///
+    /// This is a type of its own, not a type parameter: it cannot be written
+    /// where a bounded type parameter is expected, and only the trait's
+    /// `self`-taking methods can be called on it.
+    Dyn(Rc<str>),
 }
 
 /// A function type: `fn(Int) -> Int`, `async fn() -> Result<Unit, Error>`.
@@ -249,7 +306,7 @@ impl Ty {
                     && a.params.iter().zip(&b.params).all(|(a, b)| a.matches(b))
                     && a.ret.matches(&b.ret)
             }
-            (Ty::Param(a), Ty::Param(b)) => a == b,
+            (Ty::Param(a), Ty::Param(b)) | (Ty::Dyn(a), Ty::Dyn(b)) => a == b,
             (a, b) => std::mem::discriminant(a) == std::mem::discriminant(b),
         }
     }
@@ -329,6 +386,7 @@ impl fmt::Display for Ty {
             Ty::MapEntry(k, v) => write!(f, "MapEntry<{k}, {v}>"),
             Ty::Result(t, e) => write!(f, "Result<{t}, {e}>"),
             Ty::Param(name) => f.write_str(name),
+            Ty::Dyn(name) => write!(f, "dyn {name}"),
             Ty::Struct(name, args) | Ty::Enum(name, args) => {
                 f.write_str(name)?;
                 if !args.is_empty() {
@@ -365,11 +423,23 @@ struct ParamSig {
     span: Span,
 }
 
+/// One trait a type parameter is bounded by, and where the bound was
+/// written, so an unsatisfied bound can point at it.
+#[derive(Clone, Debug)]
+struct TraitBound {
+    name: Rc<str>,
+    span: Span,
+}
+
 /// A declared function's or method's type, as written at its boundary.
 #[derive(Clone, Debug)]
 struct FnSig {
     /// Type parameters this signature binds, rigid inside its own body.
     generics: Vec<Rc<str>>,
+    /// The traits each type parameter is bounded by. A parameter with no
+    /// bound is absent, which is also what makes a method call on it an
+    /// error: it has no operations.
+    bounds: BTreeMap<Rc<str>, Vec<TraitBound>>,
     params: Vec<ParamSig>,
     ret: Ty,
     ret_span: Span,
@@ -460,8 +530,16 @@ struct Checker<'a> {
     aliases: BTreeMap<String, (Vec<Rc<str>>, Ty)>,
     /// Aliases currently being expanded, to catch `type A = A`.
     expanding: Vec<String>,
+    /// Every trait the module declares, with the signature of each of its
+    /// methods.
+    traits: BTreeMap<String, BTreeMap<String, FnSig>>,
+    /// Every declared conformance, as `(trait, type)`. Conformance is
+    /// explicit, so this set is complete.
+    conformances: BTreeSet<(String, String)>,
     /// Type parameters in scope, innermost last.
     type_params: Vec<Rc<str>>,
+    /// The bounds of the type parameters currently in scope.
+    bounds: BTreeMap<Rc<str>, Vec<TraitBound>>,
     scopes: Vec<BTreeMap<String, Binding>>,
     /// The declared return type of the function whose body is being checked,
     /// and where it was written.
@@ -480,7 +558,14 @@ impl<'a> Checker<'a> {
             enums: BTreeMap::new(),
             aliases: BTreeMap::new(),
             expanding: Vec::new(),
+            traits: BTreeMap::new(),
+            conformances: module
+                .conformances
+                .keys()
+                .map(|(trait_name, type_name)| (trait_name.clone(), type_name.clone()))
+                .collect(),
             type_params: Vec::new(),
+            bounds: BTreeMap::new(),
             scopes: Vec::new(),
             ret: Ty::Unknown,
             ret_span: Span::new(cove_diag::FileId(0), 0, 0),
@@ -498,9 +583,81 @@ impl<'a> Checker<'a> {
         }
         let method_keys: Vec<(String, String)> = self.module.methods.keys().cloned().collect();
         for key in method_keys {
+            // A trait's default body is checked once against `Self`, below,
+            // not once per conformance.
+            if self.module.methods[&key].from_trait_default.is_some() {
+                continue;
+            }
             let decl = self.module.methods[&key].decl.clone();
             let sig = self.methods[&key].clone();
             self.check_body(&decl, &sig);
+        }
+        self.check_trait_defaults();
+    }
+
+    /// Checks every trait's default method bodies, once each, with `self`
+    /// typed as a rigid `Self` bounded by that trait.
+    ///
+    /// A default body is written against its trait's own interface and
+    /// nothing else. Checking it once against `Self: Trait` is what makes
+    /// that true: checked once per conformance instead, it could reach a
+    /// conforming type's fields, and conformance would be structural after
+    /// all.
+    fn check_trait_defaults(&mut self) {
+        let trait_names: Vec<String> = self.module.traits.keys().cloned().collect();
+        for trait_name in trait_names {
+            let decl = self.module.traits[&trait_name].decl.clone();
+            let self_param: Rc<str> = "Self".into();
+            for method in &decl.methods {
+                let sig = self.traits[&trait_name][&method.name.node].clone();
+                self.type_params = vec![self_param.clone()];
+                self.bounds = BTreeMap::from([(
+                    self_param.clone(),
+                    vec![TraitBound {
+                        name: trait_name.as_str().into(),
+                        span: decl.name.span,
+                    }],
+                )]);
+                self.ret = sig.ret.clone();
+                self.ret_span = sig.ret_span;
+                self.scopes.push(BTreeMap::new());
+                if method.receiver.is_some() {
+                    self.declare("self", Ty::Param(self_param.clone()));
+                }
+                for param in &sig.params {
+                    let ty = if param.variadic {
+                        Ty::Array(Box::new(param.ty.clone()))
+                    } else {
+                        param.ty.clone()
+                    };
+                    self.declare(&param.name, ty);
+                }
+                for (param, declared) in method.params.iter().zip(&sig.params) {
+                    if let Some(default) = &param.default {
+                        let expected = Expected::new(
+                            declared.ty.clone(),
+                            param.name.span,
+                            format!("this parameter is `{}`", declared.ty),
+                        );
+                        self.expr(default, Some(&expected));
+                    }
+                }
+                if let Some(body) = &method.default {
+                    let expected = Expected::new(
+                        sig.ret.clone(),
+                        sig.ret_span,
+                        if method.return_type.is_some() {
+                            format!("the declared return type is `{}`", sig.ret)
+                        } else {
+                            "this method declares no return type, so it returns `()`".to_string()
+                        },
+                    );
+                    self.block(body, Some(&expected));
+                }
+                self.scopes.pop();
+                self.type_params.clear();
+                self.bounds.clear();
+            }
         }
     }
 
@@ -512,6 +669,19 @@ impl<'a> Checker<'a> {
         let alias_names: Vec<String> = self.module.aliases.keys().cloned().collect();
         for name in alias_names {
             self.alias(&name);
+        }
+
+        // Trait signatures come before everything else: a bound, a `dyn`, and
+        // a conformance check all read them.
+        let trait_names: Vec<String> = self.module.traits.keys().cloned().collect();
+        for name in trait_names {
+            let decl = self.module.traits[&name].decl.clone();
+            let methods = decl
+                .methods
+                .iter()
+                .map(|method| (method.name.node.clone(), self.trait_method_sig(method)))
+                .collect();
+            self.traits.insert(name, methods);
         }
 
         let struct_names: Vec<String> = self.module.structs.keys().cloned().collect();
@@ -541,6 +711,93 @@ impl<'a> Checker<'a> {
             let sig = self.fn_sig(&decl, Some(&key.0));
             self.methods.insert(key, sig);
         }
+
+        self.check_conformance_signatures();
+    }
+
+    /// The signature of one trait method.
+    ///
+    /// A trait binds no type parameters of its own in the MVP, so its methods
+    /// are checked in an empty generic scope. The receiver type is left
+    /// `Unknown` because it is decided by the call site: `T` through a bound,
+    /// `dyn Trait` through a trait object, and the concrete type through a
+    /// conformance.
+    fn trait_method_sig(&mut self, method: &TraitMethod) -> FnSig {
+        let outer = std::mem::take(&mut self.type_params);
+        let params = method
+            .params
+            .iter()
+            .map(|param| self.param_sig(param))
+            .collect::<Vec<_>>();
+        let ret = match &method.return_type {
+            Some(ty) => self.resolve(ty),
+            None => Ty::Unit,
+        };
+        let ret_span = match &method.return_type {
+            Some(ty) => ty.span,
+            None => method.name.span,
+        };
+        self.type_params = outer;
+        FnSig {
+            generics: Vec::new(),
+            bounds: BTreeMap::new(),
+            params,
+            ret,
+            ret_span,
+            is_async: method.is_async,
+            receiver: method.receiver.map(|_| Ty::Unknown),
+        }
+    }
+
+    /// Checks that every method a conformance supplies has the signature its
+    /// trait declares.
+    ///
+    /// Resolution already rejected a method the trait does not declare and a
+    /// declared method the conformance does not supply; what is left is
+    /// whether the two agree on parameters, result, and receiver. They must,
+    /// because a call through a bound or through `dyn Trait` is checked
+    /// against the trait's signature and dispatched to this one.
+    fn check_conformance_signatures(&mut self) {
+        let conformances: Vec<(String, String)> = self.conformances.iter().cloned().collect();
+        for (trait_name, type_name) in conformances {
+            let Some(entry) = self.module.traits.get(&trait_name) else {
+                continue;
+            };
+            let trait_decl = entry.decl.clone();
+            for method in &trait_decl.methods {
+                let key = (type_name.clone(), method.name.node.clone());
+                let Some(found) = self.methods.get(&key).cloned() else {
+                    continue;
+                };
+                let Some(declared) = self.traits[&trait_name].get(&method.name.node).cloned()
+                else {
+                    continue;
+                };
+                let Some(reason) = signature_difference(&declared, &found) else {
+                    continue;
+                };
+                let span = self.module.methods[&key].decl.name.span;
+                self.diagnostics.push(
+                    Diagnostic::error(
+                        CONFORMANCE_SIGNATURE,
+                        format!(
+                            "`{type_name}.{}` does not match the signature `{trait_name}` declares: {reason}",
+                            method.name.node
+                        ),
+                    )
+                    .at(span)
+                    .label(
+                        method.name.span,
+                        format!("`{trait_name}` declares {}", trait_signature(&declared, &method.name.node)),
+                    )
+                    .rule("A conformance's method has exactly the signature its trait declares, because a call through a bound or through `dyn Trait` is checked against the trait and dispatched to the conformance.")
+                    .help(format!(
+                        "write `{}`",
+                        trait_signature(&declared, &method.name.node)
+                    )),
+                );
+            }
+        }
     }
 
     /// Checks one function's or method's body against its declared return
@@ -550,6 +807,7 @@ impl<'a> Checker<'a> {
     /// `Unit` too.
     fn check_body(&mut self, decl: &FnDecl, sig: &FnSig) {
         self.type_params = sig.generics.clone();
+        self.bounds = sig.bounds.clone();
         self.ret = sig.ret.clone();
         self.ret_span = sig.ret_span;
         self.scopes.push(BTreeMap::new());
@@ -586,12 +844,14 @@ impl<'a> Checker<'a> {
         self.block(&decl.body, Some(&expected));
         self.scopes.pop();
         self.type_params.clear();
+        self.bounds.clear();
     }
 
     // ------------------------------------------------------ declarations
 
     fn struct_sig(&mut self, decl: &StructDecl) -> StructSig {
         let outer = std::mem::take(&mut self.type_params);
+        self.reject_bounds(&decl.generics, "struct");
         let generics = self.enter_generics(&decl.generics);
         let fields = decl
             .fields
@@ -610,6 +870,7 @@ impl<'a> Checker<'a> {
 
     fn enum_sig(&mut self, decl: &EnumDecl) -> EnumSig {
         let outer = std::mem::take(&mut self.type_params);
+        self.reject_bounds(&decl.generics, "enum");
         let generics = self.enter_generics(&decl.generics);
         let cases = decl
             .cases
@@ -630,7 +891,7 @@ impl<'a> Checker<'a> {
     /// does not record an `impl` block's own parameter list, so an `impl`
     /// that renames its type's parameters is not supported.
     fn fn_sig(&mut self, decl: &FnDecl, receiver_type: Option<&str>) -> FnSig {
-        let mut type_generics: Vec<Ident> = Vec::new();
+        let mut type_generics: Vec<GenericParam> = Vec::new();
         if let Some(type_name) = receiver_type {
             if let Some(entry) = self.module.structs.get(type_name) {
                 type_generics.extend(entry.decl.generics.iter().cloned());
@@ -642,6 +903,7 @@ impl<'a> Checker<'a> {
         names.extend(decl.generics.iter().cloned());
         let outer = self.type_params.clone();
         let generics = self.enter_generics(&names);
+        let bounds = self.bounds_of(&decl.generics);
         let owner_arity = type_generics.len();
 
         let params = decl
@@ -670,6 +932,7 @@ impl<'a> Checker<'a> {
         self.type_params = outer;
         FnSig {
             generics,
+            bounds,
             params,
             ret,
             ret_span,
@@ -695,13 +958,68 @@ impl<'a> Checker<'a> {
         }
     }
 
-    /// Brings `names` into scope as type parameters, on top of whatever is
+    /// Brings `params` into scope as type parameters, on top of whatever is
     /// already in scope, and returns just the ones it added. Every caller
     /// restores the previous list when the declaration ends.
-    fn enter_generics(&mut self, names: &[Ident]) -> Vec<Rc<str>> {
-        let generics: Vec<Rc<str>> = names.iter().map(|n| n.node.as_str().into()).collect();
+    fn enter_generics(&mut self, params: &[GenericParam]) -> Vec<Rc<str>> {
+        let generics: Vec<Rc<str>> = params.iter().map(|p| p.name.node.as_str().into()).collect();
         self.type_params.extend(generics.iter().cloned());
         generics
+    }
+
+    /// The traits each of `params` is bounded by, with every bound checked to
+    /// name a trait this module declares.
+    fn bounds_of(&mut self, params: &[GenericParam]) -> BTreeMap<Rc<str>, Vec<TraitBound>> {
+        let mut bounds: BTreeMap<Rc<str>, Vec<TraitBound>> = BTreeMap::new();
+        for param in params {
+            let mut named: Vec<TraitBound> = Vec::new();
+            for bound in &param.bounds {
+                if !self.module.traits.contains_key(&bound.node) {
+                    self.diagnostics
+                        .push(unknown_trait(&bound.node, bound.span));
+                    continue;
+                }
+                if named.iter().any(|b| &*b.name == bound.node.as_str()) {
+                    continue;
+                }
+                named.push(TraitBound {
+                    name: bound.node.as_str().into(),
+                    span: bound.span,
+                });
+            }
+            if !named.is_empty() {
+                bounds.insert(param.name.node.as_str().into(), named);
+            }
+        }
+        bounds
+    }
+
+    /// Reports a bound written on a declaration whose type parameters the MVP
+    /// never checks a bound against.
+    ///
+    /// A bound is checked where a type parameter is instantiated, and only a
+    /// call site instantiates one today. A `struct`, `enum`, or `type` writes
+    /// its arguments in a type, which this pass does not check bounds for, so
+    /// a bound written there would be silently ignored.
+    fn reject_bounds(&mut self, params: &[GenericParam], what: &str) {
+        for param in params {
+            for bound in &param.bounds {
+                self.diagnostics.push(
+                    Diagnostic::error(
+                        UNSUPPORTED_BOUND,
+                        format!(
+                            "a bound on a {what}'s type parameter is not checked in the MVP"
+                        ),
+                    )
+                    .at(bound.span)
+                    .rule("A bound is checked where its type parameter is instantiated, and only a call site instantiates one; a `struct`, `enum`, or `type` binds its arguments in a type instead.")
+                    .help(format!(
+                        "write `{}` here, and bound the type parameter of the functions that operate on it",
+                        param.name.node
+                    )),
+                );
+            }
+        }
     }
 
     /// A struct or enum this module declares, or `Unknown` when it declares
@@ -742,6 +1060,13 @@ impl<'a> Checker<'a> {
                 Ty::func(*is_async, params, ret)
             }
             TypeKind::Named { path, args } => self.resolve_named(path, args, ty.span),
+            TypeKind::Dyn(name) => {
+                if !self.module.traits.contains_key(&name.node) {
+                    self.diagnostics.push(unknown_trait(&name.node, name.span));
+                    return Ty::Unknown;
+                }
+                Ty::Dyn(name.node.as_str().into())
+            }
         }
     }
 
@@ -902,6 +1227,7 @@ impl<'a> Checker<'a> {
         }
         self.expanding.push(name.to_string());
         let outer = std::mem::take(&mut self.type_params);
+        self.reject_bounds(&decl.generics, "type alias");
         let generics = self.enter_generics(&decl.generics);
         let ty = self.resolve(&decl.ty);
         self.type_params = outer;
@@ -987,6 +1313,12 @@ impl<'a> Checker<'a> {
                     let outer_ret = std::mem::replace(&mut self.ret, sig.ret.clone());
                     let outer_span = std::mem::replace(&mut self.ret_span, sig.ret_span);
                     self.type_params.extend(sig.generics.iter().cloned());
+                    let outer_bounds = self.bounds.clone();
+                    self.bounds.extend(
+                        sig.bounds
+                            .iter()
+                            .map(|(name, bounds)| (name.clone(), bounds.clone())),
+                    );
                     self.scopes.push(BTreeMap::new());
                     for param in &sig.params {
                         self.declare(&param.name, param.ty.clone());
@@ -998,6 +1330,7 @@ impl<'a> Checker<'a> {
                     );
                     self.block(&decl.body, Some(&expected));
                     self.scopes.pop();
+                    self.bounds = outer_bounds;
                     self.type_params = outer_params;
                     self.ret_span = outer_span;
                     self.ret = outer_ret;
@@ -1123,20 +1456,35 @@ impl<'a> Checker<'a> {
     /// Reports a type that does not match what the surrounding form asked
     /// for, pointing at the expression and labelling what imposed it.
     fn expect(&mut self, found: &Ty, expected: &Expected, span: Span) {
-        if found.matches(&expected.ty) {
+        if found.matches(&expected.ty) || coerces(found, &expected.ty, &self.view()) {
             return;
         }
-        let mut diagnostic = Diagnostic::error(
-            MISMATCH,
-            format!("expected `{}`, found `{found}`", expected.ty),
-        )
-        .at(span)
-        .rule("Types are nominal and there are no implicit conversions: a value must already have the type its place asks for.");
+        // The one implicit conversion the language has is to `dyn Trait`, so
+        // a value rejected there is rejected for a reason of its own: it does
+        // not conform.
+        let mut diagnostic = match &expected.ty {
+            Ty::Dyn(trait_name) if !matches!(found, Ty::Dyn(_)) => Diagnostic::error(
+                MISMATCH,
+                format!("`{found}` does not conform to `{trait_name}`, so it is not a `{}`", expected.ty),
+            )
+            .at(span)
+            .rule("A concrete value becomes a `dyn Trait` value where one is expected, and that is the only implicit conversion in the language; it requires an explicit conformance.")
+            .help(format!("write `impl {trait_name} for {found} {{ ... }}`")),
+            _ => {
+                let mut diagnostic = Diagnostic::error(
+                    MISMATCH,
+                    format!("expected `{}`, found `{found}`", expected.ty),
+                )
+                .at(span)
+                .rule("Types are nominal and the only implicit conversion is to `dyn Trait`: a value must otherwise already have the type its place asks for.");
+                if let Some(help) = conversion_help(&expected.ty, found) {
+                    diagnostic = diagnostic.help(help);
+                }
+                diagnostic
+            }
+        };
         if let Some(origin) = &expected.origin {
             diagnostic = diagnostic.label(origin.span, origin.label.clone());
-        }
-        if let Some(help) = conversion_help(&expected.ty, found) {
-            diagnostic = diagnostic.help(help);
         }
         self.diagnostics.push(diagnostic);
     }
@@ -1290,6 +1638,24 @@ impl<'a> Checker<'a> {
                     Ty::Unknown
                 }
             },
+            // A type parameter and a trait object both stand for some type
+            // the checker cannot see, so neither has fields: only the traits
+            // in play say what can be done with the value.
+            abstract_ty @ (Ty::Param(_) | Ty::Dyn(_)) => {
+                self.diagnostics.push(
+                    Diagnostic::error(
+                        UNKNOWN_FIELD,
+                        format!("`{abstract_ty}` has no field `{}`", name.node),
+                    )
+                    .at(span)
+                    .rule("A trait declares methods, not fields, so a value reached only through a trait has no fields; conformance is explicit and never structural.")
+                    .help(format!(
+                        "declare `fn {}(self) -> ...` in the trait and call `{}()`",
+                        name.node, name.node
+                    )),
+                );
+                Ty::Unknown
+            }
             other => {
                 self.diagnostics.push(
                     Diagnostic::error(
@@ -1375,7 +1741,7 @@ impl<'a> Checker<'a> {
                 format!("this case carries a `{hint}`"),
             );
             let found_ty = self.expr(&arg.value, Some(&expected));
-            unify(payload, &found_ty, &generic_set, &mut subst);
+            unify(payload, &found_ty, &generic_set, &mut subst, &self.view());
         }
         for arg in args.iter().skip(found.payload.len()) {
             self.expr(&arg.value, None);
@@ -2416,6 +2782,7 @@ impl<'a> Checker<'a> {
             what,
             "the parameter",
         );
+        self.check_bounds(sig, &subst, what, span);
         let ret = self.open(&sig.ret, &sig.generics, &subst);
         if sig.is_async {
             // An `async fn` is called like any other function and produces a
@@ -2708,7 +3075,7 @@ impl<'a> Checker<'a> {
         subst: &mut BTreeMap<Rc<str>, Ty>,
         role: &str,
     ) {
-        let unified = unify(expected, found, generics, subst);
+        let unified = unify(expected, found, generics, subst, &self.view());
         if !unified && found.matches(hint) {
             let expected = expected.substitute(subst);
             self.report_argument(found, &expected, span, param, role);
@@ -2762,7 +3129,7 @@ impl<'a> Checker<'a> {
                     return;
                 }
             };
-            if !unify(element, &spread_element, generic_set, subst) {
+            if !unify(element, &spread_element, generic_set, subst, &self.view()) {
                 self.diagnostics.push(
                     Diagnostic::error(
                         MISMATCH,
@@ -2860,6 +3227,234 @@ impl<'a> Checker<'a> {
         }
     }
 
+    // ----------------------------------------------------------- traits
+
+    /// What a conformance question needs to be answered: the module's
+    /// declared conformances, plus the bounds of the type parameters in
+    /// scope, since a bounded parameter conforms to the traits it is bounded
+    /// by.
+    fn view(&self) -> ConformanceView<'_> {
+        ConformanceView {
+            declared: &self.conformances,
+            bounds: &self.bounds,
+        }
+    }
+
+    /// Checks every bound of `sig` against the types its call site chose.
+    ///
+    /// A bound is checked here, at the call, because that is where a type
+    /// parameter is instantiated; inside the body the parameter is rigid and
+    /// its bound is a fact rather than an obligation.
+    fn check_bounds(&mut self, sig: &FnSig, subst: &BTreeMap<Rc<str>, Ty>, what: &str, span: Span) {
+        for (param, bounds) in &sig.bounds {
+            let Some(ty) = subst.get(param) else {
+                continue;
+            };
+            if ty.is_wild() {
+                continue;
+            }
+            for bound in bounds {
+                if conforms(ty, &bound.name, &self.view()) {
+                    continue;
+                }
+                // `dyn Trait` is a type, not a type parameter, so it never
+                // stands in for one even when it names the very same trait.
+                let (message, help) = if let Ty::Dyn(trait_name) = ty {
+                    (
+                        format!("`dyn {trait_name}` cannot be used as a type argument"),
+                        format!(
+                            "pass a concrete value that conforms to `{}`, or declare the parameter as `dyn {}` instead of `{param}`",
+                            bound.name, bound.name
+                        ),
+                    )
+                } else {
+                    (
+                        format!("`{ty}` does not conform to `{}`", bound.name),
+                        format!("write `impl {} for {ty} {{ ... }}`", bound.name),
+                    )
+                };
+                self.diagnostics.push(
+                    Diagnostic::error(UNSATISFIED_BOUND, message)
+                        .at(span)
+                        .label(
+                            bound.span,
+                            format!("{what} requires `{param}: {}`", bound.name),
+                        )
+                        .rule("A type argument must conform to every trait its type parameter is bounded by, and conformance is explicit: only an `impl Trait for Type` block declares one.")
+                        .help(help),
+                );
+            }
+        }
+    }
+
+    /// Whether the trait method named `method` declares a `var self`
+    /// receiver.
+    fn mutating_trait_method(&self, trait_name: &str, method: &str) -> bool {
+        self.module
+            .traits
+            .get(trait_name)
+            .and_then(|entry| entry.method(method))
+            .and_then(|method| method.receiver)
+            .is_some_and(|receiver| receiver.is_var)
+    }
+
+    /// The trait among `T`'s bounds that declares `method`, with its
+    /// signature.
+    fn bound_method(&self, param: &str, method: &str) -> Option<(Rc<str>, FnSig)> {
+        for bound in self.bounds.get(param)? {
+            if let Some(sig) = self.traits.get(&*bound.name).and_then(|m| m.get(method)) {
+                return Some((bound.name.clone(), sig.clone()));
+            }
+        }
+        None
+    }
+
+    /// A method call on a value whose type is the type parameter `param`.
+    ///
+    /// Resolution goes through the parameter's bounds: a parameter with no
+    /// bound has no operations at all, which is the whole reason a bound is
+    /// written.
+    fn param_method_call(
+        &mut self,
+        param: &Rc<str>,
+        name: &Ident,
+        args: &[Arg],
+        trailing: Option<&Expr>,
+        span: Span,
+    ) -> Ty {
+        if let Some((trait_name, sig)) = self.bound_method(param, &name.node) {
+            return self.call_signature(
+                &sig,
+                &format!("`{trait_name}.{}`", name.node),
+                Vec::new(),
+                args,
+                trailing,
+                span,
+            );
+        }
+        let diagnostic = match self.bounds.get(param) {
+            None => Diagnostic::error(
+                UNBOUNDED_PARAMETER,
+                format!("`{param}` has no bound, so it has no method `{}`", name.node),
+            )
+            .rule("A method call on a type parameter resolves through the parameter's bounds; an unbounded parameter's values can only be moved, not inspected.")
+            .help(format!(
+                "bound the parameter, as in `<{param}: SomeTrait>`, and declare `{}` in that trait",
+                name.node
+            )),
+            Some(bounds) => {
+                let names: Vec<String> = bounds.iter().map(|b| b.name.to_string()).collect();
+                Diagnostic::error(
+                    UNKNOWN_METHOD,
+                    format!(
+                        "no trait `{param}` is bounded by declares a method `{}`",
+                        name.node
+                    ),
+                )
+                .rule("A method call on a type parameter resolves through the parameter's bounds.")
+                .help(format!(
+                    "`{param}` is bounded by {}; declare `{}` in one of them, or add another bound",
+                    list(&names),
+                    name.node
+                ))
+            }
+        };
+        self.diagnostics.push(diagnostic.at(span));
+        self.check_args_freely(args, trailing);
+        Ty::Unknown
+    }
+
+    /// A method call on a `dyn Trait` value.
+    ///
+    /// Only the trait's `self`-taking methods are reachable: an associated
+    /// function has no receiver to dispatch on, so a trait object cannot
+    /// find an implementation for it.
+    fn dyn_method_call(
+        &mut self,
+        trait_name: &Rc<str>,
+        name: &Ident,
+        args: &[Arg],
+        trailing: Option<&Expr>,
+        span: Span,
+    ) -> Ty {
+        let sig = self
+            .traits
+            .get(&**trait_name)
+            .and_then(|methods| methods.get(&name.node))
+            .cloned();
+        let Some(sig) = sig else {
+            let known: Vec<String> = self
+                .traits
+                .get(&**trait_name)
+                .map(|methods| methods.keys().cloned().collect())
+                .unwrap_or_default();
+            self.diagnostics.push(
+                Diagnostic::error(
+                    UNKNOWN_METHOD,
+                    format!("`{trait_name}` has no method `{}`", name.node),
+                )
+                .at(span)
+                .rule("A call on a `dyn Trait` value reaches the trait's methods and nothing else: the concrete type is not known here.")
+                .help(if known.is_empty() {
+                    format!("`{trait_name}` declares no methods")
+                } else {
+                    format!("`{trait_name}` declares {}", list(&known))
+                }),
+            );
+            self.check_args_freely(args, trailing);
+            return Ty::Unknown;
+        };
+        if sig.receiver.is_none() {
+            self.diagnostics.push(
+                Diagnostic::error(
+                    DYN_ASSOCIATED,
+                    format!(
+                        "`{trait_name}.{}` takes no `self`, so it cannot be called through `dyn {trait_name}`",
+                        name.node
+                    ),
+                )
+                .at(span)
+                .rule("Only a trait method whose first parameter is `self` may be called through `dyn Trait`: an associated function has no receiver to dispatch on.")
+                .help(format!(
+                    "call it on a concrete type, as in `SomeType.{}(...)`, or give it a `self` parameter",
+                    name.node
+                )),
+            );
+            self.check_args_freely(args, trailing);
+            return Ty::Unknown;
+        }
+        // Conversion to `dyn Trait` produces a value, exactly as assignment
+        // and argument passing do, so a mutation made through the trait
+        // object could not be observed by whatever the value came from.
+        if self.mutating_trait_method(trait_name, &name.node) {
+            self.diagnostics.push(
+                Diagnostic::error(
+                    DYN_MUTATING,
+                    format!(
+                        "`{trait_name}.{}` takes `var self`, so it cannot be called through `dyn {trait_name}`",
+                        name.node
+                    ),
+                )
+                .at(span)
+                .rule("A concrete value becomes a `dyn Trait` value by conversion, and a conversion produces a value; a mutating receiver needs the caller's own place, which a converted value is not.")
+                .help(format!(
+                    "call `{}` on the concrete value before converting it, or declare the method with `self`",
+                    name.node
+                )),
+            );
+            self.check_args_freely(args, trailing);
+            return Ty::Unknown;
+        }
+        self.call_signature(
+            &sig,
+            &format!("`{trait_name}.{}`", name.node),
+            Vec::new(),
+            args,
+            trailing,
+            span,
+        )
+    }
+
     // ------------------------------------------------------------ methods
 
     fn method_call(
@@ -2920,6 +3515,14 @@ impl<'a> Checker<'a> {
                 );
                 self.check_args_freely(args, trailing);
                 return Ty::Unknown;
+            }
+            Ty::Param(param) => {
+                let param = param.clone();
+                return self.param_method_call(&param, name, args, trailing, span);
+            }
+            Ty::Dyn(trait_name) => {
+                let trait_name = trait_name.clone();
+                return self.dyn_method_call(&trait_name, name, args, trailing, span);
             }
             _ => {}
         }
@@ -3194,7 +3797,11 @@ fn unify(
     arg: &Ty,
     generics: &BTreeSet<Rc<str>>,
     subst: &mut BTreeMap<Rc<str>, Ty>,
+    view: &ConformanceView<'_>,
 ) -> bool {
+    if coerces(arg, param, view) {
+        return true;
+    }
     if let Ty::Param(name) = param {
         if generics.contains(name) {
             return match subst.get(name) {
@@ -3216,11 +3823,11 @@ fn unify(
         | (Ty::Vector(a), Ty::Vector(b))
         | (Ty::Set(a), Ty::Set(b))
         | (Ty::Option(a), Ty::Option(b))
-        | (Ty::Task(a), Ty::Task(b)) => unify(a, b, generics, subst),
+        | (Ty::Task(a), Ty::Task(b)) => unify(a, b, generics, subst, view),
         (Ty::Map(ak, av), Ty::Map(bk, bv))
         | (Ty::MapEntry(ak, av), Ty::MapEntry(bk, bv))
         | (Ty::Result(ak, av), Ty::Result(bk, bv)) => {
-            unify(ak, bk, generics, subst) && unify(av, bv, generics, subst)
+            unify(ak, bk, generics, subst, view) && unify(av, bv, generics, subst, view)
         }
         (Ty::Struct(a, aargs), Ty::Struct(b, bargs)) | (Ty::Enum(a, aargs), Ty::Enum(b, bargs)) => {
             a == b
@@ -3228,7 +3835,7 @@ fn unify(
                 && aargs
                     .iter()
                     .zip(bargs)
-                    .all(|(a, b)| unify(a, b, generics, subst))
+                    .all(|(a, b)| unify(a, b, generics, subst, view))
         }
         (Ty::Fn(a), Ty::Fn(b)) => {
             a.is_async == b.is_async
@@ -3236,11 +3843,146 @@ fn unify(
                 && a.params
                     .iter()
                     .zip(&b.params)
-                    .all(|(a, b)| unify(a, b, generics, subst))
-                && unify(&a.ret, &b.ret, generics, subst)
+                    .all(|(a, b)| unify(a, b, generics, subst, view))
+                && unify(&a.ret, &b.ret, generics, subst, view)
         }
         (param, arg) => param.matches(arg),
     }
+}
+
+/// Everything needed to answer "does this type conform to this trait?".
+///
+/// Conformance is explicit, so `declared` is the complete set of `(trait,
+/// type)` pairs the module has an `impl Trait for Type` block for. `bounds`
+/// adds the type parameters currently in scope, which conform to whatever
+/// they are bounded by.
+struct ConformanceView<'c> {
+    declared: &'c BTreeSet<(String, String)>,
+    bounds: &'c BTreeMap<Rc<str>, Vec<TraitBound>>,
+}
+
+/// Whether `ty` conforms to the trait named `trait_name`.
+///
+/// `Unknown` and `Never` conform to everything, for the same reason they
+/// match everything: the checker has abstained and must not turn its own
+/// silence into an error.
+fn conforms(ty: &Ty, trait_name: &str, view: &ConformanceView<'_>) -> bool {
+    match ty {
+        Ty::Unknown | Ty::Never => true,
+        Ty::Struct(name, _) | Ty::Enum(name, _) => view
+            .declared
+            .contains(&(trait_name.to_string(), name.to_string())),
+        // A type parameter conforms to exactly the traits it is bounded by,
+        // which is what lets one bounded function call another.
+        Ty::Param(name) => view
+            .bounds
+            .get(name)
+            .is_some_and(|bounds| bounds.iter().any(|b| &*b.name == trait_name)),
+        // A `dyn Trait` value is not a type parameter and never stands in for
+        // one, so it satisfies no bound — not even its own trait's.
+        _ => false,
+    }
+}
+
+/// Whether a value of type `found` may be used where `expected` is written.
+///
+/// This is the language's only implicit conversion, and it is deliberately
+/// narrow: a concrete value becomes a `dyn Trait` value when it conforms to
+/// that trait, and nothing else converts. In particular the conversion does
+/// not run in reverse (a `dyn Trait` is not a concrete type), does not chain
+/// through another trait, and does not reach inside a generic argument —
+/// `Array<Booking>` is not an `Array<dyn Display>`, because `Array` is
+/// invariant like every other generic type. Writing `[booking, receipt]`
+/// where an `Array<dyn Display>` is expected does work, because each element
+/// is checked against `dyn Display` on its own.
+fn coerces(found: &Ty, expected: &Ty, view: &ConformanceView<'_>) -> bool {
+    let Ty::Dyn(trait_name) = expected else {
+        return false;
+    };
+    !matches!(found, Ty::Dyn(_)) && conforms(found, trait_name, view)
+}
+
+/// A name written after `dyn` or after `:` in a bound that names no trait.
+fn unknown_trait(name: &str, span: Span) -> Diagnostic {
+    Diagnostic::error(UNKNOWN_TRAIT, format!("`{name}` is not a trait"))
+        .at(span)
+        .rule("`dyn` and a type parameter's bound both name a trait the module declares; there are no module-to-module imports yet.")
+        .help(format!(
+            "declare `trait {name} {{ ... }}` in this module, or name a trait that exists"
+        ))
+}
+
+/// How a conformance's method differs from the signature its trait declares,
+/// or `None` when the two agree.
+fn signature_difference(declared: &FnSig, found: &FnSig) -> Option<String> {
+    if declared.receiver.is_some() != found.receiver.is_some() {
+        return Some(if declared.receiver.is_some() {
+            "it takes no `self`".to_string()
+        } else {
+            "it takes a `self` the trait does not declare".to_string()
+        });
+    }
+    if declared.is_async != found.is_async {
+        return Some(if declared.is_async {
+            "it is not `async`".to_string()
+        } else {
+            "it is `async`".to_string()
+        });
+    }
+    if declared.params.len() != found.params.len() {
+        return Some(format!(
+            "it takes {} parameter(s), not {}",
+            found.params.len(),
+            declared.params.len()
+        ));
+    }
+    for (want, got) in declared.params.iter().zip(&found.params) {
+        if want.name != got.name {
+            return Some(format!(
+                "its parameter `{}` is named `{}` in the trait",
+                got.name, want.name
+            ));
+        }
+        if !want.ty.matches(&got.ty) {
+            return Some(format!(
+                "its parameter `{}` is `{}`, not `{}`",
+                got.name, got.ty, want.ty
+            ));
+        }
+    }
+    if !declared.ret.matches(&found.ret) {
+        return Some(format!(
+            "it returns `{}`, not `{}`",
+            found.ret, declared.ret
+        ));
+    }
+    None
+}
+
+/// A trait method's signature, written the way it would be declared.
+fn trait_signature(sig: &FnSig, name: &str) -> String {
+    let mut out = String::new();
+    if sig.is_async {
+        out.push_str("async ");
+    }
+    out.push_str("fn ");
+    out.push_str(name);
+    out.push('(');
+    let mut entries: Vec<String> = Vec::new();
+    if sig.receiver.is_some() {
+        entries.push("self".to_string());
+    }
+    entries.extend(
+        sig.params
+            .iter()
+            .map(|param| format!("{}: {}", param.name, param.ty)),
+    );
+    out.push_str(&entries.join(", "));
+    out.push(')');
+    if sig.ret != Ty::Unit {
+        out.push_str(&format!(" -> {}", sig.ret));
+    }
+    out
 }
 
 fn substitution(generics: &[Rc<str>], args: &[Ty]) -> BTreeMap<Rc<str>, Ty> {
@@ -3703,7 +4445,7 @@ export fn main(args: Array<String>) -> Result<Unit, Error> {
         let error = rejects_body("  let n: Int = \"one\"");
         assert_eq!(error.code, MISMATCH);
         assert_eq!(error.message, "expected `Int`, found `String`");
-        assert_eq!(error.rule.unwrap(), "Types are nominal and there are no implicit conversions: a value must already have the type its place asks for.");
+        assert_eq!(error.rule.unwrap(), "Types are nominal and the only implicit conversion is to `dyn Trait`: a value must otherwise already have the type its place asks for.");
         assert_eq!(
             error.help.unwrap(),
             "parse the `String` with `Int.parse(text)`, which returns a `Result<Int, Error>`"
@@ -4419,6 +5161,426 @@ fn run() -> Status {
         assert_eq!(error.code, NOT_CALLABLE);
         assert_eq!(error.message, "`Status` is an enum, not a function");
         assert_eq!(error.help.unwrap(), "name a case, such as `Status.Pending`");
+    }
+
+    // -------------------------------------------------------- traits
+
+    /// The trait, two conforming types, and one that does not conform, which
+    /// every trait test below builds on.
+    const TRAITS: &str = "\
+/// Renders itself.
+trait Display {
+  /// The full form.
+  fn describe(self) -> String
+
+  /// A short form, defaulting to the full one.
+  fn label(self) -> String { self.describe() }
+}
+
+/// A booking.
+struct Booking(id: Int)
+
+/// A receipt.
+struct Receipt(total: Int)
+
+/// Conforms to nothing.
+struct Ticket(seat: Int)
+
+impl Display for Booking {
+  fn describe(self) -> String { \"booking\" }
+  fn label(self) -> String { \"#\" }
+}
+
+impl Display for Receipt {
+  fn describe(self) -> String { \"receipt\" }
+}
+";
+
+    fn with_traits(source: &str) -> String {
+        format!("{TRAITS}\n{source}")
+    }
+
+    #[track_caller]
+    fn accepts_with_traits(source: &str) {
+        accepts(&with_traits(source));
+    }
+
+    #[track_caller]
+    fn rejects_with_traits(source: &str) -> Diagnostic {
+        rejects(&with_traits(source))
+    }
+
+    #[test]
+    fn a_bound_makes_the_trait_s_methods_callable_on_a_type_parameter() {
+        accepts_with_traits(
+            "fn render<T: Display>(value: T) -> String {\n  \"{value.label()}: {value.describe()}\"\n}\n\nfn run() -> String {\n  render(Booking(id: 1))\n}\n",
+        );
+    }
+
+    #[test]
+    fn rejects_a_type_argument_that_does_not_conform_to_the_bound() {
+        let error = rejects_with_traits(
+            "fn render<T: Display>(value: T) -> String {\n  value.describe()\n}\n\nfn run() -> String {\n  render(Ticket(seat: 1))\n}\n",
+        );
+        assert_eq!(error.code, UNSATISFIED_BOUND);
+        assert_eq!(error.message, "`Ticket` does not conform to `Display`");
+        assert_eq!(error.labels[0].message, "`render` requires `T: Display`");
+        assert_eq!(
+            error.help.as_deref(),
+            Some("write `impl Display for Ticket { ... }`")
+        );
+    }
+
+    #[test]
+    fn several_bounds_are_all_checked_and_all_searched_for_a_method() {
+        let source = "\
+/// Names itself.
+trait Named {
+  /// The name.
+  fn name(self) -> String
+}
+
+/// Weighs itself.
+trait Weighed {
+  /// The weight.
+  fn weight(self) -> Int
+}
+
+/// A crate.
+struct Crate(label: String, kilos: Int)
+
+/// A pebble, which is named but not weighed.
+struct Pebble(label: String)
+
+impl Named for Crate {
+  fn name(self) -> String { self.label }
+}
+
+impl Weighed for Crate {
+  fn weight(self) -> Int { self.kilos }
+}
+
+impl Named for Pebble {
+  fn name(self) -> String { self.label }
+}
+
+fn tag<T: Named + Weighed>(item: T) -> String {
+  \"{item.name()}({item.weight()})\"
+}
+
+fn ok() -> String {
+  tag(Crate(label: \"a\", kilos: 3))
+}
+";
+        accepts(source);
+        let error = rejects(&format!(
+            "{source}\nfn bad() -> String {{\n  tag(Pebble(label: \"b\"))\n}}\n"
+        ));
+        assert_eq!(error.code, UNSATISFIED_BOUND);
+        assert_eq!(error.message, "`Pebble` does not conform to `Weighed`");
+    }
+
+    #[test]
+    fn rejects_a_method_call_on_an_unbounded_type_parameter() {
+        let error =
+            rejects_with_traits("fn render<T>(value: T) -> String {\n  value.describe()\n}\n");
+        assert_eq!(error.code, UNBOUNDED_PARAMETER);
+        assert_eq!(
+            error.message,
+            "`T` has no bound, so it has no method `describe`"
+        );
+    }
+
+    #[test]
+    fn rejects_a_method_no_bound_of_the_parameter_declares() {
+        let error =
+            rejects_with_traits("fn render<T: Display>(value: T) -> Int {\n  value.total()\n}\n");
+        assert_eq!(error.code, UNKNOWN_METHOD);
+        assert_eq!(
+            error.message,
+            "no trait `T` is bounded by declares a method `total`"
+        );
+    }
+
+    #[test]
+    fn one_bounded_function_may_call_another() {
+        accepts_with_traits(
+            "fn render<T: Display>(value: T) -> String {\n  value.describe()\n}\n\nfn shout<U: Display>(value: U) -> String {\n  render(value)\n}\n",
+        );
+    }
+
+    #[test]
+    fn a_conforming_value_is_accepted_where_dyn_is_expected() {
+        accepts_with_traits(
+            "fn show(value: dyn Display) -> String {\n  value.describe()\n}\n\nfn run() -> String {\n  show(Booking(id: 1))\n}\n",
+        );
+    }
+
+    #[test]
+    fn rejects_a_value_that_does_not_conform_where_dyn_is_expected() {
+        let error = rejects_with_traits(
+            "fn show(value: dyn Display) -> String {\n  value.describe()\n}\n\nfn run() -> String {\n  show(Ticket(seat: 1))\n}\n",
+        );
+        assert_eq!(error.code, MISMATCH);
+        assert_eq!(
+            error.message,
+            "`Ticket` does not conform to `Display`, so it is not a `dyn Display`"
+        );
+    }
+
+    #[test]
+    fn an_array_of_dyn_mixes_conforming_types_element_by_element() {
+        // The conversion applies to each element on its own; the array type
+        // itself is invariant, so `Array<Booking>` is still not an
+        // `Array<dyn Display>`.
+        accepts_with_traits(
+            "fn run() -> Array<dyn Display> {\n  [Booking(id: 1), Receipt(total: 2)]\n}\n",
+        );
+        let error = rejects_with_traits(
+            "fn run(bookings: Array<Booking>) -> Array<dyn Display> {\n  bookings\n}\n",
+        );
+        assert_eq!(error.code, MISMATCH);
+        assert_eq!(
+            error.message,
+            "expected `Array<dyn Display>`, found `Array<Booking>`"
+        );
+    }
+
+    #[test]
+    fn dyn_is_not_a_type_parameter_and_satisfies_no_bound() {
+        let error = rejects_with_traits(
+            "fn render<T: Display>(value: T) -> String {\n  value.describe()\n}\n\nfn run(value: dyn Display) -> String {\n  render(value)\n}\n",
+        );
+        assert_eq!(error.code, UNSATISFIED_BOUND);
+        assert_eq!(
+            error.message,
+            "`dyn Display` cannot be used as a type argument"
+        );
+    }
+
+    #[test]
+    fn a_dyn_value_does_not_convert_back_to_its_concrete_type() {
+        let error = rejects_with_traits("fn run(value: dyn Display) -> Booking {\n  value\n}\n");
+        assert_eq!(error.code, MISMATCH);
+        assert_eq!(error.message, "expected `Booking`, found `dyn Display`");
+    }
+
+    #[test]
+    fn only_the_trait_s_methods_are_reachable_through_dyn() {
+        let source = format!(
+            "{TRAITS}\nimpl Booking {{\n  /// The identifier.\n  fn id(self) -> Int {{ self.id }}\n}}\n\nfn run(value: dyn Display) -> Int {{\n  value.id()\n}}\n"
+        );
+        let error = rejects(&source);
+        assert_eq!(error.code, UNKNOWN_METHOD);
+        assert_eq!(error.message, "`Display` has no method `id`");
+        assert_eq!(
+            error.help.as_deref(),
+            Some("`Display` declares `describe`, `label`")
+        );
+    }
+
+    #[test]
+    fn an_associated_function_is_not_callable_through_dyn() {
+        let source = "\
+/// Renders itself.
+trait Display {
+  /// The full form.
+  fn describe(self) -> String
+
+  /// Builds one.
+  fn blank() -> Int
+}
+
+/// A booking.
+struct Booking(id: Int)
+
+impl Display for Booking {
+  fn describe(self) -> String { \"booking\" }
+  fn blank() -> Int { 0 }
+}
+
+fn run(value: dyn Display) -> Int {
+  value.blank()
+}
+";
+        let error = rejects(source);
+        assert_eq!(error.code, DYN_ASSOCIATED);
+        assert_eq!(
+            error.message,
+            "`Display.blank` takes no `self`, so it cannot be called through `dyn Display`"
+        );
+    }
+
+    #[test]
+    fn a_mutating_method_is_not_callable_through_dyn() {
+        let source = "\
+/// Counts.
+trait Bump {
+  /// Adds one.
+  fn bump(var self)
+}
+
+/// A counter.
+struct Counter(hits: Int)
+
+impl Bump for Counter {
+  fn bump(var self) { self.hits += 1 }
+}
+
+fn run(var value: dyn Bump) {
+  value.bump()
+}
+";
+        let error = rejects(source);
+        assert_eq!(error.code, DYN_MUTATING);
+        assert_eq!(
+            error.message,
+            "`Bump.bump` takes `var self`, so it cannot be called through `dyn Bump`"
+        );
+    }
+
+    #[test]
+    fn a_mutating_method_is_callable_through_a_bound() {
+        // Through a bound the receiver is still the caller's own place, so
+        // the restriction that `dyn` imposes does not apply.
+        accepts(
+            "\
+/// Counts.
+trait Bump {
+  /// Adds one.
+  fn bump(var self)
+}
+
+/// A counter.
+struct Counter(hits: Int)
+
+impl Bump for Counter {
+  fn bump(var self) { self.hits += 1 }
+}
+
+fn run<T: Bump>(var value: T) {
+  value.bump()
+}
+",
+        );
+    }
+
+    #[test]
+    fn a_trait_method_call_is_checked_against_the_trait_s_signature() {
+        let error = rejects_with_traits(
+            "fn render<T: Display>(value: T) -> String {\n  value.describe(1)\n}\n",
+        );
+        assert_eq!(error.code, ARITY);
+    }
+
+    #[test]
+    fn rejects_a_conformance_whose_method_has_the_wrong_signature() {
+        let source = "\
+/// Renders itself.
+trait Display {
+  /// The full form.
+  fn describe(self) -> String
+}
+
+/// A booking.
+struct Booking(id: Int)
+
+impl Display for Booking {
+  fn describe(self) -> Int { 1 }
+}
+";
+        let error = rejects(source);
+        assert_eq!(error.code, CONFORMANCE_SIGNATURE);
+        assert_eq!(
+            error.message,
+            "`Booking.describe` does not match the signature `Display` declares: it returns `Int`, not `String`"
+        );
+        assert_eq!(
+            error.help.as_deref(),
+            Some("write `fn describe(self) -> String`")
+        );
+    }
+
+    #[test]
+    fn a_default_body_sees_its_trait_and_nothing_of_the_conforming_type() {
+        // Checked once against `Self: Summary`, not once per conformance, so
+        // a default body cannot reach a conforming type's fields even when
+        // every implementor happens to have one by that name.
+        let source = "\
+/// Renders itself.
+trait Summary {
+  /// The tag.
+  fn tag(self) -> Int
+
+  /// A line, which reaches for a field no trait declares.
+  fn line(self) -> String { \"{self.id}\" }
+}
+
+/// A booking.
+struct Booking(id: Int)
+
+impl Summary for Booking {
+  fn tag(self) -> Int { self.id }
+}
+";
+        let error = rejects(source);
+        assert_eq!(error.code, UNKNOWN_FIELD);
+        assert_eq!(error.message, "`Self` has no field `id`");
+    }
+
+    #[test]
+    fn a_default_body_may_call_the_trait_s_own_methods() {
+        accepts_with_traits("fn run(value: Booking) -> String {\n  value.label()\n}\n");
+    }
+
+    #[test]
+    fn a_default_body_is_reported_once_however_many_types_conform() {
+        let source = "\
+/// Renders itself.
+trait Summary {
+  /// The tag.
+  fn tag(self) -> Int
+
+  /// A line whose body does not type-check.
+  fn line(self) -> String { self.tag() }
+}
+
+/// A booking.
+struct Booking(id: Int)
+
+/// A receipt.
+struct Receipt(cents: Int)
+
+impl Summary for Booking {
+  fn tag(self) -> Int { self.id }
+}
+
+impl Summary for Receipt {
+  fn tag(self) -> Int { self.cents }
+}
+";
+        let error = rejects(source);
+        assert_eq!(error.code, MISMATCH);
+        assert_eq!(error.message, "expected `String`, found `Int`");
+    }
+
+    #[test]
+    fn rejects_a_dyn_or_a_bound_that_names_no_trait() {
+        let error = rejects("fn run(value: dyn Missing) {\n}\n");
+        assert_eq!(error.code, UNKNOWN_TRAIT);
+        let error = rejects("fn run<T: Missing>(value: T) {\n}\n");
+        assert_eq!(error.code, UNKNOWN_TRAIT);
+    }
+
+    #[test]
+    fn rejects_a_bound_where_the_mvp_never_checks_one() {
+        let source = with_traits("struct Box<T: Display>(value: T)\n");
+        let error = rejects(&source);
+        assert_eq!(error.code, UNSUPPORTED_BOUND);
+        assert_eq!(
+            error.message,
+            "a bound on a struct's type parameter is not checked in the MVP"
+        );
     }
 
     // ------------------------------------------------------ generics

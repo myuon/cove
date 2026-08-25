@@ -33,9 +33,9 @@
 use cove_diag::Span;
 
 use crate::ast::{
-    Arg, BinaryOp, Block, EnumCase, EnumDecl, Expr, ExprKind, Field, FnDecl, ImplBlock, Item,
-    ItemKind, MatchArm, Param, Pattern, PatternKind, Receiver, SourceUnit, Stmt, StmtKind, StrPart,
-    StructDecl, Type, TypeAlias, TypeKind, UnaryOp, Use,
+    Arg, BinaryOp, Block, EnumCase, EnumDecl, Expr, ExprKind, Field, FnDecl, GenericParam,
+    ImplBlock, Item, ItemKind, MatchArm, Param, Pattern, PatternKind, Receiver, SourceUnit, Stmt,
+    StmtKind, StrPart, StructDecl, TraitDecl, TraitMethod, Type, TypeAlias, TypeKind, UnaryOp, Use,
 };
 
 /// The column the formatter keeps lines within when a legal break exists.
@@ -638,6 +638,7 @@ impl<'a> Formatter<'a> {
             ItemKind::Fn(decl) => self.fn_decl(decl, indent),
             ItemKind::Struct(decl) => self.struct_decl(decl, indent),
             ItemKind::Enum(decl) => self.enum_decl(decl, indent),
+            ItemKind::Trait(decl) => self.trait_decl(decl, indent),
             ItemKind::Impl(block) => self.impl_block(block, indent),
             ItemKind::TypeAlias(alias) => self.type_alias(alias, indent),
         }
@@ -658,11 +659,12 @@ impl<'a> Formatter<'a> {
         self.out.pending_blank = false;
     }
 
-    fn generics(&mut self, generics: &[crate::ast::Ident]) {
+    /// `<T, U: Display + Ordered>`, or nothing.
+    fn generics(&mut self, generics: &[GenericParam]) {
         if generics.is_empty() {
             return;
         }
-        let names: Vec<&str> = generics.iter().map(|g| g.node.as_str()).collect();
+        let names: Vec<String> = generics.iter().map(GenericParam::to_string).collect();
         self.out.write("<");
         self.out.write(&names.join(", "));
         self.out.write(">");
@@ -824,8 +826,64 @@ impl<'a> Formatter<'a> {
         }
     }
 
+    /// `trait Name { ... }`, one method per line.
+    fn trait_decl(&mut self, decl: &TraitDecl, indent: usize) {
+        self.out.write("trait ");
+        self.out.write(&decl.name.node);
+        self.out.write(" ");
+        if decl.methods.is_empty() && !self.holds_comment(decl.span) {
+            self.out.write("{ }");
+            return;
+        }
+        self.out.write("{");
+        let inner = indent + INDENT;
+        for (i, method) in decl.methods.iter().enumerate() {
+            if i > 0 {
+                self.out.pending_blank = true;
+            }
+            self.lead(method.span.start as usize, inner, i > 0);
+            self.trait_method(method, inner);
+            self.advance(method.span.end);
+            self.trail(method.span.end);
+        }
+        self.lead_close(close_brace(decl.span.end), inner);
+        self.out.start_line(indent);
+        self.out.write("}");
+    }
+
+    /// One trait method: a signature, plus a default body when it has one.
+    fn trait_method(&mut self, method: &TraitMethod, indent: usize) {
+        if let Some(doc) = &method.doc {
+            self.doc_comment(doc, indent);
+        }
+        self.out.start_line(indent);
+        if method.is_async {
+            self.out.write("async ");
+        }
+        self.out.write("fn ");
+        self.out.write(&method.name.node);
+        self.param_list(
+            method.receiver,
+            &method.params,
+            indent,
+            method.return_type.as_ref(),
+        );
+        if let Some(return_type) = &method.return_type {
+            self.out.write(" -> ");
+            self.type_ref(return_type, indent);
+        }
+        if let Some(default) = &method.default {
+            self.out.write(" ");
+            self.block(default, indent);
+        }
+    }
+
     fn impl_block(&mut self, block: &ImplBlock, indent: usize) {
         self.out.write("impl ");
+        if let Some(trait_name) = &block.trait_name {
+            self.out.write(&trait_name.node);
+            self.out.write(" for ");
+        }
         self.out.write(&block.type_name.node);
         self.generics(&block.generics);
         self.out.write(" ");
@@ -2097,6 +2155,100 @@ impl Counter {
   /// Bumps.
   fn bump(var self, by: Int = 2 * 21) -> Int {
     self.hits
+  }
+}
+",
+        );
+    }
+
+    #[test]
+    fn formats_a_trait_with_docs_defaults_and_an_associated_function() {
+        formatted(
+            "
+/// A value that can render itself for a human.
+export trait Display {
+  /// Returns the human-readable form.
+  fn describe(self) -> String
+
+  /// Returns a short label.
+  fn label(self) -> String {
+    self.describe()
+  }
+
+  /// Builds one from nothing.
+  fn empty() -> Int
+}
+",
+        );
+    }
+
+    #[test]
+    fn writes_an_empty_trait_on_one_line() {
+        reformats(
+            "
+trait Marker {
+}
+",
+            "
+trait Marker { }
+",
+        );
+    }
+
+    #[test]
+    fn formats_a_conformance_and_keeps_it_apart_from_an_inherent_impl() {
+        formatted(
+            "
+impl Display for Booking {
+  fn describe(self) -> String {
+    \"booking\"
+  }
+}
+
+impl Booking {
+  /// The identifier.
+  fn id(self) -> Int {
+    1
+  }
+}
+",
+        );
+    }
+
+    #[test]
+    fn formats_bounds_on_type_parameters() {
+        formatted(
+            "
+fn render<T: Display, U, V: Display + Ordered>(value: T, other: V) -> String {
+  value.describe()
+}
+",
+        );
+    }
+
+    #[test]
+    fn formats_dyn_types() {
+        formatted(
+            "
+fn renderAll(values: Array<dyn Display>, one: dyn Display) -> dyn Display {
+  one
+}
+",
+        );
+    }
+
+    #[test]
+    fn keeps_comments_inside_a_trait() {
+        formatted(
+            "
+trait Display {
+  // Required.
+  fn describe(self) -> String
+
+  /// Defaulted.
+  fn label(self) -> String {
+    // Falls back.
+    self.describe()
   }
 }
 ",

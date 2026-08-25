@@ -15,7 +15,9 @@ use cove_runtime::host::{Console, Documents, Env, Grants, HostRegistry};
 use cove_runtime::interp::Interpreter;
 use cove_runtime::{Budget, Cancellation, JsonlSink, Limits, NullSink, TraceEvent, TraceSink};
 use cove_sema::package::Package;
-use cove_sema::resolve::{AliasEntry, EnumEntry, FnEntry, Program, ResolvedModule, StructEntry};
+use cove_sema::resolve::{
+    AliasEntry, EnumEntry, FnEntry, Program, ResolvedModule, StructEntry, TraitEntry,
+};
 use cove_syntax::ast::ItemKind;
 
 const USAGE: &str = "\
@@ -408,9 +410,17 @@ fn module_blocks(
                         }
                     }
                 }
+                ItemKind::Trait(decl) => {
+                    if let Some(entry) = resolved.traits.get(&decl.name.node) {
+                        if entry.exported {
+                            blocks.push(render_trait_block(sources, root, entry, INDENT));
+                        }
+                    }
+                }
                 ItemKind::Impl(_) => {
-                    // Exported methods are rendered under their struct or
-                    // enum's own block, wherever it appears.
+                    // Exported methods and the conformances an `impl Trait
+                    // for Type` block declares are rendered under their
+                    // struct or enum's own block, wherever it appears.
                 }
             }
         }
@@ -459,12 +469,7 @@ fn fn_signature(entry: &FnEntry) -> String {
     }
     sig.push_str("fn ");
     sig.push_str(&decl.name.node);
-    if !decl.generics.is_empty() {
-        let generics: Vec<&str> = decl.generics.iter().map(|g| g.node.as_str()).collect();
-        sig.push('<');
-        sig.push_str(&generics.join(", "));
-        sig.push('>');
-    }
+    sig.push_str(&generics_suffix(&decl.generics));
     sig.push('(');
     let mut params: Vec<String> = Vec::new();
     if let Some(receiver) = &decl.receiver {
@@ -540,6 +545,7 @@ fn render_struct_block(
             indent = indent + 2
         ));
     }
+    out.push_str(&render_conformances(name, resolved, indent + 2));
     out.push_str(&render_methods(sources, root, name, resolved, indent + 2));
     out
 }
@@ -590,6 +596,71 @@ fn render_enum_block(
     out
 }
 
+/// Renders a trait's doc, header, definition location, and the signature of
+/// each method it declares.
+///
+/// A trait's implementors are part of the derived interface too, so each
+/// type's own block names the traits it conforms to.
+fn render_trait_block(
+    sources: &SourceMap,
+    root: &Path,
+    entry: &TraitEntry,
+    indent: usize,
+) -> String {
+    let mut out = String::new();
+    doc_lines(&entry.doc, indent, &mut out);
+    out.push_str(&format!(
+        "{:indent$}export trait {}\n",
+        "", entry.decl.name.node
+    ));
+    out.push_str(&location_line(
+        sources,
+        root,
+        entry.decl.name.span,
+        indent + 2,
+    ));
+    for method in &entry.decl.methods {
+        let mut params: Vec<String> = Vec::new();
+        if let Some(receiver) = method.receiver {
+            params.push(if receiver.is_var { "var self" } else { "self" }.to_string());
+        }
+        params.extend(method.params.iter().map(ToString::to_string));
+        let ret = match &method.return_type {
+            Some(ty) => format!(" -> {ty}"),
+            None => String::new(),
+        };
+        let default = if method.default.is_some() {
+            " (default)"
+        } else {
+            ""
+        };
+        out.push_str(&format!(
+            "{:indent$}{}fn {}({}){ret}{default}\n",
+            "",
+            if method.is_async { "async " } else { "" },
+            method.name.node,
+            params.join(", "),
+            indent = indent + 2
+        ));
+    }
+    out
+}
+
+/// Every trait the type named `type_name` conforms to, in trait-name order.
+fn render_conformances(type_name: &str, resolved: &ResolvedModule, indent: usize) -> String {
+    let mut out = String::new();
+    for (trait_name, owner) in resolved.conformances.keys() {
+        if owner == type_name {
+            out.push_str(&format!(
+                "{:indent$}conforms to {trait_name}\n",
+                "",
+                indent = indent
+            ));
+        }
+    }
+    out
+}
+
 /// Renders a type alias's doc, header, and definition location.
 fn render_alias_block(
     sources: &SourceMap,
@@ -633,12 +704,16 @@ fn render_methods(
     out
 }
 
-/// `<T, U>`, or an empty string when there are no generic parameters.
-fn generics_suffix(generics: &[cove_syntax::ast::Ident]) -> String {
+/// `<T, U: Display>`, or an empty string when there are no generic
+/// parameters.
+fn generics_suffix(generics: &[cove_syntax::ast::GenericParam]) -> String {
     if generics.is_empty() {
         return String::new();
     }
-    let names: Vec<&str> = generics.iter().map(|g| g.node.as_str()).collect();
+    let names: Vec<String> = generics
+        .iter()
+        .map(cove_syntax::ast::GenericParam::to_string)
+        .collect();
     format!("<{}>", names.join(", "))
 }
 

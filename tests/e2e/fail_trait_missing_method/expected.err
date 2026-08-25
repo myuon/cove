@@ -1,0 +1,12 @@
+error[cove::resolve::missing_trait_method]: `Booking` does not conform to `Summary`: missing `summarize`
+  --> <e2e>/fail_trait_missing_method/main/main.cove:20:6
+   |
+20 | impl Summary for Booking {
+   |      ^^^^^^^^^^^^^^^^^^^
+ --> <e2e>/fail_trait_missing_method/main/main.cove:4:14
+  |
+4 | export trait Summary {
+  |              ^^^^^^^ `Summary` declares `summarize`
+  rule: A conformance supplies every method its trait declares without a default body.
+  help: add `fn summarize(...)` to this block
+1 error(s)

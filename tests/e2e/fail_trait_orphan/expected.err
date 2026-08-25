@@ -1,0 +1,8 @@
+error[cove::resolve::orphan_conformance]: module `main` declares neither `Summary` nor `String`, so it cannot make one conform to the other
+  --> <e2e>/fail_trait_orphan/main/main.cove:10:6
+   |
+10 | impl Summary for String {
+   |      ^^^^^^^^^^^^^^^^^^
+  rule: An `impl Trait for Type` is allowed only in the module that declares the trait or the module that declares the type, so that a conformance cannot appear from a module neither party knows about.
+  help: move this block to the module that declares `Summary` or the one that declares `String`
+1 error(s)

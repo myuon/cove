@@ -1,7 +1,21 @@
 //! Name resolution across the units of a module.
 //!
 //! Resolution produces the flat program the runtime executes and the derived
-//! facts (`export` visibility, required capabilities) that tooling reports.
+//! facts (`export` visibility, required capabilities, trait conformances)
+//! that tooling reports.
+//!
+//! # Conformances
+//!
+//! An `impl Trait for Type` block is checked here and then flattened: every
+//! method it supplies, and every method the trait defaults that it does not
+//! override, is recorded as an ordinary method of the type. Dispatch never
+//! has to ask where a method came from, and a trait method that collides with
+//! an inherent method of the same name is caught by the same duplicate check
+//! that catches two inherent methods.
+//!
+//! The conformance itself is recorded separately, because the set of a
+//! trait's implementors is a fact the type checker needs (to check a bound)
+//! and tooling needs (to show a type's interface).
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::rc::Rc;
@@ -9,7 +23,7 @@ use std::rc::Rc;
 use cove_diag::{Diagnostic, Span};
 use cove_syntax::ast::{
     Block, EnumDecl, Expr, ExprKind, FnDecl, Item, ItemKind, MatchArm, Pattern, PatternKind, Stmt,
-    StmtKind, StrPart, StructDecl, TypeAlias,
+    StmtKind, StrPart, StructDecl, TraitDecl, TraitMethod, TypeAlias,
 };
 
 use crate::capability::Capability;
@@ -23,6 +37,13 @@ pub struct FnEntry {
     pub doc: Option<String>,
     /// The type this function is a method of, when it came from an `impl`.
     pub receiver_type: Option<String>,
+    /// The trait whose default body this method runs, when the conformance
+    /// did not supply one of its own.
+    ///
+    /// Such a method's body belongs to the trait, not to this type, so it is
+    /// checked once where the trait declares it rather than once per
+    /// conformance.
+    pub from_trait_default: Option<String>,
     /// Capabilities used directly in this function's body.
     pub direct_capabilities: BTreeSet<Capability>,
     /// Capabilities this function requires, including those reached through
@@ -52,6 +73,38 @@ pub struct EnumEntry {
     pub doc: Option<String>,
 }
 
+/// A trait a module declares.
+#[derive(Debug)]
+pub struct TraitEntry {
+    pub decl: Rc<TraitDecl>,
+    pub exported: bool,
+    pub doc: Option<String>,
+}
+
+impl TraitEntry {
+    /// The method of this trait named `name`, if it declares one.
+    pub fn method(&self, name: &str) -> Option<&TraitMethod> {
+        self.decl.methods.iter().find(|m| m.name.node == name)
+    }
+}
+
+/// One `impl Trait for Type` block: the fact that `type_name` conforms to
+/// `trait_name`, and how.
+///
+/// Conformance is explicit, so this is the complete set of implementors a
+/// trait has, which is what makes a bound checkable and a `dyn Trait` value's
+/// implementation findable.
+#[derive(Debug)]
+pub struct Conformance {
+    pub trait_name: String,
+    pub type_name: String,
+    /// Every method the conformance supplies, whether written in the block or
+    /// inherited from the trait's default body.
+    pub methods: BTreeSet<String>,
+    /// The `impl Trait for Type` header, for a diagnostic to point at.
+    pub span: Span,
+}
+
 #[derive(Debug)]
 pub struct AliasEntry {
     pub decl: Rc<TypeAlias>,
@@ -69,6 +122,9 @@ pub struct ResolvedModule {
     pub methods: BTreeMap<(String, String), FnEntry>,
     pub structs: BTreeMap<String, StructEntry>,
     pub enums: BTreeMap<String, EnumEntry>,
+    pub traits: BTreeMap<String, TraitEntry>,
+    /// Every declared conformance, keyed by `(trait name, type name)`.
+    pub conformances: BTreeMap<(String, String), Conformance>,
     pub aliases: BTreeMap<String, AliasEntry>,
     /// Host modules named by `use`, such as `console` from `use console.println`.
     pub host_uses: BTreeSet<String>,
@@ -187,6 +243,7 @@ fn resolve_module(
     let mut struct_spans: BTreeMap<String, Span> = BTreeMap::new();
     let mut enum_spans: BTreeMap<String, Span> = BTreeMap::new();
     let mut alias_spans: BTreeMap<String, Span> = BTreeMap::new();
+    let mut trait_spans: BTreeMap<String, Span> = BTreeMap::new();
     let mut pending_impls: Vec<(&cove_syntax::ast::ImplBlock, Span)> = Vec::new();
     // Raw call sites found in each declaration's body, resolved to call-graph
     // edges once every declaration in the module is known (pass 4).
@@ -218,6 +275,7 @@ fn resolve_module(
                             exported: item.exported,
                             doc: item.doc.clone(),
                             receiver_type: None,
+                            from_trait_default: None,
                             direct_capabilities: capabilities,
                             required_capabilities: BTreeSet::new(),
                         },
@@ -267,6 +325,40 @@ fn resolve_module(
                         },
                     );
                 }
+                ItemKind::Trait(decl) => {
+                    if let Some(existing) =
+                        duplicate(&mut trait_spans, &decl.name.node, decl.name.span)
+                    {
+                        errors.push(duplicate_declaration(
+                            name,
+                            &decl.name.node,
+                            decl.name.span,
+                            existing,
+                        ));
+                        continue;
+                    }
+                    missing_doc(warnings, item, &decl.name.node, decl.name.span);
+                    // A trait's methods are part of the interface the trait
+                    // publishes, so an exported trait documents each of them.
+                    if item.exported {
+                        for method in &decl.methods {
+                            if method.doc.is_none() {
+                                warnings.push(undocumented(
+                                    &format!("{}.{}", decl.name.node, method.name.node),
+                                    method.name.span,
+                                ));
+                            }
+                        }
+                    }
+                    resolved.traits.insert(
+                        decl.name.node.clone(),
+                        TraitEntry {
+                            decl: Rc::new(decl.clone()),
+                            exported: item.exported,
+                            doc: item.doc.clone(),
+                        },
+                    );
+                }
                 ItemKind::TypeAlias(decl) => {
                     if let Some(existing) =
                         duplicate(&mut alias_spans, &decl.name.node, decl.name.span)
@@ -296,11 +388,45 @@ fn resolve_module(
         }
     }
 
-    // Pass 3: `impl` blocks, once every struct and enum in the module is known.
+    // Pass 3: `impl` blocks, once every struct, enum, and trait in the module
+    // is known.
     let mut method_spans: BTreeMap<(String, String), Span> = BTreeMap::new();
     for (impl_block, _impl_span) in pending_impls {
         let type_name = impl_block.type_name.node.clone();
-        if !resolved.structs.contains_key(&type_name) && !resolved.enums.contains_key(&type_name) {
+        let declares_type =
+            resolved.structs.contains_key(&type_name) || resolved.enums.contains_key(&type_name);
+
+        // The orphan rule: a conformance may only be declared where one of
+        // its two parties is. Today a module sees only its own declarations,
+        // so "declares" and "can see" coincide; when module-to-module imports
+        // arrive, only these two lookups widen.
+        if let Some(trait_ident) = &impl_block.trait_name {
+            let trait_name = trait_ident.node.clone();
+            let declares_trait = resolved.traits.contains_key(&trait_name);
+            if !declares_trait && !declares_type {
+                errors.push(orphan_conformance(
+                    name,
+                    &trait_name,
+                    &type_name,
+                    trait_ident.span.to(impl_block.type_name.span),
+                ));
+                continue;
+            }
+            if !declares_trait {
+                errors.push(
+                    Diagnostic::error(
+                        "cove::resolve::unknown_trait",
+                        format!("`{trait_name}` names a trait module `{name}` does not declare"),
+                    )
+                    .at(trait_ident.span)
+                    .rule("A conformance names a trait the module can see; there are no module-to-module imports yet.")
+                    .help(format!("Declare `trait {trait_name}` in this module, or fix the name.")),
+                );
+                continue;
+            }
+        }
+
+        if !declares_type {
             errors.push(
                 Diagnostic::error(
                     "cove::resolve::unknown_impl_type",
@@ -311,6 +437,36 @@ fn resolve_module(
                 .help(format!(
                     "Declare `struct {type_name}` or `enum {type_name}` in this module, or fix the name."
                 )),
+            );
+            continue;
+        }
+
+        if let Some(trait_ident) = &impl_block.trait_name {
+            let header = trait_ident.span.to(impl_block.type_name.span);
+            let key = (trait_ident.node.clone(), type_name.clone());
+            if let Some(existing) = resolved.conformances.get(&key) {
+                errors.push(
+                    Diagnostic::error(
+                        "cove::resolve::duplicate_conformance",
+                        format!("`{type_name}` already conforms to `{}`", trait_ident.node),
+                    )
+                    .at(header)
+                    .label(existing.span, "the first conformance is declared here")
+                    .rule("A type conforms to a trait exactly once; conformance is explicit, so two `impl Trait for Type` blocks would leave no way to choose.")
+                    .help("Merge the two blocks into one."),
+                );
+                continue;
+            }
+            check_conformance(
+                &mut resolved,
+                name,
+                impl_block,
+                trait_ident.node.clone(),
+                type_name.clone(),
+                header,
+                &mut method_spans,
+                &mut call_sites,
+                errors,
             );
             continue;
         }
@@ -354,6 +510,7 @@ fn resolve_module(
                             exported: inner.exported,
                             doc: inner.doc.clone(),
                             receiver_type: Some(type_name.clone()),
+                            from_trait_default: None,
                             direct_capabilities: capabilities,
                             required_capabilities: BTreeSet::new(),
                         },
@@ -390,6 +547,229 @@ fn resolve_module(
     resolved
 }
 
+/// Checks one `impl Trait for Type` block and records the conformance it
+/// declares.
+///
+/// A conformance must supply every method the trait declares without a
+/// default body, and may supply no method the trait does not declare. A
+/// method the trait defaults and the block does not override is recorded as
+/// the type's own method, running the trait's body, so that dispatch never
+/// has to ask where a method came from.
+#[allow(clippy::too_many_arguments)]
+fn check_conformance(
+    resolved: &mut ResolvedModule,
+    module: &str,
+    impl_block: &cove_syntax::ast::ImplBlock,
+    trait_name: String,
+    type_name: String,
+    header: Span,
+    method_spans: &mut BTreeMap<(String, String), Span>,
+    call_sites: &mut BTreeMap<FnKey, Vec<CallShape>>,
+    errors: &mut Vec<Diagnostic>,
+) {
+    let entry = &resolved.traits[&trait_name];
+    let trait_decl = entry.decl.clone();
+    let trait_exported = entry.exported;
+    let mut supplied: BTreeSet<String> = BTreeSet::new();
+
+    for inner in &impl_block.items {
+        let ItemKind::Fn(decl) = &inner.kind else {
+            errors.push(
+                Diagnostic::error(
+                    "cove::resolve::invalid_impl_item",
+                    "only `fn` declarations are allowed inside an `impl` block",
+                )
+                .at(inner.span)
+                .rule("An `impl` block may only contain method declarations."),
+            );
+            continue;
+        };
+        let method_name = decl.name.node.clone();
+        let Some(declared) = trait_decl
+            .methods
+            .iter()
+            .find(|m| m.name.node == method_name)
+        else {
+            errors.push(
+                Diagnostic::error(
+                    "cove::resolve::unknown_trait_method",
+                    format!("`{trait_name}` declares no method `{method_name}`"),
+                )
+                .at(decl.name.span)
+                .label(trait_decl.name.span, format!("`{trait_name}` is declared here"))
+                .rule("An `impl Trait for Type` block supplies exactly the methods the trait declares; anything else belongs in the type's own `impl` block.")
+                .help(format!(
+                    "declare `{method_name}` in `trait {trait_name}`, or move it to `impl {type_name}`"
+                )),
+            );
+            continue;
+        };
+        supplied.insert(method_name);
+        record_method(
+            resolved,
+            module,
+            &type_name,
+            Rc::new(decl.clone()),
+            trait_exported,
+            declared.doc.clone().or_else(|| inner.doc.clone()),
+            None,
+            method_spans,
+            call_sites,
+            errors,
+        );
+    }
+
+    let missing: Vec<String> = trait_decl
+        .methods
+        .iter()
+        .filter(|m| m.default.is_none() && !supplied.contains(&m.name.node))
+        .map(|m| m.name.node.clone())
+        .collect();
+    if !missing.is_empty() {
+        errors.push(
+            Diagnostic::error(
+                "cove::resolve::missing_trait_method",
+                format!(
+                    "`{type_name}` does not conform to `{trait_name}`: missing {}",
+                    list_backticked(&missing)
+                ),
+            )
+            .at(header)
+            .label(
+                trait_decl.name.span,
+                format!("`{trait_name}` declares {}", list_backticked(&missing)),
+            )
+            .rule("A conformance supplies every method its trait declares without a default body.")
+            .help(format!(
+                "add {} to this block",
+                missing
+                    .iter()
+                    .map(|m| format!("`fn {m}(...)`"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )),
+        );
+    }
+
+    // A defaulted method the block did not override becomes the type's own
+    // method, with the trait's body.
+    let mut methods = supplied.clone();
+    for method in &trait_decl.methods {
+        if supplied.contains(&method.name.node) {
+            continue;
+        }
+        let Some(body) = &method.default else {
+            continue;
+        };
+        methods.insert(method.name.node.clone());
+        let decl = Rc::new(FnDecl {
+            name: method.name.clone(),
+            is_async: method.is_async,
+            generics: Vec::new(),
+            receiver: method.receiver,
+            params: method.params.clone(),
+            return_type: method.return_type.clone(),
+            body: body.clone(),
+            span: method.span,
+        });
+        record_method(
+            resolved,
+            module,
+            &type_name,
+            decl,
+            trait_exported,
+            method.doc.clone(),
+            Some(trait_name.clone()),
+            method_spans,
+            call_sites,
+            errors,
+        );
+    }
+
+    resolved.conformances.insert(
+        (trait_name.clone(), type_name.clone()),
+        Conformance {
+            trait_name,
+            type_name,
+            methods,
+            span: header,
+        },
+    );
+}
+
+/// Records one method of `type_name`, rejecting a second declaration of the
+/// same name whatever `impl` block it came from: a trait method and an
+/// inherent method of the same name would leave a call site with two
+/// candidates and no rule to choose between them.
+#[allow(clippy::too_many_arguments)]
+fn record_method(
+    resolved: &mut ResolvedModule,
+    module: &str,
+    type_name: &str,
+    decl: Rc<FnDecl>,
+    exported: bool,
+    doc: Option<String>,
+    from_trait_default: Option<String>,
+    method_spans: &mut BTreeMap<(String, String), Span>,
+    call_sites: &mut BTreeMap<FnKey, Vec<CallShape>>,
+    errors: &mut Vec<Diagnostic>,
+) {
+    let key = (type_name.to_string(), decl.name.node.clone());
+    if let Some(existing_span) = method_spans.get(&key) {
+        errors.push(
+            Diagnostic::error(
+                "cove::resolve::duplicate_declaration",
+                format!(
+                    "`{type_name}.{}` is declared twice in module `{module}`",
+                    decl.name.node
+                ),
+            )
+            .at(decl.name.span)
+            .label(
+                *existing_span,
+                format!("`{}` first declared here", decl.name.node),
+            )
+            .rule(
+                "Each method name may be declared once per type across a module's implementation units.",
+            ),
+        );
+        return;
+    }
+    method_spans.insert(key.clone(), decl.name.span);
+    let (capabilities, calls) = analyze_body(&decl.body, &resolved.host_uses, &resolved.host_items);
+    call_sites.insert(
+        FnKey::Method(type_name.to_string(), decl.name.node.clone()),
+        calls,
+    );
+    resolved.methods.insert(
+        key,
+        FnEntry {
+            decl,
+            exported,
+            doc,
+            receiver_type: Some(type_name.to_string()),
+            from_trait_default,
+            direct_capabilities: capabilities,
+            required_capabilities: BTreeSet::new(),
+        },
+    );
+}
+
+/// The orphan rule from ADR 0006, stated where it is broken.
+fn orphan_conformance(module: &str, trait_name: &str, type_name: &str, span: Span) -> Diagnostic {
+    Diagnostic::error(
+        "cove::resolve::orphan_conformance",
+        format!(
+            "module `{module}` declares neither `{trait_name}` nor `{type_name}`, so it cannot make one conform to the other"
+        ),
+    )
+    .at(span)
+    .rule("An `impl Trait for Type` is allowed only in the module that declares the trait or the module that declares the type, so that a conformance cannot appear from a module neither party knows about.")
+    .help(format!(
+        "move this block to the module that declares `{trait_name}` or the one that declares `{type_name}`"
+    ))
+}
+
 /// Records `name` at `span` in `spans`, returning the previous span if `name`
 /// was already declared.
 fn duplicate(spans: &mut BTreeMap<String, Span>, name: &str, span: Span) -> Option<Span> {
@@ -413,16 +793,20 @@ fn duplicate_declaration(module: &str, name: &str, span: Span, first: Span) -> D
 /// The Language Card warns on an exported declaration with no doc comment.
 fn missing_doc(warnings: &mut Vec<Diagnostic>, item: &Item, name: &str, span: Span) {
     if item.exported && item.doc.is_none() {
-        warnings.push(
-            Diagnostic::warning(
-                "cove::resolve::missing_doc",
-                format!("exported `{name}` has no doc comment"),
-            )
-            .at(span)
-            .rule("Public declarations without doc comments warn by default.")
-            .help(format!("Add a `///` doc comment above `{name}`.")),
-        );
+        warnings.push(undocumented(name, span));
     }
+}
+
+/// The `missing_doc` warning itself, for the declarations that are not
+/// [`Item`]s of their own — a trait's methods.
+fn undocumented(name: &str, span: Span) -> Diagnostic {
+    Diagnostic::warning(
+        "cove::resolve::missing_doc",
+        format!("exported `{name}` has no doc comment"),
+    )
+    .at(span)
+    .rule("Public declarations without doc comments warn by default.")
+    .help(format!("Add a `///` doc comment above `{name}`."))
 }
 
 /// Derives the Host API capabilities a function body calls directly, plus
@@ -471,7 +855,18 @@ fn check_module_matches(
         check_body_matches(&entry.decl.body, resolved, errors, warnings);
     }
     for entry in resolved.methods.values() {
-        check_body_matches(&entry.decl.body, resolved, errors, warnings);
+        // A default body belongs to the trait that declares it, so it is
+        // walked once below rather than once per conformance.
+        if entry.from_trait_default.is_none() {
+            check_body_matches(&entry.decl.body, resolved, errors, warnings);
+        }
+    }
+    for entry in resolved.traits.values() {
+        for method in &entry.decl.methods {
+            if let Some(body) = &method.default {
+                check_body_matches(body, resolved, errors, warnings);
+            }
+        }
     }
 }
 
@@ -1300,6 +1695,233 @@ mod tests {
             .get(&("Booking".to_string(), "id".to_string()))
             .expect("method resolved");
         assert_eq!(method.receiver_type.as_deref(), Some("Booking"));
+    }
+
+    /// The trait and the two types every conformance test below builds on.
+    const TRAIT_SOURCE: &str = "\
+/// Renders itself.
+export trait Display {
+  /// The full form.
+  fn describe(self) -> String
+
+  /// A short form, defaulting to the full one.
+  fn label(self) -> String { self.describe() }
+}
+
+/// A booking.
+export struct Booking(id: Int)
+
+/// A receipt.
+export struct Receipt(total: Int)
+";
+
+    fn resolved_of(name: &str, sources: &[&str]) -> ResolvedModule {
+        let package = package_of(module_from_sources(name, sources));
+        let mut program = resolve(&package).expect("resolves");
+        program.modules.remove(name).expect("the module resolves")
+    }
+
+    fn resolve_errors(name: &str, sources: &[&str]) -> Vec<Diagnostic> {
+        let package = package_of(module_from_sources(name, sources));
+        resolve(&package).expect_err("expected resolution to fail")
+    }
+
+    fn has_code(diagnostics: &[Diagnostic], code: &str) -> bool {
+        diagnostics.iter().any(|d| d.code == code)
+    }
+
+    #[test]
+    fn records_a_conformance_and_the_methods_it_supplies() {
+        let source = format!(
+            "{TRAIT_SOURCE}\nimpl Display for Booking {{\n  fn describe(self) -> String {{ \"b\" }}\n  fn label(self) -> String {{ \"#\" }}\n}}\n"
+        );
+        let resolved = resolved_of("render", &[&source]);
+        let conformance = resolved
+            .conformances
+            .get(&("Display".to_string(), "Booking".to_string()))
+            .expect("the conformance is recorded");
+        assert_eq!(
+            conformance.methods.iter().cloned().collect::<Vec<_>>(),
+            ["describe", "label"]
+        );
+        // A conformance's methods are ordinary methods of the type, which is
+        // what lets dispatch find them without asking where they came from.
+        assert!(resolved
+            .methods
+            .contains_key(&("Booking".to_string(), "describe".to_string())));
+    }
+
+    #[test]
+    fn a_defaulted_method_becomes_the_type_s_own_method() {
+        let source = format!(
+            "{TRAIT_SOURCE}\nimpl Display for Receipt {{\n  fn describe(self) -> String {{ \"r\" }}\n}}\n"
+        );
+        let resolved = resolved_of("render", &[&source]);
+        let label = resolved
+            .methods
+            .get(&("Receipt".to_string(), "label".to_string()))
+            .expect("the default body is recorded as a method");
+        assert_eq!(label.receiver_type.as_deref(), Some("Receipt"));
+        assert_eq!(
+            label.doc.as_deref(),
+            Some("A short form, defaulting to the full one.")
+        );
+    }
+
+    #[test]
+    fn rejects_a_conformance_missing_a_required_method() {
+        let source = format!("{TRAIT_SOURCE}\nimpl Display for Booking {{\n}}\n");
+        let errors = resolve_errors("render", &[&source]);
+        assert!(has_code(&errors, "cove::resolve::missing_trait_method"));
+        assert!(errors[0].message.contains("`describe`"));
+        // `label` has a default, so it is not missing.
+        assert!(!errors[0].message.contains("`label`"));
+    }
+
+    #[test]
+    fn rejects_a_method_the_trait_does_not_declare() {
+        let source = format!(
+            "{TRAIT_SOURCE}\nimpl Display for Booking {{\n  fn describe(self) -> String {{ \"b\" }}\n  fn extra(self) -> Int {{ 1 }}\n}}\n"
+        );
+        let errors = resolve_errors("render", &[&source]);
+        assert!(has_code(&errors, "cove::resolve::unknown_trait_method"));
+    }
+
+    #[test]
+    fn rejects_the_same_conformance_twice() {
+        let source = format!(
+            "{TRAIT_SOURCE}\nimpl Display for Booking {{\n  fn describe(self) -> String {{ \"b\" }}\n}}\n\nimpl Display for Booking {{\n  fn describe(self) -> String {{ \"c\" }}\n}}\n"
+        );
+        let errors = resolve_errors("render", &[&source]);
+        assert!(has_code(&errors, "cove::resolve::duplicate_conformance"));
+    }
+
+    #[test]
+    fn rejects_a_trait_method_that_collides_with_an_inherent_method() {
+        let source = format!(
+            "{TRAIT_SOURCE}\nimpl Display for Booking {{\n  fn describe(self) -> String {{ \"b\" }}\n}}\n\nimpl Booking {{\n  /// Also describes.\n  fn describe(self) -> String {{ \"c\" }}\n}}\n"
+        );
+        let errors = resolve_errors("render", &[&source]);
+        assert!(has_code(&errors, "cove::resolve::duplicate_declaration"));
+    }
+
+    #[test]
+    fn the_orphan_rule_allows_a_local_trait_or_a_local_type() {
+        // The trait is local, the type is not declared here at all: the
+        // orphan rule is satisfied, and what fails is the separate rule that
+        // an `impl` extends a struct or enum of this module.
+        let source = format!("{TRAIT_SOURCE}\nimpl Display for Int {{\n  fn describe(self) -> String {{ \"i\" }}\n}}\n");
+        let errors = resolve_errors("render", &[&source]);
+        assert!(has_code(&errors, "cove::resolve::unknown_impl_type"));
+        assert!(!has_code(&errors, "cove::resolve::orphan_conformance"));
+    }
+
+    #[test]
+    fn rejects_a_conformance_between_two_types_the_module_does_not_declare() {
+        let errors = resolve_errors(
+            "elsewhere",
+            &["impl Display for Int {\n  fn describe(self) -> String { \"i\" }\n}\n"],
+        );
+        assert!(has_code(&errors, "cove::resolve::orphan_conformance"));
+    }
+
+    #[test]
+    fn warns_on_an_exported_trait_and_its_methods_without_docs() {
+        let package = package_of(module_from_sources(
+            "render",
+            &["export trait Display {\n  fn describe(self) -> String\n}\n"],
+        ));
+        let program = resolve(&package).expect("resolves");
+        let names: Vec<&str> = program
+            .warnings
+            .iter()
+            .filter(|d| d.code == "cove::resolve::missing_doc")
+            .map(|d| d.message.as_str())
+            .collect();
+        assert_eq!(
+            names,
+            [
+                "exported `Display` has no doc comment",
+                "exported `Display.describe` has no doc comment"
+            ]
+        );
+    }
+
+    #[test]
+    fn a_defaulted_method_is_marked_as_coming_from_its_trait() {
+        let source = format!(
+            "{TRAIT_SOURCE}\nimpl Display for Receipt {{\n  fn describe(self) -> String {{ \"r\" }}\n}}\n"
+        );
+        let resolved = resolved_of("render", &[&source]);
+        let methods = &resolved.methods;
+        assert_eq!(
+            methods[&("Receipt".to_string(), "label".to_string())]
+                .from_trait_default
+                .as_deref(),
+            Some("Display")
+        );
+        assert!(methods[&("Receipt".to_string(), "describe".to_string())]
+            .from_trait_default
+            .is_none());
+    }
+
+    #[test]
+    fn a_default_body_s_match_is_checked_once_however_many_types_conform() {
+        let source = "\
+/// A signal.
+enum Signal {
+  Red
+  Green
+}
+
+/// Shows itself.
+trait Show {
+  /// The signal.
+  fn signal(self) -> Signal
+
+  /// A name, from a `match` that misses a case.
+  fn name(self) -> String {
+    match self.signal() {
+      Signal.Red => \"red\"
+    }
+  }
+}
+
+/// One.
+struct A(x: Int)
+
+/// Two.
+struct B(x: Int)
+
+impl Show for A {
+  fn signal(self) -> Signal { Signal.Red }
+}
+
+impl Show for B {
+  fn signal(self) -> Signal { Signal.Green }
+}
+";
+        let errors = resolve_errors("show", &[source]);
+        assert_eq!(
+            errors
+                .iter()
+                .filter(|d| d.code == "cove::resolve::non_exhaustive_match")
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn a_conformance_method_propagates_its_capabilities() {
+        let source = format!(
+            "use console.println\n\n{TRAIT_SOURCE}\nimpl Display for Booking {{\n  fn describe(self) -> String {{\n    console.println(\"b\")\n    \"b\"\n  }}\n}}\n"
+        );
+        let resolved = resolved_of("render", &[&source]);
+        let describe = &resolved.methods[&("Booking".to_string(), "describe".to_string())];
+        assert!(describe
+            .required_capabilities
+            .iter()
+            .any(|c| c.to_string() == "console"));
     }
 
     #[test]

@@ -7,7 +7,7 @@ error[cove::type::mismatch]: expected `Int`, found `String`
   |
 4 | export struct Point { x: Int, y: Int }
   |                               ^ the field `y` is `Int`
-  rule: Types are nominal and there are no implicit conversions: a value must already have the type its place asks for.
+  rule: Types are nominal and the only implicit conversion is to `dyn Trait`: a value must otherwise already have the type its place asks for.
   help: parse the `String` with `Int.parse(text)`, which returns a `Result<Int, Error>`
 error[cove::type::unknown_field]: `Point` has no field `z`
   --> <e2e>/fail_type_field/main/main.cove:14:13
