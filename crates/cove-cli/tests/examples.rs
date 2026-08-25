@@ -1,17 +1,20 @@
-//! The representative programs, run against deterministic fake hosts.
+//! Every representative program, run against deterministic fake hosts.
 //!
-//! `tests/e2e` runs programs through the `cove` binary, which installs the
-//! real host implementations. That is the right boundary for a program whose
-//! hosts can be real and hermetic at once, and the wrong one for a server: a
-//! real listener waits for a client that a golden-file test has no way to be,
-//! and a real database is something this toolchain does not have at all.
+//! `examples/README.md` calls these programs executable design tests, and a
+//! design test nobody runs is a design document. `tests/e2e` runs programs
+//! through the `cove` binary, which installs the real host implementations;
+//! that is the right boundary for a program whose hosts can be real and
+//! hermetic at once, and the wrong one for a server — a real listener waits
+//! for a client a golden-file test has no way to be — and impossible for a
+//! database this toolchain does not have.
 //!
-//! So `examples/server`, `examples/tasks`, and `examples/callbacks` are run
-//! here instead, against the fakes their capabilities name — a listener with
-//! a scripted queue of requests, a `fetch` with recorded answers, a clock
-//! that moves only when something moves it, and a database of canned rows.
-//! Every one of them is deterministic, which is what lets these be assertions
-//! rather than smoke tests.
+//! So every one of them is run here, against the fakes its capabilities name:
+//! a console that is a buffer, an environment the test writes, a fixed set of
+//! documents and files, a listener with a scripted queue of requests, a
+//! `fetch` with recorded answers, a clock that moves only when something
+//! moves it, and a database of canned rows. Cove code cannot tell any of them
+//! from the real thing, and every one of them is deterministic, which is what
+//! lets these be assertions rather than smoke tests.
 
 use std::collections::BTreeMap;
 use std::io::Write;
@@ -22,7 +25,8 @@ use std::sync::{Arc, Mutex};
 use cove_diag::SourceMap;
 use cove_runtime::clock::{Clock, VirtualTime};
 use cove_runtime::database::Database;
-use cove_runtime::host::{Console, Grants, HostRegistry};
+use cove_runtime::files::Files;
+use cove_runtime::host::{Console, Documents, Env, Grants, HostRegistry};
 use cove_runtime::http::{Http, ScriptedRequest};
 use cove_runtime::interp::Interpreter;
 use cove_runtime::runtime::Runtime;
@@ -63,6 +67,14 @@ impl Write for Buffer {
 /// these programs can observe.
 #[derive(Default)]
 struct Fakes {
+    /// The arguments the entry function receives.
+    args: Vec<String>,
+    /// What `env.get` answers.
+    env: BTreeMap<String, String>,
+    /// What `documents.read` answers, by document name.
+    documents: BTreeMap<String, String>,
+    /// What `files.read` answers, by path.
+    files: BTreeMap<String, String>,
     /// What `http.fetch` answers, by URL.
     bodies: BTreeMap<String, String>,
     /// What a listener hands the program, in order.
@@ -112,15 +124,23 @@ fn run(entry: &str, allow: &[&str], fakes: Fakes) -> Ran {
     let http = Http::recorded(fakes.bodies, fakes.requests);
     let served = http.served();
 
+    // Every module is registered whether or not this entry needs it, exactly
+    // as `cove run` and `cove test` register them: the grants are what decide,
+    // so a capability the program reaches for without being granted is
+    // refused with the reason rather than with a missing module.
     let mut hosts = HostRegistry::new(Grants::new(allow.to_vec()));
     hosts.register(Box::new(Console::new(console.clone())));
+    hosts.register(Box::new(Env::new(fakes.env)));
+    hosts.register(Box::new(Documents::in_memory(fakes.documents)));
+    hosts.register(Box::new(Files::in_memory(fakes.files)));
     hosts.register(Box::new(Clock::virtual_clock(VirtualTime::new())));
     hosts.register(Box::new(Database::recorded(fakes.rows)));
     hosts.register(Box::new(http));
 
+    let args: Vec<Rc<str>> = fakes.args.iter().map(|arg| arg.as_str().into()).collect();
     let runtime = Runtime::new(resolved, sources, Arc::new(hosts));
     let value = Interpreter::new(&runtime)
-        .run_entry(module, name, Vec::<Rc<str>>::new())
+        .run_entry(module, name, args)
         .unwrap_or_else(|error| panic!("`{entry}` ran without a runtime error: {}", error.message));
     Ran {
         value,
@@ -264,4 +284,155 @@ fn the_callback_server_serves_both_routes_through_its_middleware() {
     // The timer fired once: a virtual clock has no time of its own, so one
     // round is all a repeating timer gets from it.
     assert!(ran.printed_starting("requests="), "{:?}", ran.console);
+}
+
+/// `hello` greets whoever it was given, and the world when it was given
+/// nobody.
+#[test]
+fn hello_greets_its_argument_or_the_world() {
+    let named = run(
+        "hello.main",
+        &["console"],
+        Fakes {
+            args: vec!["Cove".to_string()],
+            ..Fakes::default()
+        },
+    );
+    assert_eq!(named.console, ["Hello, Cove!"]);
+
+    let bare = run("hello.main", &["console"], Fakes::default());
+    assert_eq!(bare.console, ["Hello, world!"]);
+}
+
+/// `config` reads the environment the host chose to expose, and reports a
+/// value it cannot validate as an ordinary `Err`.
+#[test]
+fn config_validates_what_the_environment_supplied() {
+    let ran = run(
+        "config.loadConfig",
+        &["env"],
+        Fakes {
+            env: BTreeMap::from([
+                ("PORT".to_string(), "9000".to_string()),
+                ("LOG_LEVEL".to_string(), "warn".to_string()),
+            ]),
+            ..Fakes::default()
+        },
+    );
+    let Value::Struct(config) = ok(&ran.value) else {
+        panic!("expected a `Config`, found {}", ran.value);
+    };
+    assert_eq!(
+        config.get("port").map(ToString::to_string),
+        Some("9000".to_string())
+    );
+    assert_eq!(
+        config.get("logLevel").map(ToString::to_string),
+        Some("Warn".to_string())
+    );
+
+    // An environment that says nothing is the documented default, and one
+    // that says something unusable is a failure the program reports.
+    let defaulted = run("config.loadConfig", &["env"], Fakes::default());
+    let Value::Struct(config) = ok(&defaulted.value) else {
+        panic!("expected a `Config`, found {}", defaulted.value);
+    };
+    assert_eq!(
+        config.get("port").map(ToString::to_string),
+        Some("8080".to_string())
+    );
+
+    let refused = run(
+        "config.loadConfig",
+        &["env"],
+        Fakes {
+            env: BTreeMap::from([("PORT".to_string(), "eighty".to_string())]),
+            ..Fakes::default()
+        },
+    );
+    let Value::Enum(result) = &refused.value else {
+        panic!("expected a `Result`, found {}", refused.value);
+    };
+    assert_eq!(&*result.case, "Err");
+}
+
+/// `values` prints what copying, aliasing, and freezing actually do: a
+/// struct's scalar field copies while its vector field shares storage, so the
+/// copy's status stays behind while both handles see the same length.
+#[test]
+fn values_reports_its_own_collection_lifecycle() {
+    let ran = run("values.main", &["console"], Fakes::default());
+
+    assert!(ok(&ran.value).eq_value(&Value::Unit), "{}", ran.value);
+    assert_eq!(
+        ran.console,
+        ["Pending", "Confirmed", "2", "2", "2", "1"],
+        "{:?}",
+        ran.console
+    );
+}
+
+/// `traits` resolves a bound at the call site and a `dyn` value from what it
+/// carries, and prints a report built both ways.
+#[test]
+fn traits_reports_both_forms_of_dispatch() {
+    let ran = run("traits.main", &["console"], Fakes::default());
+
+    assert!(ok(&ran.value).eq_value(&Value::Unit), "{}", ran.value);
+    assert_eq!(
+        ran.console,
+        [
+            "Latest: booking 41 for 2 guest(s)",
+            "Latest: receipt for booking 41: 12500c",
+            "Report",
+            "- booking 41 for 2 guest(s)",
+            "  $ receipt for booking 41: 12500c",
+        ],
+        "{:?}",
+        ran.console
+    );
+}
+
+/// `restricted` reaches the console only through `text.report`, and reaches
+/// the document through the one capability the host granted.
+#[test]
+fn restricted_reads_only_the_document_the_host_named() {
+    let ran = run(
+        "restricted.main",
+        &["documents", "console"],
+        Fakes {
+            documents: BTreeMap::from([(
+                "input".to_string(),
+                "Cove grants only narrow authority.".to_string(),
+            )]),
+            ..Fakes::default()
+        },
+    );
+
+    assert!(ok(&ran.value).eq_value(&Value::Unit), "{}", ran.value);
+    assert_eq!(ran.console, ["5 words"]);
+}
+
+/// `codegen` derives a module from a data file, which is what
+/// `cove generate --check` keeps honest on disk. Here it runs against a file
+/// the test wrote, so what is asserted is the generator and not the checkout.
+#[test]
+fn codegen_derives_a_module_from_the_file_it_was_given() {
+    let ran = run(
+        "codegen.statusCodes",
+        &["files"],
+        Fakes {
+            files: BTreeMap::from([(
+                "status_codes.txt".to_string(),
+                "200 Ok\n404 NotFound\n".to_string(),
+            )]),
+            ..Fakes::default()
+        },
+    );
+
+    let generated = ok(&ran.value).to_string();
+    assert!(generated.contains("enum StatusCode"), "{generated}");
+    assert!(generated.contains("Ok"), "{generated}");
+    assert!(generated.contains("NotFound"), "{generated}");
+    assert!(generated.contains("404"), "{generated}");
 }

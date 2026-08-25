@@ -296,6 +296,15 @@ the fact, from how far the body pushed the clock. `is_cancelled` is what a
 repeating timer reads between rounds, so cancelling the task holding a
 `clock.every` ends the timer.
 
+"Its next safepoint" carries the same caveat cancellation has carried since
+ADR 0003: a body already inside a host call, or already waiting on a task's
+thread, reaches its next safepoint when that returns. So a timeout bounds the
+work rather than the wall clock, and a body that overran because a `fetch`
+took longer than the bound still reports the bound — it just reports it once
+the `fetch` has come back. Making the bound cut a wait short means teaching
+the wait itself to be interruptible, which is a change to how tasks and hosts
+block and not a change to this boundary.
+
 ### The loop belongs to the program
 
 `http` exposes `Server.handle(routes)`, which serves one request and answers
