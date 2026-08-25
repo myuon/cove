@@ -1,8 +1,8 @@
-error[cove::runtime]: `Array` has no method `count`; Cove spells the number of elements `length()`
- --> <e2e>/fail_count_removed/main.cove:6:27
-  |
-6 |   println("never printed {items.count()}")?
-  |                           ^^^^^^^^^^^^^
+error[cove::type::unknown_method]: `Array` has no method `count`; Cove spells the number of elements `length()`
+  --> <e2e>/fail_count_removed/main/main.cove:10:27
+   |
+10 |   println("never printed {items.count()}")?
+   |                           ^^^^^^^^^^^^^
   rule: Every sequence reports its element count as `length()`; there is no `count()`.
   help: write `length()` instead of `count()`
 1 error(s)

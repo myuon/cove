@@ -1,6 +1,10 @@
 use console.println
 
 /// Adds an `Int` to a `Float`, which Cove never converts implicitly.
+///
+/// Both operand types are known statically, so this is a check-time
+/// error. It lives in its own package so that failure cannot take down
+/// every other case.
 export fn main() -> Result<Unit, Error> {
   println("about to mix an Int and a Float")?
   println("never printed {1 + 1.0}")?

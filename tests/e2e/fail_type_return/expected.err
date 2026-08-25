@@ -1,0 +1,12 @@
+error[cove::type::mismatch]: expected `Int`, found `String`
+ --> <e2e>/fail_type_return/main/main.cove:9:3
+  |
+9 |   "{items.length()}"
+  |   ^^^^^^^^^^^^^^^^^^
+ --> <e2e>/fail_type_return/main/main.cove:8:32
+  |
+8 | fn total(items: Array<Int>) -> Int {
+  |                                ^^^ the declared return type is `Int`
+  rule: Types are nominal and there are no implicit conversions: a value must already have the type its place asks for.
+  help: parse the `String` with `Int.parse(text)`, which returns a `Result<Int, Error>`
+1 error(s)

@@ -34,10 +34,6 @@ allow = ["console"]
 entry = "fail_entry_error.main"
 allow = ["console"]
 
-[run.fail_count_removed]
-entry = "fail_count_removed.main"
-allow = ["console"]
-
 [run.fail_freeze_aliased]
 entry = "fail_freeze_aliased.main"
 allow = ["console"]
@@ -48,14 +44,6 @@ allow = ["console"]
 
 [run.fail_int_overflow]
 entry = "fail_int_overflow.main"
-allow = ["console"]
-
-[run.fail_mixed_arithmetic]
-entry = "fail_mixed_arithmetic.main"
-allow = ["console"]
-
-[run.fail_mixed_equality]
-entry = "fail_mixed_equality.main"
 allow = ["console"]
 
 [run.fail_no_capability]

@@ -1,0 +1,3 @@
+[run.fail_count_removed]
+entry = "main.main"
+allow = ["console"]
