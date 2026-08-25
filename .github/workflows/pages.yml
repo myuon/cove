@@ -105,11 +105,15 @@ jobs:
           HTML
             while IFS=$(printf '\t') read -r name src; do
               [ -n "$name" ] || continue
+              # rustdoc writes each crate under its crate name, which is the
+              # target name with hyphens turned into underscores, while the
+              # link text should stay the name a person types.
+              dir=$(printf '%s' "$name" | tr '-' '_')
               desc=$(head -n 1 "$src" | sed -n 's|^//! \{0,1\}||p' \
                 | sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' -e 's/>/\&gt;/g' \
                       -e 's|`\([^`]*\)`|<code>\1</code>|g')
               printf '  <li><a href="%s/index.html"><code>%s</code></a><span>%s</span></li>\n' \
-                "$name" "$name" "$desc"
+                "$dir" "$name" "$desc"
             done <<EOF
           $targets
           EOF
