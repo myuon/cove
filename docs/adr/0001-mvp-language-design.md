@@ -1,7 +1,19 @@
 # ADR 0001: MVP language design
 
-- Status: Proposed
-- Date: 2026-08-23
+- Status: Accepted
+- Date: 2026-08-23, accepted 2026-08-25
+- Amended by: [ADR 0008](0008-concurrent-task-execution.md), which makes
+  `Shared<T>` the MVP's only synchronized handle;
+  [ADR 0011](0011-garbage-collection.md), which narrows memory management to
+  the interpreter until a native backend exists;
+  [ADR 0012](0012-performance-gate-and-native-backend.md), which turns the
+  performance criterion into a measured gate; and
+  [ADR 0013](0013-host-resource-handles.md), which gives the Host API boundary
+  resource handles and a way back into Cove
+- Implemented by: [ADR 0002](0002-implementation-language-and-backend.md)
+  through [ADR 0013](0013-host-resource-handles.md), each of which decides and
+  builds a part of this one
+- Implementation status: partial — see "Status and implementation" below
 
 ## Context
 
@@ -28,6 +40,71 @@ familiar syntax and deliberately small semantics.
 The MVP is a hypothesis test, not a commitment to a stable language. Features
 that do not validate the core experience should be removed rather than
 preserved for compatibility.
+
+## Status and implementation
+
+This ADR was recorded as `Proposed` and is now `Accepted`, which is a claim
+about the decision rather than about the implementation. The decision above was
+taken, acted on, and never revisited: twelve later ADRs, every one of them
+accepted, amend and elaborate this one rather than offer an alternative to it,
+and four of them narrow it in ways the header records. Leaving it `Proposed`
+would say the direction was still open while all the work that assumed it went
+on regardless, which is the opposite of what happened. What a `Proposed` status
+is for — a decision a reader may still argue with — stopped being true of this
+document somewhere around ADR 0004.
+
+What is *built* is the separate question, and the answer is most of this
+document. The language and compiler exist, from the lexer through resolution,
+a type checker, module-to-module imports, traits and both dispatch forms, and
+derived outlines, capability requirements, and API snapshots. The runtime
+exists, with Host API dispatch under grants, a thread per task, `Shared<T>`, a
+per-task collector, budgets for fuel, deadlines, memory, and host calls, and
+traces that feed `cove trace` and `cove replay`. Every command in the Language
+Card's tooling contract exists and does what the card says. The eight
+representative programs all execute.
+
+What is not built is worth naming in one place, because each item is otherwise
+a sentence somewhere above that a reader would have to check against the code:
+
+- **Native code generation.** ADR 0002 deferred it, ADR 0009's `cove build`
+  packages the interpreter rather than compiling past it, and ADR 0012 records
+  what would have to be true before compiling is worth starting. "Native" as an
+  execution profile means a binary that runs anywhere, which exists; it does
+  not mean machine code generated from Cove, which does not.
+- **Wasm.** Deferred, as the classification below states.
+- **A concurrency limit.** "Runtime resource control" below lists one, and
+  nothing imposes one: a scope starts a thread for every `spawn` its body
+  reaches. See [issue #37](https://github.com/myuon/cove/issues/37).
+- **Host API schema checking.** The schema is machine-readable and shared, as
+  this ADR asks, and neither end reads its types: the checker has nothing to
+  check a host call against, and the runtime checks a call's arity but not its
+  result. See [issue #38](https://github.com/myuon/cove/issues/38).
+- **Written types at a declaration's parameters.** "Function and public API
+  boundaries remain explicitly typed" is a rule nothing enforces: a parameter
+  written without a type becomes the checker's `Unknown`, which is equal to
+  everything, so a call passing the wrong thing checks clean. See
+  [issue #41](https://github.com/myuon/cove/issues/41).
+- **`Mutex<T>`, `RwLock<T>`, `Atomic<T>`, `Channel<T>`, and `Once<T>`.** ADR
+  0008 chose `Shared<T>` alone, and no representative program has yet shown the
+  friction that would earn the rest.
+- **Two of the six trace distinctions.** Allocation and memory pressure arrived
+  with ADR 0011. Cache hits and misses have no event because there is no cache;
+  task suspension and resumption have none either, so only spawn, completion,
+  and cancellation are recorded; and a host call carries no task id, so its wait
+  is not attributable to the task that waited. `cove trace` ends its own summary
+  with that list rather than leaving a reader to discover it.
+- **Rejecting structural mutation during iteration.** A loop reads a snapshot
+  of the elements, so a mutation through another alias is not observed and not
+  refused.
+- **`Array.build` and `Map.build`.** The scoped builders this ADR names do not
+  exist; `Vector.of`, `Map.of`, and `Set.of` do.
+- **Batteries.** `database` ships a fake and a denied implementation and no
+  real one, `http` speaks no TLS, JSON exists only as `http.json`'s encoding of
+  a response body, and argument parsing is whatever a program does with
+  `args: Array<String>`.
+- **Doc-comment warnings on modules.** An exported declaration without a doc
+  comment warns. A module has nowhere to attach one, its name being derived
+  from its path, so the module half of that rule has no implementation to have.
 
 ## Product boundary
 
@@ -542,14 +619,40 @@ generated behavior must remain inspectable.
 
 ## Open questions
 
+Four of the seven questions this ADR opened have been answered, and the answers
+live in the ADRs that answered them rather than being restated here:
+
 - Which implementation language and code-generation backend minimize time to a
-  credible MVP?
+  credible MVP? **Answered by [ADR 0002](0002-implementation-language-and-backend.md):**
+  Rust, and a tree-walking interpreter as the only MVP backend, with native
+  code generation deferred.
+  [ADR 0012](0012-performance-gate-and-native-backend.md) adds what would have
+  to be true before the deferred half is worth taking up.
 - Which object representation, stack-map format, and allocator best support the
-  initial non-moving collector?
+  initial non-moving collector? **Answered for the interpreter by
+  [ADR 0011](0011-garbage-collection.md):** a per-task precise, non-moving
+  mark-and-sweep heap over the one value shape that can close a cycle, with no
+  stack maps, because a tree walker's roots are its own structures rather than
+  a machine stack. The stack-map half of the question stays open, and becomes
+  answerable when a native backend exists.
+- How are dependency cycles represented and diagnosed? **Answered by
+  [ADR 0005](0005-module-to-module-imports.md):** forbidden, and reported with
+  the path that forms them.
+- Which license should the project use? **Answered:** the workspace manifest
+  declares MIT. The repository carries no `LICENSE` file yet, which is a
+  packaging gap rather than a decision still to make.
+
+Three remain open:
+
 - What compatibility guarantees should generated API snapshots cover beyond
-  source types, such as capability requirements and host bindings?
-- How are dependency cycles represented and diagnosed?
-- Which annotations belong in the Language Card?
+  source types, such as capability requirements and host bindings? `cove api
+  snapshot` records each declaration's required capabilities and treats a newly
+  required one as a breaking change; host bindings are not covered, and nothing
+  yet decides whether they should be.
+- Which annotations belong in the Language Card? The MVP still defines none,
+  which is a scope decision rather than an answer.
 - What Host API boundary remains stable across native, embedded, and Wasm
-  execution?
-- Which license should the project use?
+  execution? [ADR 0013](0013-host-resource-handles.md) settled the boundary's
+  shape for native and embedded execution — a resource handle is a name, and a
+  Host call may run a Cove closure on the calling task — and considered no
+  third profile, because there is no third profile to consider yet.
