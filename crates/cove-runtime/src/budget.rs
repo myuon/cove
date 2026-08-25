@@ -17,7 +17,7 @@ use crate::error::RuntimeError;
 
 /// The rule this module implements, quoted for every error it raises.
 const RULE: &str =
-    "ADR 0001: CPU, memory, time, and host-call limits are runtime controls, not termination proofs.";
+    "ADR 0001: CPU, memory, time, concurrency, and host-call limits are runtime controls, not termination proofs.";
 
 /// How many [`Budget::safepoint`] calls pass between checks of the wall clock
 /// when a deadline is set.
@@ -55,6 +55,18 @@ pub struct Limits {
     /// the budget compares their sum, so a run cannot stay under the limit by
     /// spreading the same memory over more tasks.
     pub max_memory: Option<u64>,
+    /// The tasks a run may have alive at once before it is stopped.
+    ///
+    /// ADR 0001 lists concurrency limits beside CPU, memory, and time, and a
+    /// thread is the one resource a program can take without asking for it.
+    /// So this limit is charged where the taking happens: `spawn` charges it
+    /// before a thread exists, and a `spawn` past the limit stops the run
+    /// rather than waiting for a sibling to finish, because waiting would be
+    /// a scheduling policy and ADR 0008 has none. Like fuel, host calls, and
+    /// memory it bounds the *run*: every task alive anywhere in it counts, so
+    /// a program cannot stay under the limit by spreading its tasks over more
+    /// scopes.
+    pub max_tasks: Option<u64>,
 }
 
 /// Why execution was stopped.
@@ -72,6 +84,9 @@ pub enum Stopped {
     HostCalls,
     /// The live heaps grew past the memory budget.
     Memory,
+    /// A `spawn` would have left more tasks alive at once than the
+    /// concurrency limit allows.
+    Concurrency,
 }
 
 /// A cancellation flag shared with whoever may cancel the run.
@@ -129,6 +144,10 @@ pub struct Budget {
     /// task's heap is retired, so a finished task stops counting against a
     /// run that outlives it.
     live: BTreeMap<u64, u64>,
+    /// How many spawned tasks are alive right now: charged before a task is
+    /// given a thread and released when the task that spawned it observes
+    /// its end.
+    live_tasks: u64,
 }
 
 impl Budget {
@@ -148,6 +167,7 @@ impl Budget {
             host_calls: 0,
             safepoints_since_deadline_check: 0,
             live: BTreeMap::new(),
+            live_tasks: 0,
         }
     }
 
@@ -233,6 +253,43 @@ impl Budget {
         }
     }
 
+    /// Charges one task against the concurrency limit, refusing it before it
+    /// is given a thread if the run already holds as many tasks as it may.
+    ///
+    /// Every other limit stops a run for work it has already done. This one
+    /// refuses work that has not started, because a thread is taken rather
+    /// than spent: by the time a safepoint could observe it, the resource is
+    /// already held. A refusal stops the run the way exhausted fuel does; a
+    /// `spawn` that waited for a sibling to finish would be a scheduler, and
+    /// ADR 0008 deliberately has no scheduling policy.
+    pub fn charge_task(&mut self) -> Result<(), Stopped> {
+        if let Some(limit) = self.limits.max_tasks {
+            if self.live_tasks >= limit {
+                return Err(Stopped::Concurrency);
+            }
+        }
+        self.live_tasks += 1;
+        Ok(())
+    }
+
+    /// Forgets a task whose end has been observed, so its place is free
+    /// again.
+    ///
+    /// A task ends by finishing, by failing, by being cancelled, or by
+    /// breaking an invariant in its own thread, and all four reach the caller
+    /// as a join. Releasing anywhere else would make this a limit on how many
+    /// tasks a run may spawn in total rather than on how many it may hold at
+    /// once.
+    pub fn release_task(&mut self) {
+        self.live_tasks = self.live_tasks.saturating_sub(1);
+    }
+
+    /// How many spawned tasks are alive right now: what the concurrency
+    /// limit bounds, and what a stop reports.
+    pub fn live_tasks(&self) -> u64 {
+        self.live_tasks
+    }
+
     /// Forgets `task`'s heap, which has gone with its thread.
     pub fn release_memory(&mut self, task: u64) {
         self.live.remove(&task);
@@ -287,6 +344,11 @@ impl Budget {
                 self.limits.max_memory.unwrap_or_default(),
                 self.live_bytes(),
             ),
+            Stopped::Concurrency => format!(
+                "execution stopped: concurrency limit of {} task(s) exceeded, with {} already running",
+                self.limits.max_tasks.unwrap_or_default(),
+                self.live_tasks,
+            ),
         };
         RuntimeError::new(message).with_rule(RULE)
     }
@@ -305,6 +367,7 @@ impl From<Stopped> for RuntimeError {
             Stopped::CallDepth => "execution stopped: call-depth limit exceeded",
             Stopped::HostCalls => "execution stopped: host-call limit exceeded",
             Stopped::Memory => "execution stopped: memory budget exceeded",
+            Stopped::Concurrency => "execution stopped: concurrency limit exceeded",
         };
         RuntimeError::new(message).with_rule(RULE)
     }
@@ -498,6 +561,80 @@ mod tests {
         );
         assert!(
             error.message.contains("9000 bytes live"),
+            "{}",
+            error.message
+        );
+        assert!(error.rule.is_some());
+    }
+
+    #[test]
+    fn the_concurrency_limit_fires_on_the_spawn_that_would_pass_it() {
+        let mut budget = Budget::new(Limits {
+            max_tasks: Some(2),
+            ..Limits::default()
+        });
+        assert_eq!(budget.charge_task(), Ok(()));
+        assert_eq!(budget.charge_task(), Ok(()));
+        assert_eq!(budget.charge_task(), Err(Stopped::Concurrency));
+        // A refused task is not one the run holds: the limit refuses work
+        // before it starts rather than counting work that did.
+        assert_eq!(budget.live_tasks(), 2);
+    }
+
+    /// The limit bounds the tasks alive at once, not the tasks a run spawns
+    /// over its life: a run that ends each task before starting the next may
+    /// start as many as it likes.
+    #[test]
+    fn a_task_that_ended_frees_its_place_for_the_next_one() {
+        let mut budget = Budget::new(Limits {
+            max_tasks: Some(1),
+            ..Limits::default()
+        });
+        for _ in 0..1_000 {
+            assert_eq!(budget.charge_task(), Ok(()));
+            budget.release_task();
+        }
+        assert_eq!(budget.live_tasks(), 0);
+    }
+
+    /// Releasing more tasks than were charged cannot lend a run capacity it
+    /// never had, whatever a caller does.
+    #[test]
+    fn releasing_a_task_that_was_never_charged_frees_nothing() {
+        let mut budget = Budget::new(Limits::default());
+        budget.release_task();
+        assert_eq!(budget.live_tasks(), 0);
+    }
+
+    #[test]
+    fn concurrency_limit_absent_never_stops() {
+        let mut budget = Budget::new(Limits::default());
+        for _ in 0..1_000 {
+            assert_eq!(budget.charge_task(), Ok(()));
+        }
+    }
+
+    /// The concurrency diagnostic has the same shape as the memory one: it
+    /// names the limit that was configured, says what the run was holding,
+    /// and cites the rule.
+    #[test]
+    fn the_concurrency_diagnostic_names_the_limit_and_what_is_running() {
+        let mut budget = Budget::new(Limits {
+            max_tasks: Some(4),
+            ..Limits::default()
+        });
+        for _ in 0..4 {
+            assert_eq!(budget.charge_task(), Ok(()));
+        }
+        assert_eq!(budget.charge_task(), Err(Stopped::Concurrency));
+        let error = budget.to_runtime_error(Stopped::Concurrency);
+        assert!(
+            error.message.contains("concurrency limit of 4 task(s)"),
+            "{}",
+            error.message
+        );
+        assert!(
+            error.message.contains("4 already running"),
             "{}",
             error.message
         );

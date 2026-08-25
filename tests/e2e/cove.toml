@@ -46,6 +46,11 @@ allow = ["console"]
 entry = "fail_max_memory_flag.main"
 allow = ["console"]
 
+[run.fail_max_tasks]
+entry = "fail_max_tasks.main"
+allow = ["console"]
+max_tasks = 2
+
 [run.fail_files_escape]
 entry = "fail_files_escape.main"
 allow = ["files", "console"]

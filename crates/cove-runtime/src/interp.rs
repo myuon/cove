@@ -1777,6 +1777,13 @@ impl<'a> Interpreter<'a> {
         }
         let started = Instant::now();
         task.join();
+        // A task ends by finishing, by failing, by being cancelled, or by
+        // breaking an invariant in its own thread, and a join is where all
+        // four are observed — so this is where the place it held under the
+        // concurrency limit goes back. Releasing it on the task's own thread
+        // instead would make what a `spawn` is refused for depend on how
+        // quickly a sibling happened to finish.
+        self.hosts.with_budget(|budget| budget.release_task());
         self.charge_wait(started.elapsed());
         if matches!(&*task.state.borrow(), TaskState::Cancelled) {
             self.runtime
@@ -1855,6 +1862,20 @@ impl<'a> Interpreter<'a> {
             .with_help(found.help("spawning"))
         })?;
 
+        // Charged before this task is given an id, an event, or a thread: a
+        // thread that has started is a resource already taken, which no later
+        // safepoint could refuse. A run past its concurrency limit is stopped
+        // here the way an exhausted fuel budget stops one, rather than made
+        // to wait for a sibling to end, because waiting would be a scheduling
+        // policy and ADR 0008 has none.
+        if let Some(Err(error)) = self.hosts.with_budget(|budget| {
+            budget
+                .charge_task()
+                .map_err(|stopped| budget.to_runtime_error(stopped))
+        }) {
+            return Err(error.at(span));
+        }
+
         let id = self.runtime.next_task_id();
         // Traced before the thread starts, so a task is never seen completing
         // before it was seen spawning.
@@ -1871,6 +1892,9 @@ impl<'a> Interpreter<'a> {
             .name(format!("cove task {id}"))
             .spawn(move || run_task(&runtime, id, flag, body, span))
             .map_err(|e| {
+                // A task the machine refused is not a task the run holds, so
+                // the place charged for it above goes back.
+                self.hosts.with_budget(|budget| budget.release_task());
                 RuntimeError::new(format!("this task could not be given a thread: {e}")).at(span)
             })?;
 
@@ -7021,15 +7045,11 @@ export fn main() -> Result<Unit, Error> {{
     /// controls, not termination proofs", and ADR 0001 lists "concurrency
     /// limits" among what the runtime should be able to impose.
     ///
-    /// Nothing imposes one. [`Limits`] has no field for it and
-    /// [`Interpreter::spawn`] consults no budget before
-    /// `std::thread::Builder::spawn`, so a scope starts one OS thread for
-    /// every `spawn` its body reaches and a host has no way to say how many
-    /// is too many. This test asks to be stopped and is ignored because
-    /// nothing can stop it; it should set the limit and assert the
-    /// diagnostic once one exists. See issue #37.
+    /// One is imposed here, and imposed before the thread exists: the run
+    /// holds the eight tasks it was allowed, the ninth `spawn` stops it, and
+    /// nothing was started to be stopped — the trace carries eight task
+    /// spawns and not nine. See issue #37.
     #[test]
-    #[ignore = "no concurrency limit exists: see issue #37"]
     fn spawning_past_a_concurrency_limit_is_refused_before_a_thread_exists() {
         let source = r#"
 export fn main() -> Result<Unit, Error> {
@@ -7043,15 +7063,143 @@ export fn main() -> Result<Unit, Error> {
   Ok(())
 }
 "#;
-        let (sources, program) = program_of(source);
-        let mut hosts = HostRegistry::new(Grants::new(["console"]));
-        hosts.register(Box::new(Console::new(Buffer::default())));
-        hosts.set_budget(Budget::new(Limits::default()));
-        let runtime = Runtime::new(program, sources, Arc::new(hosts));
-        let error = Interpreter::new(&runtime)
-            .run_entry("test", "main", Vec::new())
-            .expect_err("a concurrency limit stops the run before it holds 64 threads");
-        assert!(error.message.contains("concurrency"), "{}", error.message);
+        let (run, events, _) = run_traced_under(
+            source,
+            Limits {
+                max_tasks: Some(8),
+                ..Limits::default()
+            },
+        );
+        let error = run.error();
+        assert!(
+            error
+                .message
+                .contains("concurrency limit of 8 task(s) exceeded"),
+            "{}",
+            error.message
+        );
+        assert!(error.span.is_some(), "the stop points at the `spawn`");
+        assert!(error.rule.is_some());
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(event, TraceEvent::TaskSpawned { .. }))
+                .count(),
+            8,
+            "the refused `spawn` was never given a thread, so it was never traced"
+        );
+    }
+
+    /// The limit bounds the tasks alive at once, not the tasks a run spawns
+    /// over its life, so a task's place goes back when its end is observed.
+    /// A task ends by finishing, by producing an `Err`, by being cancelled,
+    /// or by breaking an invariant in its own thread, and a join is where all
+    /// four are seen — so this run of four tasks, each ended before the next
+    /// begins, is not stopped by a limit of one.
+    #[test]
+    fn a_task_whose_end_was_observed_gives_its_place_back() {
+        let source = r#"
+use console.println
+
+export fn main() -> Result<Unit, Error> {
+  scope finishing {
+    let one = finishing.spawn { 1 }
+    let value = await one
+  }
+  scope failing {
+    let two = failing.spawn { Err(Error("this task produced an error")) }
+    let outcome = await two
+  }
+  scope cancelling {
+    let three = cancelling.spawn { 3 }
+    three.cancel()
+  }
+  scope last {
+    let four = last.spawn { 4 }
+    println("{await four}")?
+  }
+  Ok(())
+}
+"#;
+        let (run, _, _) = run_traced_under(
+            source,
+            Limits {
+                max_tasks: Some(1),
+                ..Limits::default()
+            },
+        );
+        assert_eq!(run.output, "4\n");
+        run.value();
+    }
+
+    /// Concurrency bounds the run and not one scope, the way memory bounds
+    /// the run and not one task: a nested scope's `spawn` counts the tasks
+    /// its parent is still holding, so a program cannot stay under the limit
+    /// by spreading its tasks over more scopes.
+    #[test]
+    fn the_concurrency_limit_is_the_run_s_and_not_one_scope_s() {
+        let source = r#"
+export fn main() -> Result<Unit, Error> {
+  scope outer {
+    let one = outer.spawn { 1 }
+    scope inner {
+      let two = inner.spawn { 2 }
+      let three = inner.spawn { 3 }
+      let ignored = await two + await three
+    }
+    let value = await one
+  }
+  Ok(())
+}
+"#;
+        let (run, _, _) = run_traced_under(
+            source,
+            Limits {
+                max_tasks: Some(2),
+                ..Limits::default()
+            },
+        );
+        let error = run.error();
+        assert!(
+            error
+                .message
+                .contains("concurrency limit of 2 task(s) exceeded"),
+            "{}",
+            error.message
+        );
+    }
+
+    /// A run that stays inside the limit is not stopped by it, however many
+    /// tasks it spawns in all.
+    #[test]
+    fn a_run_within_the_concurrency_limit_is_not_stopped() {
+        let source = r#"
+use console.println
+
+export fn main() -> Result<Unit, Error> {
+  var total = 0
+  var i = 0
+  while i < 8 {
+    scope tasks {
+      let one = tasks.spawn { 1 }
+      let two = tasks.spawn { 2 }
+      total += await one + await two
+    }
+    i += 1
+  }
+  println("{total}")?
+  Ok(())
+}
+"#;
+        let (run, _, _) = run_traced_under(
+            source,
+            Limits {
+                max_tasks: Some(2),
+                ..Limits::default()
+            },
+        );
+        assert_eq!(run.output, "24\n");
+        run.value();
     }
 
     // --------------------------------------------------------- deadlines

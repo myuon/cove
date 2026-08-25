@@ -67,6 +67,7 @@ flags:
   --deadline <duration>  bake in a deadline, e.g. `500ms`, `5s`, `1h`
   --max-host-calls <n>  bake in a limit of <n> host calls
   --max-memory <bytes>  bake in a limit of <bytes> of live heap
+  --max-tasks <n>       bake in a limit of <n> tasks alive at once
   --files-root <path>   the one directory the `files` host may reach, baked in
                         as an absolute path; without it the binary uses
                         `files/` in the directory it is run from, as it uses
@@ -115,6 +116,7 @@ struct BuildFlags {
     deadline: Option<Duration>,
     max_host_calls: Option<u64>,
     max_memory: Option<u64>,
+    max_tasks: Option<u64>,
     files_root: Option<PathBuf>,
     allow_exec: Vec<PathBuf>,
 }
@@ -133,6 +135,7 @@ fn parse_build_flags(args: &[String]) -> Result<BuildFlags, CliError> {
         deadline: None,
         max_host_calls: None,
         max_memory: None,
+        max_tasks: None,
         files_root: None,
         allow_exec: Vec::new(),
     };
@@ -168,6 +171,14 @@ fn parse_build_flags(args: &[String]) -> Result<BuildFlags, CliError> {
                 flags.max_memory = Some(value.parse().map_err(|_| {
                     CliError::Message(format!(
                         "`--max-memory` must be a non-negative integer number of bytes, found `{value}`"
+                    ))
+                })?);
+            }
+            "--max-tasks" => {
+                let value = flag_value(args, &mut i, "--max-tasks")?;
+                flags.max_tasks = Some(value.parse().map_err(|_| {
+                    CliError::Message(format!(
+                        "`--max-tasks` must be a non-negative integer, found `{value}`"
                     ))
                 })?);
             }
@@ -230,6 +241,7 @@ pub(crate) struct BuildPlan {
     pub(crate) deadline: Option<Duration>,
     pub(crate) max_host_calls: Option<u64>,
     pub(crate) max_memory: Option<u64>,
+    pub(crate) max_tasks: Option<u64>,
     pub(crate) trace: Option<String>,
     pub(crate) files_root: Option<PathBuf>,
     pub(crate) allow_exec: Vec<PathBuf>,
@@ -305,6 +317,7 @@ fn plan(
         deadline: flags.deadline.or(run.deadline),
         max_host_calls: flags.max_host_calls.or(run.max_host_calls),
         max_memory: flags.max_memory.or(run.max_memory),
+        max_tasks: flags.max_tasks.or(run.max_tasks),
         trace: run.trace.clone(),
         files_root: flags.files_root.clone(),
         allow_exec: flags.allow_exec.clone(),
@@ -492,6 +505,7 @@ fn main() -> std::process::ExitCode {{
             deadline_nanos: {deadline},
             max_host_calls: {max_host_calls},
             max_memory: {max_memory},
+            max_tasks: {max_tasks},
             trace: {trace},
             files_root: {files_root},
             allow_exec: &[{allow_exec}],
@@ -508,6 +522,7 @@ fn main() -> std::process::ExitCode {{
         deadline = rust_option(plan.deadline.map(|d| format!("{}", d.as_nanos()))),
         max_host_calls = rust_option(plan.max_host_calls.map(|n| n.to_string())),
         max_memory = rust_option(plan.max_memory.map(|n| n.to_string())),
+        max_tasks = rust_option(plan.max_tasks.map(|n| n.to_string())),
         trace = rust_option(plan.trace.as_deref().map(rust_string)),
         files_root = rust_option(
             plan.files_root
@@ -637,6 +652,9 @@ pub(crate) fn build_summary(plan: &BuildPlan) -> String {
     if let Some(max) = plan.max_memory {
         limits.push(format!("max memory {max} bytes"));
     }
+    if let Some(max) = plan.max_tasks {
+        limits.push(format!("max tasks {max}"));
+    }
     format!(
         "built `{name}` from {files} file(s) into `{out}`\n  \
          entry:  {entry}\n  \
@@ -690,6 +708,7 @@ export fn main(args: Array<String>) -> Result<Unit, Error> {
             deadline: None,
             max_host_calls: None,
             max_memory: None,
+            max_tasks: None,
             files_root: None,
             allow_exec: Vec::new(),
         }
@@ -715,7 +734,7 @@ export fn main(args: Array<String>) -> Result<Unit, Error> {
         let dir = TempDir::new("build-plan");
         fixture(
             dir.path(),
-            "[run.app]\nentry = \"app.main\"\nallow = [\"console\"]\nfuel = 1000\ndeadline = \"5s\"\nmax_host_calls = 3\n",
+            "[run.app]\nentry = \"app.main\"\nallow = [\"console\"]\nfuel = 1000\ndeadline = \"5s\"\nmax_host_calls = 3\nmax_tasks = 4\n",
         );
 
         let plan = plan_ok(dir.path(), &flags("app"));
@@ -724,6 +743,7 @@ export fn main(args: Array<String>) -> Result<Unit, Error> {
         assert_eq!(plan.fuel, Some(1000));
         assert_eq!(plan.deadline, Some(Duration::from_secs(5)));
         assert_eq!(plan.max_host_calls, Some(3));
+        assert_eq!(plan.max_tasks, Some(4));
         assert_eq!(
             plan.sources
                 .iter()
@@ -746,9 +766,11 @@ export fn main(args: Array<String>) -> Result<Unit, Error> {
         let mut flags = flags("app");
         flags.fuel = Some(7);
         flags.max_host_calls = Some(2);
+        flags.max_tasks = Some(6);
         let plan = plan_ok(dir.path(), &flags);
         assert_eq!(plan.fuel, Some(7));
         assert_eq!(plan.max_host_calls, Some(2));
+        assert_eq!(plan.max_tasks, Some(6));
     }
 
     #[test]

@@ -209,8 +209,9 @@ own new value. A cycle through two or more cells is not detected and leaks.
 
 Memory is managed by a precise, non-moving mark-and-sweep collector. CPU,
 memory, time, concurrency, and Host-call limits are runtime controls, not
-termination proofs. Every one of them is imposed today except the concurrency
-limit, which nothing yet enforces.
+termination proofs. Every one of them is imposed today. The concurrency limit
+bounds the tasks a run holds at once: a `spawn` past it stops the run, refused
+before its thread exists rather than made to wait for a sibling to finish.
 
 ## Annotations
 
