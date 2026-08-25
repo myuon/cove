@@ -278,8 +278,15 @@ pub fn call_method(
     args: Vec<Value>,
     span: Span,
 ) -> Result<Value, RuntimeError> {
-    if name == "count" && is_sequence(receiver) {
-        return Err(count_is_spelled_length(&receiver.type_name(), span));
+    // A receiver that answers `length()` is one a program might have written
+    // `count()` on, so the shared table's own methods are what decide who is
+    // taught the spelling. The name is compared first, so an ordinary call
+    // never asks.
+    if name == "count" {
+        let type_name = receiver.type_name();
+        if cove_schema::builtins::declares_length(&type_name) {
+            return Err(count_is_spelled_length(&type_name, span));
+        }
     }
     match receiver {
         Value::Array(items) => match name {
@@ -652,19 +659,6 @@ fn expects_map_entry(found: &Value, span: Span) -> RuntimeError {
     .at(span)
     .with_rule(
         "`Map.of(entries: MapEntry<K, V>...)` takes values built with `MapEntry(key:, value:)`.",
-    )
-}
-
-/// The builtin sequences, which all report their element count the same way.
-fn is_sequence(receiver: &Value) -> bool {
-    matches!(
-        receiver,
-        Value::Array(_)
-            | Value::Vector(_)
-            | Value::Str(_)
-            | Value::Range { .. }
-            | Value::Map(_)
-            | Value::Set(_)
     )
 }
 

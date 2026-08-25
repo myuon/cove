@@ -5663,7 +5663,12 @@ fn no_snapshot_conformance(receiver: &Ty, span: Span) -> Diagnostic {
 
 fn unknown_builtin_method(receiver: &Ty, name: &str, span: Span) -> Diagnostic {
     let type_name = builtin_name(receiver);
-    if name == "count" && matches!(receiver, Ty::Array(_) | Ty::Vector(_) | Ty::Str | Ty::Range) {
+    // Who is taught the spelling is derived rather than listed: a receiver
+    // that declares `length` is a receiver a program might have written
+    // `count()` on. The two ends used to keep a list each and had drifted by
+    // two types, so a `Map` was taught the spelling at run time and told
+    // nothing by `cove check`.
+    if name == "count" && cove_schema::builtins::declares_length(&type_name) {
         return Diagnostic::error(
             UNKNOWN_METHOD,
             format!("`{type_name}` has no method `count`; Cove spells the number of elements `length()`"),
@@ -6628,6 +6633,48 @@ fn run() -> Counter {
             "Every sequence reports its element count as `length()`; there is no `count()`."
         );
         assert_eq!(error.help.unwrap(), "write `length()` instead of `count()`");
+    }
+
+    /// Every receiver that answers `length()` is told so, which is what the
+    /// runtime already did: `Map` and `Set` used to be taught the spelling at
+    /// run time and told nothing here.
+    #[test]
+    fn every_sequence_is_told_that_count_is_spelled_length() {
+        let receivers = [
+            ("Array", "let items = [1]\n  items"),
+            ("Vector", "var items = Vector.of(1)\n  items"),
+            ("String", "let text = \"ab\"\n  text"),
+            ("Range", "let span = 0..<3\n  span"),
+            (
+                "Map",
+                "let ages = Map.of(MapEntry(key: \"a\", value: 1))\n  ages",
+            ),
+            ("Set", "let seen = Set.of(1)\n  seen"),
+        ];
+        for (type_name, receiver) in receivers {
+            let error = rejects_body(&format!("  {receiver}.count()"));
+            assert_eq!(error.code, UNKNOWN_METHOD, "{type_name}");
+            assert_eq!(
+                error.message,
+                format!(
+                    "`{type_name}` has no method `count`; Cove spells the number of elements `length()`"
+                )
+            );
+            assert_eq!(
+                error.help.unwrap(),
+                "write `length()` instead of `count()`",
+                "{type_name}"
+            );
+        }
+    }
+
+    /// A receiver that reports no element count is told what it does have
+    /// instead, because `count()` teaches nothing about an `Option`.
+    #[test]
+    fn a_receiver_that_has_no_length_is_not_taught_the_spelling() {
+        let error = rejects_body("  let value = Some(1)\n  let n = value.count()");
+        assert_eq!(error.code, UNKNOWN_METHOD);
+        assert_eq!(error.message, "`Option` has no method `count`");
     }
 
     #[test]
