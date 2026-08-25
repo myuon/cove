@@ -7,11 +7,11 @@ export struct HealthResponse {
 }
 
 /// Returns a stable health response without external I/O.
-export fn health(request: http.Request) -> http.Response<HealthResponse> {
+export fn health(request: http.Request) -> http.Response {
   http.json(200, HealthResponse(status: "ok"))
 }
 
-/// Builds the immutable routing table before any request task starts.
+/// Builds the immutable routing table before any request is served.
 fn routes() -> Array<http.Route> {
   var building = Vector.of()
 
@@ -25,8 +25,23 @@ fn routes() -> Array<http.Route> {
 }
 
 /// Runs the HTTP server.
+///
+/// The loop belongs to the program rather than to the host: `handle` answers
+/// one request and returns, so the run's fuel, deadline, and cancellation
+/// reach a server exactly as they reach any other Cove code. It ends when the
+/// listener has nothing more to serve.
 export fn main() -> Result<Unit, Error> {
-  console.println("listening on :8080")?
-  http.serve(8080, routes())?
+  let server = http.listen(8080)?
+  console.println("listening on :{server.port()}")?
+
+  let table = routes()
+  var served = 0
+
+  while server.handle(table)? {
+    served += 1
+  }
+
+  server.close()?
+  console.println("served {served} request(s)")?
   Ok(())
 }

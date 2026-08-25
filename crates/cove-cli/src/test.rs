@@ -29,6 +29,7 @@ use cove_runtime::clock::{Clock, VirtualTime};
 use cove_runtime::database::Database;
 use cove_runtime::files::Files;
 use cove_runtime::host::{Console, Documents, Env, Grants, HostRegistry};
+use cove_runtime::http::Http;
 use cove_runtime::interp::Interpreter;
 use cove_runtime::process::{Process, ProcessLog};
 use cove_runtime::runtime::Runtime;
@@ -280,6 +281,17 @@ fn register_hosts(hosts: &mut HostRegistry, root: &Path, allow_real: &BTreeSet<&
         hosts.register(Box::new(Database::denied()));
     } else {
         hosts.register(Box::new(Database::recorded(BTreeMap::new())));
+    }
+    // A fake `http` reaches nothing and listens to nothing: `fetch` has no
+    // recorded answers and a listener has no scripted requests, so a test
+    // that serves finds its queue already empty. A test that wants either
+    // needs data a `cove.toml` has no way to carry, so it belongs in a Rust
+    // test that can supply it — which is where the representative servers are
+    // exercised.
+    if real("http") {
+        hosts.register(Box::new(Http::real()));
+    } else {
+        hosts.register(Box::new(Http::recorded(BTreeMap::new(), Vec::new())));
     }
 }
 

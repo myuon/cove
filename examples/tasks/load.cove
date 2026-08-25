@@ -1,17 +1,21 @@
-use api.fetch
+use http
 use clock.timeout
 
 /// Data needed to render the dashboard.
 export struct Dashboard {
-  bookings: Array<Booking>
-  prices: Array<Price>
+  bookings: String
+  prices: String
 }
 
 /// Loads independent dashboard inputs concurrently.
+///
+/// The two fetches run on threads of their own, and `clock.timeout` bounds the
+/// wait for both together: a body it stops does not finish, and the error
+/// names the bound rather than whatever the stopped body was doing.
 export async fn loadDashboard() -> Result<Dashboard, Error> {
   scope tasks {
-    let bookings = tasks.spawn { api.fetch<Array<Booking>>("/bookings") }
-    let prices = tasks.spawn { api.fetch<Array<Price>>("/prices") }
+    let bookings = tasks.spawn { http.fetch("http://127.0.0.1:8080/bookings") }
+    let prices = tasks.spawn { http.fetch("http://127.0.0.1:8080/prices") }
 
     let result = clock.timeout(500ms) {
       Dashboard(bookings: bookings.await()?, prices: prices.await()?)

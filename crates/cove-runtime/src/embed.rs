@@ -25,6 +25,7 @@ use crate::clock::Clock;
 use crate::database::Database;
 use crate::files::Files;
 use crate::host::{Console, Documents, Env, GrantSource, Grants, HostRegistry};
+use crate::http::Http;
 use crate::interp::Interpreter;
 use crate::process::Process;
 use crate::runtime::Runtime;
@@ -80,6 +81,11 @@ pub fn register_hosts(setup: HostSetup) -> HostRegistry {
     // names, and it tells a run what is missing instead of telling it that
     // `database` is not a host module.
     hosts.register(Box::new(Database::denied()));
+    // `http` is real, and narrow in one direction: `fetch` reaches whatever
+    // the URL names, but `listen` binds loopback only. Granting a run the
+    // network should not publish a port on every interface the machine has,
+    // and a host that wanted that would say so by installing a different one.
+    hosts.register(Box::new(Http::real()));
     hosts
 }
 
