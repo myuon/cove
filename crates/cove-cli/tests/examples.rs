@@ -23,7 +23,8 @@
 //! within one task, the set of effects a scope produced, the value an entry
 //! returned. Where the program decides nothing — most sharply, how many times
 //! a repeating timer fires before its own cancellation reaches it — the test
-//! says so rather than pinning whichever answer this machine happens to give.
+//! says so rather than pinning whichever answer this machine happens to give,
+//! which is the line ADR 0008's amendment draws.
 
 use std::collections::BTreeMap;
 use std::io::Write;
@@ -307,21 +308,27 @@ fn the_dashboard_reports_an_awaited_failure_as_the_bodys_own_value() {
 /// `clock.every` reads its task's cancellation flag before it does anything
 /// else, so a `cancel` that lands first means no round at all. A virtual clock
 /// does not settle that race, because the clock is not what decides it.
-/// Measured on one machine, the same program fired the timer in 60 of 60 runs
-/// with two requests to serve first and in 0 of 40 with none: what changed was
-/// only how much work `main` did before it cancelled. CI, which is slower and
-/// more contended, found the zero.
+/// Measured on one machine, the same program fired the timer in 200 of 200
+/// runs with two requests to serve first — 150 of them with every core
+/// saturated — and in 0 of 100 with none: what changed was only how much work
+/// `main` did before it cancelled. CI, which is slower and more contended,
+/// found the zero.
 ///
 /// That is a property of the program rather than of the fake, and it is the
 /// same property under a real clock, where a sixty-second timer cancelled
-/// after two requests fires zero times. So this asserts what is actually
-/// decided: the fake offers one round at most, so at most one line may appear,
-/// and if one does it is the line the program prints. `clock.every`'s own
-/// behaviour — one round on a virtual clock, an `Err` handed back rather than
-/// retried, nothing run at all when the task is already cancelled — is pinned
-/// exactly by the unit tests in `crates/cove-runtime/src/clock.rs`, which
-/// drive it directly and have no second thread to race. Issue #39 records what
-/// would have to change for the count to be decidable here too.
+/// after two requests fires zero times. ADR 0008's amendment decides that it
+/// stays that way — a `spawn` starts a task and orders nothing else — and
+/// records what was rejected for making the count decidable here: a rendezvous
+/// at `spawn`, a clock this test steps, and a `clock.every` that reports its
+/// rounds. So this asserts what is actually decided: the fake offers one round
+/// at most, so at most one line may appear, and a line that does appear is one
+/// of the three the program could print. Which of the three is the scheduler's
+/// as well — those 200 runs reported one request recorded in 185 of them and
+/// none in 15, and saturating the cores reversed the split. `clock.every`'s
+/// own behaviour — one round on a virtual clock, an `Err` handed back rather
+/// than retried, nothing run at all when the task is already cancelled — is
+/// pinned exactly by the unit tests in `crates/cove-runtime/src/clock.rs`,
+/// which drive it directly and have no second thread to race.
 #[test]
 fn the_callback_server_serves_both_routes_through_its_middleware() {
     let ran = run(
@@ -363,9 +370,18 @@ fn the_callback_server_serves_both_routes_through_its_middleware() {
         timer.len() <= 1,
         "a virtual clock gives a repeating timer one round at most: {timer:?}"
     );
+    // A round reports a prefix of the two requests this run serves, because it
+    // reads the metrics under the same lock the middleware records them under,
+    // and neither of these routes fails. Which prefix it saw belongs to the
+    // scheduler; that it saw one of them belongs to the program.
     for line in &timer {
         assert!(
-            line.starts_with("requests=") && line.contains(" failures="),
+            [
+                "requests=0 failures=0",
+                "requests=1 failures=0",
+                "requests=2 failures=0",
+            ]
+            .contains(&line.as_str()),
             "{line}"
         );
     }
