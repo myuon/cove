@@ -115,6 +115,15 @@ pub trait HostApi: Send + Sync {
     /// never runs a Cove callback wants. A module that does — `clock.every`,
     /// `http.Server.handle` — overrides this instead and leaves `call`
     /// unreachable.
+    ///
+    /// `back` is the way into the program that made this call, and it is on
+    /// loan for the duration of the call and no longer. [`Reentry`] states
+    /// the whole of what may be done with it, and the parts an implementor is
+    /// most likely to get wrong are these: it may not be retained past this
+    /// return, it may be used as many times as the operation means, it may be
+    /// used from this thread only, and no lock this module owns may be held
+    /// while it is used, because the Cove code it runs may call this module
+    /// again.
     fn call_with(
         &self,
         op: &str,
@@ -132,6 +141,12 @@ pub trait HostApi: Send + Sync {
     ///
     /// A module that declares no resources can never be reached here, so the
     /// default says so rather than inventing an answer.
+    ///
+    /// `back` is the same loan [`HostApi::call_with`] describes, under the
+    /// same rules, and the lock rule is sharper here than anywhere else: the
+    /// table of open resources is exactly the lock a module holds, and the
+    /// callback is exactly the code that may ask for a resource in it. Take
+    /// what the callback's work needs, release the guard, and reenter after.
     fn call_resource(
         &self,
         handle: &ResourceHandle,
@@ -166,8 +181,127 @@ pub trait HostApi: Send + Sync {
 /// questions an operation that waits has to keep asking, and they are the
 /// only way to ask them: a host holds no budget and no interpreter of its
 /// own. [`HostApi`] says what a host owes them.
+///
+/// # For the current call, and no longer
+///
+/// A `&mut dyn Reentry` arrives with a lifetime of its own, shorter than the
+/// `&self` beside it, and `dyn Reentry` is neither `Send` nor `Sync`. So a
+/// host cannot put one in a field: a [`HostApi`] is `Send + Sync` and shared
+/// across the tasks of a run, and neither the lifetime nor the auto traits
+/// will let this through. Both refusals are deliberate rather than an
+/// accident of how the signature was written, and neither is worth working
+/// around with an `Arc` or a raw pointer. Behind the reference is a borrow of
+/// the interpreter running the task that made this call. It is valid while
+/// that call is on the stack, and once the call returns the interpreter has
+/// moved on: a retained one would name a stack frame the task has left, and
+/// would run Cove code on a task that is doing something else.
+///
+/// A host that wants work done later does not keep the way back. It keeps
+/// the callback — a [`Value`] is an ordinary owned value — and asks for
+/// another call, which is what `http.Server.handle` is and why the loop
+/// around it is written in Cove.
+///
+/// # As many times as the operation means
+///
+/// A host may call its callback none, once, or many times. `clock.every`
+/// calls it once a period until the timer's task is cancelled;
+/// `http.Server.handle` calls it once, and not at all when no request
+/// arrived. Nothing here counts invocations and nothing makes the second one
+/// cheaper than the first.
+///
+/// Each one is a call the run pays for in full. Fuel is charged at the
+/// callback's own safepoints, its calls count against the run's call-depth
+/// limit while it is on the stack, and the run's deadline and cancellation
+/// stop it wherever they would stop any other Cove code. A host that loops
+/// therefore does not have to police the run: a body that would overrun the
+/// budget stops of its own accord and the error comes back out of
+/// [`Reentry::call`]. What the host owes is to stop looping when it is told
+/// to — [`Reentry::is_cancelled`] between rounds — rather than to keep
+/// starting rounds that will all fail.
+///
+/// # Nested, up to a bound
+///
+/// A callback is Cove code, so it may call any host the run granted,
+/// including this one, and that host may in turn be handed work. The nesting
+/// is real: the second host call builds a second way back further down the
+/// same native stack, and it reenters the same interpreter, so the inner
+/// callback sees the same task, the same heap, and the same budget as the
+/// outer one.
+///
+/// How deep it may go is a runtime control, like recursion depth and for the
+/// same reason. Two bound it. The Cove frames a callback makes count against
+/// the run's call-depth limit, since they are ordinary calls. And the number
+/// of host calls running a callback that may be stacked on one thread is
+/// bounded separately and much lower, because between one callback's frame
+/// and the next sits however much native stack the host chose to use, which
+/// nothing can measure. Past that bound the next reentry is refused with a
+/// [`RuntimeError`]; the run stops, rather than the process. It is a bound
+/// and not a proof: a host that uses an enormous amount of stack before it
+/// reenters can still exhaust it at the first level, and that is the host's
+/// responsibility, not the boundary's.
+///
+/// # One at a time, on the calling thread
+///
+/// A host may not call back from a thread of its own, and cannot: there is
+/// exactly one `&mut dyn Reentry` per host call and it is neither `Send` nor
+/// `Sync`, so two threads cannot hold it and it cannot be moved to one. This
+/// is the design's answer and not a limitation waiting to be lifted.
+/// Concurrency in Cove belongs to a task scope the program wrote; a host that
+/// ran a program's code on threads the program never asked for would be
+/// deciding how much of that program runs at once, and would be doing it
+/// outside every control the run was given.
+///
+/// # No lock may be held across it
+///
+/// A host must not hold a resource mutex, or any other non-reentrant lock,
+/// while it calls a callback. The callback is Cove code and Cove code may
+/// call this same host again; a `std::sync::Mutex` is not reentrant, so the
+/// second call would deadlock the task on a lock the first call is holding
+/// three frames up its own stack. Nothing detects this, because from the
+/// lock's point of view nothing is wrong.
+///
+/// The shape that works is to take what the callback's work needs while the
+/// lock is held, release it, and then reenter. `http`'s `Server.handle` is
+/// the worked example: it takes the next request, or a clone of the listening
+/// socket, out from under the table of open listeners, drops the guard, and
+/// only then runs the route's handler — which is free to call `http.listen`
+/// again, or to serve on the same handle.
+///
+/// # Reentry is not task transfer
+///
+/// Nothing crosses a task boundary here, so the rules that govern one do not
+/// apply. A callback's arguments are handed from a host to the interpreter of
+/// the task that called it, and its result comes back the same way, both on
+/// one thread, both belonging to one task throughout. [`crate::task::Transfer`]
+/// is not consulted and cannot be: an argument that may not cross a task
+/// boundary — a `Vector`, a resource handle whose schema says
+/// `task_safe: false` — is a perfectly ordinary argument to a callback, and a
+/// callback may answer with one.
+///
+/// Two things nearby do belong to tasks, and it is worth saying which.
+/// [`ResourceSchema::task_safe`] still decides whether the handle an
+/// operation *returns* may later be captured by a `spawn`; that is a question
+/// about the value, asked at the boundary the value eventually crosses, and
+/// reentry is not that boundary. And a callback that is an `async fn` answers
+/// with a task, which the implementation settles before handing the value
+/// back — the host was given a callback rather than a task, so this is what
+/// `await` would have done at the call site the host is standing in for. That
+/// settle is a join, and a value coming back out of a *spawned* task does
+/// cross a boundary and is checked; a settled `async fn` body ran on this
+/// thread and crosses nothing.
 pub trait Reentry {
     /// Calls `callee` with `args` and answers what it produced.
+    ///
+    /// The call runs to completion before this returns, on this thread. An
+    /// `Err` is what the callback failed with, or what stopped the run while
+    /// it was running — exhausted fuel, an expired deadline, a raised
+    /// cancellation, a depth limit — and a host that receives one has nothing
+    /// useful to add: pass it on, so the reason the run stopped reaches the
+    /// caller as the runtime wrote it.
+    ///
+    /// No lock the host owns may be held across this call. See the trait's
+    /// documentation for why, and for what a host may and may not do with
+    /// the way back it was handed.
     fn call(&mut self, callee: &Value, args: Vec<Value>) -> Result<Value, RuntimeError>;
 
     /// Calls `callee` with `args`, stopping it at its next safepoint if
@@ -176,6 +310,15 @@ pub trait Reentry {
     /// This is how a timeout is a timeout rather than a measurement taken
     /// afterwards: the body observes the flag exactly where it observes its
     /// own task's cancellation, and stops there.
+    ///
+    /// `stop` bounds this call and everything inside it, including a further
+    /// host call the body makes and any callback that host runs in turn — a
+    /// bound that a nested call escaped would not be a bound. It adds to the
+    /// reasons the body may stop and replaces none of them: the run's own
+    /// cancellation and deadline still apply, and a body stopped by one of
+    /// those is not stopped by this. A caller that needs to tell the two
+    /// apart reads `stop` afterwards, which is what `clock.timeout` does to
+    /// decide whether to report its bound or the error it was given.
     fn call_until(
         &mut self,
         callee: &Value,

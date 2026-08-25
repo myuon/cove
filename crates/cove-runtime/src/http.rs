@@ -1582,6 +1582,59 @@ mod tests {
         );
     }
 
+    /// Runs `body` on a thread of its own and fails if it has not finished
+    /// within `limit`.
+    ///
+    /// The rule below is one a host breaks by deadlocking, which is a way of
+    /// failing that a test asserting on a result never reaches. This makes a
+    /// regression a failure with a message rather than a suite that never
+    /// ends.
+    fn within<T: Send + 'static>(limit: Duration, body: impl FnOnce() -> T + Send + 'static) -> T {
+        let (finished, done) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = finished.send(body());
+        });
+        done.recv_timeout(limit)
+            .unwrap_or_else(|_| panic!("this did not finish within {limit:?}"))
+    }
+
+    /// A host may not hold a lock of its own while it runs a Cove callback,
+    /// because the callback is Cove code and Cove code may call the same host
+    /// again. `serve_one` keeps the rule by taking what the next request
+    /// needs out from under the table of open listeners and dropping the
+    /// guard before the handler runs.
+    ///
+    /// So a handler may ask the very handle it is being served by for its
+    /// port, and may open a second listener, and both answer. Held across the
+    /// callback, either would deadlock this task on a lock three frames up
+    /// its own stack — which is why the whole thing runs under a bound.
+    #[test]
+    fn a_handler_may_call_back_into_the_same_host_that_is_serving_it() {
+        let (served, answered) = within(Duration::from_secs(10), || {
+            let http = Arc::new(Http::recorded(
+                BTreeMap::new(),
+                vec![ScriptedRequest::get("/health")],
+            ));
+            let handle = listen(&http, 4242);
+            let inside = Arc::clone(&http);
+            let serving = Arc::clone(&handle);
+            let mut back = StubReentry::new(move || {
+                let port = inside.call_resource(&serving, "port", Vec::new(), &mut NoReentry)?;
+                let second = inside.call("listen", vec![Value::Int(8080)])?;
+                assert!(is_ok(&second), "a second listener opened: {second}");
+                Ok(response(200, &format!("{port}")))
+            });
+
+            let routes = Value::Array(vec![route("Get", "/health")].into());
+            let answer = http
+                .call_resource(&handle, "handle", vec![routes], &mut back)
+                .unwrap();
+            (http.served().responses(), bool_ok(answer))
+        });
+        assert!(answered, "the scripted request was served");
+        assert_eq!(served, vec!["200 4242".to_string()]);
+    }
+
     /// A handle is a name; closing the resource ends what it named, and a
     /// later call on the same name is a reported error rather than a call on
     /// whatever occupies the slot now.
