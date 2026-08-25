@@ -76,6 +76,8 @@ reports that rather than guessing which reading was meant.
 - There is no implicit `null`.
 - Missing values use `Option<T>`: `Some(value)` or `None`.
 - Expected failure uses `Result<T, E>`: `Ok(value)` or `Err(error)`.
+- `Error` is the builtin error type. `Error("...")` builds one and `.message`
+  reads what it carries.
 - `expr?` returns the error from the current function.
 - `await` binds tighter than `?`, so `await task()?` awaits and then propagates.
 - Panics are reserved for broken invariants, not ordinary errors.

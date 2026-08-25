@@ -439,24 +439,16 @@ mod tests {
     }
 
     fn ok_value(value: Value) -> Value {
-        match value {
-            Value::Enum(result) if &*result.type_name == "Result" && &*result.case == "Ok" => {
-                result.payload.into_iter().next().unwrap_or(Value::Unit)
-            }
-            other => panic!("expected `Ok(...)`, found {other}"),
+        match value.ok_payload() {
+            Some(payload) => payload.first().cloned().unwrap_or(Value::Unit),
+            None => panic!("expected `Ok(...)`, found {value}"),
         }
     }
 
     fn err_message(value: Value) -> String {
-        match value {
-            Value::Enum(result) if &*result.type_name == "Result" && &*result.case == "Err" => {
-                result
-                    .payload
-                    .first()
-                    .map(ToString::to_string)
-                    .unwrap_or_default()
-            }
-            other => panic!("expected `Err(...)`, found {other}"),
+        match value.err_payload() {
+            Some(payload) => payload.first().map(ToString::to_string).unwrap_or_default(),
+            None => panic!("expected `Err(...)`, found {value}"),
         }
     }
 

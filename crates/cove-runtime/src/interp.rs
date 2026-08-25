@@ -23,7 +23,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use cove_diag::{SourceMap, Span};
-use cove_schema::builtins::FreeBuiltinKind;
+use cove_schema::builtins::{FreeBuiltinKind, MAP_ENTRY, NONE_CASE, OPTION, RESULT};
 use cove_sema::resolve::{Program, ResolvedModule};
 use cove_syntax::ast::{
     Arg, BinaryOp, Block, EnumDecl, Expr, ExprKind, FnDecl, Ident, ItemKind, Param, Pattern,
@@ -1464,18 +1464,16 @@ impl<'a> Interpreter<'a> {
             ExprKind::Try(inner) => {
                 let value = self.eval(env, inner)?;
                 match &value {
-                    Value::Enum(result) if &*result.type_name == "Result" => {
-                        if &*result.case == "Ok" {
-                            Ok(result.payload.first().cloned().unwrap_or(Value::Unit))
-                        } else {
-                            Err(Control::Return(value))
+                    Value::Enum(result) if &*result.type_name == RESULT.name => {
+                        match value.ok_payload() {
+                            Some(payload) => Ok(payload.first().cloned().unwrap_or(Value::Unit)),
+                            None => Err(Control::Return(value)),
                         }
                     }
-                    Value::Enum(option) if &*option.type_name == "Option" => {
-                        if &*option.case == "Some" {
-                            Ok(option.payload.first().cloned().unwrap_or(Value::Unit))
-                        } else {
-                            Err(Control::Return(Value::none()))
+                    Value::Enum(option) if &*option.type_name == OPTION.name => {
+                        match value.some_payload() {
+                            Some(payload) => Ok(payload.first().cloned().unwrap_or(Value::Unit)),
+                            None => Err(Control::Return(Value::none())),
                         }
                     }
                     other => {
@@ -2071,7 +2069,7 @@ impl<'a> Interpreter<'a> {
                 .iter()
                 .map(|(key, value)| {
                     Value::Struct(Box::new(StructValue {
-                        type_name: "MapEntry".into(),
+                        type_name: MAP_ENTRY.name.into(),
                         fields: vec![("key".into(), key.to_value()), ("value".into(), value.clone())],
                     }))
                 })
@@ -2089,7 +2087,7 @@ impl<'a> Interpreter<'a> {
         if let Some(place) = env.lookup(name) {
             return Ok(place.read(span)?);
         }
-        if name == "None" {
+        if name == NONE_CASE.name {
             return Ok(Value::none());
         }
         let module = env.module.clone();
@@ -2318,7 +2316,7 @@ impl<'a> Interpreter<'a> {
                     let values = plain_values(args, name)?;
                     return Ok(self.call_host(&host, name, values, span)?);
                 }
-                if name == "MapEntry" {
+                if name == MAP_ENTRY.name {
                     let args = self.eval_args(env, args, trailing)?;
                     return Ok(init_map_entry(args, span)?);
                 }
@@ -2338,7 +2336,7 @@ impl<'a> Interpreter<'a> {
                         }
                     };
                 }
-                if name == "None" {
+                if name == NONE_CASE.name {
                     return Err(RuntimeError::new("`None` is a value, not a call")
                         .at(span)
                         .with_help("write `None`")
@@ -2512,10 +2510,8 @@ impl<'a> Interpreter<'a> {
         let values = plain_values(evaluated, name)?;
         let sources: Vec<&str> = spans.iter().map(|span| self.source_text(*span)).collect();
         let outcome = builtins::call_assertion(name, values, &sources, span)?;
-        if let Value::Enum(result) = &outcome {
-            if &*result.case == "Err" {
-                self.assertion_failure = Some((span, result.payload[0].to_string()));
-            }
+        if let Some(payload) = outcome.err_payload() {
+            self.assertion_failure = Some((span, payload[0].to_string()));
         }
         Ok(outcome)
     }
@@ -2852,10 +2848,10 @@ impl<'a> Interpreter<'a> {
             PatternKind::Wildcard => Ok(true),
             PatternKind::Binding(name) => {
                 // `None` is a case, not a name to bind.
-                if name == "None" {
+                if name == NONE_CASE.name {
                     if let Value::Enum(option) = value {
-                        if &*option.type_name == "Option" {
-                            return Ok(&*option.case == "None");
+                        if &*option.type_name == OPTION.name {
+                            return Ok(&*option.case == NONE_CASE.name);
                         }
                     }
                 }
@@ -3170,20 +3166,22 @@ fn unary(op: UnaryOp, value: Value, span: Span) -> Result<Value, RuntimeError> {
 
 // -------------------------------------------------------------- arguments
 
-/// The labels `MapEntry(key:, value:)` accepts, in declaration order.
-const MAP_ENTRY_FIELDS: [&str; 2] = ["key", "value"];
-
 /// `MapEntry(key: ..., value: ...)` is a synthesized labeled call for a
 /// builtin struct, exactly like a user struct's synthesized initializer. It
 /// exists only so `Map.of` has an ordinary call-shaped way to build the pairs
 /// it collects; it is not a declared struct because nothing else derives it.
+///
+/// Its labels are the fields `cove_schema::builtins::MAP_ENTRY` declares, in
+/// declaration order, which is also what the checker checks the call against.
 fn init_map_entry(args: Vec<EvaluatedArg>, span: Span) -> Result<Value, RuntimeError> {
-    let (mut slots, _) = assign_labels(&MAP_ENTRY_FIELDS, args, "MapEntry", false)?;
-    let mut fields = Vec::with_capacity(MAP_ENTRY_FIELDS.len());
-    for (index, field_name) in MAP_ENTRY_FIELDS.iter().enumerate() {
+    let labels: Vec<&str> = MAP_ENTRY.fields.iter().map(|field| field.name).collect();
+    let (mut slots, _) = assign_labels(&labels, args, MAP_ENTRY.name, false)?;
+    let mut fields = Vec::with_capacity(labels.len());
+    for (index, field_name) in labels.iter().enumerate() {
         let Some(arg) = slots[index].take() else {
             return Err(RuntimeError::new(format!(
-                "`MapEntry` needs a value for field `{field_name}`"
+                "`{}` needs a value for field `{field_name}`",
+                MAP_ENTRY.name
             ))
             .at(span)
             .with_rule("Struct initialization is a synthesized labeled call.")
@@ -3192,7 +3190,7 @@ fn init_map_entry(args: Vec<EvaluatedArg>, span: Span) -> Result<Value, RuntimeE
         fields.push(((*field_name).into(), value_of(&arg, field_name, arg.span)?));
     }
     Ok(Value::Struct(Box::new(StructValue {
-        type_name: "MapEntry".into(),
+        type_name: MAP_ENTRY.name.into(),
         fields,
     })))
 }
@@ -3595,12 +3593,9 @@ fn task_cancelled(span: Span) -> RuntimeError {
 
 /// The error a `Result` carries, when the value is one and it failed.
 fn failure_of(value: &Value) -> Option<Value> {
-    match value {
-        Value::Enum(result) if &*result.type_name == "Result" && &*result.case == "Err" => {
-            Some(result.payload.first().cloned().unwrap_or(Value::Unit))
-        }
-        _ => None,
-    }
+    value
+        .err_payload()
+        .map(|payload| payload.first().cloned().unwrap_or(Value::Unit))
 }
 
 fn expect_no_arguments(what: &str, values: &[Value], span: Span) -> Result<(), RuntimeError> {
@@ -3976,18 +3971,15 @@ mod tests {
 
     /// The message a failed assertion reported, or `None` when it held.
     fn assertion_message(body: &str) -> Option<String> {
-        match run_assertion(body).value() {
-            Value::Enum(result) if &*result.case == "Err" => Some(result.payload[0].to_string()),
-            _ => None,
-        }
+        run_assertion(body)
+            .value()
+            .err_payload()
+            .map(|payload| payload[0].to_string())
     }
 
     #[test]
     fn a_holding_assertion_produces_ok() {
-        assert!(matches!(
-            run_assertion("  assert(1 + 1 == 2)").value(),
-            Value::Enum(result) if &*result.case == "Ok"
-        ));
+        assert!(run_assertion("  assert(1 + 1 == 2)").value().is_ok());
     }
 
     #[test]

@@ -189,7 +189,7 @@ fn failure_message(value: &Value) -> Option<String> {
     let Value::Enum(result) = value else {
         return None;
     };
-    if &*result.type_name != "Result" || &*result.case != "Err" {
+    if !value.is_err() {
         return None;
     }
     Some(

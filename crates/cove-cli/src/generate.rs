@@ -186,16 +186,18 @@ fn expect_generated_source(
     value: cove_runtime::Value,
 ) -> Result<String, CliError> {
     use cove_runtime::value::Value;
-    let Value::Enum(result) = &value else {
+    let Value::Enum(_) = &value else {
         return Err(CliError::Message(format!(
             "`{entry_name}` did not return a `Result`"
         )));
     };
-    match (&*result.case, result.payload.first()) {
-        ("Ok", Some(Value::Str(source))) => Ok(source.to_string()),
-        ("Err", payload) => Err(CliError::Message(
-            payload.map(ToString::to_string).unwrap_or_default(),
-        )),
+    if let Some(payload) = value.err_payload() {
+        return Err(CliError::Message(
+            payload.first().map(ToString::to_string).unwrap_or_default(),
+        ));
+    }
+    match value.ok_payload().and_then(<[Value]>::first) {
+        Some(Value::Str(source)) => Ok(source.to_string()),
         _ => Err(CliError::Message(format!(
             "`{entry_name}` returned `Ok(...)` with a value that is not a `String`"
         ))),

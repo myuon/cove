@@ -20,6 +20,8 @@ pub use cove_schema::{
     TypeSchema,
 };
 
+use cove_schema::builtins::{ERROR, ERR_CASE, NONE_CASE, OK_CASE, OPTION, RESULT, SOME_CASE};
+
 use crate::value::Value;
 
 /// Whether a value is one a declared type admits.
@@ -62,7 +64,7 @@ impl Admits for HostType {
             | (HostType::Duration, Value::Duration(_)) => Ok(()),
             // The builtin error struct, which is what `Err` carries
             // everywhere a host declares one.
-            (HostType::Error, Value::Struct(fields)) if &*fields.type_name == "Error" => Ok(()),
+            (HostType::Error, Value::Struct(fields)) if &*fields.type_name == ERROR.name => Ok(()),
             (HostType::Array(item), Value::Array(items)) => {
                 for (index, element) in items.iter().enumerate() {
                     item.admits(element)
@@ -70,17 +72,26 @@ impl Admits for HostType {
                 }
                 Ok(())
             }
-            (HostType::Option(some), Value::Enum(case)) if &*case.type_name == "Option" => {
+            // The two builtin enums, whose cases `cove_schema::builtins`
+            // declares: a case's name and how much it carries are read off
+            // the same entry `Value::some` and `Value::ok` build from.
+            (HostType::Option(some), Value::Enum(case)) if &*case.type_name == OPTION.name => {
                 match (&*case.case, case.payload.as_slice()) {
-                    ("Some", [inner]) => some.admits(inner).map_err(|m| m.inside("Some(_)")),
-                    ("None", []) => Ok(()),
+                    (name, [inner]) if name == SOME_CASE.name => some
+                        .admits(inner)
+                        .map_err(|m| m.inside(&SOME_CASE.wildcard_pattern())),
+                    (name, []) if name == NONE_CASE.name => Ok(()),
                     _ => Err(mismatched(self, value)),
                 }
             }
-            (HostType::Result(ok, error), Value::Enum(case)) if &*case.type_name == "Result" => {
+            (HostType::Result(ok, error), Value::Enum(case)) if &*case.type_name == RESULT.name => {
                 match (&*case.case, case.payload.as_slice()) {
-                    ("Ok", [inner]) => ok.admits(inner).map_err(|m| m.inside("Ok(_)")),
-                    ("Err", [inner]) => error.admits(inner).map_err(|m| m.inside("Err(_)")),
+                    (name, [inner]) if name == OK_CASE.name => ok
+                        .admits(inner)
+                        .map_err(|m| m.inside(&OK_CASE.wildcard_pattern())),
+                    (name, [inner]) if name == ERR_CASE.name => error
+                        .admits(inner)
+                        .map_err(|m| m.inside(&ERR_CASE.wildcard_pattern())),
                     _ => Err(mismatched(self, value)),
                 }
             }

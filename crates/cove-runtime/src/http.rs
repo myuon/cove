@@ -41,6 +41,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use cove_schema::builtins::RESULT;
 use cove_sema::Capability;
 
 use crate::error::RuntimeError;
@@ -391,9 +392,9 @@ fn response_of(value: &Value) -> Result<(i64, String), RuntimeError> {
             };
             Ok((status, body))
         }
-        Value::Enum(result) if &*result.type_name == "Result" => match &*result.case {
-            "Ok" => response_of(result.payload.first().unwrap_or(&Value::Unit)),
-            _ => Ok((
+        Value::Enum(result) if &*result.type_name == RESULT.name => match value.ok_payload() {
+            Some(payload) => response_of(payload.first().unwrap_or(&Value::Unit)),
+            None => Ok((
                 500,
                 json_string(
                     &result
@@ -780,44 +781,33 @@ mod tests {
     use std::rc::Rc;
 
     fn err_message(value: Value) -> String {
-        match value {
-            Value::Enum(result) if &*result.type_name == "Result" && &*result.case == "Err" => {
-                result
-                    .payload
-                    .first()
-                    .map(ToString::to_string)
-                    .unwrap_or_default()
-            }
-            other => panic!("expected `Err(...)`, found {other}"),
+        match value.err_payload() {
+            Some(payload) => payload.first().map(ToString::to_string).unwrap_or_default(),
+            None => panic!("expected `Err(...)`, found {value}"),
         }
     }
 
     fn is_ok(value: &Value) -> bool {
-        matches!(value, Value::Enum(result)
-            if &*result.type_name == "Result" && &*result.case == "Ok")
+        value.is_ok()
     }
 
     fn ok_str(value: Value) -> String {
-        match value {
-            Value::Enum(result) if &*result.type_name == "Result" && &*result.case == "Ok" => {
-                match result.payload.into_iter().next() {
-                    Some(Value::Str(s)) => s.to_string(),
-                    other => panic!("expected `Ok(String)`, found {other:?}"),
-                }
-            }
-            other => panic!("expected `Ok(...)`, found {other}"),
+        match value.ok_payload() {
+            Some(payload) => match payload.first() {
+                Some(Value::Str(s)) => s.to_string(),
+                other => panic!("expected `Ok(String)`, found {other:?}"),
+            },
+            None => panic!("expected `Ok(...)`, found {value}"),
         }
     }
 
     fn bool_ok(value: Value) -> bool {
-        match value {
-            Value::Enum(result) if &*result.type_name == "Result" && &*result.case == "Ok" => {
-                match result.payload.into_iter().next() {
-                    Some(Value::Bool(b)) => b,
-                    other => panic!("expected `Ok(Bool)`, found {other:?}"),
-                }
-            }
-            other => panic!("expected `Ok(...)`, found {other}"),
+        match value.ok_payload() {
+            Some(payload) => match payload.first() {
+                Some(Value::Bool(b)) => *b,
+                other => panic!("expected `Ok(Bool)`, found {other:?}"),
+            },
+            None => panic!("expected `Ok(...)`, found {value}"),
         }
     }
 
@@ -837,14 +827,13 @@ mod tests {
 
     /// Opens a listener on `port` and answers the handle it issued.
     fn listen(http: &Http, port: i64) -> Arc<ResourceHandle> {
-        match http.call("listen", vec![Value::Int(port)]).unwrap() {
-            Value::Enum(result) if &*result.type_name == "Result" && &*result.case == "Ok" => {
-                match result.payload.into_iter().next() {
-                    Some(Value::Resource(handle)) => handle,
-                    other => panic!("expected `Ok(Resource)`, found {other:?}"),
-                }
-            }
-            other => panic!("expected `Ok(...)`, found {other}"),
+        let answered = http.call("listen", vec![Value::Int(port)]).unwrap();
+        match answered.ok_payload() {
+            Some(payload) => match payload.first() {
+                Some(Value::Resource(handle)) => handle.clone(),
+                other => panic!("expected `Ok(Resource)`, found {other:?}"),
+            },
+            None => panic!("expected `Ok(...)`, found {answered}"),
         }
     }
 

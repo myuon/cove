@@ -2,12 +2,13 @@
 //! compiler agrees about what that body is called.
 //!
 //! `cove_schema::builtins` is the one description of the language's own
-//! methods and associated functions. `cove-sema` checks a call against it and
-//! `cove_runtime::builtins` implements the call, and the second of those is a
-//! Rust `match` rather than a table, so nothing in the type system holds the
-//! two together. This file does, by driving every entry in the shared table
-//! through the whole toolchain: each one is a program that is resolved,
-//! type-checked, and run.
+//! methods and associated functions, of the cases its two enums are made of,
+//! and of the fields its two structs carry. `cove-sema` checks a program
+//! against it and `cove_runtime` builds and dispatches the values, and the
+//! second of those is Rust rather than a table, so nothing in the type system
+//! holds the two together. This file does, by driving every entry in the
+//! shared table through the whole toolchain: each one is a program that is
+//! resolved, type-checked, and run.
 //!
 //! That closes both directions. An entry added to the schema with no
 //! implementation behind it has no exercise, which
@@ -18,6 +19,12 @@
 //! table does not declare -- which is what makes the shared table the list
 //! rather than one of two lists.
 //!
+//! The cases and the fields are held the same way, by
+//! [`CASE_EXERCISES`] and [`FIELD_EXERCISES`]: a case is exercised by a
+//! program that *builds* the case and then matches it, so a name the two
+//! ends disagreed about would fail either the checker's exhaustiveness or the
+//! interpreter's match rather than pass both.
+//!
 //! The programs touch no host, so nothing here reads a clock, a file, or a
 //! socket.
 
@@ -27,6 +34,7 @@ use std::sync::Arc;
 
 use cove_diag::SourceMap;
 use cove_runtime::interp::Interpreter;
+use cove_runtime::value::Value;
 use cove_runtime::{Grants, HostRegistry, Runtime};
 use cove_sema::{Config, Module, Package, Unit};
 
@@ -44,9 +52,10 @@ struct Exercise {
 /// A call to every method and associated function
 /// `cove_schema::builtins::BUILTINS` declares.
 ///
-/// `Error` is the one builtin type with no entries: a program writes the name
-/// to build one and reads the message as a field, so there is nothing to
-/// call and nothing here to call it with.
+/// `Error` and `MapEntry` are the two builtin types with no entries here:
+/// both are structs, so a program builds one and reads what it carries by
+/// field rather than calling anything on it. [`FIELD_EXERCISES`] is where
+/// those are held to the table.
 static EXERCISES: &[Exercise] = &[
     Exercise {
         ty: "Array",
@@ -371,6 +380,96 @@ static FREE_EXERCISES: &[FreeExercise] = &[
     },
 ];
 
+/// One case of a builtin enum, with a program that builds it and matches it.
+struct CaseExercise {
+    /// The builtin enum the case belongs to.
+    ty: &'static str,
+    /// The case the program builds.
+    name: &'static str,
+    /// The body of `export fn main() -> Int`, as [`Exercise::body`].
+    body: &'static str,
+    /// What the program answers, which only the arm for this case produces.
+    ///
+    /// A method either dispatches or it does not, so running it is proof
+    /// enough; a case is different, because a `match` that took the wrong arm
+    /// still runs. The answer is what makes the exercise say *which* arm ran,
+    /// so a payload the two ends disagreed about fails here rather than
+    /// passing quietly.
+    answer: i64,
+}
+
+/// A program per case `cove_schema::builtins` declares.
+///
+/// A case is exercised from both ends at once: the value is built by the
+/// constructor the runtime dispatches, and then matched by an arm the
+/// checker holds to the same table for exhaustiveness. `None` is built by
+/// writing the bare name, which is the one builtin case that is not a call.
+static CASE_EXERCISES: &[CaseExercise] = &[
+    CaseExercise {
+        ty: "Option",
+        name: "Some",
+        body: "  let found: Option<Int> = Some(3)\n  match found {\n    Some(n) => n,\n    None => 0\n  }",
+        answer: 3,
+    },
+    CaseExercise {
+        ty: "Option",
+        name: "None",
+        body: "  let found: Option<Int> = None\n  match found {\n    Some(n) => n,\n    None => 7\n  }",
+        answer: 7,
+    },
+    CaseExercise {
+        ty: "Result",
+        name: "Ok",
+        body: "  let outcome: Result<Int, Error> = Ok(3)\n  match outcome {\n    Ok(n) => n,\n    Err(failure) => 0\n  }",
+        answer: 3,
+    },
+    CaseExercise {
+        ty: "Result",
+        name: "Err",
+        body: "  let outcome: Result<Int, Error> = Err(Error(\"boom\"))\n  match outcome {\n    Ok(n) => n,\n    Err(failure) => 7\n  }",
+        answer: 7,
+    },
+];
+
+/// One field of a builtin struct, with a program that reads it.
+struct FieldExercise {
+    /// The builtin struct the field belongs to.
+    ty: &'static str,
+    /// The field the program reads.
+    name: &'static str,
+    /// The body of `export fn main() -> Int`, as [`Exercise::body`].
+    body: &'static str,
+    /// What the program answers, read out of the field.
+    answer: i64,
+}
+
+/// A program per field `cove_schema::builtins` declares.
+///
+/// These are the two builtin structs. `Error`'s `message` is the one that was
+/// a gap rather than a duplication: the runtime built the field and served a
+/// read of it, and the checker answered that `Error` had no such field, so
+/// this pair of tests is what now holds them to one answer.
+static FIELD_EXERCISES: &[FieldExercise] = &[
+    FieldExercise {
+        ty: "MapEntry",
+        name: "key",
+        body: "  let entry = MapEntry(key: \"ab\", value: 1)\n  entry.key.length()",
+        answer: 2,
+    },
+    FieldExercise {
+        ty: "MapEntry",
+        name: "value",
+        body: "  let entry = MapEntry(key: \"ab\", value: 1)\n  entry.value",
+        answer: 1,
+    },
+    FieldExercise {
+        ty: "Error",
+        name: "message",
+        body: "  let failure = Error(\"boom\")\n  failure.message.length()",
+        answer: 4,
+    },
+];
+
 /// The exercise for `type.name`, if this file has one.
 fn exercise(ty: &str, name: &str) -> Option<&'static Exercise> {
     EXERCISES
@@ -505,9 +604,139 @@ fn every_free_builtin_the_schema_declares_checks_and_runs() {
     }
 }
 
+/// Every case the shared table declares, qualified.
+fn declared_cases() -> Vec<(&'static str, &'static str)> {
+    cove_schema::builtins::builtins()
+        .iter()
+        .flat_map(|entry| entry.cases.iter().map(move |case| (entry.name, case.name)))
+        .collect()
+}
+
+/// A case the schema declares that nothing here builds is a case nothing
+/// holds the two ends to.
+#[test]
+fn every_builtin_case_the_schema_declares_is_exercised() {
+    let missing: Vec<String> = declared_cases()
+        .into_iter()
+        .filter(|(ty, name)| {
+            !CASE_EXERCISES
+                .iter()
+                .any(|exercise| exercise.ty == *ty && exercise.name == *name)
+        })
+        .map(|(ty, name)| format!("`{ty}.{name}`"))
+        .collect();
+    assert!(
+        missing.is_empty(),
+        "the builtin schema declares {} that nothing in this file builds",
+        missing.join(", ")
+    );
+}
+
+/// The other direction: a case nothing declares is a case no program can
+/// write.
+#[test]
+fn every_case_exercise_names_something_the_schema_declares() {
+    for entry in CASE_EXERCISES {
+        let schema = cove_schema::builtin(entry.ty)
+            .unwrap_or_else(|| panic!("`{}` is not a builtin type", entry.ty));
+        assert!(
+            schema.case(entry.name).is_some(),
+            "`{}.{}` is not in the builtin schema",
+            entry.ty,
+            entry.name
+        );
+    }
+}
+
+/// What the schema says a builtin enum is made of, the compiler matches
+/// exhaustively and the interpreter builds.
+#[test]
+fn every_builtin_case_the_schema_declares_checks_and_runs() {
+    for entry in CASE_EXERCISES {
+        check_and_answer(
+            &format!("{}.{}", entry.ty, entry.name),
+            entry.body,
+            entry.answer,
+        );
+    }
+}
+
+/// Every field the shared table declares, qualified.
+fn declared_fields() -> Vec<(&'static str, &'static str)> {
+    cove_schema::builtins::builtins()
+        .iter()
+        .flat_map(|entry| {
+            entry
+                .fields
+                .iter()
+                .map(move |field| (entry.name, field.name))
+        })
+        .collect()
+}
+
+/// A field the schema declares that nothing here reads is a field nothing
+/// holds the two ends to.
+#[test]
+fn every_builtin_field_the_schema_declares_is_exercised() {
+    let missing: Vec<String> = declared_fields()
+        .into_iter()
+        .filter(|(ty, name)| {
+            !FIELD_EXERCISES
+                .iter()
+                .any(|exercise| exercise.ty == *ty && exercise.name == *name)
+        })
+        .map(|(ty, name)| format!("`{ty}.{name}`"))
+        .collect();
+    assert!(
+        missing.is_empty(),
+        "the builtin schema declares {} that nothing in this file reads",
+        missing.join(", ")
+    );
+}
+
+/// The other direction, as above.
+#[test]
+fn every_field_exercise_names_something_the_schema_declares() {
+    for entry in FIELD_EXERCISES {
+        let schema = cove_schema::builtin(entry.ty)
+            .unwrap_or_else(|| panic!("`{}` is not a builtin type", entry.ty));
+        assert!(
+            schema.field(entry.name).is_some(),
+            "`{}.{}` is not in the builtin schema",
+            entry.ty,
+            entry.name
+        );
+    }
+}
+
+/// What the schema says a builtin struct carries, the compiler types and the
+/// interpreter serves.
+#[test]
+fn every_builtin_field_the_schema_declares_checks_and_runs() {
+    for entry in FIELD_EXERCISES {
+        check_and_answer(
+            &format!("{}.{}", entry.ty, entry.name),
+            entry.body,
+            entry.answer,
+        );
+    }
+}
+
+/// Resolves, checks, and runs one exercise, and holds what it answered to
+/// `answer` -- which is what says the `match` took the arm it was written
+/// for, or the read reached the field it named.
+fn check_and_answer(what: &str, body: &str, answer: i64) {
+    let answered = check_and_run(what, body);
+    assert!(
+        matches!(answered, Value::Int(found) if found == answer),
+        "`{what}` is declared by the schema, but the program that exercises it \
+         answered `{answered}` rather than `{answer}`"
+    );
+}
+
 /// Resolves, checks, and runs one exercise, and says which one it was when
 /// any of the three refuses it.
-fn check_and_run(what: &str, body: &str) {
+fn check_and_run(what: &str, body: &str) -> Value {
     let (package, sources) = package(body);
     let program = cove_sema::resolve::resolve(&package)
         .unwrap_or_else(|errors| panic!("`{what}` resolves: {errors:?}"));
@@ -530,5 +759,5 @@ fn check_and_run(what: &str, body: &str) {
                 "`{what}` is declared by the schema but the runtime refused it: {}",
                 error.message
             )
-        });
+        })
 }

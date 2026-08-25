@@ -230,10 +230,8 @@ impl Clock {
             // The body reports failure the way every Cove function does, and
             // a timer whose body failed stops rather than failing again every
             // period from now on.
-            if let Value::Enum(result) = &answered {
-                if &*result.type_name == "Result" && &*result.case == "Err" {
-                    return Ok(answered);
-                }
+            if answered.is_err() {
+                return Ok(answered);
             }
             if !self.is_real() {
                 return Ok(Value::ok(Value::Unit));
@@ -359,32 +357,23 @@ mod tests {
     }
 
     fn is_ok(value: &Value) -> bool {
-        matches!(value, Value::Enum(result)
-            if &*result.type_name == "Result" && &*result.case == "Ok")
+        value.is_ok()
     }
 
     fn err_message(value: Value) -> String {
-        match value {
-            Value::Enum(result) if &*result.type_name == "Result" && &*result.case == "Err" => {
-                result
-                    .payload
-                    .first()
-                    .map(ToString::to_string)
-                    .unwrap_or_default()
-            }
-            other => panic!("expected `Err(...)`, found {other}"),
+        match value.err_payload() {
+            Some(payload) => payload.first().map(ToString::to_string).unwrap_or_default(),
+            None => panic!("expected `Err(...)`, found {value}"),
         }
     }
 
     fn ok_int(value: Value) -> i64 {
-        match value {
-            Value::Enum(result) if &*result.type_name == "Result" && &*result.case == "Ok" => {
-                match result.payload.into_iter().next() {
-                    Some(Value::Int(n)) => n,
-                    other => panic!("expected `Ok(Int)`, found {other:?}"),
-                }
-            }
-            other => panic!("expected `Ok(...)`, found {other}"),
+        match value.ok_payload() {
+            Some(payload) => match payload.first() {
+                Some(Value::Int(n)) => *n,
+                other => panic!("expected `Ok(Int)`, found {other:?}"),
+            },
+            None => panic!("expected `Ok(...)`, found {value}"),
         }
     }
 
