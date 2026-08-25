@@ -145,8 +145,11 @@ and CLI, and `OperationSchema` holds all three — but nothing in `cove-sema`
 looks at it, so a host call's result is `Unknown` and its arguments are
 unchecked. The checker does not hide this: it warns (`HOST_TYPE`) wherever a
 host type is named, which is why `cove check` reports warnings on
-`examples/server` and `examples/callbacks`. The runtime does not check the
-other end either, which is [issue #38](https://github.com/myuon/cove/issues/38).
+`examples/server` and `examples/callbacks`. The runtime reads half of the same
+description now — it holds a host to the result its schema declares, which
+[ADR 0013](0013-host-resource-handles.md)'s amendment decided — and a call's
+arguments are still read by neither end, which is
+[issue #44](https://github.com/myuon/cove/issues/44).
 
 "Annotations are mandatory at boundaries" used to have a second exception,
 worth recording now that it is closed: a declaration's parameter could omit

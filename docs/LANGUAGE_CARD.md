@@ -171,9 +171,13 @@ allow = ["http", "clock"]
 
 A host may provide real, fake, filtered, remote, or denied implementations.
 The runtime rejects Host API calls that were not granted. An operation's
-argument, result, and error types come from its schema, and nothing checks a
-call against them yet: `cove check` warns at a host type rather than checking
-it.
+argument, result, and error types come from its schema, and the runtime holds
+a host to the result it declared: a value that is not one the declared type
+admits, followed all the way down through `Array`, `Option`, `Result`, and a
+declared type's name, stops the run rather than travelling on. `Any` admits
+everything, and a declared type's fields are not checked. Arguments are still
+checked only by the host's own hand, and `cove check` warns at a host type
+rather than checking it.
 
 `cove test` is such a host: it grants each test the capabilities its call
 graph requires, taking every implementation's fake form so a suite is

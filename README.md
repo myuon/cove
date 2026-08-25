@@ -96,10 +96,10 @@ Still missing, and each of these is a documented gap rather than an oversight:
 a real `database` implementation, because connecting to one means speaking a
 wire protocol the standard library cannot; TLS in the `http` host, where an
 `https` URL is refused rather than downgraded; anything that checks a Host API
-call against the types its schema declares, at either end — the checker reports
+call's arguments against the types its schema declares — the checker reports
 `http.Request` and its neighbors as unchecked host types, and the runtime
-checks a call's arity but not its result
-([#38](https://github.com/myuon/cove/issues/38)); a trace event for task
+holds a host to the result it declared and leaves the arguments to the host
+([#44](https://github.com/myuon/cove/issues/44)); a trace event for task
 suspension or for a cache, and a task id on a host call, which is why `cove
 trace` ends its summary with what it cannot tell you; and native code
 generation, still ADR 0002's open decision, which

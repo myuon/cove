@@ -75,9 +75,11 @@ a sentence somewhere above that a reader would have to check against the code:
   not mean machine code generated from Cove, which does not.
 - **Wasm.** Deferred, as the classification below states.
 - **Host API schema checking.** The schema is machine-readable and shared, as
-  this ADR asks, and neither end reads its types: the checker has nothing to
-  check a host call against, and the runtime checks a call's arity but not its
-  result. See [issue #38](https://github.com/myuon/cove/issues/38).
+  this ADR asks, and one end now reads its types: the runtime holds a host to
+  the result it declared ([ADR 0013](0013-host-resource-handles.md)'s
+  amendment). A call's arguments are read by neither end — the checker still
+  has nothing to check one against, and the boundary counts arguments without
+  looking at them. See [issue #44](https://github.com/myuon/cove/issues/44).
 - **Written types at a declaration's parameters.** "Function and public API
   boundaries remain explicitly typed" is a rule nothing enforces: a parameter
   written without a type becomes the checker's `Unknown`, which is equal to

@@ -30,6 +30,8 @@
 
 use std::fmt;
 
+use crate::value::Value;
+
 /// A type in a Host API signature, written in Cove's source vocabulary.
 ///
 /// This is a small enum rather than [`cove_syntax::ast::Type`] because an
@@ -99,6 +101,128 @@ impl fmt::Display for HostType {
     }
 }
 
+impl HostType {
+    /// Whether `value` is one this type admits, and where it stops being one
+    /// when it is not.
+    ///
+    /// The check follows this type's own recursion rather than looking only
+    /// at the outermost constructor, because a shallow check would admit an
+    /// `Array<Int>` where an `Array<String>` was declared and the schema says
+    /// more than "an array". [`HostType::Any`] admits everything, which is
+    /// not a hole: it is the type of an operation whose meaning does not
+    /// depend on which value it was given — the work `clock.timeout` bounds,
+    /// the body `clock.every` repeats — so there is nothing there to check.
+    ///
+    /// [`HostType::Named`] is checked by name. Every value carries the
+    /// qualified type it was built with and a [`crate::host::ResourceHandle`]
+    /// carries the module and kind it was issued for, so the comparison is
+    /// one the value itself can answer, with no registry to consult and no
+    /// second lookup on a path every host call takes. What that leaves
+    /// unchecked is a [`TypeSchema`]'s *fields*: a value calling itself an
+    /// `http.Response` is taken at its word about what is inside it. See ADR
+    /// 0013's amendment for why that line is drawn there.
+    pub fn admits(&self, value: &Value) -> Result<(), Mismatch> {
+        match (self, value) {
+            (HostType::Any, _)
+            | (HostType::Unit, Value::Unit)
+            | (HostType::Bool, Value::Bool(_))
+            | (HostType::Int, Value::Int(_))
+            | (HostType::String, Value::Str(_))
+            | (HostType::Duration, Value::Duration(_)) => Ok(()),
+            // The builtin error struct, which is what `Err` carries
+            // everywhere a host declares one.
+            (HostType::Error, Value::Struct(fields)) if &*fields.type_name == "Error" => Ok(()),
+            (HostType::Array(item), Value::Array(items)) => {
+                for (index, element) in items.iter().enumerate() {
+                    item.admits(element)
+                        .map_err(|mismatch| mismatch.inside(&format!("[{index}]")))?;
+                }
+                Ok(())
+            }
+            (HostType::Option(some), Value::Enum(case)) if &*case.type_name == "Option" => {
+                match (&*case.case, case.payload.as_slice()) {
+                    ("Some", [inner]) => some.admits(inner).map_err(|m| m.inside("Some(_)")),
+                    ("None", []) => Ok(()),
+                    _ => Err(self.mismatched(value)),
+                }
+            }
+            (HostType::Result(ok, error), Value::Enum(case)) if &*case.type_name == "Result" => {
+                match (&*case.case, case.payload.as_slice()) {
+                    ("Ok", [inner]) => ok.admits(inner).map_err(|m| m.inside("Ok(_)")),
+                    ("Err", [inner]) => error.admits(inner).map_err(|m| m.inside("Err(_)")),
+                    _ => Err(self.mismatched(value)),
+                }
+            }
+            // A handle names its module and its kind, which together are the
+            // qualified name a signature writes.
+            (HostType::Named(name), Value::Resource(handle))
+                if handle.qualified_type() == *name =>
+            {
+                Ok(())
+            }
+            (HostType::Named(name), Value::Struct(fields)) if &*fields.type_name == *name => Ok(()),
+            (HostType::Named(name), Value::Enum(case)) if &*case.type_name == *name => Ok(()),
+            _ => Err(self.mismatched(value)),
+        }
+    }
+
+    /// This type and a value that is none of it, as a mismatch at the point
+    /// the two part company.
+    fn mismatched(&self, value: &Value) -> Mismatch {
+        Mismatch {
+            path: String::new(),
+            expected: *self,
+            found: value.type_name(),
+        }
+    }
+}
+
+/// Where a value stopped agreeing with the type declared for it, and what was
+/// found there instead.
+///
+/// The disagreement is reported where it happens rather than at the top of
+/// the value: an operation declaring `Result<Array<String>, Error>` that
+/// answers `Ok([3])` disagrees at one element, and saying which one is the
+/// difference between a diagnostic the host's author can act on and one that
+/// says only that the two do not match. Nothing here is built until a value
+/// fails, so the path costs a run that never fails nothing at all.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Mismatch {
+    /// How the offending part is reached from the whole value, such as
+    /// `Ok(_)[0]`. Empty when the value itself, rather than something nested
+    /// inside it, is the disagreement.
+    pub path: String,
+    /// The type declared at that point.
+    pub expected: HostType,
+    /// What was found there, named the way a diagnostic names a value.
+    pub found: String,
+}
+
+impl Mismatch {
+    /// Re-anchors this mismatch one level out, where the part that disagrees
+    /// is reached by `step`.
+    fn inside(mut self, step: &str) -> Mismatch {
+        self.path.insert_str(0, step);
+        self
+    }
+
+    /// The disagreement, phrased for a diagnostic about the operation
+    /// `shown` names.
+    pub fn describe(&self, shown: &str) -> String {
+        if self.path.is_empty() {
+            format!(
+                "`{shown}` answered `{}`, but its schema declares `{}`",
+                self.found, self.expected
+            )
+        } else {
+            format!(
+                "`{shown}` answered `{}` at `{}` of its result, but its schema declares `{}` there",
+                self.found, self.path, self.expected
+            )
+        }
+    }
+}
+
 /// Whether an operation observes the world or changes it, and whether the
 /// change can be taken back.
 ///
@@ -130,8 +254,9 @@ impl fmt::Display for Effect {
 /// One operation of one host module.
 ///
 /// Every field is read by something: [`crate::host::HostRegistry::call`]
-/// checks `name` and arity before it dispatches, `params` and `result` render
-/// the signature a diagnostic shows, `capability` is the gate, and
+/// checks `name` and arity before it dispatches and holds the host to
+/// `result` after it answers, `params` and `result` render the signature a
+/// diagnostic shows, `capability` is the gate, and
 /// `result_is_task_safe` answers the Language Card's rule for values leaving
 /// a host call for a task. `effect`, `cancellable`, and `recordable` are the
 /// three ADR 0001 facts whose consumers are named but not yet built —
@@ -153,6 +278,12 @@ pub struct OperationSchema {
     /// `params.len()`.
     pub variadic: bool,
     /// The type the operation produces.
+    ///
+    /// This is a promise the boundary holds the host to rather than a label
+    /// on it: [`crate::host::HostRegistry`] checks what the host answered
+    /// against this before handing it on, so an operation cannot declare one
+    /// type and produce another. [`HostType::admits`] says how far the check
+    /// goes.
     pub result: HostType,
     /// The capability a host must grant before this operation may be called.
     pub capability: &'static str,
@@ -316,6 +447,8 @@ impl ResourceSchema {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::host::ResourceHandle;
+    use crate::value::StructValue;
 
     const READ_A_STRING: OperationSchema = OperationSchema {
         name: "read",
@@ -377,6 +510,155 @@ mod tests {
         assert!(PRINT_MANY.accepts(7));
         assert_eq!(PRINT_MANY.min_arity(), 0);
         assert_eq!(PRINT_MANY.expected_arity(), "at least 0 arguments");
+    }
+
+    // ------------------------------------------- what a declared type admits
+    //
+    // ADR 0001 asks each operation to describe its argument, result, and
+    // error types, and ADR 0013's amendment makes the result one the boundary
+    // holds a host to. These pin the vocabulary of that check; `host.rs` pins
+    // what the boundary does with it.
+
+    /// The one kind of resource a host in these tests can open.
+    static CONNECTION: ResourceSchema = ResourceSchema {
+        name: "Connection",
+        task_safe: true,
+        operations: &[],
+    };
+
+    /// A struct value named the way a host builds one: qualified by module.
+    fn host_struct(type_name: &str, fields: Vec<(&str, Value)>) -> Value {
+        Value::Struct(Box::new(StructValue {
+            type_name: type_name.into(),
+            fields: fields
+                .into_iter()
+                .map(|(name, value)| (name.into(), value))
+                .collect(),
+        }))
+    }
+
+    #[test]
+    fn a_declared_type_admits_the_value_it_names() {
+        assert!(HostType::Unit.admits(&Value::Unit).is_ok());
+        assert!(HostType::Bool.admits(&Value::Bool(true)).is_ok());
+        assert!(HostType::Int.admits(&Value::Int(3)).is_ok());
+        assert!(HostType::String.admits(&Value::Str("text".into())).is_ok());
+        assert!(HostType::Duration.admits(&Value::Duration(500)).is_ok());
+        assert!(HostType::Error.admits(&Value::error("gone")).is_ok());
+    }
+
+    #[test]
+    fn a_value_of_another_type_is_a_mismatch_where_the_two_part_company() {
+        let mismatch = HostType::String
+            .admits(&Value::Int(3))
+            .expect_err("an `Int` is not a `String`");
+
+        assert_eq!(mismatch.path, "");
+        assert_eq!(mismatch.expected, HostType::String);
+        assert_eq!(mismatch.found, "Int");
+        assert_eq!(
+            mismatch.describe("wayward.read"),
+            "`wayward.read` answered `Int`, but its schema declares `String`"
+        );
+    }
+
+    #[test]
+    fn a_declared_type_is_followed_all_the_way_down() {
+        let declared = HostType::Result(&HostType::Array(&HostType::String), &HostType::Error);
+
+        assert!(declared
+            .admits(&Value::ok(Value::Array(
+                vec![Value::Str("one".into())].into()
+            )))
+            .is_ok());
+        assert!(
+            declared.admits(&Value::err(Value::error("gone"))).is_ok(),
+            "the declared error type is the one inside `Err`"
+        );
+
+        let mismatch = declared
+            .admits(&Value::ok(Value::Array(
+                vec![Value::Str("one".into()), Value::Int(2)].into(),
+            )))
+            .expect_err("an `Int` among the declared strings is not admitted");
+        assert_eq!(mismatch.path, "Ok(_)[1]");
+        assert_eq!(mismatch.expected, HostType::String);
+        assert_eq!(
+            mismatch.describe("wayward.list"),
+            "`wayward.list` answered `Int` at `Ok(_)[1]` of its result, but its schema declares `String` there"
+        );
+    }
+
+    #[test]
+    fn an_option_is_admitted_by_either_case() {
+        let declared = HostType::Option(&HostType::String);
+
+        assert!(declared.admits(&Value::none()).is_ok());
+        assert!(declared
+            .admits(&Value::some(Value::Str("set".into())))
+            .is_ok());
+        assert_eq!(
+            declared
+                .admits(&Value::some(Value::Int(3)))
+                .expect_err("`Some(3)` is not an `Option<String>`")
+                .path,
+            "Some(_)"
+        );
+    }
+
+    #[test]
+    fn any_admits_whatever_it_is_given() {
+        assert!(HostType::Any.admits(&Value::Int(3)).is_ok());
+        assert!(HostType::Any.admits(&Value::Unit).is_ok());
+        assert!(HostType::Any
+            .admits(&host_struct("demo.Point", Vec::new()))
+            .is_ok());
+        assert!(HostType::Array(&HostType::Any)
+            .admits(&Value::Array(vec![Value::Int(1), Value::Unit].into()))
+            .is_ok());
+    }
+
+    #[test]
+    fn a_named_type_is_checked_by_the_name_the_value_carries() {
+        let declared = HostType::Named("http.Response");
+        let response = host_struct(
+            "http.Response",
+            vec![
+                ("status", Value::Int(200)),
+                ("body", Value::Str("ok".into())),
+            ],
+        );
+        assert!(declared.admits(&response).is_ok());
+
+        // The name is what is checked; the fields behind it are not. A
+        // `Response` with nothing inside it is still a `Response` here.
+        assert!(declared
+            .admits(&host_struct("http.Response", Vec::new()))
+            .is_ok());
+
+        assert_eq!(
+            declared
+                .admits(&host_struct("demo.Point", Vec::new()))
+                .expect_err("another struct is not an `http.Response`")
+                .found,
+            "demo.Point"
+        );
+    }
+
+    #[test]
+    fn a_named_resource_is_checked_by_the_kind_the_handle_was_issued_for() {
+        let declared = HostType::Named("database.Connection");
+        let handle = Value::Resource(ResourceHandle::new("database", &CONNECTION, 7));
+        assert!(declared.admits(&handle).is_ok());
+
+        let elsewhere = Value::Resource(ResourceHandle::new("http", &CONNECTION, 7));
+        assert_eq!(
+            declared
+                .admits(&elsewhere)
+                .expect_err("the same kind of another module is another type")
+                .found,
+            "http.Connection"
+        );
     }
 
     #[test]

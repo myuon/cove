@@ -5,12 +5,16 @@
 - Amends: [ADR 0001](0001-mvp-language-design.md), whose Host API schema gains
   the "serialization and resource ownership" it asks for, and whose Host API
   boundary gains a second direction: a call may now run a Cove closure
-- Implemented by: PR #35
+- Amended by: this ADR's own "Amendment (2026-08-25): a host answers the type
+  it declared" below, which makes `OperationSchema::result` a promise the
+  boundary holds a host to rather than a signature it renders
+- Implemented by: PR #35; the amendment by PR #46
 - Implementation status: complete — the boundary is built in both directions.
   What sits behind it is a separate question this ADR states rather than
-  answers: `database` still ships only a fake and a denied host, `http` speaks
-  no TLS, and nothing checks a Host result against the type its schema declares
-  ([issue #38](https://github.com/myuon/cove/issues/38)).
+  answers: `database` still ships only a fake and a denied host, and `http`
+  speaks no TLS. A host is now held to the result its schema declares; a call's
+  arguments are read by neither end
+  ([issue #44](https://github.com/myuon/cove/issues/44)).
 
 ## Context
 
@@ -375,3 +379,103 @@ is still unchecked at compile time and every operation on it is still left to
 the runtime. Closing that needs a dependency inversion between `cove-sema` and
 the host set — most likely the schema moving to a crate both can see — and it
 is a decision worth making on its own rather than inside this one.
+
+## Amendment (2026-08-25): a host answers the type it declared
+
+`OperationSchema::result` has existed since this ADR's first line, and nothing
+read it except to render a signature in a diagnostic. Issue #38 asks for the
+promise ADR 0001 makes about it to be kept — "Each operation describes its
+argument, result, and error types", shared by the compiler, runtime, and CLI —
+because a description nothing enforces is a comment. It matters most for a host
+that is not the toolchain's: the "real, fake, filtered, remote, and denied"
+implementations above all have to agree about what an operation answers, and a
+fake that has drifted from the real one is exactly the bug a shared schema is
+supposed to make impossible. Until now a host could declare
+`Result<String, Error>`, answer `3`, and be dispatched; the `Int` failed
+somewhere else, and the diagnostic named the Cove code that received it rather
+than the host that broke its word.
+
+### Where the check runs
+
+In `HostRegistry::dispatch`, after `invoke`. That is the one choke point every
+Host API call already passes through — the grant, the operation, the arity, the
+budget, the irreversible-write counter, the trace — so a module's operation and
+a handle's operation are both covered by one rule written once, and a host
+cannot be reached by a path that skips it.
+
+It runs after the trace is written, not before. What the host actually did
+belongs on the record either way: a trace of a run that stopped here shows the
+answer that stopped it, which is the first thing whoever wrote that host will
+want to see. The value is what is refused, not the fact.
+
+Only a value is checked. A host that answers `Err` has already failed on its
+own terms, and the `Error` a schema declares is the one inside a Cove `Result`,
+not a `RuntimeError` beside it.
+
+### How deep it goes
+
+Structurally, following `HostType`'s own recursion: `Array`, `Option`, and
+`Result` are checked through to what they contain, so an `Array<Int>` is not
+admitted where an `Array<String>` was declared. A shallow check would have
+admitted it, and the schema says more than "an array" — writing the element
+type and then not reading it would be the same comment this amendment is
+removing.
+
+`HostType::Any` admits everything, which is not a hole in the check for the
+same reason it is not a hole in the schema: "Schema typing" above already calls
+it a claim rather than a gap, and the claim is that the operation does not care.
+`clock.timeout` and `clock.every` declare it of the work they are given.
+
+The cost is a match on a value the boundary already holds, plus one walk of an
+array a host had to build first. Nothing is allocated unless a value fails: the
+path to the part that disagrees — `Ok(_)[1]` — is assembled on the way out of
+the recursion, so a run in which every host keeps its word pays for no strings
+at all.
+
+### What `Named` means
+
+The name, and only the name. Every value carries the qualified type it was
+built with, and a `ResourceHandle` carries the module and kind it was issued
+for, so `database.Connection` is checked by asking the value what it is — no
+registry lookup, no second table walk on a path every host call takes. That is
+a real check, and it is the same reasoning `call_resource` already used when it
+refused a handle naming a kind the module never declared; the difference is
+that the lie is now caught where it is told rather than at the next call made
+on it.
+
+What it does not check is a `TypeSchema`'s fields. A value calling itself an
+`http.Response` is taken at its word about what is inside it. The shipped hosts
+do not justify more: `http.Response` is the only declared type any operation
+produces, its two fields are built by one function three lines long, and the
+check would need the registry the paragraph above avoids. If a host is ever
+written whose declared types are minted in more than one place, that is the
+moment to reconsider, and this paragraph is the record that it was a decision.
+
+### What a violation is
+
+A `RuntimeError` that stops the run, carrying the operation, what it answered,
+where the disagreement is, and the signature its schema declares. A host that
+breaks its own schema has broken an invariant on the host's side of the
+boundary — no Cove program asked for the value and none can handle it — so it
+is not expected failure, which in Cove is a `Result` the program was given the
+chance to match on.
+
+Issue #38 raises warning-first, on the grounds that this makes a previously
+working embedding fail. Every host the toolchain ships passes its own schema
+check, verified by running each of them against the check rather than by
+reading them, so nothing that works today starts failing. An embedding that
+would newly fail is an embedding whose host is already lying about itself, and
+a warning would ask its author to keep reading past the first line of a
+diagnostic to find that out.
+
+### What is still not checked
+
+A call's arguments. The same machinery would point at `schema.params`, and the
+sixteen hand-written `let [Value::Str(name)] = args.as_slice() else { ... }`
+arms across the shipped hosts would become the `unreachable!` the operation
+arms beside them already are. It is left out on purpose: a wrong argument is
+usually the *program's* mistake, made at a call site with a span, and it is the
+same mistake `cove check` should catch before the run starts — so what the
+boundary says about it cannot be settled without settling what the checker says
+about it, and the checker still reads no schema at all. Both halves are
+[issue #44](https://github.com/myuon/cove/issues/44).
