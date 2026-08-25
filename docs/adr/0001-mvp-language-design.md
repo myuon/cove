@@ -10,7 +10,10 @@
   performance criterion into a measured gate; and
   [ADR 0013](0013-host-resource-handles.md), which gives the Host API boundary
   resource handles and a way back into Cove, and whose two amendments make the
-  schema this ADR asks for one description both ends enforce
+  schema this ADR asks for one description both ends enforce; and
+  [ADR 0004](0004-static-type-checking.md)'s third amendment, which settles
+  the builtin `Error` as a struct carrying a `message` a program may read,
+  rather than an opaque type
 - Implemented by: [ADR 0002](0002-implementation-language-and-backend.md)
   through [ADR 0013](0013-host-resource-handles.md), each of which decides and
   builds a part of this one

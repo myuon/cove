@@ -5,17 +5,25 @@
 - Amended by: [ADR 0005](0005-module-to-module-imports.md), which gave the
   checker the import environment "Checking is per-module" said it would need,
   [ADR 0006](0006-traits-and-dispatch.md), which turned "parametric and
-  unbounded" into parametric with bounds, and this ADR's own two amendments
+  unbounded" into parametric with bounds, and this ADR's own three amendments
   below — "Amendment (2026-08-25): one builtin table", which unmirrors the
-  builtin method table "What is not checked yet" recorded, and
+  builtin method table "What is not checked yet" recorded,
   "Amendment (2026-08-25): the builtins that are called on nothing", which
-  unmirrors the three lists the first one left
+  unmirrors the three lists the first one left, and
+  "Amendment (2026-08-25): what a builtin type is made of", which unmirrors
+  the builtin enums' cases and declares the builtin structs' fields, closing
+  the sequence
+- Amends: [ADR 0001](0001-mvp-language-design.md)'s account of the builtin
+  `Error`, which the third amendment settles as a struct carrying a `message`
+  a program may read
 - Implemented by: PR #12; the declaration-parameter rule by PR #43; the Host
-  API schema by PR #48; the first amendment by PR #51; the second by PR #54
+  API schema by PR #48; the first amendment by PR #51; the second by PR #54;
+  the third by PR #55
 - Implementation status: partial — see "What is not checked yet" below, which
   is now shorter than it was: the checker reads the Host API schema (#44), the
-  builtin table it used to mirror (#49), and the constructors, assertions, and
-  sequence names it mirrored after that (#50)
+  builtin table it used to mirror (#49), the constructors, assertions, and
+  sequence names it mirrored after that (#50), and the builtin enums' cases
+  and structs' fields (#53)
 
 ## Context
 
@@ -86,9 +94,13 @@ checker gains an import environment; nothing else changes.
 ### Builtin types
 
 `Unit`, `Bool`, `Int`, `Float`, `String`, `Duration`, `Error`, `Range`,
-`Array<T>`, `Vector<T>`, `Map<K, V>`, `Set<T>`, `Option<T>`, `Result<T, E>`,
-`Task<T>`, function types, and the type a `scope` binds, which is where
-`spawn` lives.
+`Array<T>`, `Vector<T>`, `Map<K, V>`, `MapEntry<K, V>`, `Set<T>`,
+`Option<T>`, `Result<T, E>`, `Task<T>`, function types, and the type a `scope`
+binds, which is where `spawn` lives.
+
+Two of them are structs rather than opaque: an `Error` carries a `message` and
+a `MapEntry` carries a `key` and a `value`, and a program reads all three by
+field. The third amendment below says where those fields are declared.
 
 Calling an `async fn` yields `Task<T>`, matching what the interpreter does;
 `await` settles it to `T`.
@@ -186,7 +198,12 @@ site instantiates one.
 
 The builtin method table used to be listed here too, as still mirrored between
 `cove-sema` and `cove-runtime` rather than shared. It is not any more; the
-amendment below says where it went.
+three amendments below say where it went, and where the cases, the
+constructors, and the fields went after it.
+
+`Error` used to be checked as an opaque type with no fields, which is no
+longer true: it is a builtin struct carrying a `message`, exactly as the
+runtime has always built it. The third amendment says why.
 
 ## Amendment (2026-08-25): one builtin table
 
@@ -280,3 +297,73 @@ runtime already did.
 `crates/cove-runtime/tests/builtin_schema.rs` covers the new table the way it
 covers the old one, with one program per entry driven through resolve, check,
 and a real run.
+
+## Amendment (2026-08-25): what a builtin type is made of
+
+The two amendments above moved what a builtin type *answers* and what a
+builtin called on nothing *takes*. One list about the builtins was still
+written out in both crates, and it was out of scope for both:
+[issue #53](https://github.com/myuon/cove/issues/53), the case names of the
+builtin enums. `cove-sema` knew that an `Option` is `Some` and `None` and a
+`Result` is `Ok` and `Err` — twice, in fact, once for `match` exhaustiveness
+and once to give a pattern's binding a type — and `cove-runtime` knew the same
+four strings where it built the values.
+
+That list had not drifted and is hard to drift: a case name the two sides
+disagreed about fails immediately and loudly, because every program that calls
+a function returning a `Result` builds one value and matches on it. `Ok` is
+not a name either side can quietly forget. So the argument for closing it is
+consistency — the rule the two previous amendments settled was one list, not
+two that happen to agree.
+
+**A `BuiltinSchema` says what a type is made of, not only what it answers.**
+An entry now declares its `cases` if it is an enum and its `fields` if it is a
+struct, in the same shape a host type's are: a case has a name and a payload,
+a field has a name and a type. A case's payload is written in the parameters
+the receiver binds — `Some` carries a `T`, `Err` carries an `E` — so a pattern
+reads its binding's type off the scrutinee exactly as a method reads its
+result off its receiver, through the same substitution. `Option` and `Result`
+are the two enums; `Error` and `MapEntry` are the two structs, and `MapEntry`
+joins the table rather than staying beside it, so that the labels its
+initializer takes and the fields a program reads are one declaration.
+
+**`Error` carries a `message`, and saying so closed a gap rather than a
+duplication.** The runtime has always built an `Error` as a struct value with
+a `message` field and has always served a read of it; the checker treated
+`Error` as opaque and answered "`Error` has no field `message`", suggesting a
+method instead — and `Error` has no methods at all, so the suggestion pointed
+nowhere. Nothing in the Language Card or ADR 0001 ever said an `Error` is
+opaque, and this table's own entry for `Error` already said the opposite: "the
+message is read as a field". The checker was the half that was missing, so
+`Error`'s field is declared here and `error.message` now type-checks as a
+`String`. That is the one behavioural change these three amendments make to a
+program that runs.
+
+**What the runtime reads, and how far.** `Value::ok`, `Value::err`,
+`Value::some`, `Value::none`, and `Value::error` build their values out of
+this table, and the readers beside them — `is_ok`, `err_payload`, and their
+neighbours — are how everything else in the workspace asks which case a value
+is. The four strings are written once. The constructor `match` in
+`cove_runtime::builtins` stays a `match`, on the rule the first amendment set:
+a body reaches into a `Value`, and
+`crates/cove-runtime/tests/builtin_schema.rs` is what holds it to the table. A
+case is exercised there by a program that builds it *and* matches it *and*
+answers a number only that arm produces, because a `match` that took the wrong
+arm still runs.
+
+**What is left mirrored, and why it is not a list.** One "static half" comment
+survives in `cove-sema`, on `task_safe_argument`, and the second amendment's
+reading of it holds: the `Shared` task-safety rule has a half in each crate
+because each sees something the other cannot — the checker sees the type
+arguments a program writes, the runtime sees a struct whose *field* holds a
+vector — so that pair is two enforcements of one rule rather than two copies
+of one list. The name-to-`Ty` translation in `Checker::builtin_type` also
+stays, because `Ty` is `cove-sema`'s own representation and no other crate can
+name it; what *was* a second list there, how many type parameters each builtin
+binds, is read off `BuiltinSchema::parameters` now.
+
+Nothing else about the builtins is stated in two crates. That is the end of
+the sequence [#48](https://github.com/myuon/cove/issues/48),
+[#49](https://github.com/myuon/cove/issues/49),
+[#50](https://github.com/myuon/cove/issues/50), and
+[#53](https://github.com/myuon/cove/issues/53) was working toward.
