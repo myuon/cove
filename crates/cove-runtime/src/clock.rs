@@ -348,6 +348,7 @@ impl Drop for Watchdog {
 mod tests {
     use super::*;
     use crate::host::{Grants, HostRegistry};
+    use std::time::Duration;
 
     fn nanos(value: Value) -> i64 {
         match value {
@@ -386,7 +387,12 @@ mod tests {
     /// carried, so a body that wants to observe a bound can.
     struct StubReentry {
         calls: usize,
-        cancelled: bool,
+        /// Whether the task holding this reentry has been asked to stop.
+        ///
+        /// Shared rather than owned so a body can raise it while the host is
+        /// looping, which is how a test ends a repeating timer the way a
+        /// cancelled task ends one.
+        cancelled: Arc<AtomicBool>,
         body: StubBody,
     }
 
@@ -394,14 +400,22 @@ mod tests {
         fn new(body: impl FnMut(&Cancellation) -> Result<Value, RuntimeError> + 'static) -> Self {
             StubReentry {
                 calls: 0,
-                cancelled: false,
+                cancelled: Arc::new(AtomicBool::new(false)),
                 body: Box::new(body),
             }
         }
 
         /// Reports the task holding this reentry as already cancelled.
-        fn cancelled(mut self) -> Self {
-            self.cancelled = true;
+        fn cancelled(self) -> Self {
+            self.cancelled.store(true, Ordering::Relaxed);
+            self
+        }
+
+        /// Reports the task holding this reentry as stopped when `flag` is
+        /// raised, so a body can end a repeating timer from inside a round
+        /// the way a cancelled task ends one.
+        fn stopped_by(mut self, flag: Arc<AtomicBool>) -> Self {
+            self.cancelled = flag;
             self
         }
     }
@@ -423,7 +437,7 @@ mod tests {
         }
 
         fn is_cancelled(&self) -> bool {
-            self.cancelled
+            self.cancelled.load(Ordering::Relaxed)
         }
 
         /// Neither `timeout` nor `every` reads the run's deadline — a bound
@@ -691,6 +705,87 @@ mod tests {
             .unwrap();
         assert_eq!(err_message(answer), "boom");
         assert_eq!(back.calls, 1, "a failing round is not retried");
+    }
+
+    /// Runs `body` on a thread of its own and fails if it has not finished
+    /// within `limit`.
+    ///
+    /// The rule below is one a host breaks by deadlocking, which is a way of
+    /// failing that a test asserting on a result never reaches. This makes a
+    /// regression a failure with a message rather than a suite that never
+    /// ends.
+    fn within<T: Send + 'static>(limit: Duration, body: impl FnOnce() -> T + Send + 'static) -> T {
+        let (finished, done) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = finished.send(body());
+        });
+        done.recv_timeout(limit)
+            .unwrap_or_else(|_| panic!("this did not finish within {limit:?}"))
+    }
+
+    /// A host may run the callback it was handed as many times as its
+    /// operation means, and a timer means once a period. Nothing counts the
+    /// invocations and none of them is cheaper than the first: what ends the
+    /// loop is the run being stopped, which the host reads between rounds.
+    #[test]
+    fn every_on_a_real_clock_runs_the_body_once_a_round_until_the_run_is_stopped() {
+        let rounds = within(Duration::from_secs(10), || {
+            let clock = Clock::real();
+            let stop = Arc::new(AtomicBool::new(false));
+            let raise = Arc::clone(&stop);
+            let mut rounds = 0;
+            let mut back = StubReentry::new(move |_stop| {
+                rounds += 1;
+                if rounds >= 3 {
+                    raise.store(true, Ordering::Relaxed);
+                }
+                Ok(Value::ok(Value::Unit))
+            })
+            .stopped_by(stop);
+
+            let answer = clock
+                .call_with("every", vec![Value::Duration(0), Value::Unit], &mut back)
+                .unwrap();
+            assert!(is_ok(&answer), "{answer}");
+            back.calls
+        });
+        assert_eq!(rounds, 3, "the timer ran a round each period until stopped");
+    }
+
+    /// A host must hold no lock of its own while it runs a Cove callback,
+    /// because the callback is Cove code and Cove code may call the same host
+    /// again. `clock`'s only state is the virtual clock's counter, and it is
+    /// held for a read and a write and nothing else — so a timer's body may
+    /// read and move the very clock that is running it.
+    ///
+    /// Held across the round, this would deadlock the task on a mutex three
+    /// frames up its own stack, which is why it runs under a bound.
+    #[test]
+    fn a_timer_body_may_read_and_move_the_clock_that_is_running_it() {
+        let moved = within(Duration::from_secs(10), || {
+            let time = VirtualTime::new();
+            let clock = Clock::virtual_clock(time.clone());
+            let inside = Clock::virtual_clock(time.clone());
+            let mut back = StubReentry::new(move |_stop| {
+                inside.call("now", Vec::new())?;
+                inside.call("sleep", vec![Value::Duration(5)])?;
+                Ok(Value::ok(Value::Unit))
+            });
+
+            let answer = clock
+                .call_with(
+                    "every",
+                    vec![Value::Duration(1_000_000_000), Value::Unit],
+                    &mut back,
+                )
+                .unwrap();
+            assert!(is_ok(&answer), "{answer}");
+            time.nanos()
+        });
+        assert_eq!(
+            moved, 1_000_000_005,
+            "the period the timer slept, plus what its body slept from inside the round"
+        );
     }
 
     #[test]

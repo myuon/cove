@@ -7,12 +7,15 @@
   boundary gains a second direction: a call may now run a Cove closure
 - Amended by: this ADR's own "Amendment (2026-08-25): a host answers the type
   it declared" below, which makes `OperationSchema::result` a promise the
-  boundary holds a host to rather than a signature it renders; and
+  boundary holds a host to rather than a signature it renders;
   "Amendment (2026-08-25): a call passes the arguments it declared, and both
   ends say so", which does the same for `OperationSchema::params` and moves
-  the schema into a crate the compiler can read
-- Implemented by: PR #35; the first amendment by PR #46 and the second by
-  PR #48
+  the schema into a crate the compiler can read; and
+  "Amendment (2026-08-25): what a host may do with `Reentry`", which states
+  the lifetime, nesting, repetition, concurrency, and locking rules the way
+  back was always subject to, and bounds how deep a host may nest it
+- Implemented by: PR #35; the first amendment by PR #46, the second by PR #48,
+  and the third by the change that closed issue #60
 - Implementation status: complete — the boundary is built in both directions
   and both ends read the schema. What sits behind it is a separate question
   this ADR states rather than answers: `database` still ships only a fake and
@@ -302,6 +305,7 @@ pub trait Reentry {
     fn call_until(&mut self, callee: &Value, args: Vec<Value>, stop: &Cancellation)
         -> Result<Value, RuntimeError>;
     fn is_cancelled(&self) -> bool;
+    fn time_left(&self) -> Option<Duration>;
 }
 ```
 
@@ -331,6 +335,17 @@ took longer than the bound still reports the bound — it just reports it once
 the `fetch` has come back. Making the bound cut a wait short means teaching
 the wait itself to be interruptible, which is a change to how tasks and hosts
 block and not a change to this boundary.
+
+That change has since been made for the host it mattered most for. ADR 0003's
+"Amendment (2026-08-25): a blocking Host call must cooperate" turns the caveat
+into a contract every blocking operation keeps — bound the wait, poll in short
+steps, ask this `Reentry` between them whether the run has been stopped and
+how long it has left, hold no lock while waiting — and `http.Server.handle`
+now accepts by polling rather than by blocking. `Reentry::time_left` is the
+half of that contract this trait gained. What the paragraph above describes as
+undone is therefore done for the operations that cooperate, and still true of
+any operation that does not: the caveat is now a statement about a particular
+host rather than about this boundary.
 
 ### The loop belongs to the program
 
@@ -639,3 +654,186 @@ is the day to move it.
 A **host module the toolchain does not ship** is unchecked by the compiler, by
 construction. That is not a gap to be closed — it is the reason the boundary
 checks arguments at all.
+
+## Amendment (2026-08-25): what a host may do with `Reentry`
+
+The section above says what `Reentry` is for and how the two hosts that use it
+use it. It does not say what a host is *allowed* to do with it, and the
+allowance was never written down anywhere except in Rust's borrow checker,
+which is a poor place to keep a contract: it refuses the wrong programs
+silently, in a language a host author may reasonably assume they can argue
+with, and it says nothing at all about the rules it does not encode. This is a
+Host SDK. A third party writing a module against it needs the whole answer, and
+"whatever compiles" is not one.
+
+[Issue #60](https://github.com/myuon/cove/issues/60) asks for that answer.
+Every question it raises already had one in the implementation; what follows is
+what the implementation says, found by reading it and, where reading was not
+conclusive, by asking it. One of the answers was bad and the code changed.
+
+### For the current call, and no longer
+
+A host may use the way back it was handed during the call it was handed it in,
+and may not keep it. Two independent things enforce this today, and both are
+deliberate. `&mut dyn Reentry` arrives with a lifetime of its own, shorter than
+the `&self` beside it, so it cannot be stored in a field of the host. And
+`dyn Reentry` is neither `Send` nor `Sync`, while `HostApi` is both, so it
+cannot be stored in a field of a host even with the lifetime problem solved.
+
+The reason is not tidiness. Behind the reference is a borrow of the interpreter
+running the task that made the call, and that interpreter is a frame of that
+task's native stack. Once the call returns, the task has moved on: a retained
+way back would name a frame that no longer exists, and a host that used it
+would be running Cove code on a task that is doing something else. Working
+around the refusal with an `Arc` or a raw pointer does not make the frame come
+back.
+
+A host that wants work done later keeps the callback, which is an ordinary
+owned `Value`, and asks to be called again. That is what `Server.handle` is,
+and it is the same argument "The loop belongs to the program" already makes for
+a different reason.
+
+### As many times as the operation means
+
+A host may run the callback none, once, or many times. `clock.every` runs it
+once a period until the timer's task is stopped; `Server.handle` runs it once,
+and not at all when no request arrived. Nothing counts the invocations.
+
+Each one is a round the run pays for in full: fuel is charged at the callback's
+own safepoints, its frames count against the call-depth limit while they are on
+the stack, and the deadline and cancellation stop it wherever they would stop
+any other Cove code. So a host that loops does not have to police the run — a
+body that would overrun the budget stops of its own accord, and the error comes
+back out of `call`. What a looping host owes is to stop looping when it is told
+to, which is what `is_cancelled` between rounds is for, rather than to keep
+starting rounds that will all fail.
+
+### Nested, up to a bound the implementation did not have
+
+A callback is Cove code, so it may call any host the run granted, and that host
+may be handed work of its own. The nesting is real: the second host call builds
+a second way back further down the same native stack, over the same
+interpreter, so the inner callback sees the same task, the same heap, and the
+same budget as the outer one.
+
+This is where the honest answer was a bad one. `MAX_CALL_DEPTH` is the
+interpreter's unconditional safety net, and its own comment states the promise
+it makes: Cove calls nest "before the runtime reports a limit instead of
+exhausting the host stack". The limit is 256, and it is calibrated against the
+interpreter's own frames, because those are the only frames it can see. A
+reentry level is not one of those. Between the callback's frame and the frame
+that called the host sit the boundary's dispatch and then however much native
+stack the host itself chose to use — which no counter in the runtime can know.
+So the promise held for Cove calling Cove and stopped holding exactly where a
+third party controlled the multiplier.
+
+Measured rather than argued: a program that nests `clock.timeout` inside itself
+runs twelve levels deep on a spawned task's thread in a debug build and aborts
+the process on the thirteenth, and `clock.timeout` is a thin host. The abort is
+the important part. A `RuntimeError` stops a run and a host can be told why; a
+stack overflow ends the process, takes every other task with it, and is
+precisely the failure a sandbox may not have.
+
+So reentry carries a bound of its own. `MAX_REENTRY_DEPTH` counts the host
+calls running a callback that are stacked on one thread, and the next one past
+eight is refused with an error naming the limit. Eight is far below 256 on
+purpose: the deepest layering the shipped hosts reach is a route handler that
+bounds its work with `clock.timeout`, which is two, and it is below the
+thirteen that was measured to fail on the smallest stack this runtime runs Cove
+on, which is a spawned task's thread. The count is per interpreter, so a task
+gets its own allowance, for the same reason call depth does — a task has a
+stack of its own.
+
+It is a bound and not a proof, and this ADR would rather say so than imply
+otherwise. A host that puts a megabyte on the stack before it reenters can
+still exhaust it at the first level, and nothing here can know that. What the
+bound removes is the case where a *host* decides how many times the multiplier
+applies.
+
+### One at a time, on the calling thread
+
+A host may not use the way back concurrently, and cannot: there is exactly one
+`&mut dyn Reentry` per host call and it is neither `Send` nor `Sync`, so two
+threads can neither share it nor be given it. This is the design's answer
+rather than a limitation waiting to be lifted. Concurrency in Cove belongs to a
+task scope the program wrote; a host that ran a program's code on threads the
+program never asked for would be deciding how much of that program runs at
+once, and would be doing it outside every control the run was given.
+
+### No lock may be held across it
+
+A host must not hold a resource mutex, or any other non-reentrant lock, while
+it runs a callback. The callback is Cove code and Cove code may call the same
+host again; `std::sync::Mutex` is not reentrant, so the second call deadlocks
+the task on a lock the first call is holding a few frames up its own stack.
+Nothing detects this, because from the lock's point of view nothing is wrong.
+
+The shipped hosts keep the rule, and are tested for it rather than read for
+it. `Server.handle` takes the next request, or a clone of the listening socket,
+out from under the table of open listeners, drops the guard, and only then runs
+the route's handler — so a handler may ask the very handle it is being served
+by for its port, and may open a second listener, and does. `clock`'s only state
+is the virtual clock's counter, held for a read or a write and nothing else, so
+a timer's body may read and move the clock that is running it. Both tests run
+under a bounded join, because the failure this rule prevents is a hang, and a
+test that asserts on a result never reaches it.
+
+### Reentry is not task transfer
+
+Nothing crosses a task boundary here, so the rules that govern one do not
+apply. The arguments a host passes to a callback go from the host to the
+interpreter of the task that called it, and the result comes back the same way,
+both on one thread, both belonging to one task throughout. `Transfer` is not
+consulted and could not be: a `Vector`, or a resource handle whose schema says
+`task_safe: false`, is a perfectly ordinary argument to a callback, and a
+callback may answer with one.
+
+This is worth stating because a host author who has read the rest of this ADR
+has read a good deal about task safety and will reasonably assume it applies.
+Two things nearby do belong to tasks, and it is the difference that matters.
+`ResourceSchema::task_safe` still decides whether the handle an operation
+*returns* may later be captured by a `spawn` — a question about the value,
+asked at the boundary the value eventually crosses, and reentry is not that
+boundary. And a callback that is an `async fn` answers with a task, which the
+implementation settles before handing the value back, because the host was
+given a callback rather than a task and settling is what `await` would have
+done at the call site the host is standing in for. That settle is a join; a
+value coming back out of a *spawned* task does cross a boundary and is checked
+there, while a settled `async fn` body ran on this thread and crosses nothing.
+
+### How the controls compose
+
+Fuel is the run's, and a callback is the run's work: the interpreter charging a
+safepoint inside a callback is the one that charged the statement that made the
+host call, so a body handed to a host buys a program nothing.
+
+Call depth counts the callback's frames as the ordinary calls they are. The
+callback itself costs one, which is enough to matter: the same recursion that
+fits under a given limit at the top level is stopped by it when it runs inside
+a callback.
+
+The deadline and cancellation reach a callback at the callback's own
+safepoints. A body that was inside the deadline when it started stops when the
+deadline passes, wherever it next looks — not when the host's own bound
+expires, which may be much later. A host call that *starts* after the deadline
+has passed is refused before dispatch by `charge_host_call`, which is the check
+ADR 0003 already describes. And `call_until`'s flag bounds the call and
+everything inside it, including a further host call the body makes; it adds to
+the reasons a body may stop and replaces none of them, which is why
+`clock.timeout` reads the flag afterwards to decide whether to report its bound
+or the error it was given.
+
+Host-call counting charges a call made from inside a callback again, because it
+passes the same choke point every other call passes. A run allowed one host
+call is stopped by the `clock.now` its own bounded body makes.
+
+Tracing is the one that gives less than a reader would assume, and
+[issue #61](https://github.com/myuon/cove/issues/61) should know it. A
+`HostCall` event is written after the host returns, so a call whose callback
+made another call is recorded *after* the inner one, and the two are siblings
+in a flat stream: `sleep`, `now`, `timeout`, in that order, for a `timeout`
+whose body slept and then read the clock. Nothing on either event says one
+happened inside the other. The only thing that connects them is the outer
+call's `wait`, which contains the inner call's — an inclusion a reader can
+notice and no consumer can rely on, since two sequential calls can have the
+same shape. Reentry is invisible in a trace today.

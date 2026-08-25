@@ -52,6 +52,31 @@ use crate::value::{Closure, DynValue, EnumValue, RangeBounds, StructValue, Value
 /// this constant is the fallback when it does not.
 const MAX_CALL_DEPTH: usize = 256;
 
+/// How many host calls that are running a Cove callback may be stacked on one
+/// thread before the runtime refuses the next one.
+///
+/// [`MAX_CALL_DEPTH`] bounds Cove frames, and it is calibrated against the
+/// interpreter's own frames, which are the only ones it can see. A reentry
+/// level is not one of those: between the callback's frame and the frame that
+/// called the host sit `HostRegistry::dispatch` and then however much native
+/// stack the host itself uses, which is a host's business and nothing counts
+/// it. So the depth limit's promise — a limit reported instead of an
+/// exhausted native stack — holds for Cove calling Cove and stops holding
+/// exactly where a third party controls the multiplier.
+///
+/// This is the bound that puts it back. It is deliberately far below
+/// [`MAX_CALL_DEPTH`]: the deepest layering the shipped hosts reach is a
+/// route handler that bounds its work with `clock.timeout`, which is two, and
+/// nothing plausible needs eight. It is also measured rather than guessed: a
+/// thirteenth nested `clock.timeout` level exhausts the smallest stack this
+/// runtime runs Cove on, which is a spawned task's thread in a debug build.
+///
+/// It is a bound and not a proof. A host that puts a megabyte on the stack
+/// before it reenters can still overflow at the first level, and no counter
+/// here can know that; what this removes is the case where a *host* decides
+/// how many times the multiplier applies.
+const MAX_REENTRY_DEPTH: usize = 8;
+
 /// Fuel charged at every safepoint: a loop back edge, a function call, or an
 /// `await`.
 ///
@@ -364,6 +389,13 @@ pub struct Interpreter<'a> {
     /// beside the task's own flag, which is what makes a timeout stop the
     /// body it bounds rather than measure it afterwards.
     stops: Vec<Cancellation>,
+    /// How many host calls running a Cove callback this thread is currently
+    /// inside, which is what [`MAX_REENTRY_DEPTH`] bounds.
+    ///
+    /// Counted here rather than in the budget for the same reason `depth` is:
+    /// it measures one thread's native stack, and ADR 0008 gives each task a
+    /// stack of its own.
+    reentry_depth: usize,
     /// Ids of the tasks whose bodies this thread is running, innermost last,
     /// so a nested `spawn` can name its immediate parent.
     task_stack: Vec<u64>,
@@ -408,6 +440,7 @@ impl<'a> Interpreter<'a> {
             depth: 0,
             cancellation: None,
             stops: Vec::new(),
+            reentry_depth: 0,
             task_stack: Vec::new(),
             timings: Vec::new(),
             roots: Rc::new(RefCell::new(Roots::new())),
@@ -3463,6 +3496,13 @@ fn run_task(
 /// this interpreter — this task's stack, this task's heap, this run's budget
 /// — because a host that ran Cove code anywhere else would be running it
 /// outside the controls the run was given.
+///
+/// Holding `&mut Interpreter` is what makes the rest of that trait's contract
+/// true rather than merely stated. There can be one of these per host call
+/// and it cannot be moved to another thread, so a host cannot use its way
+/// back concurrently; it borrows a frame of the calling task, so a host
+/// cannot keep it; and every level of nesting is another one of these further
+/// down the same native stack, which is what [`MAX_REENTRY_DEPTH`] counts.
 struct Callback<'i, 'a> {
     interpreter: &'i mut Interpreter<'a>,
     /// Where the host call that is running this callback was written, so a
@@ -3473,6 +3513,19 @@ struct Callback<'i, 'a> {
 impl Callback<'_, '_> {
     fn run(&mut self, callee: &Value, args: Vec<Value>) -> Result<Value, RuntimeError> {
         let span = self.span;
+        // The count is raised for as long as the callback runs and dropped
+        // when it returns, so a host that runs its callback twice pays for
+        // one level twice over rather than for two levels at once. What is
+        // bounded is how many are stacked on this thread, because that is
+        // what is spending the native stack.
+        if self.interpreter.reentry_depth >= MAX_REENTRY_DEPTH {
+            return Err(RuntimeError::new(format!(
+                "reentry depth limit of {MAX_REENTRY_DEPTH} reached while a host ran a Cove callback"
+            ))
+            .at(span)
+            .with_rule("A host runs a Cove callback on the calling task's own stack, and how deep that may nest is a runtime control.")
+            .with_help("a callback is Cove code and may call a host that is handed work of its own; that nesting is what this bounds"));
+        }
         let args: Vec<EvaluatedArg> = args
             .into_iter()
             .map(|value| EvaluatedArg {
@@ -3482,13 +3535,15 @@ impl Callback<'_, '_> {
                 span,
             })
             .collect();
-        let value = self
+        self.interpreter.reentry_depth += 1;
+        let result = self
             .interpreter
-            .call_value_slots(callee.clone(), args, span)?;
+            .call_value_slots(callee.clone(), args, span);
+        self.interpreter.reentry_depth -= 1;
         // An `async fn` answers with a task. A host was handed a callback and
         // not a task, so settling it here is what `await` would have done at
         // the call site the host is standing in for.
-        match value {
+        match result? {
             Value::Task(task) => self.interpreter.settle(&task, span),
             other => Ok(other),
         }
@@ -7370,6 +7425,327 @@ export fn main() -> Result<Unit, Error> {
                 .iter()
                 .any(|event| matches!(event, TraceEvent::HostCall { op, .. } if op == "timeout")),
             "the bound is a granted host call, and the trace says so: {events:?}"
+        );
+    }
+
+    // ------------------------------------------------- the reentry contract
+
+    /// Nests `clock.timeout` `levels` deep: every level is a host call whose
+    /// callback calls a host that is handed work of its own, which is the
+    /// Host → Cove → Host → Cove shape the reentry bound exists for.
+    fn nested_reentry(levels: usize) -> Run {
+        let source = format!(
+            r#"
+use clock.timeout
+use console.println
+
+fn nest(n: Int) -> Int {{
+  if n <= 0 {{
+    0
+  }} else {{
+    let inner = clock.timeout(60s) {{ nest(n - 1) }}
+    match inner {{
+      Ok(deeper) => deeper + 1,
+      Err(stopped) => 0 - 1,
+    }}
+  }}
+}}
+
+export fn main() -> Result<Unit, Error> {{
+  println("{{nest({levels})}}")?
+  Ok(())
+}}
+"#
+        );
+        run_traced(&source).0
+    }
+
+    /// Nesting is supported: the inner callback runs on the same task, the
+    /// same heap, and the same budget as the outer one, and the values come
+    /// back out through the host calls that were standing in for them.
+    #[test]
+    fn a_callback_may_call_a_host_that_runs_a_callback_of_its_own() {
+        let run = nested_reentry(MAX_REENTRY_DEPTH);
+        assert_eq!(run.output, format!("{MAX_REENTRY_DEPTH}\n"));
+        run.value();
+    }
+
+    /// And it is bounded. A native stack is what a reentry level spends, and
+    /// how much of it a host spends per level is the host's business, so the
+    /// count is what the runtime can hold: past it the run stops with an
+    /// error naming the limit. Without this the same program aborts the
+    /// process, which is the one failure a sandbox may not have.
+    #[test]
+    fn nested_reentry_past_the_bound_stops_the_run_rather_than_the_process() {
+        let error = nested_reentry(MAX_REENTRY_DEPTH + 1).error();
+        assert_eq!(
+            error.message,
+            format!(
+                "reentry depth limit of {MAX_REENTRY_DEPTH} reached while a host ran a Cove callback"
+            )
+        );
+        assert!(error.span.is_some(), "the stop points at the host call");
+        assert!(error.rule.is_some());
+    }
+
+    /// Fuel is the run's, and a callback is the run's work: the interpreter
+    /// that charges a safepoint inside a callback is the one that charged the
+    /// statement that made the host call, so a body handed to a host cannot
+    /// buy a program more of anything.
+    #[test]
+    fn work_a_callback_does_is_charged_to_the_budget_that_made_the_host_call() {
+        let source = r#"
+use clock.timeout
+
+export fn main() -> Result<Unit, Error> {
+  let outcome = clock.timeout(60s) {
+    var i = 0
+    while i < 1000000000 {
+      i += 1
+    }
+    i
+  }
+  Ok(())
+}
+"#;
+        let (run, _, _) = run_traced_under(
+            source,
+            Limits {
+                fuel: Some(10_000),
+                ..Limits::default()
+            },
+        );
+        assert_eq!(
+            run.error().message,
+            "execution stopped: fuel budget of 10000 exhausted"
+        );
+    }
+
+    /// A host may run its callback as many times as its operation means, and
+    /// every one of them is a round the run pays for: fuel is charged inside
+    /// the body exactly as it is charged outside, so a timer cannot outlive
+    /// the budget by hiding its work behind a host call. The output shows the
+    /// rounds that were affordable, and the stop names the limit.
+    #[test]
+    fn every_round_of_a_repeated_callback_is_charged_to_the_run() {
+        let source = r#"
+use clock.every
+use console.println
+
+export fn main() -> Result<Unit, Error> {
+  let outcome = clock.every(1ms, async fn() {
+    println("round")?
+    Ok(())
+  })
+  Ok(())
+}
+"#;
+        let (run, _, _) = run_traced_under(
+            source,
+            Limits {
+                fuel: Some(500),
+                ..Limits::default()
+            },
+        );
+        let rounds = run.output.lines().count();
+        assert_eq!(
+            run.error().message,
+            "execution stopped: fuel budget of 500 exhausted"
+        );
+        assert!(
+            rounds > 1,
+            "the timer ran more than one round before the budget ran out, but ran {rounds}"
+        );
+    }
+
+    /// A callback's frames are ordinary Cove frames and count as ordinary
+    /// Cove frames. The recursion here is the same depth in both runs and the
+    /// limit is the same; the only difference is the one frame the callback
+    /// itself adds, and that frame is enough to cross the limit.
+    #[test]
+    fn a_callback_s_own_frame_counts_against_the_run_s_call_depth() {
+        let recursing = r#"
+fn nest(n: Int) -> Int {
+  if n <= 0 {
+    0
+  } else {
+    nest(n - 1) + 1
+  }
+}
+"#;
+        let limits = || Limits {
+            max_call_depth: Some(6),
+            ..Limits::default()
+        };
+        let direct = format!(
+            r#"{recursing}
+export fn main() -> Result<Unit, Error> {{
+  let answer = nest(4)
+  Ok(())
+}}
+"#
+        );
+        run_traced_under(&direct, limits()).0.value();
+
+        let through_a_callback = format!(
+            r#"
+use clock.timeout
+{recursing}
+export fn main() -> Result<Unit, Error> {{
+  let answer = clock.timeout(60s) {{ nest(4) }}
+  Ok(())
+}}
+"#
+        );
+        assert_eq!(
+            run_traced_under(&through_a_callback, limits())
+                .0
+                .error()
+                .message,
+            "execution stopped: call-depth limit of 6 exceeded"
+        );
+    }
+
+    /// A host call made from inside a callback passes the same choke point as
+    /// any other, so it is charged again. A run allowed one host call is
+    /// stopped by the `clock.now` its own bounded body makes; a run allowed
+    /// two is not.
+    #[test]
+    fn a_host_call_a_callback_makes_is_charged_against_the_run_again() {
+        let source = r#"
+use clock.timeout
+
+export fn main() -> Result<Unit, Error> {
+  let outcome = clock.timeout(60s) { clock.now() }
+  Ok(())
+}
+"#;
+        let limited = |max_host_calls| Limits {
+            max_host_calls: Some(max_host_calls),
+            ..Limits::default()
+        };
+        assert_eq!(
+            run_traced_under(source, limited(1)).0.error().message,
+            "execution stopped: host-call limit of 1 exceeded"
+        );
+        run_traced_under(source, limited(2)).0.value();
+    }
+
+    /// The deadline reaches a callback the way it reaches anything else: the
+    /// body was inside the deadline when it started and is stopped at its own
+    /// next safepoint once the deadline has passed. The bound the host itself
+    /// applies is far longer, so what stops this is the run's deadline and
+    /// the message says so.
+    #[test]
+    fn a_deadline_that_passes_while_a_callback_runs_stops_the_callback() {
+        let source = r#"
+use clock.timeout
+
+export fn main() -> Result<Unit, Error> {
+  let outcome = clock.timeout(60s) {
+    var i = 0
+    while i < 1000000000 {
+      i += 1
+    }
+    i
+  }
+  Ok(())
+}
+"#;
+        let (run, _, elapsed) = run_traced_under(
+            source,
+            Limits {
+                deadline: Some(Duration::from_millis(150)),
+                ..Limits::default()
+            },
+        );
+        assert_eq!(
+            run.error().message,
+            "execution stopped: wall-clock deadline of 150ms exceeded"
+        );
+        assert!(
+            elapsed < Duration::from_secs(60),
+            "the callback stopped at its own safepoint rather than running to the host's bound, but took {elapsed:?}"
+        );
+    }
+
+    /// Cancelling the task stops the callback its host call is running, at
+    /// the callback's own next safepoint. The flag belongs to the task, not
+    /// to the host call, so the host neither knows nor has to.
+    #[test]
+    fn cancelling_a_task_stops_the_callback_it_is_running() {
+        let source = r#"
+use clock.timeout
+use console.println
+
+export fn main() -> Result<Unit, Error> {
+  scope tasks {
+    let bounded = tasks.spawn {
+      clock.timeout(60s) {
+        var i = 0
+        while i < 1000000000 {
+          i += 1
+        }
+        i
+      }
+    }
+    println("the parent is not waiting")?
+    bounded.cancel()
+  }
+  println("the scope was left")?
+  Ok(())
+}
+"#;
+        let (run, _, elapsed) = run_traced(source);
+        assert_eq!(
+            run.output,
+            "the parent is not waiting\nthe scope was left\n"
+        );
+        run.value();
+        assert!(
+            elapsed < Duration::from_secs(60),
+            "the cancelled callback stopped rather than running to the host's bound, but took {elapsed:?}"
+        );
+    }
+
+    /// What a trace says about a host call whose callback made another host
+    /// call, which is worth writing down because it is less than a reader
+    /// might assume. The two are recorded as siblings, in the order they
+    /// finished, so the inner one comes first; nothing on either event says
+    /// one happened inside the other. All that connects them is the outer
+    /// call's `wait`, which contains the inner call's.
+    #[test]
+    fn a_host_call_made_inside_a_callback_is_traced_beside_the_one_that_ran_it() {
+        let source = r#"
+use clock.timeout
+
+export fn main() -> Result<Unit, Error> {
+  let outcome = clock.timeout(60s) {
+    clock.sleep(20ms)
+    clock.now()
+  }
+  Ok(())
+}
+"#;
+        let (run, events, _) = run_traced(source);
+        run.value();
+        let calls: Vec<(&str, Duration)> = events
+            .iter()
+            .filter_map(|event| match event {
+                TraceEvent::HostCall { op, wait, .. } => Some((op.as_str(), *wait)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            calls.iter().map(|(op, _)| *op).collect::<Vec<_>>(),
+            vec!["sleep", "now", "timeout"],
+            "the calls a callback made are recorded before the call that ran it: {events:?}"
+        );
+        let sleep = calls[0].1;
+        let timeout = calls[2].1;
+        assert!(
+            timeout >= sleep,
+            "the outer call's wait contains the inner call's, but {timeout:?} < {sleep:?}"
         );
     }
 
