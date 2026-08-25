@@ -7678,6 +7678,7 @@ export fn main() -> Result<Unit, Error> {
                 deadline: None,
                 max_host_calls: None,
                 trace: None,
+                generates: None,
             },
         );
         Config {

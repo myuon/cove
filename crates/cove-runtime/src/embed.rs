@@ -285,6 +285,10 @@ impl Embedded {
                 deadline: self.run.deadline_nanos.map(Duration::from_nanos),
                 max_host_calls: self.run.max_host_calls,
                 trace: self.run.trace.map(str::to_string),
+                // A built binary never generates: its whole point is a run
+                // `cove build` already refused to build if it set
+                // `generates`, so the rebuilt config here carries none.
+                generates: None,
             },
         );
         Ok(Package {

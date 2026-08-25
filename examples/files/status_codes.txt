@@ -1,0 +1,11 @@
+200 Ok
+201 Created
+204 NoContent
+400 BadRequest
+401 Unauthorized
+403 Forbidden
+404 NotFound
+409 Conflict
+422 UnprocessableEntity
+500 InternalServerError
+503 ServiceUnavailable

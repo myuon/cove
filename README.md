@@ -36,6 +36,7 @@ ok    text.countsWordsSeparatedBySpaces
 ok    text.reportsOnTheConsole
 ran 2 test(s), 2 passed
 $ cove fmt --check
+$ cove generate --check
 $ cove build hello
 built `hello` from 9 file(s) into `target/hello`
   entry:  hello.main
@@ -59,11 +60,15 @@ library. `cove test` runs every `test fn` in a package, granting each test
 the fake implementation of every capability its call graph requires unless
 `cove.toml`'s `[test] allow_real` names one. `cove build` packages a run as a
 single native executable that runs with no toolchain, no `cove` on the path,
-and no source tree. Tasks spawned in a scope run on
-threads, so a trace attributes each one's wait to the task that waited, and
-`Shared` holds mutable state across them. Not yet implemented: the `http`
-host, host resource handles such as a database connection, and the garbage
-collector.
+and no source tree. `cove generate <name>` runs a `[run.<name>]` entry that
+returns `Result<String, Error>` under its granted capabilities, writes and
+formats what it returns to the package-relative `generates` path, and checks
+the package; `cove generate --check` regenerates every such run into memory
+and fails on the first file that differs from what is on disk, which is what
+CI runs. Tasks spawned in a scope run on threads, so a trace attributes each
+one's wait to the task that waited, and `Shared` holds mutable state across
+them. Not yet implemented: the `http` host, host resource handles such as a
+database connection, and the garbage collector.
 
 `cove build` is not a code generator. The executable it writes embeds the
 program's sources and the interpreter, so it delivers a program without

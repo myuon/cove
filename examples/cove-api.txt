@@ -4,7 +4,7 @@
 # against the interface the current source derives, so check it in and let a
 # reviewer read the difference. Do not edit it by hand.
 cove-api 1
-hash fnv1a64:3ccd68df1316d03a
+hash fnv1a64:75fad32f2d2bf174
 
 module callbacks
   /// Task-safe application dependencies captured by request handlers.
@@ -28,6 +28,15 @@ module callbacks
   /// Runs a server with immutable routes and structured background work.
   export async fn main() -> Result<Unit, Error>
     requires clock, console, http
+
+module codegen
+  /// Builds the `httpstatus.StatusCode` module from `files/status_codes.txt`,
+  /// which pairs each numeric code with a `PascalCase` case name as
+  /// alternating whitespace-separated tokens: `200 Ok 404 NotFound ...`. One
+  /// data file driving both the enum's cases and its `code()` accessor is what
+  /// keeps them from drifting apart the way two hand-written lists would.
+  export fn statusCodes() -> Result<String, Error>
+    requires files
 
 module config
   /// Validated application configuration.
@@ -54,6 +63,24 @@ module hello
   /// Runs the command-line program.
   export fn main(args: Array<String>) -> Result<Unit, Error>
     requires console
+
+module httpstatus
+  /// HTTP status codes this package recognizes, derived from
+  /// `files/status_codes.txt` by `codegen.statusCodes`.
+  export enum StatusCode
+    case Ok
+    case Created
+    case NoContent
+    case BadRequest
+    case Unauthorized
+    case Forbidden
+    case NotFound
+    case Conflict
+    case UnprocessableEntity
+    case InternalServerError
+    case ServiceUnavailable
+    /// The numeric HTTP status code.
+    export fn code(self) -> Int
 
 module restricted
   /// Reads only through the document capability supplied by the host.

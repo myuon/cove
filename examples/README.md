@@ -22,6 +22,8 @@ Together they test the core product hypotheses:
 | `traits/` | Nominal traits, generic bounds, and both dispatch forms |
 | `callbacks/` | Routers, middleware, events, timers, retries, and task-safe captures |
 | `text/` | Not a program: the module `restricted/` imports, for `export` and capabilities across a boundary, and the package's own `test fn` declarations |
+| `codegen/` | `cove generate`: a capability-controlled generator that reads `files/status_codes.txt` |
+| `httpstatus/` | Not written by hand: `codegen.statusCodes`'s output, checked in and kept honest by `cove generate --check` |
 | `cove.toml` | Host-selected entry functions and granted capabilities |
 
 Each directory is a module; declarations marked `export` form its public API.

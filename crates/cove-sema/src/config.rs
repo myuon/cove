@@ -4,6 +4,7 @@
 //! boundary; it never changes the meaning of the language.
 
 use std::collections::BTreeMap;
+use std::path::{Component, Path, PathBuf};
 use std::time::Duration;
 
 /// A parsed `cove.toml`.
@@ -138,6 +139,7 @@ fn parse_run(name: &str, value: &toml::Value) -> Result<RunConfig, String> {
     let mut deadline = None;
     let mut max_host_calls = None;
     let mut trace = None;
+    let mut generates = None;
     for (key, value) in table {
         match key.as_str() {
             "entry" => {
@@ -179,6 +181,12 @@ fn parse_run(name: &str, value: &toml::Value) -> Result<RunConfig, String> {
                         .to_string(),
                 );
             }
+            "generates" => {
+                let text = value
+                    .as_str()
+                    .ok_or_else(|| format!("run `{name}`: `generates` must be a string"))?;
+                generates = Some(parse_generates_path(name, text)?);
+            }
             other => return Err(format!("run `{name}`: unknown key `{other}`")),
         }
     }
@@ -191,7 +199,37 @@ fn parse_run(name: &str, value: &toml::Value) -> Result<RunConfig, String> {
         deadline,
         max_host_calls,
         trace,
+        generates,
     })
+}
+
+/// Validates a `generates` path: package-relative, staying inside the
+/// package, and naming a `.cove` file.
+///
+/// A generator's authority is exactly what `[run.<name>] allow` grants, and
+/// letting `generates` name any path at all would hand back the ambient
+/// filesystem authority ADR 0010 exists to avoid: an absolute path, or one
+/// that climbs out of the package with `..`, could write anywhere the `cove`
+/// process can reach. Requiring `.cove` keeps the promise that a generator's
+/// output is inspectable Cove source, not an arbitrary file.
+fn parse_generates_path(name: &str, text: &str) -> Result<PathBuf, String> {
+    let path = Path::new(text);
+    if path.is_absolute() {
+        return Err(format!(
+            "run `{name}`: `generates` must be a package-relative path, found the absolute path `{text}`"
+        ));
+    }
+    if path.components().any(|c| c == Component::ParentDir) {
+        return Err(format!(
+            "run `{name}`: `generates` must stay inside the package, found `{text}`, which escapes it with `..`"
+        ));
+    }
+    if path.extension().and_then(|e| e.to_str()) != Some("cove") {
+        return Err(format!(
+            "run `{name}`: `generates` must name a `.cove` file, found `{text}`"
+        ));
+    }
+    Ok(path.to_path_buf())
 }
 
 /// Parses a non-negative integer key, such as `fuel` or `max_host_calls`.
@@ -251,6 +289,13 @@ pub struct RunConfig {
     pub max_host_calls: Option<u64>,
     /// A path to write a JSONL trace of this run to.
     pub trace: Option<String>,
+    /// The package-relative `.cove` path `cove generate` writes this run's
+    /// entry's returned source to.
+    ///
+    /// A run with `generates` may still be executed by `cove run`; it just
+    /// also names where its output belongs. `cove generate --check`
+    /// regenerates every run that sets this and refuses a stale result.
+    pub generates: Option<PathBuf>,
 }
 
 impl RunConfig {
@@ -279,6 +324,7 @@ mod tests {
                 "hello",
                 "restricted",
                 "server",
+                "statusCodes",
                 "tasks",
                 "traits",
                 "values"
@@ -501,5 +547,78 @@ mod tests {
     fn rejects_non_table_check() {
         let err = parse("check = true\n").unwrap_err();
         assert_eq!(err, "cove.toml: `check` must be a table");
+    }
+
+    #[test]
+    fn generates_defaults_to_none() {
+        let config = parse("[run.hello]\nentry = \"hello.main\"\n").unwrap();
+        assert_eq!(config.runs["hello"].generates, None);
+    }
+
+    #[test]
+    fn parses_generates() {
+        let config =
+            parse("[run.hello]\nentry = \"hello.main\"\ngenerates = \"gen/hello.cove\"\n").unwrap();
+        assert_eq!(
+            config.runs["hello"].generates,
+            Some(std::path::PathBuf::from("gen/hello.cove"))
+        );
+    }
+
+    #[test]
+    fn rejects_non_string_generates() {
+        let err = parse("[run.hello]\nentry = \"hello.main\"\ngenerates = 1\n").unwrap_err();
+        assert_eq!(err, "run `hello`: `generates` must be a string");
+    }
+
+    #[test]
+    fn rejects_absolute_generates_path() {
+        let err = parse("[run.hello]\nentry = \"hello.main\"\ngenerates = \"/etc/hello.cove\"\n")
+            .unwrap_err();
+        assert_eq!(
+            err,
+            "run `hello`: `generates` must be a package-relative path, found the absolute path `/etc/hello.cove`"
+        );
+    }
+
+    #[test]
+    fn rejects_generates_path_escaping_the_package() {
+        let err = parse("[run.hello]\nentry = \"hello.main\"\ngenerates = \"../outside.cove\"\n")
+            .unwrap_err();
+        assert_eq!(
+            err,
+            "run `hello`: `generates` must stay inside the package, found `../outside.cove`, which escapes it with `..`"
+        );
+    }
+
+    #[test]
+    fn rejects_generates_path_escaping_the_package_from_within_a_subdirectory() {
+        let err =
+            parse("[run.hello]\nentry = \"hello.main\"\ngenerates = \"gen/../../outside.cove\"\n")
+                .unwrap_err();
+        assert_eq!(
+            err,
+            "run `hello`: `generates` must stay inside the package, found `gen/../../outside.cove`, which escapes it with `..`"
+        );
+    }
+
+    #[test]
+    fn rejects_generates_path_not_ending_in_cove() {
+        let err = parse("[run.hello]\nentry = \"hello.main\"\ngenerates = \"gen/hello.rs\"\n")
+            .unwrap_err();
+        assert_eq!(
+            err,
+            "run `hello`: `generates` must name a `.cove` file, found `gen/hello.rs`"
+        );
+    }
+
+    #[test]
+    fn rejects_generates_path_with_no_extension() {
+        let err =
+            parse("[run.hello]\nentry = \"hello.main\"\ngenerates = \"gen/hello\"\n").unwrap_err();
+        assert_eq!(
+            err,
+            "run `hello`: `generates` must name a `.cove` file, found `gen/hello`"
+        );
     }
 }

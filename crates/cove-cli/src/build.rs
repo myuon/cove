@@ -48,6 +48,12 @@ entry, its granted capabilities, and its limits are the ones `[run.<name>]`
 recorded when it was built, and it accepts only its program's own arguments:
 a `cove.toml` placed beside it grants it nothing.
 
+A run that sets `generates` cannot be built: its entry returns source text
+for `cove generate` to write, not a program meant to be started, and a
+binary that silently discarded that return value would not be what building
+it was asked for. Build the program that consumes the generated file
+instead, once `cove generate <name>` has written it.
+
 Building the binary needs more than running one does. It needs `cargo` on the
 PATH and the Cove source tree this `cove` was built from, because producing an
 executable means compiling and linking the runtime into it; set `COVE_CRATES`
@@ -241,29 +247,21 @@ fn plan(
     flags: &BuildFlags,
 ) -> Result<BuildPlan, CliError> {
     let name = &flags.name;
-    let Some(run) = package.config.runs.get(name.as_str()) else {
-        let known: Vec<&str> = package.config.runs.keys().map(String::as_str).collect();
+    let run = crate::lookup_run(package, name)?;
+    // A `generates` run's entry produces source text, not a program meant to
+    // be started; embedding it as a standalone binary would silently drop
+    // the return value a generator's whole point is, which is not something
+    // a person asking for a distributable executable is likely to want.
+    // `cove generate <name>` is the command for what this run is for.
+    if run.generates.is_some() {
         return Err(CliError::Message(format!(
-            "cove.toml has no `[run.{name}]` table\n  known runs: {}",
-            if known.is_empty() {
-                "(none)".to_string()
-            } else {
-                known.join(", ")
-            }
-        )));
-    };
-    let Some((module, entry)) = run.entry_parts() else {
-        return Err(CliError::Message(format!(
-            "`[run.{name}] entry` must be a qualified function such as `hello.main`, found `{}`",
-            run.entry
-        )));
-    };
-    if program.lookup_fn(module, entry).is_none() {
-        return Err(CliError::Message(format!(
-            "`[run.{name}] entry` refers to `{}`, which this package does not declare",
-            run.entry
+            "`[run.{name}]` sets `generates`, so it is a generator, not a program to build\n  \
+             use `cove generate {name}` instead"
         )));
     }
+    // The lookup validates the entry; `plan` needs only `run.entry` itself,
+    // which the `BuildPlan` below carries as the qualified string.
+    crate::lookup_entry(program, name, run)?;
 
     let mut embedded = Vec::new();
     for module in package.modules.values() {
@@ -777,6 +775,23 @@ export fn main(args: Array<String>) -> Result<Unit, Error> {
         assert_eq!(
             message,
             "`[run.app] entry` refers to `app.missing`, which this package does not declare"
+        );
+    }
+
+    #[test]
+    fn a_run_that_sets_generates_is_refused() {
+        let dir = TempDir::new("build-refuses-generates");
+        fixture(
+            dir.path(),
+            "[run.app]\nentry = \"app.main\"\ngenerates = \"out/app.cove\"\n",
+        );
+
+        let Err(CliError::Message(message)) = plan_for(dir.path(), &flags("app")) else {
+            panic!("a run that generates must not be built");
+        };
+        assert_eq!(
+            message,
+            "`[run.app]` sets `generates`, so it is a generator, not a program to build\n  use `cove generate app` instead"
         );
     }
 
