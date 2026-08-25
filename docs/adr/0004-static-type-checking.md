@@ -6,8 +6,9 @@
   checker the import environment "Checking is per-module" said it would need,
   and [ADR 0006](0006-traits-and-dispatch.md), which turned "parametric and
   unbounded" into parametric with bounds
-- Implemented by: PR #12
-- Implementation status: partial — see "What is not checked yet" below
+- Implemented by: PR #12; the declaration-parameter rule by PR #43
+- Implementation status: partial — the Host API schema is still unread
+  (#38); see "What is not checked yet" below
 
 ## Context
 
@@ -33,9 +34,15 @@ and `cove run` refuses to execute a package that does not check.
 
 ### Annotations are mandatory at boundaries, inferred inside
 
-Function parameters, return types, struct fields, and enum payloads are
-written. Local `let` and `var` bindings infer from their initializer, and
-lambda parameters infer from the expected type at the call site.
+Function parameters, struct fields, and enum payloads are written; the
+checker refuses a declaration whose parameter has none. A return type may be
+omitted, and an omitted one means `Unit` — a default, not a hole, because a
+function's result is always produced whether or not the signature names it,
+and `benches/startup`'s `export fn main() {}` is the shortest program that
+relies on that default staying implicit. Local `let` and `var` bindings infer
+from their initializer, and lambda parameters infer from the expected type at
+the call site, because a lambda has no signature of its own to read outside
+the call that gives it one.
 
 This is the rule ADR 0001 already chose — "Function and public API boundaries
 remain explicitly typed" with local inference — and it keeps the checker a
@@ -129,8 +136,8 @@ polymorphism remain out of scope, as ADR 0001 decided.
 ## What is not checked yet (2026-08-25)
 
 The checker described above exists and `cove check` runs it, so the Context's
-"none of that is true today" is history. Two of its promises are not kept, and
-naming them here is cheaper for a reader than deriving them from the code.
+"none of that is true today" is history. One of its promises is not kept, and
+naming it here is cheaper for a reader than deriving it from the code.
 
 The Host API schema is still unread. ADR 0001 asks for one description of each
 operation's argument, result, and error types shared by the compiler, runtime,
@@ -141,12 +148,11 @@ host type is named, which is why `cove check` reports warnings on
 `examples/server` and `examples/callbacks`. The runtime does not check the
 other end either, which is [issue #38](https://github.com/myuon/cove/issues/38).
 
-"Annotations are mandatory at boundaries" is not enforced for a declaration's
-parameters. A parameter written without a type becomes `Unknown` rather than
-an error, and `Unknown` is equal to everything, so a call passing the wrong
-thing checks clean. The cause is structural — a declaration's parameter and a
-lambda's parameter are the same node, and ADR 0004 wants the second to infer —
-and the fix is a decision rather than a line, so it is
+"Annotations are mandatory at boundaries" used to have a second exception,
+worth recording now that it is closed: a declaration's parameter could omit
+its type and become `Unknown`, which is equal to everything, so a call
+passing the wrong thing checked clean. That is now refused
+(`cove::type::missing_parameter_type`), closing
 [issue #41](https://github.com/myuon/cove/issues/41).
 
 Two smaller things are worth stating because they read as gaps and are not. A

@@ -1,0 +1,8 @@
+error[cove::type::missing_parameter_type]: parameter `x` has no declared type
+ --> <e2e>/fail_missing_parameter_type/main/main.cove:9:18
+  |
+9 | export fn double(x) -> Int {
+  |                  ^
+  rule: A declaration's parameters are written: only a lambda's infer, from the expected type at its call site.
+  help: write `x: <type>`
+1 error(s)
