@@ -639,7 +639,9 @@ pub const TASK_SAFETY_RULE: &str = "Immutable task-safe values such as arrays ma
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::schema::ResourceSchema;
     use crate::value::VectorStorage;
+    use cove_diag::{FileId, Span};
 
     /// The point of the type: a value that may cross a task boundary is a
     /// value a thread can own. If this ever stopped holding, `spawn` could
@@ -694,5 +696,327 @@ mod tests {
             Value::Shared(other) => assert!(Arc::ptr_eq(&cell, &other)),
             other => panic!("expected a `Shared`, found {other}"),
         }
+    }
+
+    // ------------------------------------------- shapes a value crosses in
+    //
+    // The tests above cover a struct field directly. Everything below walks
+    // the rest of the shapes `Transfer::convert` descends into — arrays,
+    // enums, maps, trait objects, closures, and Host resource handles — and
+    // pins both directions: a task-safe value of that shape crosses and
+    // round-trips, and a `Vector` (or a non-task-safe resource handle)
+    // nested in that shape is refused with a `path` that names how it was
+    // reached.
+
+    /// A resource handle for a fictitious host, naming `module.Connection`,
+    /// with its schema's `task_safe` set as the test needs.
+    fn resource_handle(module: &str, task_safe: bool, id: u64) -> Arc<ResourceHandle> {
+        let schema = ResourceSchema {
+            name: "Connection",
+            task_safe,
+            operations: &[],
+        };
+        ResourceHandle::new(module, &schema, id)
+    }
+
+    /// A closure with no body worth running: only its captures matter to
+    /// `Transfer::convert`, so the body is the emptiest one the AST allows.
+    fn closure_value(module: &str, captures: Vec<(&str, Value)>) -> Value {
+        let span = Span::new(FileId(0), 0, 0);
+        Value::Closure(Rc::new(Closure {
+            is_async: false,
+            params: Vec::new(),
+            decl: None,
+            body: Arc::new(Block {
+                statements: Vec::new(),
+                tail: None,
+                span,
+            }),
+            module: module.into(),
+            captures: captures
+                .into_iter()
+                .map(|(name, value)| (name.into(), value))
+                .collect(),
+        }))
+    }
+
+    #[test]
+    fn an_array_of_structs_crosses_and_round_trips() {
+        let value = Value::Array(
+            vec![
+                Value::Struct(Box::new(StructValue {
+                    type_name: "test.Point".into(),
+                    fields: vec![("x".into(), Value::Int(1)), ("y".into(), Value::Int(2))],
+                })),
+                Value::Struct(Box::new(StructValue {
+                    type_name: "test.Point".into(),
+                    fields: vec![("x".into(), Value::Int(3)), ("y".into(), Value::Int(4))],
+                })),
+            ]
+            .into(),
+        );
+        let crossed = Transfer::of(&value)
+            .expect("an array of structs built only from Ints is task-safe")
+            .into_value();
+        assert!(crossed.eq_value(&value), "{crossed} != {value}");
+    }
+
+    /// "Immutable task-safe values such as arrays may cross task boundaries"
+    /// — but an array is only as task-safe as what it holds. A vector
+    /// nested two levels down, inside a struct inside the array, is still
+    /// refused, and `Transfer::convert` builds the path by extending it once
+    /// per level: `"{path}[{i}]"` for the array, then `"{path}.{name}"` for
+    /// the struct field.
+    #[test]
+    fn an_array_of_structs_is_refused_for_the_one_vector_it_holds() {
+        let value = Value::Array(
+            vec![Value::Struct(Box::new(StructValue {
+                type_name: "test.Draft".into(),
+                fields: vec![(
+                    "guests".into(),
+                    Value::Vector(VectorStorage::new(vec![Value::Int(1)])),
+                )],
+            }))]
+            .into(),
+        );
+        let found = Transfer::of(&value).expect_err("a vector nested in an array may not cross");
+        assert_eq!(found.path, "[0].guests");
+        assert_eq!(found.type_name, "Vector");
+    }
+
+    #[test]
+    fn an_enum_payload_that_is_task_safe_crosses_and_round_trips() {
+        let value = Value::Enum(Box::new(EnumValue {
+            type_name: "test.Shape".into(),
+            case: "Circle".into(),
+            payload: vec![Value::Int(4)],
+        }));
+        let crossed = Transfer::of(&value)
+            .expect("an enum payload of Ints is task-safe")
+            .into_value();
+        assert!(crossed.eq_value(&value), "{crossed} != {value}");
+    }
+
+    /// An enum case's payload is walked exactly like a struct's fields, just
+    /// with no field names to hang a path on: `Transfer::convert` names the
+    /// case and the payload's position instead, `"{path}.{case}({i})"`.
+    #[test]
+    fn an_enum_payload_holding_a_vector_is_refused_by_its_case_and_index() {
+        let value = Value::Enum(Box::new(EnumValue {
+            type_name: "test.Shape".into(),
+            case: "Wrap".into(),
+            payload: vec![Value::Vector(VectorStorage::new(Vec::new()))],
+        }));
+        let found = Transfer::of(&value).expect_err("a vector in an enum payload may not cross");
+        assert_eq!(found.path, ".Wrap(0)");
+        assert_eq!(found.type_name, "Vector");
+    }
+
+    #[test]
+    fn a_map_of_task_safe_values_crosses_and_round_trips() {
+        let value = Value::Map(Rc::new(BTreeMap::from([
+            (MapKey::Str("a".to_string()), Value::Int(1)),
+            (MapKey::Str("b".to_string()), Value::Int(2)),
+        ])));
+        let crossed = Transfer::of(&value)
+            .expect("a map of Ints is task-safe")
+            .into_value();
+        assert!(crossed.eq_value(&value), "{crossed} != {value}");
+    }
+
+    #[test]
+    fn a_map_value_holding_a_vector_is_refused_naming_the_key() {
+        let value = Value::Map(Rc::new(BTreeMap::from([(
+            MapKey::Str("widgets".to_string()),
+            Value::Vector(VectorStorage::new(Vec::new())),
+        )])));
+        let found = Transfer::of(&value).expect_err("a vector held by a map entry may not cross");
+        assert_eq!(found.path, "[widgets]");
+        assert_eq!(found.type_name, "Vector");
+    }
+
+    #[test]
+    fn a_dyn_value_that_is_task_safe_crosses_keeping_its_trait_name() {
+        let value = Value::Dyn(Rc::new(DynValue {
+            trait_name: "render.Display".into(),
+            value: Value::Str("hi".into()),
+        }));
+        let crossed = Transfer::of(&value)
+            .expect("a `dyn Trait` wrapping a task-safe value is itself task-safe")
+            .into_value();
+        match crossed {
+            Value::Dyn(d) => {
+                assert_eq!(&*d.trait_name, "render.Display");
+                assert!(d.value.eq_value(&Value::Str("hi".into())));
+            }
+            other => panic!("expected a `Dyn`, found {other}"),
+        }
+    }
+
+    /// "A trait object is task-safe exactly when the value it holds is: the
+    /// wrapper adds a trait name, which is not state" — and `Transfer::convert`
+    /// takes that literally about the path too, passing `path` through to the
+    /// wrapped value *unchanged*. So a struct's `Vector` field is refused with
+    /// exactly the path it would have outside the `Dyn`, with no `dyn` marker
+    /// anywhere in it.
+    #[test]
+    fn a_dyn_wrapping_a_struct_with_a_vector_is_refused_at_the_fields_path() {
+        let value = Value::Dyn(Rc::new(DynValue {
+            trait_name: "render.Display".into(),
+            value: Value::Struct(Box::new(StructValue {
+                type_name: "test.Draft".into(),
+                fields: vec![(
+                    "guests".into(),
+                    Value::Vector(VectorStorage::new(Vec::new())),
+                )],
+            })),
+        }));
+        let found = Transfer::of(&value).expect_err("a vector inside a `Dyn` may not cross");
+        assert_eq!(found.path, ".guests");
+        assert_eq!(found.type_name, "Vector");
+    }
+
+    #[test]
+    fn a_closure_with_a_task_safe_capture_crosses_keeping_its_captures() {
+        let value = closure_value(
+            "test.mod",
+            vec![("count", Value::Int(1)), ("label", Value::Str("a".into()))],
+        );
+        let crossed = Transfer::of(&value)
+            .expect("a closure whose captures are an Int and a String is task-safe")
+            .into_value();
+        match crossed {
+            Value::Closure(closure) => {
+                assert_eq!(closure.captures.len(), 2);
+                assert!(closure.captures[0].1.eq_value(&Value::Int(1)));
+                assert!(closure.captures[1].1.eq_value(&Value::Str("a".into())));
+            }
+            other => panic!("expected a `Closure`, found {other}"),
+        }
+    }
+
+    /// "Closures are task-safe only when every capture is" — including a
+    /// capture that is itself a closure, whose own captures are walked in
+    /// turn. `Transfer::convert` writes `" -> "` between a capture's name and
+    /// the name of whatever it captures next, so a vector reached two
+    /// captures deep still names the whole chain that reaches it, not just
+    /// the last step.
+    #[test]
+    fn a_closure_capturing_a_closure_whose_capture_holds_a_vector_is_refused_two_levels_deep() {
+        let inner = closure_value(
+            "test.mod",
+            vec![(
+                "state",
+                Value::Struct(Box::new(StructValue {
+                    type_name: "test.Draft".into(),
+                    fields: vec![(
+                        "guests".into(),
+                        Value::Vector(VectorStorage::new(Vec::new())),
+                    )],
+                })),
+            )],
+        );
+        let outer = closure_value("test.mod", vec![("handler", inner)]);
+        let found =
+            Transfer::of(&outer).expect_err("a vector captured two closures deep may not cross");
+        assert_eq!(found.path, "handler -> state.guests");
+        assert_eq!(found.type_name, "Vector");
+    }
+
+    // ------------------------------------------------------ host resources
+
+    /// "Host resources declare task-safety in their Host API schema." A
+    /// resource whose state the host keeps behind a lock says
+    /// `task_safe: true`, and ADR 0013 says a handle is a name and nothing
+    /// else, so it then crosses the way a string does: the same `Arc` both
+    /// sides address, naming one resource.
+    #[test]
+    fn a_resource_handle_whose_schema_says_task_safe_crosses_naming_the_same_resource() {
+        let handle = resource_handle("test", true, 7);
+        let crossed = Transfer::of(&Value::Resource(handle.clone()))
+            .expect("a resource whose schema says task-safe may cross")
+            .into_value();
+        match crossed {
+            Value::Resource(other) => assert!(
+                Arc::ptr_eq(&handle, &other),
+                "a handle crosses by sharing its `Arc`, so both sides should name one resource: {handle} and {other}"
+            ),
+            other => panic!("expected a `Resource`, found {other}"),
+        }
+    }
+
+    #[test]
+    fn a_resource_handle_whose_schema_says_not_task_safe_is_refused() {
+        let handle = resource_handle("test", false, 7);
+        let found = Transfer::of(&Value::Resource(handle))
+            .expect_err("a resource whose schema says not task-safe may not cross");
+        assert_eq!(found.type_name, "test.Connection");
+    }
+
+    /// The correction for a host resource is not "wrap it in `Shared`" — the
+    /// host already decided this resource's state stays with the task that
+    /// opened it — so `NotTaskSafe::help` reads a `.` in the type name, which
+    /// is exactly how `Value::type_name` renders a resource's
+    /// `module.Type`, and gives a different sentence than the generic one a
+    /// struct or closure capture gets.
+    #[test]
+    fn not_task_safe_help_for_a_host_resource_names_its_schema() {
+        let found = NotTaskSafe {
+            path: String::new(),
+            type_name: "database.Connection".to_string(),
+        };
+        assert_eq!(
+            found.help("spawning"),
+            "`database.Connection` is a host resource whose Host API schema declares it not task-safe; open one in the task that uses it rather than spawning"
+        );
+    }
+
+    // ------------------------------------------------------ shared cells
+
+    /// `Value::Shared(cell) => Ok(Transfer::Shared(cell.clone()))` asks
+    /// nothing about what `cell` holds — unlike every other shape above,
+    /// this arm does not walk. That is sound in the running language only
+    /// because nothing reaches a `Shared` with an unchecked payload:
+    /// `SharedCell::wrap` (`crates/cove-runtime/src/shared.rs`), called from
+    /// the `Shared(value)` constructor in
+    /// `crates/cove-runtime/src/builtins.rs`, runs `Transfer::of` on the
+    /// payload before a cell is ever built, so a `Shared` this walk sees has
+    /// already been vetted once, by a check that lives outside this file.
+    /// This test reaches around that guard with `SharedCell::new` — a
+    /// constructor ordinary Cove code cannot call — to pin what the walk
+    /// itself actually does: it does not repeat the check.
+    #[test]
+    fn a_shared_crosses_without_rechecking_what_it_already_holds() {
+        let handle = resource_handle("test", false, 1);
+        Transfer::of(&Value::Resource(handle.clone()))
+            .expect_err("a task-unsafe resource handle is refused on its own");
+        let cell = SharedCell::new(Transfer::Resource(handle));
+        let crossed = Transfer::of(&Value::Shared(cell.clone()))
+            .expect("`Shared` crosses without walking its payload")
+            .into_value();
+        match crossed {
+            Value::Shared(other) => assert!(Arc::ptr_eq(&cell, &other)),
+            other => panic!("expected a `Shared`, found {other}"),
+        }
+    }
+
+    // ------------------------------------------------------- subject()
+
+    #[test]
+    fn not_task_safe_subject_names_the_type_alone_at_the_root() {
+        let found = NotTaskSafe {
+            path: String::new(),
+            type_name: "Vector".to_string(),
+        };
+        assert_eq!(found.subject(), "a `Vector`");
+    }
+
+    #[test]
+    fn not_task_safe_subject_names_the_path_when_nested() {
+        let found = NotTaskSafe {
+            path: ".guests".to_string(),
+            type_name: "Vector".to_string(),
+        };
+        assert_eq!(found.subject(), "a `Vector` in `guests`");
     }
 }

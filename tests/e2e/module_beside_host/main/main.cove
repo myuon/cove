@@ -1,0 +1,17 @@
+use clocks.tick
+use console.println
+use clock.now
+
+/// Imports a package module and a host module whose names are one letter
+/// apart, and reaches both.
+///
+/// The other half of `fail_module_shadows_host`. A package module is refused
+/// only when its name *is* a host module's, so a name beside one resolves
+/// normally and leaves the host reachable from the same file. The elapsed
+/// time is compared rather than printed, so what the case reports is which
+/// module answered and not how fast the machine is.
+export fn main() -> Result<Unit, Error> {
+  println(tick())?
+  println("the host answered {now() >= 0s}")?
+  Ok(())
+}

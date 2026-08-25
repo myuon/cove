@@ -1,0 +1,8 @@
+error[cove::resolve::module_shadows_host]: module `http` has the same name as the host module `http`
+ --> <e2e>/fail_module_shadows_host/main/main.cove:2:1
+  |
+2 | use http.fetch
+  | ^^^^^^^^^^^^^^
+  rule: `use` resolves against the package's modules first, so a module named after a host module hides it.
+  help: rename the `http` module; the host namespace is not this package's to change
+1 error(s)

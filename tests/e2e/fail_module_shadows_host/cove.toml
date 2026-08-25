@@ -1,0 +1,3 @@
+[run.fail_module_shadows_host]
+entry = "main.main"
+allow = ["console", "http"]

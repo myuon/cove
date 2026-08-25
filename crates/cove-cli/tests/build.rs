@@ -121,6 +121,81 @@ fn a_cove_toml_beside_a_built_binary_changes_nothing() {
     assert_eq!(outcome.stdout, "Hello, --files-root!\n");
 }
 
+/// ADR 0009 says a built binary's grants cannot be widened after the fact:
+/// "An embedded grant set is the point. A built binary carries the authority
+/// its `[run.<name>]` table granted and cannot be handed more by editing a
+/// file beside it." `a_cove_toml_beside_a_built_binary_changes_nothing`
+/// proves that a neighbouring `cove.toml` cannot change the entry or the
+/// limits, but every capability that test's `cove.toml` names is one `hello`
+/// already holds, so a binary that quietly read the neighbouring `allow`
+/// list would still pass it. This test asks for a capability the binary was
+/// never granted, `files`, from a program that would otherwise have been
+/// able to read the file it names — the failure below can only be the
+/// missing grant, never a missing file.
+#[test]
+fn a_cove_toml_beside_a_built_binary_grants_it_no_capability() {
+    let (program, _) = build("tests/e2e", "fail_files_no_capability");
+    let dir = TempDir::new("sealed-grants");
+    let program = dir.install(&program);
+
+    // A file the `files` capability would have let the program read, so a
+    // refusal below is about the missing grant, not about a missing file.
+    std::fs::create_dir(dir.path().join("files")).expect("the files directory is created");
+    std::fs::write(dir.path().join("files").join("notes.txt"), "the notes")
+        .expect("the note is written");
+
+    // Widens `allow` to include `files`, which the binary was never built
+    // with. This is the config source `cove run` would honour; the binary
+    // was sealed before this file existed.
+    std::fs::write(
+        dir.path().join("cove.toml"),
+        "[run.fail_files_no_capability]\nentry = \"fail_files_no_capability.main\"\nallow = [\"console\", \"files\"]\n",
+    )
+    .expect("the config is written");
+
+    let outcome = run(&program, dir.path(), &[]);
+    assert!(
+        !outcome.status.success(),
+        "a `cove.toml` beside the binary must not grant it `files`:\n{}",
+        outcome.stdout
+    );
+    // The capability the binary was sealed with, `console`, still works: the
+    // refusal below is about `files` alone.
+    assert_eq!(outcome.stdout, "console was granted\n");
+    assert!(
+        outcome.stderr.contains(
+            "`files.read` requires the `files` capability, which this run was not granted"
+        ),
+        "{}",
+        outcome.stderr
+    );
+    // The sealed help line, not the config one `cove run` would print for the
+    // same refusal: this is what shows the sealed code path ran.
+    assert!(
+        outcome.stderr.contains(
+            "  help: this binary carries the capabilities it was built with; add `files` to `allow` in the run's `cove.toml` table and build it again\n"
+        ),
+        "{}",
+        outcome.stderr
+    );
+    assert!(
+        !outcome
+            .stderr
+            .contains("  help: add `files` to `allow` in the run's `cove.toml` table\n"),
+        "{}",
+        outcome.stderr
+    );
+    // A package-relative path, not the build machine's absolute one: this
+    // binary can run somewhere that path never existed.
+    assert!(
+        outcome
+            .stderr
+            .contains(" --> fail_files_no_capability/main.cove:7:27"),
+        "{}",
+        outcome.stderr
+    );
+}
+
 /// ADR 0008 runs each spawned task on a thread of its own, and a built
 /// binary is the same runtime, so it has to spawn them too. This is the
 /// claim a compile error cannot make for us: `Embedded::main` builds its own

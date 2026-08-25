@@ -1,0 +1,29 @@
+use console.println
+
+/// Prints `label`, as the one host call a spawned task makes in this fixture.
+fn announce(label: String) -> Result<Unit, Error> {
+  println(label)
+}
+
+/// Runs two tasks whose host calls land in one fixed order, because the
+/// program fixes it rather than the scheduler.
+///
+/// ADR 0008 runs each spawned task on a thread of its own, so ordinarily
+/// nothing says which of two concurrent tasks reaches a host first. Spawning
+/// the second task only after the first has been awaited — rather than
+/// spawning both before awaiting either — pins the order here: the second
+/// task cannot even start until the first has finished and been awaited. As
+/// `crates/cove-cli/src/replay.rs`'s module doc puts it, a scope's contract
+/// is "the set of effects it produces and never their sequence"; this
+/// fixture is deliberately not exercising that freedom, so its recorded
+/// trace has exactly one order to record.
+export fn main() -> Result<Unit, Error> {
+  scope order {
+    let first = order.spawn { announce("first") }
+    await first?
+
+    let second = order.spawn { announce("second") }
+    await second?
+  }
+  Ok(())
+}

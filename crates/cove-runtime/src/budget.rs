@@ -194,10 +194,24 @@ impl Budget {
     }
 
     /// Charges one host call against the budget, failing before the call is
-    /// dispatched if it would exceed `max_host_calls`.
+    /// dispatched if the run was cancelled, if its deadline has passed, or if
+    /// the call would exceed `max_host_calls`.
+    ///
+    /// A host call is a control point exactly as a safepoint is. ADR 0003
+    /// puts the controls at "loop back edges, calls, and `await`", and a run
+    /// whose work is waiting on a host reaches none of the other three: a
+    /// deadline checked only in Cove code would not bound a program that
+    /// spends its time inside calls. The clock is read on every call rather
+    /// than every `DEADLINE_CHECK_INTERVAL`th, because a host call already
+    /// costs far more than reading it does.
     pub fn charge_host_call(&mut self) -> Result<(), Stopped> {
         if self.cancellation.is_cancelled() {
             return Err(Stopped::Cancelled);
+        }
+        if let Some(deadline) = self.limits.deadline {
+            if self.started_at.elapsed() >= deadline {
+                return Err(Stopped::Deadline);
+            }
         }
         self.host_calls += 1;
         if let Some(limit) = self.limits.max_host_calls {
@@ -397,6 +411,21 @@ mod tests {
 
         let mut budget = budget;
         assert_eq!(budget.safepoint(0), Err(Stopped::Cancelled));
+    }
+
+    /// The deadline bounds a run whose work is host calls, which reaches no
+    /// loop back edge, no Cove call, and no `await` to be stopped at.
+    #[test]
+    fn the_deadline_also_stops_host_call_charging() {
+        let mut budget = Budget::new(Limits {
+            deadline: Some(Duration::from_millis(1)),
+            ..Limits::default()
+        });
+        assert_eq!(budget.charge_host_call(), Ok(()));
+        thread::sleep(Duration::from_millis(20));
+        assert_eq!(budget.charge_host_call(), Err(Stopped::Deadline));
+        // A call refused for the deadline is not one the run made.
+        assert_eq!(budget.host_calls(), 1);
     }
 
     #[test]

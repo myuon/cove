@@ -6343,6 +6343,150 @@ export fn main() -> Result<Unit, Error> {
         );
     }
 
+    /// A vector reached through an array element and then a struct field. The
+    /// path a diagnostic reports is how the value was reached, so a
+    /// programmer looking for what to change reads the way in rather than the
+    /// name of the whole capture.
+    #[test]
+    fn task_safety_names_the_array_element_that_cannot_cross() {
+        let source = r#"
+struct Draft {
+  guests: Vector<String>
+}
+
+export fn main() -> Result<Unit, Error> {
+  let drafts = [Draft(guests: Vector.of("Alice"))]
+  scope tasks {
+    let counting = tasks.spawn { drafts.length() }
+  }
+  Ok(())
+}
+"#;
+        let error = run_entry_of(source, "main", &[]).error();
+        assert_eq!(
+            error.message,
+            "`spawn` cannot capture `drafts[0].guests`, which is a `Vector`"
+        );
+    }
+
+    /// An enum is a tagged union, so what a case carries is reached through
+    /// the case that carries it and the position it sits in.
+    #[test]
+    fn task_safety_names_the_enum_payload_that_cannot_cross() {
+        let source = r#"
+enum Draft {
+  Empty
+  Guests(Vector<String>)
+}
+
+export fn main() -> Result<Unit, Error> {
+  let draft = Draft.Guests(Vector.of("Alice"))
+  scope tasks {
+    let counting = tasks.spawn { draft }
+  }
+  Ok(())
+}
+"#;
+        let error = run_entry_of(source, "main", &[]).error();
+        assert_eq!(
+            error.message,
+            "`spawn` cannot capture `draft.Guests(0)`, which is a `Vector`"
+        );
+    }
+
+    /// A payload-free case of the same enum crosses: what decides is the
+    /// value a case carries, never the type it belongs to.
+    #[test]
+    fn an_enum_case_that_carries_nothing_crosses_a_task_boundary() {
+        let source = r#"
+use console.println
+
+enum Draft {
+  Empty
+  Guests(Vector<String>)
+}
+
+export fn main() -> Result<Unit, Error> {
+  let draft = Draft.Empty
+  scope tasks {
+    let crossing = tasks.spawn { draft }
+    println("{await crossing}")?
+  }
+  Ok(())
+}
+"#;
+        assert_eq!(run_entry_of(source, "main", &[]).output, "Empty\n");
+    }
+
+    /// A trait object is task-safe exactly when the value it holds is: the
+    /// wrapper adds a trait name, which is not state. So the diagnostic names
+    /// the field inside, and says nothing about the trait.
+    #[test]
+    fn task_safety_looks_through_a_trait_object_to_the_value_it_holds() {
+        let source = r#"
+trait Summary {
+  fn summarize(self) -> String
+}
+
+struct Draft {
+  guests: Vector<String>
+}
+
+impl Summary for Draft {
+  fn summarize(self) -> String {
+    "a draft"
+  }
+}
+
+export fn main() -> Result<Unit, Error> {
+  let entry: dyn Summary = Draft(guests: Vector.of("Alice"))
+  scope tasks {
+    let describing = tasks.spawn { entry.summarize() }
+  }
+  Ok(())
+}
+"#;
+        let error = run_entry_of(source, "main", &[]).error();
+        assert_eq!(
+            error.message,
+            "`spawn` cannot capture `entry.guests`, which is a `Vector`"
+        );
+    }
+
+    /// The same trait object over a value that may cross does cross, and
+    /// dispatch on the far side still reaches the implementation the value
+    /// carried with it.
+    #[test]
+    fn a_trait_object_over_a_task_safe_value_crosses_and_still_dispatches() {
+        let source = r#"
+use console.println
+
+trait Summary {
+  fn summarize(self) -> String
+}
+
+struct Draft {
+  guests: Array<String>
+}
+
+impl Summary for Draft {
+  fn summarize(self) -> String {
+    "a draft of {self.guests.length()}"
+  }
+}
+
+export fn main() -> Result<Unit, Error> {
+  let entry: dyn Summary = Draft(guests: ["Alice"])
+  scope tasks {
+    let describing = tasks.spawn { entry.summarize() }
+    println("{await describing}")?
+  }
+  Ok(())
+}
+"#;
+        assert_eq!(run_entry_of(source, "main", &[]).output, "a draft of 1\n");
+    }
+
     // --------------------------------------------------- real concurrency
 
     /// Runs `source`'s `main` with `console` and a real `clock` granted, and
@@ -6388,12 +6532,19 @@ export fn main() -> Result<Unit, Error> {
     /// Runs `source`'s `main` with `console` and a real `clock` granted,
     /// reporting what it traced and how long it took.
     fn run_traced(source: &str) -> (Run, Vec<TraceEvent>, Duration) {
+        run_traced_under(source, Limits::default())
+    }
+
+    /// The same, under `limits`, for the tests that are about what stops a
+    /// run rather than about what it computes.
+    fn run_traced_under(source: &str, limits: Limits) -> (Run, Vec<TraceEvent>, Duration) {
         let (sources, program) = program_of(source);
         let buffer = Buffer::default();
         let sink = RecordingSink::default();
         let mut hosts = HostRegistry::new(Grants::new(["console", "clock"]));
         hosts.register(Box::new(Console::new(buffer.clone())));
         hosts.register(Box::new(crate::clock::Clock::real()));
+        hosts.set_budget(Budget::new(limits));
         hosts.set_trace(Arc::new(sink.clone()));
         let runtime =
             Runtime::new(program, sources, Arc::new(hosts)).with_trace(Arc::new(sink.clone()));
@@ -6610,6 +6761,470 @@ export fn main() -> Result<Unit, Error> {
                 .with_budget(|budget| budget.fuel_spent())
                 .unwrap_or_default()
                 >= 10_000
+        );
+    }
+
+    // -------------------------------------------------- leaving a scope
+    //
+    // "Concurrent work belongs to a task scope. Leaving the scope waits for
+    // or cancels its child tasks." That rule is about every child and about
+    // every way out, so this section takes each exit a scope has — running
+    // off the end of its body, `return`, a propagated `Err`, a cancellation
+    // the program asked for, and a broken invariant — and reads the trace
+    // for what became of every task that was spawned. The outcome a test
+    // must never find is a child that was neither joined nor cancelled,
+    // because that is a thread the scope outlived.
+
+    /// What the trace says became of each task the run spawned, in spawn
+    /// order, as `(id, joined, cancelled)`.
+    ///
+    /// The children are read from the events rather than from the source, so
+    /// a test asserts on the ones the run actually had and not on the ones
+    /// its author remembered writing.
+    fn children_of(events: &[TraceEvent]) -> Vec<(u64, bool, bool)> {
+        let mut children: Vec<(u64, bool, bool)> = Vec::new();
+        for event in events {
+            match event {
+                // Spawning is traced before the thread starts, so a child is
+                // always in the list before anything can settle it.
+                TraceEvent::TaskSpawned { id, .. } => children.push((*id, false, false)),
+                TraceEvent::TaskCompleted { id, .. } => {
+                    if let Some(child) = children.iter_mut().find(|child| child.0 == *id) {
+                        child.1 = true;
+                    }
+                }
+                TraceEvent::TaskCancelled { id } => {
+                    if let Some(child) = children.iter_mut().find(|child| child.0 == *id) {
+                        child.2 = true;
+                    }
+                }
+                _ => {}
+            }
+        }
+        children
+    }
+
+    /// The rule itself, in the form every exit has to satisfy.
+    fn assert_every_child_settled(events: &[TraceEvent]) {
+        let children = children_of(events);
+        assert!(
+            !children.is_empty(),
+            "the run spawned no task, so it cannot show what a scope does with one"
+        );
+        for (id, joined, cancelled) in &children {
+            assert!(
+                *joined || *cancelled,
+                "task {id} was neither joined nor cancelled: {children:?}"
+            );
+        }
+    }
+
+    /// The scope runs off the end of its body. It waits for the child the
+    /// body never awaited — which is why that child's line comes before the
+    /// line after the scope — and cancels nothing.
+    #[test]
+    fn a_scope_that_completes_normally_joins_the_child_it_never_awaited() {
+        let source = r#"
+use console.println
+
+export fn main() -> Result<Unit, Error> {
+  scope tasks {
+    let awaited = tasks.spawn { 1 }
+    let ignored = tasks.spawn { println("the child the body never awaited ran")? }
+    await awaited
+  }
+  println("the scope was left")?
+  Ok(())
+}
+"#;
+        let (run, events, _) = run_traced(source);
+        assert_eq!(
+            run.output,
+            "the child the body never awaited ran\nthe scope was left\n"
+        );
+        run.value();
+        assert_every_child_settled(&events);
+        assert_eq!(
+            children_of(&events),
+            vec![(1, true, false), (2, true, false)]
+        );
+    }
+
+    /// `return` leaves the scope early. The child that had already been
+    /// awaited keeps what it did, and the one still running is cancelled:
+    /// cancellation stops work that has not happened, it does not undo work
+    /// that has.
+    #[test]
+    fn a_scope_left_by_return_cancels_only_the_child_still_running() {
+        let source = format!(
+            "use console.println
+
+export fn main() -> Result<Unit, Error> {{
+  scope tasks {{
+    let quick = tasks.spawn {{ println(\"the quick child ran\")? }}
+    let spinning = tasks.spawn {{
+{SPINNING_TASK}
+    }}
+    await quick
+    return Ok(())
+  }}
+}}
+"
+        );
+        let (run, events, _) = run_traced(&source);
+        assert_eq!(run.output, "the quick child ran\n");
+        run.value();
+        assert_every_child_settled(&events);
+        assert_eq!(
+            children_of(&events),
+            vec![(1, true, false), (2, false, true)]
+        );
+    }
+
+    /// An `Err` propagated out of the scope's body with `?` leaves it the way
+    /// `return` does: the error is the scope's value, and the child still
+    /// running is cancelled rather than waited for.
+    #[test]
+    fn a_scope_left_by_a_propagated_err_cancels_the_child_still_running() {
+        let source = format!(
+            "{TASKS}
+export fn main() -> Result<Unit, Error> {{
+  scope tasks {{
+    let quick = tasks.spawn {{ println(\"the quick child ran\")? }}
+    let spinning = tasks.spawn {{
+{SPINNING_TASK}
+    }}
+    await quick
+    await load(false)?
+    println(\"never printed\")?
+  }}
+  Ok(())
+}}
+"
+        );
+        let (run, events, _) = run_traced(&source);
+        assert_eq!(run.output, "the quick child ran\n");
+        assert_eq!(run.value().to_string(), "Err(boom)");
+        assert_every_child_settled(&events);
+        assert_eq!(
+            children_of(&events),
+            vec![(1, true, false), (2, false, true)]
+        );
+    }
+
+    /// The program cancels a child itself and then leaves the scope normally.
+    /// Asking is all `cancel` does, so the trace records the cancellation
+    /// where the scope waits and learns that the child really stopped.
+    #[test]
+    fn a_child_the_program_cancelled_is_still_waited_for_at_scope_exit() {
+        let source = format!(
+            "use console.println
+
+export fn main() -> Result<Unit, Error> {{
+  scope tasks {{
+    let quick = tasks.spawn {{ println(\"the quick child ran\")? }}
+    let spinning = tasks.spawn {{
+{SPINNING_TASK}
+    }}
+    await quick
+    spinning.cancel()
+  }}
+  println(\"the scope was left\")?
+  Ok(())
+}}
+"
+        );
+        let (run, events, _) = run_traced(&source);
+        assert_eq!(run.output, "the quick child ran\nthe scope was left\n");
+        run.value();
+        assert_every_child_settled(&events);
+        assert_eq!(
+            children_of(&events),
+            vec![(1, true, false), (2, false, true)]
+        );
+    }
+
+    /// A broken invariant in the scope's own body. "Integer overflow is a
+    /// broken invariant, not a wrapped result", so this is not an `Err` the
+    /// body chose to propagate — and the scope still cancels its child, since
+    /// leaving a scope is leaving it however it happened.
+    #[test]
+    fn a_scope_left_by_a_broken_invariant_cancels_the_child_still_running() {
+        let source = format!(
+            "use console.println
+
+export fn main() -> Result<Unit, Error> {{
+  scope tasks {{
+    let spinning = tasks.spawn {{
+{SPINNING_TASK}
+    }}
+    let largest = 9223372036854775807
+    println(\"never printed {{largest + 1}}\")?
+  }}
+  Ok(())
+}}
+"
+        );
+        let (run, events, _) = run_traced(&source);
+        assert_eq!(run.output, "");
+        let error = run.error();
+        assert_eq!(error.message, "`Int` addition overflowed");
+        assert_eq!(
+            error.rule.as_deref(),
+            Some("Integer overflow is a broken invariant, not a wrapped result.")
+        );
+        assert_every_child_settled(&events);
+        assert_eq!(children_of(&events), vec![(1, false, true)]);
+    }
+
+    /// A broken invariant inside a child rather than in the scope's body. The
+    /// overflow reaches the scope through `await`, and the sibling that was
+    /// still running is cancelled on the way out.
+    ///
+    /// The child that broke is traced as completed rather than as cancelled.
+    /// ADR 0003 asks for "trace events for task spawn, completion, and
+    /// cancellation", so the distinction the trace draws is between a thread
+    /// that finished and one that was stopped, and a thread that finished by
+    /// raising is on the first side of it.
+    #[test]
+    fn a_broken_invariant_in_a_child_leaves_the_scope_and_stops_its_sibling() {
+        let source = format!(
+            "use console.println
+
+export fn main() -> Result<Unit, Error> {{
+  scope tasks {{
+    let spinning = tasks.spawn {{
+{SPINNING_TASK}
+    }}
+    let broken = tasks.spawn {{
+      let largest = 9223372036854775807
+      largest + 1
+    }}
+    await broken
+  }}
+  Ok(())
+}}
+"
+        );
+        let (run, events, _) = run_traced(&source);
+        assert_eq!(run.output, "");
+        assert_eq!(run.error().message, "`Int` addition overflowed");
+        assert_every_child_settled(&events);
+        assert_eq!(
+            children_of(&events),
+            vec![(1, false, true), (2, true, false)]
+        );
+    }
+
+    /// The Language Card lists concurrency beside the limits that do exist:
+    /// "CPU, memory, time, concurrency, and Host-call limits are runtime
+    /// controls, not termination proofs", and ADR 0001 lists "concurrency
+    /// limits" among what the runtime should be able to impose.
+    ///
+    /// Nothing imposes one. [`Limits`] has no field for it and
+    /// [`Interpreter::spawn`] consults no budget before
+    /// `std::thread::Builder::spawn`, so a scope starts one OS thread for
+    /// every `spawn` its body reaches and a host has no way to say how many
+    /// is too many. This test asks to be stopped and is ignored because
+    /// nothing can stop it; it should set the limit and assert the
+    /// diagnostic once one exists. See issue #37.
+    #[test]
+    #[ignore = "no concurrency limit exists: see issue #37"]
+    fn spawning_past_a_concurrency_limit_is_refused_before_a_thread_exists() {
+        let source = r#"
+export fn main() -> Result<Unit, Error> {
+  scope tasks {
+    var i = 0
+    while i < 64 {
+      let ignored = tasks.spawn { 1 }
+      i += 1
+    }
+  }
+  Ok(())
+}
+"#;
+        let (sources, program) = program_of(source);
+        let mut hosts = HostRegistry::new(Grants::new(["console"]));
+        hosts.register(Box::new(Console::new(Buffer::default())));
+        hosts.set_budget(Budget::new(Limits::default()));
+        let runtime = Runtime::new(program, sources, Arc::new(hosts));
+        let error = Interpreter::new(&runtime)
+            .run_entry("test", "main", Vec::new())
+            .expect_err("a concurrency limit stops the run before it holds 64 threads");
+        assert!(error.message.contains("concurrency"), "{}", error.message);
+    }
+
+    // --------------------------------------------------------- deadlines
+
+    /// A run that finishes inside its deadline is not stopped, however
+    /// generous the bound: a limit that fired early would be a limit on the
+    /// machine rather than on the run.
+    #[test]
+    fn a_run_that_finishes_inside_its_deadline_is_not_stopped() {
+        let source = r#"
+use console.println
+
+export fn main() -> Result<Unit, Error> {
+  println("inside the deadline")?
+  Ok(())
+}
+"#;
+        let (run, _, _) = run_traced_under(
+            source,
+            Limits {
+                deadline: Some(Duration::from_secs(30)),
+                ..Limits::default()
+            },
+        );
+        assert_eq!(run.output, "inside the deadline\n");
+        run.value();
+    }
+
+    /// A deadline that expires while Cove code runs stops it at the next
+    /// safepoint, and the diagnostic names the bound that was configured. The
+    /// loop is bounded only so that a runtime which never observes the
+    /// deadline fails the test instead of hanging.
+    #[test]
+    fn a_deadline_that_expires_while_cove_code_runs_stops_it_at_a_safepoint() {
+        let source = r#"
+use console.println
+
+export fn main() -> Result<Unit, Error> {
+  var i = 0
+  while i < 1000000000 {
+    i += 1
+  }
+  println("never printed")?
+  Ok(())
+}
+"#;
+        let (run, _, _) = run_traced_under(
+            source,
+            Limits {
+                deadline: Some(Duration::from_millis(50)),
+                ..Limits::default()
+            },
+        );
+        assert_eq!(run.output, "");
+        let error = run.error();
+        assert_eq!(
+            error.message,
+            "execution stopped: wall-clock deadline of 50ms exceeded"
+        );
+        assert!(error.rule.is_some(), "the stop cites the rule it enforces");
+        assert!(error.span.is_some(), "the stop points at the loop");
+    }
+
+    /// A deadline that expires while a Host call blocks stops the run only
+    /// once that call has returned.
+    ///
+    /// That is the documented behaviour rather than a shortfall of it. The
+    /// `clock` schema says of `sleep` that "a cancelled task stops at its
+    /// next safepoint, which is after the wait it is already inside
+    /// returns", and a safepoint is a place in Cove code. So the evidence is
+    /// in the trace: the host call is recorded whole, having waited for as
+    /// long as it was asked to, and the run stops afterwards.
+    #[test]
+    fn a_deadline_that_expires_while_a_host_call_blocks_stops_the_run_when_it_returns() {
+        let source = r#"
+use clock.sleep
+use console.println
+
+export fn main() -> Result<Unit, Error> {
+  sleep(750ms)?
+  println("never printed")?
+  Ok(())
+}
+"#;
+        let (run, events, elapsed) = run_traced_under(
+            source,
+            Limits {
+                deadline: Some(Duration::from_millis(250)),
+                ..Limits::default()
+            },
+        );
+        assert_eq!(run.output, "");
+        assert_eq!(
+            run.error().message,
+            "execution stopped: wall-clock deadline of 250ms exceeded"
+        );
+        let waits: Vec<Duration> = events
+            .iter()
+            .filter_map(|event| match event {
+                TraceEvent::HostCall { op, wait, .. } if op == "sleep" => Some(*wait),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(waits.len(), 1, "the sleep was recorded once: {waits:?}");
+        assert!(
+            waits[0] >= Duration::from_millis(500),
+            "the sleep ran to its end rather than being cut short, but waited {:?}",
+            waits[0]
+        );
+        assert!(
+            elapsed >= Duration::from_millis(500),
+            "the run outlived its deadline for as long as the call held it, but took {elapsed:?}"
+        );
+    }
+
+    /// `clock.timeout` bounds work the program hands the host, which the host
+    /// runs back on this task through `Reentry`. Work that finishes inside
+    /// the bound answers `Ok` with its value.
+    #[test]
+    fn a_timeout_answers_ok_when_the_bounded_work_finishes_inside_it() {
+        let source = r#"
+use clock.timeout
+use console.println
+
+export fn main() -> Result<Unit, Error> {
+  let answer = clock.timeout(30s) {
+    7
+  }?
+  println("the bounded work answered {answer}")?
+  Ok(())
+}
+"#;
+        let (run, events, _) = run_traced(source);
+        assert_eq!(run.output, "the bounded work answered 7\n");
+        run.value();
+        assert!(
+            events.iter().any(|event| {
+                matches!(event, TraceEvent::HostCall { op, granted, .. } if op == "timeout" && *granted)
+            }),
+            "the bound is a granted host call, and the trace says so: {events:?}"
+        );
+    }
+
+    /// The other half: a bound that expires stops the Cove code it was given
+    /// at that code's next safepoint, and the answer names the bound rather
+    /// than whatever the stopped body was doing. The loop is bounded only so
+    /// that a runtime which never delivers the stop fails instead of hanging.
+    #[test]
+    fn a_timeout_stops_cove_code_that_runs_past_its_bound() {
+        let source = r#"
+use clock.timeout
+use console.println
+
+export fn main() -> Result<Unit, Error> {
+  let outcome = clock.timeout(50ms) {
+    var i = 0
+    while i < 1000000000 {
+      i += 1
+    }
+    i
+  }
+  println("{outcome}")?
+  Ok(())
+}
+"#;
+        let (run, events, _) = run_traced(source);
+        assert_eq!(run.output, "Err(clock: timed out after 50ms)\n");
+        run.value();
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event, TraceEvent::HostCall { op, .. } if op == "timeout")),
+            "the bound is a granted host call, and the trace says so: {events:?}"
         );
     }
 
