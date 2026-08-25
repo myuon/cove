@@ -1,7 +1,10 @@
 use console.println
 
 /// A point in the plane.
-export struct Point { x: Int, y: Int }
+export struct Point {
+  x: Int
+  y: Int
+}
 
 /// Initializes a struct with the wrong field type and reads a field that
 /// does not exist.

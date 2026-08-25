@@ -1,18 +1,18 @@
 error[cove::type::mismatch]: expected `Int`, found `String`
-  --> <e2e>/fail_type_field/main/main.cove:13:30
+  --> <e2e>/fail_type_field/main/main.cove:16:30
    |
-13 |   let point = Point(x: 1, y: "two")
+16 |   let point = Point(x: 1, y: "two")
    |                              ^^^^^
- --> <e2e>/fail_type_field/main/main.cove:4:31
+ --> <e2e>/fail_type_field/main/main.cove:6:3
   |
-4 | export struct Point { x: Int, y: Int }
-  |                               ^ the field `y` is `Int`
+6 |   y: Int
+  |   ^ the field `y` is `Int`
   rule: Types are nominal and the only implicit conversion is to `dyn Trait`: a value must otherwise already have the type its place asks for.
   help: parse the `String` with `Int.parse(text)`, which returns a `Result<Int, Error>`
 error[cove::type::unknown_field]: `Point` has no field `z`
-  --> <e2e>/fail_type_field/main/main.cove:14:13
+  --> <e2e>/fail_type_field/main/main.cove:17:13
    |
-14 |   println("{point.z}")?
+17 |   println("{point.z}")?
    |             ^^^^^^^
   rule: A struct's fields are exactly the ones its declaration lists.
   help: `Point` declares `x`, `y`
