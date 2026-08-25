@@ -42,6 +42,19 @@
 //! both `cove-sema` and `cove-runtime`; [issue #50](https://github.com/myuon/cove/issues/50)
 //! is why they are here.
 //!
+//! # What a builtin type is made of, and not only what it answers
+//!
+//! A [`BuiltinSchema`] began as a name and a list of methods, which was
+//! enough for a call and not enough for anything else: `Option` is `Some` and
+//! `None`, `Result` is `Ok` and `Err`, an `Error` carries a `message`, and a
+//! `MapEntry` carries a `key` and a `value`, and none of that is a method. So
+//! an entry also declares its [`cases`](BuiltinSchema::cases) if it is an
+//! enum and its [`fields`](BuiltinSchema::fields) if it is a struct, and both
+//! ends read them: `match` exhaustiveness, the type a pattern's binding gets,
+//! the value the interpreter builds, and the field a program reads all come
+//! from here. [issue #53](https://github.com/myuon/cove/issues/53) is why,
+//! and it is the last of the four.
+//!
 //! # What is here and what is not
 //!
 //! The signatures are here; the implementations are not, and cannot be. A
@@ -52,10 +65,12 @@
 //! from here every question it can answer from a name alone — which type
 //! names are namespaces, which methods take a `var self` receiver, which
 //! names are constructors, which are assertions, how many arguments each
-//! takes, and which receivers are told that `count()` is spelled `length()`.
-//! `crates/cove-runtime/tests/builtin_schema.rs` closes the loop by driving
-//! every entry in both tables through a real interpreter, so an entry added
-//! here with no implementation behind it fails a test rather than a program.
+//! takes, which receivers are told that `count()` is spelled `length()`, and
+//! what each builtin enum's cases and each builtin struct's fields are
+//! called. `crates/cove-runtime/tests/builtin_schema.rs` closes the loop by
+//! driving every entry in both tables through a real interpreter, so an entry
+//! added here with no implementation behind it fails a test rather than a
+//! program.
 //!
 //! The variants of [`BuiltinType`] cover exactly the types the tables below
 //! use, on the same rule the host vocabulary follows: add one when a builtin
@@ -161,6 +176,76 @@ pub struct ParamSchema {
     pub ty: BuiltinType,
 }
 
+/// One case of a builtin enum.
+///
+/// A case is what a builtin enum is made of, the way a [`FieldSchema`] is
+/// what a builtin struct is made of, and the payload is written in the
+/// receiver's own type parameters: `Some` carries a `T` and `Err` carries an
+/// `E`. So a pattern reads its binding's type off the scrutinee exactly as a
+/// method reads its result off its receiver, and there is one description of
+/// what `Ok` carries rather than one on each side of the toolchain.
+///
+/// This is [`TypeSchema::cases`](crate::TypeSchema::cases) in the builtin
+/// vocabulary. A host's enum cases are bare names, because a boundary hands
+/// over data it has already made; a builtin's carry a payload the language
+/// itself binds.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CaseSchema {
+    /// The name Cove source writes in a pattern or a call, such as `Ok`.
+    pub name: &'static str,
+    /// What the case carries, in order.
+    ///
+    /// Empty for a case that carries nothing, which is `None` and only
+    /// `None`: it is the one builtin case a program writes as a bare name
+    /// rather than as a call.
+    pub payload: &'static [BuiltinType],
+}
+
+impl CaseSchema {
+    /// The case, in the form a declaration would write it: `Ok(T)`, or
+    /// `None` for a case that carries nothing.
+    pub fn signature(&self) -> String {
+        if self.payload.is_empty() {
+            return self.name.to_string();
+        }
+        let payload: Vec<String> = self.payload.iter().map(BuiltinType::to_string).collect();
+        format!("{}({})", self.name, payload.join(", "))
+    }
+
+    /// The case as a pattern that binds nothing: `Ok(_)`, or `None` for a
+    /// case that carries nothing.
+    ///
+    /// This is how a diagnostic points *inside* a value: a host that
+    /// declares `Result<String, Error>` and hands back an `Ok(1)` is told
+    /// the mismatch is inside `Ok(_)`.
+    pub fn wildcard_pattern(&self) -> String {
+        if self.payload.is_empty() {
+            return self.name.to_string();
+        }
+        let payload: Vec<&str> = self.payload.iter().map(|_| "_").collect();
+        format!("{}({})", self.name, payload.join(", "))
+    }
+}
+
+/// One field of a builtin struct.
+///
+/// `Error` and `MapEntry` are structs the language builds rather than a
+/// module declares, and a program reads them the ordinary way, by field. The
+/// runtime has always built both — a `Value::Struct` with the fields below —
+/// so what this adds is the half the checker was missing: what the runtime
+/// builds, written down where the checker can read it.
+///
+/// This is [`FieldSchema`](crate::FieldSchema) in the builtin vocabulary,
+/// carrying a [`BuiltinType`] because a builtin struct may be generic:
+/// `MapEntry<K, V>`'s two fields are its two type parameters.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FieldSchema {
+    /// The label Cove source writes to read the field, such as `message`.
+    pub name: &'static str,
+    /// The field's type.
+    pub ty: BuiltinType,
+}
+
 /// One builtin method or associated function.
 ///
 /// The two are the same shape and differ only in whether there is a receiver,
@@ -231,6 +316,18 @@ pub struct BuiltinSchema {
     /// and a `Range`, a `Duration`, or a `Unit` from an expression that makes
     /// one.
     pub namespace: bool,
+    /// The cases, for a builtin enum. Empty for everything else.
+    ///
+    /// `Option` and `Result` are the two, and this is the one list of what
+    /// they are made of: `match` exhaustiveness, the sentence that names a
+    /// missing case, the type a pattern's binding gets, and the value the
+    /// interpreter builds all read it here.
+    pub cases: &'static [CaseSchema],
+    /// The fields, for a builtin struct. Empty for everything else.
+    ///
+    /// `Error` and `MapEntry` are the two. The order is the order an
+    /// initializer takes them in and a diagnostic reads them out.
+    pub fields: &'static [FieldSchema],
     /// What may be called on a value of this type.
     ///
     /// The order is the order a diagnostic lists them in when it has to say
@@ -249,6 +346,26 @@ impl BuiltinSchema {
     /// The associated function `name`, if this type has one.
     pub fn associated_function(&self, name: &str) -> Option<&'static MethodSchema> {
         self.associated.iter().find(|entry| entry.name == name)
+    }
+
+    /// The case `name`, if this type declares one.
+    pub fn case(&self, name: &str) -> Option<&'static CaseSchema> {
+        self.cases.iter().find(|entry| entry.name == name)
+    }
+
+    /// The field `name`, if this type declares one.
+    pub fn field(&self, name: &str) -> Option<&'static FieldSchema> {
+        self.fields.iter().find(|entry| entry.name == name)
+    }
+
+    /// Whether this is a builtin enum, which is what having cases means.
+    pub fn is_enum(&self) -> bool {
+        !self.cases.is_empty()
+    }
+
+    /// Whether this is a builtin struct, which is what having fields means.
+    pub fn is_struct(&self) -> bool {
+        !self.fields.is_empty()
     }
 }
 
@@ -332,8 +449,8 @@ impl FreeBuiltinSchema {
 /// The order is the order the associated functions read out in a diagnostic
 /// that has to list them, which is why the collections come first.
 pub static BUILTINS: &[BuiltinSchema] = &[
-    ARRAY, VECTOR, MAP, SET, STRING, RANGE, OPTION, RESULT, INT, FLOAT, BOOL, UNIT, DURATION,
-    ERROR, TASK, SHARED, SCOPE,
+    ARRAY, VECTOR, MAP, MAP_ENTRY, SET, STRING, RANGE, OPTION, RESULT, INT, FLOAT, BOOL, UNIT,
+    DURATION, ERROR, TASK, SHARED, SCOPE,
 ];
 
 /// Every builtin type the language defines.
@@ -381,6 +498,63 @@ pub fn is_mutating_method(name: &str) -> bool {
 pub fn declares_length(name: &str) -> bool {
     builtin(name).is_some_and(|entry| entry.method("length").is_some())
 }
+
+/// The builtin enum that declares the case `name`, if one does.
+///
+/// This is what lets a bare `Some(value)` arm say which enum a `match` is
+/// over without a list of its own: the two builtin enums are the two entries
+/// with cases, and a case name belongs to at most one of them.
+pub fn enum_declaring(name: &str) -> Option<&'static BuiltinSchema> {
+    BUILTINS.iter().find(|entry| entry.case(name).is_some())
+}
+
+// -------------------------------------------- the cases and the one field
+//
+// The four case names and the two structs' field names are what
+// [issue #53](https://github.com/myuon/cove/issues/53) was about: they were
+// written out in `cove-sema` for exhaustiveness and pattern types, and again
+// in `cove-runtime` for the values it builds. These are the constants both
+// ends name.
+
+/// `Some(T)`, the case an `Option` carries a value in.
+pub const SOME_CASE: CaseSchema = CaseSchema {
+    name: "Some",
+    payload: &[BuiltinType::Param("T")],
+};
+
+/// `None`, the empty case of `Option`.
+///
+/// It is the one builtin case with no payload, and therefore the one written
+/// as a bare name rather than as a call — which is why both ends ask for this
+/// constant by itself: the checker to give the name a type, the interpreter
+/// to build the value, and both to say that `None(...)` is a mistake.
+pub const NONE_CASE: CaseSchema = CaseSchema {
+    name: "None",
+    payload: &[],
+};
+
+/// `Ok(T)`, the success case of a `Result`.
+pub const OK_CASE: CaseSchema = CaseSchema {
+    name: "Ok",
+    payload: &[BuiltinType::Param("T")],
+};
+
+/// `Err(E)`, the failure case of a `Result`.
+pub const ERR_CASE: CaseSchema = CaseSchema {
+    name: "Err",
+    payload: &[BuiltinType::Param("E")],
+};
+
+/// `message: String`, the one field of the builtin `Error` struct.
+///
+/// The runtime has always built an `Error` with this field and served a read
+/// of it; the checker used to answer "`Error` has no field `message`" and
+/// suggest a method `Error` does not have. Declaring it here is what closed
+/// that gap.
+pub const MESSAGE_FIELD: FieldSchema = FieldSchema {
+    name: "message",
+    ty: BuiltinType::String,
+};
 
 /// Every builtin that is called on nothing: the constructors, then the
 /// assertions.
@@ -450,6 +624,10 @@ pub const SOME: FreeBuiltinSchema = FreeBuiltinSchema {
 /// `Error(message: String) -> Error`, the one constructor whose payload has a
 /// type of its own rather than one the call site settles.
 ///
+/// Its one parameter *is* [`MESSAGE_FIELD`], the field the value it builds
+/// carries, so the label a call writes and the label a read writes cannot
+/// come apart.
+///
 /// The constant is not called `ERROR` because [`BuiltinType::Error`]'s type
 /// table already is.
 pub const ERROR_OF: FreeBuiltinSchema = FreeBuiltinSchema {
@@ -457,8 +635,8 @@ pub const ERROR_OF: FreeBuiltinSchema = FreeBuiltinSchema {
     kind: FreeBuiltinKind::Constructor,
     generics: &[],
     params: &[ParamSchema {
-        name: "message",
-        ty: BuiltinType::String,
+        name: MESSAGE_FIELD.name,
+        ty: MESSAGE_FIELD.ty,
     }],
     result: BuiltinType::Error,
 };
@@ -570,6 +748,8 @@ pub const ARRAY: BuiltinSchema = BuiltinSchema {
     name: "Array",
     parameters: &["T"],
     namespace: true,
+    cases: &[],
+    fields: &[],
     methods: &[
         MethodSchema {
             name: "get",
@@ -602,6 +782,8 @@ pub const VECTOR: BuiltinSchema = BuiltinSchema {
     name: "Vector",
     parameters: &["T"],
     namespace: true,
+    cases: &[],
+    fields: &[],
     methods: &[
         MethodSchema {
             name: "get",
@@ -671,6 +853,8 @@ pub const MAP: BuiltinSchema = BuiltinSchema {
     name: "Map",
     parameters: &["K", "V"],
     namespace: true,
+    cases: &[],
+    fields: &[],
     methods: &[
         MethodSchema {
             name: "get",
@@ -755,6 +939,36 @@ pub const MAP: BuiltinSchema = BuiltinSchema {
     }],
 };
 
+// ---------------------------------------------------------------- MapEntry
+
+/// `MapEntry<K, V>`: the one `key`/`value` pair a `Map` is built from and
+/// iterated as.
+///
+/// It is the second builtin *struct*, and the only builtin whose initializer
+/// is labelled: `MapEntry(key: "a", value: 1)` is the synthesized labelled
+/// call a declared struct gets, and its labels are the two fields below, read
+/// by both ends rather than written out at each. It is not a namespace,
+/// because nothing is called on the name — `Map.of` collects the pairs and a
+/// `for` over a `Map` binds them.
+pub const MAP_ENTRY: BuiltinSchema = BuiltinSchema {
+    name: "MapEntry",
+    parameters: &["K", "V"],
+    namespace: false,
+    cases: &[],
+    fields: &[
+        FieldSchema {
+            name: "key",
+            ty: BuiltinType::Param("K"),
+        },
+        FieldSchema {
+            name: "value",
+            ty: BuiltinType::Param("V"),
+        },
+    ],
+    methods: &[],
+    associated: &[],
+};
+
 // --------------------------------------------------------------------- Set
 
 /// `Set<T>`: an immutable set, kept in ascending element order.
@@ -762,6 +976,8 @@ pub const SET: BuiltinSchema = BuiltinSchema {
     name: "Set",
     parameters: &["T"],
     namespace: true,
+    cases: &[],
+    fields: &[],
     methods: &[
         LENGTH,
         IS_EMPTY,
@@ -829,6 +1045,8 @@ pub const STRING: BuiltinSchema = BuiltinSchema {
     name: "String",
     parameters: &[],
     namespace: true,
+    cases: &[],
+    fields: &[],
     methods: &[
         LENGTH,
         IS_EMPTY,
@@ -852,6 +1070,8 @@ pub const RANGE: BuiltinSchema = BuiltinSchema {
     name: "Range",
     parameters: &[],
     namespace: false,
+    cases: &[],
+    fields: &[],
     methods: &[
         LENGTH,
         IS_EMPTY,
@@ -881,6 +1101,8 @@ pub const OPTION: BuiltinSchema = BuiltinSchema {
     name: "Option",
     parameters: &["T"],
     namespace: true,
+    cases: &[SOME_CASE, NONE_CASE],
+    fields: &[],
     methods: &[
         MethodSchema {
             name: "isSome",
@@ -920,6 +1142,8 @@ pub const RESULT: BuiltinSchema = BuiltinSchema {
     name: "Result",
     parameters: &["T", "E"],
     namespace: true,
+    cases: &[OK_CASE, ERR_CASE],
+    fields: &[],
     methods: &[
         MethodSchema {
             name: "isOk",
@@ -970,6 +1194,8 @@ pub const INT: BuiltinSchema = BuiltinSchema {
     name: "Int",
     parameters: &[],
     namespace: true,
+    cases: &[],
+    fields: &[],
     methods: &[SNAPSHOT],
     associated: &[MethodSchema {
         name: "parse",
@@ -991,6 +1217,8 @@ pub const FLOAT: BuiltinSchema = BuiltinSchema {
     name: "Float",
     parameters: &[],
     namespace: true,
+    cases: &[],
+    fields: &[],
     methods: &[SNAPSHOT],
     associated: &[],
 };
@@ -1002,6 +1230,8 @@ pub const BOOL: BuiltinSchema = BuiltinSchema {
     name: "Bool",
     parameters: &[],
     namespace: true,
+    cases: &[],
+    fields: &[],
     methods: &[SNAPSHOT],
     associated: &[],
 };
@@ -1013,6 +1243,8 @@ pub const UNIT: BuiltinSchema = BuiltinSchema {
     name: "Unit",
     parameters: &[],
     namespace: false,
+    cases: &[],
+    fields: &[],
     methods: &[SNAPSHOT],
     associated: &[],
 };
@@ -1024,6 +1256,8 @@ pub const DURATION: BuiltinSchema = BuiltinSchema {
     name: "Duration",
     parameters: &[],
     namespace: false,
+    cases: &[],
+    fields: &[],
     methods: &[SNAPSHOT],
     associated: &[],
 };
@@ -1035,11 +1269,13 @@ pub const DURATION: BuiltinSchema = BuiltinSchema {
 /// It is a namespace because a program writes the name — `Error("message")`
 /// builds one — so a mistyped `Error.something()` should be told what `Error`
 /// is rather than that the name is undeclared. There is nothing to call on
-/// it: the message is read as a field.
+/// it: the message is read as a field, and [`MESSAGE_FIELD`] is that field.
 pub const ERROR: BuiltinSchema = BuiltinSchema {
     name: "Error",
     parameters: &[],
     namespace: true,
+    cases: &[],
+    fields: &[MESSAGE_FIELD],
     methods: &[],
     associated: &[],
 };
@@ -1055,6 +1291,8 @@ pub const TASK: BuiltinSchema = BuiltinSchema {
     name: "Task",
     parameters: &["T"],
     namespace: false,
+    cases: &[],
+    fields: &[],
     methods: &[
         MethodSchema {
             name: "await",
@@ -1088,6 +1326,8 @@ pub const SHARED: BuiltinSchema = BuiltinSchema {
     name: "Shared",
     parameters: &["T"],
     namespace: false,
+    cases: &[],
+    fields: &[],
     methods: &[MethodSchema {
         name: "lock",
         generics: &["R"],
@@ -1112,6 +1352,8 @@ pub const SCOPE: BuiltinSchema = BuiltinSchema {
     name: "Scope",
     parameters: &[],
     namespace: false,
+    cases: &[],
+    fields: &[],
     methods: &[MethodSchema {
         name: "spawn",
         generics: &["T"],
@@ -1262,6 +1504,27 @@ mod tests {
             }
         }
 
+        // A case's payload and a field's type name only the receiver's
+        // parameters: there is no signature of their own to bind one.
+        for entry in BUILTINS {
+            let mut found = Vec::new();
+            for case in entry.cases {
+                for payload in case.payload {
+                    named(payload, &mut found);
+                }
+            }
+            for field in entry.fields {
+                named(&field.ty, &mut found);
+            }
+            for name in found {
+                assert!(
+                    entry.parameters.contains(&name),
+                    "`{}` names `{name}`, which nothing binds",
+                    entry.name
+                );
+            }
+        }
+
         // A free builtin has no receiver, so every name it uses is one it
         // binds itself.
         for entry in FREE_BUILTINS {
@@ -1345,6 +1608,133 @@ mod tests {
         );
         assert!(!declares_length("Option"));
         assert!(!declares_length("Nothing"));
+    }
+
+    /// The builtin enums are two, and these are the four names that used to
+    /// be written out in `cove-sema` and again in `cove-runtime`.
+    #[test]
+    fn the_builtin_enums_are_option_and_result() {
+        let enums: Vec<(&str, Vec<&str>)> = BUILTINS
+            .iter()
+            .filter(|entry| entry.is_enum())
+            .map(|entry| {
+                (
+                    entry.name,
+                    entry.cases.iter().map(|case| case.name).collect(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            enums,
+            [
+                ("Option", vec!["Some", "None"]),
+                ("Result", vec!["Ok", "Err"]),
+            ]
+        );
+        assert_eq!(OPTION.case("Some").unwrap().signature(), "Some(T)");
+        assert_eq!(OPTION.case("None").unwrap().signature(), "None");
+        assert_eq!(RESULT.case("Err").unwrap().signature(), "Err(E)");
+        assert!(RESULT.case("Nothing").is_none());
+    }
+
+    /// A case name belongs to one builtin enum, which is what lets a bare
+    /// `Some(value)` arm say which enum a `match` is over.
+    #[test]
+    fn a_case_name_names_one_builtin_enum() {
+        assert_eq!(
+            enum_declaring("Some").map(|entry| entry.name),
+            Some("Option")
+        );
+        assert_eq!(
+            enum_declaring("None").map(|entry| entry.name),
+            Some("Option")
+        );
+        assert_eq!(enum_declaring("Ok").map(|entry| entry.name), Some("Result"));
+        assert_eq!(
+            enum_declaring("Err").map(|entry| entry.name),
+            Some("Result")
+        );
+        assert!(enum_declaring("Confirmed").is_none());
+        let mut seen: Vec<&str> = Vec::new();
+        for entry in BUILTINS {
+            for case in entry.cases {
+                assert!(
+                    !seen.contains(&case.name),
+                    "`{}` is a case of two builtin enums",
+                    case.name
+                );
+                seen.push(case.name);
+            }
+        }
+    }
+
+    /// `None` is the one builtin case that carries nothing, which is why it
+    /// is the one written as a bare name rather than as a call.
+    #[test]
+    fn none_is_the_only_builtin_case_that_carries_nothing() {
+        let empty: Vec<&str> = BUILTINS
+            .iter()
+            .flat_map(|entry| entry.cases)
+            .filter(|case| case.payload.is_empty())
+            .map(|case| case.name)
+            .collect();
+        assert_eq!(empty, ["None"]);
+        assert!(free_builtin(NONE_CASE.name).is_none());
+    }
+
+    /// The builtin structs are two, and their fields are what the runtime
+    /// has always built and the checker used to deny.
+    #[test]
+    fn the_builtin_structs_are_error_and_map_entry() {
+        let structs: Vec<(&str, Vec<String>)> = BUILTINS
+            .iter()
+            .filter(|entry| entry.is_struct())
+            .map(|entry| {
+                (
+                    entry.name,
+                    entry
+                        .fields
+                        .iter()
+                        .map(|field| format!("{}: {}", field.name, field.ty))
+                        .collect(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            structs,
+            [
+                (
+                    "MapEntry",
+                    vec!["key: K".to_string(), "value: V".to_string()]
+                ),
+                ("Error", vec!["message: String".to_string()]),
+            ]
+        );
+        assert!(ERROR.field("code").is_none());
+    }
+
+    /// `Error("boom")` takes the field the value it builds carries, so the
+    /// label a call writes and the label a read writes are one word.
+    #[test]
+    fn the_error_constructor_takes_the_field_an_error_carries() {
+        let param = ERROR_OF.params.first().expect("`Error` takes a message");
+        let field = ERROR.fields.first().expect("an `Error` carries one");
+        assert_eq!(param.name, field.name);
+        assert_eq!(param.ty, field.ty);
+    }
+
+    /// A builtin is a struct or an enum or neither, never both: a value has
+    /// cases to match or fields to read, and nothing in the language has
+    /// each.
+    #[test]
+    fn no_builtin_type_has_both_cases_and_fields() {
+        for entry in BUILTINS {
+            assert!(
+                !(entry.is_enum() && entry.is_struct()),
+                "`{}` declares both cases and fields",
+                entry.name
+            );
+        }
     }
 
     /// An associated function is called on the type, so there is no receiver
