@@ -13,15 +13,24 @@
 //! time of a piece of work, and no program can accidentally depend on the
 //! origin itself.
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use cove_sema::Capability;
 
+use crate::budget::Cancellation;
 use crate::error::RuntimeError;
-use crate::host::HostApi;
+use crate::host::{HostApi, Reentry};
 use crate::schema::{Effect, HostType, OperationSchema};
 use crate::value::Value;
+
+/// How often a watchdog looks at the work it is bounding.
+///
+/// A timeout is a bound, not a stopwatch, so the granularity only decides how
+/// long past the bound a body may run before its next safepoint sees the
+/// flag.
+const WATCH_INTERVAL: std::time::Duration = std::time::Duration::from_millis(2);
 
 /// The current time of a virtual clock, shared between the host and whoever
 /// moves it.
@@ -78,15 +87,14 @@ enum ClockSource {
 
 /// The operations `clock` exposes.
 ///
-/// `every` is deliberately absent. `examples/callbacks/main.cove` calls it,
-/// but a repeating timer needs something that keeps firing beside the
-/// program, and ADR 0008 adds a thread per task rather than a scheduler with
-/// timers. A host that answered `every` today would either run the handler
-/// once or block forever, and neither is what the program asked for.
+/// `timeout` and `every` are both given work rather than data: the first
+/// takes the block it bounds as a trailing closure, and the second takes the
+/// body it repeats. Neither could be written before ADR 0013 added
+/// [`Reentry`], because [`HostApi::call`] receives values and had no way to
+/// run one.
 ///
-/// `timeout` is absent for a different reason: it takes the work to bound as
-/// a trailing closure, and [`HostApi::call`] receives values but has no way to
-/// call back into the interpreter to run one.
+/// Both are reads. Waiting leaves nothing outside the run different, and
+/// whatever the body does is charged where the body does it.
 static CLOCK_SCHEMA: &[OperationSchema] = &[
     OperationSchema {
         name: "now",
@@ -111,6 +119,30 @@ static CLOCK_SCHEMA: &[OperationSchema] = &[
         // Nothing has happened yet while a wait is in flight, so abandoning
         // one is safe. A cancelled task stops at its next safepoint, which is
         // after the wait it is already inside returns.
+        cancellable: true,
+        recordable: true,
+        result_is_task_safe: true,
+    },
+    OperationSchema {
+        name: "timeout",
+        params: &[HostType::Duration, HostType::Any],
+        variadic: false,
+        result: HostType::Result(&HostType::Any, &HostType::Error),
+        capability: "clock",
+        effect: Effect::Read,
+        cancellable: true,
+        // What the body did is the body's own business and is recorded where
+        // it happened; what this call answers is whether the bound held.
+        recordable: true,
+        result_is_task_safe: true,
+    },
+    OperationSchema {
+        name: "every",
+        params: &[HostType::Duration, HostType::Any],
+        variadic: false,
+        result: HostType::Result(&HostType::Unit, &HostType::Error),
+        capability: "clock",
+        effect: Effect::Read,
         cancellable: true,
         recordable: true,
         result_is_task_safe: true,
@@ -154,6 +186,112 @@ impl Clock {
         }
     }
 
+    /// Whether this clock's time is the machine's.
+    fn is_real(&self) -> bool {
+        matches!(&self.source, ClockSource::Real(_))
+    }
+
+    /// Runs `body` and answers what it produced, unless it took longer than
+    /// `nanos`.
+    ///
+    /// A real clock bounds the body while it runs: a watchdog thread raises a
+    /// flag when the bound is reached, and the body stops at its next
+    /// safepoint. That is a timeout rather than a measurement — the work
+    /// stops, and the caller is told it did.
+    ///
+    /// A virtual clock has no thread to raise anything, because it has no
+    /// time of its own: it moves only when something moves it, and the only
+    /// thing that moves it during the body is the body's own `sleep`. So a
+    /// virtual clock judges afterwards, by how far the body pushed it. The
+    /// answer is the same one — a body that slept past the bound timed out —
+    /// and it is deterministic, which is what a virtual clock is for.
+    fn timeout(
+        &self,
+        nanos: i64,
+        body: &Value,
+        back: &mut dyn Reentry,
+    ) -> Result<Value, RuntimeError> {
+        if nanos < 0 {
+            return Ok(Value::err(Value::error(
+                "clock: a timeout must not be negative",
+            )));
+        }
+        let expired = |value: Value| {
+            let _ = value;
+            Value::err(Value::error(format!(
+                "clock: timed out after {}",
+                Value::Duration(nanos)
+            )))
+        };
+        match &self.source {
+            ClockSource::Real(_) => {
+                let stop = Cancellation::new();
+                let watch = Watchdog::start(nanos, stop.clone());
+                let outcome = back.call_until(body, Vec::new(), &stop);
+                drop(watch);
+                match outcome {
+                    Ok(value) if stop.is_cancelled() => Ok(expired(value)),
+                    Ok(value) => Ok(Value::ok(value)),
+                    // A body stopped by this bound reports the bound, not
+                    // whatever the safepoint happened to say.
+                    Err(_) if stop.is_cancelled() => Ok(expired(Value::Unit)),
+                    Err(error) => Err(error),
+                }
+            }
+            ClockSource::Virtual(time) => {
+                let before = time.nanos();
+                let value = back.call(body, Vec::new())?;
+                if time.nanos().saturating_sub(before) > nanos {
+                    return Ok(expired(value));
+                }
+                Ok(Value::ok(value))
+            }
+        }
+    }
+
+    /// Runs `body` every `nanos` until the task holding the timer is
+    /// cancelled, or until `body` fails.
+    ///
+    /// A real clock repeats: that is what a timer is. A virtual clock fires
+    /// once, because it has no time of its own — its `sleep` moves the clock
+    /// instead of waiting, so a repeating timer on it would be a loop with
+    /// nothing to wait for. One round is what a clock that only moves when
+    /// the host moves it can honestly give, and it is what makes a program
+    /// with a timer testable without one.
+    fn every(
+        &self,
+        nanos: i64,
+        body: &Value,
+        back: &mut dyn Reentry,
+    ) -> Result<Value, RuntimeError> {
+        if nanos < 0 {
+            return Ok(Value::err(Value::error(
+                "clock: a timer period must not be negative",
+            )));
+        }
+        loop {
+            if back.is_cancelled() {
+                return Ok(Value::ok(Value::Unit));
+            }
+            self.sleep(nanos);
+            if back.is_cancelled() {
+                return Ok(Value::ok(Value::Unit));
+            }
+            let answered = back.call(body, Vec::new())?;
+            // The body reports failure the way every Cove function does, and
+            // a timer whose body failed stops rather than failing again every
+            // period from now on.
+            if let Value::Enum(result) = &answered {
+                if &*result.type_name == "Result" && &*result.case == "Err" {
+                    return Ok(answered);
+                }
+            }
+            if !self.is_real() {
+                return Ok(Value::ok(Value::Unit));
+            }
+        }
+    }
+
     /// Waits `nanos`, or reports why it will not.
     fn sleep(&self, nanos: i64) -> Value {
         if nanos < 0 {
@@ -182,6 +320,33 @@ impl HostApi for Clock {
         CLOCK_SCHEMA
     }
 
+    fn call_with(
+        &self,
+        op: &str,
+        args: Vec<Value>,
+        back: &mut dyn Reentry,
+    ) -> Result<Value, RuntimeError> {
+        match op {
+            "timeout" => {
+                let [Value::Duration(nanos), body] = args.as_slice() else {
+                    return Err(RuntimeError::new(
+                        "`clock.timeout` takes a `Duration` and the work to bound",
+                    ));
+                };
+                self.timeout(*nanos, body, back)
+            }
+            "every" => {
+                let [Value::Duration(nanos), body] = args.as_slice() else {
+                    return Err(RuntimeError::new(
+                        "`clock.every` takes a `Duration` and the work to repeat",
+                    ));
+                };
+                self.every(*nanos, body, back)
+            }
+            _ => self.call(op, args),
+        }
+    }
+
     fn call(&self, op: &str, args: Vec<Value>) -> Result<Value, RuntimeError> {
         match op {
             "now" => Ok(Value::Duration(self.now_nanos())),
@@ -194,6 +359,46 @@ impl HostApi for Clock {
                 Ok(self.sleep(*nanos))
             }
             _ => unreachable!("checked by HostRegistry::call"),
+        }
+    }
+}
+
+/// A thread that raises a flag once a bound is reached, and stops when the
+/// work it was watching is done.
+///
+/// It polls rather than sleeping the whole bound, so a body that finishes
+/// early does not leave a thread asleep for a minute behind it.
+struct Watchdog {
+    finished: Arc<AtomicBool>,
+    thread: Option<std::thread::JoinHandle<()>>,
+}
+
+impl Watchdog {
+    fn start(nanos: i64, stop: Cancellation) -> Watchdog {
+        let finished = Arc::new(AtomicBool::new(false));
+        let done = Arc::clone(&finished);
+        let deadline = Instant::now() + std::time::Duration::from_nanos(nanos as u64);
+        let thread = std::thread::spawn(move || {
+            while !done.load(Ordering::Relaxed) {
+                if Instant::now() >= deadline {
+                    stop.cancel();
+                    return;
+                }
+                std::thread::sleep(WATCH_INTERVAL);
+            }
+        });
+        Watchdog {
+            finished,
+            thread: Some(thread),
+        }
+    }
+}
+
+impl Drop for Watchdog {
+    fn drop(&mut self) {
+        self.finished.store(true, Ordering::Relaxed);
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
         }
     }
 }

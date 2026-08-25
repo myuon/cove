@@ -55,6 +55,7 @@
 //! {"type":"array","items":[<value>...]}
 //! {"type":"enum","name":<string>,"case":<string>,"payload":[<value>...]}
 //! {"type":"struct","name":<string>,"fields":[{"name":<string>,"value":<value>}...]}
+//! {"type":"resource","name":<string>,"id":<i64>}
 //! {"type":"redacted","of":<string>}
 //! {"type":"opaque","of":<string>,"shown":<string>}
 //! ```
@@ -447,6 +448,14 @@ fn encode_value(value: &Value) -> String {
         Value::Float(x) if x.is_finite() => format!("{{\"type\":\"float\",\"value\":{x:?}}}"),
         Value::Duration(ns) => format!("{{\"type\":\"duration\",\"ns\":{ns}}}"),
         Value::Str(s) => format!("{{\"type\":\"string\",\"value\":{}}}", json_string(s)),
+        // A handle is a name, so recording it whole is recording the name:
+        // that is exactly what a replay needs in order to hand the same
+        // resource back and match the calls later made on it.
+        Value::Resource(handle) => format!(
+            "{{\"type\":\"resource\",\"name\":{},\"id\":{}}}",
+            json_string(&handle.qualified_type()),
+            handle.id
+        ),
         Value::Array(items) => {
             let items = items.iter().map(encode_value).collect::<Vec<_>>().join(",");
             format!("{{\"type\":\"array\",\"items\":[{items}]}}")

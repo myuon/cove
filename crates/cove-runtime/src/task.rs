@@ -32,6 +32,7 @@ use cove_syntax::ast::{Block, FnDecl, Param};
 
 use crate::budget::Cancellation;
 use crate::error::RuntimeError;
+use crate::host::ResourceHandle;
 use crate::shared::SharedCell;
 use crate::value::{Closure, DynValue, EnumValue, MapKey, StructValue, Value};
 
@@ -306,6 +307,14 @@ pub enum Transfer {
     /// sides address the same [`SharedCell`], which is what makes `Shared`
     /// the sanctioned way to hold mutable state across tasks.
     Shared(Arc<SharedCell>),
+    /// A resource handle, when its schema says it may cross.
+    ///
+    /// A handle is a name and nothing else, so it crosses the way a string
+    /// does. What decides is not the handle but the resource: a host that
+    /// keeps a connection behind a lock says so in its
+    /// [`crate::schema::ResourceSchema`], and the answer travels on the
+    /// handle so this walk can read it.
+    Resource(Arc<ResourceHandle>),
 }
 
 /// The parts of a [`Closure`] a receiving task can own.
@@ -450,6 +459,14 @@ impl Transfer {
                 op: op.to_string(),
             }),
             Value::Type(name) => Ok(Transfer::Type(name.to_string())),
+            // "Host resources declare task-safety in their Host API schema."
+            // The handle carries that declaration, so a resource the host
+            // keeps to one task is refused here exactly like a vector.
+            Value::Resource(handle) if handle.task_safe => Ok(Transfer::Resource(handle.clone())),
+            Value::Resource(_) => Err(NotTaskSafe {
+                path: path.to_string(),
+                type_name: value.type_name(),
+            }),
             // A `Shared` is the one exception to the copy rule: it crosses by
             // sharing the cell, which is the reason the type exists.
             Value::Shared(cell) => Ok(Transfer::Shared(cell.clone())),
@@ -534,6 +551,7 @@ impl Transfer {
                 inclusive_end,
             },
             Transfer::Shared(cell) => Value::Shared(cell),
+            Transfer::Resource(handle) => Value::Resource(handle),
         }
     }
 }
@@ -559,6 +577,11 @@ impl NotTaskSafe {
         if self.type_name == "Vector" {
             format!(
                 "finish it as an array with `freeze()`, or copy it with `toArray()`, before {boundary}"
+            )
+        } else if self.type_name.contains('.') {
+            format!(
+                "`{}` is a host resource whose Host API schema declares it not task-safe; open one in the task that uses it rather than {boundary}",
+                self.type_name
             )
         } else {
             "wrap mutable state in `Shared` or another synchronized type, or pass an immutable value"

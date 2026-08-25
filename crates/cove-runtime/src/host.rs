@@ -9,7 +9,15 @@
 //! [`HostRegistry`] — together with the three small modules that have nothing
 //! else to say: [`Console`], [`Env`], and [`Documents`]. A host with rules of
 //! its own gets a module of its own: [`crate::clock`], [`crate::files`],
-//! [`crate::process`], and [`crate::database`].
+//! [`crate::http`], [`crate::process`], and [`crate::database`].
+//!
+//! Two things cross this boundary besides plain values. A [`ResourceHandle`]
+//! goes outwards: the host keeps a connection or a listening socket and
+//! Cove holds the name of it, so a later call names the resource the way a
+//! method names its receiver. A [`Reentry`] goes inwards: a host that was
+//! handed a Cove callback — a route's handler, a repeating timer's body, the
+//! work a timeout bounds — needs a way to run it, and this is the only one
+//! there is. Both are ADR 0013's.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::Write;
@@ -20,9 +28,9 @@ use std::time::Instant;
 
 use cove_sema::Capability;
 
-use crate::budget::Budget;
+use crate::budget::{Budget, Cancellation};
 use crate::error::RuntimeError;
-use crate::schema::{Effect, HostType, OperationSchema};
+use crate::schema::{Effect, HostType, OperationSchema, ResourceSchema, TypeSchema};
 use crate::trace::{HostOutcome, NullSink, RecordedValue, TraceEvent, TraceSink};
 use crate::value::Value;
 
@@ -50,8 +58,180 @@ pub trait HostApi: Send + Sync {
     /// boundary.
     fn schema(&self) -> &[OperationSchema];
 
+    /// The types this module declares, which Cove source may name and
+    /// initialize: `http.Method.Get`, `http.Route(method: ..., path: ...)`.
+    ///
+    /// A host type is ordinary data. Declaring none, which is the default, is
+    /// what most modules do: `console` has nothing to say about types.
+    fn types(&self) -> &[TypeSchema] {
+        &[]
+    }
+
+    /// The kinds of resource this module can open, and what a handle to each
+    /// of them answers.
+    ///
+    /// Declaring none, which is the default, says that this module hands back
+    /// only values.
+    fn resources(&self) -> &[ResourceSchema] {
+        &[]
+    }
+
+    /// Invokes one operation.
+    ///
+    /// The default forwards to [`HostApi::call`], which is what a module that
+    /// never runs a Cove callback wants. A module that does — `clock.every`,
+    /// `http.Server.handle` — overrides this instead and leaves `call`
+    /// unreachable.
+    fn call_with(
+        &self,
+        op: &str,
+        args: Vec<Value>,
+        back: &mut dyn Reentry,
+    ) -> Result<Value, RuntimeError> {
+        let _ = back;
+        self.call(op, args)
+    }
+
     /// Invokes one operation.
     fn call(&self, op: &str, args: Vec<Value>) -> Result<Value, RuntimeError>;
+
+    /// Invokes one operation on a handle this module issued.
+    ///
+    /// A module that declares no resources can never be reached here, so the
+    /// default says so rather than inventing an answer.
+    fn call_resource(
+        &self,
+        handle: &ResourceHandle,
+        op: &str,
+        args: Vec<Value>,
+        back: &mut dyn Reentry,
+    ) -> Result<Value, RuntimeError> {
+        let _ = (args, back);
+        Err(RuntimeError::new(format!(
+            "host module `{}` issues no resource handles, so `{}.{op}` cannot be called",
+            self.name(),
+            handle.qualified_type()
+        )))
+    }
+}
+
+/// How a host runs a Cove callback it was handed.
+///
+/// A Host API call is a value in and a value out, which is enough until an
+/// operation is given work to do rather than data to act on. A route's
+/// handler, a repeating timer's body, and the block a timeout bounds are all
+/// Cove closures the host holds and has to run; without this they could be
+/// stored and never called.
+///
+/// The callback runs on the task that made the host call, on that task's own
+/// stack, charged to that task's budget. There is no second thread and no
+/// scheduler: a host that wants concurrency spawns nothing, because
+/// concurrency in Cove belongs to a task scope the program wrote.
+pub trait Reentry {
+    /// Calls `callee` with `args` and answers what it produced.
+    fn call(&mut self, callee: &Value, args: Vec<Value>) -> Result<Value, RuntimeError>;
+
+    /// Calls `callee` with `args`, stopping it at its next safepoint if
+    /// `stop` is raised while it runs.
+    ///
+    /// This is how a timeout is a timeout rather than a measurement taken
+    /// afterwards: the body observes the flag exactly where it observes its
+    /// own task's cancellation, and stops there.
+    fn call_until(
+        &mut self,
+        callee: &Value,
+        args: Vec<Value>,
+        stop: &Cancellation,
+    ) -> Result<Value, RuntimeError>;
+
+    /// Whether the task that made this host call has been asked to stop.
+    ///
+    /// A host that loops — `clock.every` is the one that does — reads this
+    /// between rounds, so cancelling the task holding the timer ends the
+    /// timer rather than leaving it running with nobody waiting.
+    fn is_cancelled(&self) -> bool;
+}
+
+/// A [`Reentry`] for a caller that has no interpreter to reenter.
+///
+/// [`HostRegistry::call`] uses it, so a host that never runs a callback can
+/// still be driven from a test or a tool with no program behind it. An
+/// operation that does need one is told what is missing rather than being
+/// handed a closure it cannot run.
+pub struct NoReentry;
+
+impl Reentry for NoReentry {
+    fn call(&mut self, callee: &Value, _args: Vec<Value>) -> Result<Value, RuntimeError> {
+        Err(RuntimeError::new(format!(
+            "this host call cannot run {}, because it was not made from a running program",
+            callee.type_name()
+        )))
+    }
+
+    fn call_until(
+        &mut self,
+        callee: &Value,
+        args: Vec<Value>,
+        _stop: &Cancellation,
+    ) -> Result<Value, RuntimeError> {
+        self.call(callee, args)
+    }
+
+    fn is_cancelled(&self) -> bool {
+        false
+    }
+}
+
+/// The identity of one resource a host owns.
+///
+/// ADR 0013: a handle is a name. Every field here is part of the name and
+/// none of them is state — `module` and `type_name` say what kind of thing is
+/// named, `id` says which one, and `task_safe` is the schema's answer copied
+/// onto the handle so the task boundary can read it without a registry.
+///
+/// That is why a handle is [`Arc`]-shared and immutable: copying one copies a
+/// name, two tasks holding it name the same resource, and a trace that
+/// records it records something a replay can reproduce exactly.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ResourceHandle {
+    /// The host module that issued this handle, such as `database`.
+    pub module: String,
+    /// The resource kind, such as `Connection`.
+    pub type_name: String,
+    /// Which resource of that kind, unique among the ones this host issued.
+    pub id: u64,
+    /// Whether this handle may cross a task boundary, copied from the
+    /// resource's [`ResourceSchema`] when the handle was issued.
+    pub task_safe: bool,
+}
+
+impl ResourceHandle {
+    /// Issues a handle for resource `id` of kind `resource` in `module`.
+    pub fn new(module: &str, resource: &ResourceSchema, id: u64) -> Arc<ResourceHandle> {
+        Arc::new(ResourceHandle {
+            module: module.to_string(),
+            type_name: resource.name.to_string(),
+            id,
+            task_safe: resource.task_safe,
+        })
+    }
+
+    /// The type as Cove source writes it: `database.Connection`.
+    pub fn qualified_type(&self) -> String {
+        format!("{}.{}", self.module, self.type_name)
+    }
+
+    /// Whether two handles name the same resource.
+    pub fn names_same(&self, other: &ResourceHandle) -> bool {
+        self.module == other.module && self.type_name == other.type_name && self.id == other.id
+    }
+}
+
+/// A handle shows as the name it is: the type, and which one.
+impl std::fmt::Display for ResourceHandle {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}#{}", self.qualified_type(), self.id)
+    }
 }
 
 /// The set of capabilities granted at the execution boundary.
@@ -111,6 +291,47 @@ pub struct HostRegistry {
     /// there is still exactly one authoritative count of what the run spent.
     budget: Mutex<Option<Budget>>,
     irreversible_writes: AtomicU64,
+}
+
+/// What one dispatch is addressed to: a module's operation, or a handle's.
+///
+/// The two differ only in how they are named, so this carries the naming and
+/// [`HostRegistry::dispatch`] carries the rules.
+struct Callee {
+    /// The host module, which is what a trace records and what a grant gates.
+    module: String,
+    /// The operation as the trace records it: `query` for a module's, and
+    /// `Connection.query` for a handle's.
+    op: String,
+    /// What has the operation, as a diagnostic names it.
+    owner: String,
+    /// Every operation the owner has, for the help when this one is not among
+    /// them.
+    known: Vec<&'static str>,
+}
+
+impl Callee {
+    /// The call as Cove source writes it: `database.query`, or
+    /// `database.Connection.query`.
+    fn shown(&self) -> String {
+        format!("{}.{}", self.module, self.op)
+    }
+
+    /// The operation's own name, without the resource that answers it.
+    fn bare_op(&self) -> &str {
+        match self.op.rsplit_once('.') {
+            Some((_, op)) => op,
+            None => &self.op,
+        }
+    }
+
+    /// The declared signature, qualified the way this callee is named.
+    fn signature(&self, schema: &OperationSchema) -> String {
+        match self.op.rsplit_once('.') {
+            Some((resource, _)) => format!("{resource}.{}", schema.signature()),
+            None => schema.signature(),
+        }
+    }
 }
 
 impl HostRegistry {
@@ -207,6 +428,21 @@ impl HostRegistry {
             .find(|entry| entry.name == op)
     }
 
+    /// The type `module.name` declares, if the module declares one.
+    ///
+    /// A [`TypeSchema`] is [`Copy`], so this hands back the entry itself
+    /// rather than a borrow of the registry: the interpreter that asks is
+    /// about to evaluate arguments, which it cannot do while holding one.
+    pub fn host_type(&self, module: &str, name: &str) -> Option<TypeSchema> {
+        self.modules
+            .iter()
+            .find(|m| m.name() == module)?
+            .types()
+            .iter()
+            .find(|declared| declared.name == name)
+            .copied()
+    }
+
     /// Whether the value `module.op` produces may cross a task boundary, or
     /// `None` when no such operation exists.
     ///
@@ -231,7 +467,23 @@ impl HostRegistry {
 
     /// Dispatches a Host API call after checking the grant, the schema, and
     /// the budget, tracing the outcome either way.
+    ///
+    /// This is the boundary's one choke point, and it takes no interpreter:
+    /// an operation that was handed a Cove callback cannot be reached through
+    /// it. [`HostRegistry::call_with`] is the same dispatch with a way back
+    /// into the program.
     pub fn call(&self, module: &str, op: &str, args: Vec<Value>) -> Result<Value, RuntimeError> {
+        self.call_with(module, op, args, &mut NoReentry)
+    }
+
+    /// Dispatches a Host API call that may run a Cove callback it was given.
+    pub fn call_with(
+        &self,
+        module: &str,
+        op: &str,
+        args: Vec<Value>,
+        back: &mut dyn Reentry,
+    ) -> Result<Value, RuntimeError> {
         let Some(entry) = self.modules.iter().find(|m| m.name() == module) else {
             return Err(RuntimeError::new(format!("unknown host module `{module}`")));
         };
@@ -248,18 +500,94 @@ impl HostRegistry {
             Some(schema) => Capability::new(schema.capability),
             None => entry.capability(),
         };
-        if !self.grants.allows(&capability) {
-            self.trace.record(TraceEvent::HostCall {
-                module: module.to_string(),
-                op: op.to_string(),
-                capability: capability.to_string(),
-                wait: std::time::Duration::ZERO,
-                granted: false,
-                args: self.record_args(&args),
-                outcome: None,
-            });
+        let callee = Callee {
+            module: module.to_string(),
+            op: op.to_string(),
+            owner: format!("host module `{module}`"),
+            known: entry.schema().iter().map(|e| e.name).collect(),
+        };
+        self.dispatch(&callee, declared, capability, args, |args| {
+            entry.call_with(op, args, back)
+        })
+    }
+
+    /// Dispatches an operation on a resource handle, through the same gate
+    /// every other Host API call passes.
+    ///
+    /// A handle is a name, so nothing here trusts it: the module it names has
+    /// to exist, the resource kind has to be one that module declares, and
+    /// the operation has to be one that kind answers. A handle that outlived
+    /// what it named fails inside the host instead, which is where the only
+    /// record of what is still open lives.
+    pub fn call_resource(
+        &self,
+        handle: &ResourceHandle,
+        op: &str,
+        args: Vec<Value>,
+        back: &mut dyn Reentry,
+    ) -> Result<Value, RuntimeError> {
+        let qualified = handle.qualified_type();
+        let Some(entry) = self.modules.iter().find(|m| m.name() == handle.module) else {
+            return Err(
+                RuntimeError::new(format!("unknown host module `{}`", handle.module)).with_help(
+                    format!("`{qualified}` names a resource of a host module this run has none of"),
+                ),
+            );
+        };
+        let Some(resource) = entry
+            .resources()
+            .iter()
+            .find(|resource| resource.name == handle.type_name)
+        else {
             return Err(RuntimeError::new(format!(
-                "`{module}.{op}` requires the `{capability}` capability, which this run was not granted"
+                "host module `{}` issues no `{}` handles",
+                handle.module, handle.type_name
+            )));
+        };
+        let declared = resource.operation(op).copied();
+        let capability = match &declared {
+            Some(schema) => Capability::new(schema.capability),
+            None => entry.capability(),
+        };
+        let callee = Callee {
+            module: handle.module.clone(),
+            // A resource operation is recorded under the name that says which
+            // resource answered it, so a trace of a run holding two kinds of
+            // handle does not read as one flat list of `query` calls.
+            op: format!("{}.{op}", handle.type_name),
+            owner: format!("`{qualified}`"),
+            known: resource.operations.iter().map(|e| e.name).collect(),
+        };
+        self.dispatch(&callee, declared, capability, args, |args| {
+            entry.call_resource(handle, op, args, back)
+        })
+    }
+
+    /// The grant check, the schema check, the budget charge, the trace, and
+    /// the dispatch itself — everything a Host API call passes through,
+    /// whether it was addressed to a module or to a handle.
+    fn dispatch(
+        &self,
+        callee: &Callee,
+        declared: Option<OperationSchema>,
+        capability: Capability,
+        args: Vec<Value>,
+        invoke: impl FnOnce(Vec<Value>) -> Result<Value, RuntimeError>,
+    ) -> Result<Value, RuntimeError> {
+        let shown = callee.shown();
+        let refused = |args: Vec<RecordedValue>| TraceEvent::HostCall {
+            module: callee.module.clone(),
+            op: callee.op.clone(),
+            capability: capability.to_string(),
+            wait: std::time::Duration::ZERO,
+            granted: false,
+            args,
+            outcome: None,
+        };
+        if !self.grants.allows(&capability) {
+            self.trace.record(refused(self.record_args(&args)));
+            return Err(RuntimeError::new(format!(
+                "`{shown}` requires the `{capability}` capability, which this run was not granted"
             ))
             .with_rule("Cove code has no ambient authority; the host grants capabilities at the execution boundary.")
             .with_help(match self.grant_source {
@@ -274,32 +602,36 @@ impl HostRegistry {
             }));
         }
         let Some(schema) = declared else {
-            let known = entry
-                .schema()
-                .iter()
-                .map(|entry| format!("`{}`", entry.name))
-                .collect::<Vec<_>>();
             return Err(RuntimeError::new(format!(
-                "host module `{module}` has no operation `{op}`"
+                "{} has no operation `{}`",
+                callee.owner,
+                callee.bare_op()
             ))
             .with_help(format!(
-                "`{module}` exposes {}",
-                if known.is_empty() {
+                "{} exposes {}",
+                callee.owner,
+                if callee.known.is_empty() {
                     "no operations".to_string()
                 } else {
-                    known.join(", ")
+                    callee
+                        .known
+                        .iter()
+                        .map(|name| format!("`{name}`"))
+                        .collect::<Vec<_>>()
+                        .join(", ")
                 }
             )));
         };
         if !schema.accepts(args.len()) {
             return Err(RuntimeError::new(format!(
-                "`{module}.{op}` takes {}, but {} were given",
+                "`{shown}` takes {}, but {} were given",
                 schema.expected_arity(),
                 args.len()
             ))
             .with_help(format!(
-                "the Host API schema declares `{module}.{}`",
-                schema.signature()
+                "the Host API schema declares `{}.{}`",
+                callee.module,
+                callee.signature(&schema)
             )));
         }
 
@@ -308,15 +640,7 @@ impl HostRegistry {
                 .charge_host_call()
                 .map_err(|stopped| budget.to_runtime_error(stopped))
         }) {
-            self.trace.record(TraceEvent::HostCall {
-                module: module.to_string(),
-                op: op.to_string(),
-                capability: capability.to_string(),
-                wait: std::time::Duration::ZERO,
-                granted: false,
-                args: self.record_args(&args),
-                outcome: None,
-            });
+            self.trace.record(refused(self.record_args(&args)));
             return Err(error);
         }
 
@@ -329,7 +653,7 @@ impl HostRegistry {
         // rather than reconstructed afterwards.
         let recorded_args = self.record_args(&args);
         let started = Instant::now();
-        let result = entry.call(op, args);
+        let result = invoke(args);
         let wait = started.elapsed();
         // The schema decides whether the result is written down. An operation
         // that is not recordable has its call recorded and its result left
@@ -345,8 +669,8 @@ impl HostRegistry {
                 HostOutcome::NotRecordable
             };
             self.trace.record(TraceEvent::HostCall {
-                module: module.to_string(),
-                op: op.to_string(),
+                module: callee.module.clone(),
+                op: callee.op.clone(),
                 capability: capability.to_string(),
                 wait,
                 granted: true,
@@ -372,6 +696,10 @@ pub struct ModuleSchema {
     pub capability: Capability,
     /// Every operation the module exposes.
     pub operations: Vec<OperationSchema>,
+    /// Every type the module declares.
+    pub types: Vec<TypeSchema>,
+    /// Every kind of resource the module can open.
+    pub resources: Vec<ResourceSchema>,
 }
 
 /// The schema of every host module the toolchain ships.
@@ -390,6 +718,7 @@ pub fn shipped_schema() -> Vec<ModuleSchema> {
         Box::new(crate::files::Files::in_memory(BTreeMap::new())),
         Box::new(crate::process::Process::real(Vec::new(), Vec::new())),
         Box::new(crate::database::Database::denied()),
+        Box::new(crate::http::Http::real()),
     ];
     modules
         .iter()
@@ -397,6 +726,8 @@ pub fn shipped_schema() -> Vec<ModuleSchema> {
             name: module.name().to_string(),
             capability: module.capability(),
             operations: module.schema().to_vec(),
+            types: module.types().to_vec(),
+            resources: module.resources().to_vec(),
         })
         .collect()
 }
@@ -1047,7 +1378,10 @@ mod tests {
             error.message,
             "host module `documents` has no operation `write`"
         );
-        assert_eq!(error.help.as_deref(), Some("`documents` exposes `read`"));
+        assert_eq!(
+            error.help.as_deref(),
+            Some("host module `documents` exposes `read`")
+        );
     }
 
     #[test]
@@ -1139,7 +1473,8 @@ mod tests {
                 "clock",
                 "files",
                 "process",
-                "database"
+                "database",
+                "http"
             ]
         );
     }
