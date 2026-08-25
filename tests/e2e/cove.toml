@@ -42,10 +42,6 @@ allow = ["console"]
 entry = "fail_entry_error.main"
 allow = ["console"]
 
-[run.fail_max_memory_flag]
-entry = "fail_max_memory_flag.main"
-allow = ["console"]
-
 [run.fail_max_tasks]
 entry = "fail_max_tasks.main"
 allow = ["console"]

@@ -138,7 +138,6 @@ fn parse_run(name: &str, value: &toml::Value) -> Result<RunConfig, String> {
     let mut fuel = None;
     let mut deadline = None;
     let mut max_host_calls = None;
-    let mut max_memory = None;
     let mut max_tasks = None;
     let mut trace = None;
     let mut generates = None;
@@ -175,9 +174,6 @@ fn parse_run(name: &str, value: &toml::Value) -> Result<RunConfig, String> {
             "max_host_calls" => {
                 max_host_calls = Some(parse_non_negative_integer(name, "max_host_calls", value)?);
             }
-            "max_memory" => {
-                max_memory = Some(parse_non_negative_integer(name, "max_memory", value)?);
-            }
             "max_tasks" => {
                 max_tasks = Some(parse_non_negative_integer(name, "max_tasks", value)?);
             }
@@ -206,7 +202,6 @@ fn parse_run(name: &str, value: &toml::Value) -> Result<RunConfig, String> {
         fuel,
         deadline,
         max_host_calls,
-        max_memory,
         max_tasks,
         trace,
         generates,
@@ -297,8 +292,6 @@ pub struct RunConfig {
     /// The total number of host calls this run may make before the runtime
     /// stops it.
     pub max_host_calls: Option<u64>,
-    /// The bytes this run's live heaps may hold before the runtime stops it.
-    pub max_memory: Option<u64>,
     /// The tasks this run may hold alive at once, across the whole run, before
     /// the runtime stops it: a `spawn` that would exceed it fails the run
     /// before a thread is created.
@@ -397,7 +390,6 @@ mod tests {
         assert_eq!(hello.fuel, None);
         assert_eq!(hello.deadline, None);
         assert_eq!(hello.max_host_calls, None);
-        assert_eq!(hello.max_memory, None);
         assert_eq!(hello.max_tasks, None);
         assert_eq!(hello.trace, None);
     }
@@ -424,18 +416,6 @@ mod tests {
     fn parses_max_host_calls() {
         let config = parse("[run.hello]\nentry = \"hello.main\"\nmax_host_calls = 5\n").unwrap();
         assert_eq!(config.runs["hello"].max_host_calls, Some(5));
-    }
-
-    #[test]
-    fn parses_max_memory() {
-        let config = parse("[run.hello]\nentry = \"hello.main\"\nmax_memory = 65536\n").unwrap();
-        assert_eq!(config.runs["hello"].max_memory, Some(65536));
-    }
-
-    #[test]
-    fn rejects_negative_max_memory() {
-        let err = parse("[run.hello]\nentry = \"hello.main\"\nmax_memory = -1\n").unwrap_err();
-        assert_eq!(err, "run `hello`: `max_memory` must not be negative");
     }
 
     #[test]

@@ -51,18 +51,19 @@ Hello, world!
 ```
 
 Implemented: lexer, parser, directory modules, `export` visibility, derived
-outlines and capability requirements, a deterministic formatter, a
-tree-walking interpreter, Host API dispatch with grant enforcement, task
-scopes with a thread per task, a per-task mark-and-sweep collector, and
-runtime budgets for fuel, deadlines, memory, host calls, and concurrency with
-tracing. A Host API call is checked against the schema its operation declares
-at both ends: `cove check` checks its arguments where they are written, and
-the boundary checks them again, along with what the host answered. A host
-resource handle is a name for something the host owns -- a module, a resource
-kind, an identity number, and the task-safety its schema declares -- never the
-resource itself, and every operation called on one goes through the same
-dispatch as any other Host API call, so it gets the same grant check, the same
-schema check, the same budget charge, and the same trace; a handle whose
+outlines and capability requirements, a deterministic formatter, a tree-walking
+interpreter, Host API dispatch with grant enforcement, task scopes with a
+thread per task, a per-task mark-and-sweep collector whose allocation and heap
+size stay observable through `--stats` and traces rather than an enforced
+limit, and runtime budgets for fuel, deadlines, host calls, and concurrency
+with tracing. A Host API call is checked against the schema its operation
+declares at both ends: `cove check` checks its arguments where they are
+written, and the boundary checks them again, along with what the host answered.
+A host resource handle is a name for something the host owns -- a module, a
+resource kind, an identity number, and the task-safety its schema declares --
+never the resource itself, and every operation called on one goes through the
+same dispatch as any other Host API call, so it gets the same grant check, the
+same schema check, the same budget charge, and the same trace; a handle whose
 resource has been closed reports a diagnostic rather than acting on whatever
 now occupies the slot. A host module may also declare plain-data types in a
 `TypeSchema`, which Cove source names and initializes with labels exactly like
@@ -141,8 +142,8 @@ against the profile list on its own:
   representative program end to end; see `examples/` and `cove-cli`'s own
   tests.
 - [x] **Sandboxed — MVP required.** An ungranted Host API call is refused and
-  a run is stopped by its fuel, deadline, host-call, memory, or concurrency
-  limits; see the tests in `crates/cove-runtime/src/host.rs` and
+  a run is stopped by its fuel, deadline, host-call, or concurrency limits;
+  see the tests in `crates/cove-runtime/src/host.rs` and
   `crates/cove-runtime/src/budget.rs`.
 - [x] **Embedded — MVP required.** A host outside `cove-runtime` can supply
   its own capability implementation and its own limits, and see both a

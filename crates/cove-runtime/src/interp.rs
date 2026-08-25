@@ -64,23 +64,6 @@ const MAX_CALL_DEPTH: usize = 256;
 /// than that is claimed.
 const SAFEPOINT_FUEL: u64 = 10;
 
-/// How many safepoints pass between forced collections when a memory budget
-/// is set.
-///
-/// Allocating a collectable object is what ordinarily schedules a collection,
-/// and a task that allocates none never pays for one. A memory budget has to
-/// hold anyway: a program can grow its live set by appending to a string or to
-/// one vector it already owns, allocating no object at all. So a run with a
-/// budget measures on a schedule as well, which is the cost of asking for the
-/// bound.
-const MEMORY_CHECK_INTERVAL: u64 = 1_024;
-
-/// The task id a heap reports under when it is the entry's own.
-///
-/// The entry is not a spawned task and has no id of its own, so it takes the
-/// one id [`Runtime::next_task_id`] never hands out.
-const ENTRY_TASK: u64 = 0;
-
 /// Non-local control flow raised while evaluating an expression.
 enum Control {
     Error(RuntimeError),
@@ -401,9 +384,6 @@ pub struct Interpreter<'a> {
     /// heap is reached only from the thread that owns it: a collection needs
     /// no safepoint from any other task and takes no lock.
     heap: Heap,
-    /// Safepoints passed since the last collection, for the scheduled
-    /// measurement a memory budget needs.
-    safepoints_since_collection: u64,
     /// Where the most recent assertion failed, and the message it produced.
     ///
     /// A failed assertion is an ordinary `Err`, which carries a message and
@@ -432,15 +412,8 @@ impl<'a> Interpreter<'a> {
             timings: Vec::new(),
             roots: Rc::new(RefCell::new(Roots::new())),
             heap: Heap::new(),
-            safepoints_since_collection: 0,
             assertion_failure: None,
         }
-    }
-
-    /// The task whose heap this interpreter owns: the spawned task's id, or
-    /// [`ENTRY_TASK`] when this interpreter is running the entry.
-    fn task_id(&self) -> u64 {
-        self.task_stack.last().copied().unwrap_or(ENTRY_TASK)
     }
 
     /// What this run's heaps have done so far: allocation, collections, live
@@ -477,7 +450,6 @@ impl<'a> Interpreter<'a> {
             let roots = roots.borrow();
             self.heap.collect(&roots)
         };
-        self.safepoints_since_collection = 0;
         self.runtime.trace(TraceEvent::HeapCollected {
             task: self.task_stack.last().copied(),
             allocated: collected.allocated,
@@ -489,30 +461,11 @@ impl<'a> Interpreter<'a> {
         collected
     }
 
-    /// Collects when enough has been allocated to be worth it, or when a
-    /// memory budget makes the measurement due, and stops the run if the live
-    /// heaps are over that budget.
-    fn collect_if_due(&mut self, span: Span) -> Result<(), RuntimeError> {
-        self.safepoints_since_collection += 1;
-        let bounded = self
-            .hosts
-            .with_budget(|budget| budget.limits().max_memory.is_some())
-            .unwrap_or(false);
-        let due = self.heap.should_collect()
-            || (bounded && self.safepoints_since_collection >= MEMORY_CHECK_INTERVAL);
-        if !due {
-            return Ok(());
+    /// Collects when enough has been allocated to be worth it.
+    fn collect_if_due(&mut self) {
+        if self.heap.should_collect() {
+            self.collect();
         }
-        let live_bytes = self.collect().live_bytes;
-        let task = self.task_id();
-        if let Some(Err(error)) = self.hosts.with_budget(|budget| {
-            budget
-                .charge_memory(task, live_bytes)
-                .map_err(|stopped| budget.to_runtime_error(stopped))
-        }) {
-            return Err(error.at(span));
-        }
-        Ok(())
     }
 
     /// Ends this task's heap and folds what it did into the run's totals.
@@ -525,15 +478,10 @@ impl<'a> Interpreter<'a> {
     /// has dropped and the roots are empty, so the only thing left to survive
     /// is what the value the task produced still holds; the reference counts
     /// find that, as they find any other value the collector cannot read.
-    ///
-    /// Afterwards the run's memory budget stops counting this heap: a task
-    /// that has finished holds nothing.
     fn retire_heap(&mut self) {
         if !self.heap.is_empty() {
             self.collect();
         }
-        let task = self.task_id();
-        self.hosts.with_budget(|budget| budget.release_memory(task));
         let stats = self.heap.take_stats();
         self.runtime.retire_heap(&stats);
     }
@@ -893,7 +841,8 @@ impl<'a> Interpreter<'a> {
         }) {
             return Err(error.at(span));
         }
-        self.collect_if_due(span)
+        self.collect_if_due();
+        Ok(())
     }
 
     /// Records `wait` against every active [`Timing`] context, so a trace can
@@ -8079,68 +8028,6 @@ export fn main() -> Result<Unit, Error> {
             "{:?}",
             run.collections()
         );
-    }
-
-    /// The memory budget stops a run the way fuel does, with a diagnostic
-    /// naming the limit that was configured.
-    #[test]
-    fn the_memory_budget_stops_a_run_that_exceeds_it() {
-        let run = run_watching_the_heap(
-            "export fn main() -> Result<Unit, Error> {\n  var kept = Vector.of()\n  var i = 0\n  while i < 100000 {\n    kept.push(i)\n    i += 1\n  }\n  Ok(())\n}\n",
-            crate::budget::Limits {
-                max_memory: Some(4_096),
-                ..crate::budget::Limits::default()
-            },
-        );
-        let error = run.value.as_ref().expect_err("the run should have stopped");
-        assert!(
-            error
-                .message
-                .contains("memory budget of 4096 bytes exceeded"),
-            "{}",
-            error.message
-        );
-        assert!(error.span.is_some(), "the stop points at the loop");
-        assert!(error.rule.is_some());
-    }
-
-    /// Memory bounds the run, not one task, so two tasks that each stay under
-    /// the limit but together exceed it still stop it — the same way their
-    /// fuel is drawn from one budget rather than one each.
-    #[test]
-    fn the_memory_budget_is_the_run_s_and_not_one_task_s() {
-        let grow = "  var kept = Vector.of()\n  var i = 0\n  while i < 100000 {\n    kept.push(i)\n    i += 1\n  }\n  kept.length()\n";
-        let run = run_watching_the_heap(
-            &format!(
-                "fn grow() -> Int {{\n{grow}}}\n\nexport fn main() -> Result<Unit, Error> {{\n  scope tasks {{\n    let one = tasks.spawn {{ grow() }}\n    let two = tasks.spawn {{ grow() }}\n    let first = one.await()\n    let second = two.await()\n    first + second\n  }}\n  Ok(())\n}}\n"
-            ),
-            crate::budget::Limits {
-                max_memory: Some(600_000),
-                ..crate::budget::Limits::default()
-            },
-        );
-        let error = run.value.as_ref().expect_err("the run should have stopped");
-        assert!(
-            error
-                .message
-                .contains("memory budget of 600000 bytes exceeded"),
-            "{}",
-            error.message
-        );
-    }
-
-    /// A run that stays inside its budget is not stopped by it.
-    #[test]
-    fn a_run_within_the_memory_budget_is_not_stopped() {
-        let run = run_watching_the_heap(
-            "use console.println\n\nexport fn main() -> Result<Unit, Error> {\n  var kept = Vector.of()\n  var i = 0\n  while i < 100 {\n    kept.push(i)\n    i += 1\n  }\n  println(\"{kept.length()}\")?\n  Ok(())\n}\n",
-            crate::budget::Limits {
-                max_memory: Some(1 << 20),
-                ..crate::budget::Limits::default()
-            },
-        );
-        run.value.as_ref().expect("the program ran");
-        assert_eq!(run.output, "100\n");
     }
 
     /// ADR 0011 asks allocation, live heap size, collection count, and pause

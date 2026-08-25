@@ -159,7 +159,10 @@ observes its end.
 **What happens at the limit: the run is stopped.** A `spawn` past the limit
 raises a `RuntimeError` naming the limit and what the run was holding, exactly
 as an exhausted fuel budget, a passed deadline, `max_host_calls`, and
-`max_memory` do. The alternative — a `spawn` that blocks until a sibling
+`max_memory` do (`max_memory` itself was later retracted by
+[ADR 0011](0011-garbage-collection.md)'s "Amendment (2026-08-25): the memory
+budget is removed"; the analogy still holds for fuel, deadlines, and host
+calls). The alternative — a `spawn` that blocks until a sibling
 finishes — was rejected: waiting is a scheduling policy, and ADR 0008
 deliberately has none. A limit that blocked would also turn a bound on
 concurrency into a bound on nothing at all, since the program would still get
