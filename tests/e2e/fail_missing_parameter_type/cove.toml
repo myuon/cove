@@ -1,0 +1,3 @@
+[run.fail_missing_parameter_type]
+entry = "main.main"
+allow = ["console"]
