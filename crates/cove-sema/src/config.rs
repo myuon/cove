@@ -139,6 +139,7 @@ fn parse_run(name: &str, value: &toml::Value) -> Result<RunConfig, String> {
     let mut deadline = None;
     let mut max_host_calls = None;
     let mut max_memory = None;
+    let mut max_tasks = None;
     let mut trace = None;
     let mut generates = None;
     for (key, value) in table {
@@ -177,6 +178,9 @@ fn parse_run(name: &str, value: &toml::Value) -> Result<RunConfig, String> {
             "max_memory" => {
                 max_memory = Some(parse_non_negative_integer(name, "max_memory", value)?);
             }
+            "max_tasks" => {
+                max_tasks = Some(parse_non_negative_integer(name, "max_tasks", value)?);
+            }
             "trace" => {
                 trace = Some(
                     value
@@ -203,6 +207,7 @@ fn parse_run(name: &str, value: &toml::Value) -> Result<RunConfig, String> {
         deadline,
         max_host_calls,
         max_memory,
+        max_tasks,
         trace,
         generates,
     })
@@ -294,6 +299,10 @@ pub struct RunConfig {
     pub max_host_calls: Option<u64>,
     /// The bytes this run's live heaps may hold before the runtime stops it.
     pub max_memory: Option<u64>,
+    /// The tasks this run may hold alive at once, across the whole run, before
+    /// the runtime stops it: a `spawn` that would exceed it fails the run
+    /// before a thread is created.
+    pub max_tasks: Option<u64>,
     /// A path to write a JSONL trace of this run to.
     pub trace: Option<String>,
     /// The package-relative `.cove` path `cove generate` writes this run's
@@ -389,6 +398,7 @@ mod tests {
         assert_eq!(hello.deadline, None);
         assert_eq!(hello.max_host_calls, None);
         assert_eq!(hello.max_memory, None);
+        assert_eq!(hello.max_tasks, None);
         assert_eq!(hello.trace, None);
     }
 
@@ -426,6 +436,18 @@ mod tests {
     fn rejects_negative_max_memory() {
         let err = parse("[run.hello]\nentry = \"hello.main\"\nmax_memory = -1\n").unwrap_err();
         assert_eq!(err, "run `hello`: `max_memory` must not be negative");
+    }
+
+    #[test]
+    fn parses_max_tasks() {
+        let config = parse("[run.hello]\nentry = \"hello.main\"\nmax_tasks = 5\n").unwrap();
+        assert_eq!(config.runs["hello"].max_tasks, Some(5));
+    }
+
+    #[test]
+    fn rejects_negative_max_tasks() {
+        let err = parse("[run.hello]\nentry = \"hello.main\"\nmax_tasks = -1\n").unwrap_err();
+        assert_eq!(err, "run `hello`: `max_tasks` must not be negative");
     }
 
     #[test]

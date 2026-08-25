@@ -120,6 +120,8 @@ pub struct EmbeddedRun {
     pub max_host_calls: Option<u64>,
     /// The bytes this binary's live heaps may hold.
     pub max_memory: Option<u64>,
+    /// The tasks this binary may hold alive at once, across the whole run.
+    pub max_tasks: Option<u64>,
     /// A path to write a JSONL trace to, or `-` for stderr.
     pub trace: Option<&'static str>,
     /// The one directory the `files` host may reach, as an absolute path
@@ -222,6 +224,7 @@ impl Embedded {
             max_host_calls: self.run.max_host_calls,
             max_call_depth: None,
             max_memory: self.run.max_memory,
+            max_tasks: self.run.max_tasks,
         };
         hosts.set_budget(Budget::with_cancellation(limits, Cancellation::new()));
 
@@ -294,6 +297,7 @@ impl Embedded {
                 deadline: self.run.deadline_nanos.map(Duration::from_nanos),
                 max_host_calls: self.run.max_host_calls,
                 max_memory: self.run.max_memory,
+                max_tasks: self.run.max_tasks,
                 trace: self.run.trace.map(str::to_string),
                 // A built binary never generates: its whole point is a run
                 // `cove build` already refused to build if it set
@@ -400,6 +404,7 @@ export fn main() -> Result<Unit, Error> {
                 deadline_nanos: None,
                 max_host_calls: None,
                 max_memory: None,
+                max_tasks: None,
                 trace: None,
                 files_root: None,
                 allow_exec: &[],
