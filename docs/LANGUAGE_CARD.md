@@ -170,7 +170,10 @@ allow = ["http", "clock"]
 ```
 
 A host may provide real, fake, filtered, remote, or denied implementations.
-The runtime rejects Host API calls that were not granted.
+The runtime rejects Host API calls that were not granted. An operation's
+argument, result, and error types come from its schema, and nothing checks a
+call against them yet: `cove check` warns at a host type rather than checking
+it.
 
 `cove test` is such a host: it grants each test the capabilities its call
 graph requires, taking every implementation's fake form so a suite is
@@ -181,9 +184,9 @@ deterministic, and `[test] allow_real = [...]` names the exceptions.
 Concurrent work belongs to a task scope. Leaving the scope waits for or cancels
 its child tasks. Immutable task-safe values such as arrays may cross task
 boundaries. A vector cannot cross, even through `let`; finish it as an array
-or wrap mutable state in `Shared` or another synchronized type. Closures are
-task-safe only when every capture is. Host resources declare task-safety in
-their Host API schema.
+or wrap mutable state in `Shared`, which is the MVP's only synchronized type.
+Closures are task-safe only when every capture is. Host resources declare
+task-safety in their Host API schema.
 
 `Shared(value)` wraps task-safe mutable state, and `lock` is its only
 operation: it holds the value for the whole of the closure it is given and
@@ -202,7 +205,8 @@ own new value. A cycle through two or more cells is not detected and leaks.
 
 Memory is managed by a precise, non-moving mark-and-sweep collector. CPU,
 memory, time, concurrency, and Host-call limits are runtime controls, not
-termination proofs.
+termination proofs. Every one of them is imposed today except the concurrency
+limit, which nothing yet enforces.
 
 ## Annotations
 

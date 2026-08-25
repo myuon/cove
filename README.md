@@ -15,6 +15,9 @@ design is recorded in [ADR 0001](docs/adr/0001-mvp-language-design.md).
 
 - [Philosophy](docs/PHILOSOPHY.md)
 - [Language Card](docs/LANGUAGE_CARD.md)
+- [Architecture decisions](docs/adr/) — each one carries its status, the pull
+  request that implemented it, how much of it is built, and what has since
+  amended or superseded it
 - [Representative programs](examples/README.md)
 - [API documentation](https://myuon.github.io/cove/) — rustdoc for the
   implementation crates, published from `main`
@@ -85,14 +88,25 @@ returns `Result<String, Error>` under its granted capabilities, writes and
 formats what it returns to the package-relative `generates` path, and checks
 the package; `cove generate --check` regenerates every such run into memory
 and fails on the first file that differs from what is on disk, which is what
-CI runs. Tasks spawned in a scope run on threads, so a trace attributes each
-one's wait to the task that waited, and `Shared` holds mutable state across
-them. Still missing: a real `database` implementation, because connecting to
-one means speaking a wire protocol the standard library cannot; TLS in the
-`http` host, where an `https` URL is refused rather than downgraded; a type
-checker that reads the Host API schema, so `http.Request` and its neighbors
-are still reported as unchecked host types; and native code generation, still
-ADR 0002's open decision.
+CI runs. Tasks spawned in a scope run on threads, so waits genuinely overlap
+and a trace records each task's own CPU time and each host call's wait, and
+`Shared` holds mutable state across them.
+
+Still missing, and each of these is a documented gap rather than an oversight:
+a real `database` implementation, because connecting to one means speaking a
+wire protocol the standard library cannot; TLS in the `http` host, where an
+`https` URL is refused rather than downgraded; anything that checks a Host API
+call against the types its schema declares, at either end — the checker reports
+`http.Request` and its neighbors as unchecked host types, and the runtime
+checks a call's arity but not its result
+([#38](https://github.com/myuon/cove/issues/38)); a concurrency limit, so a
+scope starts a thread for every `spawn` its body reaches and no budget refuses
+one ([#37](https://github.com/myuon/cove/issues/37)); a trace event for task
+suspension or for a cache, and a task id on a host call, which is why `cove
+trace` ends its summary with what it cannot tell you; and native code
+generation, still ADR 0002's open decision, which
+[ADR 0012](docs/adr/0012-performance-gate-and-native-backend.md) has since
+attached five gates to.
 
 `cove build` is not a code generator. The executable it writes embeds the
 program's sources and the interpreter, so it delivers a program without
@@ -108,10 +122,13 @@ the runtime; running one needs neither. This is recorded in
 decision.
 
 The implementation direction is recorded in
-[ADR 0002](docs/adr/0002-implementation-language-and-backend.md), how
-tasks execute in
-[ADR 0003](docs/adr/0003-task-execution-and-runtime-control.md), and how a
-host hands out a resource handle and reenters a Cove closure in
+[ADR 0002](docs/adr/0002-implementation-language-and-backend.md), how a run is
+controlled — budgets, safepoints, cancellation, and traces — in
+[ADR 0003](docs/adr/0003-task-execution-and-runtime-control.md), how tasks
+actually execute in
+[ADR 0008](docs/adr/0008-concurrent-task-execution.md), which replaced ADR
+0003's sequential phase, and how a host hands out a resource handle and
+reenters a Cove closure in
 [ADR 0013](docs/adr/0013-host-resource-handles.md).
 
 Syntax is still provisional and may change.

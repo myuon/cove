@@ -22,6 +22,19 @@ requests, a `fetch` with recorded answers, a clock that moves only when
 something moves it, and a database of canned rows -- which is where their
 behavior is actually pinned.
 
+There is one assertion those tests cannot make. `callbacks` spawns a repeating
+report timer and cancels it once the server's listener runs dry, and how many
+times it fires is decided by whether the operating system starts the timer's
+thread before the cancellation reaches it, because `clock.every` reads its
+task's cancellation flag before doing anything else. The test asserts the part
+that is decidable -- the fake clock offers at most one round, so at most one
+report line may appear, and if one does it has the shape the program prints --
+and asserts no count. Whether that should change is
+[issue #39](https://github.com/myuon/cove/issues/39); `clock.every`'s own
+behavior is pinned exactly by the unit tests in
+`crates/cove-runtime/src/clock.rs`, which drive it with no second thread to
+race.
+
 Together they test the core product hypotheses:
 
 | Program | What it validates |
