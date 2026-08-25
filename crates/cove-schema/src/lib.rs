@@ -351,14 +351,6 @@ impl ResourceSchema {
     pub fn operation(&self, name: &str) -> Option<&'static OperationSchema> {
         self.operations.iter().find(|entry| entry.name == name)
     }
-
-    /// Every operation name, for a diagnostic that has to list them.
-    pub fn operation_names(&self) -> Vec<String> {
-        self.operations
-            .iter()
-            .map(|entry| format!("`{}`", entry.name))
-            .collect()
-    }
 }
 
 /// The name, capability, operations, types, and resources of one host module.
@@ -411,14 +403,6 @@ impl ModuleSchema {
     /// business.
     pub fn declares_type(&self, name: &str) -> bool {
         self.declared_type(name).is_some() || self.resource(name).is_some()
-    }
-
-    /// Every operation name, for a diagnostic that has to list them.
-    pub fn operation_names(&self) -> Vec<String> {
-        self.operations
-            .iter()
-            .map(|entry| format!("`{}`", entry.name))
-            .collect()
     }
 }
 
