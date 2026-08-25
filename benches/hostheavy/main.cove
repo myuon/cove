@@ -1,0 +1,23 @@
+use console.println
+use clock
+
+/// Host-heavy benchmark: repeated dispatch through `console` and `clock`.
+///
+/// `cove-bench` grants this the same deterministic fakes `cove test` uses: a
+/// `console` that writes into a sink nobody reads, and a `clock` whose
+/// virtual time never advances on its own. Every call below is therefore
+/// deterministic, and this measures the cost of grant checking, budget
+/// accounting, dispatch, and string formatting -- not real I/O latency.
+///
+/// The correctness check does not depend on which `clock` answered: it
+/// holds under the virtual clock `cove-bench` grants and under the real one
+/// `cove run` grants, so a person can run this benchmark either way.
+export fn main() -> Result<Unit, Error> {
+  var lastSeen = clock.now()
+  for i in 0..<2000 {
+    lastSeen = clock.now()
+    println("tick {i}")?
+  }
+  assert(lastSeen >= 0ns)?
+  Ok(())
+}

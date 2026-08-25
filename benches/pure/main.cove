@@ -1,0 +1,22 @@
+/// Pure-compute benchmark: naive recursive Fibonacci.
+///
+/// No Host capability is granted or required, so this is ADR 0012's
+/// baseline for how fast the tree-walking interpreter evaluates calls,
+/// branches, and arithmetic with zero Host dispatch on the hot path.
+fn fib(n: Int) -> Int {
+  if n < 2 {
+    n
+  } else {
+    fib(n - 1) + fib(n - 2)
+  }
+}
+
+/// The workload size is fixed rather than read from arguments, so a
+/// measured run and a `--iterations 1` correctness run exercise exactly the
+/// same code path. `fib(20)` is about 22,000 recursive calls: enough to be
+/// measurable well above process noise, small enough that many iterations
+/// stay fast in CI.
+export fn main() -> Result<Unit, Error> {
+  assertEqual(fib(20), 6765)?
+  Ok(())
+}
