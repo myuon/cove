@@ -54,6 +54,15 @@ pub fn format_unit(unit: &SourceUnit) -> String {
     format_source("", unit)
 }
 
+/// Renders one expression on a single line, from the tree alone.
+///
+/// A literal's spelling is not in the tree, so `0xff` renders as `255`. That
+/// is enough for the places this is used: showing a parameter's default in a
+/// signature, where what matters is which value it is.
+pub fn format_expr(expr: &Expr) -> String {
+    Formatter::new("").flat(expr, 0)
+}
+
 /// Formats `unit`, which must be the tree parsed from `source`.
 ///
 /// Reading the source alongside the tree is what lets the formatter keep

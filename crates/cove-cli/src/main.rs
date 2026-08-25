@@ -23,6 +23,11 @@ use cove_sema::resolve::{
 };
 use cove_syntax::ast::ItemKind;
 
+mod api;
+#[cfg(test)]
+mod fixture;
+mod impact;
+
 const USAGE: &str = "\
 cove — the Cove toolchain
 
@@ -31,6 +36,9 @@ usage:
   cove check [path] [--deny-warnings]  parse, resolve, and type-check the package
   cove run <name> [flags] [args]       run the entry selected by `[run.<name>]` in cove.toml
   cove outline [path]                  show modules and their exported declarations
+  cove api snapshot [path]             record the package's derived public interface
+  cove api diff [path]                 compare the source against a recorded interface
+  cove impact [path] <name>            explain what a change to <name> can affect
   cove help                            show this message
 
 `cove fmt` rewrites files in place and prints how many changed. `--check`
@@ -41,6 +49,21 @@ not parse is reported and never rewritten.
 `--deny-warnings` fails `cove check` when the package has any warnings, as
 does setting `deny_warnings = true` in `cove.toml`'s `[check]` table; either
 one is enough to deny.
+
+`cove api snapshot` derives the package's public interface from source and
+writes it to `cove-api.txt` at the package root, or to `--out <file>`. Check
+that file in: `cove api diff` compares it — or the file `--against <file>`
+names — against the interface the current source derives, and classifies
+every difference as breaking or compatible, exiting non-zero on a breaking
+one so CI can use it. The recorded interface hash covers everything but the
+doc comments.
+
+`cove impact <name>` reports what a change to a function or method can
+affect: what calls it transitively, which modules those live in, which
+`[run.<name>]` entries reach it, and whether it needs authority an entry
+does not grant. Name it as `name`, `module.name`, or `module.Type.method`.
+A caller marked `(approximate)` is reached only through a call whose
+receiver type the compiler cannot narrow yet.
 
 `cove run` flags (may appear in any position after <name>; everything after a
 literal `--` is a program argument, even if it looks like a flag):
@@ -62,6 +85,8 @@ fn main() -> ExitCode {
         "check" => cmd_check(&args[1..]),
         "run" => cmd_run(&args[1..]),
         "outline" => cmd_outline(args.get(1).map(Path::new)),
+        "api" => api::cmd_api(&args[1..]),
+        "impact" => impact::cmd_impact(&args[1..]),
         "help" | "-h" | "--help" => {
             print!("{USAGE}");
             return ExitCode::SUCCESS;
@@ -92,11 +117,13 @@ fn main() -> ExitCode {
                 ExitCode::SUCCESS
             }
         }
-        Err(CliError::WarningsDenied) | Err(CliError::Unformatted) => ExitCode::FAILURE,
+        Err(CliError::WarningsDenied)
+        | Err(CliError::Unformatted)
+        | Err(CliError::BreakingChange) => ExitCode::FAILURE,
     }
 }
 
-enum CliError {
+pub(crate) enum CliError {
     Message(String),
     Diagnostics {
         sources: SourceMap,
@@ -108,6 +135,9 @@ enum CliError {
     /// `cove fmt --check` found files that are not formatted. Their paths
     /// were already printed, so there is nothing left to say.
     Unformatted,
+    /// `cove api diff` found a breaking change. The classified changes were
+    /// already printed, so there is nothing left to say.
+    BreakingChange,
 }
 
 impl From<String> for CliError {
@@ -117,7 +147,7 @@ impl From<String> for CliError {
 }
 
 /// Loads and resolves the package containing `start`.
-fn load(start: Option<&Path>) -> Result<(SourceMap, Package, Program), CliError> {
+pub(crate) fn load(start: Option<&Path>) -> Result<(SourceMap, Package, Program), CliError> {
     let start = match start {
         Some(path) => path.to_path_buf(),
         None => std::env::current_dir()
@@ -158,7 +188,7 @@ fn load(start: Option<&Path>) -> Result<(SourceMap, Package, Program), CliError>
 }
 
 /// Walks up from `start` to the nearest directory holding a `cove.toml`.
-fn find_root(start: &Path) -> Option<PathBuf> {
+pub(crate) fn find_root(start: &Path) -> Option<PathBuf> {
     let mut dir: Option<&Path> = if start.is_dir() {
         Some(start)
     } else {
@@ -358,7 +388,7 @@ fn render_outline(sources: &SourceMap, package: &Package, program: &Program) -> 
     let mut out = String::new();
     for (name, resolved) in &program.modules {
         out.push_str(&format!("module {name}\n"));
-        let blocks = module_blocks(sources, &package.root, package, resolved);
+        let blocks = module_blocks(sources, &package.root, package, program, resolved);
         for (i, block) in blocks.iter().enumerate() {
             if i > 0 {
                 out.push('\n');
@@ -375,6 +405,7 @@ fn module_blocks(
     sources: &SourceMap,
     root: &Path,
     package: &Package,
+    program: &Program,
     resolved: &ResolvedModule,
 ) -> Vec<String> {
     const INDENT: usize = 2;
@@ -398,9 +429,10 @@ fn module_blocks(
                             blocks.push(render_struct_block(
                                 sources,
                                 root,
+                                program,
+                                &resolved.name,
                                 &decl.name.node,
                                 entry,
-                                resolved,
                                 INDENT,
                             ));
                         }
@@ -412,9 +444,10 @@ fn module_blocks(
                             blocks.push(render_enum_block(
                                 sources,
                                 root,
+                                program,
+                                &resolved.name,
                                 &decl.name.node,
                                 entry,
-                                resolved,
                                 INDENT,
                             ));
                         }
@@ -457,7 +490,7 @@ fn rel_path(sources: &SourceMap, root: &Path, span: Span) -> String {
 }
 
 /// `  at path:line:col\n`, indented by `indent` spaces.
-fn location_line(sources: &SourceMap, root: &Path, span: Span, indent: usize) -> String {
+pub(crate) fn location_line(sources: &SourceMap, root: &Path, span: Span, indent: usize) -> String {
     let (line, col) = sources.get(span.file).line_col(span.start);
     format!(
         "{:indent$}at {}:{line}:{col}\n",
@@ -478,7 +511,7 @@ fn doc_lines(doc: &Option<String>, indent: usize, out: &mut String) {
 /// Renders a function or method's signature in the source form it would be
 /// written in: `export [async] fn name[<T, U>](params) -> ReturnType`, with a
 /// method's receiver as its first parameter.
-fn fn_signature(entry: &FnEntry) -> String {
+pub(crate) fn fn_signature(entry: &FnEntry) -> String {
     let decl = &entry.decl;
     let mut sig = String::from("export ");
     if decl.is_async {
@@ -532,12 +565,14 @@ fn render_fn_block(sources: &SourceMap, root: &Path, entry: &FnEntry, indent: us
 
 /// Renders a struct's doc, header, definition location, fields, and any
 /// exported methods declared for it in an `impl` block.
+#[allow(clippy::too_many_arguments)]
 fn render_struct_block(
     sources: &SourceMap,
     root: &Path,
+    program: &Program,
+    module: &str,
     name: &str,
     entry: &StructEntry,
-    resolved: &ResolvedModule,
     indent: usize,
 ) -> String {
     let mut out = String::new();
@@ -562,19 +597,28 @@ fn render_struct_block(
             indent = indent + 2
         ));
     }
-    out.push_str(&render_conformances(name, resolved, indent + 2));
-    out.push_str(&render_methods(sources, root, name, resolved, indent + 2));
+    out.push_str(&render_conformances(program, module, name, indent + 2));
+    out.push_str(&render_methods(
+        sources,
+        root,
+        program,
+        module,
+        name,
+        indent + 2,
+    ));
     out
 }
 
 /// Renders an enum's doc, header, definition location, cases with their
 /// payload types, and any exported methods declared for it.
+#[allow(clippy::too_many_arguments)]
 fn render_enum_block(
     sources: &SourceMap,
     root: &Path,
+    program: &Program,
+    module: &str,
     name: &str,
     entry: &EnumEntry,
-    resolved: &ResolvedModule,
     indent: usize,
 ) -> String {
     let mut out = String::new();
@@ -609,7 +653,15 @@ fn render_enum_block(
             ));
         }
     }
-    out.push_str(&render_methods(sources, root, name, resolved, indent + 2));
+    out.push_str(&render_conformances(program, module, name, indent + 2));
+    out.push_str(&render_methods(
+        sources,
+        root,
+        program,
+        module,
+        name,
+        indent + 2,
+    ));
     out
 }
 
@@ -663,17 +715,20 @@ fn render_trait_block(
     out
 }
 
-/// Every trait the type named `type_name` conforms to, in trait-name order.
-fn render_conformances(type_name: &str, resolved: &ResolvedModule, indent: usize) -> String {
+/// Every trait the type `module.type_name` conforms to, qualified by the
+/// module that declares the trait.
+///
+/// The conformances come from [`Program::conformances_of`] rather than from
+/// the type's own module: ADR 0006 lets an `impl Trait for Type` block be
+/// written where the *trait* is declared, and such a conformance is still
+/// part of this type's interface.
+fn render_conformances(program: &Program, module: &str, type_name: &str, indent: usize) -> String {
     let mut out = String::new();
-    for (trait_name, owner) in resolved.conformances.keys() {
-        if owner == type_name {
-            out.push_str(&format!(
-                "{:indent$}conforms to {trait_name}\n",
-                "",
-                indent = indent
-            ));
-        }
+    for (_, conformance) in program.conformances_of(module, type_name) {
+        out.push_str(&format!(
+            "{:indent$}conforms to {}.{}\n",
+            "", conformance.trait_module, conformance.trait_name
+        ));
     }
     out
 }
@@ -703,19 +758,20 @@ fn render_alias_block(
     out
 }
 
-/// Every exported method declared for the type named `type_name`, in the
-/// module's method order.
+/// Every exported method of the type `module.type_name`, in method-name
+/// order, wherever it is declared.
 fn render_methods(
     sources: &SourceMap,
     root: &Path,
+    program: &Program,
+    module: &str,
     type_name: &str,
-    resolved: &ResolvedModule,
     indent: usize,
 ) -> String {
     let mut out = String::new();
-    for ((owner, _), method) in &resolved.methods {
-        if owner == type_name && method.exported {
-            out.push_str(&render_fn_block(sources, root, method, indent));
+    for declared in program.methods_of(module, type_name) {
+        if declared.entry.exported {
+            out.push_str(&render_fn_block(sources, root, declared.entry, indent));
         }
     }
     out
@@ -723,7 +779,7 @@ fn render_methods(
 
 /// `<T, U: Display>`, or an empty string when there are no generic
 /// parameters.
-fn generics_suffix(generics: &[cove_syntax::ast::GenericParam]) -> String {
+pub(crate) fn generics_suffix(generics: &[cove_syntax::ast::GenericParam]) -> String {
     if generics.is_empty() {
         return String::new();
     }
@@ -1127,56 +1183,7 @@ fn report_exit(value: cove_runtime::Value) -> Result<(), CliError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use cove_sema::package::load;
-    use cove_sema::resolve::resolve;
-
-    /// A package written to a real temporary directory, so relative paths
-    /// and `SourceMap::path` behave exactly as they do for a package loaded
-    /// from disk by the CLI.
-    struct TempDir(PathBuf);
-
-    impl TempDir {
-        fn new(name: &str) -> Self {
-            let dir = std::env::temp_dir().join(format!(
-                "cove-cli-test-{name}-{}-{}",
-                std::process::id(),
-                nanos()
-            ));
-            std::fs::create_dir_all(&dir).unwrap();
-            TempDir(dir)
-        }
-
-        fn path(&self) -> &Path {
-            &self.0
-        }
-    }
-
-    impl Drop for TempDir {
-        fn drop(&mut self) {
-            let _ = std::fs::remove_dir_all(&self.0);
-        }
-    }
-
-    fn nanos() -> u128 {
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    }
-
-    fn write(dir: &Path, rel: &str, text: &str) {
-        let path = dir.join(rel);
-        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-        std::fs::write(path, text).unwrap();
-    }
-
-    /// Loads and resolves the package rooted at `root`.
-    fn load_fixture(root: &Path) -> (SourceMap, Package, Program) {
-        let mut sources = SourceMap::new();
-        let package = load(root, &mut sources).expect("fixture package loads");
-        let program = resolve(&package).expect("fixture package resolves");
-        (sources, package, program)
-    }
+    use crate::fixture::{examples_root, load_fixture, write, TempDir};
 
     #[test]
     fn fmt_check_reports_an_unformatted_file_and_formatting_makes_it_clean() {
@@ -1300,8 +1307,7 @@ export fn main() -> Result<Unit, Error> {
 
     #[test]
     fn outline_matches_hello_and_config_in_the_real_examples_package() {
-        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples");
-        let (sources, package, program) = load_fixture(&root);
+        let (sources, package, program) = load_fixture(&examples_root());
         let out = render_outline(&sources, &package, &program);
 
         let expected_hello = "\
@@ -1505,6 +1511,65 @@ module private
             ),
             _ => panic!("expected a message"),
         }
+    }
+
+    /// A conformance may be declared in the module that declares the
+    /// *trait*, for a type declared elsewhere: ADR 0006's orphan rule asks
+    /// only that the module declaring the block declares one of the two.
+    /// The type's own outline block must still name it, because the
+    /// conformance and the methods it supplies are part of that type's
+    /// public interface wherever they were written.
+    #[test]
+    fn outline_shows_a_conformance_declared_in_the_trait_s_module() {
+        let dir = TempDir::new("cross-module-conformance");
+        write(dir.path(), "cove.toml", "");
+        write(
+            dir.path(),
+            "shapes/widget.cove",
+            "\
+/// A widget.
+export struct Widget {
+  id: Int
+}
+",
+        );
+        write(
+            dir.path(),
+            "report/summary.cove",
+            "\
+use shapes.Widget
+
+/// A value that can summarise itself.
+export trait Summary {
+  /// Returns the one-line summary.
+  fn summarize(self) -> String
+}
+
+impl Summary for Widget {
+  fn summarize(self) -> String {
+    \"widget {self.id}\"
+  }
+}
+",
+        );
+        let (sources, package, program) = load_fixture(dir.path());
+        let out = render_outline(&sources, &package, &program);
+
+        let expected = "\
+module shapes
+  /// A widget.
+  export struct Widget
+    at shapes/widget.cove:2:15
+    id: Int
+    conforms to report.Summary
+    /// Returns the one-line summary.
+    export fn summarize(self) -> String
+      at report/summary.cove:10:6
+";
+        assert!(
+            out.contains(expected),
+            "the type's block must name the conformance and its method:\n{out}"
+        );
     }
 
     #[test]
