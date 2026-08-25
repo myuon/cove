@@ -433,6 +433,68 @@ mod tests {
         }
     }
 
+    fn ok_int(value: Value) -> i64 {
+        match value {
+            Value::Enum(result) if &*result.type_name == "Result" && &*result.case == "Ok" => {
+                match result.payload.into_iter().next() {
+                    Some(Value::Int(n)) => n,
+                    other => panic!("expected `Ok(Int)`, found {other:?}"),
+                }
+            }
+            other => panic!("expected `Ok(...)`, found {other}"),
+        }
+    }
+
+    /// What a [`StubReentry`] runs in place of a Cove callback.
+    type StubBody = Box<dyn FnMut(&Cancellation) -> Result<Value, RuntimeError>>;
+
+    /// A stub [`Reentry`] for tests, standing in for the interpreter: it runs
+    /// the boxed closure it was built with instead of dispatching into Cove
+    /// code, and hands the closure whichever [`Cancellation`] the call
+    /// carried, so a body that wants to observe a bound can.
+    struct StubReentry {
+        calls: usize,
+        cancelled: bool,
+        body: StubBody,
+    }
+
+    impl StubReentry {
+        fn new(body: impl FnMut(&Cancellation) -> Result<Value, RuntimeError> + 'static) -> Self {
+            StubReentry {
+                calls: 0,
+                cancelled: false,
+                body: Box::new(body),
+            }
+        }
+
+        /// Reports the task holding this reentry as already cancelled.
+        fn cancelled(mut self) -> Self {
+            self.cancelled = true;
+            self
+        }
+    }
+
+    impl Reentry for StubReentry {
+        fn call(&mut self, _callee: &Value, _args: Vec<Value>) -> Result<Value, RuntimeError> {
+            self.calls += 1;
+            (self.body)(&Cancellation::new())
+        }
+
+        fn call_until(
+            &mut self,
+            _callee: &Value,
+            _args: Vec<Value>,
+            stop: &Cancellation,
+        ) -> Result<Value, RuntimeError> {
+            self.calls += 1;
+            (self.body)(stop)
+        }
+
+        fn is_cancelled(&self) -> bool {
+            self.cancelled
+        }
+    }
+
     #[test]
     fn a_virtual_clock_starts_at_its_origin_and_stands_still() {
         let time = VirtualTime::new();
@@ -538,5 +600,173 @@ mod tests {
             .call("clock", "now", Vec::new())
             .expect("the call should be allowed");
         assert_eq!(nanos(now), 250_000_000);
+    }
+
+    #[test]
+    fn timeout_on_a_virtual_clock_answers_ok_when_the_body_does_not_oversleep() {
+        let clock = Clock::virtual_clock(VirtualTime::new());
+        let mut back = StubReentry::new(|_stop| Ok(Value::Int(42)));
+
+        let answer = clock
+            .call_with(
+                "timeout",
+                vec![Value::Duration(1_000_000_000), Value::Unit],
+                &mut back,
+            )
+            .unwrap();
+        assert!(is_ok(&answer), "{answer}");
+        assert_eq!(ok_int(answer), 42);
+    }
+
+    /// A virtual clock has no time of its own, so `timeout` judges afterwards
+    /// by how far the body's own `sleep` pushed the shared clock, rather than
+    /// by racing a watchdog thread against it.
+    #[test]
+    fn timeout_on_a_virtual_clock_times_out_when_the_body_sleeps_past_the_bound() {
+        let time = VirtualTime::new();
+        let clock = Clock::virtual_clock(time.clone());
+        let sleeper = Clock::virtual_clock(time);
+        let mut back = StubReentry::new(move |_stop| {
+            sleeper.call("sleep", vec![Value::Duration(2_000_000_000)])
+        });
+
+        let answer = clock
+            .call_with(
+                "timeout",
+                vec![Value::Duration(1_000_000_000), Value::Unit],
+                &mut back,
+            )
+            .unwrap();
+        assert_eq!(
+            err_message(answer),
+            format!("clock: timed out after {}", Value::Duration(1_000_000_000))
+        );
+    }
+
+    #[test]
+    fn timeout_on_a_real_clock_answers_ok_when_the_body_finishes_before_the_bound() {
+        let clock = Clock::real();
+        let mut back = StubReentry::new(|_stop| Ok(Value::Int(7)));
+
+        let answer = clock
+            .call_with(
+                "timeout",
+                vec![Value::Duration(200_000_000), Value::Unit],
+                &mut back,
+            )
+            .unwrap();
+        assert!(is_ok(&answer), "{answer}");
+        assert_eq!(ok_int(answer), 7);
+    }
+
+    /// The bound is kept to a few milliseconds so the test finishes quickly,
+    /// and the body's own loop watches `stop` directly so nothing can hang:
+    /// the watchdog is what raises the flag, and the body is what has to
+    /// notice it.
+    #[test]
+    fn timeout_on_a_real_clock_times_out_a_body_that_spins_past_the_bound() {
+        let clock = Clock::real();
+        let mut back = StubReentry::new(|stop| {
+            while !stop.is_cancelled() {
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            }
+            Ok(Value::Unit)
+        });
+
+        let answer = clock
+            .call_with(
+                "timeout",
+                vec![Value::Duration(5_000_000), Value::Unit],
+                &mut back,
+            )
+            .unwrap();
+        assert_eq!(
+            err_message(answer),
+            format!("clock: timed out after {}", Value::Duration(5_000_000))
+        );
+    }
+
+    #[test]
+    fn a_negative_timeout_bound_is_an_error_on_either_clock() {
+        for clock in [Clock::real(), Clock::virtual_clock(VirtualTime::new())] {
+            let mut back = StubReentry::new(|_stop| Ok(Value::Unit));
+            let answer = clock
+                .call_with("timeout", vec![Value::Duration(-1), Value::Unit], &mut back)
+                .unwrap();
+            assert_eq!(err_message(answer), "clock: a timeout must not be negative");
+            assert_eq!(
+                back.calls, 0,
+                "a bound this obviously bad never runs the body"
+            );
+        }
+    }
+
+    #[test]
+    fn a_negative_timer_period_is_an_error_on_either_clock() {
+        for clock in [Clock::real(), Clock::virtual_clock(VirtualTime::new())] {
+            let mut back = StubReentry::new(|_stop| Ok(Value::Unit));
+            let answer = clock
+                .call_with("every", vec![Value::Duration(-1), Value::Unit], &mut back)
+                .unwrap();
+            assert_eq!(
+                err_message(answer),
+                "clock: a timer period must not be negative"
+            );
+            assert_eq!(
+                back.calls, 0,
+                "a period this obviously bad never runs the body"
+            );
+        }
+    }
+
+    /// A virtual clock has no time of its own to repeat a timer with, so
+    /// `every` gives the one round it honestly can rather than looping
+    /// forever with nothing to wait for.
+    #[test]
+    fn every_on_a_virtual_clock_fires_exactly_once() {
+        let clock = Clock::virtual_clock(VirtualTime::new());
+        let mut back = StubReentry::new(|_stop| Ok(Value::ok(Value::Unit)));
+
+        let answer = clock
+            .call_with(
+                "every",
+                vec![Value::Duration(1_000_000_000), Value::Unit],
+                &mut back,
+            )
+            .unwrap();
+        assert!(is_ok(&answer), "{answer}");
+        assert_eq!(back.calls, 1);
+    }
+
+    #[test]
+    fn every_hands_back_a_failing_bodys_err_instead_of_repeating() {
+        let clock = Clock::virtual_clock(VirtualTime::new());
+        let mut back = StubReentry::new(|_stop| Ok(Value::err(Value::error("boom"))));
+
+        let answer = clock
+            .call_with(
+                "every",
+                vec![Value::Duration(1_000_000_000), Value::Unit],
+                &mut back,
+            )
+            .unwrap();
+        assert_eq!(err_message(answer), "boom");
+        assert_eq!(back.calls, 1, "a failing round is not retried");
+    }
+
+    #[test]
+    fn every_answers_ok_without_running_the_body_when_the_task_is_already_cancelled() {
+        let clock = Clock::virtual_clock(VirtualTime::new());
+        let mut back = StubReentry::new(|_stop| panic!("the body must not run")).cancelled();
+
+        let answer = clock
+            .call_with(
+                "every",
+                vec![Value::Duration(1_000_000_000), Value::Unit],
+                &mut back,
+            )
+            .unwrap();
+        assert!(is_ok(&answer), "{answer}");
+        assert_eq!(back.calls, 0);
     }
 }

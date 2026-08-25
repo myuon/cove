@@ -398,8 +398,9 @@ impl Http {
     /// Serves one request, and answers whether one arrived.
     ///
     /// `false` means the listener has nothing more to serve, which is what
-    /// ends the loop the program wrote around this call. A real listener
-    /// waits, so it answers `false` only once it has been closed.
+    /// ends the loop the program wrote around this call. Only a fake listener
+    /// ever says it: a real one waits for a connection, so a program serving
+    /// against one runs until the run itself is stopped.
     fn serve_one(
         &self,
         handle: &ResourceHandle,
@@ -927,4 +928,510 @@ fn write_response(mut stream: &TcpStream, status: i64, body: &str) -> Result<(),
         .and_then(|_| stream.write_all(body.as_bytes()))
         .and_then(|_| stream.flush())
         .map_err(|e| format!("http: cannot send the response: {e}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::budget::Cancellation;
+    use crate::host::NoReentry;
+    use crate::value::MapKey;
+    use std::rc::Rc;
+
+    fn err_message(value: Value) -> String {
+        match value {
+            Value::Enum(result) if &*result.type_name == "Result" && &*result.case == "Err" => {
+                result
+                    .payload
+                    .first()
+                    .map(ToString::to_string)
+                    .unwrap_or_default()
+            }
+            other => panic!("expected `Err(...)`, found {other}"),
+        }
+    }
+
+    fn is_ok(value: &Value) -> bool {
+        matches!(value, Value::Enum(result)
+            if &*result.type_name == "Result" && &*result.case == "Ok")
+    }
+
+    fn ok_str(value: Value) -> String {
+        match value {
+            Value::Enum(result) if &*result.type_name == "Result" && &*result.case == "Ok" => {
+                match result.payload.into_iter().next() {
+                    Some(Value::Str(s)) => s.to_string(),
+                    other => panic!("expected `Ok(String)`, found {other:?}"),
+                }
+            }
+            other => panic!("expected `Ok(...)`, found {other}"),
+        }
+    }
+
+    fn bool_ok(value: Value) -> bool {
+        match value {
+            Value::Enum(result) if &*result.type_name == "Result" && &*result.case == "Ok" => {
+                match result.payload.into_iter().next() {
+                    Some(Value::Bool(b)) => b,
+                    other => panic!("expected `Ok(Bool)`, found {other:?}"),
+                }
+            }
+            other => panic!("expected `Ok(...)`, found {other}"),
+        }
+    }
+
+    /// The body a `http.json`-built `http.Response` carries, read back for a
+    /// test to check the encoding rather than the module's own plumbing.
+    fn response_body(value: Value) -> String {
+        match value {
+            Value::Struct(structure) if &*structure.type_name == "http.Response" => {
+                match structure.get("body") {
+                    Some(Value::Str(body)) => body.to_string(),
+                    other => panic!("expected a `String` body, found {other:?}"),
+                }
+            }
+            other => panic!("expected an `http.Response`, found {other}"),
+        }
+    }
+
+    /// Opens a listener on `port` and answers the handle it issued.
+    fn listen(http: &Http, port: i64) -> Arc<ResourceHandle> {
+        match http.call("listen", vec![Value::Int(port)]).unwrap() {
+            Value::Enum(result) if &*result.type_name == "Result" && &*result.case == "Ok" => {
+                match result.payload.into_iter().next() {
+                    Some(Value::Resource(handle)) => handle,
+                    other => panic!("expected `Ok(Resource)`, found {other:?}"),
+                }
+            }
+            other => panic!("expected `Ok(...)`, found {other}"),
+        }
+    }
+
+    /// One `http.Route`, as Cove source would build it: a method, a path,
+    /// and a handler the host never looks inside.
+    fn route(method: &str, path: &str) -> Value {
+        Value::Struct(Box::new(StructValue {
+            type_name: "http.Route".into(),
+            fields: vec![
+                (
+                    "method".into(),
+                    Value::Enum(Box::new(EnumValue {
+                        type_name: "http.Method".into(),
+                        case: method.into(),
+                        payload: Vec::new(),
+                    })),
+                ),
+                ("path".into(), Value::Str(path.into())),
+                ("handler".into(), Value::Unit),
+            ],
+        }))
+    }
+
+    /// Reads and discards one HTTP/1.1 request's headers, so a test server
+    /// can answer only after the client has actually sent its request —
+    /// closing a socket with unread bytes still sitting in it can reset the
+    /// connection before the response goes out.
+    fn read_request_head(stream: &TcpStream) {
+        let mut reader = BufReader::new(stream);
+        loop {
+            let mut line = String::new();
+            let read = reader
+                .read_line(&mut line)
+                .expect("reading a header line should succeed");
+            if read == 0 || line == "\r\n" || line == "\n" {
+                break;
+            }
+        }
+    }
+
+    /// A stub [`Reentry`] for tests, standing in for the interpreter: it runs
+    /// the boxed closure it was built with instead of dispatching a route's
+    /// handler into Cove code.
+    struct StubReentry {
+        calls: usize,
+        respond: Box<dyn FnMut() -> Result<Value, RuntimeError>>,
+    }
+
+    impl StubReentry {
+        fn new(respond: impl FnMut() -> Result<Value, RuntimeError> + 'static) -> Self {
+            StubReentry {
+                calls: 0,
+                respond: Box::new(respond),
+            }
+        }
+    }
+
+    impl Reentry for StubReentry {
+        fn call(&mut self, _callee: &Value, _args: Vec<Value>) -> Result<Value, RuntimeError> {
+            self.calls += 1;
+            (self.respond)()
+        }
+
+        fn call_until(
+            &mut self,
+            callee: &Value,
+            args: Vec<Value>,
+            _stop: &Cancellation,
+        ) -> Result<Value, RuntimeError> {
+            self.call(callee, args)
+        }
+
+        fn is_cancelled(&self) -> bool {
+            false
+        }
+    }
+
+    #[test]
+    fn a_denied_host_refuses_to_fetch() {
+        let http = Http::denied();
+        let answer = http
+            .call("fetch", vec![Value::Str("http://example.com/".into())])
+            .unwrap();
+        assert_eq!(
+            err_message(answer),
+            "http: this host has no network, so no request can be sent"
+        );
+    }
+
+    #[test]
+    fn a_denied_host_refuses_to_listen() {
+        let http = Http::denied();
+        let answer = http.call("listen", vec![Value::Int(8080)]).unwrap();
+        assert_eq!(
+            err_message(answer),
+            "http: this host has no network, so nothing can listen"
+        );
+    }
+
+    #[test]
+    fn a_recorded_fetch_answers_its_body() {
+        let http = Http::recorded(
+            BTreeMap::from([("http://example.com/".to_string(), "hello".to_string())]),
+            Vec::new(),
+        );
+        let answer = http
+            .call("fetch", vec![Value::Str("http://example.com/".into())])
+            .unwrap();
+        assert_eq!(ok_str(answer), "hello");
+    }
+
+    #[test]
+    fn a_fetch_the_fake_has_no_answer_for_says_so() {
+        let http = Http::recorded(BTreeMap::new(), Vec::new());
+        let answer = http
+            .call(
+                "fetch",
+                vec![Value::Str("http://example.com/missing".into())],
+            )
+            .unwrap();
+        assert_eq!(
+            err_message(answer),
+            "http: no recorded answer for `http://example.com/missing`"
+        );
+    }
+
+    #[test]
+    fn listen_issues_a_task_safe_server_handle() {
+        let http = Http::recorded(BTreeMap::new(), Vec::new());
+        let handle = listen(&http, 0);
+        assert_eq!(handle.qualified_type(), "http.Server");
+        assert!(handle.task_safe);
+    }
+
+    #[test]
+    fn port_answers_the_port_the_program_asked_for() {
+        let http = Http::recorded(BTreeMap::new(), Vec::new());
+        let handle = listen(&http, 4242);
+        match http
+            .call_resource(&handle, "port", Vec::new(), &mut NoReentry)
+            .unwrap()
+        {
+            Value::Int(port) => assert_eq!(port, 4242),
+            other => panic!("expected an `Int`, found {other}"),
+        }
+    }
+
+    #[test]
+    fn handle_routes_a_matching_request_to_its_handler() {
+        let http = Http::recorded(BTreeMap::new(), vec![ScriptedRequest::get("/health")]);
+        let handle = listen(&http, 0);
+
+        let routes = Value::Array(vec![route("Get", "/health")].into());
+        let mut back = StubReentry::new(|| Ok(response(200, "healthy")));
+        let answer = http
+            .call_resource(&handle, "handle", vec![routes], &mut back)
+            .unwrap();
+
+        assert!(
+            bool_ok(answer),
+            "a scripted request should have been served"
+        );
+        assert_eq!(back.calls, 1, "the handler runs exactly once per request");
+        assert_eq!(http.served().responses(), vec!["200 healthy".to_string()]);
+    }
+
+    #[test]
+    fn handle_answers_404_for_an_unrouted_request() {
+        let http = Http::recorded(BTreeMap::new(), vec![ScriptedRequest::get("/missing")]);
+        let handle = listen(&http, 0);
+
+        let routes = Value::Array(vec![route("Get", "/health")].into());
+        let answer = http
+            .call_resource(&handle, "handle", vec![routes], &mut NoReentry)
+            .unwrap();
+
+        assert!(
+            bool_ok(answer),
+            "an unrouted request is still served, just with a 404"
+        );
+        assert_eq!(
+            http.served().responses(),
+            vec!["404 \"no route for Get /missing\"".to_string()]
+        );
+    }
+
+    #[test]
+    fn handle_drains_its_scripted_queue_then_answers_false() {
+        let http = Http::recorded(BTreeMap::new(), vec![ScriptedRequest::get("/health")]);
+        let handle = listen(&http, 0);
+        let routes = Value::Array(vec![route("Get", "/health")].into());
+        let mut back = StubReentry::new(|| Ok(response(200, "healthy")));
+
+        let first = http
+            .call_resource(&handle, "handle", vec![routes.clone()], &mut back)
+            .unwrap();
+        assert!(bool_ok(first), "the one scripted request should be served");
+
+        let second = http
+            .call_resource(&handle, "handle", vec![routes], &mut back)
+            .unwrap();
+        assert!(
+            !bool_ok(second),
+            "an empty queue answers false rather than waiting for more"
+        );
+    }
+
+    /// A handle is a name; closing the resource ends what it named, and a
+    /// later call on the same name is a reported error rather than a call on
+    /// whatever occupies the slot now.
+    #[test]
+    fn close_ends_the_handle_and_a_later_call_reports_it() {
+        let http = Http::recorded(BTreeMap::new(), Vec::new());
+        let handle = listen(&http, 0);
+
+        let closed = http
+            .call_resource(&handle, "close", Vec::new(), &mut NoReentry)
+            .unwrap();
+        assert!(is_ok(&closed), "{closed}");
+
+        let error = http
+            .call_resource(&handle, "port", Vec::new(), &mut NoReentry)
+            .expect_err("a closed handle's port cannot be read");
+        assert_eq!(
+            error.message,
+            format!("`{handle}` is closed, so `port` has nothing to act on")
+        );
+    }
+
+    #[test]
+    fn json_encodes_a_struct_as_an_object() {
+        let http = Http::denied();
+        let payload = Value::Struct(Box::new(StructValue {
+            type_name: "demo.Point".into(),
+            fields: vec![("x".into(), Value::Int(1)), ("y".into(), Value::Int(2))],
+        }));
+        let answer = http.call("json", vec![Value::Int(200), payload]).unwrap();
+        assert_eq!(response_body(answer), "{\"x\":1,\"y\":2}");
+    }
+
+    #[test]
+    fn json_encodes_a_map_as_an_object() {
+        let http = Http::denied();
+        let mut map = BTreeMap::new();
+        map.insert(MapKey::Str("a".to_string()), Value::Int(1));
+        let answer = http
+            .call("json", vec![Value::Int(200), Value::Map(Rc::new(map))])
+            .unwrap();
+        assert_eq!(response_body(answer), "{\"a\":1}");
+    }
+
+    #[test]
+    fn json_encodes_a_string_with_its_quotes() {
+        let http = Http::denied();
+        let answer = http
+            .call("json", vec![Value::Int(200), Value::Str("hi".into())])
+            .unwrap();
+        assert_eq!(response_body(answer), "\"hi\"");
+    }
+
+    #[test]
+    fn json_encodes_an_array() {
+        let http = Http::denied();
+        let payload = Value::Array(vec![Value::Int(1), Value::Int(2)].into());
+        let answer = http.call("json", vec![Value::Int(200), payload]).unwrap();
+        assert_eq!(response_body(answer), "[1,2]");
+    }
+
+    #[test]
+    fn json_encodes_a_payload_free_enum_case_as_its_name() {
+        let http = Http::denied();
+        let payload = Value::Enum(Box::new(EnumValue {
+            type_name: "demo.Color".into(),
+            case: "Red".into(),
+            payload: Vec::new(),
+        }));
+        let answer = http.call("json", vec![Value::Int(200), payload]).unwrap();
+        assert_eq!(response_body(answer), "\"Red\"");
+    }
+
+    #[test]
+    fn json_escapes_a_quote_and_a_newline() {
+        let http = Http::denied();
+        let payload = Value::Str("a\"b\nc".into());
+        let answer = http.call("json", vec![Value::Int(200), payload]).unwrap();
+        assert_eq!(response_body(answer), r#""a\"b\nc""#);
+    }
+
+    #[test]
+    fn split_url_refuses_https() {
+        assert_eq!(
+            split_url("https://example.com/").unwrap_err(),
+            "http: `https://example.com/` is https, which this host does not speak"
+        );
+    }
+
+    #[test]
+    fn split_url_refuses_an_unknown_scheme() {
+        assert_eq!(
+            split_url("ftp://example.com/").unwrap_err(),
+            "http: `ftp://example.com/` uses the unknown scheme `ftp`"
+        );
+    }
+
+    #[test]
+    fn split_url_refuses_a_non_absolute_url() {
+        assert_eq!(
+            split_url("example.com/path").unwrap_err(),
+            "http: `example.com/path` is not an absolute URL"
+        );
+    }
+
+    #[test]
+    fn a_real_fetch_reads_the_body_a_2xx_response_carries() {
+        let listener =
+            TcpListener::bind("127.0.0.1:0").expect("binding to loopback should succeed");
+        let port = listener
+            .local_addr()
+            .expect("the bound address should be known")
+            .port();
+
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener
+                .accept()
+                .expect("accepting the one connection should succeed");
+            read_request_head(&stream);
+            let body = "hello from loopback";
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            stream
+                .write_all(response.as_bytes())
+                .expect("writing the canned response should succeed");
+        });
+
+        let url = format!("http://127.0.0.1:{port}/");
+        let answer = Http::real()
+            .call("fetch", vec![Value::Str(url.into())])
+            .unwrap();
+        server.join().expect("the server thread should not panic");
+
+        assert_eq!(ok_str(answer), "hello from loopback");
+    }
+
+    #[test]
+    fn a_real_fetch_reports_a_non_2xx_status() {
+        let listener =
+            TcpListener::bind("127.0.0.1:0").expect("binding to loopback should succeed");
+        let port = listener
+            .local_addr()
+            .expect("the bound address should be known")
+            .port();
+
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener
+                .accept()
+                .expect("accepting the one connection should succeed");
+            read_request_head(&stream);
+            let body = "not found here";
+            let response = format!(
+                "HTTP/1.1 404 Not Found\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            stream
+                .write_all(response.as_bytes())
+                .expect("writing the canned response should succeed");
+        });
+
+        let url = format!("http://127.0.0.1:{port}/");
+        let answer = Http::real()
+            .call("fetch", vec![Value::Str(url.clone().into())])
+            .unwrap();
+        server.join().expect("the server thread should not panic");
+
+        assert_eq!(err_message(answer), format!("http: {url} answered 404"));
+    }
+
+    /// Exercises the real host both ways at once: `listen` binds an ephemeral
+    /// port, a client thread reaches it as an ordinary HTTP client would, and
+    /// `handle` (driven by a stub reentry standing in for the interpreter)
+    /// answers the request the way a program's own route handler would.
+    #[test]
+    fn the_real_host_serves_a_request_end_to_end_over_loopback() {
+        let http = Http::real();
+        let opened = http.call("listen", vec![Value::Int(0)]).unwrap();
+        let Value::Enum(result) = opened else {
+            panic!("expected `Ok(...)`");
+        };
+        let Some(Value::Resource(handle)) = result.payload.into_iter().next() else {
+            panic!("`listen` should answer a handle");
+        };
+        let port = match http
+            .call_resource(&handle, "port", Vec::new(), &mut NoReentry)
+            .unwrap()
+        {
+            Value::Int(port) => port,
+            other => panic!("expected an `Int` port, found {other}"),
+        };
+
+        let client = std::thread::spawn(move || {
+            let mut stream = TcpStream::connect(("127.0.0.1", port as u16))
+                .expect("connecting to the loopback listener should succeed");
+            stream
+                .write_all(b"GET /health HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n")
+                .expect("writing the request should succeed");
+            let mut answer = Vec::new();
+            stream
+                .read_to_end(&mut answer)
+                .expect("reading the response should succeed");
+            String::from_utf8_lossy(&answer).into_owned()
+        });
+
+        let routes = Value::Array(vec![route("Get", "/health")].into());
+        let mut back = StubReentry::new(|| Ok(response(200, "healthy")));
+        let served = bool_ok(
+            http.call_resource(&handle, "handle", vec![routes], &mut back)
+                .unwrap(),
+        );
+        assert!(served, "the listener should have answered one request");
+
+        let received = client.join().expect("the client thread should not panic");
+        assert!(received.starts_with("HTTP/1.1 200"), "{received}");
+        assert!(received.ends_with("healthy"), "{received}");
+
+        http.call_resource(&handle, "close", Vec::new(), &mut NoReentry)
+            .unwrap();
+    }
 }
