@@ -65,7 +65,10 @@ struct Asked {
 /// what was asked for.
 fn serve_once(status: &str, body: &'static str) -> (u16, std::thread::JoinHandle<Asked>) {
     let listener = TcpListener::bind("127.0.0.1:0").expect("loopback is available");
-    let port = listener.local_addr().expect("a bound socket has an address").port();
+    let port = listener
+        .local_addr()
+        .expect("a bound socket has an address")
+        .port();
     let status = status.to_string();
     let thread = std::thread::spawn(move || {
         let (stream, _) = listener.accept().expect("the program connects");
@@ -75,7 +78,8 @@ fn serve_once(status: &str, body: &'static str) -> (u16, std::thread::JoinHandle
             body.len()
         );
         let mut out = &stream;
-        out.write_all(answer.as_bytes()).expect("the answer is sent");
+        out.write_all(answer.as_bytes())
+            .expect("the answer is sent");
         out.flush().expect("the answer is flushed");
         asked
     });
