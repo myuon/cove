@@ -8,7 +8,7 @@
 - Amended by: this ADR's own "Amendment (2026-08-25): a host answers the type
   it declared" below, which makes `OperationSchema::result` a promise the
   boundary holds a host to rather than a signature it renders
-- Implemented by: PR #35; the amendment by PR #45
+- Implemented by: PR #35; the amendment by PR #46
 - Implementation status: complete — the boundary is built in both directions.
   What sits behind it is a separate question this ADR states rather than
   answers: `database` still ships only a fake and a denied host, and `http`
