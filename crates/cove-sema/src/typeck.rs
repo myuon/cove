@@ -7732,6 +7732,7 @@ export fn main() -> Result<Unit, Error> {
                 deadline: None,
                 max_host_calls: None,
                 max_memory: None,
+                max_tasks: None,
                 trace: None,
                 generates: None,
             },

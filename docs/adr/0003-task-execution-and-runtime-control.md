@@ -6,9 +6,14 @@
 - Superseded by: [ADR 0008](0008-concurrent-task-execution.md), which took over
   phase 2 of the Decision below and, with it, the whole of "What Phase 1 does
   not validate"
-- Implemented by: PR #6 (phase 1); PR #23 replaced phase 1's execution model
-- Implementation status: complete — phase 1 shipped whole, and phase 2 became an
-  ADR of its own rather than a later commit against this one
+- Amended by: this ADR's own "Amendment (2026-08-25): a concurrency limit"
+  below, which adds the one control [ADR 0001](0001-mvp-language-design.md)
+  asked for and phase 1 did not build
+- Implemented by: PR #6 (phase 1); PR #23 replaced phase 1's execution model;
+  the amendment by PR #45
+- Implementation status: complete — phase 1 shipped whole, phase 2 became an
+  ADR of its own rather than a later commit against this one, and the
+  concurrency limit the amendment adds is imposed
 
 ## Context
 
@@ -126,3 +131,56 @@ line of that section still worth checking rather than assuming — a trace now
 carries each task's own CPU and each host call's wait, but not which task made
 the call, which `cove trace` says of itself under "not carried by these
 events".
+
+## Amendment (2026-08-25): a concurrency limit
+
+[ADR 0001](0001-mvp-language-design.md)'s "Runtime resource control" lists six
+things the runtime should be able to impose. Phase 1 above built four of them —
+fuel, a deadline, cancellation, and host-call accounting, along with a
+call-depth limit that list does not name — and
+[ADR 0011](0011-garbage-collection.md)'s collector later made the fifth,
+memory, a quantity something could be held to. Concurrency limits were the one
+left, and phase 1 had nothing to limit: a spawned task ran at its `spawn`, so a
+scope never held two at once. ADR 0008 changed that and did not add the limit,
+so between PR #23 and this
+amendment a program could write `while true { tasks.spawn { ... } }` and be
+bounded only by fuel, which is charged at the loop back edge *after* the thread
+already exists. Threads were the one resource a program could take without
+asking.
+
+**What is counted: the tasks a run holds alive at once.** Not the tasks one
+scope holds, and not the tasks a run spawns over its life. "Concurrency" means
+what is happening at the same time, and it is the run's total for the same
+reason memory is: a task's fuel is drawn from the run's budget rather than one
+of its own, so a program cannot stay under a limit by spreading the same work
+over more scopes. A task counts from its `spawn` until the task that spawned it
+observes its end.
+
+**What happens at the limit: the run is stopped.** A `spawn` past the limit
+raises a `RuntimeError` naming the limit and what the run was holding, exactly
+as an exhausted fuel budget, a passed deadline, `max_host_calls`, and
+`max_memory` do. The alternative — a `spawn` that blocks until a sibling
+finishes — was rejected: waiting is a scheduling policy, and ADR 0008
+deliberately has none. A limit that blocked would also turn a bound on
+concurrency into a bound on nothing at all, since the program would still get
+every task it asked for, only later.
+
+**Where it is checked: before the thread exists.** This is the one control that
+refuses work rather than stopping work already done, and it has to be, because
+a thread that has started is a resource already held; no later safepoint could
+give it back. `Interpreter::spawn` charges the budget before it takes a task
+id, traces the spawn, or calls `std::thread::Builder::spawn`, so a refused task
+is never given a thread and never appears in a trace.
+
+**Where a task's place goes back: at the join.** A task ends by finishing, by
+producing an `Err`, by being cancelled, or by breaking an invariant in its own
+thread, and the join that `await` and scope exit both perform is the one place
+all four are observed. Releasing there rather than on the task's own thread
+also keeps the limit deterministic: what a `spawn` is refused for depends on
+what the program has awaited, never on how quickly a sibling thread happened to
+start or finish.
+
+**Where it is configured: the three places every other limit lives.**
+`Limits::max_tasks` for a host embedding Cove, `--max-tasks <n>` for `cove
+run`, and `max_tasks` in a `[run.<name>]` table; `cove build` seals the
+configured value into the executable it writes, as it seals the rest.
