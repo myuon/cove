@@ -1,0 +1,4 @@
+/// Names the package's own idea of a clock, one letter from the host's.
+export fn tick() -> String {
+  "the package answered"
+}

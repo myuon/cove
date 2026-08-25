@@ -864,13 +864,20 @@ fn resolve_module(
 /// consulted to refuse a package module that would shadow a host module: a
 /// `use` naming an unknown host module is still accepted, since a host may
 /// register any module it likes.
-const HOST_MODULES: [&str; 7] = [
+///
+/// Two lists that must agree and cannot see each other drift silently, and a
+/// name missing from this one shadows its host without a word. `cove-cli`
+/// depends on both crates, so
+/// `crates/cove-cli/tests/host_modules.rs` compares this list against
+/// `cove_runtime::shipped_schema()` and is what catches the drift.
+pub const HOST_MODULES: [&str; 8] = [
     "clock",
     "console",
     "database",
     "documents",
     "env",
     "files",
+    "http",
     "process",
 ];
 
@@ -3446,17 +3453,14 @@ impl Show for B {
 
     /// Every host the runtime registers must be here, or a package module of
     /// that name shadows it silently -- modules resolve first.
+    ///
+    /// The loop reads [`HOST_MODULES`] rather than repeating it, because a
+    /// second copy of the list is a second place for a host to go missing:
+    /// `http` was absent from both for as long as this test spelled its own
+    /// names out.
     #[test]
     fn every_registered_host_module_is_refused_as_a_package_module() {
-        for host in [
-            "clock",
-            "console",
-            "database",
-            "documents",
-            "env",
-            "files",
-            "process",
-        ] {
+        for host in HOST_MODULES {
             let diagnostic = resolve_err(
                 &[
                     (host, "/// Does something.\nexport fn thing() {\n}\n"),

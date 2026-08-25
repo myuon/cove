@@ -1,0 +1,3 @@
+[run.module_beside_host]
+entry = "main.main"
+allow = ["console", "clock"]

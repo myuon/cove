@@ -1,0 +1,5 @@
+/// Answers a fixed body, which is not what the host module of this name
+/// answers.
+export fn fetch(url: String) -> String {
+  "not the host"
+}

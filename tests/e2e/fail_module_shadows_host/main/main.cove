@@ -1,0 +1,15 @@
+use console.println
+use http.fetch
+
+/// Never runs: this case exists to pin the diagnostic a package module named
+/// after a host module produces.
+///
+/// ADR 0005: "A path that matches both is an error; the fix is to rename the
+/// module, since the host namespace is not the package's to change." Without
+/// that error this program would check against the package's `http` and run
+/// against the host's, because the checker resolves modules first and the
+/// interpreter resolves hosts first.
+export fn main() -> Result<Unit, Error> {
+  println(fetch(url: "https://example.invalid"))?
+  Ok(())
+}
