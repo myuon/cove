@@ -439,6 +439,40 @@ export fn main() -> Result<Unit, Error> {
                     && line.contains("\"entry\":\"a.b.main\"")),
             "{trace}"
         );
+        // A sealed binary is a run like any other, so its trace ends the way
+        // every other run's does: with how the run came out.
+        assert!(
+            trace.lines().last().is_some_and(
+                |line| line == r#"{"event":"run_ended","outcome":"success","message":null}"#
+            ),
+            "{trace}"
+        );
+    }
+
+    /// The other half of that: a sealed binary that fails records what
+    /// stopped it, which for a capability it was not built with is the Host
+    /// API boundary refusing rather than the program failing.
+    #[test]
+    fn a_sealed_binary_that_was_refused_records_what_refused_it() {
+        let path: &'static str = Box::leak(
+            std::env::temp_dir()
+                .join(format!("cove-embed-refused-{}.jsonl", std::process::id()))
+                .display()
+                .to_string()
+                .into_boxed_str(),
+        );
+        let mut embedded = embedded(REFUSED, "app.main");
+        embedded.run.trace = Some(path);
+        assert!(embedded.run(Vec::new()).is_err());
+
+        let trace = std::fs::read_to_string(path).expect("the trace file was created");
+        let _ = std::fs::remove_file(path);
+        let last = trace.lines().last().expect("a terminal line");
+        assert!(
+            last.contains(r#""event":"run_ended","outcome":"host_boundary""#)
+                && last.contains("requires the `files` capability"),
+            "{trace}"
+        );
     }
 
     #[test]

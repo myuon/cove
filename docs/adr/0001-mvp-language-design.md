@@ -87,11 +87,13 @@ a sentence somewhere above that a reader would have to check against the code:
   0008 chose `Shared<T>` alone, and no representative program has yet shown the
   friction that would earn the rest.
 - **Two of the six trace distinctions.** Allocation and memory pressure arrived
-  with ADR 0011. Cache hits and misses have no event because there is no cache;
-  task suspension and resumption have none either, so only spawn, completion,
-  and cancellation are recorded; and a host call carries no task id, so its wait
-  is not attributable to the task that waited. `cove trace` ends its own summary
-  with that list rather than leaving a reader to discover it.
+  with ADR 0011, and a host call's task with ADR 0003's "Amendment
+  (2026-08-25): a run ends with an event, and a call names its task", which
+  also gave a run the terminal event its errors had never had. Cache hits and
+  misses have no event because there is no cache; task suspension and
+  resumption have none either, so only spawn, completion, and cancellation are
+  recorded. `cove trace` ends its own summary with what is left rather than
+  leaving a reader to discover it.
 - **Rejecting structural mutation during iteration.** A loop reads a snapshot
   of the elements, so a mutation through another alias is not observed and not
   refused.

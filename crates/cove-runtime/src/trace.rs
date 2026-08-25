@@ -26,12 +26,18 @@
 //! {"event":"task_spawned","id":<u64>,"parent":<u64|null>,"scope":<string>}
 //! {"event":"task_completed","id":<u64>,"cpu_ns":<u64>}
 //! {"event":"task_cancelled","id":<u64>}
-//! {"event":"host_call","module":<string>,"op":<string>,"capability":<string>,"wait_ns":<u64>,"granted":<bool>,"args":[<value>...],"outcome":<outcome>|null}
+//! {"event":"host_call","task":<u64>,"module":<string>,"op":<string>,"capability":<string>,"wait_ns":<u64>,"granted":<bool>,"args":[<value>...],"outcome":<outcome>|null}
 //! {"event":"entry_enter","module":<string>,"function":<string>}
 //! {"event":"entry_exit","module":<string>,"function":<string>,"cpu_ns":<u64>,"wait_ns":<u64>}
-//! {"event":"heap_collected","task":<u64|null>,"allocated":<u64>,"freed":<u64>,"live_objects":<u64>,"live_bytes":<u64>,"pause_ns":<u64>}
+//! {"event":"heap_collected","task":<u64>,"allocated":<u64>,"freed":<u64>,"live_objects":<u64>,"live_bytes":<u64>,"pause_ns":<u64>}
 //! {"event":"heap_summary","allocated":<u64>,"allocated_bytes":<u64>,"collections":<u64>,"live_bytes":<u64>,"peak_bytes":<u64>,"pause_ns":<u64>}
+//! {"event":"run_ended","outcome":<outcome-name>,"message":<string>|null}
 //! ```
+//!
+//! A `task` is the id of the task that did the thing, and the entry's own id
+//! is [`crate::runtime::ENTRY_TASK`]: the entry is not a spawned task, so it
+//! takes the one id the run never hands out. An `<outcome-name>` is one of
+//! the names [`RunOutcome::as_str`] writes.
 //!
 //! An `<outcome>` is `null` for a call that never reached the host, and
 //! otherwise one of:
@@ -87,7 +93,16 @@ use crate::value::Value;
 
 /// The version of the JSONL trace format this build writes, and the only one
 /// it reads.
-pub const TRACE_FORMAT_VERSION: u32 = 1;
+///
+/// Version 2 gave every `host_call` the id of the task that made it, gave
+/// every run a terminal `run_ended` event, and settled `heap_collected`'s
+/// `task` on the same convention the other two use, so the entry is task
+/// [`crate::runtime::ENTRY_TASK`] rather than a null. A version 1 trace can
+/// answer none of the three questions this build's reader now asks of one, and
+/// a reader that met a `run_ended` it had never heard of would report a broken
+/// line rather than an old file — so the version says what changed and a
+/// version 1 trace is refused for its version.
+pub const TRACE_FORMAT_VERSION: u32 = 2;
 
 /// How much of a host call's arguments and results a trace records.
 ///
@@ -194,6 +209,103 @@ pub enum HostOutcome {
     NotRecordable,
 }
 
+/// How a run ended.
+///
+/// Every run reaches exactly one of these, and [`TraceEvent::RunEnded`]
+/// records which. The names [`RunOutcome::as_str`] writes are a compatibility
+/// surface like the rest of the format: a reader groups runs by them.
+///
+/// The first two are the program answering. Cove's entry returns
+/// `Result<Unit, Error>`, so a returned `Err` is a program saying what it was
+/// written to say and not a failure of the run — which is why it is kept
+/// apart from every other way a run can end. The rest are failures, and they
+/// divide the way [`crate::error::RuntimeError`]'s own documentation divides
+/// them: a broken invariant, the Host API boundary refusing, or a limit the
+/// host imposed. The limits are [`crate::budget::Stopped`] one for one, so a
+/// trace names the control that stopped the run rather than reporting six
+/// stops as one.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RunOutcome {
+    /// The entry returned a value that is not an `Err`.
+    Success,
+    /// The entry returned `Err(...)`: expected failure, expressed in the
+    /// language rather than by stopping the run.
+    Error,
+    /// Cove execution broke an invariant — a failed assertion, a division by
+    /// zero, an overflow, a violated task-safety rule.
+    ///
+    /// This is also where a host that failed on its own terms arrives, and
+    /// the two are not currently told apart: an error raised inside a host
+    /// and an error raised by a Cove callback the host was running come back
+    /// out of the same call, and nothing at the boundary can say which was
+    /// which.
+    Invariant,
+    /// The Host API boundary refused: a capability the run was not granted,
+    /// an operation that does not exist, or an argument or a result the
+    /// operation's own schema does not admit.
+    HostBoundary,
+    /// The fuel budget was exhausted.
+    Fuel,
+    /// The wall-clock deadline was exceeded.
+    Deadline,
+    /// The run was cancelled from outside.
+    Cancelled,
+    /// The call-depth limit was exceeded.
+    CallDepth,
+    /// The host-call limit was exceeded.
+    HostCalls,
+    /// A `spawn` would have passed the concurrency limit.
+    Concurrency,
+}
+
+impl RunOutcome {
+    /// The name this outcome is written under in a trace.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            RunOutcome::Success => "success",
+            RunOutcome::Error => "error",
+            RunOutcome::Invariant => "invariant",
+            RunOutcome::HostBoundary => "host_boundary",
+            RunOutcome::Fuel => "fuel",
+            RunOutcome::Deadline => "deadline",
+            RunOutcome::Cancelled => "cancelled",
+            RunOutcome::CallDepth => "call_depth",
+            RunOutcome::HostCalls => "host_calls",
+            RunOutcome::Concurrency => "concurrency",
+        }
+    }
+
+    /// Parses the name [`RunOutcome::as_str`] produces.
+    pub fn parse(text: &str) -> Option<RunOutcome> {
+        [
+            RunOutcome::Success,
+            RunOutcome::Error,
+            RunOutcome::Invariant,
+            RunOutcome::HostBoundary,
+            RunOutcome::Fuel,
+            RunOutcome::Deadline,
+            RunOutcome::Cancelled,
+            RunOutcome::CallDepth,
+            RunOutcome::HostCalls,
+            RunOutcome::Concurrency,
+        ]
+        .into_iter()
+        .find(|outcome| outcome.as_str() == text)
+    }
+
+    /// Whether this outcome is one a program chose rather than one the
+    /// runtime imposed.
+    ///
+    /// The distinction the trace makes with it is what a redacted trace
+    /// carries: the message of a run the program ended is a value the program
+    /// built, which may hold anything the run read, while the message of a
+    /// run the runtime stopped is the runtime's own sentence about its own
+    /// limit.
+    pub fn is_the_program_s_own(self) -> bool {
+        matches!(self, RunOutcome::Success | RunOutcome::Error)
+    }
+}
+
 /// One recorded runtime event.
 #[derive(Clone, Debug)]
 pub enum TraceEvent {
@@ -218,7 +330,12 @@ pub enum TraceEvent {
     /// host answered — `None` for a call that never reached a host, so there
     /// was nothing to answer. Together they are what makes the call
     /// reproducible.
+    ///
+    /// `task` is the task that made the call, which is what lets a trace of a
+    /// run with concurrent tasks be grouped by whose I/O each call was. The
+    /// entry made its own calls under [`crate::runtime::ENTRY_TASK`].
     HostCall {
+        task: u64,
         module: String,
         op: String,
         capability: String,
@@ -239,8 +356,9 @@ pub enum TraceEvent {
     /// A heap belongs to one task, so this event says whose it was, and two
     /// tasks collecting at the same time produce two independent events.
     HeapCollected {
-        /// The task whose heap this was, or `None` for the entry's own.
-        task: Option<u64>,
+        /// The task whose heap this was, or [`crate::runtime::ENTRY_TASK`]
+        /// for the entry's own.
+        task: u64,
         /// Objects allocated since the previous collection.
         allocated: u64,
         /// Objects this collection reclaimed.
@@ -280,6 +398,23 @@ pub enum TraceEvent {
         function: String,
         cpu: Duration,
         wait: Duration,
+    },
+    /// The run ended, and this is how. The last event of every trace.
+    ///
+    /// [`TraceEvent::EntryExit`] says what an entry that got as far as
+    /// running spent; this says how the whole run came out, including for a
+    /// run that never reached its entry at all. There is one per run because
+    /// there is one entry per run: a task that ends is already three events
+    /// of its own, and a task's failure does not decide the run's — it
+    /// reaches whoever joined it, and either stops the run, which this event
+    /// then reports with that task's own message, or is handled, in which
+    /// case no terminal classification would have been true of it.
+    RunEnded {
+        outcome: RunOutcome,
+        /// Why, for an outcome that has a why: the `Error` the entry
+        /// returned, or the message of the error that stopped the run.
+        /// `None` for a run that succeeded.
+        message: Option<String>,
     },
 }
 
@@ -558,6 +693,7 @@ fn to_json_line(event: &TraceEvent, capture: ValueCapture) -> String {
             format!("{{\"event\":\"task_cancelled\",\"id\":{id}}}")
         }
         TraceEvent::HostCall {
+            task,
             module,
             op,
             capability,
@@ -572,7 +708,7 @@ fn to_json_line(event: &TraceEvent, capture: ValueCapture) -> String {
                 .collect::<Vec<_>>()
                 .join(",");
             format!(
-                "{{\"event\":\"host_call\",\"module\":{},\"op\":{},\"capability\":{},\"wait_ns\":{},\"granted\":{granted},\"args\":[{args}],\"outcome\":{}}}",
+                "{{\"event\":\"host_call\",\"task\":{task},\"module\":{},\"op\":{},\"capability\":{},\"wait_ns\":{},\"granted\":{granted},\"args\":[{args}],\"outcome\":{}}}",
                 json_string(module),
                 json_string(op),
                 json_string(capability),
@@ -588,10 +724,6 @@ fn to_json_line(event: &TraceEvent, capture: ValueCapture) -> String {
             live_bytes,
             pause,
         } => {
-            let task = match task {
-                Some(id) => id.to_string(),
-                None => "null".to_string(),
-            };
             format!(
                 "{{\"event\":\"heap_collected\",\"task\":{task},\"allocated\":{allocated},\"freed\":{freed},\"live_objects\":{live_objects},\"live_bytes\":{live_bytes},\"pause_ns\":{}}}",
                 json_ns(*pause)
@@ -625,6 +757,29 @@ fn to_json_line(event: &TraceEvent, capture: ValueCapture) -> String {
             json_ns(*cpu),
             json_ns(*wait),
         ),
+        TraceEvent::RunEnded { outcome, message } => format!(
+            "{{\"event\":\"run_ended\",\"outcome\":{},\"message\":{}}}",
+            json_string(outcome.as_str()),
+            encode_run_message(*outcome, message.as_deref(), capture),
+        ),
+    }
+}
+
+/// Renders the message a run ended with, honouring `capture`.
+///
+/// The runtime's own sentence about its own limit is kept in both modes, for
+/// the same reason a host's refusal is: it is why the run stopped, not data
+/// the run read. The `Error` a program *returned* is a value the program
+/// built, and a redacted trace carries no values it built — so it is dropped
+/// rather than shown, which leaves the classification, which is the part a
+/// reader groups by.
+fn encode_run_message(outcome: RunOutcome, message: Option<&str>, capture: ValueCapture) -> String {
+    match message {
+        Some(_) if capture == ValueCapture::Redacted && outcome.is_the_program_s_own() => {
+            "null".to_string()
+        }
+        Some(message) => json_string(message),
+        None => "null".to_string(),
     }
 }
 
@@ -725,6 +880,7 @@ mod tests {
 
     fn host_call(args: Vec<Value>, outcome: Option<HostOutcome>) -> TraceEvent {
         TraceEvent::HostCall {
+            task: crate::runtime::ENTRY_TASK,
             module: "documents".to_string(),
             op: "read".to_string(),
             capability: "documents".to_string(),
@@ -747,7 +903,7 @@ mod tests {
         );
         assert_eq!(
             String::from_utf8(sink.writer.into_inner().unwrap().0).unwrap(),
-            "{\"event\":\"trace_header\",\"version\":1,\"values\":\"full\",\"entry\":\"restricted.main\",\"args\":[\"one\",\"two\"]}\n"
+            "{\"event\":\"trace_header\",\"version\":2,\"values\":\"full\",\"entry\":\"restricted.main\",\"args\":[\"one\",\"two\"]}\n"
         );
     }
 
@@ -808,7 +964,7 @@ mod tests {
                 vec![Value::Str("input".into())],
                 answered(Value::ok(Value::Str("text".into()))),
             )),
-            r#"{"event":"host_call","module":"documents","op":"read","capability":"documents","wait_ns":900,"granted":true,"args":[{"type":"string","value":"input"}],"outcome":{"kind":"value","value":{"type":"enum","name":"Result","case":"Ok","payload":[{"type":"string","value":"text"}]}}}"#
+            r#"{"event":"host_call","task":0,"module":"documents","op":"read","capability":"documents","wait_ns":900,"granted":true,"args":[{"type":"string","value":"input"}],"outcome":{"kind":"value","value":{"type":"enum","name":"Result","case":"Ok","payload":[{"type":"string","value":"text"}]}}}"#
         );
     }
 
@@ -816,6 +972,7 @@ mod tests {
     fn a_call_that_never_reached_a_host_records_no_outcome() {
         assert_eq!(
             record_one(TraceEvent::HostCall {
+                task: 3,
                 module: "network".to_string(),
                 op: "fetch".to_string(),
                 capability: "network".to_string(),
@@ -824,7 +981,7 @@ mod tests {
                 args: vec![recorded(Value::Str("https://example.test".into()))],
                 outcome: None,
             }),
-            r#"{"event":"host_call","module":"network","op":"fetch","capability":"network","wait_ns":0,"granted":false,"args":[{"type":"string","value":"https://example.test"}],"outcome":null}"#
+            r#"{"event":"host_call","task":3,"module":"network","op":"fetch","capability":"network","wait_ns":0,"granted":false,"args":[{"type":"string","value":"https://example.test"}],"outcome":null}"#
         );
     }
 
@@ -835,7 +992,7 @@ mod tests {
     fn an_operation_that_is_not_recordable_records_that_instead_of_a_result() {
         assert_eq!(
             record_one(host_call(Vec::new(), Some(HostOutcome::NotRecordable))),
-            r#"{"event":"host_call","module":"documents","op":"read","capability":"documents","wait_ns":900,"granted":true,"args":[],"outcome":{"kind":"not_recordable"}}"#
+            r#"{"event":"host_call","task":0,"module":"documents","op":"read","capability":"documents","wait_ns":900,"granted":true,"args":[],"outcome":{"kind":"not_recordable"}}"#
         );
     }
 
@@ -846,7 +1003,7 @@ mod tests {
                 Vec::new(),
                 Some(HostOutcome::Error("no such host".to_string())),
             )),
-            r#"{"event":"host_call","module":"documents","op":"read","capability":"documents","wait_ns":900,"granted":true,"args":[],"outcome":{"kind":"error","message":"no such host"}}"#
+            r#"{"event":"host_call","task":0,"module":"documents","op":"read","capability":"documents","wait_ns":900,"granted":true,"args":[],"outcome":{"kind":"error","message":"no such host"}}"#
         );
     }
 
@@ -862,7 +1019,7 @@ mod tests {
                     answered(Value::some(Value::Str("hunter2".into()))),
                 )
             ),
-            r#"{"event":"host_call","module":"documents","op":"read","capability":"documents","wait_ns":900,"granted":true,"args":[{"type":"redacted","of":"String"}],"outcome":{"kind":"value","value":{"type":"redacted","of":"Option"}}}"#
+            r#"{"event":"host_call","task":0,"module":"documents","op":"read","capability":"documents","wait_ns":900,"granted":true,"args":[{"type":"redacted","of":"String"}],"outcome":{"kind":"value","value":{"type":"redacted","of":"Option"}}}"#
         );
     }
 
@@ -988,7 +1145,7 @@ mod tests {
     fn heap_collected() {
         assert_eq!(
             record_one(TraceEvent::HeapCollected {
-                task: Some(2),
+                task: 2,
                 allocated: 64,
                 freed: 60,
                 live_objects: 4,
@@ -999,18 +1156,40 @@ mod tests {
         );
     }
 
+    /// A call the entry made and a call a task made are told apart by the one
+    /// field that says so, which is what makes a concurrent trace groupable.
     #[test]
-    fn heap_collected_for_the_entry_names_no_task() {
+    fn a_host_call_names_the_task_that_made_it() {
+        let entry = record_one(host_call(Vec::new(), None));
+        assert!(entry.contains(r#""event":"host_call","task":0"#), "{entry}");
+        let spawned = record_one(TraceEvent::HostCall {
+            task: 7,
+            module: "console".to_string(),
+            op: "println".to_string(),
+            capability: "console".to_string(),
+            wait: Duration::ZERO,
+            granted: true,
+            args: Vec::new(),
+            outcome: None,
+        });
+        assert!(
+            spawned.contains(r#""event":"host_call","task":7"#),
+            "{spawned}"
+        );
+    }
+
+    #[test]
+    fn heap_collected_for_the_entry_names_the_entry_s_task() {
         assert_eq!(
             record_one(TraceEvent::HeapCollected {
-                task: None,
+                task: crate::runtime::ENTRY_TASK,
                 allocated: 1,
                 freed: 0,
                 live_objects: 1,
                 live_bytes: 8,
                 pause: Duration::ZERO,
             }),
-            r#"{"event":"heap_collected","task":null,"allocated":1,"freed":0,"live_objects":1,"live_bytes":8,"pause_ns":0}"#
+            r#"{"event":"heap_collected","task":0,"allocated":1,"freed":0,"live_objects":1,"live_bytes":8,"pause_ns":0}"#
         );
     }
 
@@ -1039,6 +1218,90 @@ mod tests {
                 wait: Duration::from_nanos(300),
             }),
             r#"{"event":"entry_exit","module":"hello","function":"main","cpu_ns":1200,"wait_ns":300}"#
+        );
+    }
+
+    #[test]
+    fn a_run_that_succeeded_ends_with_that_and_no_message() {
+        assert_eq!(
+            record_one(TraceEvent::RunEnded {
+                outcome: RunOutcome::Success,
+                message: None,
+            }),
+            r#"{"event":"run_ended","outcome":"success","message":null}"#
+        );
+    }
+
+    #[test]
+    fn a_run_whose_entry_returned_an_error_ends_with_that_error() {
+        assert_eq!(
+            record_one(TraceEvent::RunEnded {
+                outcome: RunOutcome::Error,
+                message: Some("no such document".to_string()),
+            }),
+            r#"{"event":"run_ended","outcome":"error","message":"no such document"}"#
+        );
+    }
+
+    #[test]
+    fn a_run_a_limit_stopped_ends_naming_the_limit_and_what_it_said() {
+        assert_eq!(
+            record_one(TraceEvent::RunEnded {
+                outcome: RunOutcome::Deadline,
+                message: Some("execution stopped: wall-clock deadline of 1ms exceeded".to_string()),
+            }),
+            r#"{"event":"run_ended","outcome":"deadline","message":"execution stopped: wall-clock deadline of 1ms exceeded"}"#
+        );
+    }
+
+    /// Every classification has a name, and every name reads back as the
+    /// classification it was written for: a trace consumer groups runs by
+    /// these strings, so they are as much of the format as the keys are.
+    #[test]
+    fn every_run_outcome_has_a_name_that_round_trips() {
+        let all = [
+            (RunOutcome::Success, "success"),
+            (RunOutcome::Error, "error"),
+            (RunOutcome::Invariant, "invariant"),
+            (RunOutcome::HostBoundary, "host_boundary"),
+            (RunOutcome::Fuel, "fuel"),
+            (RunOutcome::Deadline, "deadline"),
+            (RunOutcome::Cancelled, "cancelled"),
+            (RunOutcome::CallDepth, "call_depth"),
+            (RunOutcome::HostCalls, "host_calls"),
+            (RunOutcome::Concurrency, "concurrency"),
+        ];
+        for (outcome, name) in all {
+            assert_eq!(outcome.as_str(), name);
+            assert_eq!(RunOutcome::parse(name), Some(outcome));
+        }
+        assert_eq!(RunOutcome::parse("stopped"), None);
+    }
+
+    /// A redacted trace carries no value the program built, and the `Error` a
+    /// program returned is one — while the runtime's own sentence about its
+    /// own limit is not, so that one stays.
+    #[test]
+    fn a_redacted_trace_drops_a_returned_error_and_keeps_a_limit_s_own_words() {
+        assert_eq!(
+            record_with(
+                ValueCapture::Redacted,
+                TraceEvent::RunEnded {
+                    outcome: RunOutcome::Error,
+                    message: Some("the token was hunter2".to_string()),
+                }
+            ),
+            r#"{"event":"run_ended","outcome":"error","message":null}"#
+        );
+        assert_eq!(
+            record_with(
+                ValueCapture::Redacted,
+                TraceEvent::RunEnded {
+                    outcome: RunOutcome::Fuel,
+                    message: Some("execution stopped: fuel budget of 10 exhausted".to_string()),
+                }
+            ),
+            r#"{"event":"run_ended","outcome":"fuel","message":"execution stopped: fuel budget of 10 exhausted"}"#
         );
     }
 

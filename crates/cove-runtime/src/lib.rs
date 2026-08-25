@@ -31,7 +31,7 @@ pub use host::{
 };
 pub use http::{Http, ScriptedRequest, Served};
 pub use process::{Process, ProcessLog};
-pub use runtime::Runtime;
+pub use runtime::{Runtime, ENTRY_TASK};
 pub use schema::{
     Admits, Effect, FieldSchema, HostType, Mismatch, ModuleSchema, OperationSchema, Part,
     ResourceSchema, TypeSchema,
@@ -39,7 +39,7 @@ pub use schema::{
 pub use shared::SharedCell;
 pub use task::Transfer;
 pub use trace::{
-    create_trace_file, value_to_json, HostOutcome, JsonlSink, NullSink, RecordedValue, TraceEvent,
-    TraceHeader, TraceSink, ValueCapture, TRACE_FORMAT_VERSION,
+    create_trace_file, value_to_json, HostOutcome, JsonlSink, NullSink, RecordedValue, RunOutcome,
+    TraceEvent, TraceHeader, TraceSink, ValueCapture, TRACE_FORMAT_VERSION,
 };
 pub use value::Value;

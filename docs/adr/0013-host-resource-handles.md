@@ -837,3 +837,14 @@ happened inside the other. The only thing that connects them is the outer
 call's `wait`, which contains the inner call's — an inclusion a reader can
 notice and no consumer can rely on, since two sequential calls can have the
 same shape. Reentry is invisible in a trace today.
+
+The task attribution that issue #61 added does not change that, and is worth
+saying so plainly. A callback runs on the calling task, so the call a callback
+makes carries the same task id as the call that ran it: grouping a trace by
+task puts the two together, which is true — one task did both — and says
+nothing about one having happened inside the other. What a task id fixes is
+telling one task's calls from another's. Telling a task's outer call from its
+own inner one would need an event with a shape this one does not have, and
+[ADR 0003](0003-task-execution-and-runtime-control.md)'s "Amendment
+(2026-08-25): a run ends with an event, and a call names its task"
+deliberately did not invent one.

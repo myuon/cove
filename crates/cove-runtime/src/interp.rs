@@ -35,10 +35,10 @@ use crate::builtins::{self, Callable};
 use crate::error::RuntimeError;
 use crate::heap::{Collection, Heap, HeapStats, Roots};
 use crate::host::{HostRegistry, Reentry, ResourceHandle};
-use crate::runtime::Runtime;
+use crate::runtime::{Runtime, ENTRY_TASK};
 use crate::schema::TypeSchema;
 use crate::task::{Task, TaskOutcome, TaskScope, TaskState, Transfer};
-use crate::trace::{Timing, TraceEvent};
+use crate::trace::{RunOutcome, Timing, TraceEvent};
 use crate::value::{Closure, DynValue, EnumValue, RangeBounds, StructValue, Value};
 
 /// How deep Cove calls may nest before the runtime reports a limit instead of
@@ -473,6 +473,15 @@ impl<'a> Interpreter<'a> {
         Value::Vector(self.heap.allocate(elements))
     }
 
+    /// The task this interpreter is running: the spawned task's id, or
+    /// [`ENTRY_TASK`] when it is running the entry.
+    ///
+    /// This is the one answer to "which task" that every event naming a task
+    /// is written from — the heap it collected, and the host call it made.
+    fn task_id(&self) -> u64 {
+        self.task_stack.last().copied().unwrap_or(ENTRY_TASK)
+    }
+
     /// Marks and sweeps this task's heap, and records what it did.
     ///
     /// The interpreter calls this at safepoints; a host may call it directly
@@ -483,8 +492,9 @@ impl<'a> Interpreter<'a> {
             let roots = roots.borrow();
             self.heap.collect(&roots)
         };
+        let task = self.task_id();
         self.runtime.trace(TraceEvent::HeapCollected {
-            task: self.task_stack.last().copied(),
+            task,
             allocated: collected.allocated,
             freed: collected.freed_objects,
             live_objects: collected.live_objects,
@@ -549,11 +559,45 @@ impl<'a> Interpreter<'a> {
         interpreter
     }
 
-    /// Calls the host-selected entry function.
+    /// Calls the host-selected entry function, and records how the run came
+    /// out.
     ///
     /// `args` are the process arguments; they are passed as an
     /// `Array<String>` when the entry declares a parameter for them.
+    ///
+    /// Every path into a Cove program passes through here — `cove run`, `cove
+    /// test`, `cove generate`, `cove replay`, a `cove build` binary, and a
+    /// host embedding the runtime — so this is where a run's terminal event
+    /// is written, and writing it here is what makes "every run has one" true
+    /// rather than a claim about the paths somebody remembered. It wraps
+    /// [`Interpreter::enter`] rather than living inside it so that a run that
+    /// never reached its entry — one that named a function this package does
+    /// not declare, say — still ends with an event saying so.
     pub fn run_entry(
+        &mut self,
+        module: &str,
+        name: &str,
+        args: Vec<Rc<str>>,
+    ) -> Result<Value, RuntimeError> {
+        let outcome = self.enter(module, name, args);
+        let (classification, message) = match &outcome {
+            // Cove's entry returns `Result<Unit, Error>`, so an `Err` is the
+            // program saying what it was written to say. It is a failure of
+            // the program's work and not of the run, which is why it is its
+            // own outcome rather than one more kind of stop.
+            Ok(value) if value.is_err() => (RunOutcome::Error, returned_error_message(value)),
+            Ok(_) => (RunOutcome::Success, None),
+            Err(error) => (error.outcome, Some(error.message.clone())),
+        };
+        self.runtime.trace(TraceEvent::RunEnded {
+            outcome: classification,
+            message,
+        });
+        outcome
+    }
+
+    /// The entry itself, from looking it up to retiring the last heap.
+    fn enter(
         &mut self,
         module: &str,
         name: &str,
@@ -620,7 +664,7 @@ impl<'a> Interpreter<'a> {
         let timing = self
             .timings
             .pop()
-            .expect("run_entry pushes exactly the one timing it pops");
+            .expect("an entry pushes exactly the one timing it pops");
         self.runtime.trace(TraceEvent::EntryExit {
             module: module.to_string(),
             function: name.to_string(),
@@ -3489,6 +3533,18 @@ fn run_task(
     })
 }
 
+/// What an entry that returned `Err(...)` said, for the run's terminal event.
+///
+/// The `Error` inside prints as its own message, which is the same text `cove
+/// run` reports and the same text the program would have printed, so a trace
+/// and a terminal say the same thing about the same failure.
+fn returned_error_message(value: &Value) -> Option<String> {
+    let Value::Enum(result) = value else {
+        return None;
+    };
+    result.payload.first().map(ToString::to_string)
+}
+
 /// The way back into a running program for a host call that was handed work.
 ///
 /// [`crate::host::Reentry`] is the whole of what a host may do with a Cove
@@ -3612,6 +3668,17 @@ impl Reentry for Callback<'_, '_> {
             let deadline = budget.limits().deadline?;
             Some(deadline.saturating_sub(budget.elapsed()))
         })?
+    }
+
+    /// The task whose stack this call is standing on, which is the task the
+    /// boundary records the call against.
+    ///
+    /// A callback runs on the calling task, so a host call made from inside
+    /// one is made by the same task as the call that ran it: the answer does
+    /// not change with nesting, and a trace of a nested call attributes it
+    /// where the work is actually being charged.
+    fn task(&self) -> u64 {
+        self.interpreter.task_id()
     }
 }
 
@@ -6637,6 +6704,282 @@ export fn main() -> Result<Unit, Error> {
         )
     }
 
+    /// How a run of `source`'s `main` ended, under `limits`, granting
+    /// `grants`, and with `cancellation` as the run's own stop flag.
+    ///
+    /// Every classification a trace can carry is produced by a real run
+    /// here rather than by building the event by hand: the point of the
+    /// terminal event is that the runtime can tell these cases apart, and a
+    /// test that constructed the answer itself would not test that.
+    fn run_ended(
+        source: &str,
+        limits: Limits,
+        grants: &[&str],
+        cancellation: Cancellation,
+    ) -> (RunOutcome, Option<String>) {
+        let (sources, program) = program_of(source);
+        let sink = RecordingSink::default();
+        let mut hosts = HostRegistry::new(Grants::new(grants.iter().copied()));
+        hosts.register(Box::new(Console::new(Buffer::default())));
+        hosts.set_budget(Budget::with_cancellation(limits, cancellation));
+        hosts.set_trace(Arc::new(sink.clone()));
+        let runtime =
+            Runtime::new(program, sources, Arc::new(hosts)).with_trace(Arc::new(sink.clone()));
+        let _ = Interpreter::new(&runtime).run_entry("test", "main", Vec::new());
+        let events = sink.events();
+        // The terminal event is terminal: nothing a run traces comes after
+        // it, whatever the run did.
+        match events.last() {
+            Some(TraceEvent::RunEnded { outcome, message }) => (*outcome, message.clone()),
+            other => panic!("a run's last event must be `run_ended`, found {other:?}"),
+        }
+    }
+
+    /// A run of `source`'s `main` that needs nothing but `console`.
+    fn ended(source: &str) -> (RunOutcome, Option<String>) {
+        run_ended(source, Limits::default(), &["console"], Cancellation::new())
+    }
+
+    /// A `main` around `body`, for the terminal-event tests.
+    fn main_of(body: &str) -> String {
+        format!("use console.println\n\nexport fn main() -> Result<Unit, Error> {{\n{body}\n}}\n")
+    }
+
+    #[test]
+    fn a_run_that_finished_ends_with_success_and_says_nothing_more() {
+        assert_eq!(
+            ended(&main_of("  println(\"hi\")?\n  Ok(())")),
+            (RunOutcome::Success, None)
+        );
+    }
+
+    /// A returned `Err` is the program saying what it was written to say, so
+    /// it is its own outcome rather than one more kind of failure — and the
+    /// message it carries is the one the program wrote.
+    #[test]
+    fn a_run_whose_entry_returned_an_error_ends_with_that_error_and_its_message() {
+        assert_eq!(
+            ended(&main_of("  Err(Error(message: \"no report\"))")),
+            (RunOutcome::Error, Some("no report".to_string()))
+        );
+    }
+
+    #[test]
+    fn a_run_that_broke_an_invariant_ends_with_that() {
+        let (outcome, message) = ended(&main_of("  let n = 1 / 0\n  Ok(())"));
+        assert_eq!(outcome, RunOutcome::Invariant);
+        assert_eq!(message.as_deref(), Some("`Int` division by zero"));
+    }
+
+    /// A capability the run was not granted is the boundary refusing, which
+    /// is neither the program's own failure nor a limit the run passed.
+    #[test]
+    fn a_run_the_host_boundary_refused_ends_with_that() {
+        let (outcome, message) = run_ended(
+            &main_of("  println(\"hi\")?\n  Ok(())"),
+            Limits::default(),
+            &[],
+            Cancellation::new(),
+        );
+        assert_eq!(outcome, RunOutcome::HostBoundary);
+        assert!(
+            message.is_some_and(|message| message.contains("requires the `console` capability")),
+            "the message names what was refused"
+        );
+    }
+
+    /// Each runtime control is its own classification: a reader deciding what
+    /// to do about a stopped run wants to know which control stopped it.
+    #[test]
+    fn each_limit_that_stops_a_run_ends_it_with_that_limit_s_own_name() {
+        let looping = main_of("  var i = 0\n  while true {\n    i = i + 1\n  }\n  Ok(())");
+        let stopped = |limits: Limits, source: &str| {
+            run_ended(source, limits, &["console"], Cancellation::new()).0
+        };
+        assert_eq!(
+            stopped(
+                Limits {
+                    fuel: Some(100),
+                    ..Limits::default()
+                },
+                &looping
+            ),
+            RunOutcome::Fuel
+        );
+        assert_eq!(
+            stopped(
+                Limits {
+                    deadline: Some(Duration::from_millis(1)),
+                    ..Limits::default()
+                },
+                &looping
+            ),
+            RunOutcome::Deadline
+        );
+        assert_eq!(
+            stopped(
+                Limits {
+                    max_host_calls: Some(0),
+                    ..Limits::default()
+                },
+                &main_of("  println(\"hi\")?\n  Ok(())")
+            ),
+            RunOutcome::HostCalls
+        );
+        assert_eq!(
+            stopped(
+                Limits {
+                    max_call_depth: Some(2),
+                    ..Limits::default()
+                },
+                &format!(
+                    "fn down(n: Int) -> Int {{\n  if n == 0 {{ 0 }} else {{ down(n - 1) }}\n}}\n\n{}",
+                    main_of("  let n = down(8)\n  Ok(())")
+                )
+            ),
+            RunOutcome::CallDepth
+        );
+        assert_eq!(
+            stopped(
+                Limits {
+                    max_tasks: Some(1),
+                    ..Limits::default()
+                },
+                &main_of(
+                    "  scope many {\n    let a = many.spawn { 1 }\n    let b = many.spawn { 2 }\n    let total = await a + await b\n  }\n  Ok(())"
+                )
+            ),
+            RunOutcome::Concurrency
+        );
+    }
+
+    /// The one stop `cove run` cannot itself raise, and the reason the
+    /// classification exists: a host embedding the runtime cancels a run
+    /// through the flag it kept, and the trace says that is what happened.
+    #[test]
+    fn a_run_cancelled_from_outside_ends_with_that() {
+        let cancellation = Cancellation::new();
+        cancellation.cancel();
+        assert_eq!(
+            run_ended(
+                &main_of("  println(\"hi\")?\n  Ok(())"),
+                Limits::default(),
+                &["console"],
+                cancellation,
+            )
+            .0,
+            RunOutcome::Cancelled
+        );
+    }
+
+    /// A run that never reached its entry still ended, and a trace that said
+    /// nothing about it would be a trace with no ending at all.
+    #[test]
+    fn a_run_that_could_not_find_its_entry_still_ends_with_an_event() {
+        let (sources, program) = program_of(&main_of("  Ok(())"));
+        let sink = RecordingSink::default();
+        let runtime = Runtime::new(
+            program,
+            sources,
+            Arc::new(HostRegistry::new(Grants::new(["console"]))),
+        )
+        .with_trace(Arc::new(sink.clone()));
+        let outcome = Interpreter::new(&runtime).run_entry("test", "absent", Vec::new());
+        assert!(outcome.is_err());
+        let events = sink.events();
+        assert!(
+            matches!(
+                events.as_slice(),
+                [TraceEvent::RunEnded {
+                    outcome: RunOutcome::Invariant,
+                    ..
+                }]
+            ),
+            "{events:?}"
+        );
+    }
+
+    /// The acceptance criterion of issue #61: a trace of concurrent tasks can
+    /// be grouped by which task did the I/O, unambiguously.
+    ///
+    /// Three tasks each make two host calls around a wait, so their calls
+    /// genuinely interleave and no order is fixed. What is fixed is whose
+    /// each one was: every call a task made carries that task's id, so
+    /// grouping by it recovers exactly the three pairs the program wrote,
+    /// with the entry's own call under its own id and mixed into none of
+    /// them.
+    #[test]
+    fn every_host_call_names_the_task_that_made_it() {
+        let source = r#"
+use clock.sleep
+use console.println
+
+fn work(label: String) -> Result<Unit, Error> {
+  println("{label} started")?
+  sleep(1ms)
+  println("{label} finished")
+}
+
+export fn main() -> Result<Unit, Error> {
+  println("entry")?
+  scope workers {
+    let a = workers.spawn { work("a") }
+    let b = workers.spawn { work("b") }
+    let c = workers.spawn { work("c") }
+    await a?
+    await b?
+    await c?
+  }
+  Ok(())
+}
+"#;
+        let (run, events, _) = run_traced(source);
+        run.value();
+
+        let mut said: std::collections::BTreeMap<u64, Vec<String>> =
+            std::collections::BTreeMap::new();
+        for event in &events {
+            let TraceEvent::HostCall { task, op, args, .. } = event else {
+                continue;
+            };
+            if op != "println" {
+                continue;
+            }
+            let crate::trace::RecordedValue::Carried(transfer) = &args[0] else {
+                panic!("a printed line is a string, which crosses a boundary whole");
+            };
+            said.entry(*task)
+                .or_default()
+                .push(transfer.clone().into_value().to_string());
+        }
+
+        // The entry called a host too, under the id a call outside any
+        // spawned task is made with, and nothing a task said is under it.
+        assert_eq!(said.remove(&ENTRY_TASK), Some(vec!["entry".to_string()]));
+
+        // Three tasks, three ids, and each id's calls are one label's — a
+        // grouping that mixed two tasks would show up as a group with two
+        // labels in it.
+        assert_eq!(said.len(), 3, "{said:?}");
+        let mut labels: Vec<String> = Vec::new();
+        for (task, lines) in &said {
+            assert_ne!(*task, ENTRY_TASK);
+            let label = lines[0]
+                .split_once(' ')
+                .expect("a line is `<label> <what>`")
+                .0
+                .to_string();
+            assert_eq!(
+                *lines,
+                vec![format!("{label} started"), format!("{label} finished")],
+                "task {task} said something another task said"
+            );
+            labels.push(label);
+        }
+        labels.sort();
+        assert_eq!(labels, ["a", "b", "c"]);
+    }
+
     #[test]
     fn a_task_can_spawn_tasks_of_its_own() {
         let run = run_task_body(
@@ -8149,7 +8492,7 @@ export fn main() -> Result<Unit, Error> {
 
     impl HeapRun {
         /// Every collection the run recorded, as `(task, allocated, freed)`.
-        fn collections(&self) -> Vec<(Option<u64>, u64, u64)> {
+        fn collections(&self) -> Vec<(u64, u64, u64)> {
             self.events
                 .iter()
                 .filter_map(|event| match event {
@@ -8330,7 +8673,7 @@ export fn main() -> Result<Unit, Error> {
         assert!(
             run.collections()
                 .iter()
-                .any(|(task, _, freed)| task.is_some() && *freed > 0),
+                .any(|(task, _, freed)| *task != ENTRY_TASK && *freed > 0),
             "no collection ran inside the task: {:?}",
             run.collections()
         );
@@ -8364,14 +8707,14 @@ export fn main() -> Result<Unit, Error> {
         // of those vectors.
         assert_eq!(run.output, "3201 3202\n");
 
-        let collected: BTreeSet<Option<u64>> = run
+        let collected: BTreeSet<u64> = run
             .collections()
             .into_iter()
             .filter(|(_, _, freed)| *freed > 0)
             .map(|(task, _, _)| task)
             .collect();
         assert!(
-            collected.contains(&Some(1)) && collected.contains(&Some(2)),
+            collected.contains(&1) && collected.contains(&2),
             "both tasks should have collected: {collected:?}"
         );
     }
@@ -8440,7 +8783,7 @@ export fn main() -> Result<Unit, Error> {
         assert!(
             run.collections()
                 .iter()
-                .any(|(task, _, freed)| task.is_some() && *freed > 0),
+                .any(|(task, _, freed)| *task != ENTRY_TASK && *freed > 0),
             "{:?}",
             run.collections()
         );

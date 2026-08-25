@@ -20,6 +20,14 @@ use crate::heap::HeapStats;
 use crate::host::HostRegistry;
 use crate::trace::{NullSink, TraceEvent, TraceSink};
 
+/// The task id the entry runs under.
+///
+/// The entry is not a spawned task and has no id of its own, so it takes the
+/// one id [`Runtime::next_task_id`] never hands out. Every event that names a
+/// task names it this way, so a trace has one convention for "which task"
+/// rather than one per event.
+pub const ENTRY_TASK: u64 = 0;
+
 /// The shared context of one run.
 #[derive(Clone)]
 pub struct Runtime {
@@ -80,7 +88,8 @@ impl Runtime {
         self.trace.record(event);
     }
 
-    /// The next task id, unique across every thread of this run.
+    /// The next task id, unique across every thread of this run, and never
+    /// [`ENTRY_TASK`].
     pub fn next_task_id(&self) -> u64 {
         self.next_task_id.fetch_add(1, Ordering::Relaxed)
     }

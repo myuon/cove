@@ -112,7 +112,7 @@ fn a_recorded_run_reads_back_and_replays() {
     let path = dir.join("t.jsonl");
     let recorded = record(&path);
     assert!(
-        recorded.starts_with(r#"{"event":"trace_header","version":1,"values":"full","entry":"restricted.main","args":[]}"#),
+        recorded.starts_with(r#"{"event":"trace_header","version":2,"values":"full","entry":"restricted.main","args":[]}"#),
         "{recorded}"
     );
 
@@ -129,6 +129,11 @@ fn a_recorded_run_reads_back_and_replays() {
         r#"host_call       documents.read("input") [documents] dispatched"#,
         r#"result Ok("Cove grants only narrow authority.\n")"#,
         r#"host_call       console.println("5 words") [console] dispatched"#,
+        // Every call this run made, it made itself: the entry is a task with
+        // an id like any other, and that is what the calls are attributed to.
+        "by the entry",
+        "outcome      success",
+        "run_ended       success",
         "not carried by these events",
     ] {
         assert!(report.contains(expected), "missing `{expected}`:\n{report}");
@@ -213,7 +218,7 @@ fn a_trace_from_a_future_version_is_rejected_by_both_commands() {
     let dir = TempDir::new("version");
     let path = dir.join("t.jsonl");
     let recorded = record(&path);
-    std::fs::write(&path, recorded.replace(r#""version":1"#, r#""version":99"#)).unwrap();
+    std::fs::write(&path, recorded.replace(r#""version":2"#, r#""version":99"#)).unwrap();
 
     let path = path.display().to_string();
     for args in [
@@ -226,7 +231,7 @@ fn a_trace_from_a_future_version_is_rejected_by_both_commands() {
             "an unknown version must be rejected"
         );
         assert!(
-            stderr(&output).contains("is version 99, and this build of `cove` reads version 1"),
+            stderr(&output).contains("is version 99, and this build of `cove` reads version 2"),
             "{}",
             stderr(&output)
         );
@@ -378,18 +383,21 @@ fn a_recorded_task_scope_replays_the_host_calls_it_made() {
     let recorded = record_tasks_host_order(&path);
 
     // The trace really did record the two `console.println` calls, in the
-    // program's order: `first` before `second`.
+    // program's order: `first` before `second`, each under the id of the task
+    // that made it.
     let calls: Vec<&str> = recorded
         .lines()
         .filter(|line| line.contains(r#""event":"host_call""#))
         .collect();
     assert_eq!(calls.len(), 2, "{recorded}");
     assert!(
-        calls[0].contains(r#""args":[{"type":"string","value":"first"}]"#),
+        calls[0].contains(r#""task":1"#)
+            && calls[0].contains(r#""args":[{"type":"string","value":"first"}]"#),
         "{recorded}"
     );
     assert!(
-        calls[1].contains(r#""args":[{"type":"string","value":"second"}]"#),
+        calls[1].contains(r#""task":2"#)
+            && calls[1].contains(r#""args":[{"type":"string","value":"second"}]"#),
         "{recorded}"
     );
 
@@ -472,6 +480,162 @@ fn a_trace_whose_concurrent_calls_are_reordered_diverges_and_says_where() {
         "rule               a replay answers every Host API call from the trace, in the",
         "recorded order; the program's own computation runs for real,",
         "so a divergence means it took a different path than it did",
+    ] {
+        assert!(report.contains(expected), "missing `{expected}`:\n{report}");
+    }
+}
+
+/// The question a concurrent trace could not answer before: which task did
+/// this I/O.
+///
+/// `tests/e2e/tasks_host_order` spawns two tasks that each make exactly one
+/// host call, so the recording has two calls from two tasks and nothing else
+/// to confuse them. The summary separates them, and `--task` selects one
+/// task's calls along with its lifecycle.
+#[test]
+fn a_concurrent_trace_can_be_grouped_by_the_task_that_made_each_host_call() {
+    let dir = TempDir::new("host-by-task");
+    let path = dir.join("t.jsonl");
+    record_tasks_host_order(&path);
+    let trace = path.display().to_string();
+
+    let inspect = cove_in(&e2e(), &["trace", &trace]);
+    assert!(inspect.status.success(), "{}", stderr(&inspect));
+    let report = stdout(&inspect);
+    for expected in [
+        "by task",
+        "task 1     1 dispatched, 0 refused, 1 irreversible",
+        "task 2     1 dispatched, 0 refused, 1 irreversible",
+        r#"host_call       console.println("first") [console] dispatched, by task 1"#,
+        r#"host_call       console.println("second") [console] dispatched, by task 2"#,
+    ] {
+        assert!(report.contains(expected), "missing `{expected}`:\n{report}");
+    }
+    // The summary no longer ends by admitting it cannot say whose call was
+    // whose, because it now can.
+    assert!(!report.contains("which task made a host call"), "{report}");
+
+    let one = cove_in(&e2e(), &["trace", &trace, "--task", "1"]);
+    assert!(one.status.success(), "{}", stderr(&one));
+    let timeline = stdout(&one)
+        .split("timeline")
+        .nth(1)
+        .expect("a timeline")
+        .to_string();
+    assert!(
+        timeline.contains(r#"console.println("first")"#),
+        "{timeline}"
+    );
+    assert!(
+        !timeline.contains(r#"console.println("second")"#),
+        "{timeline}"
+    );
+    assert!(timeline.contains("task_spawned    1"), "{timeline}");
+    assert!(timeline.contains("task_completed  1"), "{timeline}");
+}
+
+/// Every run has a terminal outcome, whichever way it ended, and the
+/// classification is the name a reader groups runs by.
+#[test]
+fn every_run_records_how_it_ended() {
+    let dir = TempDir::new("outcome");
+    // A limit the program cannot get past, an entry that returns `Err`, and a
+    // capability the run was not granted: one of each family the
+    // classification names.
+    let cases: [(&str, &[&str], &str); 4] = [
+        ("success", &["run", "hello"], "\"outcome\":\"success\""),
+        (
+            "deadline",
+            &["run", "restricted", "--deadline", "1ns"],
+            "\"outcome\":\"deadline\"",
+        ),
+        (
+            "fuel",
+            &["run", "restricted", "--fuel", "5"],
+            "\"outcome\":\"fuel\"",
+        ),
+        (
+            "host-calls",
+            &["run", "restricted", "--max-host-calls", "0"],
+            "\"outcome\":\"host_calls\"",
+        ),
+    ];
+    for (name, args, expected) in cases {
+        let path = dir.join(&format!("{name}.jsonl"));
+        let trace = path.display().to_string();
+        let mut argv = args.to_vec();
+        argv.extend(["--trace", trace.as_str()]);
+        cove(&argv);
+        let recorded = std::fs::read_to_string(&path).expect("the trace was written");
+        let last = recorded
+            .lines()
+            .last()
+            .expect("a trace has at least a header");
+        assert!(
+            last.contains("\"event\":\"run_ended\"") && last.contains(expected),
+            "`{name}` should end `{expected}`, and it must be the last line:\n{recorded}"
+        );
+    }
+}
+
+/// The other two families, from the `tests/e2e` package: an entry that
+/// returned `Err`, and one the Host API boundary refused.
+#[test]
+fn a_program_s_own_failure_and_the_boundary_s_are_different_outcomes() {
+    let dir = TempDir::new("outcome-e2e");
+    for (run, expected, said) in [
+        (
+            "fail_entry_error",
+            "\"outcome\":\"error\"",
+            "the requested report is not available",
+        ),
+        (
+            "fail_no_capability",
+            "\"outcome\":\"host_boundary\"",
+            "requires the `console` capability",
+        ),
+        (
+            "fail_divide_by_zero",
+            "\"outcome\":\"invariant\"",
+            "division by zero",
+        ),
+    ] {
+        let path = dir.join(&format!("{run}.jsonl"));
+        let trace = path.display().to_string();
+        cove_in(&e2e(), &["run", run, "--trace", &trace]);
+        let recorded = std::fs::read_to_string(&path).expect("the trace was written");
+        let last = recorded.lines().last().expect("a terminal line");
+        assert!(last.contains(expected), "{recorded}");
+        assert!(last.contains(said), "{recorded}");
+    }
+}
+
+/// A replay that ends differently than the recording did is the program
+/// saying it would behave differently, which is what a replay is for.
+#[test]
+fn a_replay_that_ends_differently_than_the_recording_diverges() {
+    let dir = TempDir::new("diverge-ending");
+    let path = dir.join("t.jsonl");
+    let recorded = record(&path);
+    std::fs::write(
+        &path,
+        recorded.replace(
+            r#""outcome":"success","message":null"#,
+            r#""outcome":"error","message":"the report was not available""#,
+        ),
+    )
+    .unwrap();
+
+    let replay = cove(&["replay", &path.display().to_string(), "restricted"]);
+    assert!(
+        !replay.status.success(),
+        "a different ending must fail the replay"
+    );
+    let report = stderr(&replay);
+    for expected in [
+        "divergence: the program ended differently than it did",
+        "the trace records  error — the report was not available",
+        "the program ended  success",
     ] {
         assert!(report.contains(expected), "missing `{expected}`:\n{report}");
     }
