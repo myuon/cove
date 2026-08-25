@@ -1,0 +1,31 @@
+use module_conformance.note.Note
+
+/// A value that can render itself for a human.
+export trait Display {
+  /// Returns the full form.
+  fn describe(self) -> String
+
+  /// Returns the short form, defaulting to the full one.
+  fn label(self) -> String {
+    "<{self.describe()}>"
+  }
+}
+
+/// A conformance for a type this module imports, which ADR 0006 allows
+/// because this module declares the trait.
+impl Display for Note {
+  /// Returns the full form.
+  fn describe(self) -> String {
+    "note: {self.text}"
+  }
+}
+
+/// Renders any conforming value, choosing the implementation statically.
+export fn render<T: Display>(value: T) -> String {
+  value.label()
+}
+
+/// Renders any conforming value, choosing the implementation from the value.
+export fn renderDyn(value: dyn Display) -> String {
+  value.label()
+}

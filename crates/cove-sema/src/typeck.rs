@@ -2,9 +2,27 @@
 //!
 //! ADR 0004 decides what this checks and how: annotations are mandatory at
 //! boundaries and inferred inside, types are nominal with no subtyping, and
-//! checking is per-module. A module sees its own declarations plus the
-//! builtins. ADR 0006 replaces that ADR's "parametric and unbounded" with
-//! "parametric with bounds", which is the change it anticipated.
+//! checking is per-module. A module sees its own declarations, whatever it
+//! imports with `use`, and the builtins. ADR 0006 replaces that ADR's
+//! "parametric and unbounded" with "parametric with bounds", which is the
+//! change it anticipated.
+//!
+//! # The import environment
+//!
+//! ADR 0005 makes a module able to name another module's exported
+//! declarations, and ADR 0004 anticipated exactly one change for it: the
+//! checker gains an import environment. That is [`Checker::import`], and
+//! nothing else about the pass is different.
+//!
+//! One rule holds it together. A declaration is known by the module that
+//! declares it: its table key is its bare name inside that module, and
+//! `module.Name` everywhere else. So two modules may each declare a
+//! `Config` without the checker confusing them, and a type keeps one
+//! identity however many imports it is reached through. Traits and
+//! conformances travel with it, so an imported trait can be named in a bound
+//! and a conformance declared anywhere in the package is found wherever the
+//! trait and the type are both in scope. Modules are checked in dependency
+//! order, which exists because ADR 0005 forbids import cycles.
 //!
 //! # Traits and the two dispatch forms
 //!
@@ -68,12 +86,13 @@
 //!   typed Host API schema and there is none yet, so the checker has nothing
 //!   to check a host call against. It warns ([`HOST_TYPE`]) at a host *type*
 //!   so the gap is visible in `cove check`.
-//! - **Names no module declares.** With no module-to-module imports, a
-//!   capitalized name a module does not declare cannot be resolved by any
-//!   means the language offers; it is assumed to come from the host and warns
+//! - **Names nothing in scope explains.** A capitalized name a module
+//!   neither declares nor imports cannot be resolved by any means the
+//!   language offers; it is assumed to come from the host and warns
 //!   ([`UNRESOLVED_NAME`], [`UNKNOWN_TYPE`]). A lowercase name has no such
-//!   excuse — locals, parameters, module functions and `use`d host items are
-//!   all in scope — so an unresolved one is an error ([`UNKNOWN_NAME`]).
+//!   excuse — locals, parameters, module functions, imports and `use`d host
+//!   items are all in scope — so an unresolved one is an error
+//!   ([`UNKNOWN_NAME`]).
 //! - **A type used as a value.** `Vector` in `Vector.of(1, 2)` is understood
 //!   as part of the call; a bare `Vector`, `console`, or `Counter` used as a
 //!   value is not a form with a type in this system.
@@ -86,7 +105,8 @@
 //!
 //! Everything else is checked. In particular, `Unknown` is never the result
 //! of a struct field, a declared parameter, or a call to a function this
-//! module declares, so an ordinary program's errors cannot hide behind it.
+//! module declares or imports, so an ordinary program's errors cannot hide
+//! behind it.
 //!
 //! # What the runtime keeps
 //!
@@ -117,7 +137,7 @@ use cove_syntax::ast::{
 };
 
 use crate::package::Package;
-use crate::resolve::{Program, ResolvedModule};
+use crate::resolve::{Conformance, Program, ResolvedModule, TraitEntry};
 
 /// An argument's type does not match the parameter, field, or payload it is
 /// given to.
@@ -174,7 +194,7 @@ pub const RECEIVER: &str = "cove::type::receiver";
 pub const NOT_A_PLACE: &str = "cove::type::not_a_place";
 /// An entry function's shape does not fit the host boundary.
 pub const ENTRY: &str = "cove::type::entry";
-/// A `dyn` or a bound names something that is not a trait this module declares.
+/// A `dyn` or a bound names something that is not a trait this module can see.
 pub const UNKNOWN_TRAIT: &str = "cove::type::unknown_trait";
 /// A type argument does not conform to the bound its type parameter declares.
 pub const UNSATISFIED_BOUND: &str = "cove::type::unsatisfied_bound";
@@ -188,24 +208,163 @@ pub const DYN_ASSOCIATED: &str = "cove::type::dyn_associated_function";
 pub const DYN_MUTATING: &str = "cove::type::dyn_mutating_method";
 /// A bound was written where the MVP does not check one.
 pub const UNSUPPORTED_BOUND: &str = "cove::type::unsupported_bound";
+/// A qualified name reaches nothing an imported module exports.
+pub const UNKNOWN_MEMBER: &str = "cove::type::unknown_member";
 
 /// Type-checks a resolved program.
 ///
-/// Every module is checked against its own declarations plus the builtins,
-/// and every `[run.<name>]` entry against the shape the host boundary calls.
-/// The result holds both errors and warnings; an empty result means the
-/// program checks.
+/// Every module is checked against its own declarations, the declarations it
+/// imported, and the builtins, and every `[run.<name>]` entry against the
+/// shape the host boundary calls. The result holds both errors and warnings;
+/// an empty result means the program checks.
+///
+/// Modules are checked in dependency order, so a module's imports are
+/// already resolved signatures by the time its own declarations are. ADR
+/// 0005 forbids import cycles, which is what makes such an order exist.
 pub fn check(package: &Package, program: &Program) -> Vec<Diagnostic> {
     let mut diagnostics = Vec::new();
+    let mut envs: BTreeMap<&str, ImportEnv> = BTreeMap::new();
     let mut checked: BTreeMap<&str, Checker> = BTreeMap::new();
-    for (name, module) in &program.modules {
-        let mut checker = Checker::new(module);
-        checker.check_module();
+    for name in import_order(program) {
+        let module = &program.modules[name];
+        let mut checker = Checker::new(module, program);
+        checker.import(&envs);
+        checker.prepare();
+        envs.insert(name, checker.export_env());
+        checker.check_bodies();
         diagnostics.append(&mut checker.diagnostics);
-        checked.insert(name.as_str(), checker);
+        checked.insert(name, checker);
     }
     check_entries(package, &checked, &mut diagnostics);
     diagnostics
+}
+
+/// Every module of `program`, each after the modules it imports from.
+///
+/// A package whose modules form a cycle never reaches this pass, since
+/// resolution rejects one; if one somehow does, the modules left over are
+/// checked in name order rather than dropped.
+fn import_order(program: &Program) -> Vec<&str> {
+    let mut order: Vec<&str> = Vec::new();
+    let mut placed: BTreeSet<&str> = BTreeSet::new();
+    loop {
+        let mut progressed = false;
+        for (name, module) in &program.modules {
+            if placed.contains(name.as_str()) {
+                continue;
+            }
+            let ready = module
+                .dependencies()
+                .iter()
+                .all(|dep| placed.contains(dep) || !program.modules.contains_key(*dep));
+            if ready {
+                order.push(name.as_str());
+                placed.insert(name.as_str());
+                progressed = true;
+            }
+        }
+        if !progressed {
+            break;
+        }
+    }
+    order.extend(
+        program
+            .modules
+            .keys()
+            .map(String::as_str)
+            .filter(|name| !placed.contains(name)),
+    );
+    order
+}
+
+/// The canonical `(trait key, type key)` a recorded conformance names, as
+/// the module that declared it sees them: bare for a party this module
+/// declares, `module.Name` for an imported one.
+fn conformance_key(module: &ResolvedModule, conformance: &Conformance) -> (String, String) {
+    let key = |owner: &str, name: &str| {
+        if owner == module.name {
+            name.to_string()
+        } else {
+            format!("{owner}.{name}")
+        }
+    };
+    (
+        key(&conformance.trait_module, &conformance.trait_name),
+        key(&conformance.type_module, &conformance.type_name),
+    )
+}
+
+/// The canonical key of a declaration `module` makes, leaving a name that
+/// already carries a module alone.
+fn qualified_name(name: &Rc<str>, module: &str) -> Rc<str> {
+    if name.contains('.') {
+        name.clone()
+    } else {
+        format!("{module}.{name}").into()
+    }
+}
+
+/// Everything one module offers the modules that import it: the signatures
+/// of its own declarations, keyed by the canonical `module.Name` a foreign
+/// declaration is known by, plus every foreign signature it imported in
+/// turn, so a type reached through two imports keeps one identity.
+#[derive(Clone, Debug, Default)]
+struct ImportEnv {
+    structs: BTreeMap<String, StructSig>,
+    enums: BTreeMap<String, EnumSig>,
+    aliases: BTreeMap<String, (Vec<Rc<str>>, Ty)>,
+    functions: BTreeMap<String, FnSig>,
+    methods: BTreeMap<(String, String), FnSig>,
+    traits: BTreeMap<String, BTreeMap<String, FnSig>>,
+    /// Every conformance the module declares or can see, as canonical
+    /// `(trait key, type key)` pairs.
+    ///
+    /// Conformance travels with the declarations it joins because it is a
+    /// fact about them, not about the module that wrote it down: a bound is
+    /// satisfied wherever both parties are in scope, and the orphan rule is
+    /// what guarantees the conformance is somewhere on the import path that
+    /// brought them here.
+    conformances: BTreeSet<(String, String)>,
+}
+
+/// Rewrites the nominal names `module` declares into the canonical
+/// `module.Name` form.
+///
+/// A name that already carries a module is left alone: it is already
+/// absolute, so a type reached through two imports keeps one identity. A
+/// name a module writes for its own declaration is bare, which is what makes
+/// the two cases distinguishable.
+fn qualify(ty: &Ty, module: &str) -> Ty {
+    let qualified = |name: &Rc<str>| qualified_name(name, module);
+    match ty {
+        Ty::Array(inner) => Ty::Array(Box::new(qualify(inner, module))),
+        Ty::Vector(inner) => Ty::Vector(Box::new(qualify(inner, module))),
+        Ty::Set(inner) => Ty::Set(Box::new(qualify(inner, module))),
+        Ty::Option(inner) => Ty::Option(Box::new(qualify(inner, module))),
+        Ty::Task(inner) => Ty::Task(Box::new(qualify(inner, module))),
+        Ty::Map(k, v) => Ty::Map(Box::new(qualify(k, module)), Box::new(qualify(v, module))),
+        Ty::MapEntry(k, v) => {
+            Ty::MapEntry(Box::new(qualify(k, module)), Box::new(qualify(v, module)))
+        }
+        Ty::Result(t, e) => Ty::Result(Box::new(qualify(t, module)), Box::new(qualify(e, module))),
+        Ty::Struct(name, args) => Ty::Struct(
+            qualified(name),
+            args.iter().map(|arg| qualify(arg, module)).collect(),
+        ),
+        Ty::Enum(name, args) => Ty::Enum(
+            qualified(name),
+            args.iter().map(|arg| qualify(arg, module)).collect(),
+        ),
+        // A `dyn Trait` names a trait, which belongs to a module exactly as
+        // a struct or an enum does.
+        Ty::Dyn(name) => Ty::Dyn(qualified(name)),
+        Ty::Fn(f) => Ty::func(
+            f.is_async,
+            f.params.iter().map(|p| qualify(p, module)).collect(),
+            qualify(&f.ret, module),
+        ),
+        other => other.clone(),
+    }
 }
 
 // ------------------------------------------------------------------- types
@@ -449,6 +608,40 @@ struct FnSig {
 }
 
 impl FnSig {
+    /// This signature as a module importing it sees it: every nominal name
+    /// `module` declares rewritten into its canonical `module.Name` form.
+    fn qualified(&self, module: &str) -> FnSig {
+        FnSig {
+            generics: self.generics.clone(),
+            bounds: self
+                .bounds
+                .iter()
+                .map(|(param, bounds)| {
+                    let bounds = bounds
+                        .iter()
+                        .map(|bound| TraitBound {
+                            name: qualified_name(&bound.name, module),
+                            span: bound.span,
+                        })
+                        .collect();
+                    (param.clone(), bounds)
+                })
+                .collect(),
+            params: self
+                .params
+                .iter()
+                .map(|param| ParamSig {
+                    ty: qualify(&param.ty, module),
+                    ..param.clone()
+                })
+                .collect(),
+            ret: qualify(&self.ret, module),
+            ret_span: self.ret_span,
+            is_async: self.is_async,
+            receiver: self.receiver.as_ref().map(|ty| qualify(ty, module)),
+        }
+    }
+
     /// The type of this function used as a value, which is what a bare
     /// reference to it evaluates to.
     fn as_value(&self) -> Ty {
@@ -517,9 +710,23 @@ impl Expected {
 
 // ---------------------------------------------------------------- checking
 
-/// Checks one module against its own declarations plus the builtins.
+/// Checks one module against its own declarations, its imports, and the
+/// builtins.
+///
+/// # How a declaration is named
+///
+/// Every table below is keyed by a declaration's *canonical name*: the bare
+/// name for a declaration this module makes, and `module.Name` for one that
+/// belongs to another module — whether this module imported it or only ever
+/// meets it as the type of an imported function's result. One declaration
+/// therefore has exactly one key here, so `Ty::Struct` and `Ty::Enum` can
+/// compare two types by name without confusing two modules' `Config`.
+/// [`Checker::key`] turns a name as written into that key.
 struct Checker<'a> {
     module: &'a ResolvedModule,
+    /// The whole program, for the declarations of the modules this one
+    /// imports from.
+    program: &'a Program,
     diagnostics: Vec<Diagnostic>,
     functions: BTreeMap<String, FnSig>,
     methods: BTreeMap<(String, String), FnSig>,
@@ -548,9 +755,10 @@ struct Checker<'a> {
 }
 
 impl<'a> Checker<'a> {
-    fn new(module: &'a ResolvedModule) -> Checker<'a> {
+    fn new(module: &'a ResolvedModule, program: &'a Program) -> Checker<'a> {
         Checker {
             module,
+            program,
             diagnostics: Vec::new(),
             functions: BTreeMap::new(),
             methods: BTreeMap::new(),
@@ -561,8 +769,8 @@ impl<'a> Checker<'a> {
             traits: BTreeMap::new(),
             conformances: module
                 .conformances
-                .keys()
-                .map(|(trait_name, type_name)| (trait_name.clone(), type_name.clone()))
+                .values()
+                .map(|conformance| conformance_key(module, conformance))
                 .collect(),
             type_params: Vec::new(),
             bounds: BTreeMap::new(),
@@ -572,9 +780,197 @@ impl<'a> Checker<'a> {
         }
     }
 
-    /// Resolves every declaration's written types, then checks every body.
-    fn check_module(&mut self) {
-        self.prepare();
+    // ------------------------------------------------------------ imports
+
+    /// The table key a name written in this module refers to: the name
+    /// itself when this module declares it, and `module.Name` when a `use`
+    /// imported it from `module`.
+    ///
+    /// Resolution refuses a `use` that binds a name the importing module
+    /// also declares, so at most one of the two answers ever applies.
+    fn key(&self, name: &str) -> String {
+        match self.module.imports.get(name) {
+            Some(owner) => format!("{owner}.{name}"),
+            None => name.to_string(),
+        }
+    }
+
+    /// Whether `name` as written names a declaration of another module,
+    /// which is what makes [`Checker::key`] answer something other than
+    /// `name`.
+    fn is_imported(&self, name: &str) -> bool {
+        self.module.imports.contains_key(name)
+    }
+
+    /// The key `head.name` refers to when `head` is a module imported whole
+    /// and that module exports `name`.
+    ///
+    /// A module-private declaration is reported rather than resolved: a
+    /// qualified name reaches exactly what a `use` of it would.
+    fn qualified_key(&mut self, head: &str, name: &str, span: Span) -> Option<String> {
+        let owner_name = self.module.module_imports.get(head)?;
+        let owner = self.program.modules.get(owner_name)?;
+        let exported = match owner.exported(name) {
+            Some(exported) => exported,
+            None => {
+                self.diagnostics.push(
+                    Diagnostic::error(
+                        UNKNOWN_MEMBER,
+                        format!("module `{owner_name}` declares no `{name}`"),
+                    )
+                    .at(span)
+                    .rule(
+                        "A qualified name reaches an exported declaration of the module it names.",
+                    )
+                    .help(format!(
+                        "module `{owner_name}` exports {}",
+                        list(&owner.exports())
+                    )),
+                );
+                return None;
+            }
+        };
+        if !exported {
+            self.diagnostics.push(
+                Diagnostic::error(
+                    UNKNOWN_MEMBER,
+                    format!("`{name}` is declared by module `{owner_name}`, but is not exported"),
+                )
+                .at(span)
+                .rule("An `export` declaration is public; other declarations are module-private.")
+                .help(format!(
+                    "write `export` on `{name}` in module `{owner_name}`, or name something else"
+                )),
+            );
+            return None;
+        }
+        Some(format!("{owner_name}.{name}"))
+    }
+
+    /// Brings every declaration of every module this one imports from into
+    /// its tables, under the canonical `module.Name` keys.
+    ///
+    /// A module's whole environment is brought in, not only the declarations
+    /// a `use` named: a type reached as the result of an imported function
+    /// must still have fields and methods, even when this module never
+    /// names it. What a `use` decides is which of them this module can
+    /// *write*, which is [`Checker::key`]'s business, not this one's.
+    fn import(&mut self, envs: &BTreeMap<&str, ImportEnv>) {
+        for dependency in self.module.dependencies() {
+            let Some(env) = envs.get(dependency) else {
+                continue;
+            };
+            self.structs
+                .extend(env.structs.iter().map(|(k, v)| (k.clone(), v.clone())));
+            self.enums
+                .extend(env.enums.iter().map(|(k, v)| (k.clone(), v.clone())));
+            self.aliases
+                .extend(env.aliases.iter().map(|(k, v)| (k.clone(), v.clone())));
+            self.functions
+                .extend(env.functions.iter().map(|(k, v)| (k.clone(), v.clone())));
+            self.methods
+                .extend(env.methods.iter().map(|(k, v)| (k.clone(), v.clone())));
+            self.traits
+                .extend(env.traits.iter().map(|(k, v)| (k.clone(), v.clone())));
+            self.conformances.extend(env.conformances.iter().cloned());
+        }
+    }
+
+    /// What this module offers the modules that import it, once its own
+    /// declarations are resolved.
+    fn export_env(&self) -> ImportEnv {
+        let module = self.module.name.as_str();
+        let key = |name: &String| {
+            if name.contains('.') {
+                name.clone()
+            } else {
+                format!("{module}.{name}")
+            }
+        };
+        ImportEnv {
+            structs: self
+                .structs
+                .iter()
+                .map(|(name, sig)| {
+                    (
+                        key(name),
+                        StructSig {
+                            generics: sig.generics.clone(),
+                            fields: sig
+                                .fields
+                                .iter()
+                                .map(|field| ParamSig {
+                                    ty: qualify(&field.ty, module),
+                                    ..field.clone()
+                                })
+                                .collect(),
+                        },
+                    )
+                })
+                .collect(),
+            enums: self
+                .enums
+                .iter()
+                .map(|(name, sig)| {
+                    (
+                        key(name),
+                        EnumSig {
+                            generics: sig.generics.clone(),
+                            cases: sig
+                                .cases
+                                .iter()
+                                .map(|case| CaseSig {
+                                    payload: case
+                                        .payload
+                                        .iter()
+                                        .map(|ty| qualify(ty, module))
+                                        .collect(),
+                                    ..case.clone()
+                                })
+                                .collect(),
+                        },
+                    )
+                })
+                .collect(),
+            aliases: self
+                .aliases
+                .iter()
+                .map(|(name, (generics, ty))| (key(name), (generics.clone(), qualify(ty, module))))
+                .collect(),
+            functions: self
+                .functions
+                .iter()
+                .map(|(name, sig)| (key(name), sig.qualified(module)))
+                .collect(),
+            methods: self
+                .methods
+                .iter()
+                .map(|((type_name, name), sig)| {
+                    ((key(type_name), name.clone()), sig.qualified(module))
+                })
+                .collect(),
+            traits: self
+                .traits
+                .iter()
+                .map(|(name, methods)| {
+                    let methods = methods
+                        .iter()
+                        .map(|(name, sig)| (name.clone(), sig.qualified(module)))
+                        .collect();
+                    (key(name), methods)
+                })
+                .collect(),
+            conformances: self
+                .conformances
+                .iter()
+                .map(|(trait_name, type_name)| (key(trait_name), key(type_name)))
+                .collect(),
+        }
+    }
+
+    /// Checks every body of this module, once every signature it can see is
+    /// resolved.
+    fn check_bodies(&mut self) {
         let fn_names: Vec<String> = self.module.functions.keys().cloned().collect();
         for name in fn_names {
             let decl = self.module.functions[&name].decl.clone();
@@ -589,7 +985,10 @@ impl<'a> Checker<'a> {
                 continue;
             }
             let decl = self.module.methods[&key].decl.clone();
-            let sig = self.methods[&key].clone();
+            // The signature is filed under the type's canonical key, which
+            // differs from the name written here when the conformance is for
+            // an imported type.
+            let sig = self.methods[&(self.key(&key.0), key.1.clone())].clone();
             self.check_body(&decl, &sig);
         }
         self.check_trait_defaults();
@@ -705,11 +1104,15 @@ impl<'a> Checker<'a> {
             self.functions.insert(name, sig);
         }
 
+        // A method's table key names the type's own module: a conformance
+        // this module declares for an imported type extends *that* type, so
+        // its methods have to be found under the same key everyone else
+        // reaches it by.
         let method_keys: Vec<(String, String)> = self.module.methods.keys().cloned().collect();
         for key in method_keys {
             let decl = self.module.methods[&key].decl.clone();
             let sig = self.fn_sig(&decl, Some(&key.0));
-            self.methods.insert(key, sig);
+            self.methods.insert((self.key(&key.0), key.1), sig);
         }
 
         self.check_conformance_signatures();
@@ -758,25 +1161,44 @@ impl<'a> Checker<'a> {
     /// because a call through a bound or through `dyn Trait` is checked
     /// against the trait's signature and dispatched to this one.
     fn check_conformance_signatures(&mut self) {
-        let conformances: Vec<(String, String)> = self.conformances.iter().cloned().collect();
-        for (trait_name, type_name) in conformances {
-            let Some(entry) = self.module.traits.get(&trait_name) else {
+        // Only the conformances this module declares: one it merely imported
+        // was checked where it was written, and its methods are not this
+        // module's to fix.
+        let conformances: Vec<(String, String, String, String)> = self
+            .module
+            .conformances
+            .values()
+            .map(|conformance| {
+                let (trait_key, type_key) = conformance_key(self.module, conformance);
+                (
+                    trait_key,
+                    type_key,
+                    conformance.trait_name.clone(),
+                    conformance.type_name.clone(),
+                )
+            })
+            .collect();
+        for (trait_key, type_key, trait_name, written_type) in conformances {
+            let Some(entry) = self.trait_entry(&trait_key) else {
                 continue;
             };
+            let type_name = written_type;
             let trait_decl = entry.decl.clone();
             for method in &trait_decl.methods {
-                let key = (type_name.clone(), method.name.node.clone());
+                let key = (type_key.clone(), method.name.node.clone());
                 let Some(found) = self.methods.get(&key).cloned() else {
                     continue;
                 };
-                let Some(declared) = self.traits[&trait_name].get(&method.name.node).cloned()
-                else {
+                let Some(declared) = self.traits[&trait_key].get(&method.name.node).cloned() else {
                     continue;
                 };
                 let Some(reason) = signature_difference(&declared, &found) else {
                     continue;
                 };
-                let span = self.module.methods[&key].decl.name.span;
+                let span = self.module.methods[&(type_name.clone(), method.name.node.clone())]
+                    .decl
+                    .name
+                    .span;
                 self.diagnostics.push(
                     Diagnostic::error(
                         CONFORMANCE_SIGNATURE,
@@ -893,10 +1315,15 @@ impl<'a> Checker<'a> {
     fn fn_sig(&mut self, decl: &FnDecl, receiver_type: Option<&str>) -> FnSig {
         let mut type_generics: Vec<GenericParam> = Vec::new();
         if let Some(type_name) = receiver_type {
-            if let Some(entry) = self.module.structs.get(type_name) {
-                type_generics.extend(entry.decl.generics.iter().cloned());
-            } else if let Some(entry) = self.module.enums.get(type_name) {
-                type_generics.extend(entry.decl.generics.iter().cloned());
+            // The type may be one this module imported, when the method
+            // comes from a conformance declared here for another module's
+            // type, so its declaration is looked up where it lives.
+            if let Some(owner) = self.declaring_module(type_name) {
+                if let Some(entry) = owner.structs.get(type_name) {
+                    type_generics.extend(entry.decl.generics.iter().cloned());
+                } else if let Some(entry) = owner.enums.get(type_name) {
+                    type_generics.extend(entry.decl.generics.iter().cloned());
+                }
             }
         }
         let mut names = type_generics.clone();
@@ -974,16 +1401,16 @@ impl<'a> Checker<'a> {
         for param in params {
             let mut named: Vec<TraitBound> = Vec::new();
             for bound in &param.bounds {
-                if !self.module.traits.contains_key(&bound.node) {
+                let Some(key) = self.trait_key(&bound.node) else {
                     self.diagnostics
                         .push(unknown_trait(&bound.node, bound.span));
                     continue;
-                }
-                if named.iter().any(|b| &*b.name == bound.node.as_str()) {
+                };
+                if named.iter().any(|b| *b.name == *key) {
                     continue;
                 }
                 named.push(TraitBound {
-                    name: bound.node.as_str().into(),
+                    name: key.as_str().into(),
                     span: bound.span,
                 });
             }
@@ -1025,13 +1452,43 @@ impl<'a> Checker<'a> {
     /// A struct or enum this module declares, or `Unknown` when it declares
     /// neither.
     fn nominal(&self, name: &str, args: Vec<Ty>) -> Ty {
-        if self.module.structs.contains_key(name) {
-            Ty::Struct(name.into(), args)
-        } else if self.module.enums.contains_key(name) {
-            Ty::Enum(name.into(), args)
+        let Some(owner) = self.declaring_module(name) else {
+            return Ty::Unknown;
+        };
+        let key = self.key(name);
+        if owner.structs.contains_key(name) {
+            Ty::Struct(key.into(), args)
+        } else if owner.enums.contains_key(name) {
+            Ty::Enum(key.into(), args)
         } else {
             Ty::Unknown
         }
+    }
+
+    /// The resolved module a name as written belongs to: this one when it
+    /// declares the name, and the module a `use` imported it from otherwise.
+    fn declaring_module(&self, name: &str) -> Option<&'a ResolvedModule> {
+        match self.module.imports.get(name) {
+            Some(owner) if self.module.owner_of(name) != Some(&self.module.name) => {
+                self.program.modules.get(owner)
+            }
+            _ => Some(self.module),
+        }
+    }
+
+    /// The trait a canonical key names, wherever it is declared.
+    fn trait_entry(&self, key: &str) -> Option<&'a TraitEntry> {
+        match key.rsplit_once('.') {
+            Some((owner, name)) => self.program.modules.get(owner)?.traits.get(name),
+            None => self.module.traits.get(key),
+        }
+    }
+
+    /// The canonical key of the trait `name` refers to here, when this
+    /// module declares or imports one.
+    fn trait_key(&self, name: &str) -> Option<String> {
+        let key = self.key(name);
+        self.traits.contains_key(&key).then_some(key)
     }
 
     // ---------------------------------------------------- written types
@@ -1061,11 +1518,14 @@ impl<'a> Checker<'a> {
             }
             TypeKind::Named { path, args } => self.resolve_named(path, args, ty.span),
             TypeKind::Dyn(name) => {
-                if !self.module.traits.contains_key(&name.node) {
+                // `dyn` names a trait with a bare name, so an imported trait
+                // is reached through a `use` of the trait itself; a module
+                // imported whole cannot qualify one.
+                let Some(key) = self.trait_key(&name.node) else {
                     self.diagnostics.push(unknown_trait(&name.node, name.span));
                     return Ty::Unknown;
-                }
-                Ty::Dyn(name.node.as_str().into())
+                };
+                Ty::Dyn(key.as_str().into())
             }
         }
     }
@@ -1074,6 +1534,15 @@ impl<'a> Checker<'a> {
         let arguments: Vec<Ty> = args.iter().map(|arg| self.resolve(arg)).collect();
         if path.len() > 1 {
             let head = &path[0].node;
+            // A module imported whole makes its exported types writable
+            // qualified, exactly as a `use` of the type would make them
+            // writable bare.
+            if path.len() == 2 && self.module.module_imports.contains_key(head.as_str()) {
+                let Some(key) = self.qualified_key(head, &path[1].node, span) else {
+                    return Ty::Unknown;
+                };
+                return self.foreign_type(&key, arguments, span);
+            }
             if self.module.host_uses.contains(head.as_str()) {
                 self.diagnostics.push(
                     Diagnostic::warning(
@@ -1096,9 +1565,9 @@ impl<'a> Checker<'a> {
                         format!("`{}` names no type this module can see", join_path(path)),
                     )
                     .at(span)
-                    .rule("A module sees its own declarations plus the builtins; `use` names a host module.")
+                    .rule("A qualified type name reaches a host module, or a module of this package imported with `use`.")
                     .help(format!(
-                        "add `use {}` if `{}` is a host module, or declare the type in this module",
+                        "add `use {}` if `{}` is a host module or a module of this package, or declare the type in this module",
                         path[0].node,
                         path[0].node
                     )),
@@ -1128,27 +1597,49 @@ impl<'a> Checker<'a> {
         if self.module.aliases.contains_key(name) {
             let (generics, ty) = self.alias(name);
             self.check_type_arity(name, generics.len(), arguments.len(), span);
-            let subst = generics
-                .into_iter()
-                .zip(
-                    fit(arguments, 0)
-                        .into_iter()
-                        .chain(std::iter::repeat(Ty::Unknown)),
-                )
-                .collect();
-            return ty.substitute(&subst);
+            return expand_alias(generics, ty, arguments);
+        }
+        if self.is_imported(name) {
+            let key = self.key(name);
+            return self.foreign_type(&key, arguments, span);
         }
         self.diagnostics.push(
             Diagnostic::warning(
                 UNKNOWN_TYPE,
-                format!("`{name}` names no type this module declares"),
+                format!("`{name}` names no type this module can see"),
             )
             .at(span)
-            .rule("A module sees its own declarations plus the builtins; there are no module-to-module imports yet.")
+            .rule("A module sees its own declarations, what it imports with `use`, and the builtins.")
             .help(format!(
-                "declare `struct {name}`, `enum {name}`, or `type {name} = ...` in this module; until then values of `{name}` are unchecked"
+                "declare `struct {name}`, `enum {name}`, or `type {name} = ...` in this module, or `use <module>.{name}` to import it; until then values of `{name}` are unchecked"
             )),
         );
+        Ty::Unknown
+    }
+
+    /// A type another module declares, named by its canonical key.
+    ///
+    /// The key is enough: the module's whole environment was brought in
+    /// before this one was prepared, so the declaration's own signature is
+    /// already resolved.
+    fn foreign_type(&mut self, key: &str, arguments: Vec<Ty>, span: Span) -> Ty {
+        let written = key.rsplit('.').next().unwrap_or(key).to_string();
+        if let Some(sig) = self.structs.get(key) {
+            let declared = sig.generics.len();
+            self.check_type_arity(&written, declared, arguments.len(), span);
+            return Ty::Struct(key.into(), fit(arguments, declared));
+        }
+        if let Some(sig) = self.enums.get(key) {
+            let declared = sig.generics.len();
+            self.check_type_arity(&written, declared, arguments.len(), span);
+            return Ty::Enum(key.into(), fit(arguments, declared));
+        }
+        if let Some((generics, ty)) = self.aliases.get(key).cloned() {
+            self.check_type_arity(&written, generics.len(), arguments.len(), span);
+            return expand_alias(generics, ty, arguments);
+        }
+        // The name resolves to a declaration that is not a type, such as an
+        // imported function; nothing here can be checked against it.
         Ty::Unknown
     }
 
@@ -1501,18 +1992,21 @@ impl<'a> Checker<'a> {
                 _ => Ty::Option(Box::new(Ty::Unknown)),
             };
         }
-        if let Some(sig) = self.functions.get(name) {
+        if let Some(sig) = self.functions.get(&self.key(name)) {
             return sig.as_value();
         }
-        // A type or a host module used as a value has no type in this system;
-        // the forms that give it meaning (`Vector.of`, `MapEntry(key:,
-        // value:)`, `console.println`) are understood at the call itself.
+        // A type, a module, or a host module used as a value has no type in
+        // this system; the forms that give it meaning (`Vector.of`,
+        // `MapEntry(key:, value:)`, `console.println`, `booking.create`) are
+        // understood at the call itself.
         if self.module.structs.contains_key(name)
             || self.module.enums.contains_key(name)
+            || self.is_imported(name)
             || is_builtin_type(name)
             || name == "MapEntry"
             || self.module.host_uses.contains(name)
             || self.module.host_items.contains_key(name)
+            || self.module.module_imports.contains_key(name)
         {
             return Ty::Unknown;
         }
@@ -1521,8 +2015,8 @@ impl<'a> Checker<'a> {
 
     /// The type of a name nothing in scope explains.
     ///
-    /// A capitalized name is assumed to come from the host: with no
-    /// module-to-module imports, there is no other way for one to reach this
+    /// A capitalized name is assumed to come from the host: a name that is
+    /// neither declared here nor imported has no other way to reach this
     /// module, so the checker says so and abstains. A lowercase name has no
     /// such excuse.
     fn unresolved_name(&mut self, name: &str, span: Span) -> Ty {
@@ -1533,7 +2027,7 @@ impl<'a> Checker<'a> {
                     format!("`{name}` is not declared in this module, so it is unchecked"),
                 )
                 .at(span)
-                .rule("A module sees its own declarations plus the builtins; anything else must come from a host module.")
+                .rule("A module sees its own declarations, what it imports with `use`, and the builtins; anything else must come from a host module.")
                 .help(format!(
                     "declare `{name}` in this module, or leave it to the host; until the Host API schema exists, values of `{name}` are unchecked"
                 )),
@@ -1542,7 +2036,7 @@ impl<'a> Checker<'a> {
             self.diagnostics.push(
                 Diagnostic::error(UNKNOWN_NAME, format!("cannot find `{name}` in this scope"))
                     .at(span)
-                    .rule("A name must be a local binding, a parameter, a declaration of this module, or a `use`d host item.")
+                    .rule("A name must be a local binding, a parameter, a declaration of this module, or something `use` imports.")
                     .help(format!(
                         "declare `let {name} = ...` before this expression, or `use <host>.{name}`"
                     )),
@@ -1579,15 +2073,29 @@ impl<'a> Checker<'a> {
         Ty::Array(Box::new(element))
     }
 
-    /// `base.name`: an enum case, a host operation, or a struct field.
+    /// `base.name`: an enum case, a host operation, an imported module's
+    /// declaration, or a struct field.
     fn field(&mut self, base: &Expr, name: &Ident, span: Span) -> Ty {
         if let ExprKind::Ident(head) = &base.kind {
             if self.lookup(head).is_none() {
-                if self.module.enums.contains_key(head.as_str()) {
-                    return self.enum_case(head, name, &[], span);
+                let key = self.key(head);
+                if self.enums.contains_key(&key) {
+                    return self.enum_case(&key, name, &[], span);
                 }
                 if self.module.host_uses.contains(head.as_str()) {
                     return Ty::Unknown;
+                }
+                if self.module.module_imports.contains_key(head.as_str()) {
+                    let Some(key) = self.qualified_key(head, &name.node, span) else {
+                        return Ty::Unknown;
+                    };
+                    // A function reached through its module is an ordinary
+                    // value; a type is not, exactly as a bare type name is
+                    // not.
+                    return match self.functions.get(&key) {
+                        Some(sig) => sig.as_value(),
+                        None => Ty::Unknown,
+                    };
                 }
             }
         }
@@ -2188,7 +2696,7 @@ impl<'a> Checker<'a> {
             },
             Ty::Enum(name, args) => {
                 if let [qualifier, _] = path {
-                    if qualifier.node != **name {
+                    if self.key(&qualifier.node) != **name {
                         self.diagnostics.push(
                             Diagnostic::error(
                                 PATTERN,
@@ -2433,15 +2941,16 @@ impl<'a> Checker<'a> {
         callee_span: Span,
         expected: Option<&Expected>,
     ) -> Ty {
-        if let Some(sig) = self.functions.get(name).cloned() {
+        let key = self.key(name);
+        if let Some(sig) = self.functions.get(&key).cloned() {
             let explicit = generics.iter().map(|ty| self.resolve(ty)).collect();
             return self.call_signature(&sig, &format!("`{name}`"), explicit, args, trailing, span);
         }
-        if let Some(sig) = self.structs.get(name).cloned() {
-            return self.struct_init(name, &sig, args, trailing, span);
+        if let Some(sig) = self.structs.get(&key).cloned() {
+            return self.struct_init(&key, &sig, args, trailing, span);
         }
-        if self.module.enums.contains_key(name) {
-            let cases = first_case_of(self.enums.get(name));
+        if self.enums.contains_key(&key) {
+            let cases = first_case_of(self.enums.get(&key));
             self.diagnostics.push(
                 Diagnostic::error(NOT_CALLABLE, format!("`{name}` is an enum, not a function"))
                     .at(callee_span)
@@ -2572,18 +3081,36 @@ impl<'a> Checker<'a> {
             self.check_args_freely(args, trailing);
             return Some(Ty::Unknown);
         }
-        if self.module.enums.contains_key(head) {
-            let is_case = self
-                .enums
-                .get(head)
-                .is_some_and(|sig| sig.cases.iter().any(|c| c.name == name.node));
+        // A module imported whole answers a qualified call with whatever it
+        // exports under that name: a function to call, or a struct to
+        // initialize.
+        if self.module.module_imports.contains_key(head) {
+            let Some(key) = self.qualified_key(head, &name.node, span) else {
+                self.check_args_freely(args, trailing);
+                return Some(Ty::Unknown);
+            };
+            if let Some(sig) = self.functions.get(&key).cloned() {
+                return Some(self.call_signature(
+                    &sig,
+                    &format!("`{head}.{}`", name.node),
+                    Vec::new(),
+                    args,
+                    trailing,
+                    span,
+                ));
+            }
+            if let Some(sig) = self.structs.get(&key).cloned() {
+                return Some(self.struct_init(&key, &sig, args, trailing, span));
+            }
+            self.check_args_freely(args, trailing);
+            return Some(Ty::Unknown);
+        }
+        let key = self.key(head);
+        if let Some(sig) = self.enums.get(&key).cloned() {
+            let is_case = sig.cases.iter().any(|c| c.name == name.node);
             if !is_case {
-                if let Some(sig) = self
-                    .methods
-                    .get(&(head.to_string(), name.node.clone()))
-                    .cloned()
-                {
-                    self.check_receiver(&sig, head, &name.node, span, false);
+                if let Some(sig) = self.methods.get(&(key.clone(), name.node.clone())).cloned() {
+                    self.check_receiver(&sig, &key, &name.node, span, false);
                     return Some(self.call_signature(
                         &sig,
                         &format!("`{head}.{}`", name.node),
@@ -2594,15 +3121,11 @@ impl<'a> Checker<'a> {
                     ));
                 }
             }
-            return Some(self.enum_case(head, name, args, span));
+            return Some(self.enum_case(&key, name, args, span));
         }
-        if self.module.structs.contains_key(head) {
-            if let Some(sig) = self
-                .methods
-                .get(&(head.to_string(), name.node.clone()))
-                .cloned()
-            {
-                self.check_receiver(&sig, head, &name.node, span, false);
+        if self.structs.contains_key(&key) {
+            if let Some(sig) = self.methods.get(&(key.clone(), name.node.clone())).cloned() {
+                self.check_receiver(&sig, &key, &name.node, span, false);
                 return Some(self.call_signature(
                     &sig,
                     &format!("`{head}.{}`", name.node),
@@ -2612,7 +3135,7 @@ impl<'a> Checker<'a> {
                     span,
                 ));
             }
-            let known = self.known_members(head);
+            let known = self.known_members(&key);
             self.diagnostics.push(
                 Diagnostic::error(
                     UNKNOWN_ASSOCIATED,
@@ -3290,9 +3813,7 @@ impl<'a> Checker<'a> {
     /// Whether the trait method named `method` declares a `var self`
     /// receiver.
     fn mutating_trait_method(&self, trait_name: &str, method: &str) -> bool {
-        self.module
-            .traits
-            .get(trait_name)
+        self.trait_entry(trait_name)
             .and_then(|entry| entry.method(method))
             .and_then(|method| method.receiver)
             .is_some_and(|receiver| receiver.is_var)
@@ -3993,6 +4514,20 @@ fn substitution(generics: &[Rc<str>], args: &[Ty]) -> BTreeMap<Rc<str>, Ty> {
         .collect()
 }
 
+/// Substitutes the arguments a type alias was written with into the type it
+/// expands to.
+fn expand_alias(generics: Vec<Rc<str>>, ty: Ty, arguments: Vec<Ty>) -> Ty {
+    let subst = generics
+        .into_iter()
+        .zip(
+            fit(arguments, 0)
+                .into_iter()
+                .chain(std::iter::repeat(Ty::Unknown)),
+        )
+        .collect();
+    ty.substitute(&subst)
+}
+
 /// Truncates or pads `args` to `arity`, so a type written with the wrong
 /// number of arguments still has a shape the rest of the pass can use.
 fn fit(mut args: Vec<Ty>, arity: usize) -> Vec<Ty> {
@@ -4347,6 +4882,68 @@ mod tests {
         };
         let program = resolve(&package).expect("test source resolves");
         check(&package, &program)
+    }
+
+    /// Type-checks several modules written inline, so one can `use` another.
+    fn diagnostics_of_modules(modules: &[(&str, &str)]) -> Vec<Diagnostic> {
+        let mut sources = SourceMap::new();
+        let mut map = BTreeMap::new();
+        for (name, source) in modules {
+            let path = PathBuf::from(format!("{name}.cove"));
+            let file = sources.add(path.clone(), *source);
+            let ast = cove_syntax::parse_file(&sources, file).expect("test source parses");
+            map.insert(
+                (*name).to_string(),
+                Module {
+                    name: (*name).to_string(),
+                    dir: PathBuf::from(*name),
+                    units: vec![Unit { file, path, ast }],
+                },
+            );
+        }
+        let package = Package {
+            root: PathBuf::new(),
+            config: Config::default(),
+            modules: map,
+        };
+        let program = resolve(&package).expect("test package resolves");
+        check(&package, &program)
+    }
+
+    #[track_caller]
+    fn accepts_modules(modules: &[(&str, &str)]) {
+        let errors: Vec<Diagnostic> = diagnostics_of_modules(modules)
+            .into_iter()
+            .filter(|d| d.severity == Severity::Error)
+            .collect();
+        assert!(
+            errors.is_empty(),
+            "expected no errors, found: {}",
+            errors
+                .iter()
+                .map(|d| format!("{}: {}", d.code, d.message))
+                .collect::<Vec<_>>()
+                .join("; ")
+        );
+    }
+
+    #[track_caller]
+    fn rejects_modules(modules: &[(&str, &str)]) -> Diagnostic {
+        let mut errors: Vec<Diagnostic> = diagnostics_of_modules(modules)
+            .into_iter()
+            .filter(|d| d.severity == Severity::Error)
+            .collect();
+        assert_eq!(
+            errors.len(),
+            1,
+            "expected exactly one error, found: {}",
+            errors
+                .iter()
+                .map(|d| format!("{}: {}", d.code, d.message))
+                .collect::<Vec<_>>()
+                .join("; ")
+        );
+        errors.remove(0)
     }
 
     fn errors_of(source: &str) -> Vec<Diagnostic> {
@@ -6428,7 +7025,7 @@ fn handle(request: http.Request) -> Int {
         assert_eq!(error.message, "cannot find `total` in this scope");
         assert_eq!(
             error.rule.unwrap(),
-            "A name must be a local binding, a parameter, a declaration of this module, or a `use`d host item."
+            "A name must be a local binding, a parameter, a declaration of this module, or something `use` imports."
         );
         assert_eq!(
             error.help.unwrap(),
@@ -6443,7 +7040,7 @@ fn handle(request: http.Request) -> Int {
         assert_eq!(warnings[0].code, UNKNOWN_TYPE);
         assert_eq!(
             warnings[0].message,
-            "`Missing` names no type this module declares"
+            "`Missing` names no type this module can see"
         );
     }
 
@@ -6628,6 +7225,484 @@ export fn main() -> Result<Unit, Error> {
             }
         }
         assert!(failures.is_empty(), "{}", failures.join("\n"));
+    }
+
+    // ---------------------------------------------------- import environment
+
+    const LEVELS: &str = "\
+/// Supported logging levels.
+export enum LogLevel {
+  Debug
+  Info
+}
+
+/// Validated configuration.
+export struct Config {
+  port: Int
+  level: LogLevel
+}
+
+/// A pair of ports.
+export struct Pair<T> {
+  first: T
+  second: T
+}
+
+/// The shape a handler has.
+export type Handler = fn(Int) -> String
+
+impl Config {
+  /// The port, as text.
+  export fn describe(self) -> String {
+    \"{self.port}\"
+  }
+}
+
+/// Loads configuration.
+export fn load() -> Config {
+  Config(port: 8080, level: LogLevel.Debug)
+}
+
+fn secret() -> Int {
+  1
+}
+";
+
+    #[test]
+    fn the_checker_sees_an_imported_struct_s_fields() {
+        accepts_modules(&[
+            ("levels", LEVELS),
+            (
+                "app",
+                "use levels.load\n\n/// Entry point.\nexport fn main() -> Int {\n  load().port\n}\n",
+            ),
+        ]);
+    }
+
+    #[test]
+    fn a_field_an_imported_struct_does_not_declare_is_rejected() {
+        let error = rejects_modules(&[
+            ("levels", LEVELS),
+            (
+                "app",
+                "use levels.load\n\n/// Entry point.\nexport fn main() -> Int {\n  load().host\n}\n",
+            ),
+        ]);
+        assert_eq!(error.code, UNKNOWN_FIELD);
+        // The type is named by the module that declares it.
+        assert!(error.message.contains("levels.Config"));
+    }
+
+    #[test]
+    fn an_imported_struct_s_field_keeps_its_type() {
+        let error = rejects_modules(&[
+            ("levels", LEVELS),
+            (
+                "app",
+                "use levels.load\n\n/// Entry point.\nexport fn main() -> String {\n  load().port\n}\n",
+            ),
+        ]);
+        assert_eq!(error.code, MISMATCH);
+        assert!(error.message.contains("Int"));
+    }
+
+    #[test]
+    fn an_imported_struct_is_initialized_and_checked_like_a_declared_one() {
+        accepts_modules(&[
+            ("levels", LEVELS),
+            (
+                "app",
+                "use levels.Config\nuse levels.LogLevel\n\n/// Entry point.\nexport fn main() -> Config {\n  Config(port: 1, level: LogLevel.Info)\n}\n",
+            ),
+        ]);
+        let error = rejects_modules(&[
+            ("levels", LEVELS),
+            (
+                "app",
+                "use levels.Config\nuse levels.LogLevel\n\n/// Entry point.\nexport fn main() -> Config {\n  Config(port: \"1\", level: LogLevel.Info)\n}\n",
+            ),
+        ]);
+        assert_eq!(error.code, MISMATCH);
+    }
+
+    #[test]
+    fn an_imported_function_s_arguments_are_checked() {
+        let error = rejects_modules(&[
+            (
+                "greet",
+                "/// Greets by name.\nexport fn greeting(name: String) -> String {\n  name\n}\n",
+            ),
+            (
+                "app",
+                "use greet.greeting\n\n/// Entry point.\nexport fn main() -> String {\n  greeting(1)\n}\n",
+            ),
+        ]);
+        assert_eq!(error.code, MISMATCH);
+    }
+
+    #[test]
+    fn an_imported_method_is_reached_through_the_value_s_type() {
+        accepts_modules(&[
+            ("levels", LEVELS),
+            (
+                "app",
+                "use levels.load\n\n/// Entry point.\nexport fn main() -> String {\n  load().describe()\n}\n",
+            ),
+        ]);
+    }
+
+    #[test]
+    fn an_imported_enum_s_cases_are_checked() {
+        accepts_modules(&[
+            ("levels", LEVELS),
+            (
+                "app",
+                "use levels.LogLevel\n\n/// Entry point.\nexport fn main(level: LogLevel) -> String {\n  match level {\n    LogLevel.Debug => \"d\"\n    LogLevel.Info => \"i\"\n  }\n}\n",
+            ),
+        ]);
+        let error = rejects_modules(&[
+            ("levels", LEVELS),
+            (
+                "app",
+                "use levels.LogLevel\n\n/// Entry point.\nexport fn main() -> LogLevel {\n  LogLevel.Bogus\n}\n",
+            ),
+        ]);
+        assert_eq!(error.code, UNKNOWN_CASE);
+    }
+
+    #[test]
+    fn an_imported_generic_type_keeps_its_arity_and_arguments() {
+        accepts_modules(&[
+            ("levels", LEVELS),
+            (
+                "app",
+                "use levels.Pair\n\n/// Entry point.\nexport fn main() -> Int {\n  Pair(first: 1, second: 2).first\n}\n",
+            ),
+        ]);
+        let error = rejects_modules(&[
+            ("levels", LEVELS),
+            (
+                "app",
+                "use levels.Pair\n\n/// Entry point.\nexport fn main() -> Pair<Int> {\n  Pair(first: 1, second: \"2\")\n}\n",
+            ),
+        ]);
+        assert_eq!(error.code, MISMATCH);
+    }
+
+    #[test]
+    fn an_imported_type_alias_expands() {
+        accepts_modules(&[
+            ("levels", LEVELS),
+            (
+                "app",
+                "use levels.Handler\n\n/// Entry point.\nexport fn main(handler: Handler) -> String {\n  handler(1)\n}\n",
+            ),
+        ]);
+    }
+
+    /// A module imported whole makes its exports writable qualified, with
+    /// the same checking a `use` of each would give.
+    #[test]
+    fn a_module_imported_whole_is_named_qualified() {
+        accepts_modules(&[
+            ("levels", LEVELS),
+            (
+                "app",
+                "use levels\n\n/// Entry point.\nexport fn main() -> levels.Config {\n  levels.load()\n}\n",
+            ),
+        ]);
+        let error = rejects_modules(&[
+            ("levels", LEVELS),
+            (
+                "app",
+                "use levels\n\n/// Entry point.\nexport fn main() -> Int {\n  levels.load()\n}\n",
+            ),
+        ]);
+        assert_eq!(error.code, MISMATCH);
+    }
+
+    #[test]
+    fn a_qualified_name_a_module_does_not_export_is_rejected() {
+        let error = rejects_modules(&[
+            ("levels", LEVELS),
+            (
+                "app",
+                "use levels\n\n/// Entry point.\nexport fn main() -> Int {\n  levels.secret()\n}\n",
+            ),
+        ]);
+        assert_eq!(error.code, UNKNOWN_MEMBER);
+        assert!(error.message.contains("not exported"));
+    }
+
+    #[test]
+    fn a_qualified_name_a_module_does_not_declare_is_rejected() {
+        let error = rejects_modules(&[
+            ("levels", LEVELS),
+            (
+                "app",
+                "use levels\n\n/// Entry point.\nexport fn main() -> Int {\n  levels.missing()\n}\n",
+            ),
+        ]);
+        assert_eq!(error.code, UNKNOWN_MEMBER);
+        assert!(error.message.contains("declares no `missing`"));
+    }
+
+    /// Two modules may each declare a `Config`, and the checker must not
+    /// confuse them: a declaration is known by the module that declares it.
+    #[test]
+    fn two_modules_declaring_one_name_are_different_types() {
+        let error = rejects_modules(&[
+            ("levels", LEVELS),
+            (
+                "app",
+                "use levels.load\n\n/// This module's own `Config`.\nexport struct Config {\n  port: Int\n}\n\n\
+                 /// Entry point.\nexport fn main() -> Config {\n  load()\n}\n",
+            ),
+        ]);
+        assert_eq!(error.code, MISMATCH);
+        assert!(error.message.contains("levels.Config"));
+    }
+
+    /// A type reached only as an imported function's result still has its
+    /// fields, even though this module could not write its name.
+    #[test]
+    fn a_type_reached_without_importing_it_still_has_its_fields() {
+        accepts_modules(&[
+            ("levels", LEVELS),
+            (
+                "app",
+                "use levels.load\n\n/// Entry point.\nexport fn main() -> String {\n  load().describe()\n}\n",
+            ),
+        ]);
+        let error = rejects_modules(&[
+            ("levels", LEVELS),
+            (
+                "app",
+                "use levels.load\n\n/// Entry point.\nexport fn main() -> String {\n  load().level\n}\n",
+            ),
+        ]);
+        assert_eq!(error.code, MISMATCH);
+        assert!(error.message.contains("levels.LogLevel"));
+    }
+
+    /// The transitive case: a module that imports a module that imports a
+    /// third still sees one identity for the third's type.
+    #[test]
+    fn a_type_keeps_one_identity_through_two_imports() {
+        accepts_modules(&[
+            ("levels", LEVELS),
+            (
+                "middle",
+                "use levels.load\nuse levels.Config\n\n/// Reloads.\nexport fn reload() -> Config {\n  load()\n}\n",
+            ),
+            (
+                "app",
+                "use middle.reload\nuse levels.Config\n\n/// Entry point.\nexport fn main() -> Config {\n  reload()\n}\n",
+            ),
+        ]);
+    }
+
+    /// A diamond needs no special treatment: importing a module runs none
+    /// of its code, and both sides of the diamond name the same declaration.
+    #[test]
+    fn a_type_keeps_one_identity_through_a_diamond() {
+        accepts_modules(&[
+            ("levels", LEVELS),
+            (
+                "left",
+                "use levels.load\nuse levels.Config\n\n/// Loads.\nexport fn fromLeft() -> Config {\n  load()\n}\n",
+            ),
+            (
+                "right",
+                "use levels.load\nuse levels.Config\n\n/// Loads.\nexport fn fromRight() -> Config {\n  load()\n}\n",
+            ),
+            (
+                "app",
+                "use left.fromLeft\nuse right.fromRight\n\n/// Entry point.\nexport fn main() -> Int {\n  fromLeft().port + fromRight().port\n}\n",
+            ),
+        ]);
+    }
+
+    // ------------------------------------------ conformances across modules
+
+    const DISPLAY: &str = "\
+/// Renders itself.
+export trait Display {
+  /// The full form.
+  fn describe(self) -> String
+
+  /// A short form, defaulting to the full one.
+  fn label(self) -> String { self.describe() }
+}
+
+/// Renders anything that conforms.
+export fn render<T: Display>(value: T) -> String {
+  value.label()
+}
+";
+
+    const BOOKING: &str = "\
+/// A booking.
+export struct Booking {
+  id: Int
+}
+";
+
+    /// A conformance declared where the type is, for an imported trait: the
+    /// bound it satisfies is checked in a third module that imports both.
+    #[test]
+    fn a_bound_is_satisfied_by_a_conformance_to_an_imported_trait() {
+        let booking = format!(
+            "use display.Display\n\n{BOOKING}\nimpl Display for Booking {{\n  \
+             /// The full form.\n  fn describe(self) -> String {{\n    \"b\"\n  }}\n}}\n"
+        );
+        accepts_modules(&[
+            ("display", DISPLAY),
+            ("booking", &booking),
+            (
+                "app",
+                "use display.render\nuse booking.Booking\n\n\
+                 /// Entry point.\nexport fn main() -> String {\n  render(Booking(id: 1))\n}\n",
+            ),
+        ]);
+    }
+
+    /// And the reverse: the conformance is declared where the trait is, for
+    /// an imported type.
+    #[test]
+    fn a_bound_is_satisfied_by_a_conformance_to_an_imported_type() {
+        let display = format!(
+            "use booking.Booking\n\n{DISPLAY}\nimpl Display for Booking {{\n  \
+             /// The full form.\n  fn describe(self) -> String {{\n    \"b\"\n  }}\n}}\n"
+        );
+        accepts_modules(&[
+            ("booking", BOOKING),
+            ("display", &display),
+            (
+                "app",
+                "use display.render\nuse booking.Booking\n\n\
+                 /// Entry point.\nexport fn main() -> String {\n  render(Booking(id: 1))\n}\n",
+            ),
+        ]);
+    }
+
+    /// A trait method supplied by a conformance in another module is a
+    /// method of the type, reachable wherever that conformance is visible.
+    #[test]
+    fn a_conformance_method_declared_elsewhere_is_a_method_of_the_type() {
+        let display = format!(
+            "use booking.Booking\n\n{DISPLAY}\nimpl Display for Booking {{\n  \
+             /// The full form.\n  fn describe(self) -> String {{\n    \"b\"\n  }}\n}}\n"
+        );
+        accepts_modules(&[
+            ("booking", BOOKING),
+            ("display", &display),
+            (
+                "app",
+                "use display.Display\nuse booking.Booking\n\n\
+                 /// Entry point.\nexport fn main(value: Booking) -> String {\n  value.describe()\n}\n",
+            ),
+        ]);
+    }
+
+    #[test]
+    fn a_type_that_conforms_nowhere_does_not_satisfy_an_imported_bound() {
+        let error = rejects_modules(&[
+            ("display", DISPLAY),
+            ("booking", BOOKING),
+            (
+                "app",
+                "use display.render\nuse booking.Booking\n\n\
+                 /// Entry point.\nexport fn main() -> String {\n  render(Booking(id: 1))\n}\n",
+            ),
+        ]);
+        assert_eq!(error.code, UNSATISFIED_BOUND);
+        assert!(error.message.contains("booking.Booking"));
+        assert!(error.message.contains("display.Display"));
+    }
+
+    /// `dyn` names an imported trait through a `use` of the trait itself,
+    /// and the conversion consults the same conformances a bound does.
+    #[test]
+    fn dyn_names_an_imported_trait() {
+        let booking = format!(
+            "use display.Display\n\n{BOOKING}\nimpl Display for Booking {{\n  \
+             /// The full form.\n  fn describe(self) -> String {{\n    \"b\"\n  }}\n}}\n"
+        );
+        accepts_modules(&[
+            ("display", DISPLAY),
+            ("booking", &booking),
+            (
+                "app",
+                "use display.Display\nuse booking.Booking\n\n\
+                 /// Entry point.\nexport fn main() -> String {\n  \
+                 let shown: dyn Display = Booking(id: 1)\n  shown.label()\n}\n",
+            ),
+        ]);
+    }
+
+    #[test]
+    fn a_trait_neither_declared_nor_imported_is_not_a_trait() {
+        let error = rejects_modules(&[
+            ("display", DISPLAY),
+            (
+                "app",
+                "/// Entry point.\nexport fn main() -> Int {\n  1\n}\n\n\
+                 /// Renders.\nfn show<T: Display>(value: T) -> String {\n  \"x\"\n}\n",
+            ),
+        ]);
+        assert_eq!(error.code, UNKNOWN_TRAIT);
+    }
+
+    /// Two modules may each declare a `Display`, and a `dyn` of one is not a
+    /// `dyn` of the other.
+    #[test]
+    fn two_modules_declaring_one_trait_name_are_different_traits() {
+        let booking = format!(
+            "use display.Display\n\n{BOOKING}\nimpl Display for Booking {{\n  \
+             /// The full form.\n  fn describe(self) -> String {{\n    \"b\"\n  }}\n}}\n"
+        );
+        let error = rejects_modules(&[
+            ("display", DISPLAY),
+            ("booking", &booking),
+            (
+                "app",
+                "use booking.Booking\n\n\
+                 /// This module's own `Display`, unrelated to `display`'s.\n\
+                 trait Display {\n  /// The full form.\n  fn describe(self) -> String\n}\n\n\
+                 /// Entry point.\nexport fn main() -> Int {\n  \
+                 let shown: dyn Display = Booking(id: 1)\n  1\n}\n",
+            ),
+        ]);
+        assert_eq!(error.code, MISMATCH);
+        assert!(error.message.contains("dyn Display"));
+    }
+
+    /// A conformance's signature is checked in the module that declares the
+    /// conformance, against the trait it imported.
+    #[test]
+    fn a_conformance_to_an_imported_trait_must_match_its_signature() {
+        let booking = format!(
+            "use display.Display\n\n{BOOKING}\nimpl Display for Booking {{\n  \
+             /// The full form.\n  fn describe(self) -> Int {{\n    1\n  }}\n}}\n"
+        );
+        let error = rejects_modules(&[("display", DISPLAY), ("booking", &booking)]);
+        assert_eq!(error.code, CONFORMANCE_SIGNATURE);
+    }
+
+    #[test]
+    fn a_name_neither_declared_nor_imported_is_still_unresolved() {
+        let error = rejects_modules(&[
+            (
+                "greet",
+                "/// Greets.\nexport fn greeting() -> String {\n  \"hi\"\n}\n",
+            ),
+            (
+                "app",
+                "/// Entry point.\nexport fn main() -> String {\n  greeting()\n}\n",
+            ),
+        ]);
+        assert_eq!(error.code, UNKNOWN_NAME);
     }
 
     fn render_all(sources: &SourceMap, diagnostics: &[Diagnostic]) -> String {

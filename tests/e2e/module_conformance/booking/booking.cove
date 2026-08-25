@@ -1,0 +1,20 @@
+use module_conformance.display.Display
+
+/// A room booking.
+export struct Booking {
+  id: Int
+}
+
+/// A conformance for a trait this module imports, which ADR 0006 allows
+/// because this module declares the type.
+impl Display for Booking {
+  /// Returns the full form.
+  fn describe(self) -> String {
+    "booking {self.id}"
+  }
+
+  /// Returns the short form.
+  fn label(self) -> String {
+    "#{self.id}"
+  }
+}

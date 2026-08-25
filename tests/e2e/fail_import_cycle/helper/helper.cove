@@ -1,0 +1,6 @@
+use main.label
+
+/// Decorates the entry module's label, which imports this module in turn.
+export fn decorate() -> String {
+  "[{label()}]"
+}

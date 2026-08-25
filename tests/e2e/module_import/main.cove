@@ -1,0 +1,13 @@
+use module_import.greet
+use module_import.greet.say
+
+/// Greets through another module of this package.
+///
+/// `say` is imported by name and `greet.say` names the same declaration
+/// through the module. This module names no host module: `console` reaches
+/// it only through `greet`, which is where the granted capability is used.
+export fn main() -> Result<Unit, Error> {
+  say("world")?
+  greet.say("Cove")?
+  Ok(())
+}

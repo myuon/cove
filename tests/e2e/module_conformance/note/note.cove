@@ -1,0 +1,4 @@
+/// A note somebody left.
+export struct Note {
+  text: String
+}

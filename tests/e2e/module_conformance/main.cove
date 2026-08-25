@@ -1,0 +1,18 @@
+use console.println
+use module_conformance.booking.Booking
+use module_conformance.note.Note
+use module_conformance.display.render
+use module_conformance.display.renderDyn
+
+/// Renders values whose conformances were declared in two different
+/// modules: one where the type is declared, one where the trait is.
+export fn main() -> Result<Unit, Error> {
+  let booking = Booking(id: 41)
+  let note = Note(text: "call the guest")
+
+  console.println(render(booking))?
+  console.println(render(note))?
+  console.println(renderDyn(booking))?
+  console.println(booking.describe())?
+  Ok(())
+}

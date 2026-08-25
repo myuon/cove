@@ -1,15 +1,13 @@
 use documents.read
-use console.println
-
-/// Counts words in `text`.
-export fn wordCount(text: String) -> Int {
-  text.words().length()
-}
+use text
 
 /// Reads only through the document capability supplied by the host.
+///
+/// `console` is reached only through `text.report`, so this module requires
+/// the console capability without naming a host module for it.
 export fn main() -> Result<Unit, Error> {
-  let text = documents.read("input")?
-  console.println("{wordCount(text)} words")?
+  let input = documents.read("input")?
+  text.report(input)?
   Ok(())
 }
 

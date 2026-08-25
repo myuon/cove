@@ -1,0 +1,12 @@
+error[cove::resolve::private_declaration]: `hidden` is declared by module `secret`, but is not exported
+ --> <e2e>/fail_import_private/main/main.cove:2:1
+  |
+2 | use secret.hidden
+  | ^^^^^^^^^^^^^^^^^
+ --> <e2e>/fail_import_private/secret/secret.cove:6:4
+  |
+6 | fn hidden() -> String {
+  |    ^^^^^^ `hidden` is declared here, without `export`
+  rule: An `export` declaration is public; other declarations are module-private.
+  help: write `export` on `hidden` in module `secret`, or import something else
+1 error(s)

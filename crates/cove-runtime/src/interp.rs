@@ -407,26 +407,183 @@ impl<'a> Interpreter<'a> {
         self.program.modules.get(module)
     }
 
-    fn find_function(&self, module: &str, name: &str) -> Option<Rc<FnDecl>> {
-        Some(self.resolved(module)?.functions.get(name)?.decl.clone())
+    /// Resolves `name` as module `module` sees it, to the module that
+    /// declares it and whatever `select` finds there.
+    ///
+    /// A module's own declaration answers first; failing that, the
+    /// declaration a `use` imported under that name does. Which module
+    /// answers matters beyond the declaration itself: a body runs in the
+    /// module that declares it, so an imported function resolves its own
+    /// names where it was written, not where it was called.
+    fn find_declared<T>(
+        &self,
+        module: &str,
+        name: &str,
+        select: impl Fn(&'a ResolvedModule, &str) -> Option<T>,
+    ) -> Option<(Rc<str>, T)> {
+        let resolved = self.resolved(module)?;
+        if let Some(found) = select(resolved, name) {
+            return Some((module.into(), found));
+        }
+        let owner_name = resolved.imports.get(name)?;
+        let owner = self.resolved(owner_name)?;
+        select(owner, name).map(|found| (owner_name.as_str().into(), found))
     }
 
-    fn find_method(&self, module: &str, type_name: &str, name: &str) -> Option<Rc<FnDecl>> {
+    fn find_function(&self, module: &str, name: &str) -> Option<(Rc<str>, Rc<FnDecl>)> {
+        self.find_declared(module, name, |resolved, name| {
+            Some(resolved.functions.get(name)?.decl.clone())
+        })
+    }
+
+    /// The method `type_module.type_name` answers to, and the module whose
+    /// body runs it.
+    ///
+    /// A type's methods usually live with the type. They do not have to: ADR
+    /// 0006 allows `impl Trait for Type` in the module that declares the
+    /// trait as well as the one that declares the type, so a conformance
+    /// written elsewhere puts a method for this type in that other module.
+    /// The orphan rule bounds the search — only a module declaring one of
+    /// the two parties can have it — and the conformance itself says which
+    /// module to look in.
+    fn find_method(
+        &self,
+        type_module: &str,
+        type_name: &str,
+        name: &str,
+    ) -> Option<(Rc<str>, Rc<FnDecl>)> {
+        let key = (type_name.to_string(), name.to_string());
+        if let Some(entry) = self.resolved(type_module).and_then(|m| m.methods.get(&key)) {
+            return Some((type_module.into(), entry.decl.clone()));
+        }
+        for (module, resolved) in &self.program.modules {
+            let conforms = resolved.conformances.values().any(|conformance| {
+                conformance.type_module == type_module
+                    && conformance.type_name == type_name
+                    && conformance.methods.contains(name)
+            });
+            if !conforms {
+                continue;
+            }
+            if let Some(entry) = resolved.methods.get(&key) {
+                return Some((module.as_str().into(), entry.decl.clone()));
+            }
+        }
+        None
+    }
+
+    fn find_struct(&self, module: &str, name: &str) -> Option<(Rc<str>, Rc<StructDecl>)> {
+        self.find_declared(module, name, |resolved, name| {
+            Some(resolved.structs.get(name)?.decl.clone())
+        })
+    }
+
+    fn find_enum(&self, module: &str, name: &str) -> Option<(Rc<str>, Rc<EnumDecl>)> {
+        self.find_declared(module, name, |resolved, name| {
+            Some(resolved.enums.get(name)?.decl.clone())
+        })
+    }
+
+    /// The module that declares the trait `name` as `module` sees it: itself
+    /// when it declares the trait, and the module a `use` imported it from
+    /// otherwise.
+    fn declaring_module(&self, module: &str, name: &str) -> Option<Rc<str>> {
+        let resolved = self.resolved(module)?;
+        if resolved.traits.contains_key(name) {
+            return Some(module.into());
+        }
+        let owner = resolved.imports.get(name)?;
+        self.resolved(owner)?
+            .traits
+            .contains_key(name)
+            .then(|| owner.as_str().into())
+    }
+
+    /// The module `head` names in `module`, when `use` imported it whole.
+    fn imported_module(&self, module: &str, head: &str) -> Option<Rc<str>> {
         Some(
             self.resolved(module)?
-                .methods
-                .get(&(type_name.to_string(), name.to_string()))?
-                .decl
-                .clone(),
+                .module_imports
+                .get(head)?
+                .as_str()
+                .into(),
         )
     }
 
-    fn find_struct(&self, module: &str, name: &str) -> Option<Rc<StructDecl>> {
-        Some(self.resolved(module)?.structs.get(name)?.decl.clone())
+    /// The exported declaration `owner.name` reaches, when `owner` exports
+    /// one.
+    ///
+    /// A module-private declaration is not reachable qualified, exactly as
+    /// it is not importable: `export` is the whole of a module's boundary.
+    fn find_exported<T>(
+        &self,
+        owner: &str,
+        name: &str,
+        select: impl Fn(&'a ResolvedModule) -> Option<T>,
+    ) -> Option<T> {
+        let resolved = self.resolved(owner)?;
+        if resolved.exported(name) != Some(true) {
+            return None;
+        }
+        select(resolved)
     }
 
-    fn find_enum(&self, module: &str, name: &str) -> Option<Rc<EnumDecl>> {
-        Some(self.resolved(module)?.enums.get(name)?.decl.clone())
+    /// The exported function of `owner` named `name`.
+    fn exported_function(&self, owner: &str, name: &str) -> Option<Rc<FnDecl>> {
+        self.find_exported(owner, name, |resolved| {
+            Some(resolved.functions.get(name)?.decl.clone())
+        })
+    }
+
+    /// `owner.name` as a value: an exported function is an ordinary handle,
+    /// and an exported struct or enum is the type used as a value, exactly
+    /// as a bare name for either would be.
+    fn module_member(&self, owner: &str, name: &str, span: Span) -> Eval {
+        if let Some(decl) = self.exported_function(owner, name) {
+            return Ok(Value::Closure(Rc::new(Closure {
+                is_async: decl.is_async,
+                params: decl.params.clone(),
+                body: Rc::new(decl.body.clone()),
+                decl: Some(decl),
+                module: owner.into(),
+                captures: Vec::new(),
+            })));
+        }
+        if self
+            .find_exported(owner, name, |resolved| {
+                resolved
+                    .structs
+                    .contains_key(name)
+                    .then_some(())
+                    .or_else(|| resolved.enums.contains_key(name).then_some(()))
+            })
+            .is_some()
+        {
+            return Ok(Value::Type(format!("{owner}.{name}").into()));
+        }
+        Err(self.no_export(owner, name, span).into())
+    }
+
+    /// Reports a qualified name that no export of `owner` answers, naming
+    /// the module-private declaration when that is what went wrong.
+    fn no_export(&self, owner: &str, name: &str, span: Span) -> RuntimeError {
+        let exported = self.resolved(owner).map(|resolved| resolved.exported(name));
+        match exported {
+            Some(Some(false)) => RuntimeError::new(format!(
+                "`{name}` is declared by module `{owner}`, but is not exported"
+            ))
+            .at(span)
+            .with_rule("An `export` declaration is public; other declarations are module-private.")
+            .with_help(format!("write `export` on `{name}` in module `{owner}`")),
+            _ => RuntimeError::new(format!("module `{owner}` declares no `{name}`"))
+                .at(span)
+                .with_help(match self.resolved(owner) {
+                    Some(resolved) if !resolved.exports().is_empty() => {
+                        format!("module `{owner}` exports {}", resolved.exports().join(", "))
+                    }
+                    _ => format!("module `{owner}` exports nothing"),
+                }),
+        }
     }
 
     /// Whether `name` is a host module this module may address by name.
@@ -599,11 +756,13 @@ impl<'a> Interpreter<'a> {
                 if matches!(value, Value::Dyn(_)) {
                     return value;
                 }
-                let qualified: Rc<str> = match self.resolved(module) {
-                    Some(resolved) if resolved.traits.contains_key(&trait_name.node) => {
-                        format!("{module}.{}", trait_name.node).into()
-                    }
-                    _ => trait_name.node.as_str().into(),
+                // A trait belongs to the module that declares it, which may
+                // be one this module imported the trait from: a `dyn` value
+                // built here must carry the same name a value built there
+                // does, or the two would not compare equal.
+                let qualified: Rc<str> = match self.declaring_module(module, &trait_name.node) {
+                    Some(owner) => format!("{owner}.{}", trait_name.node).into(),
+                    None => trait_name.node.as_str().into(),
                 };
                 Value::Dyn(Rc::new(DynValue {
                     trait_name: qualified,
@@ -1431,21 +1590,38 @@ impl<'a> Interpreter<'a> {
             return Ok(Value::none());
         }
         let module = env.module.clone();
-        if let Some(decl) = self.find_function(&module, name) {
+        if let Some((owner, decl)) = self.find_function(&module, name) {
             return Ok(Value::Closure(Rc::new(Closure {
                 is_async: decl.is_async,
                 params: decl.params.clone(),
                 body: Rc::new(decl.body.clone()),
                 decl: Some(decl),
-                module,
+                module: owner,
                 captures: Vec::new(),
             })));
         }
-        if self.find_struct(&module, name).is_some() || self.find_enum(&module, name).is_some() {
-            return Ok(Value::Type(format!("{module}.{name}").into()));
+        // A type is named by the module that declares it, wherever it is
+        // written: two modules may each declare a `Config`, and a value has
+        // to say which one it is.
+        if let Some((owner, _)) = self.find_struct(&module, name) {
+            return Ok(Value::Type(format!("{owner}.{name}").into()));
+        }
+        if let Some((owner, _)) = self.find_enum(&module, name) {
+            return Ok(Value::Type(format!("{owner}.{name}").into()));
         }
         if builtins::is_builtin_type(name) {
             return Ok(Value::Type(name.into()));
+        }
+        if let Some(owner) = self.imported_module(&module, name) {
+            return Err(RuntimeError::new(format!("`{name}` is a module, not a value"))
+                .at(span)
+                .with_rule(
+                    "A module imported whole is a namespace; its exported declarations are the values.",
+                )
+                .with_help(format!(
+                    "name one of its exports, such as `{name}.<declaration>`, or import the declaration with `use {owner}.<declaration>`"
+                ))
+                .into());
         }
         if self.is_host_module(&module, name) {
             return Ok(Value::HostModule(name.into()));
@@ -1467,14 +1643,19 @@ impl<'a> Interpreter<'a> {
         if let ExprKind::Ident(head) = &base.kind {
             if env.lookup(head).is_none() {
                 let module = env.module.clone();
-                if let Some(decl) = self.find_enum(&module, head) {
-                    return Ok(self.enum_case(&module, &decl, name, Vec::new(), span)?);
+                if let Some((owner, decl)) = self.find_enum(&module, head) {
+                    return Ok(self.enum_case(&owner, &decl, name, Vec::new(), span)?);
                 }
                 if self.is_host_module(&module, head) {
                     return Ok(Value::HostFn {
                         module: head.as_str().into(),
                         op: name.into(),
                     });
+                }
+                // `booking.create` and `booking.Status`: a module imported
+                // whole answers with the exported declaration it names.
+                if let Some(owner) = self.imported_module(&module, head) {
+                    return self.module_member(&owner, name, span);
                 }
             }
         }
@@ -1484,6 +1665,17 @@ impl<'a> Interpreter<'a> {
             Value::Struct(value) => match value.get(name) {
                 Some(field) => Ok(field.clone()),
                 None => Err(no_field(&value.type_name, name, span).into()),
+            },
+            // `booking.Status.Confirmed`, once `booking.Status` named the
+            // type: a case of an enum reached through its module.
+            Value::Type(type_name) => match type_name.rsplit_once('.') {
+                Some((owner, short)) => match self.find_enum(owner, short) {
+                    Some((owner, decl)) => {
+                        Ok(self.enum_case(&owner, &decl, name, Vec::new(), span)?)
+                    }
+                    None => Err(no_field(type_name, name, span).into()),
+                },
+                None => Err(no_field(type_name, name, span).into()),
             },
             Value::HostModule(module) => Ok(Value::HostFn {
                 module: module.clone(),
@@ -1575,14 +1767,14 @@ impl<'a> Interpreter<'a> {
                     return Ok(self.call_value_slots(value, args, span)?);
                 }
                 let module = env.module.clone();
-                if let Some(decl) = self.find_function(&module, name) {
+                if let Some((owner, decl)) = self.find_function(&module, name) {
                     let args = self.eval_args(env, args, trailing)?;
                     return Ok(self.invoke(
                         &Target {
                             name,
                             params: &decl.params,
                             body: &decl.body,
-                            module,
+                            module: owner,
                             receiver: decl.receiver,
                             is_async: decl.is_async,
                             captures: &[],
@@ -1593,9 +1785,9 @@ impl<'a> Interpreter<'a> {
                         span,
                     )?);
                 }
-                if let Some(decl) = self.find_struct(&module, name) {
+                if let Some((owner, decl)) = self.find_struct(&module, name) {
                     let args = self.eval_args(env, args, trailing)?;
-                    return Ok(self.init_struct(&module, &decl, args, span)?);
+                    return Ok(self.init_struct(&owner, &decl, args, span)?);
                 }
                 if self.find_enum(&module, name).is_some() {
                     return Err(
@@ -1640,7 +1832,7 @@ impl<'a> Interpreter<'a> {
                             let values = plain_values(args, &format!("{head}.{}", name.node))?;
                             return Ok(self.call_host(head, &name.node, values, span)?);
                         }
-                        if let Some(enum_decl) = self.find_enum(&module, head) {
+                        if let Some((owner, enum_decl)) = self.find_enum(&module, head) {
                             // A case wins over an associated function of the
                             // same name, so naming a case never changes
                             // meaning when an `impl` block is added.
@@ -1649,14 +1841,16 @@ impl<'a> Interpreter<'a> {
                                 .iter()
                                 .any(|case| case.name.node == name.node);
                             if !is_case {
-                                if let Some(decl) = self.find_method(&module, head, &name.node) {
+                                if let Some((declaring, decl)) =
+                                    self.find_method(&owner, head, &name.node)
+                                {
                                     let args = self.eval_args(env, args, trailing)?;
                                     return Ok(self.invoke(
                                         &Target {
                                             name: &name.node,
                                             params: &decl.params,
                                             body: &decl.body,
-                                            module,
+                                            module: declaring,
                                             receiver: decl.receiver,
                                             is_async: decl.is_async,
                                             captures: &[],
@@ -1671,18 +1865,20 @@ impl<'a> Interpreter<'a> {
                             let args = self.eval_args(env, args, trailing)?;
                             let values = plain_values(args, &format!("{head}.{}", name.node))?;
                             return Ok(
-                                self.enum_case(&module, &enum_decl, &name.node, values, span)?
+                                self.enum_case(&owner, &enum_decl, &name.node, values, span)?
                             );
                         }
-                        if self.find_struct(&module, head).is_some() {
-                            if let Some(decl) = self.find_method(&module, head, &name.node) {
+                        if let Some((owner, _)) = self.find_struct(&module, head) {
+                            if let Some((declaring, decl)) =
+                                self.find_method(&owner, head, &name.node)
+                            {
                                 let args = self.eval_args(env, args, trailing)?;
                                 return Ok(self.invoke(
                                     &Target {
                                         name: &name.node,
                                         params: &decl.params,
                                         body: &decl.body,
-                                        module,
+                                        module: declaring,
                                         receiver: decl.receiver,
                                         is_async: decl.is_async,
                                         captures: &[],
@@ -1693,6 +1889,52 @@ impl<'a> Interpreter<'a> {
                                     span,
                                 )?);
                             }
+                        }
+                        // `booking.create(...)`: a module imported whole is
+                        // called through the declaration it exports.
+                        if let Some(owner) = self.imported_module(&module, head) {
+                            if let Some(decl) = self.exported_function(&owner, &name.node) {
+                                let args = self.eval_args(env, args, trailing)?;
+                                return Ok(self.invoke(
+                                    &Target {
+                                        name: &name.node,
+                                        params: &decl.params,
+                                        body: &decl.body,
+                                        module: owner,
+                                        receiver: decl.receiver,
+                                        is_async: decl.is_async,
+                                        captures: &[],
+                                        return_type: decl.return_type.as_ref(),
+                                    },
+                                    None,
+                                    args,
+                                    span,
+                                )?);
+                            }
+                            if let Some(decl) = self.find_exported(&owner, &name.node, |resolved| {
+                                Some(resolved.structs.get(&name.node)?.decl.clone())
+                            }) {
+                                let args = self.eval_args(env, args, trailing)?;
+                                return Ok(self.init_struct(&owner, &decl, args, span)?);
+                            }
+                            if self
+                                .find_exported(&owner, &name.node, |resolved| {
+                                    resolved.enums.get(&name.node)
+                                })
+                                .is_some()
+                            {
+                                return Err(RuntimeError::new(format!(
+                                    "`{head}.{}` is an enum, not a function",
+                                    name.node
+                                ))
+                                .at(span)
+                                .with_help(format!(
+                                    "name a case, such as `{head}.{}.Case(...)`",
+                                    name.node
+                                ))
+                                .into());
+                            }
+                            return Err(self.no_export(&owner, &name.node, span).into());
                         }
                         if builtins::is_builtin_type(head) {
                             let args = self.eval_args(env, args, trailing)?;
@@ -1752,9 +1994,8 @@ impl<'a> Interpreter<'a> {
             _ => unreachable!("a receiver is either a place or a temporary"),
         };
 
-        if let Some((module, short)) = type_name.rsplit_once('.') {
-            if let Some(decl) = self.find_method(module, short, name) {
-                let module: Rc<str> = module.into();
+        if let Some((type_module, short)) = type_name.rsplit_once('.') {
+            if let Some((module, decl)) = self.find_method(type_module, short, name) {
                 let receiver_slot = match decl.receiver {
                     Some(Receiver { is_var: true, .. }) => {
                         let Some(place) = place else {
@@ -2726,6 +2967,46 @@ mod tests {
         (sources, program)
     }
 
+    /// Parses several modules, so one can `use` another.
+    fn program_of_modules(modules: &[(&str, &str)]) -> (SourceMap, Program) {
+        let mut sources = SourceMap::new();
+        let mut map = BTreeMap::new();
+        for (name, source) in modules {
+            let path = PathBuf::from(format!("{name}/main.cove"));
+            let file = sources.add(path.clone(), *source);
+            let ast = cove_syntax::parse_file(&sources, file).expect("test source parses");
+            map.insert(
+                (*name).to_string(),
+                Module {
+                    name: (*name).to_string(),
+                    dir: PathBuf::from(*name),
+                    units: vec![Unit { file, path, ast }],
+                },
+            );
+        }
+        let package = Package {
+            root: PathBuf::new(),
+            config: Config::default(),
+            modules: map,
+        };
+        let program = cove_sema::resolve::resolve(&package).expect("test package resolves");
+        (sources, program)
+    }
+
+    /// Runs `app.main` of a package written inline, with `console` granted.
+    fn run_modules(modules: &[(&str, &str)]) -> Run {
+        let (sources, program) = program_of_modules(modules);
+        run_in(
+            &program,
+            &sources,
+            "app",
+            "main",
+            &[],
+            &["console"],
+            BTreeMap::new(),
+        )
+    }
+
     struct Run {
         value: Result<Value, RuntimeError>,
         output: String,
@@ -2910,6 +3191,338 @@ fn renderAll(values: Array<dyn Display>) -> String {
         )
         .output;
         assert_eq!(output, "true false\n");
+    }
+
+    // ------------------------------------------------------------ imports
+
+    /// The module a body runs in is the module that declares it, so an
+    /// imported function resolves its own names where it was written.
+    #[test]
+    fn an_imported_function_runs_in_the_module_that_declares_it() {
+        let run = run_modules(&[
+            (
+                "greet",
+                "use console.println\n\nfn punctuation() -> String {\n  \"!\"\n}\n\n\
+                 /// Greets by name.\nexport fn greeting(name: String) -> String {\n  \"Hello, {name}{punctuation()}\"\n}\n",
+            ),
+            (
+                "app",
+                "use console.println\nuse greet.greeting\n\n\
+                 /// Entry point.\nexport fn main() -> Result<Unit, Error> {\n  console.println(greeting(\"world\"))?\n  Ok(())\n}\n",
+            ),
+        ]);
+        assert_eq!(run.output, "Hello, world!\n");
+    }
+
+    #[test]
+    fn a_module_imported_whole_is_called_qualified() {
+        let run = run_modules(&[
+            (
+                "greet",
+                "/// Greets by name.\nexport fn greeting(name: String) -> String {\n  \"Hello, {name}!\"\n}\n",
+            ),
+            (
+                "app",
+                "use console.println\nuse greet\n\n\
+                 /// Entry point.\nexport fn main() -> Result<Unit, Error> {\n  console.println(greet.greeting(\"world\"))?\n  Ok(())\n}\n",
+            ),
+        ]);
+        assert_eq!(run.output, "Hello, world!\n");
+    }
+
+    #[test]
+    fn an_imported_struct_is_constructed_and_its_methods_run() {
+        let run = run_modules(&[
+            (
+                "booking",
+                "/// A booking.\nexport struct Booking {\n  id: String\n}\n\n\
+                 impl Booking {\n  /// The id, in a sentence.\n  export fn describe(self) -> String {\n    \"booking {self.id}\"\n  }\n}\n",
+            ),
+            (
+                "app",
+                "use console.println\nuse booking.Booking\n\n\
+                 /// Entry point.\nexport fn main() -> Result<Unit, Error> {\n  \
+                 let made = Booking(id: \"7\")\n  console.println(made.describe())?\n  Ok(())\n}\n",
+            ),
+        ]);
+        assert_eq!(run.output, "booking 7\n");
+    }
+
+    /// A value carries the module that declares its type, so a method of an
+    /// imported type dispatches even when the value crossed a boundary.
+    #[test]
+    fn an_imported_type_s_value_keeps_its_methods_across_a_boundary() {
+        let run = run_modules(&[
+            (
+                "booking",
+                "/// A booking.\nexport struct Booking {\n  id: String\n}\n\n\
+                 impl Booking {\n  /// The id, in a sentence.\n  export fn describe(self) -> String {\n    \"booking {self.id}\"\n  }\n}\n\n\
+                 /// Makes one.\nexport fn make() -> Booking {\n  Booking(id: \"9\")\n}\n",
+            ),
+            (
+                "app",
+                "use console.println\nuse booking.make\n\n\
+                 /// Entry point.\nexport fn main() -> Result<Unit, Error> {\n  console.println(make().describe())?\n  Ok(())\n}\n",
+            ),
+        ]);
+        assert_eq!(run.output, "booking 9\n");
+    }
+
+    #[test]
+    fn an_imported_enum_s_cases_are_built_and_matched() {
+        let run = run_modules(&[
+            (
+                "levels",
+                "/// Levels.\nexport enum LogLevel {\n  Debug\n  Info\n}\n",
+            ),
+            (
+                "app",
+                "use console.println\nuse levels.LogLevel\n\n\
+                 /// Names a level.\nfn name(level: LogLevel) -> String {\n  \
+                 match level {\n    LogLevel.Debug => \"debug\"\n    LogLevel.Info => \"info\"\n  }\n}\n\n\
+                 /// Entry point.\nexport fn main() -> Result<Unit, Error> {\n  console.println(name(LogLevel.Info))?\n  Ok(())\n}\n",
+            ),
+        ]);
+        assert_eq!(run.output, "info\n");
+    }
+
+    /// An enum reached through a module imported whole: `levels.LogLevel`
+    /// names the type, and the case follows it.
+    #[test]
+    fn an_enum_case_is_reached_through_a_module_imported_whole() {
+        let run = run_modules(&[
+            (
+                "levels",
+                "/// Levels.\nexport enum LogLevel {\n  Debug\n  Info\n}\n",
+            ),
+            (
+                "app",
+                "use console.println\nuse levels\n\n\
+                 /// Entry point.\nexport fn main() -> Result<Unit, Error> {\n  console.println(\"{levels.LogLevel.Info}\")?\n  Ok(())\n}\n",
+            ),
+        ]);
+        assert_eq!(run.output, "Info\n");
+    }
+
+    /// An imported function is an ordinary handle value, so it can be passed
+    /// where any other closure can.
+    #[test]
+    fn an_imported_function_is_an_ordinary_value() {
+        let run = run_modules(&[
+            (
+                "greet",
+                "/// Greets by name.\nexport fn greeting(name: String) -> String {\n  \"Hello, {name}!\"\n}\n",
+            ),
+            (
+                "app",
+                "use console.println\nuse greet\n\n\
+                 /// Applies `f`.\nfn apply(f: fn(String) -> String) -> String {\n  f(\"world\")\n}\n\n\
+                 /// Entry point.\nexport fn main() -> Result<Unit, Error> {\n  console.println(apply(greet.greeting))?\n  Ok(())\n}\n",
+            ),
+        ]);
+        assert_eq!(run.output, "Hello, world!\n");
+    }
+
+    /// `export` is the whole of a module's boundary: a qualified name
+    /// reaches exactly what a `use` of it would.
+    #[test]
+    fn a_qualified_name_that_is_not_exported_is_refused() {
+        let (sources, program) = program_of_modules(&[
+            (
+                "greet",
+                "fn secret() -> String {\n  \"s\"\n}\n\n/// Greets.\nexport fn greeting() -> String {\n  \"hi\"\n}\n",
+            ),
+            (
+                "app",
+                "use greet\n\n/// Entry point.\nexport fn main() -> String {\n  greet.secret()\n}\n",
+            ),
+        ]);
+        let error = run_in(
+            &program,
+            &sources,
+            "app",
+            "main",
+            &[],
+            &["console"],
+            BTreeMap::new(),
+        )
+        .error();
+        assert!(error.message.contains("not exported"), "{}", error.message);
+    }
+
+    #[test]
+    fn a_module_used_as_a_value_is_refused() {
+        let (sources, program) = program_of_modules(&[
+            (
+                "greet",
+                "/// Greets.\nexport fn greeting() -> String {\n  \"hi\"\n}\n",
+            ),
+            (
+                "app",
+                "use greet\n\n/// Entry point.\nexport fn main() -> String {\n  let m = greet\n  \"x\"\n}\n",
+            ),
+        ]);
+        let error = run_in(
+            &program,
+            &sources,
+            "app",
+            "main",
+            &[],
+            &["console"],
+            BTreeMap::new(),
+        )
+        .error();
+        assert!(
+            error.message.contains("is a module, not a value"),
+            "{}",
+            error.message
+        );
+    }
+
+    /// A host call inside an imported function is charged to the grant the
+    /// host gave the entry, not to the module that wrote the call.
+    #[test]
+    fn a_host_call_inside_an_imported_function_still_needs_the_grant() {
+        let (sources, program) = program_of_modules(&[
+            (
+                "log",
+                "use console.println\n\n/// Logs.\nexport fn log(msg: String) -> Result<Unit, Error> {\n  console.println(msg)\n}\n",
+            ),
+            (
+                "app",
+                "use log.log\n\n/// Entry point.\nexport fn main() -> Result<Unit, Error> {\n  log(\"hi\")?\n  Ok(())\n}\n",
+            ),
+        ]);
+        let granted = run_in(
+            &program,
+            &sources,
+            "app",
+            "main",
+            &[],
+            &["console"],
+            BTreeMap::new(),
+        );
+        assert_eq!(granted.output, "hi\n");
+
+        let denied = run_in(&program, &sources, "app", "main", &[], &[], BTreeMap::new());
+        assert!(denied.value.is_err() || denied.output.is_empty());
+    }
+
+    // ------------------------------------------ conformances across modules
+
+    const DISPLAY: &str = "\
+/// Renders itself.
+export trait Display {
+  /// The full form.
+  fn describe(self) -> String
+
+  /// A short form, defaulting to the full one.
+  fn label(self) -> String { \"<{self.describe()}>\" }
+}
+
+/// Renders anything that conforms, through static dispatch.
+export fn render<T: Display>(value: T) -> String {
+  value.label()
+}
+
+/// Renders through dynamic dispatch.
+export fn renderDyn(value: dyn Display) -> String {
+  value.label()
+}
+";
+
+    const BOOKING: &str = "\
+/// A booking.
+export struct Booking {
+  id: Int
+}
+";
+
+    /// ADR 0006 allows the conformance where the type is declared, so the
+    /// trait may be imported; both dispatch forms must reach it.
+    #[test]
+    fn a_conformance_to_an_imported_trait_dispatches_both_ways() {
+        let booking = format!(
+            "use display.Display\n\n{BOOKING}\nimpl Display for Booking {{\n  \
+             /// The full form.\n  fn describe(self) -> String {{\n    \"booking {{self.id}}\"\n  }}\n}}\n"
+        );
+        let run = run_modules(&[
+            ("display", DISPLAY),
+            ("booking", &booking),
+            (
+                "app",
+                "use console.println\nuse booking.Booking\nuse display.render\nuse display.renderDyn\n\n\
+                 /// Entry point.\nexport fn main() -> Result<Unit, Error> {\n  \
+                 let one = Booking(id: 7)\n  \
+                 console.println(render(one))?\n  \
+                 console.println(renderDyn(one))?\n  \
+                 Ok(())\n}\n",
+            ),
+        ]);
+        // The default body comes from the trait's module, the `describe` it
+        // calls from the conformance's, and both dispatch forms agree.
+        assert_eq!(run.output, "<booking 7>\n<booking 7>\n");
+    }
+
+    /// And the reverse: the conformance is declared with the trait, for an
+    /// imported type, so the type's methods do not all live with the type.
+    #[test]
+    fn a_conformance_to_an_imported_type_dispatches_both_ways() {
+        let display = format!(
+            "use booking.Booking\n\n{DISPLAY}\nimpl Display for Booking {{\n  \
+             /// The full form.\n  fn describe(self) -> String {{\n    \"booking {{self.id}}\"\n  }}\n}}\n"
+        );
+        let run = run_modules(&[
+            ("booking", BOOKING),
+            ("display", &display),
+            (
+                "app",
+                "use console.println\nuse booking.Booking\nuse display.render\nuse display.Display\n\n\
+                 /// Entry point.\nexport fn main() -> Result<Unit, Error> {\n  \
+                 let one = Booking(id: 7)\n  \
+                 console.println(render(one))?\n  \
+                 console.println(one.describe())?\n  \
+                 let shown: dyn Display = one\n  \
+                 console.println(shown.label())?\n  \
+                 Ok(())\n}\n",
+            ),
+        ]);
+        assert_eq!(run.output, "<booking 7>\nbooking 7\n<booking 7>\n");
+    }
+
+    /// A `dyn` value names its trait by the module that declares it,
+    /// wherever the conversion was written, so two `dyn` values of the same
+    /// trait built in different modules are the same kind of value.
+    #[test]
+    fn a_dyn_value_names_its_trait_by_the_module_that_declares_it() {
+        let booking = format!(
+            "use display.Display\n\n{BOOKING}\nimpl Display for Booking {{\n  \
+             /// The full form.\n  fn describe(self) -> String {{\n    \"b\"\n  }}\n}}\n\n\
+             /// Wraps one here, in the module that declares the type.\n\
+             export fn shown(value: Booking) -> dyn Display {{\n  value\n}}\n"
+        );
+        let (sources, program) = program_of_modules(&[
+            ("display", DISPLAY),
+            ("booking", &booking),
+            (
+                "app",
+                "use booking.Booking\nuse booking.shown\nuse display.Display\n\n\
+                 /// Entry point: wraps one here too.\n\
+                 export fn main() -> Bool {\n  \
+                 let here: dyn Display = Booking(id: 1)\n  \
+                 here == shown(Booking(id: 1))\n}\n",
+            ),
+        ]);
+        let run = run_in(
+            &program,
+            &sources,
+            "app",
+            "main",
+            &[],
+            &["console"],
+            BTreeMap::new(),
+        );
+        assert_eq!(run.value().to_string(), "true");
     }
 
     // ------------------------------------------------------------- rule 1
