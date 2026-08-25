@@ -1,0 +1,76 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  # A failed build should say what failed, not where in the compiler it failed.
+  RUST_BACKTRACE: 1
+
+jobs:
+  build:
+    name: test, lint, and dogfood
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # The runner image ships a current stable toolchain; asking for the two
+      # components is a no-op when they are already there and a clear failure
+      # when they are not.
+      - name: Show the toolchain
+        run: |
+          rustup component add clippy rustfmt
+          rustc --version
+          cargo --version
+          cargo clippy --version
+          cargo fmt --version
+
+      - name: Cache cargo registry and target
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+
+      # Formatting first: it is the cheapest check and the easiest to fix.
+      - name: cargo fmt
+        run: cargo fmt --all --check
+
+      - name: cargo clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: cargo test
+        run: cargo test --workspace
+
+      # Dogfooding. These are the project's own claims about its own sources:
+      # the repository is formatted, the representative programs check, and
+      # their tests pass. They are checked with the binary this commit builds.
+      - name: Build the cove CLI
+        run: cargo build -p cove-cli
+
+      - name: cove fmt --check (repository root)
+        run: ./target/debug/cove fmt --check
+
+      - name: cove check (examples)
+        working-directory: examples
+        run: ../target/debug/cove check
+
+      - name: cove test (examples)
+        working-directory: examples
+        run: ../target/debug/cove test

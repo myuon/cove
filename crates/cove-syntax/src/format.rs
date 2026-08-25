@@ -1,6 +1,6 @@
 //! Deterministic formatting of Cove source.
 //!
-//! The formatter prints an [`ast::SourceUnit`] back to source text. It is
+//! The formatter prints an [`ast::SourceUnit`](crate::ast::SourceUnit) back to source text. It is
 //! deterministic and idempotent: formatting twice produces exactly what
 //! formatting once produced, and re-parsing the result produces the same tree.
 //!

@@ -11,7 +11,7 @@
 //!
 //! ADR 0005 makes a module able to name another module's exported
 //! declarations, and ADR 0004 anticipated exactly one change for it: the
-//! checker gains an import environment. That is [`Checker::import`], and
+//! checker gains an import environment. That is `Checker::import`, and
 //! nothing else about the pass is different.
 //!
 //! One rule holds it together. A declaration is known by the module that
@@ -54,9 +54,9 @@
 //! - it satisfies no bound. `render(someDyn)` is an error even when
 //!   `render<T: Display>` and the value is a `dyn Display`.
 //!
-//! It is spelled out here, in [`coerces`], and nowhere else: every place that
+//! It is spelled out here, in `coerces`, and nowhere else: every place that
 //! compares a found type against an expected one goes through
-//! [`Checker::expect`] or [`unify`], and both consult it.
+//! `Checker::expect` or `unify`, and both consult it.
 //!
 //! # The type representation
 //!

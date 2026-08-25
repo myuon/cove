@@ -16,6 +16,8 @@ design is recorded in [ADR 0001](docs/adr/0001-mvp-language-design.md).
 - [Philosophy](docs/PHILOSOPHY.md)
 - [Language Card](docs/LANGUAGE_CARD.md)
 - [Representative programs](examples/README.md)
+- [API documentation](https://myuon.github.io/cove/) — rustdoc for the
+  implementation crates, published from `main`
 
 ## Status
 
