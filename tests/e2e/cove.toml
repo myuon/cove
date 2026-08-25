@@ -70,6 +70,10 @@ allow = []
 entry = "fail_no_clock_capability.main"
 allow = ["console"]
 
+[run.fail_shared_cycle]
+entry = "fail_shared_cycle.main"
+allow = ["console"]
+
 [run.flow_bindings]
 entry = "flow_bindings.main"
 allow = ["console"]
