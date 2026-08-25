@@ -19,8 +19,13 @@ pub use clock::{Clock, VirtualTime};
 pub use database::Database;
 pub use error::RuntimeError;
 pub use files::Files;
-pub use host::{Console, Documents, Env, Grants, HostApi, HostRegistry};
+pub use host::{
+    shipped_schema, Console, Documents, Env, Grants, HostApi, HostRegistry, ModuleSchema,
+};
 pub use process::{Process, ProcessLog};
 pub use schema::{Effect, HostType, OperationSchema};
-pub use trace::{JsonlSink, NullSink, TraceEvent, TraceSink};
+pub use trace::{
+    value_to_json, HostOutcome, JsonlSink, NullSink, TraceEvent, TraceHeader, TraceSink,
+    ValueCapture, TRACE_FORMAT_VERSION,
+};
 pub use value::Value;

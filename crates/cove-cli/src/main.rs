@@ -16,7 +16,10 @@ use cove_runtime::files::Files;
 use cove_runtime::host::{Console, Documents, Env, Grants, HostRegistry};
 use cove_runtime::interp::Interpreter;
 use cove_runtime::process::Process;
-use cove_runtime::{Budget, Cancellation, JsonlSink, Limits, NullSink, TraceEvent, TraceSink};
+use cove_runtime::{
+    Budget, Cancellation, JsonlSink, Limits, NullSink, TraceEvent, TraceHeader, TraceSink,
+    ValueCapture,
+};
 use cove_sema::package::Package;
 use cove_sema::resolve::{
     AliasEntry, EnumEntry, FnEntry, Program, ResolvedModule, StructEntry, TraitEntry,
@@ -27,7 +30,10 @@ mod api;
 #[cfg(test)]
 mod fixture;
 mod impact;
+mod json;
+mod replay;
 mod test;
+mod trace;
 
 const USAGE: &str = "\
 cove — the Cove toolchain
@@ -41,6 +47,9 @@ usage:
   cove api snapshot [path]             record the package's derived public interface
   cove api diff [path]                 compare the source against a recorded interface
   cove impact [path] <name>            explain what a change to <name> can affect
+  cove trace <file> [--capability <c>] [--task <id>]
+                                       summarise and list a recorded trace
+  cove replay <file> <name>            re-run <name>, answering every host call from <file>
   cove help                            show this message
 
 `cove fmt` rewrites files in place and prints how many changed. `--check`
@@ -74,12 +83,24 @@ does not grant. Name it as `name`, `module.name`, or `module.Type.method`.
 A caller marked `(approximate)` is reached only through a call whose
 receiver type the compiler cannot narrow yet.
 
+`cove trace` reads a JSONL trace written by `cove run --trace` and prints a
+summary and a timeline. It reports which of the distinctions ADR 0001 asks a
+trace to make the events actually carry, and which they do not.
+
+`cove replay <file> <name>` runs `[run.<name>]`'s entry again with every host
+replaced by one that answers from `<file>`, in the recorded order. The
+program's own computation runs for real; only the Host API boundary is canned,
+so no host is called and nothing outside the process changes. A replay exits
+non-zero when it diverges: the program asked for a call the trace does not
+have, asked for a different one, or stopped before using them all.
+
 `cove run` flags (may appear in any position after <name>; everything after a
 literal `--` is a program argument, even if it looks like a flag):
   --fuel <n>            stop the run after <n> fuel is spent
   --deadline <duration>  stop the run after <duration> has elapsed, e.g. `500ms`, `5s`, `1h`
   --max-host-calls <n>  stop the run after <n> host calls
   --trace <path>        write a JSONL trace to <path>, or `-` for stderr
+  --trace-values <mode> `full` (the default) records each host call's arguments and result, which is what `cove replay` needs; `redacted` records only their types
   --stats               print fuel spent, host calls, irreversible writes, elapsed time, and host-call wait to stderr
   --files-root <path>   the one directory the `files` host may reach; defaults to `files/` in the package
   --allow-exec <path>   an absolute path `process.run` may start; repeat to allow more, and omit to allow none
@@ -97,6 +118,8 @@ fn main() -> ExitCode {
         "outline" => cmd_outline(args.get(1).map(Path::new)),
         "api" => api::cmd_api(&args[1..]),
         "impact" => impact::cmd_impact(&args[1..]),
+        "trace" => trace::cmd_trace(&args[1..]),
+        "replay" => replay::cmd_replay(&args[1..]),
         "help" | "-h" | "--help" => {
             print!("{USAGE}");
             return ExitCode::SUCCESS;
@@ -130,7 +153,8 @@ fn main() -> ExitCode {
         Err(CliError::WarningsDenied)
         | Err(CliError::Unformatted)
         | Err(CliError::BreakingChange)
-        | Err(CliError::TestsFailed) => ExitCode::FAILURE,
+        | Err(CliError::TestsFailed)
+        | Err(CliError::Diverged) => ExitCode::FAILURE,
     }
 }
 
@@ -152,6 +176,9 @@ pub(crate) enum CliError {
     /// `cove test` had a test fail. Each failure and the summary were
     /// already printed, so there is nothing left to say.
     TestsFailed,
+    /// `cove replay` could not reproduce the recorded run. The divergence
+    /// report was already printed, so there is nothing left to say.
+    Diverged,
 }
 
 impl From<String> for CliError {
@@ -889,16 +916,30 @@ fn cmd_run(args: &[String]) -> Result<(), CliError> {
         .trace
         .or_else(|| run.trace.as_deref().map(TraceTarget::from_flag));
     let wait_total = WaitTotal::default();
+    let header = TraceHeader {
+        values: flags.trace_values,
+        entry: run.entry.clone(),
+        args: flags.program_args.clone(),
+    };
     let primary_sink: Box<dyn TraceSink> = match &trace_target {
-        Some(TraceTarget::Stderr) => Box::new(JsonlSink::new(std::io::stderr())),
+        Some(TraceTarget::Stderr) => Box::new(JsonlSink::new(std::io::stderr(), header)),
         Some(TraceTarget::File(path)) => {
-            let file = std::fs::File::create(path).map_err(|e| {
+            let file = create_trace_file(path).map_err(|e| {
                 CliError::Message(format!(
                     "cannot create trace file `{}`: {e}",
                     path.display()
                 ))
             })?;
-            Box::new(JsonlSink::new(file))
+            // A trace a program can be asked to share should not surprise the
+            // person sharing it. The file says so in its header, and the run
+            // says so once, here, where the choice was made.
+            if flags.trace_values == ValueCapture::Full {
+                eprintln!(
+                    "note: `{}` will record the arguments and result of every host call, which may include secrets; `--trace-values redacted` records only their types",
+                    path.display()
+                );
+            }
+            Box::new(JsonlSink::new(file, header))
         }
         None => Box::new(NullSink),
     };
@@ -959,12 +1000,31 @@ struct RunFlags {
     deadline: Option<Duration>,
     max_host_calls: Option<u64>,
     trace: Option<TraceTarget>,
+    /// How much of each host call the trace records.
+    trace_values: ValueCapture,
     stats: bool,
     /// The one directory the `files` host may reach.
     files_root: Option<PathBuf>,
     /// The executables `process.run` may start. Empty allows none.
     allow_exec: Vec<PathBuf>,
     program_args: Vec<String>,
+}
+
+/// Creates the file `--trace` names, readable only by its owner where the
+/// platform can say so.
+///
+/// A full-capture trace holds whatever the host answered with, so it is not a
+/// file to leave world-readable by default. The mode applies to a file this
+/// call creates; one that already exists keeps the permissions it has.
+fn create_trace_file(path: &Path) -> std::io::Result<std::fs::File> {
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    options.open(path)
 }
 
 /// Where `--trace` (or the config's `trace` key) sends trace lines.
@@ -995,6 +1055,7 @@ fn parse_run_flags(args: &[String]) -> Result<RunFlags, CliError> {
         deadline: None,
         max_host_calls: None,
         trace: None,
+        trace_values: ValueCapture::Full,
         stats: false,
         files_root: None,
         allow_exec: Vec::new(),
@@ -1037,6 +1098,17 @@ fn parse_run_flags(args: &[String]) -> Result<RunFlags, CliError> {
                 let value = flag_value(args, &mut i, "--trace")?;
                 flags.trace = Some(TraceTarget::from_flag(&value));
             }
+            // The default records values: a trace that does not carry them
+            // cannot be replayed, and replay is why they are recorded at all.
+            // `redacted` is the form to share.
+            "--trace-values" => {
+                let value = flag_value(args, &mut i, "--trace-values")?;
+                flags.trace_values = ValueCapture::parse(&value).ok_or_else(|| {
+                    CliError::Message(format!(
+                        "`--trace-values` must be `full` or `redacted`, found `{value}`"
+                    ))
+                })?;
+            }
             "--stats" => flags.stats = true,
             "--files-root" => {
                 let value = flag_value(args, &mut i, "--files-root")?;
@@ -1065,7 +1137,7 @@ fn parse_run_flags(args: &[String]) -> Result<RunFlags, CliError> {
 /// Consumes and returns the value following the flag at `args[*i]`,
 /// advancing `*i` to point at it so the caller's loop increment lands on the
 /// next unconsumed argument.
-fn flag_value(args: &[String], i: &mut usize, flag: &str) -> Result<String, CliError> {
+pub(crate) fn flag_value(args: &[String], i: &mut usize, flag: &str) -> Result<String, CliError> {
     let value = args
         .get(*i + 1)
         .ok_or_else(|| CliError::Message(format!("`{flag}` needs a value")))?;
@@ -1179,7 +1251,7 @@ fn print_stats(hosts: &HostRegistry, wait_total: &WaitTotal) {
 }
 
 /// An entry returning `Err(...)` fails the run and prints the error.
-fn report_exit(value: cove_runtime::Value) -> Result<(), CliError> {
+pub(crate) fn report_exit(value: cove_runtime::Value) -> Result<(), CliError> {
     use cove_runtime::value::Value;
     if let Value::Enum(result) = &value {
         if &*result.type_name == "Result" && &*result.case == "Err" {
