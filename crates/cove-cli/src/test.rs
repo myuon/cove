@@ -5,6 +5,20 @@
 //! bodies, and derived the capabilities each one's call graph requires; the
 //! runner grants exactly those, runs each test, and reports what happened.
 //!
+//! # A capability-open test
+//!
+//! "Exactly those" is a floor, not a ceiling (ADR 0015). A test that reaches
+//! a call the compiler cannot follow — a closure invoked through a
+//! parameter, a `dyn Trait` method — may ask for a capability the derived
+//! set does not name, and the boundary refuses it, because the runtime's
+//! grants are the only thing that decides. The runner does not widen the
+//! grants to cover the gap; it says, when a refusal happens to a
+//! capability-open test, that the derived set was the reason.
+//!
+//! In practice the floor holds for most higher-order code, because a lambda
+//! is analysed where it is *written*: a test that builds a closure that
+//! prints has already been charged `console`, whoever ends up calling it.
+//!
 //! # Fakes are the default
 //!
 //! Each capability is granted with its host's *fake* implementation unless
@@ -34,6 +48,7 @@ use cove_runtime::interp::Interpreter;
 use cove_runtime::process::{Process, ProcessLog};
 use cove_runtime::runtime::Runtime;
 use cove_runtime::value::Value;
+use cove_sema::capability::open_reasons;
 use cove_sema::resolve::DeclaredTest;
 
 use crate::{load, CliError};
@@ -179,9 +194,30 @@ fn run_test(
             let mut diagnostic = error.to_diagnostic();
             diagnostic.message =
                 format!("test `{}` failed: {}", test.qualified_name(), error.message);
+            if error.denied_capability.is_some() && test.entry.is_capability_open() {
+                let note = capability_open_help(test);
+                diagnostic.help = Some(match diagnostic.help {
+                    Some(help) => format!("{help}; {note}"),
+                    None => note,
+                });
+            }
             Some(diagnostic)
         }
     }
+}
+
+/// What a capability-open test owes a refusal at the Host boundary.
+///
+/// The runner grants what the call graph could see, and this test reaches a
+/// call it could not follow, so the missing capability was never derivable.
+/// Saying which indirect form is in the way is what turns "the boundary
+/// refused it" into something a reader can act on.
+fn capability_open_help(test: &DeclaredTest) -> String {
+    format!(
+        "`cove test` grants what the call graph derives, and `{}` is capability-open ({}), so the derived set is a floor rather than the whole of what it needs; call the host operation somewhere the call graph can follow, or exercise this path through `cove run` with an explicit `allow`",
+        test.qualified_name(),
+        open_reasons(&test.entry.open_calls)
+    )
 }
 
 /// The message a test's returned value reports, or `None` when it passed.
@@ -428,6 +464,126 @@ mod tests {
         let (_, package, _) = load_fixture(dir.path());
         assert_eq!(package.config.test.allow_real, vec!["clock".to_string()]);
         assert_eq!(run_all(dir.path(), &["clock"])[0].1, None);
+    }
+
+    /// The case ADR 0015 is about, from the runner's side: the closure is
+    /// invoked through a parameter, so no edge leads from `run` to what it
+    /// runs — but the closure is *written* in the test, so `console` is
+    /// derived there and the runner grants it a fake console. The floor is
+    /// enough, and the host call happens.
+    #[test]
+    fn a_closure_calling_a_host_through_a_parameter_is_granted_what_it_needs() {
+        let dir = package(
+            "closure-host-call",
+            "",
+            "use console.println\n\n\
+             /// Runs whatever it was handed.\n\
+             fn run(work: fn() -> Result<Unit, Error>) -> Result<Unit, Error> {\n  work()\n}\n\n\
+             test fn printsThroughAParameter() -> Result<Unit, Error> {\n  \
+             run(fn() {\n    println(\"hello from a closure\")\n  })?\n  Ok(())\n}\n",
+        );
+
+        let (_, _, program) = load_fixture(dir.path());
+        let test = program.tests()[0];
+        assert!(
+            test.entry
+                .required_capabilities
+                .contains(&cove_sema::Capability::new("console")),
+            "the closure's body belongs to the test that wrote it"
+        );
+        assert!(
+            test.entry.is_capability_open(),
+            "the test still reaches a call the compiler cannot follow"
+        );
+        assert_eq!(run_all(dir.path(), &[])[0].1, None);
+    }
+
+    /// And the case where the floor is not enough. The conformance that runs
+    /// is declared in a module `dyn`-dispatching code cannot reach, so the
+    /// capability it needs is derivable nowhere the runner looks. The
+    /// boundary refuses the call — it is the only thing that decides — and
+    /// the runner says which indirect call left the grant list short.
+    #[test]
+    fn a_capability_open_test_refused_at_the_boundary_is_told_why() {
+        let dir = TempDir::new("capability-open-refusal");
+        write(dir.path(), "cove.toml", "");
+        write(
+            dir.path(),
+            "render/render.cove",
+            "\
+/// Something that can describe itself.
+export trait Summary {
+  /// One line about this value.
+  fn summarize(self) -> String
+}
+
+/// Describes a value whose type this module never sees.
+export fn describe(entry: dyn Summary) -> String {
+  entry.summarize()
+}
+",
+        );
+        write(
+            dir.path(),
+            "unit/unit.cove",
+            "\
+use console.println
+use render.Summary
+use render.describe
+
+/// A noisy value: describing it reaches the console.
+struct Loud {
+  text: String
+}
+
+impl Summary for Loud {
+  fn summarize(self) -> String {
+    console.println(self.text)
+    self.text
+  }
+}
+
+test fn describesThroughDynDispatch() -> Result<Unit, Error> {
+  assertEqual(describe(Loud(text: \"hi\")), \"hi\")?
+  Ok(())
+}
+",
+        );
+
+        let (sources, _, program) = load_fixture(dir.path());
+        let (sources, program) = (Arc::new(sources), Arc::new(program));
+        let test = program.tests()[0];
+        assert!(
+            !test
+                .entry
+                .required_capabilities
+                .contains(&cove_sema::Capability::new("console")),
+            "the conformance is not reachable from where the call is written"
+        );
+        assert!(test.entry.is_capability_open());
+
+        let diagnostic = run_test(&test, dir.path(), &BTreeSet::new(), &sources, &program)
+            .expect("the boundary refuses the call");
+        assert!(
+            diagnostic.message.contains("`console` capability"),
+            "{}",
+            diagnostic.message
+        );
+        let help = diagnostic.help.expect("a refusal explains itself");
+        // The note is added to the runtime's own help rather than put in
+        // place of it: "add `console` to `allow`" is the actionable half, and
+        // overwriting it would trade the fix for the explanation.
+        assert!(
+            help.starts_with("add `console` to `allow`"),
+            "the boundary's own help survives: {help}"
+        );
+        assert!(help.contains("capability-open"), "{help}");
+        // The `dyn` dispatch is one hop away, in `render.describe`, so what
+        // this test carries is the reason that reached it.
+        assert!(
+            help.contains("calls a capability-open declaration"),
+            "{help}"
+        );
     }
 
     #[test]

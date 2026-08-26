@@ -4,9 +4,9 @@
 //! Exported declarations are the single source of truth, so a snapshot is
 //! derived entirely from source and duplicates nothing by hand. It records
 //! what a caller can depend on — the exported declarations of every module,
-//! their types, the traits their types conform to, and the capabilities they
-//! require — and nothing that only describes where the source happens to sit
-//! today. Definition locations, declaration order within a file, and
+//! their types, the traits their types conform to, the capabilities they
+//! require, and whether that last list is the whole of what they require —
+//! and nothing that only describes where the source happens to sit today. Definition locations, declaration order within a file, and
 //! module-private declarations are all left out: none of them can break a
 //! caller, and every one of them would put noise in the diff a reviewer
 //! reads.
@@ -18,7 +18,8 @@
 //! exported declaration's header (its kind, name, generic parameters,
 //! parameter labels and types, return type, and `async`), every struct
 //! field, enum case, and trait requirement in declaration order, every alias
-//! target, every trait conformance, and every required capability. It does
+//! target, every trait conformance, every required capability, and every
+//! `capability-open` marker. It does
 //! not cover doc comments, definition locations, declaration order in
 //! source, module-private declarations, or any function body. A doc change
 //! therefore leaves the hash alone, and a capability change does not.
@@ -41,6 +42,10 @@ pub(crate) const DEFAULT_SNAPSHOT: &str = "cove-api.txt";
 /// The format marker every snapshot starts with, so a later format can be
 /// recognised rather than misread.
 const FORMAT: &str = "cove-api 1";
+
+/// The line a capability-open declaration carries in a snapshot; see
+/// [`Decl::open`].
+const CAPABILITY_OPEN: &str = "capability-open";
 
 /// The comment block a written snapshot opens with, telling a reader what
 /// the file is for and that it is not edited by hand.
@@ -174,6 +179,13 @@ struct Decl {
     /// The capabilities this declaration requires, in name order. Only a
     /// function or method has any.
     requires: Vec<String>,
+    /// Whether `requires` is a floor rather than the whole of it, because
+    /// this declaration reaches a call the compiler cannot follow (ADR
+    /// 0015). It is part of the interface for the same reason `requires` is:
+    /// a caller's host has to grant what it will actually need, and a
+    /// declaration that stopped being able to say so is a change a reviewer
+    /// must see.
+    open: bool,
     /// Fields, enum cases, and trait requirements, in declaration order:
     /// their order is part of the contract, because it decides a synthesized
     /// initializer's positional arguments and an enum payload's positions.
@@ -282,6 +294,7 @@ pub(crate) fn derive(program: &Program) -> Interface {
                 header: format!("export trait {trait_name}"),
                 doc: doc_lines(&entry.doc),
                 requires: Vec::new(),
+                open: false,
                 members: entry.decl.methods.iter().map(requirement_line).collect(),
                 conforms: Vec::new(),
                 methods: Vec::new(),
@@ -296,6 +309,7 @@ pub(crate) fn derive(program: &Program) -> Interface {
                 ),
                 doc: doc_lines(&entry.doc),
                 requires: Vec::new(),
+                open: false,
                 members: Vec::new(),
                 conforms: Vec::new(),
                 methods: Vec::new(),
@@ -325,6 +339,7 @@ fn function_decl(entry: &FnEntry) -> Decl {
             .iter()
             .map(ToString::to_string)
             .collect(),
+        open: entry.is_capability_open(),
         members: Vec::new(),
         conforms: Vec::new(),
         methods: Vec::new(),
@@ -345,6 +360,7 @@ fn type_decl(
         header,
         doc: doc_lines(&doc),
         requires: Vec::new(),
+        open: false,
         members,
         conforms: exported_conformances(program, module, type_name),
         methods: exported_methods(program, module, type_name)
@@ -482,6 +498,12 @@ fn render_decl(decl: &Decl, indent: usize, docs: bool, out: &mut String) {
             decl.requires.join(", ")
         ));
     }
+    // Recorded without its reasons: which indirect form a body happens to
+    // use is a fact about that body, and a snapshot records what a caller
+    // depends on. That the list above is a floor is the part a caller feels.
+    if decl.open {
+        out.push_str(&format!("{:inner$}{CAPABILITY_OPEN}\n", ""));
+    }
     for member in &decl.members {
         out.push_str(&format!("{:inner$}{member}\n", ""));
     }
@@ -561,6 +583,7 @@ pub(crate) fn parse(text: &str) -> Result<Interface, String> {
                 header: content.to_string(),
                 doc: std::mem::take(&mut doc),
                 requires: Vec::new(),
+                open: false,
                 members: Vec::new(),
                 conforms: Vec::new(),
                 methods: Vec::new(),
@@ -583,6 +606,8 @@ pub(crate) fn parse(text: &str) -> Result<Interface, String> {
             .ok_or_else(|| format!("`{content}` has no declaration to belong to"))?;
         if let Some(caps) = content.strip_prefix("requires ") {
             owner.requires = caps.split(", ").map(str::to_string).collect();
+        } else if content == CAPABILITY_OPEN {
+            owner.open = true;
         } else if let Some(name) = content.strip_prefix("conforms ") {
             owner.conforms.push(name.to_string());
         } else {
@@ -645,6 +670,7 @@ struct Facts<'a> {
     header: &'a str,
     doc: &'a [String],
     requires: BTreeSet<&'a str>,
+    open: bool,
     members: &'a [String],
     conforms: BTreeSet<&'a str>,
 }
@@ -669,6 +695,7 @@ fn facts(decl: &Decl) -> Facts<'_> {
         header: &decl.header,
         doc: &decl.doc,
         requires: decl.requires.iter().map(String::as_str).collect(),
+        open: decl.open,
         members: &decl.members,
         conforms: decl.conforms.iter().map(String::as_str).collect(),
     }
@@ -842,6 +869,25 @@ fn compare_tail(path: &str, was: &Facts, now: &Facts, changes: &mut Vec<Change>)
             Severity::Compatible,
             path,
             format!("no longer requires `{capability}`"),
+        ));
+    }
+
+    // Becoming capability-open is breaking for the same reason a new
+    // capability is: what this declaration will ask the host for is no longer
+    // bounded by the list above it, so a caller's grants may no longer cover
+    // it. Becoming closed only ever narrows that.
+    if now.open && !was.open {
+        changes.push(Change::new(
+            Severity::Breaking,
+            path,
+            "is now capability-open, so the capabilities it requires are no longer bounded by this list",
+        ));
+    }
+    if was.open && !now.open {
+        changes.push(Change::new(
+            Severity::Compatible,
+            path,
+            "is no longer capability-open, so the capabilities it requires are exactly this list",
         ));
     }
 
@@ -1286,6 +1332,71 @@ export fn main() -> Result<Unit, Error> {
         }
         assert_eq!(changes[0].path, "app.greeting");
         assert_eq!(changes[1].path, "app.main");
+    }
+
+    /// A declaration that starts calling a value stops being able to say
+    /// what it will ask the host for, and a caller's grants are what pays
+    /// for that. So the snapshot records the marker, and the diff treats
+    /// gaining it the way it treats gaining a capability.
+    #[test]
+    fn becoming_capability_open_is_breaking_and_closing_again_is_compatible() {
+        let opened_source = GREETER.replace(
+            "export fn greeting(name: String) -> String {\n  \"Hello, {name}!\"\n}",
+            "export fn greeting(name: String, decorate: fn(String) -> String) -> String {\n  decorate(name)\n}",
+        );
+        assert_ne!(opened_source, GREETER, "the fixture must actually change");
+
+        let before = TempDir::new("api-open-before");
+        let closed = interface_of(&one_module(&before, GREETER));
+        let after = TempDir::new("api-open-after");
+        let opened = interface_of(&one_module(&after, &opened_source));
+
+        assert!(
+            opened.to_snapshot().contains("    capability-open\n"),
+            "the snapshot records the marker:\n{}",
+            opened.to_snapshot()
+        );
+
+        let opening: Vec<Change> = diff(&closed, &opened)
+            .into_iter()
+            .filter(|change| change.detail[0].contains("capability-open"))
+            .collect();
+        assert_eq!(opening.len(), 2, "`greeting` opens and `main` follows it");
+        for change in &opening {
+            assert_eq!(change.severity, Severity::Breaking);
+            assert_eq!(
+                change.detail[0],
+                "is now capability-open, so the capabilities it requires are no longer bounded by this list"
+            );
+        }
+
+        let closing = diff(&opened, &closed);
+        assert!(closing.iter().any(|change| {
+            change.severity == Severity::Compatible
+                && change.detail[0]
+                    == "is no longer capability-open, so the capabilities it requires are exactly this list"
+        }));
+    }
+
+    /// A recording carries the marker across the file, so `cove api diff`
+    /// compares openness rather than rediscovering it every run.
+    #[test]
+    fn a_capability_open_marker_survives_a_round_trip() {
+        let dir = TempDir::new("api-open-roundtrip");
+        let root = one_module(
+            &dir,
+            "\
+/// Runs whatever it was handed.
+export fn run(work: fn() -> Unit) {
+  work()
+}
+",
+        );
+        let interface = interface_of(&root);
+        assert_eq!(
+            parse(&interface.to_snapshot()).expect("the snapshot parses"),
+            interface
+        );
     }
 
     #[test]

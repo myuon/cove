@@ -1,0 +1,9 @@
+use lib
+use plugin
+
+/// Puts a `plugin` value in a `lib` box and asks the box for its line.
+export fn main() -> Result<Unit, Error> {
+  let held = lib.Box(item: plugin.Noisy(n: 1))
+  let text = held.show()
+  Ok(())
+}

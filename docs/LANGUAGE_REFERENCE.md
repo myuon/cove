@@ -605,6 +605,19 @@ type. A program can pass `cove check` and fail on all three:
 - every capability, budget, and task-safety decision at the host and task
   boundaries.
 
+The last of those is why a derived capability requirement is a lower bound
+rather than an exact set. `cove check` follows the calls it can see; a
+declaration that reaches a call it cannot follow — a call to a function value,
+or a method dispatched through a `dyn Trait` or a bounded generic parameter,
+including one read out of a struct field whose declared type is or contains a
+`dyn Trait` — is marked **capability-open**, because what it will run is
+chosen by its caller. The marker is what the derived set does not cover, not a
+capability of its own: it names the calls a program may make beyond those the
+compiler counted, and the boundary is what decides either way. `cove outline`,
+`cove api`, `cove test`, and `cove impact` all report it, and gaining it is a
+breaking change in `cove api diff`
+([ADR 0015](adr/0015-capability-analysis-for-higher-order-calls.md)).
+
 Two more are the language's own limits rather than gaps: exhaustiveness over
 `Int` and `String` needs a catch-all arm, and a bare case name two enums share
 is one resolution cannot place.

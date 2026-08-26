@@ -1,0 +1,29 @@
+module app
+  /// Puts a `plugin` value in a `lib` box and asks the box for its line.
+  export fn main() -> Result<Unit, Error>
+    at app/app.cove:5:11
+    capability-open: calls a capability-open declaration
+module lib
+  /// Something that describes itself in one line.
+  export trait Summary
+    at lib/lib.cove:2:14
+    fn summarize(self) -> String
+
+  /// Holds one value that describes itself, whatever type it turns out to be.
+  export struct Box
+    at lib/lib.cove:8:15
+    item: dyn Summary
+    /// The line the held value describes itself with.
+    export fn show(self) -> String
+      at lib/lib.cove:17:13
+      capability-open: dispatches through a `dyn` or generic value
+module plugin
+  /// A value that says something on the console on its way past.
+  export struct Noisy
+    at plugin/plugin.cove:5:15
+    n: Int
+    conforms to lib.Summary
+    /// One line about this value.
+    export fn summarize(self) -> String
+      at plugin/plugin.cove:11:6
+      requires console

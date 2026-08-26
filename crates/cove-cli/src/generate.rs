@@ -23,7 +23,10 @@ use std::sync::Arc;
 use cove_diag::SourceMap;
 use cove_sema::resolve::Program;
 
-use crate::{execute_entry, load, lookup_entry, lookup_run, CliError, ExecuteError, RunFlags};
+use crate::{
+    execute_entry, load, lookup_entry, lookup_run, runtime_failure, CliError, ExecuteError,
+    RunFlags,
+};
 
 /// The return type ADR 0010 requires of a generator's entry, so its output
 /// is always the source `cove generate` can write, format, and check.
@@ -75,8 +78,8 @@ fn generate_one(path: Option<&Path>, name: &str) -> Result<(), CliError> {
         Err(ExecuteError::Setup(message)) => return Err(CliError::Message(message)),
         Err(ExecuteError::Runtime(error)) => {
             return Err(CliError::Diagnostics {
+                items: vec![runtime_failure(&program, module, entry, &error)],
                 sources,
-                items: vec![error.to_diagnostic()],
             })
         }
     };
@@ -123,8 +126,8 @@ fn generate_check(path: Option<&Path>) -> Result<(), CliError> {
             Err(ExecuteError::Setup(message)) => return Err(CliError::Message(message)),
             Err(ExecuteError::Runtime(error)) => {
                 return Err(CliError::Diagnostics {
+                    items: vec![runtime_failure(&program, module, entry, &error)],
                     sources,
-                    items: vec![error.to_diagnostic()],
                 })
             }
         };

@@ -1,0 +1,15 @@
+use console.println
+use lib.Summary
+
+/// A value that says something on the console on its way past.
+export struct Noisy {
+  n: Int
+}
+
+impl Summary for Noisy {
+  /// One line about this value.
+  fn summarize(self) -> String {
+    let ignored = println("side effect")
+    "noisy {self.n}"
+  }
+}

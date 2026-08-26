@@ -1,0 +1,19 @@
+use console.println
+
+/// Runs whatever it was handed.
+///
+/// Nothing here says what `work` will do, so the compiler reports `run` as
+/// capability-open: the capabilities it needs are whatever its caller's
+/// closure needs.
+export fn run(work: fn() -> Result<Unit, Error>) -> Result<Unit, Error> {
+  work()
+}
+
+/// A closure written here and invoked through a parameter still reaches the
+/// console, because a lambda is charged to the function that wrote it.
+test fn printsThroughAParameter() -> Result<Unit, Error> {
+  run(fn() {
+    println("hello from a closure")
+  })?
+  Ok(())
+}

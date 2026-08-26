@@ -63,9 +63,15 @@ interpreter, Host API dispatch with grant enforcement, task scopes with a
 thread per task, a per-task mark-and-sweep collector whose allocation and heap
 size stay observable through `--stats` and traces rather than an enforced
 limit, and runtime budgets for fuel, deadlines, host calls, and concurrency
-with tracing. A Host API call is checked against the schema its operation
-declares at both ends: `cove check` checks its arguments where they are
-written, and the boundary checks them again, along with what the host answered.
+with tracing. A derived capability requirement is a lower bound rather than
+an exact set: a declaration that calls a function value, or dispatches through
+a `dyn Trait` or a bounded generic parameter, is reported as capability-open,
+because what it will run is chosen by its caller
+([ADR 0015](docs/adr/0015-capability-analysis-for-higher-order-calls.md)).
+Grant enforcement at the boundary is what decides, either way. A Host API call
+is checked against the schema its operation declares at both ends:
+`cove check` checks its arguments where they are written, and the boundary
+checks them again, along with what the host answered.
 Where the checker does *not* know a type it says which kind of not-knowing it
 is. An operation whose schema declares its result `Any` is noted, as is a
 field declared the same way. Anything the language should have been told --

@@ -968,7 +968,8 @@ impl HostRegistry {
                     "this binary carries the capabilities it was built with; add `{capability}` to `allow` in the run's `cove.toml` table and build it again"
                 ),
             })
-            .with_outcome(RunOutcome::HostBoundary));
+            .with_outcome(RunOutcome::HostBoundary)
+            .with_denied_capability(capability.to_string()));
         }
         let Some(schema) = declared else {
             return Err(RuntimeError::new(format!(

@@ -17,7 +17,7 @@ pub mod package;
 pub mod resolve;
 pub mod typeck;
 
-pub use capability::Capability;
+pub use capability::{open_reasons, Capability, OpenCall};
 pub use compile::Compiler;
 pub use config::{Config, RunConfig};
 pub use package::{Module, Package, Unit};

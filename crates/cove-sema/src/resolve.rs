@@ -11,6 +11,18 @@
 //! the module dependency graph must be acyclic, and required capabilities are
 //! derived from the whole package's call graph.
 //!
+//! # What a derived capability set promises
+//!
+//! ADR 0015: a derived set is a *lower bound*. Function types carry no latent
+//! capability set, so a call through a function value, a `dyn Trait`
+//! receiver, or a generic parameter's bound is one the call graph cannot
+//! follow to a declaration. Rather than pretend otherwise, resolution records
+//! *why* it could not — [`FnEntry::open_calls`] — and propagates that along
+//! the same edges the capabilities travel. A function that carries no open
+//! call has a complete set; one that does has a floor and says so, and the
+//! runtime's grant check remains the only thing that decides what a call may
+//! actually do.
+//!
 //! # Conformances
 //!
 //! An `impl Trait for Type` block is checked here and then flattened: every
@@ -42,7 +54,7 @@ use cove_syntax::ast::{
     Receiver, Stmt, StmtKind, StrPart, StructDecl, TraitDecl, TraitMethod, TypeAlias,
 };
 
-use crate::capability::Capability;
+use crate::capability::{Capability, OpenCall};
 use crate::package::Package;
 
 /// A declaration that belongs to a module, with the facts derived from it.
@@ -90,7 +102,35 @@ pub struct FnEntry {
     /// What they did narrow is the *other* direction — a call that leaves
     /// the module is now followed rather than lost, so a capability reached
     /// through an imported helper is reported instead of missed.
+    ///
+    /// This set is a *lower bound* when [`FnEntry::open_calls`] is not empty;
+    /// see ADR 0015.
     pub required_capabilities: BTreeSet<Capability>,
+    /// The indirect calls written in this function's own body: calls the
+    /// call graph cannot follow, so whatever they reach is not in
+    /// `direct_capabilities`.
+    pub direct_open_calls: BTreeSet<OpenCall>,
+    /// Why `required_capabilities` is a lower bound rather than the whole of
+    /// what calling this function can reach — empty when it is the whole of
+    /// it.
+    ///
+    /// This is `direct_open_calls` propagated over the same call graph the
+    /// capabilities travel: a caller of a capability-open declaration is
+    /// capability-open too, because the requirement it cannot see is one its
+    /// own callers cannot see either.
+    pub open_calls: BTreeSet<OpenCall>,
+}
+
+impl FnEntry {
+    /// Whether [`FnEntry::required_capabilities`] is a lower bound: this
+    /// function, or something it calls, makes a call the call graph cannot
+    /// follow.
+    ///
+    /// Every report that shows a derived capability set asks this, so that
+    /// an incomplete set is never shown as though it were complete.
+    pub fn is_capability_open(&self) -> bool {
+        !self.open_calls.is_empty()
+    }
 }
 
 #[derive(Debug)]
@@ -456,9 +496,10 @@ pub struct DeclaredMethod<'a> {
 /// 3. the module dependency graph is checked for cycles, which ADR 0005
 ///    forbids;
 /// 4. each module's own declarations are merged across its units;
-/// 5. required capabilities are derived as a fixed point over the
-///    *package's* call graph, so a function reaching a Host API through an
-///    imported helper reports it;
+/// 5. required capabilities, and the reasons they are only a lower bound,
+///    are derived as a fixed point over the *package's* call graph, so a
+///    function reaching a Host API through an imported helper reports it and
+///    a function reaching an indirect call through one says so;
 /// 6. every body is checked against everything now known, including enums
 ///    reached through an import.
 pub fn resolve(package: &Package) -> Result<Program, Vec<Diagnostic>> {
@@ -483,6 +524,8 @@ pub fn resolve_with(package: &Package, schemas: &HostSchemas) -> Result<Program,
         .iter()
         .map(|(name, module)| (name.as_str(), Surface::of(module)))
         .collect();
+
+    let opaque_fields = OpaqueFields::of(package);
 
     let mut call_sites: BTreeMap<Node, Vec<CallShape>> = BTreeMap::new();
     let mut edges: Vec<ImportEdge> = Vec::new();
@@ -510,6 +553,7 @@ pub fn resolve_with(package: &Package, schemas: &HostSchemas) -> Result<Program,
             module,
             uses,
             &surfaces,
+            &opaque_fields,
             schemas,
             &mut errors,
             &mut warnings,
@@ -522,7 +566,8 @@ pub fn resolve_with(package: &Package, schemas: &HostSchemas) -> Result<Program,
 
     check_import_cycles(&edges, &mut errors);
     check_method_collisions(&program, &mut errors);
-    let call_graph = package_call_graph(&program, &call_sites);
+    let (call_graph, unresolved) = package_call_graph(&program, &call_sites);
+    merge_open_calls(&mut program, &unresolved);
     propagate_capabilities(&mut program, &call_graph);
     program.call_graph = call_graph;
     check_bodies(&program, schemas, &mut errors, &mut warnings);
@@ -536,11 +581,13 @@ pub fn resolve_with(package: &Package, schemas: &HostSchemas) -> Result<Program,
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn resolve_module(
     name: &str,
     module: &crate::package::Module,
     uses: ModuleUses,
     surfaces: &BTreeMap<&str, Surface>,
+    opaque_fields: &OpaqueFields,
     schemas: &HostSchemas,
     errors: &mut Vec<Diagnostic>,
     warnings: &mut Vec<Diagnostic>,
@@ -581,10 +628,11 @@ fn resolve_module(
                         continue;
                     }
                     missing_doc(warnings, item, &decl.name.node, decl.name.span);
-                    let (capabilities, calls) = analyze_body(
-                        &decl.body,
+                    let (capabilities, calls, open) = analyze_body(
+                        decl,
                         &resolved.host_uses,
                         &resolved.host_items,
+                        opaque_fields,
                         schemas,
                     );
                     call_sites.insert(FnKey::Fn(decl.name.node.clone()), calls);
@@ -599,6 +647,8 @@ fn resolve_module(
                             from_trait_default: None,
                             direct_capabilities: capabilities,
                             required_capabilities: BTreeSet::new(),
+                            direct_open_calls: open,
+                            open_calls: BTreeSet::new(),
                         },
                     );
                 }
@@ -844,6 +894,7 @@ fn resolve_module(
                 trait_decl,
                 &mut method_spans,
                 &mut call_sites,
+                opaque_fields,
                 schemas,
                 errors,
             );
@@ -876,10 +927,11 @@ fn resolve_module(
                     }
                     method_spans.insert(key.clone(), decl.name.span);
                     missing_doc(warnings, inner, &decl.name.node, decl.name.span);
-                    let (capabilities, calls) = analyze_body(
-                        &decl.body,
+                    let (capabilities, calls, open) = analyze_body(
+                        decl,
                         &resolved.host_uses,
                         &resolved.host_items,
+                        opaque_fields,
                         schemas,
                     );
                     call_sites.insert(
@@ -900,6 +952,8 @@ fn resolve_module(
                             from_trait_default: None,
                             direct_capabilities: capabilities,
                             required_capabilities: BTreeSet::new(),
+                            direct_open_calls: open,
+                            open_calls: BTreeSet::new(),
                         },
                     );
                 }
@@ -1646,6 +1700,7 @@ fn check_conformance(
     trait_decl: Arc<TraitDecl>,
     method_spans: &mut BTreeMap<(String, String), Span>,
     call_sites: &mut BTreeMap<FnKey, Vec<CallShape>>,
+    opaque_fields: &OpaqueFields,
     schemas: &HostSchemas,
     errors: &mut Vec<Diagnostic>,
 ) {
@@ -1708,6 +1763,7 @@ fn check_conformance(
             None,
             method_spans,
             call_sites,
+            opaque_fields,
             schemas,
             errors,
         );
@@ -1776,6 +1832,7 @@ fn check_conformance(
             Some(trait_name.clone()),
             method_spans,
             call_sites,
+            opaque_fields,
             schemas,
             errors,
         );
@@ -1805,6 +1862,7 @@ fn record_method(
     from_trait_default: Option<String>,
     method_spans: &mut BTreeMap<(String, String), Span>,
     call_sites: &mut BTreeMap<FnKey, Vec<CallShape>>,
+    opaque_fields: &OpaqueFields,
     schemas: &HostSchemas,
     errors: &mut Vec<Diagnostic>,
 ) {
@@ -1830,10 +1888,11 @@ fn record_method(
         return;
     }
     method_spans.insert(key.clone(), decl.name.span);
-    let (capabilities, calls) = analyze_body(
-        &decl.body,
+    let (capabilities, calls, open) = analyze_body(
+        &decl,
         &resolved.host_uses,
         &resolved.host_items,
+        opaque_fields,
         schemas,
     );
     call_sites.insert(
@@ -1852,6 +1911,8 @@ fn record_method(
             from_trait_default,
             direct_capabilities: capabilities,
             required_capabilities: BTreeSet::new(),
+            direct_open_calls: open,
+            open_calls: BTreeSet::new(),
         },
     );
 }
@@ -1910,23 +1971,126 @@ fn undocumented(name: &str, span: Span) -> Diagnostic {
     .help(format!("Add a `///` doc comment above `{name}`."))
 }
 
-/// Derives the Host API capabilities a function body calls directly, plus
-/// the raw call sites found in it (used to build the module's call graph in
-/// a later pass).
+/// Every field name in the package declared with a type whose implementation
+/// its producer chose, split by whether reading the field *is* holding such a
+/// value or merely holding a container of them.
 ///
-/// This only looks at calls textually inside `body` (including nested
-/// blocks, lambdas, match arms, and loops). `enums` is `None` here: a
+/// A body reaches a `dyn Trait` through a field far more often than it names
+/// one: `struct Box { item: dyn Summary }` is written once, and every method
+/// of `Box` then dispatches through `self.item` without the type appearing
+/// again. Seeding the walk from parameters alone missed that shape entirely,
+/// and a missed shape is the lower-bound-presented-as-complete failure
+/// ADR 0015 exists to rule out.
+///
+/// The set is keyed by field *name*, across the whole package, because
+/// resolution has no type checker to ask what `holder.item` is a field of.
+/// That over-approximates in one direction only: an unrelated struct's field
+/// of the same name reads as opaque too, so a method called on it is reported
+/// as dispatching dynamically when it does not. Naming a capability-open
+/// declaration that is not one costs a reader a second look; missing one
+/// costs them the guarantee.
+#[derive(Debug, Default)]
+struct OpaqueFields {
+    /// Fields declared `dyn Trait`, or as one of the declaring struct's own
+    /// generic parameters: reading one holds the opaque value itself.
+    direct: BTreeSet<String>,
+    /// Fields whose type only mentions such a value at depth, such as
+    /// `entries: Array<dyn Summary>`: reading one holds an ordinary
+    /// container, and what comes out of it is opaque.
+    containers: BTreeSet<String>,
+}
+
+impl OpaqueFields {
+    /// Collects them from every struct the package declares.
+    ///
+    /// A struct's own generic parameters are what make `item: T` opaque, so
+    /// each declaration is read against its own, not against the ones of
+    /// whatever function later touches the field.
+    fn of(package: &Package) -> Self {
+        let mut fields = OpaqueFields::default();
+        for module in package.modules.values() {
+            for unit in &module.units {
+                for item in &unit.ast.items {
+                    let ItemKind::Struct(decl) = &item.kind else {
+                        continue;
+                    };
+                    let generics: BTreeSet<String> = decl
+                        .generics
+                        .iter()
+                        .map(|param| param.name.node.clone())
+                        .collect();
+                    for field in &decl.fields {
+                        match type_opacity(&field.ty, &generics) {
+                            Opacity::Direct => {
+                                fields.direct.insert(field.name.node.clone());
+                            }
+                            Opacity::Container => {
+                                fields.containers.insert(field.name.node.clone());
+                            }
+                            Opacity::None => {}
+                        }
+                    }
+                }
+            }
+        }
+        fields
+    }
+}
+
+/// How far out of this declaration's reach the implementation behind a value
+/// was chosen.
+///
+/// The distinction the two non-`None` cases draw is the whole point: a
+/// container of `dyn Trait` is itself an ordinary `Array`, so `items.length()`
+/// is an ordinary call, while `items.get(0).summarize()` is not.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+enum Opacity {
+    /// An ordinary value: its type names no `dyn Trait` and no generic
+    /// parameter.
+    None,
+    /// A container of opaque values. A method called on the container is an
+    /// ordinary call; anything taken out of it is [`Opacity::Direct`].
+    Container,
+    /// The value itself is one whose implementation its producer chose: a
+    /// `dyn Trait`, or a generic parameter of the declaration being walked.
+    /// A method called on it runs a conformance picked where the value was
+    /// made.
+    Direct,
+}
+
+/// Derives the Host API capabilities a function body calls directly, the raw
+/// call sites found in it (used to build the module's call graph in a later
+/// pass), and the indirect calls that make what it derived a lower bound.
+///
+/// This only looks at calls textually inside `decl`'s body (including nested
+/// blocks, lambdas, match arms, loops, and local `fn` declarations). A
+/// closure written here is walked here, which is the whole reason the lower
+/// bound is worth having: a callback that prints is charged to the function
+/// that *wrote* it, whatever later invokes it. `enums` is `None` here: a
 /// module's enums are not all known yet at this point (see [`BodyWalk`]), so
 /// `match` exhaustiveness is not checked during this walk.
+///
+/// The generic parameters this reads are `decl`'s own. An `impl` block's
+/// generics are not consulted, because this is handed an [`FnDecl`] and
+/// nothing else; that is not a hole today, since the parser rejects
+/// `impl<T: Summary> Cell<T>`, but it becomes one the moment bounds on
+/// `impl` blocks land.
 fn analyze_body(
-    body: &Block,
+    decl: &FnDecl,
     host_uses: &BTreeSet<String>,
     host_items: &BTreeMap<String, String>,
+    opaque_fields: &OpaqueFields,
     schemas: &HostSchemas,
-) -> (BTreeSet<Capability>, Vec<CallShape>) {
+) -> (BTreeSet<Capability>, Vec<CallShape>, BTreeSet<OpenCall>) {
+    let generics: BTreeSet<String> = decl
+        .generics
+        .iter()
+        .map(|param| param.name.node.clone())
+        .collect();
     let mut walk = BodyWalk {
         host_uses,
         host_items,
+        opaque_fields,
         schemas,
         enums: None,
         capabilities: BTreeSet::new(),
@@ -1934,9 +2098,211 @@ fn analyze_body(
         errors: Vec::new(),
         warnings: Vec::new(),
         loop_depth: 0,
+        generics,
+        scopes: vec![Scope::default()],
+        opaque: BTreeSet::new(),
+        containers: BTreeSet::new(),
+        open: BTreeSet::new(),
     };
-    walk_block(body, &mut walk);
-    (walk.capabilities, walk.calls)
+    // `self` is a value the caller supplied, not a declaration this module
+    // can be called through, so binding it keeps a body that merely reads it
+    // from recording an edge to a same-named function.
+    walk.bind_value("self");
+    walk.bind_params(&decl.params);
+    walk_block(&decl.body, &mut walk);
+    (walk.capabilities, walk.calls, walk.open)
+}
+
+/// Which [`Opacity`] a value of type `ty` has, for a declaration binding
+/// `generics`.
+fn type_opacity(ty: &cove_syntax::ast::Type, generics: &BTreeSet<String>) -> Opacity {
+    if is_opaque_type(ty, generics) {
+        Opacity::Direct
+    } else if mentions_opaque_type(ty, generics) {
+        Opacity::Container
+    } else {
+        Opacity::None
+    }
+}
+
+/// Whether a value of type `ty` is *itself* one whose implementation its
+/// producer chose: a `dyn Trait`, or one of `generics` written bare.
+///
+/// This deliberately does not look inside a type's arguments.
+/// `items: Array<T>` is an `Array` and nothing else, and `items.length()` is
+/// `Array.length`, a builtin with no conformance to pick; only what comes out
+/// of `items` is opaque. [`mentions_opaque_type`] is the question with the
+/// depth in it.
+fn is_opaque_type(ty: &cove_syntax::ast::Type, generics: &BTreeSet<String>) -> bool {
+    use cove_syntax::ast::TypeKind;
+    match &ty.kind {
+        TypeKind::Dyn(_) => true,
+        TypeKind::Named { path, .. } => path.len() == 1 && generics.contains(path[0].node.as_str()),
+        TypeKind::Unit | TypeKind::Fn { .. } => false,
+    }
+}
+
+/// Whether `ty` names, at any depth, a value whose implementation its
+/// producer chose rather than this declaration.
+///
+/// Depth matters because a container hands out its elements:
+/// `entries: Array<dyn Summary>` is how a body comes to hold a `dyn Summary`
+/// without ever writing the type again.
+fn mentions_opaque_type(ty: &cove_syntax::ast::Type, generics: &BTreeSet<String>) -> bool {
+    use cove_syntax::ast::TypeKind;
+    match &ty.kind {
+        TypeKind::Dyn(_) => true,
+        TypeKind::Unit => false,
+        TypeKind::Named { path, args } => {
+            (path.len() == 1 && generics.contains(path[0].node.as_str()))
+                || args.iter().any(|arg| mentions_opaque_type(arg, generics))
+        }
+        TypeKind::Fn {
+            params,
+            return_type,
+            ..
+        } => {
+            params.iter().any(|param| {
+                param
+                    .ty
+                    .as_ref()
+                    .is_some_and(|ty| mentions_opaque_type(ty, generics))
+            }) || return_type
+                .as_ref()
+                .is_some_and(|ty| mentions_opaque_type(ty, generics))
+        }
+    }
+}
+
+/// Whether `expr`'s own value is one whose implementation its producer chose,
+/// so that a method called on it runs a conformance picked somewhere this
+/// call graph does not reach.
+///
+/// A bare name and a field read are values this walk can classify exactly:
+/// `items: Array<T>` binds a container, so `items.length()` is an ordinary
+/// call and `holder.entries.length()` is too, while `self.item.summarize()`
+/// is not. Anything else — a call, an element taken out of a collection, a
+/// chain — is a value with no name here, and [`mentions_opaque`] is what
+/// decides it: without a type checker the walk cannot say what
+/// `entries.get(0)` *is*, only that it came out of `entries`, which is enough
+/// to know that a method called on it dispatches where this call graph does
+/// not lead.
+fn value_is_opaque(expr: &Expr, walk: &BodyWalk) -> bool {
+    match &expr.kind {
+        ExprKind::Ident(name) => walk.is_opaque(name),
+        ExprKind::Field { base, name } => {
+            walk.opaque_fields.direct.contains(name.node.as_str()) || value_is_opaque(base, walk)
+        }
+        _ => mentions_opaque(expr, walk),
+    }
+}
+
+/// Whether `expr` reads a name or a field bound to a *container* of opaque
+/// values, so that a binding taken straight from it is a container too.
+fn holds_opaque_container(expr: &Expr, walk: &BodyWalk) -> bool {
+    match &expr.kind {
+        ExprKind::Ident(name) => walk.is_container(name),
+        ExprKind::Field { name, .. } => walk.opaque_fields.containers.contains(name.node.as_str()),
+        _ => false,
+    }
+}
+
+/// The [`Opacity`] a `let` or `var` binding takes on.
+///
+/// A written type answers it outright. Without one this falls back to what
+/// the initialiser *reads*, which is a mention rather than a type: a bare
+/// name or a field read passes its own class along, and anything else that
+/// touches an opaque value — `entries.get(0)`, `self.item.next()` — produces
+/// the opaque value rather than a container of them.
+///
+/// What this cannot see is an initialiser whose opacity lives only in its
+/// type. `let entry = makeDyn()` binds a `dyn Trait` that nothing in this
+/// body writes, and resolution has no type checker to ask what `makeDyn`
+/// returns, so the binding is not tracked and the dispatch on it falls back
+/// to the receiver over-approximation. ADR 0015 names that gap.
+fn binding_opacity(ty: Option<&cove_syntax::ast::Type>, value: &Expr, walk: &BodyWalk) -> Opacity {
+    let written = ty.map_or(Opacity::None, |ty| type_opacity(ty, &walk.generics));
+    let read = if value_is_opaque(value, walk) {
+        Opacity::Direct
+    } else if holds_opaque_container(value, walk) {
+        Opacity::Container
+    } else if mentions_opaque(value, walk) {
+        Opacity::Direct
+    } else {
+        Opacity::None
+    };
+    written.max(read)
+}
+
+/// Whether `expr` reads anything opaque, so that what it produces may be one
+/// of those values or something taken out of one.
+///
+/// This is deliberately a mention rather than a type: without a type checker
+/// the walk cannot say what `entries.get(0)` *is*, only that it came from
+/// `entries`.
+fn mentions_opaque(expr: &Expr, walk: &BodyWalk) -> bool {
+    let any = |exprs: &[Expr]| exprs.iter().any(|e| mentions_opaque(e, walk));
+    match &expr.kind {
+        ExprKind::Ident(name) => walk.is_opaque(name) || walk.is_container(name),
+        ExprKind::Field { base, name } => {
+            walk.opaque_fields.direct.contains(name.node.as_str())
+                || walk.opaque_fields.containers.contains(name.node.as_str())
+                || mentions_opaque(base, walk)
+        }
+        ExprKind::Call {
+            callee,
+            args,
+            trailing,
+            ..
+        } => {
+            mentions_opaque(callee, walk)
+                || args.iter().any(|arg| mentions_opaque(&arg.value, walk))
+                || trailing
+                    .as_ref()
+                    .is_some_and(|tail| mentions_opaque(tail, walk))
+        }
+        ExprKind::Try(inner) | ExprKind::Await(inner) | ExprKind::Unary { operand: inner, .. } => {
+            mentions_opaque(inner, walk)
+        }
+        ExprKind::Binary { lhs, rhs, .. } => {
+            mentions_opaque(lhs, walk) || mentions_opaque(rhs, walk)
+        }
+        ExprKind::ArrayLit(items) => any(items),
+        ExprKind::Str(parts) => parts.iter().any(|part| match part {
+            StrPart::Interpolation(inner) => mentions_opaque(inner, walk),
+            StrPart::Text(_) => false,
+        }),
+        ExprKind::Block(block) | ExprKind::Scope { body: block, .. } => {
+            block_mentions_opaque(block, walk)
+        }
+        ExprKind::If {
+            then_branch,
+            else_branch,
+            ..
+        } => {
+            block_mentions_opaque(then_branch, walk)
+                || else_branch
+                    .as_ref()
+                    .is_some_and(|branch| mentions_opaque(branch, walk))
+        }
+        ExprKind::Match { arms, .. } => arms.iter().any(|arm| mentions_opaque(&arm.body, walk)),
+        _ => false,
+    }
+}
+
+/// Whether a block's value can be an opaque one: its tail is what it
+/// produces, and that is the only way a value leaves it.
+///
+/// A `break` inside the block is not a second way out. It belongs to an
+/// enclosing loop rather than to this block, and a loop is not a value in
+/// Cove anyway — `typeck` gives both `while` and `for` the type `Unit`
+/// whatever a `break` inside them carries — so there is nothing here for a
+/// `break` operand to become.
+fn block_mentions_opaque(block: &Block, walk: &BodyWalk) -> bool {
+    block
+        .tail
+        .as_ref()
+        .is_some_and(|tail| mentions_opaque(tail, walk))
 }
 
 /// The enums a module can name: the ones it declares, plus the ones it
@@ -2029,6 +2395,7 @@ fn check_body(
     errors: &mut Vec<Diagnostic>,
     warnings: &mut Vec<Diagnostic>,
 ) {
+    let no_opaque_fields = OpaqueFields::default();
     let mut walk = BodyWalk {
         host_uses: &resolved.host_uses,
         host_items: &resolved.host_items,
@@ -2039,6 +2406,15 @@ fn check_body(
         errors: Vec::new(),
         warnings: Vec::new(),
         loop_depth: 0,
+        // This walk answers `match` questions; the capability facts it would
+        // re-derive were already recorded by [`analyze_body`], so it starts
+        // from no declaration and discards what it finds.
+        generics: BTreeSet::new(),
+        opaque_fields: &no_opaque_fields,
+        scopes: Vec::new(),
+        opaque: BTreeSet::new(),
+        containers: BTreeSet::new(),
+        open: BTreeSet::new(),
     };
     walk_block(body, &mut walk);
     errors.extend(walk.errors);
@@ -2071,6 +2447,124 @@ struct BodyWalk<'a> {
     /// reach a loop outside a closure boundary, matching how `return` already
     /// only unwinds to the nearest enclosing call.
     loop_depth: u32,
+    /// The generic parameters the declaration being walked binds, which is
+    /// what makes `entry: T` a value whose implementation its caller chose
+    /// rather than a value of a type named `T`.
+    generics: BTreeSet<String>,
+    /// Every field name in the package that holds, or contains, a value whose
+    /// implementation its producer chose; see [`OpaqueFields`].
+    opaque_fields: &'a OpaqueFields,
+    /// The names this body has bound, innermost scope last.
+    ///
+    /// This exists so that a name the body binds is never mistaken for the
+    /// module-level declaration it shadows: `fn label(report: String)` reads
+    /// `report` as its own parameter, not as a call-graph edge to whatever
+    /// `fn report` the module happens to declare.
+    scopes: Vec<Scope>,
+    /// The names bound to a value whose implementation its producer chose: a
+    /// parameter or lambda parameter whose type is a `dyn Trait` or a generic
+    /// parameter, and anything later bound from one by `let`, `var`, or
+    /// `for`.
+    ///
+    /// Unlike [`BodyWalk::scopes`] this is flat and only grows. A name that
+    /// has gone out of scope can then still read as opaque, which costs
+    /// precision in one direction only — an extra `DynamicDispatch`, never a
+    /// missing one — and in exchange a value that leaves a block through its
+    /// tail keeps the class it was given inside.
+    opaque: BTreeSet<String>,
+    /// The same, for names bound to a *container* of such values, which is a
+    /// different fact: `items.length()` is an ordinary call on an ordinary
+    /// `Array`, and only what comes out of `items` is opaque.
+    containers: BTreeSet<String>,
+    /// Why what this walk derived is a lower bound; see [`OpenCall`].
+    open: BTreeSet<OpenCall>,
+}
+
+/// The names one lexical scope of a body binds.
+#[derive(Debug, Default)]
+struct Scope {
+    /// Names bound to a value: parameters, `self`, `let` and `var` bindings,
+    /// a `for` binding, a lambda's parameters. Calling one is a call to a
+    /// value, and reading one is not a reference to a declaration.
+    values: BTreeSet<String>,
+    /// Local `fn` declarations. Their bodies are walked where they are
+    /// written, exactly as a lambda's is, so calling one needs no call-graph
+    /// edge and hides nothing.
+    functions: BTreeSet<String>,
+}
+
+impl BodyWalk<'_> {
+    fn push_scope(&mut self) {
+        self.scopes.push(Scope::default());
+    }
+
+    fn pop_scope(&mut self) {
+        self.scopes.pop();
+    }
+
+    /// Records `name` as bound to a value in the innermost scope.
+    fn bind_value(&mut self, name: &str) {
+        if let Some(scope) = self.scopes.last_mut() {
+            scope.values.insert(name.to_string());
+        }
+    }
+
+    /// Records `name` as a local `fn` in the innermost scope.
+    fn bind_local_fn(&mut self, name: &str) {
+        if let Some(scope) = self.scopes.last_mut() {
+            scope.functions.insert(name.to_string());
+        }
+    }
+
+    /// Binds a declaration's or a lambda's parameters, with the opacity each
+    /// one's written type gives it.
+    ///
+    /// A variadic parameter is an `Array` of what it was written as, so
+    /// `items: T...` binds a container rather than an opaque value itself.
+    fn bind_params(&mut self, params: &[cove_syntax::ast::Param]) {
+        for param in params {
+            let mut opacity = param
+                .ty
+                .as_ref()
+                .map_or(Opacity::None, |ty| type_opacity(ty, &self.generics));
+            if param.variadic {
+                opacity = opacity.min(Opacity::Container);
+            }
+            self.bind_value(&param.name.node);
+            self.mark(&param.name.node, opacity);
+        }
+    }
+
+    /// Records what `name` is bound to, when it is not an ordinary value.
+    fn mark(&mut self, name: &str, opacity: Opacity) {
+        match opacity {
+            Opacity::None => {}
+            Opacity::Container => {
+                self.containers.insert(name.to_string());
+            }
+            Opacity::Direct => {
+                self.opaque.insert(name.to_string());
+            }
+        }
+    }
+
+    fn binds_value(&self, name: &str) -> bool {
+        self.scopes.iter().any(|scope| scope.values.contains(name))
+    }
+
+    fn binds_local_fn(&self, name: &str) -> bool {
+        self.scopes
+            .iter()
+            .any(|scope| scope.functions.contains(name))
+    }
+
+    fn is_opaque(&self, name: &str) -> bool {
+        self.opaque.contains(name)
+    }
+
+    fn is_container(&self, name: &str) -> bool {
+        self.containers.contains(name)
+    }
 }
 
 /// The shape of one call site's callee, kept just precise enough to resolve
@@ -2087,6 +2581,14 @@ enum CallShape {
         receiver_ident: Option<String>,
         method: String,
     },
+    /// A bare name read as a value rather than called: `handler: health`.
+    ///
+    /// A named function handed to a host, stored in a route table, or
+    /// wrapped in a closure is called somewhere this body cannot see, so
+    /// naming it is what makes it reachable at all. The edge is the same
+    /// edge a call would make, which is what keeps a callback the host
+    /// invokes from dropping out of the derived set.
+    Reference(String),
 }
 
 /// A node in a module's call graph: a free function or an `impl` method.
@@ -2099,21 +2601,49 @@ pub enum FnKey {
 }
 
 fn walk_block(block: &Block, walk: &mut BodyWalk) {
+    walk.push_scope();
     for stmt in &block.statements {
         walk_stmt(stmt, walk);
     }
     if let Some(tail) = &block.tail {
         walk_expr(tail, walk);
     }
+    walk.pop_scope();
 }
 
 fn walk_stmt(stmt: &Stmt, walk: &mut BodyWalk) {
     match &stmt.kind {
-        StmtKind::Let { value, .. } => walk_expr(value, walk),
+        StmtKind::Let {
+            name, ty, value, ..
+        } => {
+            // The value is walked first, so `let x = x` still reads the
+            // outer binding rather than the one it is about to make.
+            walk_expr(value, walk);
+            let opacity = binding_opacity(ty.as_ref(), value, walk);
+            walk.bind_value(&name.node);
+            walk.mark(&name.node, opacity);
+        }
         StmtKind::Expr(expr) => walk_expr(expr, walk),
-        // A nested declaration (such as a local `fn`) is its own scope; it is
-        // resolved and walked on its own, not as part of the enclosing body.
-        StmtKind::Item(_) => {}
+        // A local `fn` is an ordinary closure the enclosing body writes —
+        // `typeck` and the interpreter both treat it as one — so it is
+        // charged the same way an inline lambda is: its body is analysed
+        // here, and calling it by name is an ordinary call rather than a
+        // call to a value whose target nothing can name. Any other nested
+        // declaration contributes nothing to this body.
+        StmtKind::Item(item) => {
+            if let ItemKind::Fn(decl) = &item.kind {
+                walk.bind_local_fn(&decl.name.node);
+                walk.push_scope();
+                walk.bind_params(&decl.params);
+                // A local `fn` is a closure boundary, so `break` and
+                // `continue` inside it cannot reach a loop outside it, just
+                // as they cannot out of a lambda.
+                let outer_depth = std::mem::replace(&mut walk.loop_depth, 0);
+                walk_block(&decl.body, walk);
+                walk.loop_depth = outer_depth;
+                walk.pop_scope();
+            }
+        }
     }
 }
 
@@ -2123,8 +2653,19 @@ fn walk_expr(expr: &Expr, walk: &mut BodyWalk) {
         | ExprKind::Float(_)
         | ExprKind::Bool(_)
         | ExprKind::Duration(_)
-        | ExprKind::Unit
-        | ExprKind::Ident(_) => {}
+        | ExprKind::Unit => {}
+        // A name read as a value may be a function being handed somewhere
+        // else to be called; see [`CallShape::Reference`]. A name this body
+        // binds is not that function however it is spelled, so it records
+        // nothing — otherwise a parameter or local shadowing a module-level
+        // function would draw an exact edge to a declaration it cannot
+        // reach. A name that turns out to be a type resolves to no
+        // declaration and so records nothing either.
+        ExprKind::Ident(name) => {
+            if !walk.binds_value(name) && !walk.binds_local_fn(name) {
+                walk.calls.push(CallShape::Reference(name.clone()));
+            }
+        }
         ExprKind::Str(parts) => {
             for part in parts {
                 if let StrPart::Interpolation(inner) = part {
@@ -2149,8 +2690,35 @@ fn walk_expr(expr: &Expr, walk: &mut BodyWalk) {
             {
                 walk.capabilities.insert(capability);
             }
-            if let Some(shape) = call_shape(callee) {
-                walk.calls.push(shape);
+            match call_shape(callee) {
+                // A local `fn` is a closure this walk already analysed where
+                // it was written, so calling it needs no edge and hides
+                // nothing from the derived set.
+                Some(CallShape::Ident(name)) if walk.binds_local_fn(&name) => {}
+                // A name this body bound to a value is the higher-order
+                // case whatever a module declares under the same name.
+                Some(CallShape::Ident(name)) if walk.binds_value(&name) => {
+                    walk.open.insert(OpenCall::FunctionValue);
+                }
+                Some(shape) => {
+                    // A method call on a value whose implementation the
+                    // caller chose runs a conformance picked where that
+                    // value was made, which is not somewhere resolution can
+                    // follow from here.
+                    if let (CallShape::Field { .. }, ExprKind::Field { base: receiver, .. }) =
+                        (&shape, &callee.kind)
+                    {
+                        if value_is_opaque(receiver, walk) {
+                            walk.open.insert(OpenCall::DynamicDispatch);
+                        }
+                    }
+                    walk.calls.push(shape);
+                }
+                // `handlers.get(0)()` and its neighbours: the callee is a
+                // value with no name, so no edge leads to what it runs.
+                None => {
+                    walk.open.insert(OpenCall::FunctionValue);
+                }
             }
             walk_expr(callee, walk);
             for arg in args {
@@ -2189,11 +2757,25 @@ fn walk_expr(expr: &Expr, walk: &mut BodyWalk) {
                 walk_expr(body, walk);
             }
         }
-        ExprKind::For { iterable, body, .. } => {
+        ExprKind::For {
+            binding,
+            iterable,
+            body,
+        } => {
             walk_expr(iterable, walk);
+            // Iterating a container of `dyn Trait` hands out one per turn,
+            // so the binding is the opaque value the container held rather
+            // than another container of them.
+            let opaque = mentions_opaque(iterable, walk);
+            walk.push_scope();
+            walk.bind_value(&binding.node);
+            if opaque {
+                walk.mark(&binding.node, Opacity::Direct);
+            }
             walk.loop_depth += 1;
             walk_block(body, walk);
             walk.loop_depth -= 1;
+            walk.pop_scope();
         }
         ExprKind::While { condition, body } => {
             walk_expr(condition, walk);
@@ -2216,9 +2798,12 @@ fn walk_expr(expr: &Expr, walk: &mut BodyWalk) {
         // A lambda is a separate closure boundary: `break` and `continue`
         // cannot reach a loop outside it, exactly as `return` inside a
         // lambda returns from the lambda, not the enclosing function.
-        ExprKind::Lambda { body, .. } => {
+        ExprKind::Lambda { params, body, .. } => {
             let outer_depth = std::mem::replace(&mut walk.loop_depth, 0);
+            walk.push_scope();
+            walk.bind_params(params);
             walk_block(body, walk);
+            walk.pop_scope();
             walk.loop_depth = outer_depth;
         }
         ExprKind::Scope { body, .. } => walk_block(body, walk),
@@ -2625,7 +3210,17 @@ fn non_exhaustive_enum_match(span: Span, target: &TargetEnum, missing: &[String]
 
 /// The call-graph shape of `callee`, when it is a form the call graph can
 /// resolve (a bare name or a field access). Any other callee, such as an
-/// immediately-called lambda, contributes no call-graph edge.
+/// immediately-called lambda or an element taken out of a collection,
+/// contributes no call-graph edge; its caller records
+/// [`OpenCall::FunctionValue`] instead, so the gap is reported rather than
+/// dropped.
+///
+/// A field that holds a function value is a hole waiting to open. `h.cb()`
+/// and `(h.cb)()` on a `fn`-typed field are rejected by the type checker
+/// today, so there is nothing to miss — but the parser normalises both into
+/// a `Field` callee, which this reads as a method call, resolves to no
+/// method, and marks nothing. The day a function-typed field becomes callable
+/// this has to distinguish the two.
 fn call_shape(callee: &Expr) -> Option<CallShape> {
     match &callee.kind {
         ExprKind::Ident(name) => Some(CallShape::Ident(name.clone())),
@@ -2666,24 +3261,55 @@ pub enum CallPrecision {
 
 /// Resolves every call site recorded while the modules were resolved to the
 /// declarations it may reach, anywhere in the package.
+///
+/// The second map is what resolution could *not* do: the call sites whose
+/// callee is a value rather than a declaration, keyed by the declaration
+/// that wrote them. It is merged into each entry's `direct_open_calls`
+/// before the fixed point runs, so a lower bound and the reason it is one
+/// travel together.
+#[allow(clippy::type_complexity)]
 fn package_call_graph(
     program: &Program,
     call_sites: &BTreeMap<Node, Vec<CallShape>>,
-) -> BTreeMap<Node, BTreeMap<Node, CallPrecision>> {
+) -> (
+    BTreeMap<Node, BTreeMap<Node, CallPrecision>>,
+    BTreeMap<Node, BTreeSet<OpenCall>>,
+) {
     let reachable: BTreeMap<&str, BTreeSet<&str>> = program
         .modules
         .keys()
         .map(|name| (name.as_str(), reachable_modules(program, name)))
         .collect();
-    call_sites
-        .iter()
-        .map(|((module, key), calls)| {
-            (
-                (module.clone(), key.clone()),
-                resolve_calls(program, module, calls, &reachable[module.as_str()]),
-            )
-        })
-        .collect()
+    let mut graph = BTreeMap::new();
+    let mut open = BTreeMap::new();
+    for ((module, key), calls) in call_sites {
+        let (targets, unresolved) =
+            resolve_calls(program, module, calls, &reachable[module.as_str()]);
+        let node = (module.clone(), key.clone());
+        if !unresolved.is_empty() {
+            open.insert(node.clone(), unresolved);
+        }
+        graph.insert(node, targets);
+    }
+    (graph, open)
+}
+
+/// Records what resolution could not follow on the declarations that wrote
+/// it, beside what each already found in its own body.
+fn merge_open_calls(program: &mut Program, unresolved: &BTreeMap<Node, BTreeSet<OpenCall>>) {
+    for (module, resolved) in program.modules.iter_mut() {
+        for (name, entry) in resolved.functions.iter_mut() {
+            if let Some(open) = unresolved.get(&(module.clone(), FnKey::Fn(name.clone()))) {
+                entry.direct_open_calls.extend(open.iter().copied());
+            }
+        }
+        for ((type_name, method_name), entry) in resolved.methods.iter_mut() {
+            let key = FnKey::Method(type_name.clone(), method_name.clone());
+            if let Some(open) = unresolved.get(&(module.clone(), key)) {
+                entry.direct_open_calls.extend(open.iter().copied());
+            }
+        }
+    }
 }
 
 /// Every module `module` can reach through imports, directly or through the
@@ -2728,18 +3354,34 @@ fn reachable_modules<'a>(program: &'a Program, module: &'a str) -> BTreeSet<&'a 
 /// direct because a value can be declared by a module this one never
 /// mentions and still arrive here, as the result of something it does
 /// import.
+///
+/// A bare name that resolves to no declaration at all is the higher-order
+/// case: `work()` where `work` is a parameter or a local. There is nothing
+/// to draw an edge to, so the call site is reported as
+/// [`OpenCall::FunctionValue`] in the second return value instead of
+/// vanishing.
 fn resolve_calls(
     program: &Program,
     module: &str,
     calls: &[CallShape],
     reachable: &BTreeSet<&str>,
-) -> BTreeMap<Node, CallPrecision> {
+) -> (BTreeMap<Node, CallPrecision>, BTreeSet<OpenCall>) {
     let Some(resolved) = program.modules.get(module) else {
-        return BTreeMap::new();
+        return (BTreeMap::new(), BTreeSet::new());
     };
     let mut targets: BTreeMap<Node, CallPrecision> = BTreeMap::new();
+    let mut open: BTreeSet<OpenCall> = BTreeSet::new();
     for call in calls {
         match call {
+            CallShape::Reference(name) => {
+                if resolved.functions.contains_key(name) {
+                    exact(&mut targets, (module.to_string(), FnKey::Fn(name.clone())));
+                } else if let Some(owner) = declaring_module(program, resolved, name, |owner| {
+                    owner.functions.contains_key(name)
+                }) {
+                    exact(&mut targets, (owner, FnKey::Fn(name.clone())));
+                }
+            }
             CallShape::Ident(name) => {
                 if resolved.functions.contains_key(name) {
                     exact(&mut targets, (module.to_string(), FnKey::Fn(name.clone())));
@@ -2747,6 +3389,8 @@ fn resolve_calls(
                     owner.functions.contains_key(name)
                 }) {
                     exact(&mut targets, (owner, FnKey::Fn(name.clone())));
+                } else if calls_a_value(program, resolved, name) {
+                    open.insert(OpenCall::FunctionValue);
                 }
             }
             CallShape::Field {
@@ -2798,7 +3442,31 @@ fn resolve_calls(
             }
         }
     }
-    targets
+    (targets, open)
+}
+
+/// Whether a bare `name(...)` that resolved to no function is a call to a
+/// value a parameter or local holds.
+///
+/// A bare call is one of a short list of things — a declared function, a
+/// struct initializer, a host item a `use console.println` brought into
+/// scope, a builtin written without a receiver such as `Ok` or `assert`, a
+/// builtin type used as a namespace, or a value. Only the last is indirect,
+/// so everything else is ruled out by name before the call site is called
+/// open. An enum or an unknown name written this way is a type error the
+/// checker reports, and reporting it here as well would say the wrong thing
+/// about it.
+fn calls_a_value(program: &Program, resolved: &ResolvedModule, name: &str) -> bool {
+    let names_a_type = |owner: &ResolvedModule| {
+        owner.structs.contains_key(name)
+            || owner.enums.contains_key(name)
+            || owner.aliases.contains_key(name)
+    };
+    !(declaring_module(program, resolved, name, names_a_type).is_some()
+        || resolved.host_items.contains_key(name)
+        || cove_schema::builtins::builtin(name).is_some()
+        || cove_schema::builtins::free_builtin(name).is_some()
+        || name == cove_schema::builtins::NONE_CASE.name)
 }
 
 /// Records an edge whose callee the call site named, replacing an
@@ -2856,31 +3524,36 @@ fn declaring_module(
 /// The graph is the package's, not one module's: a function that reaches
 /// `console.println` only through an imported helper requires `console`.
 ///
+/// The same round carries [`FnEntry::open_calls`] outward: a declaration
+/// that calls a capability-open one is capability-open too, since the
+/// requirement its callee could not see is one it cannot see either. Both
+/// facts have to travel together, or a report could show a complete-looking
+/// set that was assembled out of an incomplete one.
+///
 /// A fixed point rather than a recursive walk is required because the call
 /// graph can be cyclic: direct and mutual recursion must not recurse forever.
 /// Module imports may not form a cycle, but calls within a module still may.
-/// Each round only ever adds capabilities to a finite set, so the loop is
-/// guaranteed to terminate.
+/// Each round only ever adds to two finite sets, so the loop is guaranteed to
+/// terminate.
 fn propagate_capabilities(
     program: &mut Program,
     call_graph: &BTreeMap<Node, BTreeMap<Node, CallPrecision>>,
 ) {
     let mut required: BTreeMap<Node, BTreeSet<Capability>> = BTreeMap::new();
+    let mut open: BTreeMap<Node, BTreeSet<OpenCall>> = BTreeMap::new();
     for (module, resolved) in &program.modules {
         for (name, entry) in &resolved.functions {
-            required.insert(
-                (module.clone(), FnKey::Fn(name.clone())),
-                entry.direct_capabilities.clone(),
-            );
+            let node = (module.clone(), FnKey::Fn(name.clone()));
+            required.insert(node.clone(), entry.direct_capabilities.clone());
+            open.insert(node, entry.direct_open_calls.clone());
         }
         for ((type_name, method_name), entry) in &resolved.methods {
-            required.insert(
-                (
-                    module.clone(),
-                    FnKey::Method(type_name.clone(), method_name.clone()),
-                ),
-                entry.direct_capabilities.clone(),
+            let node = (
+                module.clone(),
+                FnKey::Method(type_name.clone(), method_name.clone()),
             );
+            required.insert(node.clone(), entry.direct_capabilities.clone());
+            open.insert(node, entry.direct_open_calls.clone());
         }
     }
 
@@ -2892,7 +3565,14 @@ fn propagate_capabilities(
                 continue;
             };
             let mut additions = BTreeSet::new();
+            // One reason is enough for a caller: it says the set below it is
+            // a floor, and the declaration that could not be followed says
+            // which form it was.
+            let mut reached_open = false;
             for callee in callees.keys() {
+                if let Some(callee_open) = open.get(callee) {
+                    reached_open |= !callee_open.is_empty();
+                }
                 let Some(callee_caps) = required.get(callee) else {
                     continue;
                 };
@@ -2906,6 +3586,9 @@ fn propagate_capabilities(
                 required.get_mut(key).unwrap().extend(additions);
                 changed = true;
             }
+            if reached_open && open.get_mut(key).unwrap().insert(OpenCall::ReachedOpenCall) {
+                changed = true;
+            }
         }
         if !changed {
             break;
@@ -2914,17 +3597,17 @@ fn propagate_capabilities(
 
     for (module, resolved) in program.modules.iter_mut() {
         for (name, entry) in resolved.functions.iter_mut() {
-            entry.required_capabilities = required
-                .remove(&(module.clone(), FnKey::Fn(name.clone())))
-                .unwrap_or_default();
+            let node = (module.clone(), FnKey::Fn(name.clone()));
+            entry.required_capabilities = required.remove(&node).unwrap_or_default();
+            entry.open_calls = open.remove(&node).unwrap_or_default();
         }
         for ((type_name, method_name), entry) in resolved.methods.iter_mut() {
-            entry.required_capabilities = required
-                .remove(&(
-                    module.clone(),
-                    FnKey::Method(type_name.clone(), method_name.clone()),
-                ))
-                .unwrap_or_default();
+            let node = (
+                module.clone(),
+                FnKey::Method(type_name.clone(), method_name.clone()),
+            );
+            entry.required_capabilities = required.remove(&node).unwrap_or_default();
+            entry.open_calls = open.remove(&node).unwrap_or_default();
         }
     }
 }
@@ -4691,6 +5374,324 @@ export struct Booking {
         assert!(config_load_config
             .required_capabilities
             .contains(&Capability::new("env")));
+    }
+
+    // ------------------------------------------------ capability-openness
+
+    /// The declaration `module.name` of a resolved package.
+    #[track_caller]
+    fn function<'a>(program: &'a Program, module: &str, name: &str) -> &'a FnEntry {
+        program
+            .lookup_fn(module, name)
+            .unwrap_or_else(|| panic!("`{module}.{name}` is declared"))
+    }
+
+    #[test]
+    fn calling_a_function_typed_parameter_is_capability_open() {
+        let program = resolve_ok(&[(
+            "higher",
+            "/// Runs whatever it was handed.\n\
+             export fn run(work: fn() -> Unit) {\n  work()\n}\n",
+        )]);
+        let run = function(&program, "higher", "run");
+        assert!(run.required_capabilities.is_empty());
+        assert_eq!(
+            run.open_calls,
+            BTreeSet::from([OpenCall::FunctionValue]),
+            "a call to a value the call graph cannot name is the higher-order case"
+        );
+    }
+
+    /// The model this whole decision rests on: a lambda is charged to the
+    /// function that *writes* it, so a closure invoked through a parameter
+    /// does not lose its capability on the way -- while the function that
+    /// invokes it is honest about not knowing what it will run.
+    #[test]
+    fn a_closure_that_calls_a_host_charges_the_function_that_wrote_it() {
+        let program = resolve_ok(&[(
+            "callback",
+            "use console.println\n\n\
+             /// Runs whatever it was handed.\n\
+             fn run(work: fn() -> Unit) {\n  work()\n}\n\n\
+             /// Hands `run` a closure that prints.\n\
+             export fn main() {\n  run(fn() {\n    console.println(\"hi\")\n  })\n}\n",
+        )]);
+
+        let main = function(&program, "callback", "main");
+        assert!(
+            main.direct_capabilities
+                .contains(&Capability::new("console")),
+            "the closure's body is part of the body that wrote it"
+        );
+
+        let run = function(&program, "callback", "run");
+        assert!(run.required_capabilities.is_empty());
+        assert!(run.is_capability_open());
+        assert_eq!(
+            main.open_calls,
+            BTreeSet::from([OpenCall::ReachedOpenCall]),
+            "calling a capability-open declaration makes its caller one too"
+        );
+    }
+
+    #[test]
+    fn calling_a_method_on_a_dyn_parameter_is_capability_open() {
+        let program = resolve_ok(&[(
+            "dynamic",
+            "/// Something that describes itself.\n\
+             export trait Summary {\n  \
+             /// One line about this value.\n  \
+             fn summarize(self) -> String\n}\n\n\
+             /// Renders entries whose types may differ.\n\
+             export fn report(entries: Array<dyn Summary>) -> String {\n  \
+             var text = \"\"\n  \
+             for entry in entries {\n    text = entry.summarize()\n  }\n  text\n}\n",
+        )]);
+        assert_eq!(
+            function(&program, "dynamic", "report").open_calls,
+            BTreeSet::from([OpenCall::DynamicDispatch]),
+            "a `dyn` value taken out of a container still dispatches by its own type"
+        );
+    }
+
+    #[test]
+    fn calling_a_method_on_a_bounded_generic_is_capability_open() {
+        let program = resolve_ok(&[(
+            "generic",
+            "/// Something that describes itself.\n\
+             export trait Summary {\n  \
+             /// One line about this value.\n  \
+             fn summarize(self) -> String\n}\n\n\
+             /// Headlines one entry.\n\
+             export fn headline<T: Summary>(entry: T) -> String {\n  entry.summarize()\n}\n",
+        )]);
+        assert_eq!(
+            function(&program, "generic", "headline").open_calls,
+            BTreeSet::from([OpenCall::DynamicDispatch]),
+            "the caller instantiates `T`, so it also picks the conformance that runs"
+        );
+    }
+
+    #[test]
+    fn calling_a_callback_stored_in_data_is_capability_open() {
+        let program = resolve_ok(&[(
+            "stored",
+            "/// Runs every handler in turn.\n\
+             export fn dispatch(handlers: Array<fn() -> Unit>) {\n  \
+             for handler in handlers {\n    handler()\n  }\n}\n",
+        )]);
+        assert_eq!(
+            function(&program, "stored", "dispatch").open_calls,
+            BTreeSet::from([OpenCall::FunctionValue])
+        );
+    }
+
+    /// Everything a bare call can be other than a value: a declaration, a
+    /// struct initializer, a host item, a free builtin, and a builtin type
+    /// used as a namespace. None of them is indirect, and a report that
+    /// called them open would be crying wolf on ordinary code.
+    #[test]
+    fn ordinary_calls_leave_a_function_capability_closed() {
+        let program = resolve_ok(&[(
+            "closed",
+            "use console.println\n\n\
+             /// A thing with an id.\n\
+             export struct Thing {\n  id: String\n}\n\n\
+             /// Makes one.\n\
+             fn make() -> Thing {\n  Thing(id: \"a\")\n}\n\n\
+             /// Entry point.\n\
+             export fn main() -> Result<Unit, Error> {\n  \
+             let thing = make()\n  \
+             let items = Vector.of(thing.id)\n  \
+             println(\"{items.length()}\")?\n  \
+             assert(true)?\n  \
+             Ok(())\n}\n",
+        )]);
+        let main = function(&program, "closed", "main");
+        assert!(!main.is_capability_open(), "found {:?}", main.open_calls);
+        assert!(main
+            .required_capabilities
+            .contains(&Capability::new("console")));
+    }
+
+    /// A named function handed somewhere else to be called -- a route table,
+    /// a host that will invoke it -- is still named, so the edge is real and
+    /// the capability it needs reaches the function that named it.
+    #[test]
+    fn naming_a_function_as_a_value_reaches_what_it_requires() {
+        let program = resolve_ok(&[(
+            "reentry",
+            "use http\n\
+             use console.println\n\n\
+             /// Answers one request, and says so on the console.\n\
+             fn health(request: http.Request) -> http.Response {\n  \
+             console.println(\"served\")\n  \
+             http.json(200, \"ok\")\n}\n\n\
+             /// Registers the handler the host will call back.\n\
+             export fn routes() -> Array<http.Route> {\n  \
+             [http.Route(method: http.Method.Get, path: \"/health\", handler: health)]\n}\n",
+        )]);
+        let routes = function(&program, "reentry", "routes");
+        assert!(
+            routes
+                .required_capabilities
+                .contains(&Capability::new("console")),
+            "a callback the host will invoke is reached through the name that stored it"
+        );
+        assert!(
+            !routes.is_capability_open(),
+            "nothing here is a call the graph could not follow"
+        );
+    }
+
+    /// The shape that falsified the guarantee before the field types were
+    /// read: a `dyn Trait` reached through a struct field rather than through
+    /// a parameter. `lib` writes the type once, on the field, and never
+    /// again; the conformance lives in `plugin`, which `lib` cannot reach, so
+    /// the receiver over-approximation finds nothing either. Without the
+    /// marker `app.main` reports an empty, complete-looking set and the run
+    /// is refused at the boundary.
+    #[test]
+    fn dispatching_through_a_dyn_struct_field_is_capability_open() {
+        let program = resolve_ok(&[
+            (
+                "lib",
+                "/// Something that describes itself.\n\
+                 export trait Summary {\n  \
+                 /// One line about this value.\n  \
+                 fn summarize(self) -> String\n}\n\n\
+                 /// Holds one of them.\n\
+                 export struct Box {\n  item: dyn Summary\n}\n\n\
+                 impl Box {\n  \
+                 /// Shows what it holds.\n  \
+                 export fn show(self) -> String {\n    self.item.summarize()\n  }\n}\n",
+            ),
+            (
+                "plugin",
+                "use console.println\n\
+                 use lib.Summary\n\n\
+                 /// Says so out loud.\n\
+                 export struct Noisy {\n  n: Int\n}\n\n\
+                 impl Summary for Noisy {\n  \
+                 /// One line about this value.\n  \
+                 fn summarize(self) -> String {\n    \
+                 let ignored = println(\"side effect\")\n    \"noisy\"\n  }\n}\n",
+            ),
+            (
+                "app",
+                "use lib\nuse plugin\n\n\
+                 /// Entry point.\n\
+                 export fn main() -> Result<Unit, Error> {\n  \
+                 let held = lib.Box(item: plugin.Noisy(n: 1))\n  \
+                 let text = held.show()\n  \
+                 Ok(())\n}\n",
+            ),
+        ]);
+        let show = &program.modules["lib"].methods[&("Box".to_string(), "show".to_string())];
+        assert_eq!(
+            show.open_calls,
+            BTreeSet::from([OpenCall::DynamicDispatch]),
+            "a `dyn` field is a value whose implementation its producer chose"
+        );
+        assert!(
+            function(&program, "app", "main").is_capability_open(),
+            "openness has to reach the entry, or its empty set reads as complete"
+        );
+    }
+
+    /// The container is not the thing it contains. `Array.length` is a
+    /// builtin with no conformance to pick, so reading the element type at
+    /// depth must not make the receiver itself opaque.
+    #[test]
+    fn a_method_on_a_container_of_generics_is_not_dynamic_dispatch() {
+        let program = resolve_ok(&[(
+            "counting",
+            "/// How many entries there are.\n\
+             export fn count<T>(items: Array<T>) -> Int {\n  items.length()\n}\n",
+        )]);
+        let count = function(&program, "counting", "count");
+        assert!(!count.is_capability_open(), "found {:?}", count.open_calls);
+    }
+
+    /// ...while what comes *out* of that container still is.
+    #[test]
+    fn a_method_on_an_element_of_a_dyn_container_is_dynamic_dispatch() {
+        let program = resolve_ok(&[(
+            "element",
+            "/// Something that describes itself.\n\
+             export trait Summary {\n  \
+             /// One line about this value.\n  \
+             fn summarize(self) -> String\n}\n\n\
+             /// The first entry's line, or nothing.\n\
+             export fn first(entries: Array<dyn Summary>) -> String {\n  \
+             entries.get(0).map(fn(entry) {\n    entry.summarize()\n  }).unwrapOr(\"\")\n}\n",
+        )]);
+        assert_eq!(
+            function(&program, "element", "first").open_calls,
+            BTreeSet::from([OpenCall::DynamicDispatch]),
+            "an element taken out of a `dyn` container dispatches by its own type"
+        );
+    }
+
+    /// A name the body binds is that name, whatever the module declares
+    /// under it. Reading it recorded an exact call-graph edge before, which
+    /// charged a pure function a capability it cannot reach.
+    #[test]
+    fn a_parameter_shadowing_a_function_records_no_edge() {
+        let program = resolve_ok(&[(
+            "shadow",
+            "use console.println\n\n\
+             /// Prints one line.\n\
+             fn report(text: String) -> Result<Unit, Error> {\n  println(text)\n}\n\n\
+             /// Returns what it was given.\n\
+             export fn label(report: String) -> String {\n  report\n}\n",
+        )]);
+        let label = function(&program, "shadow", "label");
+        assert!(
+            label.required_capabilities.is_empty(),
+            "found {:?}",
+            label.required_capabilities
+        );
+        assert!(!label.is_capability_open(), "found {:?}", label.open_calls);
+    }
+
+    /// A local `fn` is an ordinary closure, so it is charged where it is
+    /// written -- which both restores the capability its body needs and
+    /// removes the `FunctionValue` marker calling it used to earn.
+    #[test]
+    fn a_local_fn_is_charged_to_the_body_that_wrote_it() {
+        let program = resolve_ok(&[(
+            "local",
+            "use console.println\n\n\
+             /// Entry point.\n\
+             export fn main() -> Result<Unit, Error> {\n  \
+             /// Prints once.\n  \
+             fn helper() -> Result<Unit, Error> {\n    println(\"hi\")\n  }\n  \
+             helper()?\n  Ok(())\n}\n",
+        )]);
+        let main = function(&program, "local", "main");
+        assert!(main
+            .required_capabilities
+            .contains(&Capability::new("console")));
+        assert!(!main.is_capability_open(), "found {:?}", main.open_calls);
+    }
+
+    #[test]
+    fn openness_crosses_a_module_boundary() {
+        let program = resolve_ok(&[
+            (
+                "runner",
+                "/// Runs whatever it was handed.\n\
+                 export fn run(work: fn() -> Unit) {\n  work()\n}\n",
+            ),
+            (
+                "app",
+                "use runner.run\n\n\
+                 /// Entry point.\n\
+                 export fn main() {\n  run(fn() {\n  })\n}\n",
+            ),
+        ]);
+        assert!(function(&program, "app", "main").is_capability_open());
     }
 
     #[test]

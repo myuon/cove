@@ -1,0 +1,20 @@
+/// Something that describes itself in one line.
+export trait Summary {
+  /// One line about this value.
+  fn summarize(self) -> String
+}
+
+/// Holds one value that describes itself, whatever type it turns out to be.
+export struct Box {
+  // The `dyn Summary` is written here, on the field, and nowhere else. Every
+  // method below dispatches through `self.item` without naming the type
+  // again, which is why seeding the analysis from parameters alone missed it.
+  item: dyn Summary
+}
+
+impl Box {
+  /// The line the held value describes itself with.
+  export fn show(self) -> String {
+    self.item.summarize()
+  }
+}

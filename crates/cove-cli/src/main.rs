@@ -17,6 +17,7 @@ use cove_runtime::{
     create_trace_file, Budget, Cancellation, HeapStats, JsonlSink, Limits, NullSink, Runtime,
     TraceEvent, TraceHeader, TraceSink, ValueCapture,
 };
+use cove_sema::capability::open_reasons;
 use cove_sema::config::RunConfig;
 use cove_sema::package::Package;
 use cove_sema::resolve::{
@@ -663,8 +664,14 @@ pub(crate) fn fn_signature(entry: &FnEntry) -> String {
     sig
 }
 
-/// Renders a function or method's doc, signature, definition location, and
-/// required capabilities.
+/// Renders a function or method's doc, signature, definition location,
+/// required capabilities, and whether that list is a floor rather than the
+/// whole of it.
+///
+/// A capability-open declaration says so on a line of its own rather than
+/// leaving a reader to assume `requires` is exhaustive: ADR 0015 makes the
+/// derived set a lower bound, and a report that hid the difference would be
+/// the one thing that decision rules out.
 fn render_fn_block(sources: &SourceMap, root: &Path, entry: &FnEntry, indent: usize) -> String {
     let mut out = String::new();
     doc_lines(&entry.doc, indent, &mut out);
@@ -685,6 +692,14 @@ fn render_fn_block(sources: &SourceMap, root: &Path, entry: &FnEntry, indent: us
             "{:indent$}requires {}\n",
             "",
             caps.join(", "),
+            indent = indent + 2
+        ));
+    }
+    if entry.is_capability_open() {
+        out.push_str(&format!(
+            "{:indent$}capability-open: {}\n",
+            "",
+            open_reasons(&entry.open_calls),
             indent = indent + 2
         ));
     }
@@ -944,10 +959,41 @@ fn cmd_run(args: &[String]) -> Result<(), CliError> {
         Ok(value) => report_exit(value),
         Err(ExecuteError::Setup(message)) => Err(CliError::Message(message)),
         Err(ExecuteError::Runtime(error)) => Err(CliError::Diagnostics {
+            items: vec![runtime_failure(&program, module, entry, &error)],
             sources,
-            items: vec![error.to_diagnostic()],
         }),
     }
+}
+
+/// The diagnostic a run's failure is reported as, with what a
+/// capability-open entry owes a refusal at the Host boundary.
+///
+/// The runtime decides what a call may do and its answer stands. What it
+/// cannot say is why the static report did not warn about this call first,
+/// and for an entry whose call graph contains an indirect call the answer is
+/// that it could not: ADR 0015 makes the derived set a floor, so a refusal
+/// here is exactly the case that floor was honest about.
+pub(crate) fn runtime_failure(
+    program: &Program,
+    module: &str,
+    entry: &str,
+    error: &cove_runtime::RuntimeError,
+) -> Diagnostic {
+    let mut diagnostic = error.to_diagnostic();
+    let open = program
+        .lookup_fn(module, entry)
+        .is_some_and(FnEntry::is_capability_open);
+    if !open || error.denied_capability.is_none() {
+        return diagnostic;
+    }
+    let note = format!(
+        "`{module}.{entry}` is capability-open, so `cove outline` reports the capabilities it needs as a floor rather than the whole list; a call reached through a function value or a `dyn` receiver is not in it"
+    );
+    diagnostic.help = Some(match diagnostic.help {
+        Some(help) => format!("{help}; {note}"),
+        None => note,
+    });
+    diagnostic
 }
 
 /// Looks up `[run.<name>]`, reporting every known run name when there is no
@@ -1423,6 +1469,7 @@ pub(crate) fn report_exit(value: cove_runtime::Value) -> Result<(), CliError> {
 mod tests {
     use super::*;
     use crate::fixture::{examples_root, load_fixture, write, TempDir};
+    use cove_runtime::RunOutcome;
 
     #[test]
     fn fmt_check_reports_an_unformatted_file_and_formatting_makes_it_clean() {
@@ -1700,6 +1747,114 @@ module kitchen
 module private
 ";
         assert_eq!(out, expected);
+    }
+
+    /// `requires` is a floor whenever a declaration reaches a call the
+    /// compiler cannot follow, so the outline says which it is rather than
+    /// letting a reader read the line above as the whole list.
+    #[test]
+    fn outline_marks_a_capability_open_declaration() {
+        let dir = TempDir::new("outline-capability-open");
+        write(dir.path(), "cove.toml", "");
+        write(
+            dir.path(),
+            "app/main.cove",
+            "\
+use console.println
+
+/// Runs whatever it was handed, which may be anything at all.
+export fn run(work: fn() -> Unit) {
+  work()
+}
+
+/// Hands `run` a closure that prints.
+export fn main() {
+  run(fn() {
+    console.println(\"hi\")
+  })
+}
+",
+        );
+        let (sources, package, program) = load_fixture(dir.path());
+        let out = render_outline(&sources, &package, &program);
+
+        let expected = "\
+module app
+  /// Runs whatever it was handed, which may be anything at all.
+  export fn run(work: fn() -> Unit)
+    at app/main.cove:4:11
+    capability-open: calls a function value
+
+  /// Hands `run` a closure that prints.
+  export fn main()
+    at app/main.cove:9:11
+    requires console
+    capability-open: calls a capability-open declaration
+";
+        assert_eq!(out, expected);
+    }
+
+    /// The note belongs to a refusal about a *capability* and to nothing
+    /// else. `RunOutcome::HostBoundary` also covers an unknown host module,
+    /// an operation that does not exist, an argument the schema does not
+    /// admit, and an exhausted host-call budget; telling a reader that the
+    /// derived set was a floor when their argument had the wrong type
+    /// misattributes the failure and buries the help that would have fixed
+    /// it.
+    #[test]
+    fn a_boundary_failure_that_is_not_a_denied_capability_gets_no_capability_open_note() {
+        let dir = TempDir::new("runtime-failure-note");
+        write(dir.path(), "cove.toml", "");
+        write(
+            dir.path(),
+            "app/main.cove",
+            "\
+/// Runs whatever it was handed, which may be anything at all.
+export fn run(work: fn() -> Unit) {
+  work()
+}
+
+/// Hands `run` a closure.
+export fn main() {
+  run(fn() {
+  })
+}
+",
+        );
+        let (_, _, program) = load_fixture(dir.path());
+        assert!(
+            program
+                .lookup_fn("app", "main")
+                .is_some_and(FnEntry::is_capability_open),
+            "the entry has to be capability-open for the note to be in question"
+        );
+
+        let schema_failure = cove_runtime::RuntimeError::new("`console.println` takes 1 argument")
+            .with_help("the Host API schema declares `console.println(text: String)`")
+            .with_outcome(RunOutcome::HostBoundary);
+        let diagnostic = runtime_failure(&program, "app", "main", &schema_failure);
+        assert_eq!(
+            diagnostic.help.as_deref(),
+            Some("the Host API schema declares `console.println(text: String)`"),
+            "a schema failure keeps its own help and gains nothing"
+        );
+
+        let denied = cove_runtime::RuntimeError::new(
+            "`console.println` requires the `console` capability, which this run was not granted",
+        )
+        .with_help("add `console` to `allow` in the run's `cove.toml` table")
+        .with_outcome(RunOutcome::HostBoundary)
+        .with_denied_capability("console");
+        let diagnostic = runtime_failure(&program, "app", "main", &denied);
+        let help = diagnostic.help.expect("a refusal explains itself");
+        assert!(
+            help.starts_with("add `console` to `allow`"),
+            "the runtime's own help is kept: {help}"
+        );
+        assert!(
+            help.contains("capability-open"),
+            "and the note is appended to it: {help}"
+        );
     }
 
     /// The outline is the interface another module may write against, so an

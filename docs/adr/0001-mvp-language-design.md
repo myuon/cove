@@ -19,6 +19,9 @@
   "Runtime resource control" below, leaving the collector's measurements as
   observability rather than an enforced bound
 - Superseded in part by
+  [ADR 0015](0015-capability-analysis-for-higher-order-calls.md), which
+  replaces this ADR's account of derived capability requirements
+- Superseded in part by
   [ADR 0017](0017-embedder-host-api-schemas.md), which replaces this ADR's
   account of which host modules a compiler can see: an embedder hands its own
   `ModuleSchema` to the checker, so a module an embedding registers is no
