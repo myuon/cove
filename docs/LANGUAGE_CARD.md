@@ -53,8 +53,8 @@ export fn main(args: Array<String>) -> Result<Unit, Error> {
 - An `if` with no `else` is `Unit`: the branch runs, and its value is
   discarded, because there is no second branch to give the other case a value.
 - A `for` or `while` loop is an expression. It evaluates to `Unit`, because it
-  can reach its end without breaking; `while true` cannot, so it evaluates to
-  `break expr`'s value. `continue` skips to the next iteration.
+  can reach its end without breaking, so a `break expr` operand is evaluated
+  for its effects and discarded. `continue` skips to the next iteration.
 - Comments use `//` and `/* ... */`.
 
 ## Statements end at the end of a line

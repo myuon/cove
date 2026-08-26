@@ -1,15 +1,14 @@
 use console.println
 
-/// Shows what a loop is worth: a `for`, and a `while` that can reach its
-/// end, produce `Unit` whatever their `break` does, while a `while true`
-/// takes its value from `break expr`; `continue` skips to the next
-/// iteration.
+/// Shows what a loop is worth: every loop produces `Unit`, whatever its
+/// `break` carries — an operand there is evaluated for its effects and its
+/// value discarded — and `continue` skips to the next iteration.
 export fn main() -> Result<Unit, Error> {
   var firstMultipleOfThree = 0
   let scanned = for value in [1, 2, 3, 4, 5] {
     if value % 3 == 0 {
       firstMultipleOfThree = value
-      break
+      break value
     }
   }
   println("first multiple of three: {firstMultipleOfThree}")?
@@ -36,7 +35,7 @@ export fn main() -> Result<Unit, Error> {
       break attempts
     }
   }
-  println("while settled after {settled} attempt(s)")?
+  println("while settled after {attempts} attempt(s), and is worth {settled}")?
 
   Ok(())
 }

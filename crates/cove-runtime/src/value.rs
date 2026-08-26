@@ -325,7 +325,11 @@ impl MapKey {
     /// anchor a nested path to; a `Struct` or `Enum` invents one from its own
     /// type name the first time a path is needed.
     fn convert(anchor: Option<&str>, value: &Value) -> Result<MapKey, InvalidKey> {
-        match value {
+        // Through the `dyn Trait` wrapper first. Two values `==` calls equal
+        // have to be interchangeable as keys, and equality already looks
+        // through it, so a written `dyn Trait` and a lambda's inferred one
+        // key as the same thing they compare as: the value they hold.
+        match value.erased() {
             Value::Unit => Ok(MapKey::Unit),
             Value::Bool(b) => Ok(MapKey::Bool(*b)),
             Value::Int(n) => Ok(MapKey::Int(*n)),
@@ -602,7 +606,7 @@ impl Value {
     /// checker decides where that is: a written type converts and a lambda's
     /// inferred result does not, though both have type `dyn Trait`. Nothing
     /// a program can ask should be able to tell those two apart, so
-    /// everything that compares or renders a value looks through the
+    /// everything that compares, renders, or keys a value looks through the
     /// wrapper first.
     pub fn erased(&self) -> &Value {
         match self {

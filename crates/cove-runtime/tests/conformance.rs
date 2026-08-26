@@ -11,20 +11,27 @@
 //!
 //! - [`RULES`] pins a form's *type* and its *value* together. A rule's body
 //!   is compiled once at the type the reference gives it, which must be
-//!   accepted, and once at a foreign type, which must be refused — that
-//!   second compile is what makes the first one a claim about the type
-//!   rather than about some type that happens to fit. The same body is then
-//!   run, and what comes back must be the value the reference names.
+//!   accepted, and once at a foreign type, which must be refused with
+//!   `cove::type::mismatch` — that second compile is what makes the first
+//!   one a claim about the type rather than about some type that happens to
+//!   fit. The same body is then run, and what comes back must be the value
+//!   the reference names.
 //! - [`REJECTIONS`] pins the programs the reference does not admit, each
 //!   against the diagnostic code that refuses it.
 //! - [`TRAPS`] pins the failures the reference leaves to run time: a program
 //!   the checker admits and the interpreter stops.
 //!
+//! A fourth test reads the coverage claim off the AST itself: the list of
+//! forms is generated from `ExprKind` and `PatternKind` by the `forms!`
+//! macro below, so a variant added to either stops this file compiling, and
+//! the programs it is matched against are parsed and walked rather than
+//! searched as text — and only the ones this suite *accepts* count.
+//!
 //! A future backend is held to the reference by the same three tables:
 //! whatever produces a value for [`RULES`] and a failure for [`TRAPS`] is a
 //! Cove implementation, and whatever does not, is not.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -33,6 +40,9 @@ use cove_runtime::interp::Interpreter;
 use cove_runtime::{Grants, HostRegistry, Runtime, Value};
 use cove_sema::resolve::{resolve, Program};
 use cove_sema::{Config, Module, Package, Unit};
+use cove_syntax::ast::{
+    Block, Expr, ExprKind, Item, ItemKind, Param, Pattern, PatternKind, StmtKind, StrPart,
+};
 
 /// The module every fixture below is written in.
 const MODULE: &str = "conformance";
@@ -53,20 +63,10 @@ struct Rule {
     ty: &'static str,
     /// What the interpreter produces for it, as Cove renders a value.
     value: &'static str,
-    /// What the checker does with the same body at a foreign type.
-    refusal: Refusal,
-}
-
-/// The second half of a type claim: what happens at a type the reference
-/// does *not* give the body.
-enum Refusal {
-    /// The checker refuses the body there, which is what makes the type in
-    /// the rule the type the body has rather than one it merely fits.
-    Reported(&'static str),
-    /// The checker accepts the body there, because it abstains about this
-    /// form: an unknown type matches every expectation. The reference lists
-    /// every place this happens, and this is how that list stays true.
-    Abstains(&'static str),
+    /// A type the reference does *not* give the body, at which the checker
+    /// must refuse it. That refusal is what makes [`Rule::ty`] the type the
+    /// body has rather than one it merely fits.
+    foreign: &'static str,
 }
 
 /// A program the reference does not admit, and the diagnostic that says so.
@@ -100,7 +100,7 @@ static RULES: &[Rule] = &[
         body: "7",
         ty: "Int",
         value: "7",
-        refusal: Refusal::Reported("Bool"),
+        foreign: "Bool",
     },
     Rule {
         section: "Literals",
@@ -108,7 +108,7 @@ static RULES: &[Rule] = &[
         body: "1.5",
         ty: "Float",
         value: "1.5",
-        refusal: Refusal::Reported("Int"),
+        foreign: "Int",
     },
     Rule {
         section: "Literals",
@@ -116,7 +116,7 @@ static RULES: &[Rule] = &[
         body: "true",
         ty: "Bool",
         value: "true",
-        refusal: Refusal::Reported("Int"),
+        foreign: "Int",
     },
     Rule {
         section: "Literals",
@@ -124,7 +124,7 @@ static RULES: &[Rule] = &[
         body: "500ms",
         ty: "Duration",
         value: "500ms",
-        refusal: Refusal::Reported("Int"),
+        foreign: "Int",
     },
     Rule {
         section: "Literals",
@@ -132,7 +132,7 @@ static RULES: &[Rule] = &[
         body: "\"a{1 + 1}b\"",
         ty: "String",
         value: "a2b",
-        refusal: Refusal::Reported("Int"),
+        foreign: "Int",
     },
     Rule {
         section: "Literals",
@@ -140,7 +140,7 @@ static RULES: &[Rule] = &[
         body: "()",
         ty: "()",
         value: "()",
-        refusal: Refusal::Reported("Int"),
+        foreign: "Int",
     },
     Rule {
         section: "Literals",
@@ -148,7 +148,7 @@ static RULES: &[Rule] = &[
         body: "[1, 2]",
         ty: "Array<Int>",
         value: "[1, 2]",
-        refusal: Refusal::Reported("Array<String>"),
+        foreign: "Array<String>",
     },
     Rule {
         section: "Names",
@@ -156,7 +156,7 @@ static RULES: &[Rule] = &[
         body: "let value = 7\nvalue",
         ty: "Int",
         value: "7",
-        refusal: Refusal::Reported("Bool"),
+        foreign: "Bool",
     },
     Rule {
         section: "Names",
@@ -164,7 +164,7 @@ static RULES: &[Rule] = &[
         body: "let outer = 1\nlet shadowed = {\n  let outer = 2\n  outer\n}\nouter + shadowed",
         ty: "Int",
         value: "3",
-        refusal: Refusal::Reported("Bool"),
+        foreign: "Bool",
     },
     Rule {
         section: "Field access",
@@ -172,7 +172,7 @@ static RULES: &[Rule] = &[
         body: "let point = Point(x: 3)\npoint.x",
         ty: "Int",
         value: "3",
-        refusal: Refusal::Reported("Bool"),
+        foreign: "Bool",
     },
     Rule {
         section: "Calls",
@@ -180,7 +180,7 @@ static RULES: &[Rule] = &[
         body: "twice(n: 4)",
         ty: "Int",
         value: "8",
-        refusal: Refusal::Reported("Bool"),
+        foreign: "Bool",
     },
     Rule {
         section: "Calls",
@@ -188,7 +188,7 @@ static RULES: &[Rule] = &[
         body: "tagged()",
         ty: "String",
         value: "none",
-        refusal: Refusal::Reported("Int"),
+        foreign: "Int",
     },
     Rule {
         section: "Calls",
@@ -196,7 +196,7 @@ static RULES: &[Rule] = &[
         body: "total(1, 2, 3)",
         ty: "Int",
         value: "6",
-        refusal: Refusal::Reported("Bool"),
+        foreign: "Bool",
     },
     Rule {
         section: "Calls",
@@ -204,7 +204,7 @@ static RULES: &[Rule] = &[
         body: "unwrap(Wrapper(value: 5))",
         ty: "Int",
         value: "5",
-        refusal: Refusal::Reported("String"),
+        foreign: "String",
     },
     Rule {
         section: "Operators",
@@ -212,7 +212,7 @@ static RULES: &[Rule] = &[
         body: "-7",
         ty: "Int",
         value: "-7",
-        refusal: Refusal::Reported("Bool"),
+        foreign: "Bool",
     },
     Rule {
         section: "Operators",
@@ -220,7 +220,7 @@ static RULES: &[Rule] = &[
         body: "!true",
         ty: "Bool",
         value: "false",
-        refusal: Refusal::Reported("Int"),
+        foreign: "Int",
     },
     Rule {
         section: "Operators",
@@ -228,7 +228,7 @@ static RULES: &[Rule] = &[
         body: "1 + 2 * 3",
         ty: "Int",
         value: "7",
-        refusal: Refusal::Reported("Bool"),
+        foreign: "Bool",
     },
     Rule {
         section: "Operators",
@@ -236,7 +236,7 @@ static RULES: &[Rule] = &[
         body: "1 == 1",
         ty: "Bool",
         value: "true",
-        refusal: Refusal::Reported("Int"),
+        foreign: "Int",
     },
     Rule {
         section: "Operators",
@@ -244,7 +244,7 @@ static RULES: &[Rule] = &[
         body: "let zero = 0\nlet short = false && 1 / zero == 0\nlet long = true || 1 / zero == 0\n\"{short} {long}\"",
         ty: "String",
         value: "false true",
-        refusal: Refusal::Reported("Int"),
+        foreign: "Int",
     },
     Rule {
         section: "Operators",
@@ -252,7 +252,7 @@ static RULES: &[Rule] = &[
         body: "let first = Vector.of(1)\nlet second = first\nlet other = Vector.of(1)\n\"{first is second} {first is other} {first == other}\"",
         ty: "String",
         value: "true false true",
-        refusal: Refusal::Reported("Int"),
+        foreign: "Int",
     },
     Rule {
         section: "Assignment",
@@ -260,7 +260,7 @@ static RULES: &[Rule] = &[
         body: "var total = 1\ntotal += 2\ntotal",
         ty: "Int",
         value: "3",
-        refusal: Refusal::Reported("Bool"),
+        foreign: "Bool",
     },
     Rule {
         section: "Assignment",
@@ -268,7 +268,7 @@ static RULES: &[Rule] = &[
         body: "var total = 1\ntotal = 2",
         ty: "()",
         value: "()",
-        refusal: Refusal::Reported("Int"),
+        foreign: "Int",
     },
     Rule {
         section: "`?`",
@@ -276,7 +276,7 @@ static RULES: &[Rule] = &[
         body: "let value = parse(true)?\nOk(value + 1)",
         ty: "Result<Int, Error>",
         value: "Ok(2)",
-        refusal: Refusal::Reported("Result<String, Error>"),
+        foreign: "Result<String, Error>",
     },
     Rule {
         section: "`?`",
@@ -284,7 +284,7 @@ static RULES: &[Rule] = &[
         body: "let value = parse(false)?\nOk(value + 1)",
         ty: "Result<Int, Error>",
         value: "Err(no)",
-        refusal: Refusal::Reported("Result<String, Error>"),
+        foreign: "Result<String, Error>",
     },
     Rule {
         section: "`?`",
@@ -292,7 +292,7 @@ static RULES: &[Rule] = &[
         body: "first([4])",
         ty: "Option<Int>",
         value: "Some(5)",
-        refusal: Refusal::Reported("Option<String>"),
+        foreign: "Option<String>",
     },
     Rule {
         section: "`await`",
@@ -300,7 +300,7 @@ static RULES: &[Rule] = &[
         body: "await work()",
         ty: "Int",
         value: "7",
-        refusal: Refusal::Reported("Bool"),
+        foreign: "Bool",
     },
     Rule {
         section: "Blocks",
@@ -308,7 +308,7 @@ static RULES: &[Rule] = &[
         body: "{\n  let value = 1\n  value + 1\n}",
         ty: "Int",
         value: "2",
-        refusal: Refusal::Reported("Bool"),
+        foreign: "Bool",
     },
     Rule {
         section: "Blocks",
@@ -316,7 +316,7 @@ static RULES: &[Rule] = &[
         body: "{\n  let value = 1\n}",
         ty: "()",
         value: "()",
-        refusal: Refusal::Reported("Int"),
+        foreign: "Int",
     },
     Rule {
         section: "Blocks",
@@ -324,7 +324,7 @@ static RULES: &[Rule] = &[
         body: "1 + 1\n\"discarded\"",
         ty: "String",
         value: "discarded",
-        refusal: Refusal::Reported("Int"),
+        foreign: "Int",
     },
     Rule {
         section: "`if`",
@@ -332,7 +332,7 @@ static RULES: &[Rule] = &[
         body: "if 1 < 2 {\n  \"then\"\n} else {\n  \"else\"\n}",
         ty: "String",
         value: "then",
-        refusal: Refusal::Reported("Int"),
+        foreign: "Int",
     },
     // The rule this issue exists to settle: the branch runs, and its value
     // is still not the `if`'s.
@@ -342,7 +342,7 @@ static RULES: &[Rule] = &[
         body: "var ran = false\nlet value = if true {\n  ran = true\n  1\n}\n\"{ran} {value}\"",
         ty: "String",
         value: "true ()",
-        refusal: Refusal::Reported("Int"),
+        foreign: "Int",
     },
     Rule {
         section: "`match`",
@@ -350,7 +350,7 @@ static RULES: &[Rule] = &[
         body: "match 2 {\n  1 => \"one\"\n  2 => \"two\"\n  _ => \"other\"\n}",
         ty: "String",
         value: "two",
-        refusal: Refusal::Reported("Int"),
+        foreign: "Int",
     },
     Rule {
         section: "Patterns",
@@ -358,7 +358,7 @@ static RULES: &[Rule] = &[
         body: "match 5 {\n  bound => bound + 1\n}",
         ty: "Int",
         value: "6",
-        refusal: Refusal::Reported("Bool"),
+        foreign: "Bool",
     },
     // A `-` pattern holds an ordinary expression, evaluated in the arm's
     // enclosing scope each time the pattern is tried, so it can name a
@@ -369,7 +369,7 @@ static RULES: &[Rule] = &[
         body: "let bound = 1\nmatch -1 {\n  -bound => \"negated\"\n  _ => \"other\"\n}",
         ty: "String",
         value: "negated",
-        refusal: Refusal::Reported("Int"),
+        foreign: "Int",
     },
     Rule {
         section: "Patterns",
@@ -377,7 +377,7 @@ static RULES: &[Rule] = &[
         body: "match Status.Active(3) {\n  Status.Pending => 0\n  Status.Active(since) => since\n}",
         ty: "Int",
         value: "3",
-        refusal: Refusal::Reported("Bool"),
+        foreign: "Bool",
     },
     Rule {
         section: "Patterns",
@@ -385,7 +385,7 @@ static RULES: &[Rule] = &[
         body: "match Some(4) {\n  Some(value) => value\n  None => 0\n}",
         ty: "Int",
         value: "4",
-        refusal: Refusal::Reported("Bool"),
+        foreign: "Bool",
     },
     Rule {
         section: "Loops",
@@ -393,7 +393,7 @@ static RULES: &[Rule] = &[
         body: "var seen = 0\nfor value in [1, 2, 3] {\n  seen += value\n}\nseen",
         ty: "Int",
         value: "6",
-        refusal: Refusal::Reported("Bool"),
+        foreign: "Bool",
     },
     Rule {
         section: "Loops",
@@ -401,7 +401,7 @@ static RULES: &[Rule] = &[
         body: "for value in [1, 2] {\n  value\n}",
         ty: "()",
         value: "()",
-        refusal: Refusal::Reported("Int"),
+        foreign: "Int",
     },
     Rule {
         section: "Loops",
@@ -409,15 +409,26 @@ static RULES: &[Rule] = &[
         body: "var seen = 0\nwhile seen < 3 {\n  seen += 1\n}\nseen",
         ty: "Int",
         value: "3",
-        refusal: Refusal::Reported("Bool"),
+        foreign: "Bool",
     },
+    // Every loop is `()`, `while true` included, and a `break` operand is
+    // evaluated for its effects and discarded. Whether a loop should ever
+    // carry a value is issue #87.
     Rule {
         section: "Loops",
         decls: "",
         body: "var attempts = 0\nwhile true {\n  attempts += 1\n  if attempts == 3 {\n    break attempts\n  }\n}",
-        ty: "Int",
-        value: "3",
-        refusal: Refusal::Reported("Bool"),
+        ty: "()",
+        value: "()",
+        foreign: "Int",
+    },
+    Rule {
+        section: "Loops",
+        decls: "",
+        body: "var seen = 0\nfor value in [1, 2] {\n  seen = value\n  break value\n}",
+        ty: "()",
+        value: "()",
+        foreign: "Int",
     },
     Rule {
         section: "Loops",
@@ -425,7 +436,7 @@ static RULES: &[Rule] = &[
         body: "var odd = 0\nfor value in [1, 2, 3, 4] {\n  if value % 2 == 0 {\n    continue\n  }\n  odd += value\n}\nodd",
         ty: "Int",
         value: "4",
-        refusal: Refusal::Reported("Bool"),
+        foreign: "Bool",
     },
     Rule {
         section: "`return`",
@@ -433,7 +444,7 @@ static RULES: &[Rule] = &[
         body: "return 3",
         ty: "Int",
         value: "3",
-        refusal: Refusal::Reported("Bool"),
+        foreign: "Bool",
     },
     Rule {
         section: "Lambdas",
@@ -441,7 +452,7 @@ static RULES: &[Rule] = &[
         body: "let add: fn(Int) -> Int = fn(n) {\n  n + 1\n}\nadd(1)",
         ty: "Int",
         value: "2",
-        refusal: Refusal::Reported("Bool"),
+        foreign: "Bool",
     },
     // A lambda's `return` returns from the lambda, and the checker holds it
     // to the lambda's own result type.
@@ -451,7 +462,7 @@ static RULES: &[Rule] = &[
         body: "let classify: fn(Int) -> String = fn(n) {\n  if n > 0 {\n    return \"positive\"\n  }\n  \"other\"\n}\n\"{classify(1)} {classify(-1)}\"",
         ty: "String",
         value: "positive other",
-        refusal: Refusal::Reported("Int"),
+        foreign: "Int",
     },
     // Captures are read when the closure is made, not when it is called.
     Rule {
@@ -460,7 +471,7 @@ static RULES: &[Rule] = &[
         body: "var counter = 1\nlet read: fn() -> Int = fn() {\n  counter\n}\ncounter = 2\n\"{read()} {counter}\"",
         ty: "String",
         value: "1 2",
-        refusal: Refusal::Reported("Int"),
+        foreign: "Int",
     },
     Rule {
         section: "`scope`",
@@ -468,7 +479,7 @@ static RULES: &[Rule] = &[
         body: "scope tasks {\n  let task = tasks.spawn {\n    7\n  }\n  await task\n}",
         ty: "Int",
         value: "7",
-        refusal: Refusal::Reported("Bool"),
+        foreign: "Bool",
     },
     Rule {
         section: "Ranges",
@@ -476,7 +487,7 @@ static RULES: &[Rule] = &[
         body: "0..<3",
         ty: "Range",
         value: "0..<3",
-        refusal: Refusal::Reported("Int"),
+        foreign: "Int",
     },
     Rule {
         section: "Copies and aliases",
@@ -484,7 +495,7 @@ static RULES: &[Rule] = &[
         body: "var first = Counter(hits: 1)\nvar second = first\nsecond.hits = 2\n\"{first.hits} {second.hits}\"",
         ty: "String",
         value: "1 2",
-        refusal: Refusal::Reported("Int"),
+        foreign: "Int",
     },
     Rule {
         section: "Copies and aliases",
@@ -492,7 +503,7 @@ static RULES: &[Rule] = &[
         body: "var first = Vector.of(1, 2)\nvar second = first\nsecond.push(3)\n\"{first.length()} {second.length()}\"",
         ty: "String",
         value: "3 3",
-        refusal: Refusal::Reported("Int"),
+        foreign: "Int",
     },
     Rule {
         section: "`dyn Trait`",
@@ -500,17 +511,18 @@ static RULES: &[Rule] = &[
         body: "let shown: dyn Named = Room(id: 2)\nshown.name()",
         ty: "String",
         value: "room 2",
-        refusal: Refusal::Reported("Int"),
+        foreign: "Int",
     },
-    // The checker abstains about a bare type used as a value, so no
-    // expectation refuses it.
+    // Where the checker abstains it abstains about a sub-expression, not
+    // about the whole body: these two name a method on something it has no
+    // type for, and still owe the reference the type and value below.
     Rule {
         section: "Where the checker abstains",
         decls: "",
         body: "let sizes = Vector.of(1)\nsizes.length()",
         ty: "Int",
         value: "1",
-        refusal: Refusal::Reported("Bool"),
+        foreign: "Bool",
     },
     Rule {
         section: "Where the checker abstains",
@@ -518,7 +530,7 @@ static RULES: &[Rule] = &[
         body: "let empty = []\nempty.length()",
         ty: "Int",
         value: "0",
-        refusal: Refusal::Reported("Bool"),
+        foreign: "Bool",
     },
     // A written `dyn Trait` is wrapped where it is written and a lambda's
     // inferred one is not, so nothing a program can ask may tell the two
@@ -529,17 +541,7 @@ static RULES: &[Rule] = &[
         body: "let direct: dyn Named = Room(id: 1)\nlet make: fn(Int) -> dyn Named = fn(n) {\n  Room(id: n)\n}\n\"{direct == make(1)} {make(1).name()}\"",
         ty: "String",
         value: "true room 1",
-        refusal: Refusal::Reported("Int"),
-    },
-    // A type used as a value is not a form this type system has, so the
-    // checker abstains and every expectation accepts it.
-    Rule {
-        section: "Where the checker abstains",
-        decls: "",
-        body: "Vector",
-        ty: "Int",
-        value: "<type Vector>",
-        refusal: Refusal::Abstains("Bool"),
+        foreign: "Int",
     },
 ];
 
@@ -564,17 +566,7 @@ static REJECTIONS: &[Rejection] = &[
     },
     Rejection {
         section: "Loops",
-        source: "/// Breaks out of a `for` with a value.\nexport fn probe() -> () {\n  let found = for value in [1, 2] {\n    break value\n  }\n}\n",
-        code: "cove::type::break_value",
-    },
-    Rejection {
-        section: "Loops",
-        source: "/// Breaks out of a `while` that can reach its end.\nexport fn probe() -> () {\n  var seen = 0\n  let found = while seen < 2 {\n    break seen\n  }\n}\n",
-        code: "cove::type::break_value",
-    },
-    Rejection {
-        section: "Loops",
-        source: "/// Breaks out of a `while true` two different ways.\nexport fn probe() -> () {\n  let found = while true {\n    if true {\n      break 1\n    }\n    break \"other\"\n  }\n}\n",
+        source: "/// Asks a loop for a value its `break` cannot supply.\nexport fn probe() -> () {\n  let found: Int = while true {\n    break 1\n  }\n}\n",
         code: "cove::type::mismatch",
     },
     Rejection {
@@ -874,23 +866,23 @@ fn every_rule_has_the_type_and_the_value_the_reference_gives_it() {
 fn every_rule_says_which_type_it_has_and_not_merely_one_that_fits() {
     let mut failures = Vec::new();
     for rule in RULES {
-        let (foreign, abstains) = match rule.refusal {
-            Refusal::Reported(ty) => (ty, false),
-            Refusal::Abstains(ty) => (ty, true),
-        };
-        let reported = errors(&probe_source(rule.decls, rule.body, foreign));
-        match (abstains, reported.is_empty()) {
-            (false, true) => failures.push(format!(
-                "{}: `{}` is not a `{foreign}`, but the checker accepted it as one",
-                rule.section, rule.body
-            )),
-            (true, false) => failures.push(format!(
-                "{}: the reference says the checker abstains about `{}`, but it refused `{foreign}`: {}",
+        let reported = errors(&probe_source(rule.decls, rule.body, rule.foreign));
+        // The refusal has to be a *type* mismatch, and not merely some
+        // error. A foreign type that is malformed rather than foreign --
+        // `dyn Int`, say -- would be refused for saying nothing about the
+        // body, and the claim this test makes would be satisfied without a
+        // type ever having been compared.
+        if !reported
+            .iter()
+            .any(|diagnostic| diagnostic.code == cove_sema::typeck::MISMATCH)
+        {
+            failures.push(format!(
+                "{}: `{}` is not a `{}`, but the checker did not say so: {}",
                 rule.section,
                 rule.body,
+                rule.foreign,
                 summarize(&reported)
-            )),
-            _ => {}
+            ));
         }
     }
     assert!(failures.is_empty(), "{}", failures.join("\n"));
@@ -947,66 +939,285 @@ fn every_trap_checks_cleanly_and_stops_the_run() {
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
-/// Every form the AST admits is named by some rule above, so a form cannot
-/// be added to the language and left out of the reference unnoticed.
+// ---------------------------------------------------------------- coverage
+
+/// Declares a set of AST forms once and expands it twice: into the list of
+/// names the coverage test must account for, and into an exhaustive `match`
+/// that names the form a node is.
+///
+/// The `match` is the half that does the work. A variant added to the AST
+/// makes this file stop compiling, and there is no way to make it compile
+/// again without saying what the new form is called — which is what puts it
+/// in the list the test then insists on finding.
+macro_rules! forms {
+    ($ty:ty, $all:ident, $name_of:ident, $( $pat:pat => $name:literal ),* $(,)?) => {
+        const $all: &[&str] = &[$($name),*];
+
+        fn $name_of(form: &$ty) -> &'static str {
+            match form { $($pat => $name),* }
+        }
+    };
+}
+
+forms! {
+    ExprKind, EXPRESSION_FORMS, expression_form,
+    ExprKind::Int(..) => "Int",
+    ExprKind::Float(..) => "Float",
+    ExprKind::Bool(..) => "Bool",
+    ExprKind::Duration(..) => "Duration",
+    ExprKind::Str(..) => "Str",
+    ExprKind::Unit => "Unit",
+    ExprKind::Ident(..) => "Ident",
+    ExprKind::ArrayLit(..) => "ArrayLit",
+    ExprKind::Field { .. } => "Field",
+    ExprKind::Call { .. } => "Call",
+    ExprKind::Unary { .. } => "Unary",
+    ExprKind::Binary { .. } => "Binary",
+    ExprKind::Assign { .. } => "Assign",
+    ExprKind::Try(..) => "Try",
+    ExprKind::Await(..) => "Await",
+    ExprKind::Block(..) => "Block",
+    ExprKind::If { .. } => "If",
+    ExprKind::Match { .. } => "Match",
+    ExprKind::For { .. } => "For",
+    ExprKind::While { .. } => "While",
+    ExprKind::Return(..) => "Return",
+    ExprKind::Break(..) => "Break",
+    ExprKind::Continue => "Continue",
+    ExprKind::Lambda { .. } => "Lambda",
+    ExprKind::Scope { .. } => "Scope",
+    ExprKind::Range { .. } => "Range",
+}
+
+forms! {
+    PatternKind, PATTERN_FORMS, pattern_form,
+    PatternKind::Wildcard => "Wildcard",
+    PatternKind::Binding(..) => "Binding",
+    PatternKind::Literal(..) => "Literal",
+    PatternKind::Variant { .. } => "Variant",
+}
+
+/// The forms a program reaches, read off its tree.
+///
+/// Reading the tree rather than searching the text is what makes the count
+/// mean anything: `()` occurs in every empty parameter list and `7` occurs
+/// inside `17`, so a substring can be found in a program that does not hold
+/// the form at all. Every walk below descends into every sub-expression,
+/// because a sub-tree quietly skipped here would be a form the suite reports
+/// as covered and never looks at.
+#[derive(Default)]
+struct Coverage {
+    expressions: BTreeSet<&'static str>,
+    patterns: BTreeSet<&'static str>,
+}
+
+impl Coverage {
+    fn item(&mut self, item: &Item) {
+        match &item.kind {
+            ItemKind::Fn(decl) => {
+                self.params(&decl.params);
+                self.block(&decl.body);
+            }
+            ItemKind::Trait(decl) => {
+                for method in &decl.methods {
+                    self.params(&method.params);
+                    if let Some(default) = &method.default {
+                        self.block(default);
+                    }
+                }
+            }
+            ItemKind::Impl(block) => {
+                for item in &block.items {
+                    self.item(item);
+                }
+            }
+            // A struct, an enum and an alias are written in types alone, and
+            // a type holds no expression.
+            ItemKind::Struct(_) | ItemKind::Enum(_) | ItemKind::TypeAlias(_) => {}
+        }
+    }
+
+    /// A default is an expression written in a signature, so it is source
+    /// the program reaches like any other.
+    fn params(&mut self, params: &[Param]) {
+        for param in params {
+            if let Some(default) = &param.default {
+                self.expression(default);
+            }
+        }
+    }
+
+    fn block(&mut self, block: &Block) {
+        for statement in &block.statements {
+            match &statement.kind {
+                StmtKind::Let { value, .. } => self.expression(value),
+                StmtKind::Expr(expr) => self.expression(expr),
+                StmtKind::Item(item) => self.item(item),
+            }
+        }
+        if let Some(tail) = &block.tail {
+            self.expression(tail);
+        }
+    }
+
+    fn expression(&mut self, expr: &Expr) {
+        self.expressions.insert(expression_form(&expr.kind));
+        match &expr.kind {
+            ExprKind::Int(_)
+            | ExprKind::Float(_)
+            | ExprKind::Bool(_)
+            | ExprKind::Duration(_)
+            | ExprKind::Unit
+            | ExprKind::Ident(_)
+            | ExprKind::Continue => {}
+            // An interpolation is an expression the literal encloses, and
+            // more than one rule above hides a form inside one.
+            ExprKind::Str(parts) => {
+                for part in parts {
+                    if let StrPart::Interpolation(expr) = part {
+                        self.expression(expr);
+                    }
+                }
+            }
+            ExprKind::ArrayLit(elements) => {
+                for element in elements {
+                    self.expression(element);
+                }
+            }
+            ExprKind::Field { base, .. } => self.expression(base),
+            ExprKind::Call {
+                callee,
+                args,
+                trailing,
+                ..
+            } => {
+                self.expression(callee);
+                for arg in args {
+                    self.expression(&arg.value);
+                }
+                if let Some(trailing) = trailing {
+                    self.expression(trailing);
+                }
+            }
+            ExprKind::Unary { operand, .. } => self.expression(operand),
+            ExprKind::Binary { lhs, rhs, .. } => {
+                self.expression(lhs);
+                self.expression(rhs);
+            }
+            ExprKind::Assign { target, value, .. } => {
+                self.expression(target);
+                self.expression(value);
+            }
+            ExprKind::Try(operand) | ExprKind::Await(operand) => self.expression(operand),
+            ExprKind::Block(block) => self.block(block),
+            ExprKind::If {
+                condition,
+                then_branch,
+                else_branch,
+            } => {
+                self.expression(condition);
+                self.block(then_branch);
+                if let Some(else_branch) = else_branch {
+                    self.expression(else_branch);
+                }
+            }
+            ExprKind::Match { scrutinee, arms } => {
+                self.expression(scrutinee);
+                for arm in arms {
+                    self.pattern(&arm.pattern);
+                    self.expression(&arm.body);
+                }
+            }
+            ExprKind::For { iterable, body, .. } => {
+                self.expression(iterable);
+                self.block(body);
+            }
+            ExprKind::While { condition, body } => {
+                self.expression(condition);
+                self.block(body);
+            }
+            ExprKind::Return(operand) | ExprKind::Break(operand) => {
+                if let Some(operand) = operand {
+                    self.expression(operand);
+                }
+            }
+            ExprKind::Lambda { params, body, .. } => {
+                self.params(params);
+                self.block(body);
+            }
+            ExprKind::Scope { body, .. } => self.block(body),
+            ExprKind::Range { start, end, .. } => {
+                self.expression(start);
+                self.expression(end);
+            }
+        }
+    }
+
+    fn pattern(&mut self, pattern: &Pattern) {
+        self.patterns.insert(pattern_form(&pattern.kind));
+        match &pattern.kind {
+            PatternKind::Wildcard | PatternKind::Binding(_) => {}
+            // A literal pattern holds an ordinary expression, `-bound` and
+            // `1` alike, so it is walked like one.
+            PatternKind::Literal(expr) => self.expression(expr),
+            PatternKind::Variant { payload, .. } => {
+                for pattern in payload {
+                    self.pattern(pattern);
+                }
+            }
+        }
+    }
+}
+
+/// Every form the AST admits appears in a program this suite *accepts*, so a
+/// form cannot be added to the language and left out of the reference
+/// unnoticed.
+///
+/// Only [`RULES`] and [`TRAPS`] count. A [`REJECTIONS`] entry is a program
+/// the checker refuses, and a form that occurs nowhere else has been given
+/// neither a type nor a value by anything here — counting it would let the
+/// suite claim coverage of a form no Cove implementation ever runs.
 #[test]
-fn every_expression_and_pattern_form_appears_in_the_suite() {
-    // The forms, in the order `cove_syntax::ast` declares them. A form is
-    // covered when some rule, rejection, or trap contains the source below.
-    let forms: &[(&str, &str)] = &[
-        ("Int", "7"),
-        ("Float", "1.5"),
-        ("Bool", "true"),
-        ("Duration", "500ms"),
-        ("Str", "\"a{1 + 1}b\""),
-        ("Unit", "()"),
-        ("Ident", "value"),
-        ("ArrayLit", "[1, 2]"),
-        ("Field", "point.x"),
-        ("Call", "twice(n: 4)"),
-        ("Unary", "!true"),
-        ("Binary", "1 + 2 * 3"),
-        ("Assign", "total += 2"),
-        ("Try", "parse(true)?"),
-        ("Await", "await work()"),
-        ("Block", "{\n  let value = 1\n  value + 1\n}"),
-        ("If", "if 1 < 2 {"),
-        ("Match", "match 2 {"),
-        ("For", "for value in [1, 2, 3] {"),
-        ("While", "while true {"),
-        ("Return", "return 3"),
-        ("Break", "break attempts"),
-        ("Continue", "continue"),
-        ("Lambda", "fn(n) {"),
-        ("Scope", "scope tasks {"),
-        ("Range", "0..<3"),
-        ("Wildcard", "_ => \"other\""),
-        ("Binding", "bound => bound + 1"),
-        ("Literal", "2 => \"two\""),
-        ("Variant", "Status.Active(since) => since"),
-    ];
-    let mut corpus = String::new();
-    for rule in RULES {
-        corpus.push_str(rule.decls);
-        corpus.push_str(rule.body);
-        corpus.push('\n');
-    }
-    for rejection in REJECTIONS {
-        corpus.push_str(rejection.source);
-    }
-    for trap in TRAPS {
-        corpus.push_str(trap.decls);
-        corpus.push_str(trap.body);
-        corpus.push('\n');
-    }
-    let missing: Vec<&str> = forms
+fn every_expression_and_pattern_form_appears_in_an_accepted_program() {
+    let accepted = RULES
         .iter()
-        .filter(|(_, source)| !corpus.contains(source))
-        .map(|(name, _)| *name)
+        .map(|rule| (rule.section, probe_source(rule.decls, rule.body, rule.ty)))
+        .chain(
+            TRAPS
+                .iter()
+                .map(|trap| (trap.section, probe_source(trap.decls, trap.body, trap.ty))),
+        );
+    let mut coverage = Coverage::default();
+    for (section, source) in accepted {
+        let mut sources = SourceMap::new();
+        let file = sources.add(PathBuf::from(format!("{MODULE}/main.cove")), source.clone());
+        // A source that does not parse has no tree to read, and a suite that
+        // skipped it would go on reporting the coverage it used to have.
+        let unit = match cove_syntax::parse_file(&sources, file) {
+            Ok(unit) => unit,
+            Err(reported) => panic!(
+                "{section}: a program this suite accepts did not parse: {}\n{source}",
+                summarize(&reported)
+            ),
+        };
+        for item in &unit.items {
+            coverage.item(item);
+        }
+    }
+    let missing: Vec<String> = EXPRESSION_FORMS
+        .iter()
+        .filter(|form| !coverage.expressions.contains(*form))
+        .map(|form| format!("ExprKind::{form}"))
+        .chain(
+            PATTERN_FORMS
+                .iter()
+                .filter(|form| !coverage.patterns.contains(*form))
+                .map(|form| format!("PatternKind::{form}")),
+        )
         .collect();
     assert!(
         missing.is_empty(),
-        "no rule, rejection, or trap exercises: {}",
+        "no rule and no trap exercises: {}",
         missing.join(", ")
     );
 }

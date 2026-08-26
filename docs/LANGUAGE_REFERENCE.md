@@ -34,21 +34,30 @@ depended on which way its condition went would be a form the checker could
 not type. `if c { 1 }` is therefore `()` whether `c` holds or not, and
 `let n: Int = if c { 1 }` is a `cove::type::mismatch`.
 
-**A loop's value comes from `break` only where `break` is the only way out.**
-A `for` runs out of items and a `while` runs out of condition, so both can
-reach their end without breaking, and there is nothing at that end to produce
-but `()`. Such a loop is `()`, and a `break` out of it may not carry a value
-(`cove::type::break_value`). A `while true` has no other exit, so its value is
-the one its `break`s agree on, and a loop whose `break`s disagree is a
-`cove::type::mismatch`. `break` with no operand produces `()`.
+**Every loop produces `()`, and a `break` operand is discarded.** A `for`
+runs out of items and a `while` runs out of condition, so a loop can reach its
+end without breaking, and there is nothing at that end to produce but `()`. A
+loop is therefore `()` however it leaves. `break expr` is accepted, its
+operand is checked and evaluated for its effects, and its value is discarded —
+the same answer this document gives an `if` with no `else`, for the same
+reason. `while true` is an ordinary `while`: nothing about the condition makes
+it a different form in either pass.
+
+Whether Cove should have a loop that carries a value at all — a `loop`
+keyword, an `Option<T>`-valued loop, a `for`/`else` clause, or none of them —
+is [issue #87](https://github.com/myuon/cove/issues/87), and is deliberately
+left open here. This document records only that today the two passes agree.
 
 **A `dyn Trait` value answers as the value it holds.** The conversion happens
 where a `dyn Trait` type is *written* — a `let` annotation, a field, a
 parameter, a declared return type — and a lambda has no written return type,
 so its result is not wrapped even though the checker gives it the same
 `dyn Trait` type. Nothing a program can ask may tell those two apart, so
-equality and rendering look through the wrapper. Two trait objects holding
-different concrete types are unequal, not incomparable.
+equality, rendering, and keying all look through the wrapper: two values `==`
+calls equal are usable in the same places. Two trait objects holding different
+concrete types are unequal, not incomparable — but a trait object compared
+with anything that is not a trait object's contents is still incomparable,
+because the wrapper explains that one mismatch and no other.
 
 ## Program shape
 
@@ -321,20 +330,17 @@ while condition { ... }
 
 - **Types as**: a `for` iterates an `Array<T>`, `Vector<T>`, `Set<T>`,
   `Range`, or `Map<K, V>`, binding `T`, `Int`, or `MapEntry<K, V>`
-  respectively. A `while` condition must be `Bool`. A `for`, and a `while`
-  whose condition is not the literal `true`, is `()`. A `while true` is the
-  type its `break`s agree on, or `()` when none of them carries a value.
-- **Evaluates to** `()`, except that a `while true` evaluates to the value of
-  the `break` that left it. A `break` out of any other loop is evaluated for
-  its effects and its value discarded, which is unreachable in a checked
-  program and is what an embedding that only resolves sees. A `for`
-  materializes its iterable once, before the first iteration, and iterates
-  that snapshot in the collection's own order — ascending key order for a
-  `Map`, sorted order for a `Set`. The loop back edge is a safepoint, which is
-  where a cancelled or over-budget run stops.
+  respectively. A `while` condition must be `Bool`. Every loop is `()`,
+  `while true` included.
+- **Evaluates to** `()`, however it leaves. A `break` operand is evaluated for
+  its effects and its value discarded. A `for` materializes its iterable once,
+  before the first iteration, and iterates that snapshot in the collection's
+  own order — ascending key order for a `Map`, sorted order for a `Set`. The
+  loop back edge is a safepoint, which is where a cancelled or over-budget run
+  stops.
 - **Errors**: `cove::type::iterable`, `cove::type::condition`,
-  `cove::type::break_value`, `cove::type::mismatch`. At run time, the
-  condition not being a `Bool`, and the run's own limits.
+  `cove::type::mismatch`. At run time, the condition not being a `Bool`, and
+  the run's own limits.
 
 `break [expr]` leaves the nearest enclosing loop, and `continue` skips to its
 next iteration. Neither produces a value of its own, so both are `Never`.
@@ -455,9 +461,11 @@ associated function has no receiver, and a `var self` method needs the
 caller's own place.
 
 At run time the conversion wraps the value, and the wrapper is a
-representation rather than something the program put there: rendering and
-equality look through it, so a written `dyn Trait` and a lambda's inferred one
-behave identically.
+representation rather than something the program put there: rendering,
+equality, and use as a `Map` key or `Set` element all look through it, so a
+written `dyn Trait` and a lambda's inferred one behave identically. A trait
+object is a valid key exactly when the value it holds is one, and it keys as
+that value — which is what `==` already says about the two of them.
 
 ## Copies, aliases, and identity
 
@@ -506,8 +514,25 @@ The checker produces *unknown* deliberately, never as a shrug, and only here:
   no written signature to check it against.
 
 An unknown matches every expectation, so a form in this list is accepted
-wherever it is written. The conformance suite pins that, so the list stays
-true.
+wherever it is written.
+
+The conformance suite does not pin this list. One entry was pinned — a bare
+`Vector`, compiled at a foreign type and required to be *accepted* — and that
+rule is gone, because [PR #82](https://github.com/myuon/cove/pull/82) makes a
+type used as a value an error (`cove::type::not_a_value`). What is left is a
+description of the checker as it stands, kept by hand.
+
+It is about to change, and knowing how is worth more than pretending it will
+not. PR #82 replaces "abstains" with four named kinds — recovery, a dynamic
+boundary, an unconstrained API, and a language gap — and moves four of the six
+bullets above out of the silent case: a name nothing in scope explains and a
+lambda `return` with no expected type become errors
+(`cove::type::unresolved_name`, `cove::type::unknown_name`,
+`cove::type::unknown_type`, `cove::type::lambda_return`), a type or module
+used as a value becomes `cove::type::not_a_value`, and an empty array literal
+or a bare `None` with nothing to take an argument from warns
+(`cove::type::unconstrained`). This section is rewritten against that model
+when PR #82 lands, rather than amended twice into something that is neither.
 
 One more type is not unknown but has no name either: the value a `scope`
 binds. Its only operation is `spawn`, which is typed, and there is nothing
@@ -534,12 +559,16 @@ is one resolution cannot place.
 implementation:
 
 - every rule's body is compiled at the type stated here, which must be
-  accepted, and at a foreign type, which must be refused — so the type above
-  is the type the form has, and not merely one it fits;
+  accepted, and at a foreign type, which must be refused as a
+  `cove::type::mismatch` — so the type above is the type the form has, and not
+  merely one it fits;
 - the same body is run, and the value it produces must be the one stated here;
 - every rejected program is refused by the diagnostic named here;
 - every run-time failure named here checks cleanly and stops the run;
-- every expression and pattern form the AST declares appears in the suite.
+- every expression and pattern form the AST declares appears in an *accepted*
+  program in the suite. The list of forms is generated from `ExprKind` and
+  `PatternKind` themselves and the programs are parsed and walked, so adding a
+  form to the language without covering it here does not compile.
 
 `tests/e2e/` pins the same rules as whole programs run through the real
 binary, and `docs/adr/` records why the rules are what they are.
