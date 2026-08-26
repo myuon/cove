@@ -443,6 +443,123 @@ pub fn call_method(
                         .collect(),
                 ))
             }
+            "chars" => {
+                expect_args(name, args, 0, span)?;
+                Ok(Value::Array(
+                    text.chars()
+                        .map(|c| Value::Str(c.to_string().into()))
+                        .collect(),
+                ))
+            }
+            "split" => {
+                let args = expect_args("String.split", args, 1, span)?;
+                let separator = expect_str("String.split", "separator", &args[0], span)?;
+                if separator.is_empty() {
+                    return Err(empty_needle_error(
+                        "String.split",
+                        "separator",
+                        "use `chars()` to take a string apart character by character",
+                        span,
+                    ));
+                }
+                Ok(Value::Array(
+                    text.split(separator)
+                        .map(|part| Value::Str(part.into()))
+                        .collect(),
+                ))
+            }
+            "join" => {
+                let args = expect_args("String.join", args, 1, span)?;
+                let Value::Array(parts) = &args[0] else {
+                    return Err(type_error(
+                        "String.join",
+                        "parts",
+                        "Array<String>",
+                        &args[0],
+                        span,
+                    ));
+                };
+                let mut joined = String::new();
+                for (index, part) in parts.iter().enumerate() {
+                    if index > 0 {
+                        joined.push_str(text);
+                    }
+                    joined.push_str(expect_str("String.join", "parts", part, span)?);
+                }
+                Ok(Value::Str(joined.into()))
+            }
+            "slice" => {
+                let args = expect_args("String.slice", args, 2, span)?;
+                let Value::Int(from) = &args[0] else {
+                    return Err(type_error("String.slice", "from", "Int", &args[0], span));
+                };
+                let Value::Int(to) = &args[1] else {
+                    return Err(type_error("String.slice", "to", "Int", &args[1], span));
+                };
+                let chars: Vec<char> = text.chars().collect();
+                let len = chars.len() as i64;
+                let from = (*from).clamp(0, len) as usize;
+                let to = (*to).clamp(0, len) as usize;
+                Ok(Value::Str(if to <= from {
+                    "".into()
+                } else {
+                    chars[from..to].iter().collect::<String>().into()
+                }))
+            }
+            "trim" => {
+                expect_args(name, args, 0, span)?;
+                Ok(Value::Str(text.trim().into()))
+            }
+            "contains" => {
+                let args = expect_args("String.contains", args, 1, span)?;
+                let needle = expect_str("String.contains", "text", &args[0], span)?;
+                Ok(Value::Bool(text.contains(needle)))
+            }
+            "startsWith" => {
+                let args = expect_args("String.startsWith", args, 1, span)?;
+                let prefix = expect_str("String.startsWith", "prefix", &args[0], span)?;
+                Ok(Value::Bool(text.starts_with(prefix)))
+            }
+            "endsWith" => {
+                let args = expect_args("String.endsWith", args, 1, span)?;
+                let suffix = expect_str("String.endsWith", "suffix", &args[0], span)?;
+                Ok(Value::Bool(text.ends_with(suffix)))
+            }
+            "indexOf" => {
+                let args = expect_args("String.indexOf", args, 1, span)?;
+                let needle = expect_str("String.indexOf", "text", &args[0], span)?;
+                Ok(match text.find(needle) {
+                    // `find` answers a byte offset; the characters before it
+                    // are counted to convert that into the character index
+                    // `length()` already counts in.
+                    Some(byte_index) => {
+                        Value::some(Value::Int(text[..byte_index].chars().count() as i64))
+                    }
+                    None => Value::none(),
+                })
+            }
+            "replace" => {
+                let args = expect_args("String.replace", args, 2, span)?;
+                let old = expect_str("String.replace", "old", &args[0], span)?;
+                if old.is_empty() {
+                    return Err(empty_needle_error(
+                        "String.replace",
+                        "old",
+                        "`old` is the text to look for, and an empty `old` names none",
+                        span,
+                    ));
+                }
+                let new = expect_str("String.replace", "new", &args[1], span)?;
+                Ok(Value::Str(text.replace(old, new).into()))
+            }
+            "toUpper" => {
+                expect_args(name, args, 0, span)?;
+                Ok(Value::Str(text.to_uppercase().into()))
+            }
+            "toLower" => {
+                expect_args(name, args, 0, span)?;
+                Ok(Value::Str(text.to_lowercase().into()))
+            }
             _ => Err(no_method("String", name, span)),
         },
         Value::Range {
@@ -611,6 +728,38 @@ fn type_error(
 
 fn no_method(type_name: &str, method: &str, span: Span) -> RuntimeError {
     RuntimeError::new(format!("`{type_name}` has no method `{method}`")).at(span)
+}
+
+/// Reads `value` as a `String`, or reports the type `method` declares for
+/// `parameter` instead.
+fn expect_str<'a>(
+    method: &str,
+    parameter: &str,
+    value: &'a Value,
+    span: Span,
+) -> Result<&'a str, RuntimeError> {
+    match value {
+        Value::Str(text) => Ok(text),
+        other => Err(type_error(method, parameter, "String", other, span)),
+    }
+}
+
+/// `split` and `replace` both refuse an empty needle: matching against one
+/// would match between every character rather than answer either method's
+/// question.
+///
+/// The two are told different things afterwards, because the operation they
+/// were reaching for is different. Splitting on nothing is a request for the
+/// characters, which `chars()` answers; replacing nothing is not a request for
+/// anything, so `replace` is told what it is missing rather than offered a
+/// substitute.
+fn empty_needle_error(method: &str, parameter: &str, help: &str, span: Span) -> RuntimeError {
+    RuntimeError::new(format!("`{method}` cannot use an empty `{parameter}`"))
+        .at(span)
+        .with_rule(
+            "An empty separator or search string would match between every character, rather than answer the question the method asks.",
+        )
+        .with_help(help)
 }
 
 /// Converts `value` to a [`MapKey`], or reports why it cannot be a map key or

@@ -8161,12 +8161,14 @@ fn run() -> Counter {
 
     #[test]
     fn rejects_a_builtin_method_that_does_not_exist() {
-        let error = rejects_body("  println(\"{\"text\".trim()}\")?");
+        let error = rejects_body("  println(\"{\"text\".scream()}\")?");
         assert_eq!(error.code, UNKNOWN_METHOD);
-        assert_eq!(error.message, "`String` has no method `trim`");
+        assert_eq!(error.message, "`String` has no method `scream`");
         assert_eq!(
             error.help.unwrap(),
-            "`String` has `length`, `isEmpty`, `words`, `snapshot`"
+            "`String` has `length`, `isEmpty`, `words`, `chars`, `split`, `join`, `slice`, \
+             `trim`, `contains`, `startsWith`, `endsWith`, `indexOf`, `replace`, `toUpper`, \
+             `toLower`, `snapshot`"
         );
     }
 

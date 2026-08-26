@@ -1040,7 +1040,21 @@ pub const SET: BuiltinSchema = BuiltinSchema {
 // ------------------------------------------------------------------ String
 
 /// `String`: an immutable sequence of characters, whose `length` counts
-/// characters rather than bytes.
+/// characters rather than bytes — and every other index this type takes or
+/// answers, in `chars`, `slice`, and `indexOf`, counts the same way, so an
+/// API that mixed characters and bytes never has the chance to become a trap.
+///
+/// `join` lives here rather than on `Array<String>`, so that `", ".join(names)`
+/// reads receiver-first with the separator: [`BuiltinType`] has no way to
+/// constrain a receiver's type parameter, so an `Array<T>.join` would either
+/// have to accept an `Array<Int>` too or need a bound the MVP cannot express,
+/// and putting the method on `String` instead sidesteps the bound rather than
+/// needing it.
+///
+/// `split` and `replace` both search for a piece of text that may not be
+/// empty: an empty needle would match between every character rather than
+/// answer either method's question, so both refuse it at run time and point
+/// at `chars()`, which is the operation that actually means that.
 pub const STRING: BuiltinSchema = BuiltinSchema {
     name: "String",
     parameters: &[],
@@ -1056,6 +1070,163 @@ pub const STRING: BuiltinSchema = BuiltinSchema {
             params: &[],
             variadic: false,
             result: BuiltinType::Array(&BuiltinType::String),
+            mutating: false,
+        },
+        // One element per character, each a `String` of length 1 — the
+        // decomposition `for` cannot do itself, since `for` refuses a
+        // `String`.
+        MethodSchema {
+            name: "chars",
+            generics: &[],
+            params: &[],
+            variadic: false,
+            result: BuiltinType::Array(&BuiltinType::String),
+            mutating: false,
+        },
+        // Every occurrence of `separator` separates, so adjacent separators
+        // produce an empty part and text with none produces one part that is
+        // the whole text; an empty `separator` is refused, as the type's own
+        // doc comment says.
+        MethodSchema {
+            name: "split",
+            generics: &[],
+            params: &[ParamSchema {
+                name: "separator",
+                ty: BuiltinType::String,
+            }],
+            variadic: false,
+            result: BuiltinType::Array(&BuiltinType::String),
+            mutating: false,
+        },
+        // The receiver is the separator; see the type's own doc comment for
+        // why this is not `Array<T>.join`.
+        MethodSchema {
+            name: "join",
+            generics: &[],
+            params: &[ParamSchema {
+                name: "parts",
+                ty: BuiltinType::Array(&BuiltinType::String),
+            }],
+            variadic: false,
+            result: BuiltinType::String,
+            mutating: false,
+        },
+        // The characters at indices `from` up to but not including `to`.
+        // Both bounds are clamped into `0..length()`, and a `to` at or below
+        // `from` answers `""`, so — the same choice `Array.get` makes by
+        // answering an `Option`, in the form a substring can take — no
+        // argument can stop a program.
+        MethodSchema {
+            name: "slice",
+            generics: &[],
+            params: &[
+                ParamSchema {
+                    name: "from",
+                    ty: BuiltinType::Int,
+                },
+                ParamSchema {
+                    name: "to",
+                    ty: BuiltinType::Int,
+                },
+            ],
+            variadic: false,
+            result: BuiltinType::String,
+            mutating: false,
+        },
+        // Leading and trailing whitespace removed, where whitespace is
+        // Unicode whitespace as Rust's own `str::trim` sees it; `words()`
+        // still splits on ASCII whitespace only, and this does not change
+        // that.
+        MethodSchema {
+            name: "trim",
+            generics: &[],
+            params: &[],
+            variadic: false,
+            result: BuiltinType::String,
+            mutating: false,
+        },
+        MethodSchema {
+            name: "contains",
+            generics: &[],
+            params: &[ParamSchema {
+                name: "text",
+                ty: BuiltinType::String,
+            }],
+            variadic: false,
+            result: BuiltinType::Bool,
+            mutating: false,
+        },
+        MethodSchema {
+            name: "startsWith",
+            generics: &[],
+            params: &[ParamSchema {
+                name: "prefix",
+                ty: BuiltinType::String,
+            }],
+            variadic: false,
+            result: BuiltinType::Bool,
+            mutating: false,
+        },
+        MethodSchema {
+            name: "endsWith",
+            generics: &[],
+            params: &[ParamSchema {
+                name: "suffix",
+                ty: BuiltinType::String,
+            }],
+            variadic: false,
+            result: BuiltinType::Bool,
+            mutating: false,
+        },
+        // The character index `text` first occurs at, or `None`; an empty
+        // `text` occurs at 0.
+        MethodSchema {
+            name: "indexOf",
+            generics: &[],
+            params: &[ParamSchema {
+                name: "text",
+                ty: BuiltinType::String,
+            }],
+            variadic: false,
+            result: BuiltinType::Option(&BuiltinType::Int),
+            mutating: false,
+        },
+        // Every non-overlapping occurrence of `old`, scanning left to right;
+        // an empty `old` is refused for the same reason `split`'s empty
+        // `separator` is.
+        MethodSchema {
+            name: "replace",
+            generics: &[],
+            params: &[
+                ParamSchema {
+                    name: "old",
+                    ty: BuiltinType::String,
+                },
+                ParamSchema {
+                    name: "new",
+                    ty: BuiltinType::String,
+                },
+            ],
+            variadic: false,
+            result: BuiltinType::String,
+            mutating: false,
+        },
+        // Unicode-aware, by Rust's own `str::to_uppercase`.
+        MethodSchema {
+            name: "toUpper",
+            generics: &[],
+            params: &[],
+            variadic: false,
+            result: BuiltinType::String,
+            mutating: false,
+        },
+        // Unicode-aware, by Rust's own `str::to_lowercase`.
+        MethodSchema {
+            name: "toLower",
+            generics: &[],
+            params: &[],
+            variadic: false,
+            result: BuiltinType::String,
             mutating: false,
         },
         SNAPSHOT,
