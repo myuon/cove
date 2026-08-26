@@ -15,7 +15,7 @@ export fn main(args: Array<String>) -> Result<Unit, Error> {
   }
   println("iterated total {total}")?
 
-  let empty = []
+  let empty: Array<Int> = []
   println("empty {empty} {empty.isEmpty()} {empty.length()}")?
 
   println("process arguments {args} {args.length()}")?

@@ -14,7 +14,7 @@ fn shout(text: String) -> Option<String> {
 /// Prints `Option` construction, queries, and `?` propagation.
 export fn main() -> Result<Unit, Error> {
   let some = Some(3)
-  let none = None
+  let none: Option<Int> = None
   println("values {some} {none}")?
   println("isSome {some.isSome()} {none.isSome()}")?
   println("isNone {some.isNone()} {none.isNone()}")?
