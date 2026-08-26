@@ -62,6 +62,16 @@ jobs:
       - name: cargo clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
 
+      # The `Pages` workflow publishes these docs with warnings denied, so a
+      # broken intra-doc link (or any other doc build failure) is a build
+      # failure there whether or not it is caught here first. Running the
+      # same check on the PR means it is the PR's author who sees it, not a
+      # permanently red `main` that hides the next, genuinely new regression.
+      - name: cargo doc
+        env:
+          RUSTDOCFLAGS: -D warnings
+        run: cargo doc --workspace --no-deps
+
       - name: cargo test
         run: cargo test --workspace
 
