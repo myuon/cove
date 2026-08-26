@@ -39,5 +39,13 @@ export fn main() -> Result<Unit, Error> {
     1
   }
   println("an `if` with no `else` and a false condition is {withoutElse}")?
+
+  var ran = false
+  let takenWithoutElse = if bound == 1 {
+    ran = true
+    1
+  }
+  println("its branch ran: {ran}")?
+  println("an `if` with no `else` whose branch ran is {takenWithoutElse}")?
   Ok(())
 }

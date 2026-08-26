@@ -1,9 +1,14 @@
 # Cove Language Card
 
-> Draft 0.1 — a one-page map of the intended language, not yet a specification.
+> Draft 0.1 — a one-page map of the intended language, not a specification.
 
 Cove should feel familiar if you know TypeScript, Go, Swift, or Rust. This card
 records the parts you should not have to guess.
+
+[LANGUAGE_REFERENCE.md](LANGUAGE_REFERENCE.md) is where a rule is stated once
+and in full: for every expression and pattern form, what it resolves to, how it
+is typed, how it evaluates, and which errors it can produce. This card stays a
+map and sends you there rather than growing into the specification itself.
 
 ## Program shape
 
@@ -45,8 +50,11 @@ export fn main(args: Array<String>) -> Result<Unit, Error> {
 - Traits are nominal and explicitly implemented; dynamic dispatch is distinct
   from generic static dispatch.
 - The last expression in a block is its value; `return` exits early.
-- A `for` or `while` loop is an expression: it evaluates to `Unit`, or to
-  `break expr`'s value; `continue` skips to the next iteration.
+- An `if` with no `else` is `Unit`: the branch runs, and its value is
+  discarded, because there is no second branch to give the other case a value.
+- A `for` or `while` loop is an expression. It evaluates to `Unit`, because it
+  can reach its end without breaking, so a `break expr` operand is evaluated
+  for its effects and discarded. `continue` skips to the next iteration.
 - Comments use `//` and `/* ... */`.
 
 ## Statements end at the end of a line
@@ -116,6 +124,11 @@ fn fill(var output: Vector<Int>)
 fill(var output)
 ```
 
+A closure captures a snapshot of each binding it reads, taken where the
+closure is written, so assigning to that binding afterwards does not change
+what the closure sees. A captured `Vector` or `Shared` still shares its
+storage, because copying either copies the handle.
+
 `vector.freeze()` consumes a locally unique vector and returns an immutable
 array in O(1). `vector.toArray()` is the O(n) fallback when uniqueness cannot
 be proved. Other independent graph copies require an explicit
@@ -125,8 +138,9 @@ tasks, and Host resources do not conform by default.
 ## Evaluation
 
 - Evaluation order is left to right.
-- Integer overflow is a broken invariant, not a wrapped result. Division and
-  remainder by zero are too.
+- Integer overflow is a broken invariant, not a wrapped result. `Int` division
+  and remainder by zero are too. `Float` is IEEE 754 and stops at nothing:
+  `1.0 / 0.0` is `inf`.
 - Collection iteration order is defined by each collection type.
 - There are no implicit numeric, string, or boolean conversions.
 - Imports do not execute initialization code; fallible or asynchronous setup is

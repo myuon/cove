@@ -248,11 +248,23 @@
 //!   name here, and the rule that they must appear in declaration order stays
 //!   where it was.
 //!
-//! One rule runs the other way. An `if` with no `else` has type `()` here and
-//! its branch's value is discarded, because there is no second branch to give
-//! the missing case a value; the interpreter, which only ever evaluates the
-//! branch it took, hands that branch's value back. ADR 0004 does not settle
-//! this, and the card says only that control-flow forms are expressions.
+//! # Where a form's value comes from
+//!
+//! `docs/LANGUAGE_REFERENCE.md` states one rule per expression form, and the
+//! two that this pass and the interpreter used to answer differently are
+//! stated there because they had to be decided rather than discovered:
+//!
+//! - An `if` with no `else` produces `()`, and its branch's value is
+//!   discarded. There is no second branch to give the missing case a value,
+//!   so the branch that runs does not supply one either.
+//! - Every loop produces `()`. A `for` runs out of items and a `while` runs
+//!   out of condition, so a loop can reach its end without breaking and
+//!   there is nothing at that end to produce but `()`; a `break` operand is
+//!   checked on its own and its value discarded, exactly as an `if`'s
+//!   branch value is. Whether a loop should ever carry a value is issue #87.
+//!
+//! The interpreter obeys both, so a checked program's static and dynamic
+//! answers are the same one.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
@@ -2608,6 +2620,9 @@ impl<'a> Checker<'a> {
             // checked against the loop's expected type rather than the
             // function's. Neither form produces a value of its own.
             ExprKind::Break(value) => {
+                // The operand is checked on its own, against no expectation,
+                // and its value is discarded: the loop it leaves produces
+                // `()` however it leaves. See issue #87.
                 if let Some(value) = value {
                     self.expr(value, None);
                 }
@@ -8961,6 +8976,40 @@ fn apply(transform: fn(Int) -> Int) -> Int {
             error.help.unwrap(),
             "make both branches produce `Int`, or bind them separately"
         );
+    }
+
+    #[test]
+    fn every_loop_is_unit_and_a_break_operand_is_discarded() {
+        // Every loop can reach its end without breaking, and there is
+        // nothing at that end to produce but `()`, so the loop is `()` and a
+        // `break` operand is checked on its own and its value discarded --
+        // the rule an `if` with no `else` already follows. Whether a loop
+        // should ever carry a value is issue #87.
+        accepts_body("  let ran = for value in [1, 2] {\n    value\n  }\n  println(\"{ran}\")?");
+        accepts_body(
+            "  let ran = for value in [1, 2] {\n    break value\n  }\n  println(\"{ran}\")?",
+        );
+        accepts_body(
+            "  var seen = 0\n  let ran = while seen < 2 {\n    seen += 1\n    break seen\n  }\n  println(\"{ran}\")?",
+        );
+        // `while true` is an ordinary `while`: nothing about the condition
+        // makes it a form the two passes have to treat specially.
+        accepts_body("  let ran = while true {\n    break 1\n  }\n  println(\"{ran}\")?");
+        // Two `break`s out of one loop are checked separately, because
+        // neither of them says what the loop produces.
+        accepts_body(
+            "  let ran = while true {\n    if true {\n      break 1\n    }\n    break \"two\"\n  }\n  println(\"{ran}\")?",
+        );
+        // A binding that asks the loop for anything but `()` is a mismatch,
+        // whatever the `break`s carry.
+        let error = rejects_body("  let n: Int = while true {\n    break 1\n  }");
+        assert_eq!(error.code, MISMATCH);
+        assert_eq!(error.message, "expected `Int`, found `()`");
+        let error = rejects_body("  let n: Int = for value in [1, 2] {\n    break value\n  }");
+        assert_eq!(error.code, MISMATCH);
+        // The operand is still checked, so a mistake inside it is reported.
+        let error = rejects_body("  for value in [1, 2] {\n    break value + \"a\"\n  }");
+        assert_eq!(error.code, OPERATOR);
     }
 
     #[test]
