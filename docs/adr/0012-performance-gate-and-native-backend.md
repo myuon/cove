@@ -9,6 +9,12 @@
   [ADR 0009](0009-cove-build.md) — both of which stand exactly as written; what
   changes is that the criterion they deferred is now measured, and the deferral
   has gates
+- Superseded in part by [ADR 0019](0019-executable-ir-and-vm.md), which
+  replaces this ADR's decision that the interpreter remains the only backend.
+  Everything else here stands, including the ranking of the specification
+  above the oracle above a backend, the five gates, and the reasons this ADR
+  gives for not compiling anything: ADR 0019 does not cross gate 1 and does not
+  claim to
 - Implemented by: PR #34
 - Implementation status: complete — `crates/cove-bench`, the `benches/`
   package, and the CI step that runs it all exist, and gates 2 and 3 are met.

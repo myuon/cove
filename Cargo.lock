@@ -26,6 +26,16 @@ name = "cove-diag"
 version = "0.1.0"
 
 [[package]]
+name = "cove-ir"
+version = "0.1.0"
+dependencies = [
+ "cove-diag",
+ "cove-schema",
+ "cove-sema",
+ "cove-syntax",
+]
+
+[[package]]
 name = "cove-runtime"
 version = "0.1.0"
 dependencies = [

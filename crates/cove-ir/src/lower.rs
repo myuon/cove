@@ -1,0 +1,2829 @@
+//! Lowering a checked program to the executable IR, and the validation that
+//! stands between the two.
+//!
+//! What this lowers is decided by [ADR 0019](../../../docs/adr/0019-executable-ir-and-vm.md):
+//! everything it covers becomes instructions, and everything it does not is
+//! named as [`Unsupported`] rather than approximated. A VM that quietly
+//! finished a run somewhere else would be a VM whose measurements are about a
+//! mixture, so a construct with no lowering stops the lowering and says what
+//! it was.
+//!
+//! # What the interpreter decides and this reproduces
+//!
+//! `crates/cove-runtime/src/interp.rs` is the oracle, and six of its rules
+//! are most of the difficulty here:
+//!
+//! - **A name resolves in declaration order.** A reference written before a
+//!   `let` in the same block does not see it, so a `let`'s value is lowered
+//!   *before* its name is declared and `let x = x` reads the outer `x`.
+//! - **Shadowing makes a new slot.** `Env::declare` pushes; it never
+//!   overwrites. Two `let x`s are two slots, and a reference reaches the
+//!   later one because a lookup scans from the top.
+//! - **A block's slots are released when the block ends**, so a later sibling
+//!   block reuses the same numbers and `frame_size` is a high-water mark
+//!   rather than a count of declarations.
+//! - **A `for` binding lives in the scope its body sees**, and the iterable
+//!   is evaluated in the enclosing one.
+//! - **Evaluation is left to right everywhere**: arguments, operands, array
+//!   elements, and struct fields.
+//! - **A struct's fields are pushed in declaration order.** `assign_labels`
+//!   in the interpreter refuses a label written out of declaration order, so
+//!   a call it accepts already stands in that order; [`arguments_in_order`]
+//!   is that rule, and a call it cannot put in order is reported rather than
+//!   rearranged.
+//!
+//! # What is not lowered
+//!
+//! Closures and trailing closures, `match`, `scope`/`spawn`/`await`, `var`
+//! parameters, traits and `dyn`, the `Map` and `Set` constructors, `Shared`,
+//! `snapshot`, a range used as a value, assignment to a field, and any call
+//! whose target cannot be named at lowering time. Each is reported in the
+//! words a Cove programmer writes it in.
+//!
+//! Assignment to a field is the one on that list that is not a matter of
+//! this pass being unfinished. The IR has `GetField` and nothing on the
+//! other side of it, and the alternative — rebuilding the struct around the
+//! new value — needs the receiver's type, which is the one thing a lowering
+//! with no type table cannot name. It is reported rather than approximated,
+//! and it is what stops `benches/field` and `benches/method`.
+
+use std::collections::BTreeMap;
+use std::rc::Rc;
+
+use cove_diag::Span;
+use cove_schema::builtins;
+use cove_schema::hosts;
+use cove_sema::resolve::Program as Checked;
+use cove_syntax::ast::{
+    Arg, BinaryOp as SourceBinary, Block, Expr, ExprKind, FnDecl, ItemKind, Stmt, StmtKind,
+    StrPart, StructDecl, Type, TypeKind, UnaryOp as SourceUnary,
+};
+
+use crate::{BinaryOp, Const, ConstId, Function, FunctionId, Inst, Program, UnaryOp, Unsupported};
+
+/// Lowers every function of a checked program.
+///
+/// Functions are numbered before any body is lowered, so a call reaches a
+/// declaration written later in the package and a function reaches itself.
+/// The order is the checker's own — modules by name, then free functions by
+/// name, then methods by type and name — which is what makes a listing
+/// stable enough for a golden test.
+///
+/// One unsupported construct anywhere fails the whole program, because ADR
+/// 0019's rule is about a *run*: a program that lowered all but one of its
+/// functions could still reach the missing one, and there would be nowhere
+/// for the run to go.
+pub fn lower(program: &Checked) -> Result<Program, Unsupported> {
+    let mut lowering = Lowering::index(program);
+    let mut functions = Vec::with_capacity(lowering.declared.len());
+    for index in 0..lowering.declared.len() {
+        functions.push(lowering.function(FunctionId(index as u32))?);
+    }
+    Ok(Program {
+        functions,
+        constants: lowering.constants,
+    })
+}
+
+// -------------------------------------------------------------- the index
+
+/// One function the package declares, and what the lowering emits it from.
+struct Declared<'a> {
+    /// The module whose body runs it. A method belongs to the module that
+    /// declares its `impl` block, which ADR 0006 lets differ from the module
+    /// that declares the type.
+    module: &'a str,
+    /// The name a listing shows: `Type.method` for a method, so that a
+    /// method and a free function of one name stay two functions.
+    name: String,
+    decl: &'a FnDecl,
+}
+
+/// The whole-program state one lowering carries: what every function is
+/// numbered, and the constants they share.
+struct Lowering<'a> {
+    checked: &'a Checked,
+    declared: Vec<Declared<'a>>,
+    /// Free functions, by the module that declares them and their name.
+    functions: BTreeMap<(String, String), FunctionId>,
+    /// Methods, by the module that declares the `impl` block, the type, and
+    /// the method name.
+    methods: BTreeMap<(String, String, String), FunctionId>,
+    /// Every function a method name answers to, for a receiver whose type
+    /// the lowering has no way to name.
+    by_name: BTreeMap<String, Vec<FunctionId>>,
+    constants: Vec<Const>,
+}
+
+impl<'a> Lowering<'a> {
+    /// Numbers every declared function without lowering any of them.
+    ///
+    /// A body may call anything the package declares, including itself, so
+    /// every target has an id before the first instruction is emitted.
+    fn index(checked: &'a Checked) -> Lowering<'a> {
+        let mut lowering = Lowering {
+            checked,
+            declared: Vec::new(),
+            functions: BTreeMap::new(),
+            methods: BTreeMap::new(),
+            by_name: BTreeMap::new(),
+            constants: Vec::new(),
+        };
+        for (module, resolved) in &checked.modules {
+            for (name, entry) in &resolved.functions {
+                let id = lowering.number(Declared {
+                    module,
+                    name: name.clone(),
+                    decl: &entry.decl,
+                });
+                lowering
+                    .functions
+                    .insert((module.clone(), name.clone()), id);
+            }
+            for ((type_name, method), entry) in &resolved.methods {
+                let id = lowering.number(Declared {
+                    module,
+                    name: format!("{type_name}.{method}"),
+                    decl: &entry.decl,
+                });
+                lowering
+                    .methods
+                    .insert((module.clone(), type_name.clone(), method.clone()), id);
+                lowering.by_name.entry(method.clone()).or_default().push(id);
+            }
+        }
+        lowering
+    }
+
+    fn number(&mut self, declared: Declared<'a>) -> FunctionId {
+        let id = FunctionId(self.declared.len() as u32);
+        self.declared.push(declared);
+        id
+    }
+
+    /// Interns a constant, so that one value is one [`ConstId`] however many
+    /// instructions load it.
+    fn constant(&mut self, value: Const) -> ConstId {
+        match self.constants.iter().position(|held| *held == value) {
+            Some(index) => ConstId(index as u32),
+            None => {
+                self.constants.push(value);
+                ConstId(self.constants.len() as u32 - 1)
+            }
+        }
+    }
+
+    /// Interns a name an instruction carries: a field, a host module, a host
+    /// operation, a builtin, or a type.
+    fn name(&mut self, text: &str) -> ConstId {
+        self.constant(Const::Name(text.into()))
+    }
+
+    /// The function `module` reaches by the bare name `name`: its own
+    /// declaration first, and the one a `use` imported under that name
+    /// second, exactly as `Interpreter::find_function` does.
+    fn function_of(&self, module: &str, name: &str) -> Option<FunctionId> {
+        if let Some(id) = self.functions.get(&(module.to_string(), name.to_string())) {
+            return Some(*id);
+        }
+        let owner = self.checked.modules.get(module)?.imports.get(name)?;
+        self.functions
+            .get(&(owner.clone(), name.to_string()))
+            .copied()
+    }
+
+    /// The struct `module` reaches by the bare name `name`, and the module
+    /// that declares it.
+    fn struct_of(&self, module: &str, name: &str) -> Option<(&'a str, &'a StructDecl)> {
+        let (module, resolved) = self.checked.modules.get_key_value(module)?;
+        if let Some(entry) = resolved.structs.get(name) {
+            return Some((module.as_str(), &entry.decl));
+        }
+        let owner = resolved.imports.get(name)?;
+        let (owner, resolved) = self.checked.modules.get_key_value(owner)?;
+        Some((owner.as_str(), &resolved.structs.get(name)?.decl))
+    }
+
+    /// Whether `module` reaches an enum by the bare name `name`.
+    fn declares_enum(&self, module: &str, name: &str) -> bool {
+        let Some(resolved) = self.checked.modules.get(module) else {
+            return false;
+        };
+        if resolved.enums.contains_key(name) {
+            return true;
+        }
+        resolved
+            .imports
+            .get(name)
+            .and_then(|owner| self.checked.modules.get(owner))
+            .is_some_and(|owner| owner.enums.contains_key(name))
+    }
+
+    /// The method of `type_module.type_name` named `name`.
+    ///
+    /// A type's methods usually live with the type; ADR 0006's orphan rule
+    /// lets a conformance put one in the module that declares the trait
+    /// instead, so the conformances are searched second.
+    fn method_of(&self, type_module: &str, type_name: &str, name: &str) -> Option<FunctionId> {
+        let key = (
+            type_module.to_string(),
+            type_name.to_string(),
+            name.to_string(),
+        );
+        if let Some(id) = self.methods.get(&key) {
+            return Some(*id);
+        }
+        self.checked.modules.iter().find_map(|(module, resolved)| {
+            let conforms = resolved.conformances.values().any(|conformance| {
+                conformance.type_module == type_module
+                    && conformance.type_name == type_name
+                    && conformance.methods.contains(name)
+            });
+            if !conforms {
+                return None;
+            }
+            self.methods
+                .get(&(module.clone(), type_name.to_string(), name.to_string()))
+                .copied()
+        })
+    }
+
+    /// Whether `name` is a host module `module` may address.
+    ///
+    /// A `use` makes one addressable by name, and a shipped module is
+    /// addressable anyway, which is what `Interpreter::is_host_module` asks
+    /// the registry.
+    fn is_host_module(&self, module: &str, name: &str) -> bool {
+        self.checked
+            .modules
+            .get(module)
+            .is_some_and(|resolved| resolved.host_uses.contains(name))
+            || hosts::module(name).is_some()
+    }
+
+    /// The host module an unqualified `use console.println` binds `name` to.
+    fn host_item(&self, module: &str, name: &str) -> Option<&'a str> {
+        Some(
+            self.checked
+                .modules
+                .get(module)?
+                .host_items
+                .get(name)?
+                .as_str(),
+        )
+    }
+
+    /// The module `head` names in `module`, when a `use` imported it whole.
+    fn imported_module(&self, module: &str, head: &str) -> Option<&'a str> {
+        Some(
+            self.checked
+                .modules
+                .get(module)?
+                .module_imports
+                .get(head)?
+                .as_str(),
+        )
+    }
+
+    /// The exported function `owner.name`, when `owner` exports one.
+    fn exported_function(&self, owner: &str, name: &str) -> Option<FunctionId> {
+        if self.checked.modules.get(owner)?.exported(name) != Some(true) {
+            return None;
+        }
+        self.functions
+            .get(&(owner.to_string(), name.to_string()))
+            .copied()
+    }
+
+    /// The exported struct `owner.name`, when `owner` exports one.
+    fn exported_struct(&self, owner: &str, name: &str) -> Option<&'a StructDecl> {
+        let resolved = self.checked.modules.get(owner)?;
+        if resolved.exported(name) != Some(true) {
+            return None;
+        }
+        Some(&resolved.structs.get(name)?.decl)
+    }
+
+    /// Lowers one function into its instructions.
+    fn function(&mut self, id: FunctionId) -> Result<Function, Unsupported> {
+        let declared = &self.declared[id.0 as usize];
+        let module = declared.module;
+        let name: Rc<str> = declared.name.as_str().into();
+        let decl = declared.decl;
+
+        if decl.is_async {
+            return Err(Unsupported::new("an `async fn`", decl.span));
+        }
+        if let Some(ty) = &decl.return_type {
+            reject_dyn(ty, "a `dyn` return type")?;
+        }
+
+        let mut body = Body::new(self, module);
+        if let Some(receiver) = decl.receiver {
+            if receiver.is_var {
+                return Err(Unsupported::new("a `var self` receiver", receiver.span));
+            }
+            body.declare(Some("self"));
+        }
+        for param in &decl.params {
+            reject_parameter(param.is_var, param.variadic, param.ty.as_ref(), param.span)?;
+            body.declare(Some(param.name.node.as_str()));
+        }
+
+        body.block(&decl.body)?;
+        body.emit_final_return(decl.body.span);
+        let (code, spans, frame_size) = body.finish();
+
+        Ok(Function {
+            module: module.into(),
+            name,
+            frame_size,
+            arity: decl.params.len() as u32 + u32::from(decl.receiver.is_some()),
+            has_receiver: decl.receiver.is_some(),
+            captures: Vec::new(),
+            code,
+            spans,
+            span: decl.span,
+        })
+    }
+}
+
+// --------------------------------------------------------------- one body
+
+/// One live binding: the slot it occupies, and the name that reaches it.
+///
+/// A hidden binding has no name. A `for` header needs somewhere to keep what
+/// it walks, and those places are slots like any other — they simply cannot
+/// be reached from source, because no Cove name resolves to them.
+struct Binding<'a> {
+    name: Option<&'a str>,
+    slot: u32,
+}
+
+/// A jump target, resolved once the instruction it points at exists.
+struct Label {
+    at: Option<u32>,
+    /// The operand-stack depth control arrives here with, taken from the
+    /// first reachable jump that names it.
+    depth: Option<u32>,
+}
+
+/// The loop a `break` or a `continue` leaves.
+struct LoopFrame {
+    break_to: usize,
+    continue_to: usize,
+    /// The operand-stack depth the loop runs at, which is what a `break`
+    /// written inside a half-evaluated expression has to get back down to.
+    depth: u32,
+}
+
+/// Which kind of `for` header a loop is walking.
+#[derive(Clone, Copy)]
+enum Header {
+    /// `a..b` and `a..<b`: the cursor is the value the binding takes, and
+    /// `limit` is the bound it is tested against.
+    Range { limit: u32, inclusive: bool },
+    /// Anything else: the cursor is an index into `sequence`, whose length
+    /// was read once into `length`.
+    Sequence { sequence: u32, length: u32 },
+}
+
+/// Everything one function's instructions are built from.
+struct Body<'a, 'l> {
+    outer: &'l mut Lowering<'a>,
+    module: &'a str,
+    code: Vec<Inst>,
+    spans: Vec<Span>,
+    /// The operand-stack depth, or `None` where control cannot arrive.
+    ///
+    /// `return`, `break`, and `continue` are expressions, so the
+    /// instructions written after one are unreachable and have no depth to
+    /// speak of. Tracking that rather than guessing is what keeps a later
+    /// join point honest.
+    depth: Option<u32>,
+    live: Vec<Binding<'a>>,
+    frame_size: u32,
+    labels: Vec<Label>,
+    patches: Vec<(usize, usize)>,
+    loops: Vec<LoopFrame>,
+}
+
+impl<'a, 'l> Body<'a, 'l> {
+    fn new(outer: &'l mut Lowering<'a>, module: &'a str) -> Body<'a, 'l> {
+        Body {
+            outer,
+            module,
+            code: Vec::new(),
+            spans: Vec::new(),
+            depth: Some(0),
+            live: Vec::new(),
+            frame_size: 0,
+            labels: Vec::new(),
+            patches: Vec::new(),
+            loops: Vec::new(),
+        }
+    }
+
+    /// The finished instructions, with every jump pointing at a real one.
+    fn finish(mut self) -> (Vec<Inst>, Vec<Span>, u32) {
+        for (pc, label) in &self.patches {
+            let target = self.labels[*label]
+                .at
+                .expect("every label a jump names is bound");
+            match &mut self.code[*pc] {
+                Inst::Jump(to) | Inst::JumpIfFalse(to) | Inst::JumpIfTrue(to) => *to = target,
+                other => unreachable!("a patch points at a jump, not {other:?}"),
+            }
+        }
+        (self.code, self.spans, self.frame_size)
+    }
+
+    // ------------------------------------------------------------ emitting
+
+    /// Emits one instruction, unless control cannot reach it.
+    ///
+    /// The expressions after a `return`, a `break`, or a `continue` are
+    /// lowered — an unsupported construct written there is still refused —
+    /// but nothing they would emit can run, so nothing is kept. That is what
+    /// leaves a listing with no instruction in it that the VM could never
+    /// execute.
+    fn emit(&mut self, inst: Inst, span: Span) {
+        let Some(depth) = self.depth else {
+            return;
+        };
+        let (consumed, produced) = stack_shape(&self.outer.constants, inst);
+        self.depth = Some(depth.saturating_sub(consumed) + produced);
+        if matches!(inst, Inst::Return | Inst::Jump(_)) {
+            self.depth = None;
+        }
+        self.code.push(inst);
+        self.spans.push(span);
+    }
+
+    /// The `Return` a function ends in, emitted even where control cannot
+    /// fall into it.
+    ///
+    /// A body whose last expression is itself a `return` leaves nothing to
+    /// fall through, and a function still has to end in the instruction that
+    /// ends a function: [`validate`] asks for one, and a VM that ran off the
+    /// end would have nowhere to go.
+    fn emit_final_return(&mut self, span: Span) {
+        if self.depth.is_none() {
+            if matches!(self.code.last(), Some(Inst::Return)) {
+                return;
+            }
+            self.depth = Some(1);
+        }
+        self.emit(Inst::Return, span);
+    }
+
+    fn constant(&mut self, value: Const, span: Span) {
+        let id = self.outer.constant(value);
+        self.emit(Inst::Const(id), span);
+    }
+
+    fn label(&mut self) -> usize {
+        self.labels.push(Label {
+            at: None,
+            depth: None,
+        });
+        self.labels.len() - 1
+    }
+
+    /// Emits a jump to `label`, recording the depth control leaves with.
+    fn jump(&mut self, inst: fn(u32) -> Inst, label: usize, span: Span) {
+        let Some(depth) = self.depth else {
+            return;
+        };
+        let arrival = if matches!(inst(0), Inst::Jump(_)) {
+            depth
+        } else {
+            depth - 1
+        };
+        if self.labels[label].depth.is_none() {
+            self.labels[label].depth = Some(arrival);
+        }
+        let pc = self.code.len();
+        self.emit(inst(0), span);
+        self.patches.push((pc, label));
+    }
+
+    /// Binds `label` to the next instruction.
+    ///
+    /// Where control could not fall through, the depth the jumps arrive with
+    /// is what the code below runs at; that is how the instructions after a
+    /// `return` in one arm of an `if` get a depth again.
+    fn bind(&mut self, label: usize) {
+        self.labels[label].at = Some(self.code.len() as u32);
+        if self.depth.is_none() {
+            self.depth = self.labels[label].depth;
+        }
+    }
+
+    // --------------------------------------------------------------- slots
+
+    /// Declares a binding, which always takes a slot of its own.
+    ///
+    /// Shadowing declares rather than overwrites, exactly as `Env::declare`
+    /// does, so `let x = 1; let x = 2` is two slots.
+    fn declare(&mut self, name: Option<&'a str>) -> u32 {
+        let slot = self.live.len() as u32;
+        self.live.push(Binding { name, slot });
+        self.frame_size = self.frame_size.max(slot + 1);
+        slot
+    }
+
+    /// The slot `name` reaches: the most recent declaration of it, because a
+    /// lookup scans from the top and a shadow was declared later.
+    fn lookup(&self, name: &str) -> Option<u32> {
+        self.live
+            .iter()
+            .rev()
+            .find(|binding| binding.name == Some(name))
+            .map(|binding| binding.slot)
+    }
+
+    // ---------------------------------------------------------- statements
+
+    /// Lowers a block, leaving its value on the stack.
+    ///
+    /// The slots the block declared are released at its end, so a later
+    /// sibling block reuses the numbers and `frame_size` stays a high-water
+    /// mark rather than a total.
+    fn block(&mut self, block: &'a Block) -> Result<(), Unsupported> {
+        let mark = self.live.len();
+        for statement in &block.statements {
+            self.statement(statement)?;
+        }
+        match &block.tail {
+            Some(tail) => self.expr(tail)?,
+            None => self.constant(Const::Unit, block.span),
+        }
+        self.live.truncate(mark);
+        Ok(())
+    }
+
+    fn statement(&mut self, statement: &'a Stmt) -> Result<(), Unsupported> {
+        match &statement.kind {
+            StmtKind::Let {
+                is_var: _,
+                name,
+                ty,
+                value,
+            } => {
+                if let Some(ty) = ty {
+                    reject_dyn(ty, "a `dyn` binding")?;
+                }
+                // The value is lowered before the name exists, which is what
+                // makes `let x = x` read the outer `x`.
+                self.expr(value)?;
+                let slot = self.declare(Some(name.node.as_str()));
+                self.emit(Inst::StoreLocal(slot), statement.span);
+                Ok(())
+            }
+            StmtKind::Expr(expr) => {
+                self.expr(expr)?;
+                self.emit(Inst::Pop, expr.span);
+                Ok(())
+            }
+            StmtKind::Item(item) => Err(Unsupported::new(
+                match item.kind {
+                    ItemKind::Fn(_) => "a function declared inside a function body",
+                    _ => "a type declared inside a function body",
+                },
+                statement.span,
+            )),
+        }
+    }
+
+    // --------------------------------------------------------- expressions
+
+    /// Lowers one expression, which leaves exactly one value on the stack.
+    fn expr(&mut self, expr: &'a Expr) -> Result<(), Unsupported> {
+        let span = expr.span;
+        match &expr.kind {
+            ExprKind::Int(value) => self.constant(Const::Int(*value), span),
+            ExprKind::Float(value) => self.constant(Const::Float(*value), span),
+            ExprKind::Bool(value) => self.constant(Const::Bool(*value), span),
+            ExprKind::Duration(value) => self.constant(Const::Duration(*value), span),
+            ExprKind::Unit => self.constant(Const::Unit, span),
+            ExprKind::Str(parts) => self.string(parts, span)?,
+            ExprKind::Ident(name) => self.ident(name, span)?,
+            ExprKind::ArrayLit(items) => {
+                for item in items {
+                    self.expr(item)?;
+                }
+                self.emit(Inst::MakeArray(items.len() as u32), span);
+            }
+            ExprKind::Field { base, name } => {
+                self.reject_qualified_name(base, &name.node, span)?;
+                self.expr(base)?;
+                let field = self.outer.name(&name.node);
+                self.emit(Inst::GetField(field), span);
+            }
+            ExprKind::Call {
+                callee,
+                generics: _,
+                args,
+                trailing,
+            } => self.call(callee, args, trailing.is_some(), span)?,
+            ExprKind::Unary { op, operand } => {
+                self.expr(operand)?;
+                let op = match op {
+                    SourceUnary::Not => UnaryOp::Not,
+                    SourceUnary::Neg => UnaryOp::Neg,
+                };
+                self.emit(Inst::Unary(op), span);
+            }
+            ExprKind::Binary { op, lhs, rhs } => self.binary(*op, lhs, rhs, span)?,
+            ExprKind::Assign { op, target, value } => self.assign(*op, target, value, span)?,
+            ExprKind::Try(inner) => {
+                self.expr(inner)?;
+                self.emit(Inst::Try, span);
+            }
+            ExprKind::Block(block) => self.block(block)?,
+            ExprKind::If {
+                condition,
+                then_branch,
+                else_branch,
+            } => self.conditional(condition, then_branch, else_branch.as_deref(), span)?,
+            ExprKind::While { condition, body } => self.while_loop(condition, body, span)?,
+            ExprKind::For {
+                binding,
+                iterable,
+                body,
+            } => self.for_loop(binding.node.as_str(), iterable, body, span)?,
+            ExprKind::Return(value) => {
+                match value {
+                    Some(value) => self.expr(value)?,
+                    None => self.constant(Const::Unit, span),
+                }
+                self.emit(Inst::Return, span);
+            }
+            ExprKind::Break(value) => {
+                // The operand is evaluated for its effects and discarded: a
+                // loop is `()` however it leaves, so there is nowhere for a
+                // value to go.
+                if let Some(value) = value {
+                    self.expr(value)?;
+                    self.emit(Inst::Pop, span);
+                }
+                self.leave_loop(true, span)?;
+            }
+            ExprKind::Continue => self.leave_loop(false, span)?,
+            ExprKind::Range { .. } => {
+                return Err(Unsupported::new(
+                    "a range used as a value rather than as a `for` header",
+                    span,
+                ))
+            }
+            ExprKind::Lambda { .. } => return Err(Unsupported::new("a closure", span)),
+            ExprKind::Match { .. } => return Err(Unsupported::new("a `match` expression", span)),
+            ExprKind::Scope { .. } => return Err(Unsupported::new("a task scope", span)),
+            ExprKind::Await(_) => return Err(Unsupported::new("an `await`", span)),
+        }
+        Ok(())
+    }
+
+    /// A string literal, and the interpolations written inside it.
+    ///
+    /// A literal with nothing interpolated is one `Const::Str`: there is no
+    /// rendering to do, so there is nothing for a `Concat` to do either.
+    fn string(&mut self, parts: &'a [StrPart], span: Span) -> Result<(), Unsupported> {
+        let interpolated = parts
+            .iter()
+            .any(|part| matches!(part, StrPart::Interpolation(_)));
+        if !interpolated {
+            let mut text = String::new();
+            for part in parts {
+                if let StrPart::Text(literal) = part {
+                    text.push_str(literal);
+                }
+            }
+            self.constant(Const::Str(text.into()), span);
+            return Ok(());
+        }
+        for part in parts {
+            match part {
+                StrPart::Text(literal) => self.constant(Const::Str(literal.as_str().into()), span),
+                StrPart::Interpolation(expr) => self.expr(expr)?,
+            }
+        }
+        self.emit(Inst::Concat(parts.len() as u32), span);
+        Ok(())
+    }
+
+    /// A bare name.
+    ///
+    /// A local wins over everything else, which is what lets a `let http`
+    /// shadow the host module of that name — and what leaves an `http.fetch`
+    /// written above the `let` still reaching the host.
+    fn ident(&mut self, name: &str, span: Span) -> Result<(), Unsupported> {
+        if let Some(slot) = self.lookup(name) {
+            self.emit(Inst::LoadLocal(slot), span);
+            return Ok(());
+        }
+        if name == builtins::NONE_CASE.name {
+            // `None` is the one builtin case written as a bare name rather
+            // than as a call, so it is built here rather than at a call.
+            let none = self.outer.name(name);
+            self.emit(
+                Inst::MakeBuiltin {
+                    name: none,
+                    argc: 0,
+                },
+                span,
+            );
+            return Ok(());
+        }
+        if self.outer.function_of(self.module, name).is_some() {
+            return Err(Unsupported::new(
+                format!("`{name}`, a function used as a value"),
+                span,
+            ));
+        }
+        if self.outer.struct_of(self.module, name).is_some()
+            || self.outer.declares_enum(self.module, name)
+            || builtins::is_builtin_type(name)
+        {
+            return Err(Unsupported::new(
+                format!("`{name}`, a type used as a value"),
+                span,
+            ));
+        }
+        if self.outer.imported_module(self.module, name).is_some()
+            || self.outer.is_host_module(self.module, name)
+            || self.outer.host_item(self.module, name).is_some()
+        {
+            return Err(Unsupported::new(
+                format!("`{name}`, a module or a host operation used as a value"),
+                span,
+            ));
+        }
+        Err(Unsupported::new(
+            format!("`{name}`, a name the lowering cannot resolve"),
+            span,
+        ))
+    }
+
+    /// Refuses `Enum.Case`, `console.println`, and `booking.Status` written
+    /// where a value is wanted.
+    ///
+    /// Each is a qualified *name* rather than a field of a value, so none of
+    /// them reaches the instruction a field read lowers to.
+    fn reject_qualified_name(
+        &mut self,
+        base: &'a Expr,
+        name: &str,
+        span: Span,
+    ) -> Result<(), Unsupported> {
+        let ExprKind::Ident(head) = &base.kind else {
+            return Ok(());
+        };
+        if self.lookup(head).is_some() {
+            return Ok(());
+        }
+        if self.outer.declares_enum(self.module, head) {
+            return Err(Unsupported::new(
+                format!("the enum case `{head}.{name}`"),
+                span,
+            ));
+        }
+        if self.outer.is_host_module(self.module, head) {
+            return Err(Unsupported::new(
+                format!("`{head}.{name}`, a host operation used as a value"),
+                span,
+            ));
+        }
+        if self.outer.imported_module(self.module, head).is_some() {
+            return Err(Unsupported::new(
+                format!("`{head}.{name}`, a declaration named through its module"),
+                span,
+            ));
+        }
+        Ok(())
+    }
+
+    /// `&&` and `||` short-circuit, so they lower to a jump: there is no
+    /// instruction for them, and an operator that evaluated both sides would
+    /// be a different language.
+    fn binary(
+        &mut self,
+        op: SourceBinary,
+        lhs: &'a Expr,
+        rhs: &'a Expr,
+        span: Span,
+    ) -> Result<(), Unsupported> {
+        match op {
+            SourceBinary::And | SourceBinary::Or => {
+                let short = self.label();
+                let end = self.label();
+                self.expr(lhs)?;
+                if op == SourceBinary::And {
+                    self.jump(Inst::JumpIfFalse, short, span);
+                } else {
+                    self.jump(Inst::JumpIfTrue, short, span);
+                }
+                self.expr(rhs)?;
+                self.jump(Inst::Jump, end, span);
+                self.bind(short);
+                // The side that short-circuited is the answer: `&&` that
+                // stopped is `false` and `||` that stopped is `true`.
+                self.constant(Const::Bool(op == SourceBinary::Or), span);
+                self.bind(end);
+                Ok(())
+            }
+            _ => {
+                let op = binary_op(op).expect("`&&` and `||` are the two handled above");
+                self.expr(lhs)?;
+                self.expr(rhs)?;
+                self.emit(Inst::Binary(op), span);
+                Ok(())
+            }
+        }
+    }
+
+    /// `place = value` and `place += value`, which produce `()`.
+    ///
+    /// A compound assignment reads the place, then evaluates the right-hand
+    /// side, then combines them — the order the interpreter reads them in.
+    fn assign(
+        &mut self,
+        op: Option<SourceBinary>,
+        target: &'a Expr,
+        value: &'a Expr,
+        span: Span,
+    ) -> Result<(), Unsupported> {
+        if let ExprKind::Field { base, name } = &target.kind {
+            return self.assign_field(op, base, name.node.as_str(), value, target.span, span);
+        }
+        let ExprKind::Ident(name) = &target.kind else {
+            return Err(Unsupported::new("assignment to this place", span));
+        };
+        let Some(slot) = self.lookup(name) else {
+            return Err(Unsupported::new(
+                format!("assignment to `{name}`, which is not a local"),
+                span,
+            ));
+        };
+        match op {
+            None => self.expr(value)?,
+            Some(op) => {
+                let Some(op) = binary_op(op) else {
+                    return Err(Unsupported::new("this compound assignment", span));
+                };
+                self.emit(Inst::LoadLocal(slot), target.span);
+                self.expr(value)?;
+                self.emit(Inst::Binary(op), span);
+            }
+        }
+        self.emit(Inst::StoreLocal(slot), span);
+        self.constant(Const::Unit, span);
+        Ok(())
+    }
+
+    /// `place.field = value`, and the compound forms.
+    ///
+    /// The base must be a local. A struct is a value and a local is the only
+    /// holder of its own, so writing a field is reading the struct, replacing
+    /// the field, and storing the struct back — which is what
+    /// [`crate::Inst::SetField`] does and why it is a whole-value update
+    /// rather than a mutation through a place. A deeper path than one field is
+    /// refused rather than rebuilt: it would need the intermediate struct put
+    /// back too, and nothing in the subset produces one.
+    fn assign_field(
+        &mut self,
+        op: Option<SourceBinary>,
+        base: &'a Expr,
+        field: &str,
+        value: &'a Expr,
+        base_span: Span,
+        span: Span,
+    ) -> Result<(), Unsupported> {
+        let ExprKind::Ident(name) = &base.kind else {
+            return Err(Unsupported::new(
+                "assignment to a field of anything but a local",
+                span,
+            ));
+        };
+        let Some(slot) = self.lookup(name) else {
+            return Err(Unsupported::new(
+                format!("assignment to a field of `{name}`, which is not a local"),
+                span,
+            ));
+        };
+        let field = self.outer.name(field);
+        self.emit(Inst::LoadLocal(slot), base_span);
+        match op {
+            None => self.expr(value)?,
+            Some(op) => {
+                let Some(op) = binary_op(op) else {
+                    return Err(Unsupported::new("this compound assignment", span));
+                };
+                self.emit(Inst::Dup, base_span);
+                self.emit(Inst::GetField(field), base_span);
+                self.expr(value)?;
+                self.emit(Inst::Binary(op), span);
+            }
+        }
+        self.emit(Inst::SetField(field), span);
+        self.emit(Inst::StoreLocal(slot), span);
+        self.constant(Const::Unit, span);
+        Ok(())
+    }
+
+    /// `if` and `else`.
+    ///
+    /// An `if` with no `else` is `()` however it goes, including when the
+    /// branch that ran produced something: there is no second branch to give
+    /// the missing case a value, so the branch that ran does not get to
+    /// supply one either.
+    fn conditional(
+        &mut self,
+        condition: &'a Expr,
+        then_branch: &'a Block,
+        else_branch: Option<&'a Expr>,
+        span: Span,
+    ) -> Result<(), Unsupported> {
+        self.expr(condition)?;
+        match else_branch {
+            Some(else_branch) => {
+                let otherwise = self.label();
+                let end = self.label();
+                self.jump(Inst::JumpIfFalse, otherwise, condition.span);
+                self.block(then_branch)?;
+                self.jump(Inst::Jump, end, span);
+                self.bind(otherwise);
+                self.expr(else_branch)?;
+                self.bind(end);
+            }
+            None => {
+                let end = self.label();
+                self.jump(Inst::JumpIfFalse, end, condition.span);
+                self.block(then_branch)?;
+                self.emit(Inst::Pop, span);
+                self.bind(end);
+                self.constant(Const::Unit, span);
+            }
+        }
+        Ok(())
+    }
+
+    /// `while`, which is `()` however it leaves.
+    fn while_loop(
+        &mut self,
+        condition: &'a Expr,
+        body: &'a Block,
+        span: Span,
+    ) -> Result<(), Unsupported> {
+        let base = self.depth.unwrap_or(0);
+        let top = self.label();
+        let end = self.label();
+        self.bind(top);
+        self.expr(condition)?;
+        self.jump(Inst::JumpIfFalse, end, condition.span);
+        self.loops.push(LoopFrame {
+            break_to: end,
+            continue_to: top,
+            depth: base,
+        });
+        let lowered = self.block(body);
+        self.loops.pop();
+        lowered?;
+        self.emit(Inst::Pop, body.span);
+        self.jump(Inst::Jump, top, span);
+        self.bind(end);
+        self.constant(Const::Unit, span);
+        Ok(())
+    }
+
+    /// `for`, over a range written in the header or over a sequence.
+    ///
+    /// The iterable is evaluated once, in the enclosing scope, and the
+    /// binding is declared in the scope the body sees — the two halves of
+    /// what the interpreter does around `iterable_items`.
+    ///
+    /// A range header never builds a range value: the IR has no instruction
+    /// that makes one, and `for` is the only place the language reads one,
+    /// so the bounds go into two hidden slots and the loop counts between
+    /// them. A sequence is walked by index, with its length read once, which
+    /// is what makes iterating a `Vector` the body appends to walk the same
+    /// elements the interpreter's snapshot holds.
+    fn for_loop(
+        &mut self,
+        binding: &'a str,
+        iterable: &'a Expr,
+        body: &'a Block,
+        span: Span,
+    ) -> Result<(), Unsupported> {
+        let base = self.depth.unwrap_or(0);
+        let mark = self.live.len();
+
+        let (cursor, header) = match &iterable.kind {
+            ExprKind::Range {
+                start,
+                end,
+                inclusive_end,
+            } => {
+                let cursor = self.declare(None);
+                let limit = self.declare(None);
+                self.expr(start)?;
+                self.emit(Inst::StoreLocal(cursor), start.span);
+                self.expr(end)?;
+                self.emit(Inst::StoreLocal(limit), end.span);
+                (
+                    cursor,
+                    Header::Range {
+                        limit,
+                        inclusive: *inclusive_end,
+                    },
+                )
+            }
+            _ => {
+                let sequence = self.declare(None);
+                let length = self.declare(None);
+                let cursor = self.declare(None);
+                self.expr(iterable)?;
+                self.emit(Inst::StoreLocal(sequence), iterable.span);
+                self.emit(Inst::LoadLocal(sequence), iterable.span);
+                let name = self.outer.name("length");
+                self.emit(Inst::CallBuiltin { name, argc: 0 }, iterable.span);
+                self.emit(Inst::StoreLocal(length), iterable.span);
+                self.constant(Const::Int(0), iterable.span);
+                self.emit(Inst::StoreLocal(cursor), iterable.span);
+                (cursor, Header::Sequence { sequence, length })
+            }
+        };
+
+        // The binding belongs to the scope the body sees, and the body's own
+        // block opens a scope inside this one.
+        let element = self.declare(Some(binding));
+
+        let top = self.label();
+        let next = self.label();
+        let end = self.label();
+        self.bind(top);
+        self.emit(Inst::LoadLocal(cursor), span);
+        match header {
+            Header::Range { limit, inclusive } => {
+                self.emit(Inst::LoadLocal(limit), span);
+                // `a..b` yields `b`, and `a..<b` stops before it. Comparing
+                // rather than adding one to the bound is what keeps a range
+                // ending at the largest `Int` from overflowing.
+                self.emit(
+                    Inst::Binary(if inclusive {
+                        BinaryOp::Le
+                    } else {
+                        BinaryOp::Lt
+                    }),
+                    span,
+                );
+            }
+            Header::Sequence { length, .. } => {
+                self.emit(Inst::LoadLocal(length), span);
+                self.emit(Inst::Binary(BinaryOp::Lt), span);
+            }
+        }
+        self.jump(Inst::JumpIfFalse, end, span);
+        match header {
+            Header::Range { .. } => self.emit(Inst::LoadLocal(cursor), span),
+            Header::Sequence { sequence, .. } => {
+                self.emit(Inst::LoadLocal(sequence), span);
+                self.emit(Inst::LoadLocal(cursor), span);
+                let get = self.outer.name("get");
+                self.emit(Inst::CallBuiltin { name: get, argc: 1 }, span);
+                // An indexed read answers an `Option`, and the test above
+                // has already put the cursor below the length, so what comes
+                // back is a `Some`. `Try` is the instruction that opens one,
+                // and it is used here rather than `unwrapOr` because there is
+                // no element value the lowering could invent as a fallback.
+                self.emit(Inst::Try, span);
+            }
+        }
+        self.emit(Inst::StoreLocal(element), span);
+
+        self.loops.push(LoopFrame {
+            break_to: end,
+            continue_to: next,
+            depth: base,
+        });
+        let lowered = self.block(body);
+        self.loops.pop();
+        lowered?;
+        self.emit(Inst::Pop, body.span);
+
+        // `continue` lands here, so that skipping the rest of a body still
+        // advances the cursor.
+        self.bind(next);
+        self.emit(Inst::LoadLocal(cursor), span);
+        self.constant(Const::Int(1), span);
+        self.emit(Inst::Binary(BinaryOp::Add), span);
+        self.emit(Inst::StoreLocal(cursor), span);
+        self.jump(Inst::Jump, top, span);
+
+        self.bind(end);
+        self.live.truncate(mark);
+        self.constant(Const::Unit, span);
+        Ok(())
+    }
+
+    /// Leaves the nearest enclosing loop.
+    fn leave_loop(&mut self, breaking: bool, span: Span) -> Result<(), Unsupported> {
+        let Some(frame) = self.loops.last() else {
+            return Err(Unsupported::new(
+                if breaking {
+                    "a `break` outside a loop"
+                } else {
+                    "a `continue` outside a loop"
+                },
+                span,
+            ));
+        };
+        let target = if breaking {
+            frame.break_to
+        } else {
+            frame.continue_to
+        };
+        let base = frame.depth;
+        // Whatever the half-evaluated expression around this left on the
+        // stack goes with it, so the loop's exit is reached at the depth the
+        // loop runs at.
+        if let Some(depth) = self.depth {
+            for _ in base..depth {
+                self.emit(Inst::Pop, span);
+            }
+        }
+        self.jump(Inst::Jump, target, span);
+        Ok(())
+    }
+
+    // --------------------------------------------------------------- calls
+
+    fn call(
+        &mut self,
+        callee: &'a Expr,
+        args: &'a [Arg],
+        trailing: bool,
+        span: Span,
+    ) -> Result<(), Unsupported> {
+        if trailing {
+            return Err(Unsupported::new("a trailing closure", span));
+        }
+        for arg in args {
+            if arg.is_var {
+                return Err(Unsupported::new("a `var` argument", arg.span));
+            }
+            if arg.spread {
+                return Err(Unsupported::new("a `...` spread argument", arg.span));
+            }
+        }
+        match &callee.kind {
+            ExprKind::Ident(name) => self.call_named(name, args, span),
+            ExprKind::Field { base, name } => self.call_qualified(base, &name.node, args, span),
+            _ => Err(Unsupported::new("a call through a value", callee.span)),
+        }
+    }
+
+    /// `f(...)`, where `f` is a bare name.
+    ///
+    /// The order is the interpreter's: a local first — which is what makes a
+    /// binding shadow a declaration — then a declared function, a struct
+    /// initializer, an imported host operation, and a free builtin.
+    fn call_named(&mut self, name: &str, args: &'a [Arg], span: Span) -> Result<(), Unsupported> {
+        if self.lookup(name).is_some() {
+            return Err(Unsupported::new(
+                format!("a call through the local `{name}`"),
+                span,
+            ));
+        }
+        if let Some(id) = self.outer.function_of(self.module, name) {
+            return self.call_declared(id, None, args, span);
+        }
+        if let Some((owner, decl)) = self.outer.struct_of(self.module, name) {
+            return self.make_struct(owner, decl, args, span);
+        }
+        if self.outer.declares_enum(self.module, name) {
+            return Err(Unsupported::new(
+                format!("`{name}`, which names an enum"),
+                span,
+            ));
+        }
+        if let Some(module) = self.outer.host_item(self.module, name) {
+            return self.call_host(module, name, args, span);
+        }
+        if let Some(schema) = builtins::free_builtin(name) {
+            return self.make_builtin(schema.name, args, span);
+        }
+        Err(Unsupported::new(
+            format!("a call to `{name}`, which the lowering cannot resolve"),
+            span,
+        ))
+    }
+
+    /// `head.name(...)`, where `head` may be a host module, an enum, a
+    /// struct, or a module imported whole — and is a receiver when it is
+    /// none of those.
+    fn call_qualified(
+        &mut self,
+        base: &'a Expr,
+        name: &str,
+        args: &'a [Arg],
+        span: Span,
+    ) -> Result<(), Unsupported> {
+        if let ExprKind::Ident(head) = &base.kind {
+            if self.lookup(head).is_none() {
+                if self.outer.is_host_module(self.module, head) {
+                    return self.call_host(head, name, args, span);
+                }
+                if self.outer.declares_enum(self.module, head) {
+                    return Err(Unsupported::new(
+                        format!("`{head}.{name}`, a case or an associated function of an enum"),
+                        span,
+                    ));
+                }
+                if let Some((owner, _)) = self.outer.struct_of(self.module, head) {
+                    if let Some(id) = self.outer.method_of(owner, head, name) {
+                        return self.call_declared(id, None, args, span);
+                    }
+                }
+                if let Some(owner) = self.outer.imported_module(self.module, head) {
+                    if let Some(id) = self.outer.exported_function(owner, name) {
+                        return self.call_declared(id, None, args, span);
+                    }
+                    if let Some(decl) = self.outer.exported_struct(owner, name) {
+                        return self.make_struct(owner, decl, args, span);
+                    }
+                    return Err(Unsupported::new(
+                        format!("`{head}.{name}`, which module `{owner}` does not export"),
+                        span,
+                    ));
+                }
+                if builtins::is_builtin_type(head) {
+                    return Err(Unsupported::new(
+                        format!("`{head}.{name}`, an associated function of a builtin type"),
+                        span,
+                    ));
+                }
+            }
+        }
+        self.method_call(base, name, args, span)
+    }
+
+    /// A call to a function this package declares, with the receiver a
+    /// method needs pushed below its arguments.
+    fn call_declared(
+        &mut self,
+        id: FunctionId,
+        receiver: Option<&'a Expr>,
+        args: &'a [Arg],
+        span: Span,
+    ) -> Result<(), Unsupported> {
+        let declared = &self.outer.declared[id.0 as usize];
+        let decl = declared.decl;
+        let what = declared.name.clone();
+
+        if decl.is_async {
+            return Err(Unsupported::new(
+                format!("a call to the `async fn` `{what}`"),
+                span,
+            ));
+        }
+        for param in &decl.params {
+            reject_parameter(param.is_var, param.variadic, param.ty.as_ref(), param.span)?;
+        }
+        let names: Vec<&str> = decl
+            .params
+            .iter()
+            .map(|param| param.name.node.as_str())
+            .collect();
+        arguments_in_order(&names, args, &what, span)?;
+
+        match (decl.receiver, receiver) {
+            (Some(declared), Some(expr)) => {
+                if declared.is_var {
+                    return Err(Unsupported::new(
+                        format!("a call to `{what}`, which takes a `var self` receiver"),
+                        span,
+                    ));
+                }
+                self.expr(expr)?;
+            }
+            (Some(_), None) => {
+                return Err(Unsupported::new(
+                    format!("a call to the method `{what}` with no receiver"),
+                    span,
+                ))
+            }
+            (None, Some(_)) => {
+                return Err(Unsupported::new(
+                    format!("a call to `{what}`, which takes no receiver"),
+                    span,
+                ))
+            }
+            (None, None) => {}
+        }
+        for arg in args {
+            self.expr(&arg.value)?;
+        }
+        let argc = args.len() as u32 + u32::from(decl.receiver.is_some());
+        self.emit(Inst::Call { function: id, argc }, span);
+        Ok(())
+    }
+
+    /// `console.println(...)` and `clock.now()`.
+    fn call_host(
+        &mut self,
+        module: &str,
+        op: &str,
+        args: &'a [Arg],
+        span: Span,
+    ) -> Result<(), Unsupported> {
+        if hosts::module(module).is_some_and(|schema| schema.declared_type(op).is_some()) {
+            return Err(Unsupported::new(
+                format!("`{module}.{op}`, which initializes a type a host declares"),
+                span,
+            ));
+        }
+        for arg in args {
+            self.expr(&arg.value)?;
+        }
+        let module = self.outer.name(module);
+        let op = self.outer.name(op);
+        self.emit(
+            Inst::CallHost {
+                module,
+                op,
+                argc: args.len() as u32,
+            },
+            span,
+        );
+        Ok(())
+    }
+
+    /// `Ok(...)`, `Err(...)`, `Some(...)`, `Error(...)`, `assert(...)`, and
+    /// `assertEqual(...)`.
+    ///
+    /// `Shared(...)` is the free builtin that is not here: it makes a value
+    /// with storage shared across tasks, which nothing in this IR expresses.
+    fn make_builtin(&mut self, name: &str, args: &'a [Arg], span: Span) -> Result<(), Unsupported> {
+        if !matches!(
+            name,
+            "Ok" | "Err" | "Some" | "Error" | "assert" | "assertEqual"
+        ) {
+            return Err(Unsupported::new(format!("`{name}`"), span));
+        }
+        for arg in args {
+            self.expr(&arg.value)?;
+        }
+        let name = self.outer.name(name);
+        self.emit(
+            Inst::MakeBuiltin {
+                name,
+                argc: args.len() as u32,
+            },
+            span,
+        );
+        Ok(())
+    }
+
+    /// `Cursor(at: 0, step: 1)`: a synthesized labelled call, whose values
+    /// are pushed in the order the fields were declared.
+    fn make_struct(
+        &mut self,
+        owner: &str,
+        decl: &'a StructDecl,
+        args: &'a [Arg],
+        span: Span,
+    ) -> Result<(), Unsupported> {
+        for field in &decl.fields {
+            reject_dyn(&field.ty, "a `dyn` field")?;
+        }
+        let names: Vec<&str> = decl
+            .fields
+            .iter()
+            .map(|field| field.name.node.as_str())
+            .collect();
+        arguments_in_order(&names, args, &decl.name.node, span)?;
+        for arg in args {
+            self.expr(&arg.value)?;
+        }
+        let ty = self.outer.name(&format!("{owner}.{}", decl.name.node));
+        let fields = self.outer.name(&names.join(","));
+        self.emit(Inst::MakeStruct { ty, fields }, span);
+        Ok(())
+    }
+
+    /// `receiver.name(...)`, where the receiver is a value.
+    ///
+    /// The interpreter finds a declared method from the receiver's runtime
+    /// type and falls back to the builtin table. Nothing here knows a
+    /// receiver's type, so a declared method is found by name — and a name
+    /// more than one type declares is reported rather than guessed at.
+    fn method_call(
+        &mut self,
+        receiver: &'a Expr,
+        name: &str,
+        args: &'a [Arg],
+        span: Span,
+    ) -> Result<(), Unsupported> {
+        if name == "await" {
+            return Err(Unsupported::new("an `await`", span));
+        }
+        if name == "snapshot" {
+            return Err(Unsupported::new("`snapshot`", span));
+        }
+        if builtins::is_mutating_method(name) {
+            return Err(Unsupported::new(
+                format!("`{name}`, which writes through its receiver"),
+                span,
+            ));
+        }
+        if let Some(candidates) = self.outer.by_name.get(name) {
+            if candidates.len() > 1 {
+                return Err(Unsupported::new(
+                    format!("a call to `{name}`, which more than one type declares"),
+                    span,
+                ));
+            }
+            let id = candidates[0];
+            return self.call_declared(id, Some(receiver), args, span);
+        }
+        if builtins::builtins()
+            .iter()
+            .any(|schema| schema.method(name).is_some())
+        {
+            self.expr(receiver)?;
+            for arg in args {
+                self.expr(&arg.value)?;
+            }
+            let name = self.outer.name(name);
+            self.emit(
+                Inst::CallBuiltin {
+                    name,
+                    argc: args.len() as u32,
+                },
+                span,
+            );
+            return Ok(());
+        }
+        Err(Unsupported::new(
+            format!("a call to `{name}`, which no declared type and no builtin has"),
+            span,
+        ))
+    }
+}
+
+/// Whether the arguments already stand in declaration order, one for every
+/// parameter.
+///
+/// `assign_labels` in the interpreter matches positional arguments to names
+/// in order, refuses a label written out of declaration order, and refuses a
+/// positional argument after a labelled one. What survives all three is a
+/// call whose arguments are its parameters in order — which is what makes
+/// pushing them left to right the same as pushing them in declaration order.
+/// Anything else is reported rather than rearranged: a parameter left to its
+/// default would need the callee to evaluate an expression the IR does not
+/// carry, and a reordering would put the pushes in an order the receiver
+/// does not expect.
+fn arguments_in_order(
+    names: &[&str],
+    args: &[Arg],
+    what: &str,
+    span: Span,
+) -> Result<(), Unsupported> {
+    let mut labelled = false;
+    for (position, arg) in args.iter().enumerate() {
+        match &arg.label {
+            Some(label) => {
+                labelled = true;
+                let Some(index) = names.iter().position(|name| *name == label.node) else {
+                    return Err(Unsupported::new(
+                        format!("`{what}`, which has no parameter labelled `{}`", label.node),
+                        arg.span,
+                    ));
+                };
+                if index != position {
+                    return Err(Unsupported::new(
+                        format!(
+                            "a call to `{what}` whose arguments do not stand in declaration order"
+                        ),
+                        arg.span,
+                    ));
+                }
+            }
+            None => {
+                if labelled {
+                    return Err(Unsupported::new(
+                        format!(
+                            "a call to `{what}` with a positional argument after a labelled one"
+                        ),
+                        arg.span,
+                    ));
+                }
+                if position >= names.len() {
+                    return Err(Unsupported::new(
+                        format!("a call to `{what}` with more arguments than it has parameters"),
+                        arg.span,
+                    ));
+                }
+            }
+        }
+    }
+    if args.len() != names.len() {
+        return Err(Unsupported::new(
+            format!("a call to `{what}` that does not supply one argument for every parameter"),
+            span,
+        ));
+    }
+    Ok(())
+}
+
+/// The source binary operator as the IR carries it, or `None` for the two
+/// that short-circuit and so are not operators here at all.
+fn binary_op(op: SourceBinary) -> Option<BinaryOp> {
+    Some(match op {
+        SourceBinary::Add => BinaryOp::Add,
+        SourceBinary::Sub => BinaryOp::Sub,
+        SourceBinary::Mul => BinaryOp::Mul,
+        SourceBinary::Div => BinaryOp::Div,
+        SourceBinary::Rem => BinaryOp::Rem,
+        SourceBinary::Eq => BinaryOp::Eq,
+        SourceBinary::Ne => BinaryOp::Ne,
+        SourceBinary::Lt => BinaryOp::Lt,
+        SourceBinary::Le => BinaryOp::Le,
+        SourceBinary::Gt => BinaryOp::Gt,
+        SourceBinary::Ge => BinaryOp::Ge,
+        SourceBinary::Is => BinaryOp::Is,
+        SourceBinary::And | SourceBinary::Or => return None,
+    })
+}
+
+/// Refuses a `dyn` written anywhere in a type.
+///
+/// A `dyn` value is the language's one implicit conversion, made where a
+/// type is *written*, and the IR has no instruction that makes one.
+fn reject_dyn(ty: &Type, what: &str) -> Result<(), Unsupported> {
+    if mentions_dyn(ty) {
+        return Err(Unsupported::new(what, ty.span));
+    }
+    Ok(())
+}
+
+/// Whether a type mentions `dyn` anywhere inside it.
+fn mentions_dyn(ty: &Type) -> bool {
+    match &ty.kind {
+        TypeKind::Dyn(_) => true,
+        TypeKind::Named { args, .. } => args.iter().any(mentions_dyn),
+        TypeKind::Fn {
+            params,
+            return_type,
+            ..
+        } => {
+            params
+                .iter()
+                .any(|param| param.ty.as_ref().is_some_and(mentions_dyn))
+                || return_type.as_deref().is_some_and(mentions_dyn)
+        }
+        TypeKind::Unit => false,
+    }
+}
+
+/// Refuses a parameter the IR has no shape for.
+fn reject_parameter(
+    is_var: bool,
+    variadic: bool,
+    ty: Option<&Type>,
+    span: Span,
+) -> Result<(), Unsupported> {
+    if is_var {
+        return Err(Unsupported::new("a `var` parameter", span));
+    }
+    if variadic {
+        return Err(Unsupported::new("a variadic parameter", span));
+    }
+    if let Some(ty) = ty {
+        reject_dyn(ty, "a `dyn` parameter")?;
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------- the invariants
+
+/// Checks the invariants a lowered function must hold before the VM runs it.
+///
+/// The VM trusts its input completely — that is most of what makes it worth
+/// having — so this is where the trust is earned. Every jump lands on an
+/// instruction, every slot is inside the frame, every id names something,
+/// every function ends in a `Return`, and the operand stack has one depth at
+/// every instruction control can reach: a join point arrived at with two
+/// different depths is a bug in the lowering, and finding it here is the
+/// difference between a failed test and a VM reading a value that is not
+/// there.
+pub fn validate(program: &Program) -> Result<(), String> {
+    for (index, function) in program.functions.iter().enumerate() {
+        let id = FunctionId(index as u32);
+        validate_function(program, id)
+            .map_err(|why| format!("{}.{}: {why}", function.module, function.name))?;
+    }
+    Ok(())
+}
+
+fn validate_function(program: &Program, id: FunctionId) -> Result<(), String> {
+    let function = program.function(id);
+    if function.code.is_empty() {
+        return Err("has no instructions".to_string());
+    }
+    if function.spans.len() != function.code.len() {
+        return Err(format!(
+            "carries {} spans for {} instructions",
+            function.spans.len(),
+            function.code.len()
+        ));
+    }
+    if function.arity > function.frame_size {
+        return Err(format!(
+            "takes {} arguments but has a frame of {}",
+            function.arity, function.frame_size
+        ));
+    }
+    if !matches!(function.code.last(), Some(Inst::Return)) {
+        return Err("does not end in a `return`".to_string());
+    }
+
+    let length = function.code.len();
+    for (pc, inst) in function.code.iter().enumerate() {
+        let at = |why: String| format!("{pc}: {why}");
+        let constant = |which: ConstId, what: &str| -> Result<(), String> {
+            match program.constants.get(which.0 as usize) {
+                Some(Const::Name(_)) => Ok(()),
+                Some(other) => Err(at(format!("{what} names {other:?} rather than a name"))),
+                None => Err(at(format!("{what} names constant {} of none", which.0))),
+            }
+        };
+        match *inst {
+            Inst::Const(which) => {
+                if program.constants.get(which.0 as usize).is_none() {
+                    return Err(at(format!(
+                        "loads constant {}, which does not exist",
+                        which.0
+                    )));
+                }
+            }
+            Inst::LoadLocal(slot) | Inst::StoreLocal(slot) => {
+                if slot >= function.frame_size {
+                    return Err(at(format!(
+                        "reaches slot {slot} of a frame of {}",
+                        function.frame_size
+                    )));
+                }
+            }
+            Inst::LoadCapture(index) => {
+                if index as usize >= function.captures.len() {
+                    return Err(at(format!(
+                        "reaches capture {index} of {}",
+                        function.captures.len()
+                    )));
+                }
+            }
+            Inst::Jump(to) | Inst::JumpIfFalse(to) | Inst::JumpIfTrue(to) => {
+                if to as usize >= length {
+                    return Err(at(format!("jumps to {to}, past the {length} instructions")));
+                }
+            }
+            Inst::Call {
+                function: target,
+                argc,
+            } => {
+                let Some(target) = program.functions.get(target.0 as usize) else {
+                    return Err(at(format!(
+                        "calls function {}, which does not exist",
+                        target.0
+                    )));
+                };
+                if target.arity != argc {
+                    return Err(at(format!(
+                        "calls `{}.{}` with {argc} arguments, which takes {}",
+                        target.module, target.name, target.arity
+                    )));
+                }
+            }
+            Inst::CallHost { module, op, .. } => {
+                constant(module, "the host module")?;
+                constant(op, "the host operation")?;
+            }
+            Inst::CallBuiltin { name, .. } => constant(name, "the builtin method")?,
+            Inst::MakeBuiltin { name, .. } => constant(name, "the builtin")?,
+            Inst::GetField(name) | Inst::SetField(name) => constant(name, "the field")?,
+            Inst::MakeStruct { ty, fields } => {
+                constant(ty, "the type")?;
+                constant(fields, "the fields")?;
+            }
+            _ => {}
+        }
+    }
+
+    // The operand stack, simulated over every path control can take. Code no
+    // path reaches is not simulated: it cannot be run, so its depth is not a
+    // fact about anything.
+    let mut depths: Vec<Option<i64>> = vec![None; length];
+    let mut pending = vec![(0usize, 0i64)];
+    while let Some((pc, depth)) = pending.pop() {
+        if pc >= length {
+            return Err(format!(
+                "{}: control runs past the last instruction",
+                pc - 1
+            ));
+        }
+        if let Some(seen) = depths[pc] {
+            if seen != depth {
+                return Err(format!(
+                    "{pc}: reached with {depth} values on the stack and with {seen}"
+                ));
+            }
+            continue;
+        }
+        depths[pc] = Some(depth);
+        let inst = function.code[pc];
+        let (consumed, produced) = stack_shape(&program.constants, inst);
+        if depth < i64::from(consumed) {
+            return Err(format!(
+                "{pc}: takes {consumed} values off a stack of {depth}"
+            ));
+        }
+        let after = depth - i64::from(consumed) + i64::from(produced);
+        match inst {
+            Inst::Return => {}
+            Inst::Jump(to) => pending.push((to as usize, after)),
+            Inst::JumpIfFalse(to) | Inst::JumpIfTrue(to) => {
+                pending.push((to as usize, after));
+                pending.push((pc + 1, after));
+            }
+            _ => pending.push((pc + 1, after)),
+        }
+    }
+    Ok(())
+}
+
+/// How many values an instruction takes off the stack and puts back.
+///
+/// One description, read by the lowering as it emits and by [`validate`] as
+/// it simulates, so the two cannot disagree about what an instruction does.
+fn stack_shape(constants: &[Const], inst: Inst) -> (u32, u32) {
+    match inst {
+        Inst::Const(_) | Inst::LoadLocal(_) | Inst::LoadCapture(_) => (0, 1),
+        Inst::StoreLocal(_) | Inst::Pop => (1, 0),
+        Inst::Dup => (1, 2),
+        Inst::Unary(_) | Inst::GetField(_) | Inst::Try => (1, 1),
+        Inst::Binary(_) | Inst::SetField(_) => (2, 1),
+        Inst::Jump(_) => (0, 0),
+        Inst::JumpIfFalse(_) | Inst::JumpIfTrue(_) | Inst::Return => (1, 0),
+        Inst::Call { argc, .. } | Inst::CallHost { argc, .. } | Inst::MakeBuiltin { argc, .. } => {
+            (argc, 1)
+        }
+        // The receiver sits below the arguments.
+        Inst::CallBuiltin { argc, .. } => (argc + 1, 1),
+        Inst::MakeArray(len) => (len, 1),
+        Inst::Concat(parts) => (parts, 1),
+        Inst::MakeStruct { fields, .. } => (field_count(constants, fields), 1),
+    }
+}
+
+/// How many fields a `MakeStruct` takes, read out of the name it carries.
+///
+/// The names are one comma-separated constant rather than one constant each,
+/// because an instruction carries one id and the whole list is what says
+/// which pushed value is which field.
+fn field_count(constants: &[Const], fields: ConstId) -> u32 {
+    match constants.get(fields.0 as usize) {
+        Some(Const::Name(names)) if names.is_empty() => 0,
+        Some(Const::Name(names)) => names.split(',').count() as u32,
+        _ => 0,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::BTreeMap;
+    use std::path::{Path, PathBuf};
+
+    use cove_diag::SourceMap;
+    use cove_sema::config::Config;
+    use cove_sema::package::{Module, Package, Unit};
+
+    /// Checks one module of source the way `cove run` checks a package:
+    /// parse, then resolve, which is what runs the type checker.
+    ///
+    /// The module is called `m`, so a listing reads `fn m.something` and a
+    /// test asserts on the whole of it.
+    fn checked(source: &str) -> Checked {
+        let mut sources = SourceMap::new();
+        let file = sources.add("m/main.cove", source.to_string());
+        let ast = match cove_syntax::parse_file(&sources, file) {
+            Ok(ast) => ast,
+            Err(items) => panic!("the source parses:\n{}", rendered(&sources, &items)),
+        };
+        let package = Package {
+            root: PathBuf::from("."),
+            config: Config::default(),
+            modules: BTreeMap::from([(
+                "m".to_string(),
+                Module {
+                    name: "m".to_string(),
+                    dir: PathBuf::from("m"),
+                    units: vec![Unit {
+                        file,
+                        path: PathBuf::from("m/main.cove"),
+                        ast,
+                    }],
+                },
+            )]),
+        };
+        match cove_sema::resolve::resolve(&package) {
+            Ok(program) => program,
+            Err(items) => panic!("the source checks:\n{}", rendered(&sources, &items)),
+        }
+    }
+
+    fn rendered(sources: &SourceMap, items: &[cove_diag::Diagnostic]) -> String {
+        items
+            .iter()
+            .map(|item| cove_diag::render(sources, item))
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// The rendered instructions of one lowered function, with the whole
+    /// program validated first.
+    ///
+    /// Every listing test asserts the whole listing rather than a line of
+    /// it, so a change that moves an instruction is a test that fails rather
+    /// than a test that still passes for a reason nobody meant.
+    fn listing(source: &str, name: &str) -> String {
+        let program = lower(&checked(source)).expect("the program lowers");
+        validate(&program).expect("the lowering holds the VM's invariants");
+        let id = program
+            .function_named("m", name)
+            .unwrap_or_else(|| panic!("`{name}` was lowered"));
+        crate::render(&program, id)
+    }
+
+    /// What stopped the lowering, in the words it reported.
+    fn refused(source: &str) -> String {
+        match lower(&checked(source)) {
+            Ok(_) => panic!("the program lowered, and was expected not to"),
+            Err(why) => why.what,
+        }
+    }
+
+    /// The `benches/` package with only the module `name` kept.
+    ///
+    /// Lowering is all-or-nothing over a program, so keeping one module at a
+    /// time is what lets a test say which entry lowers rather than only that
+    /// some entry did not.
+    fn bench(name: &str) -> Checked {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../benches");
+        let mut sources = SourceMap::new();
+        let mut package = match cove_sema::package::load(&root, &mut sources) {
+            Ok(package) => package,
+            Err(items) => panic!("the benches package loads:\n{}", rendered(&sources, &items)),
+        };
+        let module = package
+            .modules
+            .remove(name)
+            .unwrap_or_else(|| panic!("`benches/{name}` is a module of the package"));
+        package.modules = BTreeMap::from([(name.to_string(), module)]);
+        match cove_sema::resolve::resolve(&package) {
+            Ok(program) => program,
+            Err(items) => panic!(
+                "the benches package checks:\n{}",
+                rendered(&sources, &items)
+            ),
+        }
+    }
+
+    // ------------------------------------------------ one construct each
+
+    #[test]
+    fn every_literal_loads_one_constant() {
+        assert_eq!(
+            listing(
+                "fn f() -> Int {\n  let a = 1\n  let b = 1.5\n  let c = true\n  let d = 250ms\n  let e = ()\n  let g = \"hi\"\n  a\n}\n",
+                "f"
+            ),
+            "fn m.f arity=0 frame=6\n\
+             \x20  0  const Int(1)\n\
+             \x20  1  store 0\n\
+             \x20  2  const Float(1.5)\n\
+             \x20  3  store 1\n\
+             \x20  4  const Bool(true)\n\
+             \x20  5  store 2\n\
+             \x20  6  const Duration(250000000)\n\
+             \x20  7  store 3\n\
+             \x20  8  const Unit\n\
+             \x20  9  store 4\n\
+             \x20 10  const Str(\"hi\")\n\
+             \x20 11  store 5\n\
+             \x20 12  load 0\n\
+             \x20 13  return\n"
+        );
+    }
+
+    #[test]
+    fn an_interpolated_string_renders_its_parts_left_to_right() {
+        assert_eq!(
+            listing("fn f(n: Int) -> String {\n  \"tick {n}!\"\n}\n", "f"),
+            "fn m.f arity=1 frame=1\n\
+             \x20  0  const Str(\"tick \")\n\
+             \x20  1  load 0\n\
+             \x20  2  const Str(\"!\")\n\
+             \x20  3  concat 3\n\
+             \x20  4  return\n"
+        );
+    }
+
+    #[test]
+    fn a_string_with_nothing_interpolated_is_one_constant() {
+        assert_eq!(
+            listing("fn f() -> String {\n  \"tick\"\n}\n", "f"),
+            "fn m.f arity=0 frame=0\n\
+             \x20  0  const Str(\"tick\")\n\
+             \x20  1  return\n"
+        );
+    }
+
+    #[test]
+    fn an_assignment_writes_a_slot_and_produces_unit() {
+        assert_eq!(
+            listing(
+                "fn f() -> Int {\n  var x = 1\n  x = 2\n  x += 3\n  x\n}\n",
+                "f"
+            ),
+            "fn m.f arity=0 frame=1\n\
+             \x20  0  const Int(1)\n\
+             \x20  1  store 0\n\
+             \x20  2  const Int(2)\n\
+             \x20  3  store 0\n\
+             \x20  4  const Unit\n\
+             \x20  5  pop\n\
+             \x20  6  load 0\n\
+             \x20  7  const Int(3)\n\
+             \x20  8  binary Add\n\
+             \x20  9  store 0\n\
+             \x20 10  const Unit\n\
+             \x20 11  pop\n\
+             \x20 12  load 0\n\
+             \x20 13  return\n"
+        );
+    }
+
+    #[test]
+    fn operands_are_evaluated_left_to_right() {
+        assert_eq!(
+            listing(
+                "fn f(a: Int, b: Int) -> Bool {\n  a * b / a % b - a + b != a\n}\n",
+                "f"
+            ),
+            "fn m.f arity=2 frame=2\n\
+             \x20  0  load 0\n\
+             \x20  1  load 1\n\
+             \x20  2  binary Mul\n\
+             \x20  3  load 0\n\
+             \x20  4  binary Div\n\
+             \x20  5  load 1\n\
+             \x20  6  binary Rem\n\
+             \x20  7  load 0\n\
+             \x20  8  binary Sub\n\
+             \x20  9  load 1\n\
+             \x20 10  binary Add\n\
+             \x20 11  load 0\n\
+             \x20 12  binary Ne\n\
+             \x20 13  return\n"
+        );
+    }
+
+    #[test]
+    fn a_unary_operator_applies_to_what_was_pushed() {
+        assert_eq!(
+            listing(
+                "fn f(b: Bool) -> Int {\n  if !b {\n    return -1\n  }\n  0\n}\n",
+                "f"
+            ),
+            "fn m.f arity=1 frame=1\n\
+             \x20  0  load 0\n\
+             \x20  1  unary Not\n\
+             \x20  2  jump-if-false 6\n\
+             \x20  3  const Int(1)\n\
+             \x20  4  unary Neg\n\
+             \x20  5  return\n\
+             \x20  6  const Unit\n\
+             \x20  7  pop\n\
+             \x20  8  const Int(0)\n\
+             \x20  9  return\n"
+        );
+    }
+
+    #[test]
+    fn and_and_or_short_circuit_through_jumps() {
+        assert_eq!(
+            listing("fn f(a: Bool, b: Bool) -> Bool {\n  a && b || a\n}\n", "f"),
+            "fn m.f arity=2 frame=2\n\
+             \x20  0  load 0\n\
+             \x20  1  jump-if-false 4\n\
+             \x20  2  load 1\n\
+             \x20  3  jump 5\n\
+             \x20  4  const Bool(false)\n\
+             \x20  5  jump-if-true 8\n\
+             \x20  6  load 0\n\
+             \x20  7  jump 9\n\
+             \x20  8  const Bool(true)\n\
+             \x20  9  return\n"
+        );
+    }
+
+    #[test]
+    fn a_block_with_no_tail_is_unit() {
+        assert_eq!(
+            listing("fn f() -> Unit {\n  let a = 1\n}\n", "f"),
+            "fn m.f arity=0 frame=1\n\
+             \x20  0  const Int(1)\n\
+             \x20  1  store 0\n\
+             \x20  2  const Unit\n\
+             \x20  3  return\n"
+        );
+    }
+
+    #[test]
+    fn an_if_with_an_else_joins_both_branches() {
+        assert_eq!(
+            listing(
+                "fn f(n: Int) -> Int {\n  if n < 2 {\n    n\n  } else {\n    n - 1\n  }\n}\n",
+                "f"
+            ),
+            "fn m.f arity=1 frame=1\n\
+             \x20  0  load 0\n\
+             \x20  1  const Int(2)\n\
+             \x20  2  binary Lt\n\
+             \x20  3  jump-if-false 6\n\
+             \x20  4  load 0\n\
+             \x20  5  jump 9\n\
+             \x20  6  load 0\n\
+             \x20  7  const Int(1)\n\
+             \x20  8  binary Sub\n\
+             \x20  9  return\n"
+        );
+    }
+
+    #[test]
+    fn an_if_with_no_else_is_unit_however_it_goes() {
+        assert_eq!(
+            listing(
+                "fn f(n: Int) -> Int {\n  var t = 0\n  if n < 2 {\n    t = 1\n  }\n  t\n}\n",
+                "f"
+            ),
+            "fn m.f arity=1 frame=2\n\
+             \x20  0  const Int(0)\n\
+             \x20  1  store 1\n\
+             \x20  2  load 0\n\
+             \x20  3  const Int(2)\n\
+             \x20  4  binary Lt\n\
+             \x20  5  jump-if-false 10\n\
+             \x20  6  const Int(1)\n\
+             \x20  7  store 1\n\
+             \x20  8  const Unit\n\
+             \x20  9  pop\n\
+             \x20 10  const Unit\n\
+             \x20 11  pop\n\
+             \x20 12  load 1\n\
+             \x20 13  return\n"
+        );
+    }
+
+    #[test]
+    fn a_while_loop_tests_at_the_top_and_jumps_back() {
+        assert_eq!(
+            listing(
+                "fn f() -> Int {\n  var i = 0\n  while i < 3 {\n    i += 1\n  }\n  i\n}\n",
+                "f"
+            ),
+            "fn m.f arity=0 frame=1\n\
+             \x20  0  const Int(0)\n\
+             \x20  1  store 0\n\
+             \x20  2  load 0\n\
+             \x20  3  const Int(3)\n\
+             \x20  4  binary Lt\n\
+             \x20  5  jump-if-false 13\n\
+             \x20  6  load 0\n\
+             \x20  7  const Int(1)\n\
+             \x20  8  binary Add\n\
+             \x20  9  store 0\n\
+             \x20 10  const Unit\n\
+             \x20 11  pop\n\
+             \x20 12  jump 2\n\
+             \x20 13  const Unit\n\
+             \x20 14  pop\n\
+             \x20 15  load 0\n\
+             \x20 16  return\n"
+        );
+    }
+
+    #[test]
+    fn a_for_over_a_range_counts_between_two_hidden_slots() {
+        assert_eq!(
+            listing(
+                "fn f() -> Int {\n  var t = 0\n  for i in 0..<3 {\n    t += i\n  }\n  t\n}\n",
+                "f"
+            ),
+            "fn m.f arity=0 frame=4\n\
+             \x20  0  const Int(0)\n\
+             \x20  1  store 0\n\
+             \x20  2  const Int(0)\n\
+             \x20  3  store 1\n\
+             \x20  4  const Int(3)\n\
+             \x20  5  store 2\n\
+             \x20  6  load 1\n\
+             \x20  7  load 2\n\
+             \x20  8  binary Lt\n\
+             \x20  9  jump-if-false 23\n\
+             \x20 10  load 1\n\
+             \x20 11  store 3\n\
+             \x20 12  load 0\n\
+             \x20 13  load 3\n\
+             \x20 14  binary Add\n\
+             \x20 15  store 0\n\
+             \x20 16  const Unit\n\
+             \x20 17  pop\n\
+             \x20 18  load 1\n\
+             \x20 19  const Int(1)\n\
+             \x20 20  binary Add\n\
+             \x20 21  store 1\n\
+             \x20 22  jump 6\n\
+             \x20 23  const Unit\n\
+             \x20 24  pop\n\
+             \x20 25  load 0\n\
+             \x20 26  return\n"
+        );
+    }
+
+    /// `a..b` yields `b` and `a..<b` stops before it, which is the one
+    /// difference between the two headers.
+    #[test]
+    fn an_inclusive_range_tests_with_le() {
+        let inclusive = listing(
+            "fn f() -> Int {\n  var t = 0\n  for i in 0..3 {\n    t += i\n  }\n  t\n}\n",
+            "f",
+        );
+        let exclusive = listing(
+            "fn f() -> Int {\n  var t = 0\n  for i in 0..<3 {\n    t += i\n  }\n  t\n}\n",
+            "f",
+        );
+        assert!(inclusive.contains("   8  binary Le\n"), "{inclusive}");
+        assert_eq!(inclusive.replace("binary Le", "binary Lt"), exclusive);
+    }
+
+    #[test]
+    fn a_for_over_an_array_walks_it_by_index() {
+        assert_eq!(
+            listing(
+                "fn f(items: Array<Int>) -> Int {\n  var t = 0\n  for item in items {\n    t += item\n  }\n  t\n}\n",
+                "f"
+            ),
+            "fn m.f arity=1 frame=6\n\
+             \x20  0  const Int(0)\n\
+             \x20  1  store 1\n\
+             \x20  2  load 0\n\
+             \x20  3  store 2\n\
+             \x20  4  load 2\n\
+             \x20  5  call-builtin length argc=0\n\
+             \x20  6  store 3\n\
+             \x20  7  const Int(0)\n\
+             \x20  8  store 4\n\
+             \x20  9  load 4\n\
+             \x20 10  load 3\n\
+             \x20 11  binary Lt\n\
+             \x20 12  jump-if-false 29\n\
+             \x20 13  load 2\n\
+             \x20 14  load 4\n\
+             \x20 15  call-builtin get argc=1\n\
+             \x20 16  try\n\
+             \x20 17  store 5\n\
+             \x20 18  load 1\n\
+             \x20 19  load 5\n\
+             \x20 20  binary Add\n\
+             \x20 21  store 1\n\
+             \x20 22  const Unit\n\
+             \x20 23  pop\n\
+             \x20 24  load 4\n\
+             \x20 25  const Int(1)\n\
+             \x20 26  binary Add\n\
+             \x20 27  store 4\n\
+             \x20 28  jump 9\n\
+             \x20 29  const Unit\n\
+             \x20 30  pop\n\
+             \x20 31  load 1\n\
+             \x20 32  return\n"
+        );
+    }
+
+    /// `break` leaves the loop and `continue` lands where the cursor is
+    /// advanced, so skipping the rest of a body still makes progress.
+    #[test]
+    fn break_leaves_the_loop_and_continue_reaches_the_next_iteration() {
+        assert_eq!(
+            listing(
+                "fn f() -> Int {\n  var i = 0\n  while i < 10 {\n    i += 1\n    if i == 2 {\n      continue\n    }\n    if i == 5 {\n      break\n    }\n  }\n  i\n}\n",
+                "f"
+            ),
+            "fn m.f arity=0 frame=1\n\
+             \x20  0  const Int(0)\n\
+             \x20  1  store 0\n\
+             \x20  2  load 0\n\
+             \x20  3  const Int(10)\n\
+             \x20  4  binary Lt\n\
+             \x20  5  jump-if-false 27\n\
+             \x20  6  load 0\n\
+             \x20  7  const Int(1)\n\
+             \x20  8  binary Add\n\
+             \x20  9  store 0\n\
+             \x20 10  const Unit\n\
+             \x20 11  pop\n\
+             \x20 12  load 0\n\
+             \x20 13  const Int(2)\n\
+             \x20 14  binary Eq\n\
+             \x20 15  jump-if-false 17\n\
+             \x20 16  jump 2\n\
+             \x20 17  const Unit\n\
+             \x20 18  pop\n\
+             \x20 19  load 0\n\
+             \x20 20  const Int(5)\n\
+             \x20 21  binary Eq\n\
+             \x20 22  jump-if-false 24\n\
+             \x20 23  jump 27\n\
+             \x20 24  const Unit\n\
+             \x20 25  pop\n\
+             \x20 26  jump 2\n\
+             \x20 27  const Unit\n\
+             \x20 28  pop\n\
+             \x20 29  load 0\n\
+             \x20 30  return\n"
+        );
+    }
+
+    #[test]
+    fn a_call_reaches_a_declaration_and_a_function_reaches_itself() {
+        assert_eq!(
+            listing(
+                "fn fib(n: Int) -> Int {\n  if n < 2 {\n    n\n  } else {\n    fib(n - 1) + fib(n - 2)\n  }\n}\n",
+                "fib"
+            ),
+            "fn m.fib arity=1 frame=1\n\
+             \x20  0  load 0\n\
+             \x20  1  const Int(2)\n\
+             \x20  2  binary Lt\n\
+             \x20  3  jump-if-false 6\n\
+             \x20  4  load 0\n\
+             \x20  5  jump 15\n\
+             \x20  6  load 0\n\
+             \x20  7  const Int(1)\n\
+             \x20  8  binary Sub\n\
+             \x20  9  call m.fib argc=1\n\
+             \x20 10  load 0\n\
+             \x20 11  const Int(2)\n\
+             \x20 12  binary Sub\n\
+             \x20 13  call m.fib argc=1\n\
+             \x20 14  binary Add\n\
+             \x20 15  return\n"
+        );
+    }
+
+    #[test]
+    fn arguments_are_pushed_left_to_right() {
+        assert_eq!(
+            listing(
+                "fn g(a: Int, b: Int) -> Int {\n  a\n}\n\nfn f() -> Int {\n  g(1, 2)\n}\n",
+                "f"
+            ),
+            "fn m.f arity=0 frame=0\n\
+             \x20  0  const Int(1)\n\
+             \x20  1  const Int(2)\n\
+             \x20  2  call m.g argc=2\n\
+             \x20  3  return\n"
+        );
+    }
+
+    const STRUCT_AND_METHOD: &str = "struct P {\n  x: Int\n  y: Int\n}\n\nimpl P {\n  fn sum(self) -> Int {\n    self.x + self.y\n  }\n}\n\nfn f() -> Int {\n  let p = P(x: 1, y: 2)\n  p.sum() + p.x\n}\n";
+
+    #[test]
+    fn a_struct_is_built_in_declaration_order_and_read_by_field() {
+        assert_eq!(
+            listing(STRUCT_AND_METHOD, "f"),
+            "fn m.f arity=0 frame=1\n\
+             \x20  0  const Int(1)\n\
+             \x20  1  const Int(2)\n\
+             \x20  2  make-struct m.P fields=x,y\n\
+             \x20  3  store 0\n\
+             \x20  4  load 0\n\
+             \x20  5  call m.P.sum argc=1\n\
+             \x20  6  load 0\n\
+             \x20  7  get-field x\n\
+             \x20  8  binary Add\n\
+             \x20  9  return\n"
+        );
+    }
+
+    #[test]
+    fn a_method_takes_its_receiver_in_slot_zero() {
+        assert_eq!(
+            listing(STRUCT_AND_METHOD, "P.sum"),
+            "fn m.P.sum arity=1 frame=1 receiver\n\
+             \x20  0  load 0\n\
+             \x20  1  get-field x\n\
+             \x20  2  load 0\n\
+             \x20  3  get-field y\n\
+             \x20  4  binary Add\n\
+             \x20  5  return\n"
+        );
+    }
+
+    #[test]
+    fn a_host_operation_is_called_through_its_module() {
+        assert_eq!(
+            listing(
+                "use console.println\nuse clock\n\nfn f() -> Result<Unit, Error> {\n  let at = clock.now()\n  println(\"at {at}\")?\n  Ok(())\n}\n",
+                "f"
+            ),
+            "fn m.f arity=0 frame=1\n\
+             \x20  0  call-host clock.now argc=0\n\
+             \x20  1  store 0\n\
+             \x20  2  const Str(\"at \")\n\
+             \x20  3  load 0\n\
+             \x20  4  concat 2\n\
+             \x20  5  call-host console.println argc=1\n\
+             \x20  6  try\n\
+             \x20  7  pop\n\
+             \x20  8  const Unit\n\
+             \x20  9  make-builtin Ok argc=1\n\
+             \x20 10  return\n"
+        );
+    }
+
+    #[test]
+    fn a_builtin_method_takes_its_receiver_below_its_arguments() {
+        assert_eq!(
+            listing(
+                "fn f(items: Array<Int>) -> Int {\n  items.get(0).unwrapOr(7)\n}\n",
+                "f"
+            ),
+            "fn m.f arity=1 frame=1\n\
+             \x20  0  load 0\n\
+             \x20  1  const Int(0)\n\
+             \x20  2  call-builtin get argc=1\n\
+             \x20  3  const Int(7)\n\
+             \x20  4  call-builtin unwrapOr argc=1\n\
+             \x20  5  return\n"
+        );
+    }
+
+    #[test]
+    fn a_free_builtin_is_built_from_its_arguments() {
+        assert_eq!(
+            listing(
+                "fn f() -> Result<Unit, Error> {\n  assertEqual(1, 1)?\n  Ok(())\n}\n",
+                "f"
+            ),
+            "fn m.f arity=0 frame=0\n\
+             \x20  0  const Int(1)\n\
+             \x20  1  const Int(1)\n\
+             \x20  2  make-builtin assertEqual argc=2\n\
+             \x20  3  try\n\
+             \x20  4  pop\n\
+             \x20  5  const Unit\n\
+             \x20  6  make-builtin Ok argc=1\n\
+             \x20  7  return\n"
+        );
+    }
+
+    /// `None` is the one builtin case written as a bare name rather than as
+    /// a call, so it is the one that builds from no arguments.
+    #[test]
+    fn none_is_built_from_nothing() {
+        assert_eq!(
+            listing("fn f() -> Option<Int> {\n  None\n}\n", "f"),
+            "fn m.f arity=0 frame=0\n\
+             \x20  0  make-builtin None argc=0\n\
+             \x20  1  return\n"
+        );
+    }
+
+    #[test]
+    fn an_array_literal_collects_its_elements_left_to_right() {
+        assert_eq!(
+            listing("fn f() -> Array<Int> {\n  [1, 2, 3]\n}\n", "f"),
+            "fn m.f arity=0 frame=0\n\
+             \x20  0  const Int(1)\n\
+             \x20  1  const Int(2)\n\
+             \x20  2  const Int(3)\n\
+             \x20  3  make-array 3\n\
+             \x20  4  return\n"
+        );
+    }
+
+    #[test]
+    fn a_question_mark_opens_what_it_is_given() {
+        assert_eq!(
+            listing(
+                "fn f(v: Option<Int>) -> Option<Int> {\n  Some(v? + 1)\n}\n",
+                "f"
+            ),
+            "fn m.f arity=1 frame=1\n\
+             \x20  0  load 0\n\
+             \x20  1  try\n\
+             \x20  2  const Int(1)\n\
+             \x20  3  binary Add\n\
+             \x20  4  make-builtin Some argc=1\n\
+             \x20  5  return\n"
+        );
+    }
+
+    #[test]
+    fn a_return_ends_the_function_where_it_is_written() {
+        assert_eq!(
+            listing(
+                "fn f(n: Int) -> Int {\n  if n < 0 {\n    return 0\n  }\n  return n\n}\n",
+                "f"
+            ),
+            "fn m.f arity=1 frame=1\n\
+             \x20  0  load 0\n\
+             \x20  1  const Int(0)\n\
+             \x20  2  binary Lt\n\
+             \x20  3  jump-if-false 6\n\
+             \x20  4  const Int(0)\n\
+             \x20  5  return\n\
+             \x20  6  const Unit\n\
+             \x20  7  pop\n\
+             \x20  8  load 0\n\
+             \x20  9  return\n"
+        );
+    }
+
+    // -------------------------------------------------------------- slots
+
+    #[test]
+    fn shadowing_declares_a_second_slot() {
+        assert_eq!(
+            listing(
+                "fn f() -> Int {\n  let x = 1\n  let x = x + 1\n  x\n}\n",
+                "f"
+            ),
+            "fn m.f arity=0 frame=2\n\
+             \x20  0  const Int(1)\n\
+             \x20  1  store 0\n\
+             \x20  2  load 0\n\
+             \x20  3  const Int(1)\n\
+             \x20  4  binary Add\n\
+             \x20  5  store 1\n\
+             \x20  6  load 1\n\
+             \x20  7  return\n"
+        );
+    }
+
+    /// A block's slots are released at its end, so the block after it takes
+    /// the same numbers and the frame is as big as the deepest block rather
+    /// than as big as the whole body.
+    #[test]
+    fn sibling_blocks_reuse_the_slots_the_first_released() {
+        assert_eq!(
+            listing(
+                "fn f() -> Int {\n  {\n    let a = 1\n    a\n  }\n  {\n    let b = 2\n    b\n  }\n}\n",
+                "f"
+            ),
+            "fn m.f arity=0 frame=1\n\
+             \x20  0  const Int(1)\n\
+             \x20  1  store 0\n\
+             \x20  2  load 0\n\
+             \x20  3  pop\n\
+             \x20  4  const Int(2)\n\
+             \x20  5  store 0\n\
+             \x20  6  load 0\n\
+             \x20  7  return\n"
+        );
+    }
+
+    /// `frame_size` is the high-water mark: three bindings are live at once
+    /// inside the nested block, and one of them is the outer body's.
+    #[test]
+    fn the_frame_is_as_big_as_the_most_that_was_ever_live() {
+        assert_eq!(
+            listing(
+                "fn f() -> Int {\n  let a = 1\n  {\n    let b = 2\n    let c = 3\n    b + c\n  }\n}\n",
+                "f"
+            ),
+            "fn m.f arity=0 frame=3\n\
+             \x20  0  const Int(1)\n\
+             \x20  1  store 0\n\
+             \x20  2  const Int(2)\n\
+             \x20  3  store 1\n\
+             \x20  4  const Int(3)\n\
+             \x20  5  store 2\n\
+             \x20  6  load 1\n\
+             \x20  7  load 2\n\
+             \x20  8  binary Add\n\
+             \x20  9  return\n"
+        );
+    }
+
+    /// A name resolves in declaration order, so the value of a `let` is read
+    /// before the name it declares exists.
+    #[test]
+    fn let_x_equals_x_reads_the_outer_binding() {
+        assert_eq!(
+            listing(
+                "fn f(x: Int) -> Int {\n  {\n    let x = x\n    x\n  }\n}\n",
+                "f"
+            ),
+            "fn m.f arity=1 frame=2\n\
+             \x20  0  load 0\n\
+             \x20  1  store 1\n\
+             \x20  2  load 1\n\
+             \x20  3  return\n"
+        );
+    }
+
+    // -------------------------------------------------------- unsupported
+
+    #[test]
+    fn every_unsupported_construct_is_named() {
+        let cases: Vec<(&str, &str)> = vec![
+            (
+                "a closure",
+                "fn f() -> Result<Int, Error> {\n  Err(Error(message: \"a\")).mapError(fn(e) {\n    Error(message: \"b\")\n  })\n}\n",
+            ),
+            (
+                "a trailing closure",
+                "fn f() -> Result<Int, Error> {\n  Err(Error(message: \"a\")).mapError {\n    Error(message: \"b\")\n  }\n}\n",
+            ),
+            (
+                "a `match` expression",
+                "fn f(v: Option<Int>) -> Int {\n  match v {\n    Some(n) => n\n    None => 0\n  }\n}\n",
+            ),
+            (
+                "a task scope",
+                "fn f() -> Int {\n  scope tasks {\n    1\n  }\n}\n",
+            ),
+            (
+                "an `await`",
+                "async fn g() -> Int {\n  1\n}\n\nfn f() -> Int {\n  await g()\n}\n",
+            ),
+            (
+                "a `var` parameter",
+                "fn g(var x: Int) {\n  x = 1\n}\n",
+            ),
+            (
+                "a `dyn` parameter",
+                "trait Show {\n  fn show(self) -> String\n}\n\nstruct A {\n  n: Int\n}\n\nimpl Show for A {\n  fn show(self) -> String {\n    \"a\"\n  }\n}\n\nfn f(v: dyn Show) -> String {\n  v.show()\n}\n",
+            ),
+            (
+                "`Map.of`, an associated function of a builtin type",
+                "fn f() -> Int {\n  Map.of().length()\n}\n",
+            ),
+            (
+                "`Shared`",
+                "fn f() -> Int {\n  let s = Shared(1)\n  1\n}\n",
+            ),
+            (
+                "`snapshot`",
+                "fn f(a: Array<Int>) -> Array<Int> {\n  a.snapshot()\n}\n",
+            ),
+            (
+                "a range used as a value rather than as a `for` header",
+                "fn f() -> Int {\n  let r = 0..<3\n  r.length()\n}\n",
+            ),
+            (
+                "assignment to a field of anything but a local",
+                "struct Q {\n  x: Int\n}\n\nstruct P {\n  q: Q\n}\n\nfn f() -> Int {\n  var p = P(q: Q(x: 1))\n  p.q.x = 2\n  p.q.x\n}\n",
+            ),
+            (
+                "a call through the local `g`",
+                "fn f(g: fn(Int) -> Int) -> Int {\n  g(1)\n}\n",
+            ),
+            (
+                "a function declared inside a function body",
+                "fn f() -> Int {\n  fn g() -> Int {\n    1\n  }\n  g()\n}\n",
+            ),
+            (
+                "the enum case `E.A`",
+                "enum E {\n  A\n  B\n}\n\nfn f() -> E {\n  E.A\n}\n",
+            ),
+            (
+                "`g`, a function used as a value",
+                "fn g() -> Int {\n  1\n}\n\nfn f() -> Int {\n  let h = g\n  1\n}\n",
+            ),
+            (
+                "a variadic parameter",
+                "fn g(items: Int...) -> Int {\n  1\n}\n\nfn f() -> Int {\n  g(1, 2)\n}\n",
+            ),
+            (
+                "a call to `g` whose arguments do not stand in declaration order",
+                "fn g(a: Int, b: Int) -> Int {\n  a\n}\n\nfn f() -> Int {\n  g(b: 2, a: 1)\n}\n",
+            ),
+            (
+                "a call to `g` that does not supply one argument for every parameter",
+                "fn g(a: Int, b: Int = 2) -> Int {\n  a\n}\n\nfn f() -> Int {\n  g(1)\n}\n",
+            ),
+        ];
+        for (what, source) in cases {
+            assert_eq!(refused(source), what, "for:\n{source}");
+        }
+    }
+
+    /// The `Display` a diagnostic shows says which backend refused, so a
+    /// person reading it knows the program is fine and the VM is not ready.
+    #[test]
+    fn an_unsupported_construct_reads_as_a_sentence() {
+        let why = lower(&checked(
+            "fn f(v: Option<Int>) -> Int {\n  match v {\n    Some(n) => n\n    None => 0\n  }\n}\n",
+        ))
+        .expect_err("a `match` is refused");
+        assert_eq!(
+            why.to_string(),
+            "the VM cannot run a `match` expression yet"
+        );
+    }
+
+    // ------------------------------------------------------------ benches
+
+    /// ADR 0012's benchmark package is the target, and six of its eight
+    /// entries lower.
+    #[test]
+    fn six_of_the_eight_bench_entries_lower_and_validate() {
+        for name in ["pure", "hostheavy", "arith", "arrayget", "call", "chars"] {
+            let program = match lower(&bench(name)) {
+                Ok(program) => program,
+                Err(why) => panic!("`benches/{name}` lowers, but stopped at {why}"),
+            };
+            assert!(
+                program.function_named(name, "main").is_some(),
+                "`benches/{name}` lowers its entry"
+            );
+            validate(&program)
+                .unwrap_or_else(|why| panic!("`benches/{name}` holds the invariants: {why}"));
+        }
+    }
+
+    /// The other two are stopped by one construct, and it is the same one:
+    /// `cursor.at += cursor.step`.
+    ///
+    /// Writing a field needs an instruction that writes a field, and the IR
+    /// has `GetField` and nothing on the other side. Rebuilding the struct
+    /// instead would need the receiver's type, which is exactly what a
+    /// lowering with no type table cannot name — so this is reported rather
+    /// than approximated.
+    #[test]
+    fn field_and_method_lower_through_a_written_field() {
+        for name in ["field", "method"] {
+            let program = lower(&bench(name)).unwrap_or_else(|why| {
+                panic!("`benches/{name}` lowers, but: {why}");
+            });
+            validate(&program).expect("it holds the invariants");
+            let id = program
+                .function_named(name, "main")
+                .expect("its entry is lowered");
+            let listing = crate::render(&program, id);
+            assert!(
+                listing.contains("set-field at"),
+                "`benches/{name}` writes a field:\n{listing}"
+            );
+        }
+    }
+
+    /// A compound write reads the field, computes, and writes it back, and
+    /// the struct it writes back to is the one it read from.
+    #[test]
+    fn a_compound_field_write_reads_the_field_it_writes() {
+        let program = lower(&checked(
+            "struct P {\n  x: Int\n}\n\nexport fn f() -> Int {\n  var p = P(x: 1)\n  p.x += 2\n  p.x\n}\n",
+        ))
+        .expect("it lowers");
+        validate(&program).expect("it holds the invariants");
+        let id = program.function_named("m", "f").expect("`f` is lowered");
+        assert_eq!(
+            crate::render(&program, id),
+            "fn m.f arity=0 frame=1\n\
+             \x20  0  const Int(1)\n\
+             \x20  1  make-struct m.P fields=x\n\
+             \x20  2  store 0\n\
+             \x20  3  load 0\n\
+             \x20  4  dup\n\
+             \x20  5  get-field x\n\
+             \x20  6  const Int(2)\n\
+             \x20  7  binary Add\n\
+             \x20  8  set-field x\n\
+             \x20  9  store 0\n\
+             \x20 10  const Unit\n\
+             \x20 11  pop\n\
+             \x20 12  load 0\n\
+             \x20 13  get-field x\n\
+             \x20 14  return\n"
+        );
+    }
+
+    /// `startup` is not one of the eight, and it lowers too: it is the
+    /// smallest function the package has, and it is what a frame of nothing
+    /// looks like.
+    #[test]
+    fn the_smallest_entry_is_a_unit_and_a_return() {
+        let program = lower(&bench("startup")).expect("`benches/startup` lowers");
+        validate(&program).expect("it holds the invariants");
+        let id = program
+            .function_named("startup", "main")
+            .expect("its entry is lowered");
+        assert_eq!(
+            crate::render(&program, id),
+            "fn startup.main arity=0 frame=0\n\
+             \x20  0  const Unit\n\
+             \x20  1  return\n"
+        );
+    }
+
+    // ----------------------------------------------------------- validate
+
+    #[test]
+    fn validate_refuses_a_jump_past_the_end() {
+        let mut program = lower(&checked("fn f() -> Int {\n  1\n}\n")).expect("it lowers");
+        let span = program.functions[0].span;
+        program.functions[0].code.insert(0, Inst::Jump(99));
+        program.functions[0].spans.insert(0, span);
+        assert_eq!(
+            validate(&program).expect_err("a jump past the end is refused"),
+            "m.f: 0: jumps to 99, past the 3 instructions"
+        );
+    }
+
+    #[test]
+    fn validate_refuses_a_slot_outside_the_frame() {
+        let mut program = lower(&checked("fn f() -> Int {\n  1\n}\n")).expect("it lowers");
+        program.functions[0].code[0] = Inst::LoadLocal(4);
+        assert_eq!(
+            validate(&program).expect_err("a slot outside the frame is refused"),
+            "m.f: 0: reaches slot 4 of a frame of 0"
+        );
+    }
+
+    #[test]
+    fn validate_refuses_a_join_reached_at_two_depths() {
+        let mut program = lower(&checked(
+            "fn f(b: Bool) -> Int {\n  if b {\n    1\n  } else {\n    2\n  }\n}\n",
+        ))
+        .expect("it lowers");
+        // One more value on the branch that jumps to the join than on the
+        // branch that falls into it.
+        let unit = program.constants.len() as u32;
+        program.constants.push(Const::Unit);
+        let function = &mut program.functions[0];
+        let span = function.span;
+        function.code.insert(2, Inst::Const(ConstId(unit)));
+        function.spans.insert(2, span);
+        for inst in &mut function.code {
+            match inst {
+                Inst::Jump(to) | Inst::JumpIfFalse(to) | Inst::JumpIfTrue(to) => *to += 1,
+                _ => {}
+            }
+        }
+        assert!(
+            validate(&program)
+                .expect_err("a join at two depths is refused")
+                .contains("on the stack"),
+            "{:?}",
+            validate(&program)
+        );
+    }
+
+    #[test]
+    fn validate_refuses_a_function_that_does_not_end_in_a_return() {
+        let mut program = lower(&checked("fn f() -> Int {\n  1\n}\n")).expect("it lowers");
+        program.functions[0].code.pop();
+        program.functions[0].spans.pop();
+        assert_eq!(
+            validate(&program).expect_err("a missing return is refused"),
+            "m.f: does not end in a `return`"
+        );
+    }
+
+    #[test]
+    fn validate_refuses_a_call_with_the_wrong_number_of_arguments() {
+        let mut program = lower(&checked(
+            "fn g(a: Int) -> Int {\n  a\n}\n\nfn f() -> Int {\n  g(1)\n}\n",
+        ))
+        .expect("it lowers");
+        let id = program.function_named("m", "f").expect("`f` is lowered");
+        let function = &mut program.functions[id.0 as usize];
+        for inst in &mut function.code {
+            if let Inst::Call { argc, .. } = inst {
+                *argc = 2;
+            }
+        }
+        assert!(validate(&program)
+            .expect_err("a mismatched call is refused")
+            .contains("with 2 arguments, which takes 1"),);
+    }
+}
