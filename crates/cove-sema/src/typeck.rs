@@ -138,11 +138,22 @@
 //!   name here, and the rule that they must appear in declaration order stays
 //!   where it was.
 //!
-//! One rule runs the other way. An `if` with no `else` has type `()` here and
-//! its branch's value is discarded, because there is no second branch to give
-//! the missing case a value; the interpreter, which only ever evaluates the
-//! branch it took, hands that branch's value back. ADR 0004 does not settle
-//! this, and the card says only that control-flow forms are expressions.
+//! # Where a form's value comes from
+//!
+//! `docs/LANGUAGE_REFERENCE.md` states one rule per expression form, and the
+//! two that this pass and the interpreter used to answer differently are
+//! stated there because they had to be decided rather than discovered:
+//!
+//! - An `if` with no `else` produces `()`, and its branch's value is
+//!   discarded. There is no second branch to give the missing case a value,
+//!   so the branch that runs does not supply one either.
+//! - A `for`, and a `while` whose condition is not the literal `true`, can
+//!   reach its end without breaking, so it produces `()` and a `break` out
+//!   of it may not carry a value ([`BREAK_VALUE`]). A `while true` has no
+//!   other way out, so its value is the one its `break`s agree on.
+//!
+//! The interpreter obeys both, so a checked program's static and dynamic
+//! answers are the same one.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
@@ -206,6 +217,8 @@ pub const OPERATOR: &str = "cove::type::operator";
 pub const CONDITION: &str = "cove::type::condition";
 /// The branches of an `if` or the arms of a `match` produce different types.
 pub const BRANCHES: &str = "cove::type::branches";
+/// A `break` carries a value out of a loop that can finish without it.
+pub const BREAK_VALUE: &str = "cove::type::break_value";
 /// `?` was applied to something that is not a `Result` or an `Option`.
 pub const TRY_OPERAND: &str = "cove::type::try_operand";
 /// `?` propagates a failure the enclosing function cannot return.
@@ -867,6 +880,22 @@ impl Expected {
     }
 }
 
+/// One loop the checker is inside, so a `break` can be checked against the
+/// loop it leaves rather than against the function it is written in.
+#[derive(Clone, Debug)]
+struct LoopFrame {
+    /// Whether the loop can reach its end without a `break`. A `for` always
+    /// can, and so can every `while` but `while true`; that path produces
+    /// `()`, which fixes the whole loop's value at `()`.
+    falls_through: bool,
+    /// What a `break` operand is checked against, once something has fixed
+    /// it: the loop's own expectation, or the first `break`'s type.
+    expected: Option<Expected>,
+    /// The type the `break`s seen so far give the loop.
+    result: Option<Ty>,
+    span: Span,
+}
+
 // ---------------------------------------------------------------- checking
 
 /// Checks one module against its own declarations, its imports, and the
@@ -907,6 +936,10 @@ struct Checker<'a> {
     /// The bounds of the type parameters currently in scope.
     bounds: BTreeMap<Rc<str>, Vec<TraitBound>>,
     scopes: Vec<BTreeMap<String, Binding>>,
+    /// The loops whose bodies are being checked, innermost last. A `break`
+    /// belongs to the last of them, and a lambda or a local `fn` starts the
+    /// stack again because neither can reach a loop outside itself.
+    loops: Vec<LoopFrame>,
     /// The declared return type of the function whose body is being checked,
     /// and where it was written.
     ret: Ty,
@@ -934,6 +967,7 @@ impl<'a> Checker<'a> {
             type_params: Vec::new(),
             bounds: BTreeMap::new(),
             scopes: Vec::new(),
+            loops: Vec::new(),
             ret: Ty::Unknown,
             ret_span: Span::new(cove_diag::FileId(0), 0, 0),
         }
@@ -2033,7 +2067,11 @@ impl<'a> Checker<'a> {
                         sig.ret_span,
                         format!("the declared return type is `{}`", sig.ret),
                     );
+                    // A `break` inside this body cannot reach a loop outside
+                    // it, exactly as its `return` cannot reach this function.
+                    let outer_loops = std::mem::take(&mut self.loops);
                     self.block(&decl.body, Some(&expected));
+                    self.loops = outer_loops;
                     self.scopes.pop();
                     self.bounds = outer_bounds;
                     self.type_params = outer_params;
@@ -2099,11 +2137,9 @@ impl<'a> Checker<'a> {
                 binding,
                 iterable,
                 body,
-            } => self.for_expr(binding, iterable, body),
+            } => self.for_expr(binding, iterable, body, span),
             ExprKind::While { condition, body } => {
-                self.condition(condition);
-                self.block(body, None);
-                Ty::Unit
+                return self.while_expr(condition, body, span, expected)
             }
             ExprKind::Return(value) => {
                 let expected = Expected::new(
@@ -2123,9 +2159,7 @@ impl<'a> Checker<'a> {
             // checked against the loop's expected type rather than the
             // function's. Neither form produces a value of its own.
             ExprKind::Break(value) => {
-                if let Some(value) = value {
-                    self.expr(value, None);
-                }
+                self.break_expr(value.as_deref(), span);
                 Ty::Never
             }
             ExprKind::Continue => Ty::Never,
@@ -3087,7 +3121,7 @@ impl<'a> Checker<'a> {
         )
     }
 
-    fn for_expr(&mut self, binding: &Ident, iterable: &Expr, body: &Block) -> Ty {
+    fn for_expr(&mut self, binding: &Ident, iterable: &Expr, body: &Block, span: Span) -> Ty {
         let ty = self.expr(iterable, None);
         let element = match &ty {
             Ty::Unknown | Ty::Never => Ty::Unknown,
@@ -3113,9 +3147,120 @@ impl<'a> Checker<'a> {
         };
         self.scopes.push(BTreeMap::new());
         self.declare(&binding.node, element);
+        // A `for` runs out of items, so it always has an end to reach and
+        // its value is always `()`.
+        self.loops.push(LoopFrame {
+            falls_through: true,
+            expected: None,
+            result: None,
+            span,
+        });
         self.block(body, None);
+        self.loops.pop();
         self.scopes.pop();
         Ty::Unit
+    }
+
+    /// A loop is an expression, and `while true` is the only one whose value
+    /// a `break` can supply.
+    ///
+    /// Every other loop can reach its end without breaking, and there is
+    /// nothing there to produce but `()`. Typing such a loop from its
+    /// `break`s would give the same expression one type when it breaks and
+    /// another when it does not, which is the disagreement `while true`
+    /// exists to avoid: its condition never turns false, so a `break` is the
+    /// only way out and the only thing that can say what comes out.
+    fn while_expr(
+        &mut self,
+        condition: &Expr,
+        body: &Block,
+        span: Span,
+        expected: Option<&Expected>,
+    ) -> Ty {
+        self.condition(condition);
+        let endless = matches!(condition.kind, ExprKind::Bool(true));
+        self.loops.push(LoopFrame {
+            falls_through: !endless,
+            // A loop that falls through has its value fixed at `()` already,
+            // so an operand it cannot use is reported for what it is rather
+            // than checked against an expectation it never had.
+            expected: if endless { expected.cloned() } else { None },
+            result: None,
+            span,
+        });
+        self.block(body, None);
+        let frame = self.loops.pop().expect("the frame pushed just above");
+        let broke = frame.result.is_some();
+        let ty = match endless {
+            true => frame.result.unwrap_or(Ty::Unit),
+            false => Ty::Unit,
+        };
+        // A `break` out of an endless loop was checked against the same
+        // expectation this would check, so checking the loop as well would
+        // report one disagreement twice, at two spans.
+        if let Some(expected) = expected {
+            if !(endless && broke) {
+                self.expect(&ty, expected, span);
+            }
+        }
+        ty
+    }
+
+    /// A `break`, checked against the loop it leaves.
+    fn break_expr(&mut self, value: Option<&Expr>, span: Span) {
+        let Some(frame) = self.loops.last() else {
+            // `break` outside a loop is resolution's error to report, and
+            // this pass still owes the operand its own checking.
+            if let Some(value) = value {
+                self.expr(value, None);
+            }
+            return;
+        };
+        let falls_through = frame.falls_through;
+        let loop_span = frame.span;
+        let expected = frame.expected.clone();
+        let (ty, value_span) = match value {
+            Some(value) => (self.expr(value, expected.as_ref()), value.span),
+            None => {
+                // A `break` that carries nothing leaves `()` behind, which
+                // is a disagreement when another `break` out of the same
+                // loop carried something.
+                if let Some(expected) = &expected {
+                    let expected = expected.clone();
+                    self.expect(&Ty::Unit, &expected, span);
+                }
+                (Ty::Unit, span)
+            }
+        };
+        if falls_through {
+            if !ty.matches(&Ty::Unit) {
+                self.diagnostics.push(
+                    Diagnostic::error(
+                        BREAK_VALUE,
+                        format!("this `break` produces `{ty}`, but the loop it leaves produces `()`"),
+                    )
+                    .at(value_span)
+                    .label(loop_span, "this loop can reach its end without breaking")
+                    .rule("A `for` loop, and a `while` whose condition is not `true`, can finish without reaching a `break`, so the loop produces `()`; only a `while true` takes its value from `break`.")
+                    .help("assign to a `var` declared outside the loop, or write `while true` and leave it with `break`"),
+                );
+            }
+            return;
+        }
+        let frame = self.loops.last_mut().expect("the frame read just above");
+        match &frame.result {
+            Some(previous) => frame.result = Some(previous.join(&ty)),
+            None => {
+                if frame.expected.is_none() {
+                    frame.expected = Some(Expected::new(
+                        ty.clone(),
+                        value_span,
+                        format!("the first `break` out of this loop produces `{ty}`"),
+                    ));
+                }
+                frame.result = Some(ty);
+            }
+        }
     }
 
     /// A lambda takes its parameter types from the expected type at the call
@@ -3179,7 +3324,11 @@ impl<'a> Checker<'a> {
             let label = format!("this function value produces `{ty}`");
             Expected::new(ty, span, label)
         });
+        // A `break` inside a lambda cannot reach a loop outside it, exactly
+        // as its `return` returns from the lambda.
+        let outer_loops = std::mem::take(&mut self.loops);
         let body_ty = self.block(body, expected_body.as_ref());
+        self.loops = outer_loops;
         self.ret = outer_ret;
         self.ret_span = outer_span;
         self.scopes.pop();
@@ -7865,6 +8014,52 @@ fn apply(transform: fn(Int) -> Int) -> Int {
             error.help.unwrap(),
             "make both branches produce `Int`, or bind them separately"
         );
+    }
+
+    #[test]
+    fn a_loop_that_can_reach_its_end_is_unit() {
+        accepts_body("  let ran = for value in [1, 2] {\n    value\n  }\n  println(\"{ran}\")?");
+        let error = rejects_body("  let found = for value in [1, 2] {\n    break value\n  }");
+        assert_eq!(error.code, BREAK_VALUE);
+        assert_eq!(
+            error.message,
+            "this `break` produces `Int`, but the loop it leaves produces `()`"
+        );
+        let error =
+            rejects_body("  var seen = 0\n  let found = while seen < 2 {\n    break seen\n  }");
+        assert_eq!(error.code, BREAK_VALUE);
+    }
+
+    #[test]
+    fn a_while_true_takes_its_value_from_its_breaks() {
+        accepts_body("  let n: Int = while true {\n    break 1\n  }\n  println(\"{n}\")?");
+        // A `break` with no operand produces `()` like any other missing
+        // value, so it cannot be the `Int` the binding asks for.
+        let error = rejects_body("  let n: Int = while true {\n    break\n  }");
+        assert_eq!(error.code, MISMATCH);
+        let error = rejects_body(
+            "  let n = while true {\n    if true {\n      break 1\n    }\n    break \"two\"\n  }",
+        );
+        assert_eq!(error.code, MISMATCH);
+        assert_eq!(error.message, "expected `Int`, found `String`");
+        // A `break` that carries nothing leaves `()` behind, which is the
+        // same disagreement written a different way.
+        let error = rejects_body(
+            "  let n = while true {\n    if true {\n      break 1\n    }\n    break\n  }",
+        );
+        assert_eq!(error.code, MISMATCH);
+        assert_eq!(error.message, "expected `Int`, found `()`");
+    }
+
+    #[test]
+    fn a_break_belongs_to_the_nearest_loop() {
+        // The `break` leaves the `for`, which can reach its own end, so it
+        // may not carry a value even though the `while true` around it
+        // would have taken one.
+        let error = rejects_body(
+            "  let n = while true {\n    for value in [1] {\n      break value\n    }\n    break 0\n  }",
+        );
+        assert_eq!(error.code, BREAK_VALUE);
     }
 
     #[test]

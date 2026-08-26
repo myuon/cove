@@ -596,9 +596,24 @@ impl Value {
         }
     }
 
+    /// The value a trait object holds, or this value when it is not one.
+    ///
+    /// A `dyn Trait` wrapper records where a value was converted, and the
+    /// checker decides where that is: a written type converts and a lambda's
+    /// inferred result does not, though both have type `dyn Trait`. Nothing
+    /// a program can ask should be able to tell those two apart, so
+    /// everything that compares or renders a value looks through the
+    /// wrapper first.
+    pub fn erased(&self) -> &Value {
+        match self {
+            Value::Dyn(d) => d.value.erased(),
+            other => other,
+        }
+    }
+
     /// Value equality. Identity, when available, is explicit and separate.
     pub fn eq_value(&self, other: &Value) -> bool {
-        match (self, other) {
+        match (self.erased(), other.erased()) {
             (Value::Unit, Value::Unit) => true,
             (Value::Bool(a), Value::Bool(b)) => a == b,
             (Value::Int(a), Value::Int(b)) => a == b,
@@ -655,11 +670,6 @@ impl Value {
             // handle has no contents to compare, so naming the same thing is
             // the whole of being the same value.
             (Value::Resource(a), Value::Resource(b)) => a.names_same(b),
-            // Two trait objects are equal when they were taken at the same
-            // trait and hold equal values.
-            (Value::Dyn(a), Value::Dyn(b)) => {
-                a.trait_name == b.trait_name && a.value.eq_value(&b.value)
-            }
             // `==` means value equality regardless of mutability, so `Vector`
             // compares its current elements structurally, exactly like
             // `Array`. Storage identity — whether two handles are the same

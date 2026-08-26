@@ -2,6 +2,9 @@
 //!
 //! The tree mirrors the surface language described by `docs/LANGUAGE_CARD.md`.
 //! Where the Language Card and ADR 0001 disagree, the Language Card wins.
+//! What each form below *means* — how it is typed, how it evaluates, and
+//! which errors it can produce — is stated once in
+//! `docs/LANGUAGE_REFERENCE.md`.
 
 use cove_diag::{Span, Spanned};
 
@@ -408,8 +411,9 @@ pub enum ExprKind {
         scrutinee: Box<Expr>,
         arms: Vec<MatchArm>,
     },
-    /// A loop is an expression: it evaluates to `Unit` unless a `break expr`
-    /// inside it says otherwise.
+    /// A loop is an expression. It evaluates to `Unit`, because it can
+    /// reach its end without breaking; only a `while true`, which cannot,
+    /// evaluates to a `break expr`'s value.
     For {
         binding: Ident,
         iterable: Box<Expr>,
@@ -420,8 +424,10 @@ pub enum ExprKind {
         body: Block,
     },
     Return(Option<Box<Expr>>),
-    /// `break` / `break expr`. Exits the nearest enclosing loop, which then
-    /// evaluates to `Unit` or to `expr`. Resolve rejects this outside a loop.
+    /// `break` / `break expr`. Exits the nearest enclosing loop. Only a
+    /// `while true` takes its value from `expr`; every other loop is `Unit`,
+    /// and the checker rejects an operand there. Resolve rejects a `break`
+    /// outside a loop.
     Break(Option<Box<Expr>>),
     /// `continue`. Skips to the next iteration of the nearest enclosing loop.
     /// Resolve rejects this outside a loop.

@@ -1733,7 +1733,16 @@ impl<'a> Interpreter<'a> {
                     .into());
                 };
                 if test {
-                    self.eval_block(env, then_branch)
+                    let value = self.eval_block(env, then_branch)?;
+                    // An `if` with no `else` produces `()`. There is no
+                    // second branch to give the missing case a value, so the
+                    // branch that ran does not get to supply one either:
+                    // the same expression would otherwise mean one thing to
+                    // the checker and another here.
+                    Ok(match else_branch {
+                        Some(_) => value,
+                        None => Value::Unit,
+                    })
                 } else {
                     match else_branch {
                         Some(branch) => self.eval(env, branch),
@@ -1776,9 +1785,6 @@ impl<'a> Interpreter<'a> {
                 body,
             } => {
                 let items = self.iterable_items(env, iterable)?;
-                // A loop is an expression: it evaluates to `Unit` unless a
-                // `break expr` inside it says otherwise.
-                let mut result_value = Value::Unit;
                 for item in items {
                     // Once per iteration, at the back edge: this is the
                     // safepoint that bounds a `for` over an unbounded
@@ -1790,15 +1796,18 @@ impl<'a> Interpreter<'a> {
                     env.pop();
                     match result {
                         Ok(_) => {}
-                        Err(Control::Break(value)) => {
-                            result_value = value;
-                            break;
-                        }
+                        // A `for` runs out of items, so it can reach its end
+                        // without breaking and there is nothing there to
+                        // produce but `()`. Its value is therefore `()`
+                        // however it leaves, and a `break` operand is
+                        // evaluated for its effects alone; the checker
+                        // refuses one that produces anything else.
+                        Err(Control::Break(_)) => break,
                         Err(Control::Continue) => continue,
                         Err(other) => return Err(other),
                     }
                 }
-                Ok(result_value)
+                Ok(Value::Unit)
             }
             ExprKind::While { condition, body } => loop {
                 let test = self.eval(env, condition)?;
@@ -1819,7 +1828,16 @@ impl<'a> Interpreter<'a> {
                 self.charge_safepoint(span)?;
                 match self.eval_block(env, body) {
                     Ok(_) => {}
-                    Err(Control::Break(value)) => return Ok(value),
+                    // `while true` is the one loop a `break` is the only way
+                    // out of, so it is the one loop whose value a `break`
+                    // supplies; any other `while` can reach its end, and is
+                    // `()` however it leaves.
+                    Err(Control::Break(value)) => {
+                        return Ok(match matches!(condition.kind, ExprKind::Bool(true)) {
+                            true => value,
+                            false => Value::Unit,
+                        })
+                    }
                     Err(Control::Continue) => continue,
                     Err(other) => return Err(other),
                 }
@@ -3248,7 +3266,17 @@ impl Callable for Interpreter<'_> {
 fn binary(op: BinaryOp, lhs: Value, rhs: Value, span: Span) -> Result<Value, RuntimeError> {
     match op {
         BinaryOp::Eq | BinaryOp::Ne => {
-            if lhs.type_name() != rhs.type_name() {
+            // Through the `dyn Trait` wrapper: a written `dyn Trait` is
+            // wrapped here and a lambda's inferred one is not, though the
+            // checker gives both the same type, so a comparison reaching
+            // one compares what it holds. Two trait objects over different
+            // concrete types are then unequal rather than incomparable —
+            // the checker already agreed their types match, and this is the
+            // one place where two values of one type are made of different
+            // things.
+            let wrapped = matches!(lhs, Value::Dyn(_)) || matches!(rhs, Value::Dyn(_));
+            let (lhs, rhs) = (lhs.erased(), rhs.erased());
+            if !wrapped && lhs.type_name() != rhs.type_name() {
                 return Err(RuntimeError::new(format!(
                     "cannot compare `{}` with `{}`",
                     lhs.type_name(),
@@ -3257,7 +3285,7 @@ fn binary(op: BinaryOp, lhs: Value, rhs: Value, span: Span) -> Result<Value, Run
                 .at(span)
                 .with_rule("`==` means value equality between values of the same type."));
             }
-            let equal = lhs.eq_value(&rhs);
+            let equal = lhs.eq_value(rhs);
             Ok(Value::Bool(if op == BinaryOp::Eq { equal } else { !equal }))
         }
         // `is` is narrower than `==`: same shared storage, not same value.
@@ -5524,21 +5552,27 @@ export fn main() -> Result<Unit, Error> {
     }
 
     #[test]
-    fn a_for_loop_evaluates_to_the_value_of_break() {
+    fn a_for_loop_is_unit_however_it_leaves() {
+        // A `for` can reach its end without breaking, so `break` stops it
+        // and supplies nothing. `cove check` refuses the operand below; this
+        // pins what the interpreter does with one that reaches it anyway,
+        // so an embedding that only resolves sees the same rule.
         let source = r#"
 use console.println
 
 export fn main() -> Result<Unit, Error> {
+  var seen = 0
   let found = for value in [1, 2, 3, 4] {
+    seen = value
     if value == 3 {
       break value * 10
     }
   }
-  console.println("{found}")?
+  console.println("{seen} {found}")?
   Ok(())
 }
 "#;
-        assert_eq!(run_entry_of(source, "main", &[]).output, "30\n");
+        assert_eq!(run_entry_of(source, "main", &[]).output, "3 ()\n");
     }
 
     #[test]
@@ -5578,7 +5612,7 @@ export fn main() -> Result<Unit, Error> {
     }
 
     #[test]
-    fn a_while_loop_evaluates_to_the_value_of_break() {
+    fn a_while_true_evaluates_to_the_value_of_break() {
         let source = r#"
 use console.println
 
@@ -5595,6 +5629,47 @@ export fn main() -> Result<Unit, Error> {
 }
 "#;
         assert_eq!(run_entry_of(source, "main", &[]).output, "3\n");
+    }
+
+    #[test]
+    fn a_while_that_can_reach_its_end_is_unit_however_it_leaves() {
+        let source = r#"
+use console.println
+
+export fn main() -> Result<Unit, Error> {
+  var count = 0
+  let found = while count < 10 {
+    count += 1
+    if count == 3 {
+      break count
+    }
+  }
+  console.println("{count} {found}")?
+  Ok(())
+}
+"#;
+        assert_eq!(run_entry_of(source, "main", &[]).output, "3 ()\n");
+    }
+
+    #[test]
+    fn an_if_with_no_else_is_unit_even_when_its_branch_runs() {
+        let source = r#"
+use console.println
+
+export fn main() -> Result<Unit, Error> {
+  var ran = false
+  let taken = if true {
+    ran = true
+    1
+  }
+  let skipped = if false {
+    2
+  }
+  console.println("{ran} {taken} {skipped}")?
+  Ok(())
+}
+"#;
+        assert_eq!(run_entry_of(source, "main", &[]).output, "true () ()\n");
     }
 
     // ------------------------------------------------------------ rule 11

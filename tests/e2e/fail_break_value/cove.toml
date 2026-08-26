@@ -1,0 +1,3 @@
+[run.fail_break_value]
+entry = "main.main"
+allow = ["console"]

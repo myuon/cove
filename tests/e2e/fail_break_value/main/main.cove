@@ -1,0 +1,16 @@
+use console.println
+
+/// Breaks out of a `for` with a value the loop cannot produce.
+///
+/// A `for` runs out of items, so it can reach its end without breaking and
+/// its value is always `()`. It lives in its own package so that failure
+/// cannot take down every other case.
+export fn main() -> Result<Unit, Error> {
+  let found = for value in [1, 2, 3] {
+    if value == 2 {
+      break value
+    }
+  }
+  println("{found}")?
+  Ok(())
+}
