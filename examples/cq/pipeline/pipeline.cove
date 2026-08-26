@@ -26,6 +26,10 @@ export enum Sink {
 /// hundred thousand chances to be told something, and a report that kept them
 /// would be the thing this program exists not to do; each diagnostic is
 /// written when it happens and only the tally outlives it.
+///
+/// `read` counts the records that folded and `skipped` the ones that did not,
+/// so the two together are how many were taken from the input -- which is what
+/// `--limit` bounds.
 export struct Outcome {
   read: Int
   written: Int
@@ -60,6 +64,7 @@ export fn transform<S>(
     None => ()
   }
   var state = initial
+  var taken = 0
   var read = 0
   var written = 0
   var skipped = 0
@@ -73,13 +78,18 @@ export fn transform<S>(
         if line.trim().isEmpty() {
           continue
         }
-        if reachedLimit(limit, read) {
+        // `limit` bounds the records taken from the input, whether or not
+        // they turn out to be readable. It is a bound on the work this run
+        // does, and counting only the good ones would make how much of the
+        // file was touched depend on how much of it was wrong.
+        if reachedLimit(limit, taken) {
           reading = false
           continue
         }
-        read += 1
+        taken += 1
         match step(state, line, number) {
           Ok(produced) => {
+            read += 1
             state = produced.state
             for row in produced.rows {
               emit(sink, renderRow(format, columns, row))?
@@ -91,7 +101,6 @@ export fn transform<S>(
               return Err(Error(describe(locate(detail, source, number))))
             }
             println(describe(locate(detail, source, number)))?
-            read -= 1
             skipped += 1
           }
         }
@@ -113,10 +122,10 @@ fn emit(sink: Sink, line: String) -> Result<Unit, Error> {
   }
 }
 
-/// Whether `read` records is as many as this run was asked for.
-fn reachedLimit(limit: Option<Int>, read: Int) -> Bool {
+/// Whether `taken` records is as many as this run was asked for.
+fn reachedLimit(limit: Option<Int>, taken: Int) -> Bool {
   match limit {
-    Some(most) => read >= most
+    Some(most) => taken >= most
     None => false
   }
 }

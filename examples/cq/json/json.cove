@@ -171,7 +171,10 @@ fn parseValue(var scan: Scanner, depth: Int) -> Result<Json, Detail> {
   if head == "" {
     return Err(scan.fail("a JSON value was expected and the line ended"))
   }
-  parseNumber(var scan)
+  if head == "-" || isDigit(head) {
+    return parseNumber(var scan)
+  }
+  Err(scan.fail("`{head}` does not start a JSON value"))
 }
 
 /// Parses `{ ... }` at `depth` levels of nesting.
@@ -261,6 +264,14 @@ fn parseText(var scan: Scanner) -> Result<String, Detail> {
     if character == "" {
       return Err(scan.fail("this string was never closed"))
     }
+    // JSON writes a character below U+0020 as an escape and never as itself.
+    // A string sorts before `" "` exactly when its one character does, so this
+    // is the code-point test written the only way Cove can write it.
+    if character < " " {
+      return Err(scan.fail(
+        "a string may not hold an unescaped control character",
+      ))
+    }
     if character == "\"" {
       scan.take()
       reading = false
@@ -308,42 +319,101 @@ fn escape(var scan: Scanner) -> Result<String, Detail> {
   }
 }
 
-/// Parses a number, which is every value that is not one of the other five.
+/// Parses a number, at a `-` or a digit.
+///
+/// The grammar is checked here rather than left to `Float.parse`, because the
+/// two do not agree. `Float.parse` accepts `+1`, `01`, `.5`, and `1.`, and JSON
+/// accepts none of the four; handing it the decision would mean reading each of
+/// them as a number JSON never wrote, which is accepting bad input as a
+/// different value rather than refusing it. So this walks
+/// `[-] int [frac] [exp]` and `Float.parse` is left with text it has already
+/// been told is a number.
 fn parseNumber(var scan: Scanner) -> Result<Json, Detail> {
   let start = scan.at
-  var digits = ""
-  var reading = true
-  while reading {
-    let character = scan.peek()
-    if isNumeric(character) {
-      digits = "{digits}{character}"
-      scan.take()
-    } else {
-      reading = false
+  var text = ""
+  if scan.peek() == "-" {
+    text = "-"
+    scan.take()
+  }
+  let leading = scan.peek()
+  if !isDigit(leading) {
+    return Err(scan.fail("a number needs a digit here"))
+  }
+  text = "{text}{leading}"
+  scan.take()
+  // JSON has no leading zeroes, so `0` is the whole of an integer part that
+  // starts with one. Saying that here rather than letting the `0` parse and
+  // the rest become the caller's problem is what makes `01` report itself.
+  if leading == "0" {
+    if isDigit(scan.peek()) {
+      return Err(scan.fail("a number may not have a leading zero"))
     }
+  } else {
+    text = "{text}{digitsAt(var scan)}"
   }
-  if digits.isEmpty() {
-    return Err(scan.fail("`{scan.peek()}` does not start a JSON value"))
+  if scan.peek() == "." {
+    scan.take()
+    if !isDigit(scan.peek()) {
+      return Err(scan.fail("a decimal point needs a digit after it"))
+    }
+    text = "{text}.{digitsAt(var scan)}"
   }
-  match Float.parse(digits) {
-    Ok(number) => Ok(Json.Number(number))
-    Err(_) => Err(Detail(
-      column: start + 1,
-      message: "`{digits}` is not a number",
-    ))
+  let exponent = scan.peek()
+  if exponent == "e" || exponent == "E" {
+    scan.take()
+    var sign = ""
+    if scan.peek() == "+" || scan.peek() == "-" {
+      sign = scan.peek()
+      scan.take()
+    }
+    if !isDigit(scan.peek()) {
+      return Err(scan.fail("an exponent needs a digit after it"))
+    }
+    text = "{text}e{sign}{digitsAt(var scan)}"
+  }
+  match Float.parse(text) {
+    Ok(number) => {
+      if isFinite(number) {
+        Ok(Json.Number(number))
+      } else {
+        Err(Detail(column: start + 1, message: "`{text}` is too large for a `Float` to hold"))
+      }
+    }
+    Err(_) => Err(
+      Detail(column: start + 1, message: "`{text}` is not a number"),
+    )
   }
 }
 
-/// Whether `character` may appear in a JSON number.
+/// Consumes the run of digits at the cursor, which may be empty.
+fn digitsAt(var scan: Scanner) -> String {
+  var digits = ""
+  while isDigit(scan.peek()) {
+    digits = "{digits}{scan.peek()}"
+    scan.take()
+  }
+  digits
+}
+
+/// Whether `value` is a real number rather than an infinity or `NaN`.
 ///
-/// This admits more than JSON does -- `1-2` and `1e` both pass -- because the
-/// shape of the run is checked once, by `Float.parse`, rather than twice.
-fn isNumeric(character: String) -> Bool {
-  if character.isEmpty() {
+/// A grammatical number can still be one `Float` cannot hold: `1e999` parses
+/// and answers `inf`, which is not a number any input meant. Cove has no
+/// `isNaN` or `isInfinite`, so this asks both questions directly -- `NaN` is
+/// the only value not equal to itself, and the only values past the largest
+/// finite `Float` are the two infinities.
+fn isFinite(value: Float) -> Bool {
+  if value != value {
     return false
   }
-  character >= "0" && character <= "9" || character == "-" || character == "+" ||
-    character == "." || character == "e" || character == "E"
+  value <= 1.7976931348623157e308 && value >= -1.7976931348623157e308
+}
+
+/// Whether `character` is one of `0` to `9`.
+///
+/// The empty string stands for the end of the text, and is not a digit.
+fn isDigit(character: String) -> Bool {
+  !character.isEmpty() && character >= "0" && character <= "9"
 }
 
 // ------------------------------------------------------------------ printing

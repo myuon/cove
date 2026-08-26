@@ -686,6 +686,44 @@ fn cq_stops_after_the_limit_it_was_given() {
     );
 }
 
+/// `--limit` bounds the records taken from the input, sound or not, so a run
+/// over a file with a bad record among the first three takes those three and
+/// stops: two read, one skipped.
+///
+/// The meaning was chosen over counting only the records that were good. A
+/// limit is a bound on the work the run does, and counting the good ones would
+/// make how much of the file was touched depend on how much of it was wrong —
+/// `--limit 3` over a file whose first hundred lines are malformed would read a
+/// hundred and three of them. That is a bound the person who wrote `3` cannot
+/// predict, so the count is of records taken.
+#[test]
+fn cq_counts_the_records_it_took_against_the_limit_not_the_good_ones() {
+    let ran = cq(
+        &[
+            "bookings-malformed.jsonl",
+            "--program",
+            "confirmed-bookings",
+            "--skip-invalid",
+            "--limit",
+            "3",
+        ],
+        file("bookings-malformed.jsonl", MALFORMED),
+    );
+
+    assert!(ok(&ran.value).eq_value(&Value::Unit), "{}", ran.value);
+    assert_eq!(
+        ran.console,
+        [
+            r#"{"checkIn":"2026-03-01","guest":"Ada Lovelace","id":"B-0001","nights":3,"property":"seaside-cottage","revenue":388.5}"#,
+            r#"{"checkIn":"2026-03-02","guest":"Grace Hopper","id":"B-0002","nights":2,"property":"harbour-loft","revenue":368}"#,
+            "bookings-malformed.jsonl:3:1: `nights` must be a number, and is a string",
+            "cq: read 2 records and skipped 1, wrote 2 rows to the console",
+        ],
+        "{:?}",
+        ran.console
+    );
+}
+
 /// A record this program cannot read stops the run, and the failure it
 /// answers is the `file:line:column: message` an editor can jump to.
 ///
@@ -820,7 +858,7 @@ fn cq_prints_its_usage_when_asked_for_help() {
             "  --input <path>          the file to read, if not given first",
             "  --output <path>         write here instead of the console",
             "  --output-format <name>  `jsonl` or `csv`; each program has a default",
-            "  --limit <count>         stop after this many records",
+            "  --limit <count>         stop after taking this many records, sound or not",
             "  --skip-invalid          report a bad record and keep going",
             "  --help                  this text",
         ],

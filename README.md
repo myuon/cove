@@ -145,11 +145,13 @@ has since attached five gates to.
 
 `examples/cq/` is the first program here large enough to say what any of that
 costs. It reads 100,000 JSON Lines records, parses and validates each into a
-type it declares, aggregates them, and writes CSV — and it does so with a peak
-heap of zero bytes, eight allocations, and one collection over a 17 MB input,
-which is what the streaming file resources
-([ADR 0018](docs/adr/0018-streaming-file-io.md)) were added for. It also takes
-107 seconds. Reading the file is 0.59 s of that and the interpreted
+type it declares, aggregates them, and writes CSV — and over a 17 MB input it
+leaves the collector's own heap at zero bytes, with eight allocations and one
+collection, which is what the streaming file resources
+([ADR 0018](docs/adr/0018-streaming-file-io.md)) were added for. That number is
+the managed heap rather than the process's memory, and `examples/cq/README.md`
+says what it does and does not cover. It also takes
+112 seconds. Reading the file is 0.59 s of that and the interpreted
 per-character loop is the rest, which
 [issue #99](https://github.com/myuon/cove/issues/99) records with its
 measurements: reaching one character costs about 1.4 µs, and calling a method

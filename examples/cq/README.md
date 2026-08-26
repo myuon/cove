@@ -117,6 +117,22 @@ cq: read 7 records and skipped 3, wrote 3 rows to the console
 of the wrong type, JSON that does not parse, a missing required field, and a
 blank line, which is skipped silently because a blank line is not a record.
 
+`--limit <count>` bounds the records taken from the input, sound or not. That
+is the meaning a limit wants: it bounds the work the run does, and counting
+only the good records would make how much of the file was touched depend on how
+much of it was wrong.
+
+Both parsers refuse rather than guess, and the distinction they are built
+around is between input a format does not cover and input a format spells
+differently. `"a"x` is not an unsupported CSV field, it is a field the naive
+reading turns into `ax` — a different value — so a quoted field must end at a
+`,` or at the end of the record. `01`, `+1`, `.5`, and `1.` are not numbers
+JSON writes, and `Float.parse` reads all four, so `cq.json` walks JSON's own
+number grammar instead of delegating the judgement; `1e999` is grammatical and
+still refused, because the `inf` it parses to is not a number any input meant.
+A data tool that quietly turns one record in a hundred thousand into a
+different record is worse than one that stops.
+
 The diagnostic reads `file:line:column: message`, so an editor that already
 knows how to jump to a compiler error can jump to a bad record. A syntax error
 carries a real column; a validation error always says column 1, and that is a
@@ -139,7 +155,7 @@ Each directory is a module.
 | --- | --- |
 | `cq` | the CLI: `main.cove` runs one transformation, `options.cove` reads the command line, `sample.cove` generates measurable input |
 | `cq.json` | a recursive `Json` value, a parser that reports a column, and a renderer |
-| `cq.csv` | RFC 4180 field splitting and formatting |
+| `cq.csv` | RFC 4180 field splitting and formatting, as a four-state machine |
 | `cq.diag` | a `Detail` a parser can report, and the `Diagnostic` it becomes once the line is known |
 | `cq.records` | the typed `Booking` and `Status`, and the validation that produces them |
 | `cq.rows` | `Cell`, `Format`, and the rendering that makes one row go out as either |
@@ -189,20 +205,37 @@ $ cove run cq --files-root cq/data --stats -- bookings-large.jsonl \
     --program revenue-summary --output summary-large.csv
 ```
 
-| run | records | wall | records/s | peak heap | allocations | collections | GC pause | host calls | irreversible writes |
+| run | records | wall | records/s | peak Cove heap | allocations | collections | GC pause | host calls | irreversible writes |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| generate 100,000 records | 100,000 | 3.50 s | 28,600 | 106 B | 100,000 | 1,563 | 4.57 ms | 100,004 | 100,002 |
-| `revenue-summary` → CSV | 100,000 | 107.5 s | 930 | **0 B** | 8 | 1 | 5.70 µs | 100,011 | 6 |
-| `confirmed-bookings` → 66,825 JSON Lines | 100,000 | 115.6 s | 865 | 6,661 B | 66,825 | 1,045 | 13.5 ms | 166,832 | 66,827 |
+| generate 100,000 records | 100,000 | 3.48 s | 28,700 | 106 B | 100,000 | 1,563 | 4.65 ms | 100,004 | 100,002 |
+| `revenue-summary` → CSV | 100,000 | 111.5 s | 900 | **0 B** | 8 | 1 | 2.72 µs | 100,011 | 6 |
+| `confirmed-bookings` → 66,825 JSON Lines | 100,000 | 120.5 s | 830 | 6,661 B | 66,825 | 1,045 | 14.9 ms | 166,832 | 66,827 |
+
+Wall time is the median of three runs, which vary by well under a second once
+the file is in the page cache; everything else is identical from run to run,
+because the interpreter's work is.
+
+**What "peak Cove heap" is, and is not.** It is `--stats`'s `peak_bytes`, which
+is the mark-and-sweep collector's own heap — what a `Vector`, a `Map`, a
+closure, or a task's state occupies. It is not the process's resident memory. A
+`String` is a reference-counted allocation outside the collector, and so are
+the reader's buffer and whatever the host holds, and none of the three appears
+in this number. Read it as what the collector was asked to manage, which is the
+only memory Cove's own numbers can speak for.
 
 The first column of that table is the point and the second is the problem.
 
-**The streaming property holds exactly.** A run that reads 17 MB and aggregates
-it reports a peak heap of *zero bytes*, eight allocations, and one collection.
-Nothing about the input outlives the line it arrived on. Filtering to 66,825
-output records peaks at 6.7 KB — one row at a time — rather than at the 7.9 MB
-it wrote. This is what `files.open` was added for
-([ADR 0018](../../docs/adr/0018-streaming-file-io.md)), and it works.
+**Nothing the program builds outlives the line it was built from.** Two
+separate things say so, and they are worth keeping separate. The measurement:
+aggregating 100,000 records over a 17 MB input leaves the collector's heap at
+zero bytes, with eight allocations and one collection, and filtering to 66,825
+output records peaks at 6.7 KB rather than at the 7.9 MB it wrote. The
+structure: the loop holds one line, one step's rows, and the transformation's
+state, and each transformation's state is bounded by something other than the
+length of the input — one entry per property for the aggregation, a count for
+the filter. The first is evidence for the second rather than a proof of it,
+since the numbers do not cover `String`. This is what `files.open` was added
+for ([ADR 0018](../../docs/adr/0018-streaming-file-io.md)), and it holds.
 
 **Throughput is about 900 records a second**, and that is slow. Where it goes,
 measured by running the same loop with each stage added:
@@ -210,13 +243,18 @@ measured by running the same loop with each stage added:
 | stage | wall | added |
 | --- | ---: | ---: |
 | read 100,000 lines and take their length | 0.59 s | — |
-| ... and call `chars()` on each | 2.08 s | 1.5 s |
-| ... and parse each as JSON | 101.6 s | **99.5 s** |
-| ... and validate each into a `Booking` | 108.5 s | 6.9 s |
+| ... and call `chars()` on each | 2.09 s | 1.5 s |
+| ... and parse each as JSON | 101.9 s | **99.8 s** |
+| ... and validate each into a `Booking` | 111.2 s | 9.3 s |
 
 Host I/O is not the cost: reading 17 MB a line at a time takes 0.59 s, which is
 29 MB/s through 100,000 grant-checked, schema-checked, budget-charged Host API
 calls. The cost is the interpreted per-character loop, and it is 99% of the run.
+
+Checking JSON's number grammar rather than delegating it to `Float.parse` is
+part of that 99% and costs about 2.5% of the run's fuel — which is what
+refusing `01` and `1e999` is worth paying, and cheap next to what the scanner
+was already spending.
 
 ## Findings
 
@@ -282,6 +320,15 @@ it. Nothing had to be threaded by hand.
 A `var` parameter is a genuine inout alias, so the scanner threads through the
 recursive parser without copying — it is the `self` receivers, not the
 parameters, that cost.
+
+Exhaustive `match` over a small enum is what made the CSV splitter right.
+Review found that the first version, which tracked quoting with a `Bool`, read
+`"a"x` as `ax`: after the closing quote it was back in the state an unquoted
+field begins in, and nothing said that was wrong. Naming the four states —
+start of a field, inside an unquoted one, inside a quoted one, and just past a
+closing quote — turned an implicit fall-through into an arm the checker made
+somebody write. The bug was not that a state was handled badly; it was that a
+state had no name.
 
 ### Gaps this example is blocked on or lives with
 

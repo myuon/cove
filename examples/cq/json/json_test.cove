@@ -161,15 +161,132 @@ test fn refusesALiteralThatIsNotOneOfTheThree() -> Result<Unit, Error> {
   Ok(())
 }
 
-/// A run of number characters that does not spell a number is refused, and
-/// the column points at where the run started rather than where it ended.
+/// A number that stops early is refused where it stopped.
 ///
-/// The parser admits more characters into the run than JSON does and lets
-/// `Float.parse` be the one judge of it, so this is the diagnostic that
-/// covers everything that admits.
+/// The scanner stops at the end of the number rather than gathering every
+/// character that could appear in one, so `1-2` is a number followed by
+/// something the line had no room for rather than one malformed run.
 test fn refusesARunThatIsNotANumber() -> Result<Unit, Error> {
-  assertEqual(failure("1-2"), "1: `1-2` is not a number")?
-  assertEqual(failure("[ 1e]"), "3: `1e` is not a number")?
+  assertEqual(failure("1-2"), "2: this line has more after the JSON value")?
+  assertEqual(failure("[ 1e]"), "5: an exponent needs a digit after it")?
+  Ok(())
+}
+
+/// A number must be spelled the way JSON spells one, and a run that is not is
+/// refused rather than read as the number it resembles.
+///
+/// `+1`, `01`, `.5`, and `1.` are each a `Float` literal Cove's `Float.parse`
+/// accepts and JSON does not write. Leaving the judgement to `Float.parse`
+/// therefore read every one of them as a value the input never held -- bad
+/// input accepted as a different value, not an unsupported spelling refused --
+/// so the grammar `[-] int [frac] [exp]` is walked here instead.
+test fn refusesANumberJsonWouldNotWrite() -> Result<Unit, Error> {
+  assertEqual(failure("+1"), "1: `+` does not start a JSON value")?
+  assertEqual(failure(".5"), "1: `.` does not start a JSON value")?
+  assertEqual(failure("01"), "2: a number may not have a leading zero")?
+  assertEqual(failure("1."), "3: a decimal point needs a digit after it")?
+  Ok(())
+}
+
+/// The same rule holds for a number inside a record, and the column counts
+/// from the start of the line rather than from the start of the number.
+///
+/// A diagnostic an editor can jump to is the whole point of carrying a column,
+/// and a number is nearly always found inside something else.
+test fn refusesALeadingZeroInsideARecord() -> Result<Unit, Error> {
+  assertEqual(
+    failure("\{\"a\":01\}"),
+    "7: a number may not have a leading zero",
+  )?
+  Ok(())
+}
+
+/// An exponent needs a digit after it, whether the line ended first or a sign
+/// was all that followed, and the column names where the digit should be.
+test fn refusesAnExponentWithNoDigit() -> Result<Unit, Error> {
+  assertEqual(failure("1e"), "3: an exponent needs a digit after it")?
+  assertEqual(failure("1e+"), "4: an exponent needs a digit after it")?
+  assertEqual(failure("[ 1e]"), "5: an exponent needs a digit after it")?
+  Ok(())
+}
+
+/// A `-` with no digit after it is refused where the digit should be, rather
+/// than read as a zero or as the start of something else.
+test fn refusesASignWithNoDigit() -> Result<Unit, Error> {
+  assertEqual(failure("-"), "2: a number needs a digit here")?
+  Ok(())
+}
+
+/// A number JSON spells correctly and a `Float` cannot hold is refused at the
+/// column the number started on.
+///
+/// `1e999` passes the grammar and parses to an infinity, which is not a value
+/// any input meant. Answering it would be this program inventing a number the
+/// file does not contain, so `isFinite` refuses it and the record is reported
+/// like any other bad one.
+test fn refusesANumberTooLargeForAFloat() -> Result<Unit, Error> {
+  assertEqual(failure("1e999"), "1: `1e999` is too large for a `Float` to hold")?
+  assertEqual(
+    failure("-1e999"),
+    "1: `-1e999` is too large for a `Float` to hold",
+  )?
+  Ok(())
+}
+
+/// Every number JSON does write is read as the number it names, because a
+/// grammar checked by hand has to be pinned from both sides: one that refuses
+/// `01` and also refuses `0` would be no better than the one it replaced.
+///
+/// Each answer is the text the value renders back to rather than the text it
+/// arrived as, so `-0` is `0` and an exponent is its value written out.
+test fn readsEveryNumberJsonDoesWrite() -> Result<Unit, Error> {
+  assertEqual(roundTrip("0"), "0")?
+  assertEqual(roundTrip("-0"), "0")?
+  assertEqual(roundTrip("0.5"), "0.5")?
+  assertEqual(roundTrip("123"), "123")?
+  assertEqual(roundTrip("-1.25e-3"), "-0.00125")?
+  assertEqual(roundTrip("1E3"), "1000")?
+  assertEqual(roundTrip("1e+3"), "1000")?
+  assertEqual(roundTrip("1e-3"), "0.001")?
+  Ok(())
+}
+
+/// The largest exponent a `Float` holds is read, and comes back as the whole
+/// number it names.
+///
+/// This is where the bound refusing `1e999` sits, so it is worth pinning that
+/// the bound is on the far side of `1e308` rather than anywhere nearer. The
+/// answer is 309 digits because this parser keeps the value and not the
+/// spelling, and it ends in `.0` because the value is past what an `Int` holds
+/// and so is written as the `Float` it is.
+test fn readsTheLargestExponentAFloatHolds() -> Result<Unit, Error> {
+  assertEqual(
+    roundTrip("1e308"),
+    "100000000000000001097906362944045541740492309677311846336810682903157585404911491537163328978494688899061249669721172515611590283743140088328307009198146046031271664502933027185697489699588559043338384466165001178426897626212945177628091195786707458122783970171784415105291802893207873272974885715430223118336.0",
+  )?
+  Ok(())
+}
+
+/// A control character inside a string is refused where it stands, and its
+/// escape is read as the character it names.
+///
+/// JSON writes every character below U+0020 as an escape and never as itself,
+/// so a literal tab between two quotes is a string JSON did not write. Reading
+/// it anyway would put a value into the program that the file does not hold,
+/// which is the same defect as accepting `"a"x` in a CSV: bad input taken as a
+/// different value rather than refused. The escaped forms still round trip, so
+/// what is refused is the spelling and not the character.
+test fn refusesAnUnescapedControlCharacter() -> Result<Unit, Error> {
+  assertEqual(
+    failure("\"a\tb\""),
+    "3: a string may not hold an unescaped control character",
+  )?
+  assertEqual(roundTrip("\"a\\tb\""), "\"a\\tb\"")?
+  assertEqual(
+    failure("\"a\rb\""),
+    "3: a string may not hold an unescaped control character",
+  )?
+  assertEqual(roundTrip("\"a\\rb\""), "\"a\\rb\"")?
   Ok(())
 }
 

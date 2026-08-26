@@ -170,6 +170,10 @@ module cq.pipeline
   /// hundred thousand chances to be told something, and a report that kept them
   /// would be the thing this program exists not to do; each diagnostic is
   /// written when it happens and only the tally outlives it.
+  ///
+  /// `read` counts the records that folded and `skipped` the ones that did not,
+  /// so the two together are how many were taken from the input -- which is what
+  /// `--limit` bounds.
   export struct Outcome
     field read: Int
     field written: Int

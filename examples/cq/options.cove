@@ -117,7 +117,7 @@ fn usage() -> String {
   lines.push(
     "  --output-format <name>  `jsonl` or `csv`; each program has a default",
   )
-  lines.push("  --limit <count>         stop after this many records")
+  lines.push("  --limit <count>         stop after taking this many records, sound or not")
   lines.push("  --skip-invalid          report a bad record and keep going")
   lines.push("  --help                  this text")
   "\n".join(lines.freeze())
