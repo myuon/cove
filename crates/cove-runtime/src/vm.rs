@@ -40,14 +40,15 @@
 //! reaches this, so there is no construct this can be wrong about.
 
 use std::rc::Rc;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use cove_diag::{SourceMap, Span};
 use cove_ir::{
     BinaryOp as IrBinary, Const, ConstId, Function, FunctionId, Inst, Program, UnaryOp as IrUnary,
 };
-use cove_schema::builtins::{free_builtin, FreeBuiltinKind, NONE_CASE, OPTION, RESULT};
-use cove_syntax::ast::{BinaryOp, UnaryOp};
+use cove_schema::builtins::{free_builtin, FreeBuiltinKind, MAP_ENTRY, NONE_CASE, OPTION, RESULT};
+use cove_syntax::ast::{BinaryOp, EnumDecl, UnaryOp};
 
 use crate::budget::{Cancellation, Stopped};
 use crate::builtins::{self, Callable};
@@ -118,6 +119,21 @@ struct StructShape {
     opaque: bool,
 }
 
+/// What a `MakeEnum` builds a case of, worked out once for the whole run.
+///
+/// A `MakeEnum` names its type with one constant holding the qualified name,
+/// and the declaration behind that name does not change between two of them,
+/// so one entry per type constant is a complete table. The declaration is
+/// what says which cases exist and how much payload each carries, and it is
+/// the checker's answer rather than the IR's — read here exactly as
+/// `Interpreter::find_enum` reads it, and read once.
+struct EnumShape {
+    /// The module that declares the enum, which is the first half of the
+    /// qualified name the built value carries.
+    module: Rc<str>,
+    decl: Arc<EnumDecl>,
+}
+
 /// Runs a lowered program.
 ///
 /// One VM runs one entry on one thread. Everything shared with the rest of
@@ -140,6 +156,8 @@ pub struct Vm<'a> {
     /// One entry per constant, filled for the constants a `MakeStruct` names
     /// its type with and empty everywhere else.
     shapes: Vec<Option<StructShape>>,
+    /// The same table for the enums a `MakeEnum` builds a case of.
+    enums: Vec<Option<EnumShape>>,
     /// This run's heap.
     ///
     /// Nothing the lowering covers allocates growable storage — `Vector.of`
@@ -184,6 +202,7 @@ impl<'a> Vm<'a> {
             stack: Vec::new(),
             frames: Vec::new(),
             shapes: struct_shapes(runtime, program),
+            enums: enum_shapes(runtime, program),
             heap: Heap::new(),
             fuel: 0,
             stops: Vec::new(),
@@ -575,6 +594,83 @@ impl<'a> Vm<'a> {
                     let value = self.make_builtin(which, values, running.arg_spans_at(pc), span)?;
                     self.stack.push(value);
                 }
+                Inst::MakeEnum { ty, case, argc } => {
+                    let span = running.span_at(pc);
+                    let case = name(program, case);
+                    let payload = self.take(argc as usize);
+                    let shape = self.enums[ty.0 as usize]
+                        .as_ref()
+                        .expect("every `make-enum` names an enum this VM shaped");
+                    // The oracle's own constructor, so a case that does not
+                    // exist and a payload of the wrong length are reported in
+                    // the words `Interpreter::enum_case` reports them in.
+                    let value = crate::interp::enum_case(
+                        self.runtime.program(),
+                        &shape.module,
+                        &shape.decl,
+                        case,
+                        payload,
+                        span,
+                    )?;
+                    // A case is built from its payload, so what it costs
+                    // follows how much payload there was.
+                    self.fuel += u64::from(argc);
+                    self.stack.push(value);
+                }
+                Inst::CallBuiltinAssoc {
+                    ty,
+                    name: which,
+                    argc,
+                } => {
+                    let span = running.span_at(pc);
+                    let ty = name(program, ty);
+                    let which = name(program, which);
+                    let values = self.take(argc as usize);
+                    let value = builtins::call_associated(self, ty, which, values, span)?;
+                    // `Vector.of` and `Map.of` are variadic and build one
+                    // element per argument, so the arguments are what the
+                    // cost follows rather than the one instruction.
+                    self.fuel += u64::from(argc);
+                    self.stack.push(value);
+                }
+                Inst::TestCase(case) => {
+                    let case = name(program, case);
+                    let subject = self.stack.last().expect("`test-case` has a value to test");
+                    self.stack.push(Value::Bool(is_case(subject, case)));
+                }
+                Inst::GetPayload(index) => {
+                    let span = running.span_at(pc);
+                    let subject = self
+                        .stack
+                        .last()
+                        .expect("`get-payload` has a value to read");
+                    let Value::Enum(held) = subject else {
+                        return Err(not_an_enum(subject, span));
+                    };
+                    let Some(found) = held.payload.get(index as usize).cloned() else {
+                        return Err(no_payload(&held.case, held.payload.len(), index, span));
+                    };
+                    self.stack.push(found);
+                }
+                Inst::IterItems => {
+                    let span = running.span_at(pc);
+                    let value = self.pop();
+                    // The oracle's own iteration, so a `Map` walks as the
+                    // `MapEntry` of each pair, a `Set` in ascending order,
+                    // and a value no `for` can walk is refused in the words
+                    // `items_of` refuses it in.
+                    let items = crate::interp::items_of(value, span)?;
+                    // One element is one unit of work, so what the walk costs
+                    // follows how many there were rather than the one
+                    // instruction that asked.
+                    self.fuel += items.len() as u64;
+                    self.stack.push(Value::Array(items.into()));
+                }
+                Inst::NoMatch => {
+                    let span = running.span_at(pc);
+                    let value = self.pop();
+                    return Err(crate::interp::no_match(&value, span));
+                }
                 Inst::Try => {
                     let span = running.span_at(pc);
                     let value = self.pop();
@@ -775,6 +871,23 @@ impl<'a> Vm<'a> {
             // than as a call, so it is a value and not a constructor.
             return Ok(Value::none());
         }
+        if which == MAP_ENTRY.name {
+            // The one builtin struct a program builds by calling its name.
+            // `init_map_entry` puts the arguments in declaration order and
+            // then fills the fields in that order; `arguments_in_order` did
+            // the first half at lowering time, so what is left is the second.
+            let fields: Vec<(Rc<str>, Value)> = MAP_ENTRY
+                .fields
+                .iter()
+                .map(|field| Rc::from(field.name))
+                .zip(values)
+                .collect();
+            return Ok(Value::Struct(Rc::new(StructValue {
+                type_name: MAP_ENTRY.name.into(),
+                fields,
+                opaque: false,
+            })));
+        }
         let assertion =
             free_builtin(which).is_some_and(|schema| schema.kind == FreeBuiltinKind::Assertion);
         if !assertion {
@@ -964,6 +1077,103 @@ fn is_opaque(runtime: &Runtime, qualified: &str) -> bool {
         .is_some_and(|entry| entry.opaque)
 }
 
+/// The declaration behind every enum the program builds a case of, worked
+/// out once.
+///
+/// A `MakeEnum` the checker's tables have no enum for cannot arise — the
+/// lowering read the name out of those same tables — so an absent entry is a
+/// broken invariant rather than a program that could be told about it, and
+/// the dispatch says so where it reads one.
+fn enum_shapes(runtime: &Runtime, program: &Program) -> Vec<Option<EnumShape>> {
+    let mut shapes: Vec<Option<EnumShape>> = (0..program.constants.len()).map(|_| None).collect();
+    for function in &program.functions {
+        for inst in &function.code {
+            let Inst::MakeEnum { ty, .. } = *inst else {
+                continue;
+            };
+            if shapes[ty.0 as usize].is_some() {
+                continue;
+            }
+            let qualified = name(program, ty);
+            let Some((module, short)) = qualified.rsplit_once('.') else {
+                continue;
+            };
+            let Some(entry) = runtime
+                .program()
+                .modules
+                .get(module)
+                .and_then(|resolved| resolved.enums.get(short))
+            else {
+                continue;
+            };
+            shapes[ty.0 as usize] = Some(EnumShape {
+                module: module.into(),
+                decl: entry.decl.clone(),
+            });
+        }
+    }
+    shapes
+}
+
+/// Whether `value` is the enum case `tested` names.
+///
+/// `tested` is a case alone, or a type's short name and a case. The pair is
+/// what `Interpreter::match_pattern` compares when a pattern wrote a path of
+/// two or more segments: the case name always, and the short name of the
+/// enum's own type as well, so that one enum's `Confirmed` does not match
+/// another's. A value that is not an enum at all matches neither, which is
+/// the `else` that pattern begins with.
+fn is_case(value: &Value, tested: &str) -> bool {
+    let Value::Enum(subject) = value else {
+        return false;
+    };
+    let (expected_type, case) = match tested.rsplit_once('.') {
+        Some((type_name, case)) => (Some(type_name), case),
+        None => (None, tested),
+    };
+    if &*subject.case != case {
+        return false;
+    }
+    match expected_type {
+        // A declared enum carries `{module}.{Enum}` and a builtin carries its
+        // name alone, so the short name is what the two have in common — and
+        // it is what the pattern wrote.
+        Some(expected) => {
+            subject
+                .type_name
+                .rsplit('.')
+                .next()
+                .unwrap_or(&subject.type_name)
+                == expected
+        }
+        None => true,
+    }
+}
+
+/// A payload was asked of something that is not an enum.
+///
+/// Nothing a checked program can write reaches this: a `get-payload` is
+/// emitted only after the `test-case` above it said the value is the case
+/// this pattern binds out of. It is reported rather than assumed because the
+/// VM reads what it is given, and a wrong answer would be read as a value.
+fn not_an_enum(value: &Value, span: Span) -> RuntimeError {
+    RuntimeError::new(format!(
+        "a payload was read from `{}`, which is not an enum",
+        value.type_name()
+    ))
+    .at(span)
+    .with_rule("A pattern binds out of the case it has already matched.")
+}
+
+/// A payload was asked for that the case does not carry.
+fn no_payload(case: &str, carried: usize, index: u32, span: Span) -> RuntimeError {
+    RuntimeError::new(format!(
+        "case `{case}` carries {carried} value(s), but value {index} was read"
+    ))
+    .at(span)
+    .with_rule("A pattern binds out of the case it has already matched.")
+}
+
 /// The way back into a VM run that a host call was handed.
 ///
 /// Nothing the lowering covers can build a closure, so no host call this
@@ -1063,7 +1273,7 @@ mod tests {
     use std::path::PathBuf;
     use std::sync::{Arc, Mutex};
 
-    use cove_diag::SourceMap;
+    use cove_diag::{FileId, SourceMap};
     use cove_sema::config::Config;
     use cove_sema::package::{Module, Package, Unit};
     use cove_sema::resolve::Program as Checked;
@@ -1429,8 +1639,18 @@ mod tests {
         );
     }
 
+    /// A `for` walks every collection the language has, and walks each one
+    /// the way the interpreter does.
+    ///
+    /// All five are here rather than a sequence and a range, because the two
+    /// that are not indexable are exactly the two an index walk was wrong
+    /// about: a `Map` answers neither `length()` nor `get(i)`, and a `Set`
+    /// answers `length()` but not `get(i)`. `iter-items` asks the oracle's
+    /// own iteration what the loop walks, so what the VM walks is what the
+    /// interpreter walks by construction, and these assert it.
     #[test]
-    fn a_for_walks_a_range_and_a_sequence() {
+    fn a_for_walks_every_collection_the_way_the_interpreter_walks_it() {
+        // A range, which builds no value: the loop counts between its bounds.
         assert_eq!(
             agree_main(
                 "Int",
@@ -1447,6 +1667,7 @@ mod tests {
             .value(),
             "Int(15)"
         );
+        // An `Array` and a `Vector`, the two sequences.
         assert_eq!(
             agree_main(
                 "Int",
@@ -1455,6 +1676,60 @@ mod tests {
             .value(),
             "Int(12)"
         );
+        assert_eq!(
+            agree_main(
+                "Int",
+                "  var total = 0\n  for n in Vector.of(3, 4, 5) {\n    total += n\n  }\n  total"
+            )
+            .value(),
+            "Int(12)"
+        );
+        // A `Set`, in ascending element order rather than in the order it was
+        // written, which is why the elements are joined rather than added.
+        assert_eq!(
+            agree_main(
+                "String",
+                "  var joined = \"\"\n  for n in Set.of(3, 1, 2) {\n    joined = \"{joined}{n}\"\n  }\n  joined"
+            )
+            .value(),
+            "Str(\"123\")"
+        );
+        // A `Map`, as the `MapEntry` of each pair in ascending key order. The
+        // binding's `key` and `value` are read in the body, because that
+        // shape is what the interpreter binds and a loop that bound anything
+        // else would still count two iterations.
+        assert_eq!(
+            agree_main(
+                "String",
+                "  var pairs = \"\"\n  let ages = Map.of(MapEntry(key: \"b\", value: 2), MapEntry(key: \"a\", value: 1))\n  for entry in ages {\n    pairs = \"{pairs}{entry.key}={entry.value};\"\n  }\n  pairs"
+            )
+            .value(),
+            "Str(\"a=1;b=2;\")"
+        );
+    }
+
+    /// An empty collection is walked zero times, whatever it is empty of.
+    ///
+    /// Zero is the length the loop's first test reads, so the body never
+    /// runs and nothing is bound — and that has to hold for the collections
+    /// whose emptiness `iter-items` reports as an empty `Array` rather than
+    /// as a zero `length()`.
+    #[test]
+    fn an_empty_collection_is_walked_zero_times() {
+        let cases: &[&str] = &["[]", "Vector.of()", "Set.of()", "Map.of()", "0..<0"];
+        for iterable in cases {
+            assert_eq!(
+                agree_main(
+                    "Int",
+                    &format!(
+                        "  var seen = 0\n  for item in {iterable} {{\n    seen += 1\n  }}\n  seen"
+                    )
+                )
+                .value(),
+                "Int(0)",
+                "for `{iterable}`"
+            );
+        }
     }
 
     #[test]
@@ -1802,6 +2077,179 @@ mod tests {
         );
     }
 
+    // ---------------------------------------------- enums and `match`
+
+    const STATUS: &str = "enum Status {\n  Confirmed\n  Pending(Int)\n}\n\n";
+
+    /// Every case of a declared enum, built and rendered.
+    #[test]
+    fn a_declared_enum_case_is_built_the_way_the_interpreter_builds_it() {
+        assert_eq!(
+            agree(&format!(
+                "{STATUS}export fn main() -> String {{\n  \"{{Status.Confirmed}} {{Status.Pending(3)}}\"\n}}\n"
+            ))
+            .value(),
+            "Str(\"Confirmed Pending(3)\")"
+        );
+    }
+
+    /// A case carries the qualified name of the enum that declares it, which
+    /// is what keeps two modules' `Status` two types.
+    #[test]
+    fn a_case_carries_the_qualified_name_of_its_enum() {
+        assert_eq!(
+            agree(&format!(
+                "{STATUS}export fn main() -> Status {{\n  Status.Pending(1)\n}}\n"
+            ))
+            .value(),
+            "Enum(EnumValue { type_name: \"m.Status\", case: \"Pending\", payload: [Int(1)] })"
+        );
+    }
+
+    /// An associated function declared in an `impl` block is a call, and a
+    /// case of the same enum is not — the order `Interpreter::eval_call`
+    /// asks in, reproduced.
+    #[test]
+    fn an_associated_function_of_an_enum_is_called_and_a_case_is_built() {
+        let source = format!(
+            "{STATUS}impl Status {{\n  fn start() -> Status {{\n    Status.Pending(0)\n  }}\n}}\n\nexport fn main() -> String {{\n  \"{{Status.start()}} {{Status.Confirmed}}\"\n}}\n"
+        );
+        assert_eq!(agree(&source).value(), "Str(\"Pending(0) Confirmed\")");
+    }
+
+    /// Every pattern form the language has, over one subject each.
+    #[test]
+    fn every_pattern_form_matches_what_the_interpreter_matches() {
+        let variant = format!(
+            "{STATUS}fn label(s: Status) -> String {{\n  match s {{\n    Status.Confirmed => \"yes\"\n    Status.Pending(n) => \"wait {{n}}\"\n  }}\n}}\n\nexport fn main() -> String {{\n  \"{{label(Status.Confirmed)}} {{label(Status.Pending(4))}}\"\n}}\n"
+        );
+        assert_eq!(agree(&variant).value(), "Str(\"yes wait 4\")");
+
+        // A literal arm, a binder arm, and a `_` arm, in one `match` each.
+        let literal = "fn name(n: Int) -> String {\n  match n {\n    1 => \"one\"\n    -2 => \"minus two\"\n    other => \"many {other}\"\n  }\n}\n\nexport fn main() -> String {\n  \"{name(1)} {name(-2)} {name(9)}\"\n}\n";
+        assert_eq!(agree(literal).value(), "Str(\"one minus two many 9\")");
+
+        let wildcard = "fn small(n: Int) -> Bool {\n  match n {\n    0 => true\n    _ => false\n  }\n}\n\nexport fn main() -> String {\n  \"{small(0)} {small(1)}\"\n}\n";
+        assert_eq!(agree(wildcard).value(), "Str(\"true false\")");
+    }
+
+    /// `Ok(Some(x))`: a pattern two levels deep, matching and failing at each
+    /// of them.
+    #[test]
+    fn a_pattern_nested_two_deep_matches_and_fails_at_each_level() {
+        let source = "fn opened(r: Result<Option<Int>, Error>) -> Int {\n  match r {\n    Ok(Some(x)) => x\n    Err(e) => -1\n    _ => 0\n  }\n}\n\nexport fn main() -> String {\n  let there: Result<Option<Int>, Error> = Ok(Some(7))\n  let nothing: Result<Option<Int>, Error> = Ok(None)\n  let bad: Result<Option<Int>, Error> = Err(Error(message: \"no\"))\n  \"{opened(there)} {opened(nothing)} {opened(bad)}\"\n}\n";
+        assert_eq!(agree(source).value(), "Str(\"7 0 -1\")");
+    }
+
+    /// `None` written as a pattern is a case of `Option` and not a name, so
+    /// it matches the case and nothing else.
+    #[test]
+    fn none_written_as_a_pattern_is_a_case_and_not_a_name() {
+        let source = "fn told(o: Option<Int>) -> Int {\n  match o {\n    None => -1\n    Some(n) => n\n  }\n}\n\nexport fn main() -> String {\n  \"{told(Some(5))} {told(None)}\"\n}\n";
+        assert_eq!(agree(source).value(), "Str(\"5 -1\")");
+    }
+
+    /// The first arm that matches is the only one that runs, even where a
+    /// later one would have matched too.
+    #[test]
+    fn an_earlier_arm_wins_over_a_later_one_that_would_also_match() {
+        let source = "fn which(n: Int) -> String {\n  match n {\n    1 => \"first\"\n    other => \"binder\"\n  }\n}\n\nexport fn main() -> String {\n  \"{which(1)} {which(2)}\"\n}\n";
+        assert_eq!(agree(source).value(), "Str(\"first binder\")");
+    }
+
+    /// An arm's binder is released when the arm ends, so a name declared
+    /// outside the `match` is what a later reference reaches.
+    #[test]
+    fn a_binder_is_out_of_scope_after_its_arm() {
+        let source = "export fn main() -> String {\n  let n = 1\n  let seen = match Some(9) {\n    Some(n) => n\n    None => 0\n  }\n  \"{seen} {n}\"\n}\n";
+        assert_eq!(agree(source).value(), "Str(\"9 1\")");
+    }
+
+    /// A `match` on the result of a `match`, so that one nests inside
+    /// another's arm and inside another's subject.
+    #[test]
+    fn a_match_nests_in_another_matchs_arm_and_subject() {
+        let source = "fn inner(n: Int) -> Option<Int> {\n  match n {\n    0 => None\n    other => Some(other * 2)\n  }\n}\n\nexport fn main() -> String {\n  let outer = match inner(3) {\n    Some(v) => match v {\n      6 => \"six\"\n      _ => \"other\"\n    }\n    None => \"none\"\n  }\n  let nested = match match inner(0) {\n    Some(v) => v\n    None => -1\n  } {\n    -1 => \"empty\"\n    _ => \"full\"\n  }\n  \"{outer} {nested}\"\n}\n";
+        assert_eq!(agree(source).value(), "Str(\"six empty\")");
+    }
+
+    /// A subject no arm covers stops the run, in the interpreter's words.
+    ///
+    /// Exhaustiveness is checked case by case rather than pattern by
+    /// pattern, so `Some(1)` covers `Some` as far as `cove-sema` is
+    /// concerned and a `Some(2)` reaches no arm at run time. That is what
+    /// makes `no-match` a thing a checked program can still arrive at.
+    #[test]
+    fn a_match_that_covers_nothing_stops_both_backends_the_same_way() {
+        let source = "export fn main() -> String {\n  let o: Option<Int> = Some(2)\n  match o {\n    Some(1) => \"one\"\n    None => \"none\"\n  }\n}\n";
+        let outcome = agree(source);
+        assert_eq!(outcome.error().message, "no `match` arm covers `Some(2)`");
+        assert_eq!(
+            outcome.error().help.as_deref(),
+            Some("add an arm for this case, or a `_` arm")
+        );
+    }
+
+    // ----------------------------------- associated functions of builtins
+
+    #[test]
+    fn builtin_associated_functions_answer_what_the_interpreter_answers() {
+        assert_eq!(expression("Int", "Vector.of(1, 2, 3).length()"), "Int(3)");
+        assert_eq!(expression("Int", "Vector.of().length()"), "Int(0)");
+        assert_eq!(expression("Int", "Set.of(3, 1, 2).length()"), "Int(3)");
+        assert_eq!(
+            expression("Int", "Map.of(MapEntry(key: \"a\", value: 1)).length()"),
+            "Int(1)"
+        );
+        assert_eq!(
+            expression("String", "\"{Int.parse(\"12\")}\""),
+            "Str(\"Ok(12)\")"
+        );
+        assert_eq!(
+            expression("String", "\"{Int.parse(\"twelve\")}\""),
+            "Str(\"Err(`twelve` is not an Int)\")"
+        );
+        assert_eq!(
+            expression("String", "\"{Float.parse(\"1.5\")}\""),
+            "Str(\"Ok(1.5)\")"
+        );
+        assert_eq!(
+            expression("String", "\"{Float.parse(\"x\")}\""),
+            "Str(\"Err(`x` is not a Float)\")"
+        );
+    }
+
+    /// A name a builtin type has no associated function for fails through the
+    /// one dispatch both backends make.
+    #[test]
+    fn an_unknown_associated_function_fails_the_way_the_interpreter_fails() {
+        assert_eq!(
+            refused(
+                "Int",
+                "Vector.of(1).length() + Int.parse(\"1\", \"2\").unwrapOr(0)"
+            ),
+            "`Int.parse` takes 1 argument(s), but 2 were given"
+        );
+    }
+
+    /// `MapEntry` is the one builtin struct a program builds by calling its
+    /// name, and its two fields are read back like any other struct's.
+    #[test]
+    fn a_map_entry_is_built_and_read_like_a_struct() {
+        assert_eq!(
+            expression("String", "\"{MapEntry(key: \"a\", value: 1)}\""),
+            "Str(\"MapEntry(key: a, value: 1)\")"
+        );
+        assert_eq!(
+            expression("String", "MapEntry(key: \"a\", value: 1).key"),
+            "Str(\"a\")"
+        );
+        assert_eq!(
+            expression("Int", "MapEntry(key: \"a\", value: 1).value"),
+            "Int(1)"
+        );
+    }
+
     // ------------------------ where a program is refused before it runs
 
     /// What the lowering said when it refused `source`.
@@ -1820,6 +2268,175 @@ mod tests {
     fn only_interpreted(checked: &Arc<Checked>, sources: &Arc<SourceMap>) -> Outcome {
         crate::on_cove_stack(|| interpreted(checked, sources, "m", None))
             .expect("a thread to run Cove on")
+    }
+
+    /// A value no `for` can walk fails in `interp::items_of`'s words on the
+    /// VM, because they *are* its words: `IterItems` calls that function
+    /// rather than restating what it decides.
+    ///
+    /// This does not run both backends from source, because no program can
+    /// reach it on either. `cove-sema` refuses the mistake —
+    /// `cove::type::iterable` — so a checked program has no `for` over a
+    /// value that is not a collection, and there is nothing to lower that
+    /// would arrive at one. What is left to hold is that the floor under a
+    /// checker that stopped proving it is one floor and not two, so the
+    /// instruction is executed over an IR written by hand and the answer is
+    /// compared against the oracle's own function.
+    #[test]
+    fn a_value_that_cannot_be_walked_fails_in_the_interpreters_words() {
+        let (sources, checked) = checked_module("export fn main() -> Int {\n  1\n}\n");
+        let span = Span::new(FileId(0), 0, 1);
+        let (on_the_vm, on_the_oracle) = crate::on_cove_stack(|| {
+            // The IR holds `Rc`s, so it is built on the thread that runs it.
+            let code = vec![
+                cove_ir::Inst::Const(cove_ir::ConstId(0)),
+                cove_ir::Inst::IterItems,
+                cove_ir::Inst::Return,
+            ];
+            let program = Program {
+                constants: vec![Const::Int(1)],
+                functions: vec![cove_ir::Function {
+                    module: "m".into(),
+                    name: "main".into(),
+                    frame_size: 0,
+                    arity: 0,
+                    has_receiver: false,
+                    captures: Vec::new(),
+                    spans: vec![span; code.len()],
+                    code,
+                    arg_spans: BTreeMap::new(),
+                    span,
+                }],
+            };
+            cove_ir::lower::validate(&program).unwrap_or_else(|why| {
+                panic!("the hand-written IR holds the VM's invariants: {why}")
+            });
+            let buffer = Buffer::default();
+            let hosts = hosts(&buffer, None);
+            let runtime = Runtime::new(checked.clone(), sources.clone(), hosts.clone());
+            let on_the_vm = Vm::new(&runtime, &hosts, &program)
+                .run(FunctionId(0), Vec::new())
+                .expect_err("an `Int` cannot be walked")
+                .message;
+            let on_the_oracle = crate::interp::items_of(Value::Int(1), span)
+                .expect_err("an `Int` cannot be walked")
+                .message;
+            (on_the_vm, on_the_oracle)
+        })
+        .expect("a thread to run Cove on");
+        assert_eq!(on_the_vm, on_the_oracle);
+        assert_eq!(
+            on_the_vm,
+            "`for` iterates an `Array`, a `Vector`, a `Range`, a `Set`, or a `Map`, but found `Int`"
+        );
+    }
+
+    /// A case that does not exist, and a payload of the wrong length, fail in
+    /// `Interpreter::enum_case`'s words on the VM, because they *are* its
+    /// words: the VM's `MakeEnum` calls that function rather than restating
+    /// what it decides.
+    ///
+    /// This is the one place here that does not run both backends, because no
+    /// program can reach it on either. `cove-sema` refuses both mistakes —
+    /// `cove::type::unknown_case` and `cove::type::payload_arity` — so a
+    /// checked program has neither, and there is nothing to lower that would
+    /// arrive at one. What is left to hold is that the floor under a checker
+    /// that stopped proving it is one floor and not two, so the instruction is
+    /// executed over an IR written by hand and the answer is compared against
+    /// the oracle's own function.
+    #[test]
+    fn a_case_that_does_not_exist_fails_in_the_interpreters_words() {
+        let (sources, checked) = checked_module(
+            "enum Status {\n  Confirmed\n  Pending(Int)\n}\n\nexport fn main() -> Status {\n  Status.Confirmed\n}\n",
+        );
+        let decl = checked
+            .modules
+            .get("m")
+            .and_then(|resolved| resolved.enums.get("Status"))
+            .map(|entry| entry.decl.clone())
+            .expect("the module declares `Status`");
+
+        // A case the declaration does not write, over no payload.
+        let (vm_said, oracle_said) = built_by_hand(&checked, &sources, "Nope", 0, &decl);
+        assert_eq!(vm_said, oracle_said);
+        assert_eq!(
+            vm_said,
+            "enum `Status` has no case or associated function `Nope`"
+        );
+
+        // A case that exists, over a payload of the wrong length.
+        let (vm_said, oracle_said) = built_by_hand(&checked, &sources, "Confirmed", 2, &decl);
+        assert_eq!(vm_said, oracle_said);
+        assert_eq!(
+            vm_said,
+            "case `Status.Confirmed` carries 0 value(s), but 2 were given"
+        );
+    }
+
+    /// Runs one `MakeEnum` over `payload` `Unit`s on the VM, and asks
+    /// [`crate::interp::enum_case`] the same question directly.
+    ///
+    /// The IR is written here rather than lowered because no source lowers to
+    /// it: what is being checked is the instruction, not a program.
+    fn built_by_hand(
+        checked: &Arc<Checked>,
+        sources: &Arc<SourceMap>,
+        case: &str,
+        payload: u32,
+        decl: &Arc<cove_syntax::ast::EnumDecl>,
+    ) -> (String, String) {
+        let span = decl.span;
+        crate::on_cove_stack(|| {
+            // The IR holds `Rc`s, so it is built on the thread that runs it.
+            let mut code = vec![cove_ir::Inst::Const(cove_ir::ConstId(2)); payload as usize];
+            code.push(cove_ir::Inst::MakeEnum {
+                ty: cove_ir::ConstId(0),
+                case: cove_ir::ConstId(1),
+                argc: payload,
+            });
+            code.push(cove_ir::Inst::Return);
+            let program = Program {
+                constants: vec![
+                    Const::Name("m.Status".into()),
+                    Const::Name(case.into()),
+                    Const::Unit,
+                ],
+                functions: vec![cove_ir::Function {
+                    module: "m".into(),
+                    name: "main".into(),
+                    frame_size: 0,
+                    arity: 0,
+                    has_receiver: false,
+                    captures: Vec::new(),
+                    spans: vec![span; code.len()],
+                    code,
+                    arg_spans: BTreeMap::new(),
+                    span,
+                }],
+            };
+            cove_ir::lower::validate(&program).unwrap_or_else(|why| {
+                panic!("the hand-written IR holds the VM's invariants: {why}")
+            });
+            let buffer = Buffer::default();
+            let hosts = hosts(&buffer, None);
+            let runtime = Runtime::new(checked.clone(), sources.clone(), hosts.clone());
+            let on_the_vm = Vm::new(&runtime, &hosts, &program)
+                .run(FunctionId(0), Vec::new())
+                .expect_err("the case cannot be built")
+                .message;
+            let on_the_oracle = crate::interp::enum_case(
+                checked,
+                "m",
+                decl,
+                case,
+                vec![Value::Unit; payload as usize],
+                span,
+            )
+            .expect_err("the case cannot be built")
+            .message;
+            (on_the_vm, on_the_oracle)
+        })
+        .expect("a thread to run Cove on")
     }
 
     /// A failing assertion quotes its condition identically on both backends.

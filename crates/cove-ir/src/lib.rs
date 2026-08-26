@@ -233,6 +233,49 @@ pub enum Inst {
     /// spans of an assertion's arguments are recorded in
     /// [`Function::arg_spans`] beside it.
     MakeBuiltin { name: ConstId, argc: u32 },
+    /// Builds a case of a declared enum. `ty` is a `Const::Name` holding the
+    /// qualified type name and `case` the case's own name.
+    MakeEnum {
+        ty: ConstId,
+        case: ConstId,
+        argc: u32,
+    },
+    /// Calls an associated function of a builtin type, such as `Vector.of` or
+    /// `Int.parse`. `ty` and `name` are `Const::Name`.
+    ///
+    /// Separate from [`Inst::CallBuiltin`] because there is no receiver: the
+    /// type is named rather than stood on, so the arguments are the whole of
+    /// the stack this reads.
+    CallBuiltinAssoc {
+        ty: ConstId,
+        name: ConstId,
+        argc: u32,
+    },
+    /// Pushes whether the value on top is an enum of case `case`, without
+    /// consuming it. `case` is a `Const::Name`.
+    ///
+    /// A pattern tests the subject and then binds out of it, and both need the
+    /// subject still there — which is why this peeks. `Pop` is what a lowering
+    /// writes when an arm is done with it.
+    TestCase(ConstId),
+    /// Pushes one payload of the enum on top, without consuming it.
+    GetPayload(u32),
+    /// Pops a value and pushes an `Array` of what `for` walks over it: the
+    /// elements of a sequence, the `MapEntry` of each pair of a `Map`, a
+    /// `Set`'s elements in ascending order.
+    ///
+    /// A `for` could walk a sequence by index, and did, and that was wrong for
+    /// the two collections whose iteration is not indexing. So the question is
+    /// asked once, by the same function the interpreter asks, and the loop
+    /// walks what comes back.
+    IterItems,
+    /// Stops the run because no `match` arm covered the value on top.
+    ///
+    /// Exhaustiveness is the checker's to prove and it does not prove it yet,
+    /// so a `match` that covers nothing has to fail rather than answer. It
+    /// carries no name: what the message needs is the value it could not
+    /// match, and that is on the stack.
+    NoMatch,
     /// `expr?`: pops a `Result` or `Option`, pushes its payload, or returns
     /// the failure from this call.
     Try,
@@ -357,6 +400,16 @@ fn render_inst(program: &Program, inst: Inst) -> String {
         Inst::GetField(n) => format!("get-field {}", name(n)),
         Inst::SetField(n) => format!("set-field {}", name(n)),
         Inst::MakeBuiltin { name: n, argc } => format!("make-builtin {} argc={argc}", name(n)),
+        Inst::MakeEnum { ty, case, argc } => {
+            format!("make-enum {}.{} argc={argc}", name(ty), name(case))
+        }
+        Inst::CallBuiltinAssoc { ty, name: n, argc } => {
+            format!("call-assoc {}.{} argc={argc}", name(ty), name(n))
+        }
+        Inst::TestCase(case) => format!("test-case {}", name(case)),
+        Inst::GetPayload(index) => format!("get-payload {index}"),
+        Inst::IterItems => "iter-items".to_string(),
+        Inst::NoMatch => "no-match".to_string(),
         Inst::Try => "try".to_string(),
         Inst::Return => "return".to_string(),
     }

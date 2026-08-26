@@ -22,7 +22,7 @@
 //!
 //! # What the interpreter decides and this reproduces
 //!
-//! `crates/cove-runtime/src/interp.rs` is the oracle, and six of its rules
+//! `crates/cove-runtime/src/interp.rs` is the oracle, and seven of its rules
 //! are most of the difficulty here:
 //!
 //! - **A name resolves in declaration order.** A reference written before a
@@ -43,14 +43,18 @@
 //!   a call it accepts already stands in that order; `arguments_in_order`
 //!   below is that rule, and a call it cannot put in order is reported rather
 //!   than rearranged.
+//! - **A `match` arm is a scope, and the first that matches is the only one
+//!   that runs.** `match_pattern` tests and binds as it walks, and the arm
+//!   that does not match releases what it bound — so an arm's slots behave
+//!   the way a block's do, and a subject no arm covers stops the run.
 //!
 //! # What is not lowered
 //!
-//! Closures and trailing closures, `match`, `scope`/`spawn`/`await`, `var`
-//! parameters, traits and `dyn`, the `Map` and `Set` constructors, `Shared`,
-//! `snapshot`, a range used as a value, assignment to a field of anything
-//! but a local, and any call whose target cannot be named at lowering time.
-//! Each is reported in the words a Cove programmer writes it in.
+//! Closures and trailing closures, `scope`/`spawn`/`await`, `var`
+//! parameters, traits and `dyn`, `Shared`, `snapshot`, a range used as a
+//! value, assignment to a field of anything but a local, and any call whose
+//! target cannot be named at lowering time. Each is reported in the words a
+//! Cove programmer writes it in.
 //!
 //! # What is refused because the program is wrong
 //!
@@ -69,8 +73,9 @@ use cove_schema::builtins;
 use cove_schema::hosts;
 use cove_sema::resolve::Program as Checked;
 use cove_syntax::ast::{
-    Arg, BinaryOp as SourceBinary, Block, Expr, ExprKind, FnDecl, ItemKind, Stmt, StmtKind,
-    StrPart, StructDecl, Type, TypeKind, UnaryOp as SourceUnary,
+    Arg, BinaryOp as SourceBinary, Block, EnumDecl, Expr, ExprKind, FnDecl, ItemKind, MatchArm,
+    Pattern, PatternKind, Stmt, StmtKind, StrPart, StructDecl, Type, TypeKind,
+    UnaryOp as SourceUnary,
 };
 
 use crate::{BinaryOp, Const, ConstId, Function, FunctionId, Inst, Program, UnaryOp, Unsupported};
@@ -422,19 +427,25 @@ impl<'a> Lowering<'a> {
         Some((owner.as_str(), &resolved.structs.get(name)?.decl))
     }
 
+    /// The enum `module` reaches by the bare name `name`, and the module
+    /// that declares it.
+    ///
+    /// The declaring module is half the answer: a case carries the qualified
+    /// type name of the enum it belongs to, and two modules may each declare
+    /// a `Status`, so a value has to say which one it is.
+    fn enum_of(&self, module: &str, name: &str) -> Option<(&'a str, &'a EnumDecl)> {
+        let (module, resolved) = self.checked.modules.get_key_value(module)?;
+        if let Some(entry) = resolved.enums.get(name) {
+            return Some((module.as_str(), &entry.decl));
+        }
+        let owner = resolved.imports.get(name)?;
+        let (owner, resolved) = self.checked.modules.get_key_value(owner)?;
+        Some((owner.as_str(), &resolved.enums.get(name)?.decl))
+    }
+
     /// Whether `module` reaches an enum by the bare name `name`.
     fn declares_enum(&self, module: &str, name: &str) -> bool {
-        let Some(resolved) = self.checked.modules.get(module) else {
-            return false;
-        };
-        if resolved.enums.contains_key(name) {
-            return true;
-        }
-        resolved
-            .imports
-            .get(name)
-            .and_then(|owner| self.checked.modules.get(owner))
-            .is_some_and(|owner| owner.enums.contains_key(name))
+        self.enum_of(module, name).is_some()
     }
 
     /// The method of `type_module.type_name` named `name`.
@@ -688,7 +699,7 @@ impl<'a, 'l> Body<'a, 'l> {
         };
         let (consumed, produced) = stack_shape(&self.outer.constants, inst);
         self.depth = Some(depth.saturating_sub(consumed) + produced);
-        if matches!(inst, Inst::Return | Inst::Jump(_)) {
+        if matches!(inst, Inst::Return | Inst::Jump(_) | Inst::NoMatch) {
             self.depth = None;
         }
         self.code.push(inst);
@@ -864,12 +875,7 @@ impl<'a, 'l> Body<'a, 'l> {
                 }
                 self.emit(Inst::MakeArray(items.len() as u32), span);
             }
-            ExprKind::Field { base, name } => {
-                self.reject_qualified_name(base, &name.node, span)?;
-                self.expr(base)?;
-                let field = self.outer.name(&name.node);
-                self.emit(Inst::GetField(field), span);
-            }
+            ExprKind::Field { base, name } => self.field(base, &name.node, span)?,
             ExprKind::Call {
                 callee,
                 generics: _,
@@ -927,7 +933,7 @@ impl<'a, 'l> Body<'a, 'l> {
                 ))
             }
             ExprKind::Lambda { .. } => return Err(Unsupported::new("a closure", span)),
-            ExprKind::Match { .. } => return Err(Unsupported::new("a `match` expression", span)),
+            ExprKind::Match { scrutinee, arms } => self.match_expr(scrutinee, arms, span)?,
             ExprKind::Scope { .. } => return Err(Unsupported::new("a task scope", span)),
             ExprKind::Await(_) => return Err(Unsupported::new("an `await`", span)),
         }
@@ -1015,41 +1021,44 @@ impl<'a, 'l> Body<'a, 'l> {
         ))
     }
 
-    /// Refuses `Enum.Case`, `console.println`, and `booking.Status` written
-    /// where a value is wanted.
+    /// `base.name` written where a value is wanted.
     ///
-    /// Each is a qualified *name* rather than a field of a value, so none of
-    /// them reaches the instruction a field read lowers to.
-    fn reject_qualified_name(
-        &mut self,
-        base: &'a Expr,
-        name: &str,
-        span: Span,
-    ) -> Result<(), Unsupported> {
-        let ExprKind::Ident(head) = &base.kind else {
-            return Ok(());
-        };
-        if self.lookup(head).is_some() {
-            return Ok(());
+    /// A head that is not a local may be a *name* rather than a value, and
+    /// `Interpreter::eval_field` answers those before it evaluates anything:
+    /// `Status.Confirmed` is a case of an enum, `console.println` is a host
+    /// operation, and `booking.Status` is a declaration reached through the
+    /// module that exports it. Only the first of the three has a lowering,
+    /// and the other two are named rather than read as a field of a value
+    /// they are not.
+    fn field(&mut self, base: &'a Expr, name: &str, span: Span) -> Result<(), Unsupported> {
+        if let ExprKind::Ident(head) = &base.kind {
+            if self.lookup(head).is_none() {
+                if let Some((owner, _)) = self.outer.enum_of(self.module, head) {
+                    // `Status.Confirmed`: a case written without a call, so
+                    // its payload is empty. Whether the enum declares such a
+                    // case is settled where the interpreter settles it — in
+                    // `enum_case`, at run time — because a case that does not
+                    // exist is a failure with a message rather than a shape
+                    // the lowering could produce something else for.
+                    return self.make_enum(owner, head, name, &[], span);
+                }
+                if self.outer.is_host_module(self.module, head) {
+                    return Err(Unsupported::new(
+                        format!("`{head}.{name}`, a host operation used as a value"),
+                        span,
+                    ));
+                }
+                if self.outer.imported_module(self.module, head).is_some() {
+                    return Err(Unsupported::new(
+                        format!("`{head}.{name}`, a declaration named through its module"),
+                        span,
+                    ));
+                }
+            }
         }
-        if self.outer.declares_enum(self.module, head) {
-            return Err(Unsupported::new(
-                format!("the enum case `{head}.{name}`"),
-                span,
-            ));
-        }
-        if self.outer.is_host_module(self.module, head) {
-            return Err(Unsupported::new(
-                format!("`{head}.{name}`, a host operation used as a value"),
-                span,
-            ));
-        }
-        if self.outer.imported_module(self.module, head).is_some() {
-            return Err(Unsupported::new(
-                format!("`{head}.{name}`, a declaration named through its module"),
-                span,
-            ));
-        }
+        self.expr(base)?;
+        let field = self.outer.name(name);
+        self.emit(Inst::GetField(field), span);
         Ok(())
     }
 
@@ -1263,9 +1272,13 @@ impl<'a, 'l> Body<'a, 'l> {
     /// A range header never builds a range value: the IR has no instruction
     /// that makes one, and `for` is the only place the language reads one,
     /// so the bounds go into two hidden slots and the loop counts between
-    /// them. A sequence is walked by index, with its length read once, which
-    /// is what makes iterating a `Vector` the body appends to walk the same
-    /// elements the interpreter's snapshot holds.
+    /// them. Anything else is asked once, by `iter-items`, for the items a
+    /// `for` walks it as — the elements of a sequence, the `MapEntry` of each
+    /// pair of a `Map`, a `Set`'s elements in ascending order — and what
+    /// comes back is always an `Array`, so the loop walks it by index with
+    /// its length read once. Asking once is what makes iterating a `Vector`
+    /// the body appends walk the same elements the interpreter's snapshot
+    /// holds.
     fn for_loop(
         &mut self,
         binding: &'a str,
@@ -1301,6 +1314,7 @@ impl<'a, 'l> Body<'a, 'l> {
                 let length = self.declare(None, false);
                 let cursor = self.declare(None, false);
                 self.expr(iterable)?;
+                self.emit(Inst::IterItems, iterable.span);
                 self.emit(Inst::StoreLocal(sequence), iterable.span);
                 self.emit(Inst::LoadLocal(sequence), iterable.span);
                 let name = self.outer.name("length");
@@ -1470,6 +1484,9 @@ impl<'a, 'l> Body<'a, 'l> {
         if let Some(module) = self.outer.host_item(self.module, name) {
             return self.call_host(module, name, args, span);
         }
+        if name == builtins::MAP_ENTRY.name {
+            return self.make_map_entry(args, span);
+        }
         if let Some(schema) = builtins::free_builtin(name) {
             return self.make_builtin(schema.name, args, span);
         }
@@ -1494,11 +1511,18 @@ impl<'a, 'l> Body<'a, 'l> {
                 if self.outer.is_host_module(self.module, head) {
                     return self.call_host(head, name, args, span);
                 }
-                if self.outer.declares_enum(self.module, head) {
-                    return Err(Unsupported::new(
-                        format!("`{head}.{name}`, a case or an associated function of an enum"),
-                        span,
-                    ));
+                if let Some((owner, decl)) = self.outer.enum_of(self.module, head) {
+                    // A case wins over an associated function of the same
+                    // name, so naming a case never changes meaning when an
+                    // `impl` block is added — which is the order
+                    // `Interpreter::eval_call` asks in.
+                    let is_case = decl.cases.iter().any(|case| case.name.node == name);
+                    if !is_case {
+                        if let Some(key) = self.outer.method_of(owner, head, name) {
+                            return self.call_declared(key, None, args, span);
+                        }
+                    }
+                    return self.make_enum(owner, head, name, args, span);
                 }
                 if let Some((owner, _)) = self.outer.struct_of(self.module, head) {
                     if let Some(key) = self.outer.method_of(owner, head, name) {
@@ -1518,10 +1542,7 @@ impl<'a, 'l> Body<'a, 'l> {
                     ));
                 }
                 if builtins::is_builtin_type(head) {
-                    return Err(Unsupported::new(
-                        format!("`{head}.{name}`, an associated function of a builtin type"),
-                        span,
-                    ));
+                    return self.call_builtin_assoc(head, name, args, span);
                 }
             }
         }
@@ -1693,6 +1714,300 @@ impl<'a, 'l> Body<'a, 'l> {
         Ok(())
     }
 
+    /// `Status.Confirmed` and `Json.Text(t)`: one case of a declared enum.
+    ///
+    /// The instruction carries the *qualified* type name, because that is
+    /// what a case value holds — two modules may each declare a `Status`, and
+    /// `Interpreter::enum_case` writes `{module}.{Enum}` into the value so
+    /// that they stay two types.
+    ///
+    /// Whether the enum declares this case, and whether the payload is the
+    /// length the case carries, are not asked here. `enum_case` asks them
+    /// when the value is built and reports each in its own words, and the VM
+    /// calls that same function; asking twice would be a second place for the
+    /// answer to be written down.
+    fn make_enum(
+        &mut self,
+        owner: &str,
+        enum_name: &str,
+        case: &str,
+        args: &'a [Arg],
+        span: Span,
+    ) -> Result<(), Unsupported> {
+        for arg in args {
+            self.expr(&arg.value)?;
+        }
+        let ty = self.outer.name(&format!("{owner}.{enum_name}"));
+        let case = self.outer.name(case);
+        self.emit(
+            Inst::MakeEnum {
+                ty,
+                case,
+                argc: args.len() as u32,
+            },
+            span,
+        );
+        Ok(())
+    }
+
+    /// `Vector.of(...)`, `Int.parse(text)`, and the rest of
+    /// `builtins::call_associated`.
+    ///
+    /// The arguments are pushed in the order they are written and nothing
+    /// else is checked: the interpreter reaches these through `plain_values`,
+    /// which reads an argument's value and never its label, so a variadic
+    /// like `Vector.of` and a fixed one like `Int.parse` are the same shape
+    /// here and their arity is the callee's to complain about.
+    ///
+    /// A name the type has no associated function for is emitted too, for the
+    /// reason a missing enum case is: the failure belongs to the call, and
+    /// the one function both backends dispatch through is where it is worded.
+    fn call_builtin_assoc(
+        &mut self,
+        ty: &str,
+        name: &str,
+        args: &'a [Arg],
+        span: Span,
+    ) -> Result<(), Unsupported> {
+        for arg in args {
+            self.expr(&arg.value)?;
+        }
+        let ty = self.outer.name(ty);
+        let name = self.outer.name(name);
+        self.emit(
+            Inst::CallBuiltinAssoc {
+                ty,
+                name,
+                argc: args.len() as u32,
+            },
+            span,
+        );
+        Ok(())
+    }
+
+    /// `MapEntry(key: k, value: v)`, the one pair a `Map` is built from.
+    ///
+    /// It is a builtin *struct* rather than an associated function — nothing
+    /// is called on the name, and `init_map_entry` builds a `StructValue`
+    /// exactly as a declared struct's synthesized initializer does — so it
+    /// lowers to the builtin that builds one, with its two fields pushed in
+    /// declaration order. `assign_labels` is what the interpreter puts them
+    /// in that order with, and [`arguments_in_order`] is the same rule read
+    /// at lowering time.
+    fn make_map_entry(&mut self, args: &'a [Arg], span: Span) -> Result<(), Unsupported> {
+        let names: Vec<&str> = builtins::MAP_ENTRY
+            .fields
+            .iter()
+            .map(|field| field.name)
+            .collect();
+        arguments_in_order(&names, args, builtins::MAP_ENTRY.name, span)?;
+        for arg in args {
+            self.expr(&arg.value)?;
+        }
+        let name = self.outer.name(builtins::MAP_ENTRY.name);
+        self.emit(
+            Inst::MakeBuiltin {
+                name,
+                argc: args.len() as u32,
+            },
+            span,
+        );
+        Ok(())
+    }
+
+    // ------------------------------------------------------------- `match`
+
+    /// `match subject { pattern => body ... }`.
+    ///
+    /// The subject is evaluated once and stays on the stack while the arms
+    /// are tried, because [`Inst::TestCase`] and [`Inst::GetPayload`] peek:
+    /// an arm that does not match has to leave the value for the next one.
+    /// The arm that does match pops it before its body runs, and the value
+    /// no arm covered is what [`Inst::NoMatch`] reports.
+    ///
+    /// Arms are tried in the order they are written and the first that
+    /// matches is the only one that runs, which is what `ExprKind::Match`
+    /// does; an arm's binders live in a scope of its own, released when the
+    /// arm ends, exactly as a block's slots are.
+    fn match_expr(
+        &mut self,
+        scrutinee: &'a Expr,
+        arms: &'a [MatchArm],
+        span: Span,
+    ) -> Result<(), Unsupported> {
+        self.expr(scrutinee)?;
+        // The depth the subject alone stands at. Every failed test gets back
+        // down to it before it jumps, so the next arm begins where this one
+        // began and `validate`'s simulation sees one depth per instruction.
+        let subject = self.depth.unwrap_or(0);
+        let end = self.label();
+        for arm in arms {
+            let mark = self.live.len();
+            let next = self.label();
+            self.pattern(&arm.pattern, next, subject)?;
+            self.emit(Inst::Pop, arm.span);
+            self.expr(&arm.body)?;
+            self.live.truncate(mark);
+            self.jump(Inst::Jump, end, arm.span);
+            self.bind(next);
+        }
+        // Exhaustiveness is the checker's to prove and it does not prove it
+        // yet, so a subject no arm covered stops the run rather than
+        // answering. Where an arm matches everything, no jump reaches here
+        // and `emit` writes nothing.
+        self.emit(Inst::NoMatch, span);
+        self.bind(end);
+        Ok(())
+    }
+
+    /// One pattern, against the value on top of the stack.
+    ///
+    /// The value stays where it is: a test peeks and a binder copies, so what
+    /// this leaves behind is what it was given, plus the payloads a nested
+    /// pattern is still standing on. A test that fails discards those and
+    /// jumps to `next`, so the arm after this one starts at `subject` — the
+    /// depth the whole `match` runs its arms at.
+    ///
+    /// The rules are `Interpreter::match_pattern`'s, one for one, with one
+    /// exception it names: a pattern that binds a different number of values
+    /// than its case carries is a run-time error there, and here it is a
+    /// `get-payload` past the end of the payload. `cove-sema` refuses such a
+    /// pattern — `cove::type::payload_arity` — so no checked program reaches
+    /// either, and reproducing the message would be reproducing it for a
+    /// program that cannot exist.
+    fn pattern(
+        &mut self,
+        pattern: &'a Pattern,
+        next: usize,
+        subject: u32,
+    ) -> Result<(), Unsupported> {
+        let span = pattern.span;
+        match &pattern.kind {
+            // Matches anything and binds nothing, so there is nothing to
+            // emit: falling through is the match.
+            PatternKind::Wildcard => Ok(()),
+            PatternKind::Binding(name) => self.binder(name, next, subject, span),
+            PatternKind::Literal(expr) => {
+                // The same equality `==` is, because it is the same
+                // comparison: `match_pattern` asks `eq_value`, which is what
+                // `binary` answers `==` with once both sides are one type —
+                // and the checker refuses a literal pattern of another type
+                // before either backend sees it.
+                self.emit(Inst::Dup, span);
+                self.expr(expr)?;
+                self.emit(Inst::Binary(BinaryOp::Eq), span);
+                self.test(next, subject, span);
+                Ok(())
+            }
+            PatternKind::Variant { path, payload } => {
+                let case = self.outer.name(&case_tested(path));
+                self.emit(Inst::TestCase(case), span);
+                self.test(next, subject, span);
+                // Each payload is matched against its own pattern, on top of
+                // the value it came out of, which is how `Ok(Some(x))` reads
+                // two levels down. The payload is dropped once its pattern is
+                // done with it, leaving the enum it belongs to on top.
+                for (index, sub) in payload.iter().enumerate() {
+                    self.emit(Inst::GetPayload(index as u32), span);
+                    self.pattern(sub, next, subject)?;
+                    self.emit(Inst::Pop, span);
+                }
+                Ok(())
+            }
+        }
+    }
+
+    /// A binder: `other` binds the value, and `None` does not.
+    ///
+    /// `match_pattern` reads a binder named exactly `None` as a case test
+    /// whenever the value it is given is an `Option`, and as a name
+    /// otherwise. Which of the two it is therefore depends on the value
+    /// rather than on the pattern, so both are lowered and the run picks:
+    /// `Option` declares `Some` and `None` and nothing else, so a value that
+    /// is neither is not an `Option`, and the name binds.
+    ///
+    /// Today's parser reaches none of this — a pattern whose name begins with
+    /// an uppercase letter is a variant, and `None` does — so what is lowered
+    /// here is the oracle's rule rather than a program's shape. It is
+    /// reproduced anyway because the oracle is what a backend is answerable
+    /// to, and a rule a backend quietly did not have is the kind of
+    /// difference the differential tests exist to make impossible.
+    ///
+    /// The two tests name the type by its short name, which is what a pattern
+    /// writes and what `match_pattern` compares a *variant* against; the
+    /// binder rule compares the whole type name instead, so a declared enum
+    /// that a module named `Option` and gave a case called `None` would be
+    /// read as the builtin here and as a name there. That program cannot be
+    /// written: the pattern it would need is one the parser makes a variant.
+    fn binder(
+        &mut self,
+        name: &'a str,
+        next: usize,
+        subject: u32,
+        span: Span,
+    ) -> Result<(), Unsupported> {
+        if name != builtins::NONE_CASE.name {
+            self.emit(Inst::Dup, span);
+            let slot = self.declare(Some(name), false);
+            self.emit(Inst::StoreLocal(slot), span);
+            return Ok(());
+        }
+        let matched = self.label();
+        let none = self.outer.name(&qualified_case(
+            builtins::OPTION.name,
+            builtins::NONE_CASE.name,
+        ));
+        self.emit(Inst::TestCase(none), span);
+        self.jump(Inst::JumpIfTrue, matched, span);
+        let some = self.outer.name(&qualified_case(
+            builtins::OPTION.name,
+            builtins::SOME_CASE.name,
+        ));
+        self.emit(Inst::TestCase(some), span);
+        let bind_it = self.label();
+        self.jump(Inst::JumpIfFalse, bind_it, span);
+        self.fail_arm(next, subject, span);
+        self.bind(bind_it);
+        self.emit(Inst::Dup, span);
+        let slot = self.declare(Some(name), false);
+        self.emit(Inst::StoreLocal(slot), span);
+        self.bind(matched);
+        Ok(())
+    }
+
+    /// Consumes the `Bool` a test pushed and leaves for the next arm when it
+    /// is false.
+    ///
+    /// A test written at the top of a pattern can jump straight there,
+    /// because the subject is all that stands on the stack. One written
+    /// inside a payload cannot: the payloads it is standing on have to come
+    /// off first, and a conditional jump has nowhere to put them.
+    fn test(&mut self, next: usize, subject: u32, span: Span) {
+        if self.depth == Some(subject + 1) {
+            self.jump(Inst::JumpIfFalse, next, span);
+            return;
+        }
+        let matched = self.label();
+        self.jump(Inst::JumpIfTrue, matched, span);
+        self.fail_arm(next, subject, span);
+        self.bind(matched);
+    }
+
+    /// Leaves a half-matched pattern for the arm after it.
+    ///
+    /// Whatever the pattern was standing on goes with it, so the next arm is
+    /// reached at the depth the arms run at — the same thing
+    /// [`Body::leave_loop`] does for a `break` written inside a half-
+    /// evaluated expression.
+    fn fail_arm(&mut self, next: usize, subject: u32, span: Span) {
+        if let Some(depth) = self.depth {
+            for _ in subject..depth {
+                self.emit(Inst::Pop, span);
+            }
+        }
+        self.jump(Inst::Jump, next, span);
+    }
+
     /// `receiver.name(...)`, where the receiver is a value.
     ///
     /// The interpreter tries a declared method of the receiver's *runtime*
@@ -1782,6 +2097,39 @@ impl<'a, 'l> Body<'a, 'l> {
             span,
         ))
     }
+}
+
+/// The name a [`Inst::TestCase`] carries for one pattern path.
+///
+/// `match_pattern` tests the case name, and — when the path has two or more
+/// segments — the enum's own short type name as well, so that
+/// `Status.Confirmed` does not match another enum's `Confirmed`. One
+/// instruction carries one name, so the two are written as one: a case alone
+/// where the pattern named one, and `Type.Case` where it named both. Neither
+/// a case name nor a type's short name can contain a `.`, so the pair reads
+/// back unambiguously.
+///
+/// The segments before the last two are not tested, for the reason the
+/// interpreter does not test them: `booking.Status.Confirmed` says which
+/// module the enum was reached through, and a value carries the module that
+/// *declares* it, which are two different questions.
+fn case_tested(path: &[cove_syntax::ast::Ident]) -> String {
+    let Some(case) = path.last() else {
+        // A path with no segments cannot be written, and a test that names
+        // nothing matches nothing, which is what `match_pattern` answers for
+        // one.
+        return String::new();
+    };
+    if path.len() < 2 {
+        return case.node.clone();
+    }
+    qualified_case(&path[path.len() - 2].node, &case.node)
+}
+
+/// A case name written with the short name of the type that declares it,
+/// which is the pair [`Inst::TestCase`] tests both halves of.
+fn qualified_case(type_name: &str, case: &str) -> String {
+    format!("{type_name}.{case}")
 }
 
 /// Whether the arguments already stand in declaration order, one for every
@@ -2054,6 +2402,15 @@ fn validate_function(program: &Program, id: FunctionId) -> Result<(), String> {
             }
             Inst::CallBuiltin { name, .. } => constant(name, "the builtin method")?,
             Inst::MakeBuiltin { name, .. } => constant(name, "the builtin")?,
+            Inst::MakeEnum { ty, case, .. } => {
+                constant(ty, "the enum")?;
+                constant(case, "the case")?;
+            }
+            Inst::CallBuiltinAssoc { ty, name, .. } => {
+                constant(ty, "the builtin type")?;
+                constant(name, "the associated function")?;
+            }
+            Inst::TestCase(case) => constant(case, "the case")?,
             Inst::GetField(name) | Inst::SetField(name) => constant(name, "the field")?,
             Inst::MakeStruct { ty, fields } => {
                 constant(ty, "the type")?;
@@ -2093,7 +2450,9 @@ fn validate_function(program: &Program, id: FunctionId) -> Result<(), String> {
         }
         let after = depth - i64::from(consumed) + i64::from(produced);
         match inst {
-            Inst::Return => {}
+            // Neither continues: a return leaves the frame, and a `match`
+            // that covered nothing stops the run.
+            Inst::Return | Inst::NoMatch => {}
             Inst::Jump(to) => pending.push((to as usize, after)),
             Inst::JumpIfFalse(to) | Inst::JumpIfTrue(to) => {
                 pending.push((to as usize, after));
@@ -2126,6 +2485,18 @@ fn stack_shape(constants: &[Const], inst: Inst) -> (u32, u32) {
         Inst::MakeArray(len) => (len, 1),
         Inst::Concat(parts) => (parts, 1),
         Inst::MakeStruct { fields, .. } => (field_count(constants, fields), 1),
+        // A case's payload is what it is built from, and an associated
+        // function has no receiver, so both read exactly their arguments.
+        Inst::MakeEnum { argc, .. } | Inst::CallBuiltinAssoc { argc, .. } => (argc, 1),
+        // Both peek: a pattern tests the subject and then binds out of it,
+        // and the arm after this one needs the subject still there.
+        Inst::TestCase(_) | Inst::GetPayload(_) => (0, 1),
+        // The iterable is read and the `Array` of what a `for` walks it as
+        // stands where it stood.
+        Inst::IterItems => (1, 1),
+        // The value no arm covered is what the message names, so it is read;
+        // nothing is put back, because control does not continue.
+        Inst::NoMatch => (1, 0),
     }
 }
 
@@ -2492,8 +2863,18 @@ mod tests {
         );
     }
 
+    /// A range header never asks `iter-items` for anything.
+    ///
+    /// It builds no value at all: the bounds go into two hidden slots and the
+    /// loop counts between them, which is faster than materialising every
+    /// element and answers exactly what walking the range's items would.
     #[test]
     fn a_for_over_a_range_counts_between_two_hidden_slots() {
+        let listed = listing(
+            "fn f() -> Int {\n  var t = 0\n  for i in 0..<3 {\n    t += i\n  }\n  t\n}\n",
+            "f",
+        );
+        assert!(!listed.contains("iter-items"), "{listed}");
         assert_eq!(
             listing(
                 "fn f() -> Int {\n  var t = 0\n  for i in 0..<3 {\n    t += i\n  }\n  t\n}\n",
@@ -2546,8 +2927,15 @@ mod tests {
         assert_eq!(inclusive.replace("binary Le", "binary Lt"), exclusive);
     }
 
+    /// A `for` over a sequence asks `iter-items` what it walks it as, once,
+    /// and walks the `Array` that comes back by index.
+    ///
+    /// The instruction is what makes the loop right for a `Map` and a `Set`
+    /// as well: they answer neither `length()` nor `get(i)`, and the walk
+    /// never asks them to, because what it walks is the `Array` of their
+    /// items rather than the collection itself.
     #[test]
-    fn a_for_over_an_array_walks_it_by_index() {
+    fn a_for_over_a_sequence_asks_for_its_items_and_walks_them_by_index() {
         assert_eq!(
             listing(
                 "fn f(items: Array<Int>) -> Int {\n  var t = 0\n  for item in items {\n    t += item\n  }\n  t\n}\n",
@@ -2557,36 +2945,37 @@ mod tests {
              \x20  0  const Int(0)\n\
              \x20  1  store 1\n\
              \x20  2  load 0\n\
-             \x20  3  store 2\n\
-             \x20  4  load 2\n\
-             \x20  5  call-builtin length argc=0\n\
-             \x20  6  store 3\n\
-             \x20  7  const Int(0)\n\
-             \x20  8  store 4\n\
-             \x20  9  load 4\n\
-             \x20 10  load 3\n\
-             \x20 11  binary Lt\n\
-             \x20 12  jump-if-false 29\n\
-             \x20 13  load 2\n\
-             \x20 14  load 4\n\
-             \x20 15  call-builtin get argc=1\n\
-             \x20 16  try\n\
-             \x20 17  store 5\n\
-             \x20 18  load 1\n\
-             \x20 19  load 5\n\
-             \x20 20  binary Add\n\
-             \x20 21  store 1\n\
-             \x20 22  const Unit\n\
-             \x20 23  pop\n\
-             \x20 24  load 4\n\
-             \x20 25  const Int(1)\n\
-             \x20 26  binary Add\n\
-             \x20 27  store 4\n\
-             \x20 28  jump 9\n\
-             \x20 29  const Unit\n\
-             \x20 30  pop\n\
-             \x20 31  load 1\n\
-             \x20 32  return\n"
+             \x20  3  iter-items\n\
+             \x20  4  store 2\n\
+             \x20  5  load 2\n\
+             \x20  6  call-builtin length argc=0\n\
+             \x20  7  store 3\n\
+             \x20  8  const Int(0)\n\
+             \x20  9  store 4\n\
+             \x20 10  load 4\n\
+             \x20 11  load 3\n\
+             \x20 12  binary Lt\n\
+             \x20 13  jump-if-false 30\n\
+             \x20 14  load 2\n\
+             \x20 15  load 4\n\
+             \x20 16  call-builtin get argc=1\n\
+             \x20 17  try\n\
+             \x20 18  store 5\n\
+             \x20 19  load 1\n\
+             \x20 20  load 5\n\
+             \x20 21  binary Add\n\
+             \x20 22  store 1\n\
+             \x20 23  const Unit\n\
+             \x20 24  pop\n\
+             \x20 25  load 4\n\
+             \x20 26  const Int(1)\n\
+             \x20 27  binary Add\n\
+             \x20 28  store 4\n\
+             \x20 29  jump 10\n\
+             \x20 30  const Unit\n\
+             \x20 31  pop\n\
+             \x20 32  load 1\n\
+             \x20 33  return\n"
         );
     }
 
@@ -2948,6 +3337,165 @@ mod tests {
         );
     }
 
+    // ------------------------------------------------------ enums and match
+
+    const ENUM: &str = "enum E {\n  A\n  B(Int)\n}\n\n";
+
+    /// A case carries the qualified name of the enum it belongs to, and its
+    /// payload is pushed before it is built.
+    #[test]
+    fn an_enum_case_is_built_from_its_payload() {
+        assert_eq!(
+            listing(&format!("{ENUM}fn f() -> E {{\n  E.B(1)\n}}\n"), "f"),
+            "fn m.f arity=0 frame=0\n\
+             \x20  0  const Int(1)\n\
+             \x20  1  make-enum m.E.B argc=1\n\
+             \x20  2  return\n"
+        );
+    }
+
+    /// A case that carries nothing is written without a call, and lowers to
+    /// the same instruction over no payload.
+    #[test]
+    fn a_case_that_carries_nothing_is_built_from_nothing() {
+        assert_eq!(
+            listing(&format!("{ENUM}fn f() -> E {{\n  E.A\n}}\n"), "f"),
+            "fn m.f arity=0 frame=0\n\
+             \x20  0  make-enum m.E.A argc=0\n\
+             \x20  1  return\n"
+        );
+    }
+
+    /// Two arms, tried in order over one subject that stays on the stack.
+    #[test]
+    fn a_match_tries_its_arms_in_order_over_one_subject() {
+        assert_eq!(
+            listing(
+                &format!("{ENUM}fn f(e: E) -> Int {{\n  match e {{\n    E.A => 1\n    E.B(n) => n\n  }}\n}}\n"),
+                "f"
+            ),
+            "fn m.f arity=1 frame=2\n\
+             \x20  0  load 0\n\
+             \x20  1  test-case E.A\n\
+             \x20  2  jump-if-false 6\n\
+             \x20  3  pop\n\
+             \x20  4  const Int(1)\n\
+             \x20  5  jump 16\n\
+             \x20  6  test-case E.B\n\
+             \x20  7  jump-if-false 15\n\
+             \x20  8  get-payload 0\n\
+             \x20  9  dup\n\
+             \x20 10  store 1\n\
+             \x20 11  pop\n\
+             \x20 12  pop\n\
+             \x20 13  load 1\n\
+             \x20 14  jump 16\n\
+             \x20 15  no-match\n\
+             \x20 16  return\n"
+        );
+    }
+
+    /// An arm's binders are released when the arm ends, so a later arm reuses
+    /// the slots and the frame is as big as one arm needs rather than as big
+    /// as all of them.
+    #[test]
+    fn sibling_arms_reuse_the_slots_the_first_released() {
+        assert_eq!(
+            listing(
+                "enum Pair {\n  L(Int)\n  R(Int)\n}\n\nfn f(p: Pair) -> Int {\n  match p {\n    Pair.L(x) => x\n    Pair.R(y) => y\n  }\n}\n",
+                "f"
+            ),
+            "fn m.f arity=1 frame=2\n\
+             \x20  0  load 0\n\
+             \x20  1  test-case Pair.L\n\
+             \x20  2  jump-if-false 10\n\
+             \x20  3  get-payload 0\n\
+             \x20  4  dup\n\
+             \x20  5  store 1\n\
+             \x20  6  pop\n\
+             \x20  7  pop\n\
+             \x20  8  load 1\n\
+             \x20  9  jump 20\n\
+             \x20 10  test-case Pair.R\n\
+             \x20 11  jump-if-false 19\n\
+             \x20 12  get-payload 0\n\
+             \x20 13  dup\n\
+             \x20 14  store 1\n\
+             \x20 15  pop\n\
+             \x20 16  pop\n\
+             \x20 17  load 1\n\
+             \x20 18  jump 20\n\
+             \x20 19  no-match\n\
+             \x20 20  return\n"
+        );
+    }
+
+    /// A pattern nested two deep tests the payload it is standing on, and
+    /// leaves that payload behind when it is done with it.
+    #[test]
+    fn a_nested_pattern_matches_the_payload_it_stands_on() {
+        assert_eq!(
+            listing(
+                "fn f(r: Result<Option<Int>, Error>) -> Int {\n  match r {\n    Ok(Some(x)) => x\n    _ => 0\n  }\n}\n",
+                "f"
+            ),
+            "fn m.f arity=1 frame=2\n\
+             \x20  0  load 0\n\
+             \x20  1  test-case Ok\n\
+             \x20  2  jump-if-false 16\n\
+             \x20  3  get-payload 0\n\
+             \x20  4  test-case Some\n\
+             \x20  5  jump-if-true 8\n\
+             \x20  6  pop\n\
+             \x20  7  jump 16\n\
+             \x20  8  get-payload 0\n\
+             \x20  9  dup\n\
+             \x20 10  store 1\n\
+             \x20 11  pop\n\
+             \x20 12  pop\n\
+             \x20 13  pop\n\
+             \x20 14  load 1\n\
+             \x20 15  jump 19\n\
+             \x20 16  pop\n\
+             \x20 17  const Int(0)\n\
+             \x20 18  jump 19\n\
+             \x20 19  return\n"
+        );
+    }
+
+    /// An associated function of a builtin type reads its arguments and
+    /// nothing else, because there is no receiver to stand below them.
+    #[test]
+    fn an_associated_function_reads_its_arguments_alone() {
+        assert_eq!(
+            listing("fn f() -> Int {\n  Vector.of(1, 2).length()\n}\n", "f"),
+            "fn m.f arity=0 frame=0\n\
+             \x20  0  const Int(1)\n\
+             \x20  1  const Int(2)\n\
+             \x20  2  call-assoc Vector.of argc=2\n\
+             \x20  3  call-builtin length argc=0\n\
+             \x20  4  return\n"
+        );
+    }
+
+    /// `MapEntry` is a builtin struct, so its two fields are pushed in
+    /// declaration order and built by the builtin that builds one.
+    #[test]
+    fn a_map_entry_is_built_from_its_two_fields() {
+        assert_eq!(
+            listing(
+                "fn f() -> String {\n  MapEntry(key: \"a\", value: 1).key\n}\n",
+                "f"
+            ),
+            "fn m.f arity=0 frame=0\n\
+             \x20  0  const Str(\"a\")\n\
+             \x20  1  const Int(1)\n\
+             \x20  2  make-builtin MapEntry argc=2\n\
+             \x20  3  get-field key\n\
+             \x20  4  return\n"
+        );
+    }
+
     // -------------------------------------------------------- unsupported
 
     #[test]
@@ -2960,10 +3508,6 @@ mod tests {
             (
                 "a trailing closure",
                 "fn f() -> Result<Int, Error> {\n  Err(Error(message: \"a\")).mapError {\n    Error(message: \"b\")\n  }\n}\n",
-            ),
-            (
-                "a `match` expression",
-                "fn f(v: Option<Int>) -> Int {\n  match v {\n    Some(n) => n\n    None => 0\n  }\n}\n",
             ),
             (
                 "a task scope",
@@ -2980,10 +3524,6 @@ mod tests {
             (
                 "a `dyn` parameter",
                 "trait Show {\n  fn show(self) -> String\n}\n\nstruct A {\n  n: Int\n}\n\nimpl Show for A {\n  fn show(self) -> String {\n    \"a\"\n  }\n}\n\nfn f(v: dyn Show) -> String {\n  v.show()\n}\n",
-            ),
-            (
-                "`Map.of`, an associated function of a builtin type",
-                "fn f() -> Int {\n  Map.of().length()\n}\n",
             ),
             (
                 "`Shared`",
@@ -3008,10 +3548,6 @@ mod tests {
             (
                 "a function declared inside a function body",
                 "fn f() -> Int {\n  fn g() -> Int {\n    1\n  }\n  g()\n}\n",
-            ),
-            (
-                "the enum case `E.A`",
-                "enum E {\n  A\n  B\n}\n\nfn f() -> E {\n  E.A\n}\n",
             ),
             (
                 "`g`, a function used as a value",
@@ -3056,13 +3592,10 @@ mod tests {
     #[test]
     fn an_unsupported_construct_reads_as_a_sentence() {
         let why = lower(&checked(
-            "fn f(v: Option<Int>) -> Int {\n  match v {\n    Some(n) => n\n    None => 0\n  }\n}\n",
+            "fn f() -> Int {\n  scope tasks {\n    1\n  }\n}\n",
         ))
-        .expect_err("a `match` is refused");
-        assert_eq!(
-            why.to_string(),
-            "the VM cannot run a `match` expression yet"
-        );
+        .expect_err("a task scope is refused");
+        assert_eq!(why.to_string(), "the VM cannot run a task scope yet");
     }
 
     // ------------------------------------------------------------ benches

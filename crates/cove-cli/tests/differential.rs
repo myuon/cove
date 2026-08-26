@@ -111,7 +111,7 @@ use cove_sema::resolve::Program as Checked;
 /// lower it, because a case that stopped lowering would be coverage lost
 /// silently, and the whole point of counting is that it cannot be. Raise this
 /// number in the same change that raises the coverage.
-const LOWERED_FLOOR: usize = 43;
+const LOWERED_FLOOR: usize = 53;
 
 // ------------------------------------------------------------------ the test
 

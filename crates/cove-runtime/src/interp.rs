@@ -1827,16 +1827,7 @@ impl<'a> Interpreter<'a> {
                         }
                     }
                 }
-                // Static exhaustiveness checking is future work; until then a
-                // `match` that covers no case fails here instead of silently
-                // producing a value.
-                Err(
-                    RuntimeError::new(format!("no `match` arm covers `{value}`"))
-                        .at(span)
-                        .with_rule("`match` must cover every enum case.")
-                        .with_help("add an arm for this case, or a `_` arm")
-                        .into(),
-                )
+                Err(no_match(&value, span).into())
             }
             ExprKind::For {
                 binding,
@@ -2344,40 +2335,8 @@ impl<'a> Interpreter<'a> {
     }
 
     fn iterable_items(&mut self, env: &mut Env, expr: &Expr) -> Result<Vec<Value>, Control> {
-        // Iteration reads a snapshot of the elements; rejecting structural
-        // mutation during iteration is future work.
-        match self.eval(env, expr)? {
-            Value::Array(items) => Ok(items.iter().cloned().collect()),
-            Value::Vector(storage) => Ok(storage.elements.borrow().clone()),
-            // An empty or reversed range such as `3..<0` iterates zero times.
-            Value::Range {
-                start,
-                end,
-                inclusive_end,
-            } => Ok(RangeBounds::of(start, end, inclusive_end).items()),
-            // A `Set` is `BTreeSet<MapKey>`-backed, so it iterates its
-            // elements in ascending order, the same order `Display` shows.
-            Value::Set(items) => Ok(items.iter().map(|key| key.to_value()).collect()),
-            // A `Map` iterates in ascending key order, matching its
-            // `BTreeMap` storage. Each binding is a `MapEntry` carrying that
-            // iteration's `key` and `value`, the same shape `Map.of` accepts.
-            Value::Map(entries) => Ok(entries
-                .iter()
-                .map(|(key, value)| {
-                    Value::Struct(Rc::new(StructValue {
-                        type_name: MAP_ENTRY.name.into(),
-                        fields: vec![("key".into(), key.to_value()), ("value".into(), value.clone())],
-                        opaque: false,
-                    }))
-                })
-                .collect()),
-            other => Err(RuntimeError::new(format!(
-                "`for` iterates an `Array`, a `Vector`, a `Range`, a `Set`, or a `Map`, but found `{}`",
-                other.type_name()
-            ))
-            .at(expr.span)
-            .into()),
-        }
+        let value = self.eval(env, expr)?;
+        Ok(items_of(value, expr.span)?)
     }
 
     fn eval_ident(&mut self, env: &mut Env, name: &str, span: Span) -> Eval {
@@ -2501,29 +2460,6 @@ impl<'a> Interpreter<'a> {
         }
     }
 
-    /// The cases and associated functions `Enum.name` could have meant.
-    fn known_members(&self, module: &str, decl: &Arc<EnumDecl>) -> String {
-        let cases: Vec<&str> = decl
-            .cases
-            .iter()
-            .map(|case| case.name.node.as_str())
-            .collect();
-        let mut help = format!("known cases: {}", cases.join(", "));
-        let functions: Vec<&str> = match self.resolved(module) {
-            Some(resolved) => resolved
-                .methods
-                .keys()
-                .filter(|(type_name, _)| *type_name == decl.name.node)
-                .map(|(_, name)| name.as_str())
-                .collect(),
-            None => Vec::new(),
-        };
-        if !functions.is_empty() {
-            help.push_str(&format!("; known functions: {}", functions.join(", ")));
-        }
-        help
-    }
-
     /// Builds one case of an enum declared in `module`.
     fn enum_case(
         &mut self,
@@ -2533,31 +2469,7 @@ impl<'a> Interpreter<'a> {
         payload: Vec<Value>,
         span: Span,
     ) -> Result<Value, RuntimeError> {
-        let Some(found) = decl.cases.iter().find(|c| c.name.node == case) else {
-            return Err(RuntimeError::new(format!(
-                "enum `{}` has no case or associated function `{case}`",
-                decl.name.node
-            ))
-            .at(span)
-            .with_rule(
-                "`Enum.name` is a case when the enum declares one, and otherwise an associated function declared in an `impl` block.",
-            )
-            .with_help(self.known_members(module, decl)));
-        };
-        if found.payload.len() != payload.len() {
-            return Err(RuntimeError::new(format!(
-                "case `{}.{case}` carries {} value(s), but {} were given",
-                decl.name.node,
-                found.payload.len(),
-                payload.len()
-            ))
-            .at(span));
-        }
-        Ok(Value::Enum(Box::new(EnumValue {
-            type_name: format!("{module}.{}", decl.name.node).into(),
-            case: case.into(),
-            payload,
-        })))
+        enum_case(self.program, module, decl, case, payload, span)
     }
 
     // ---------------------------------------------------------------- calls
@@ -3534,6 +3446,92 @@ pub(crate) fn unary(op: UnaryOp, value: Value, span: Span) -> Result<Value, Runt
     }
 }
 
+// ------------------------------------------------------------------ enums
+
+/// Builds one case of the enum `module` declares as `decl`.
+///
+/// A free function rather than a method because both backends build a
+/// declared enum's value and there is one answer to what that value is: ADR
+/// 0012 ranks the oracle above a backend, so the VM's `MakeEnum` calls this
+/// rather than restating it, and the two cannot report a missing case or a
+/// payload of the wrong length in different words.
+///
+/// Which errors those are is the whole of what this decides: a case the
+/// declaration does not write, and a payload whose length is not the one the
+/// case carries. `cove-sema` refuses both before either backend sees them,
+/// which is why neither message names a fix a checked program could need —
+/// they are the floor under a checker that stops proving it.
+pub(crate) fn enum_case(
+    program: &Program,
+    module: &str,
+    decl: &Arc<EnumDecl>,
+    case: &str,
+    payload: Vec<Value>,
+    span: Span,
+) -> Result<Value, RuntimeError> {
+    let Some(found) = decl.cases.iter().find(|c| c.name.node == case) else {
+        return Err(RuntimeError::new(format!(
+            "enum `{}` has no case or associated function `{case}`",
+            decl.name.node
+        ))
+        .at(span)
+        .with_rule(
+            "`Enum.name` is a case when the enum declares one, and otherwise an associated function declared in an `impl` block.",
+        )
+        .with_help(known_members(program, module, decl)));
+    };
+    if found.payload.len() != payload.len() {
+        return Err(RuntimeError::new(format!(
+            "case `{}.{case}` carries {} value(s), but {} were given",
+            decl.name.node,
+            found.payload.len(),
+            payload.len()
+        ))
+        .at(span));
+    }
+    Ok(Value::Enum(Box::new(EnumValue {
+        type_name: format!("{module}.{}", decl.name.node).into(),
+        case: case.into(),
+        payload,
+    })))
+}
+
+/// The cases and associated functions `Enum.name` could have meant.
+fn known_members(program: &Program, module: &str, decl: &Arc<EnumDecl>) -> String {
+    let cases: Vec<&str> = decl
+        .cases
+        .iter()
+        .map(|case| case.name.node.as_str())
+        .collect();
+    let mut help = format!("known cases: {}", cases.join(", "));
+    let functions: Vec<&str> = match program.modules.get(module) {
+        Some(resolved) => resolved
+            .methods
+            .keys()
+            .filter(|(type_name, _)| *type_name == decl.name.node)
+            .map(|(_, name)| name.as_str())
+            .collect(),
+        None => Vec::new(),
+    };
+    if !functions.is_empty() {
+        help.push_str(&format!("; known functions: {}", functions.join(", ")));
+    }
+    help
+}
+
+/// No arm of a `match` covered `value`.
+///
+/// Static exhaustiveness checking is future work; until then a `match` that
+/// covers no case fails rather than silently producing a value. Both backends
+/// say so in these words, because it is one rule and not two — the VM's
+/// `NoMatch` is this sentence given an instruction to be reached by.
+pub(crate) fn no_match(value: &Value, span: Span) -> RuntimeError {
+    RuntimeError::new(format!("no `match` arm covers `{value}`"))
+        .at(span)
+        .with_rule("`match` must cover every enum case.")
+        .with_help("add an arm for this case, or a `_` arm")
+}
+
 // -------------------------------------------------------------- arguments
 
 /// `MapEntry(key: ..., value: ...)` is a synthesized labeled call for a
@@ -4090,6 +4088,52 @@ fn unsupported(what: &str, span: Span) -> RuntimeError {
 /// `crate::builtins` reports `Int.abs()` on the most negative `Int` through
 /// this too, rather than writing the same sentence out a second time: an
 /// overflow is one rule, so it is one message wherever it is reached from.
+/// The values `for` walks over `value`, in the order it walks them.
+///
+/// One function, so that both backends walk a collection the same way — which
+/// they did not. The VM lowered a sequence to a `length()`/`get(i)` index walk,
+/// and a `Map` answers neither: it walks as the `MapEntry` of each pair, and a
+/// `Set` in ascending order. A difference like that is not a difference of
+/// speed, so it is settled in one place rather than in each backend.
+pub(crate) fn items_of(value: Value, span: Span) -> Result<Vec<Value>, RuntimeError> {
+    // Iteration reads a snapshot of the elements; rejecting structural
+    // mutation during iteration is future work.
+    match value {
+        Value::Array(items) => Ok(items.iter().cloned().collect()),
+        Value::Vector(storage) => Ok(storage.elements.borrow().clone()),
+        // An empty or reversed range such as `3..<0` iterates zero times.
+        Value::Range {
+            start,
+            end,
+            inclusive_end,
+        } => Ok(RangeBounds::of(start, end, inclusive_end).items()),
+        // A `Set` is `BTreeSet<MapKey>`-backed, so it iterates its
+        // elements in ascending order, the same order `Display` shows.
+        Value::Set(items) => Ok(items.iter().map(|key| key.to_value()).collect()),
+        // A `Map` iterates in ascending key order, matching its
+        // `BTreeMap` storage. Each binding is a `MapEntry` carrying that
+        // iteration's `key` and `value`, the same shape `Map.of` accepts.
+        Value::Map(entries) => Ok(entries
+            .iter()
+            .map(|(key, value)| {
+                Value::Struct(Rc::new(StructValue {
+                    type_name: MAP_ENTRY.name.into(),
+                    fields: vec![
+                        ("key".into(), key.to_value()),
+                        ("value".into(), value.clone()),
+                    ],
+                    opaque: false,
+                }))
+            })
+            .collect()),
+        other => Err(RuntimeError::new(format!(
+            "`for` iterates an `Array`, a `Vector`, a `Range`, a `Set`, or a `Map`, but found `{}`",
+            other.type_name()
+        ))
+        .at(span)),
+    }
+}
+
 pub(crate) fn overflow(operation: &str, span: Span) -> RuntimeError {
     RuntimeError::new(format!("`Int` {operation} overflowed"))
         .at(span)
