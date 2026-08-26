@@ -87,13 +87,19 @@ this one has numbers. What changed is not that gate 1 was crossed; it is that a
 different question was asked and answered — how far local optimization of the
 tree walk can go — and the answer bounds it well below what the project wants.
 
-**It is not a replacement for the interpreter.** ADR 0012 ranks the
-specification above the oracle above a backend, and says a compiled backend
+**It does not remove the interpreter as the semantic oracle.** Said that way
+rather than "it does not replace the interpreter", because as an *execution
+path* it is meant to: once #111 passes, the VM is what runs a program, and the
+tree walk is not. What it does not take over is the other role. ADR 0012 ranks
+the specification above the oracle above a backend, and says a compiled backend
 "sits below the interpreter and is checked differentially against it". That is
 exactly the arrangement here, and it is what makes a second backend safe to
-have rather than a second thing to be wrong. The interpreter stays, is not
-optimized further, and stays readable, because being readable is most of what
-makes it useful as an oracle.
+have rather than a second thing to be wrong.
+
+So the interpreter stays after the VM is the default, is not optimized further,
+and stays readable, because being readable is most of what makes it useful as
+an oracle — and an oracle nobody executes is a document. What that costs, and
+for how long, is a question #111 answers rather than this one.
 
 **It is not a stable format.** The IR and the instruction encoding are internal
 and versioned by nothing, because nothing outside this repository consumes

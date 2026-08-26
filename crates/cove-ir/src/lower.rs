@@ -8,6 +8,18 @@
 //! mixture, so a construct with no lowering stops the lowering and says what
 //! it was.
 //!
+//! # The unit that is lowered is the unit that is run
+//!
+//! [`lower_entry`] lowers what one entry can reach and nothing else, because
+//! an entry is what a run is. Reachability is not derived separately: a body
+//! reaches exactly the functions it emits a `Call` to, so numbering a call's
+//! target when the call is emitted *is* the closure, and the worklist is
+//! empty when nothing new was named.
+//!
+//! [`lower`] is the same loop seeded with every declaration instead of one,
+//! so a whole-package listing and an entry's program are two seeds of one
+//! lowering rather than two lowerings that could drift.
+//!
 //! # What the interpreter decides and this reproduces
 //!
 //! `crates/cove-runtime/src/interp.rs` is the oracle, and six of its rules
@@ -49,10 +61,10 @@
 //! targets was meant. ADR 0012 ranks the oracle above a backend, so refusing
 //! to lower is the answer and approximating is not.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::rc::Rc;
 
-use cove_diag::Span;
+use cove_diag::{FileId, Span};
 use cove_schema::builtins;
 use cove_schema::hosts;
 use cove_sema::resolve::Program as Checked;
@@ -63,28 +75,101 @@ use cove_syntax::ast::{
 
 use crate::{BinaryOp, Const, ConstId, Function, FunctionId, Inst, Program, UnaryOp, Unsupported};
 
+/// A lowered program and the function to start it at.
+///
+/// The id is here because the lowering already knows it — the entry is the
+/// first function it numbers — and a caller that looked it up again by name
+/// would be asking a question this pass has already answered.
+#[derive(Debug)]
+pub struct Lowered {
+    pub program: Program,
+    pub entry: FunctionId,
+}
+
+/// Lowers what the entry `module.name` can reach, and nothing else.
+///
+/// The unit being run is an entry, so the unit being lowered is an entry.
+/// A construct the lowering does not cover refuses this program only if the
+/// entry can reach it: a closure in a module this entry neither imports nor
+/// calls is not part of the program this entry is, and refusing for it would
+/// be refusing for a run that cannot happen.
+///
+/// What it *can* reach is what the lowering emits. A body reaches exactly
+/// the functions it emits a [`Inst::Call`] to, so the closure needs no
+/// separate pass: the entry is numbered, its body is lowered, every call
+/// numbers a target that was not numbered yet, and the work ends when a body
+/// names nothing new. Recursion and a cycle of mutual recursion end there
+/// too, because a declaration is numbered once.
+///
+/// A name this package does not declare is reported rather than panicked on,
+/// since the caller that chose it — a `[run.<name>]` table — is a file a
+/// person edits.
+pub fn lower_entry(checked: &Checked, module: &str, name: &str) -> Result<Lowered, Unsupported> {
+    let mut lowering = Lowering::index(checked);
+    let Some(key) = lowering.entry_point(module, name) else {
+        return Err(Unsupported::new(
+            format!("`{module}.{name}`, which this package does not declare"),
+            // A name that was looked for and not found has no declaration to
+            // underline, and inventing one would point a reader at source
+            // that has nothing to do with it.
+            Span::new(FileId(0), 0, 0),
+        ));
+    };
+    let entry = lowering.number(key);
+    Ok(Lowered {
+        program: lowering.reachable()?,
+        entry,
+    })
+}
+
 /// Lowers every function of a checked program.
 ///
-/// Functions are numbered before any body is lowered, so a call reaches a
-/// declaration written later in the package and a function reaches itself.
-/// The order is the checker's own — modules by name, then free functions by
-/// name, then methods by type and name — which is what makes a listing
-/// stable enough for a golden test.
+/// This is [`lower_entry`]'s loop seeded with every declaration rather than
+/// with one, so there is a single lowering and a whole-package listing is
+/// what it produces when nothing is left out. Seeding numbers everything
+/// before any body is lowered, so a call reaches a declaration written later
+/// in the package and a function reaches itself. The order is the checker's
+/// own — modules by name, then free functions by name, then methods by type
+/// and name — which is what makes a listing stable enough for a golden test.
 ///
-/// One unsupported construct anywhere fails the whole program, because ADR
-/// 0019's rule is about a *run*: a program that lowered all but one of its
-/// functions could still reach the missing one, and there would be nowhere
-/// for the run to go.
+/// One unsupported construct anywhere fails the whole program, which is what
+/// a whole-package listing means: everything the package declares is part of
+/// it, whether or not an entry reaches it.
 pub fn lower(program: &Checked) -> Result<Program, Unsupported> {
     let mut lowering = Lowering::index(program);
-    let mut functions = Vec::with_capacity(lowering.declared.len());
-    for index in 0..lowering.declared.len() {
-        functions.push(lowering.function(FunctionId(index as u32))?);
+    for index in 0..lowering.catalog.len() {
+        lowering.number(Key(index));
     }
-    Ok(Program {
-        functions,
-        constants: lowering.constants,
-    })
+    lowering.reachable()
+}
+
+/// Which modules each module of the package can reach, itself included.
+///
+/// A `use` is the only way one module's declarations become another's, so
+/// the transitive closure of `use` is the whole of what a module can name,
+/// and the whole of what can be handed to it by anything it names.
+fn visibility(checked: &Checked) -> BTreeMap<String, BTreeSet<String>> {
+    let mut visible = BTreeMap::new();
+    for module in checked.modules.keys() {
+        let mut reached = BTreeSet::from([module.clone()]);
+        let mut pending = vec![module.clone()];
+        while let Some(next) = pending.pop() {
+            let Some(resolved) = checked.modules.get(&next) else {
+                continue;
+            };
+            for owner in resolved
+                .imports
+                .values()
+                .chain(resolved.module_imports.values())
+            {
+                if reached.insert(owner.clone()) {
+                    pending.push(owner.clone());
+                }
+            }
+        }
+        visible.insert(module.clone(), reached);
+    }
+    visible
 }
 
 // -------------------------------------------------------------- the index
@@ -98,69 +183,200 @@ struct Declared<'a> {
     /// The name a listing shows: `Type.method` for a method, so that a
     /// method and a free function of one name stay two functions.
     name: String,
+    /// The type a method is declared on, and nothing for a free function.
+    ///
+    /// Kept apart from `name` because ADR 0006 lets a conformance put a
+    /// method in the module that declares the *trait*, so the module a
+    /// method belongs to and the module its receiver's type belongs to are
+    /// two different questions.
+    type_name: Option<&'a str>,
     decl: &'a FnDecl,
 }
 
-/// The whole-program state one lowering carries: what every function is
-/// numbered, and the constants they share.
+/// Addresses a declaration of the package, reached or not.
+///
+/// A lookup answers with one of these rather than with a [`FunctionId`],
+/// because finding a declaration and lowering it are two different events:
+/// an id is what a lowered function is addressed by, and only a call that is
+/// actually emitted earns its target one.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct Key(usize);
+
+/// The whole-program state one lowering carries: what the package declares,
+/// which of it has been reached, and the constants the reached share.
 struct Lowering<'a> {
     checked: &'a Checked,
-    declared: Vec<Declared<'a>>,
+    /// Every function the package declares, in the checker's order, whether
+    /// or not this lowering will emit any of them.
+    catalog: Vec<Declared<'a>>,
+    /// The id each catalog entry was given, once something reached it.
+    numbered: Vec<Option<FunctionId>>,
+    /// The declaration each id names, in the order the ids were handed out.
+    ///
+    /// This is the worklist as much as the table: a declaration is appended
+    /// when it is first reached, and the lowering walks the vector from the
+    /// front until it stops growing.
+    reached: Vec<Key>,
     /// Free functions, by the module that declares them and their name.
-    functions: BTreeMap<(String, String), FunctionId>,
+    functions: BTreeMap<(String, String), Key>,
     /// Methods, by the module that declares the `impl` block, the type, and
     /// the method name.
-    methods: BTreeMap<(String, String, String), FunctionId>,
-    /// Every function a method name answers to, for a receiver whose type
-    /// the lowering has no way to name.
-    by_name: BTreeMap<String, Vec<FunctionId>>,
+    methods: BTreeMap<(String, String, String), Key>,
+    /// Every method a name answers to, for a receiver whose type the
+    /// lowering has no way to name.
+    ///
+    /// Every one the package declares. Which of them a given call site could
+    /// actually reach is [`Lowering::could_dispatch`]'s question, asked
+    /// against the module the call is written in.
+    by_name: BTreeMap<String, Vec<Key>>,
+    /// The modules each module can reach through `use`, transitively, and
+    /// itself.
+    ///
+    /// A type travels only along `use` edges — a value of it is obtained by
+    /// naming something that produces one — so this bounds which types a
+    /// value written in a module can have.
+    visible: BTreeMap<String, BTreeSet<String>>,
     constants: Vec<Const>,
 }
 
 impl<'a> Lowering<'a> {
-    /// Numbers every declared function without lowering any of them.
+    /// Catalogues every declared function without numbering or lowering any
+    /// of them.
     ///
-    /// A body may call anything the package declares, including itself, so
-    /// every target has an id before the first instruction is emitted.
+    /// Cataloguing is what makes a name answerable; numbering is what makes
+    /// a function part of the program being lowered, and [`Lowering::number`]
+    /// is the only thing that does it.
     fn index(checked: &'a Checked) -> Lowering<'a> {
         let mut lowering = Lowering {
             checked,
-            declared: Vec::new(),
+            catalog: Vec::new(),
+            numbered: Vec::new(),
+            reached: Vec::new(),
             functions: BTreeMap::new(),
             methods: BTreeMap::new(),
             by_name: BTreeMap::new(),
+            visible: visibility(checked),
             constants: Vec::new(),
         };
         for (module, resolved) in &checked.modules {
             for (name, entry) in &resolved.functions {
-                let id = lowering.number(Declared {
+                let key = lowering.catalogue(Declared {
                     module,
                     name: name.clone(),
+                    type_name: None,
                     decl: &entry.decl,
                 });
                 lowering
                     .functions
-                    .insert((module.clone(), name.clone()), id);
+                    .insert((module.clone(), name.clone()), key);
             }
             for ((type_name, method), entry) in &resolved.methods {
-                let id = lowering.number(Declared {
+                let key = lowering.catalogue(Declared {
                     module,
                     name: format!("{type_name}.{method}"),
+                    type_name: Some(type_name.as_str()),
                     decl: &entry.decl,
                 });
                 lowering
                     .methods
-                    .insert((module.clone(), type_name.clone(), method.clone()), id);
-                lowering.by_name.entry(method.clone()).or_default().push(id);
+                    .insert((module.clone(), type_name.clone(), method.clone()), key);
+                lowering
+                    .by_name
+                    .entry(method.clone())
+                    .or_default()
+                    .push(key);
             }
         }
         lowering
     }
 
-    fn number(&mut self, declared: Declared<'a>) -> FunctionId {
-        let id = FunctionId(self.declared.len() as u32);
-        self.declared.push(declared);
+    fn catalogue(&mut self, declared: Declared<'a>) -> Key {
+        self.catalog.push(declared);
+        self.numbered.push(None);
+        Key(self.catalog.len() - 1)
+    }
+
+    /// The id `key` has, handing one out and queuing the declaration when
+    /// this is the first thing to reach it.
+    ///
+    /// Numbering once is what ends the walk: a function that calls itself,
+    /// and a cycle of functions that call each other, are each already
+    /// numbered by the time the call that closes the loop is emitted.
+    fn number(&mut self, key: Key) -> FunctionId {
+        if let Some(id) = self.numbered[key.0] {
+            return id;
+        }
+        let id = FunctionId(self.reached.len() as u32);
+        self.numbered[key.0] = Some(id);
+        self.reached.push(key);
         id
+    }
+
+    /// What `key` names.
+    fn declaration(&self, key: Key) -> &Declared<'a> {
+        &self.catalog[key.0]
+    }
+
+    /// Whether a method call written in `from` could reach the method `key`.
+    ///
+    /// A receiver is a value, and a value's type came from `from` or from
+    /// somewhere `from` reaches through `use`, so a method of a type no
+    /// chain of imports brings here is not an answer this call site has.
+    /// Asking is what keeps a method a package declares far away — in
+    /// another program of the same package — from making every call of that
+    /// name ambiguous.
+    ///
+    /// Either module counts: the one that declares the `impl` block, and the
+    /// one that declares the type, which ADR 0006's orphan rule lets differ.
+    /// A conformance written beside the trait is still reached through a
+    /// receiver whose type came from wherever the type is declared.
+    fn could_dispatch(&self, from: &str, key: Key) -> bool {
+        let Some(visible) = self.visible.get(from) else {
+            // A module the checker does not know is not a module this
+            // lowering can bound, so nothing is ruled out.
+            return true;
+        };
+        let declared = self.declaration(key);
+        if visible.contains(declared.module) {
+            return true;
+        }
+        let Some(type_name) = declared.type_name else {
+            return false;
+        };
+        visible.iter().any(|module| {
+            self.checked.modules.get(module).is_some_and(|resolved| {
+                resolved.structs.contains_key(type_name) || resolved.enums.contains_key(type_name)
+            })
+        })
+    }
+
+    /// The declaration a `[run.<name>]` table's `module.name` selects.
+    ///
+    /// An entry is a free function of a named module and nothing else, so
+    /// this asks the one table that holds those rather than going through
+    /// the import-aware lookups a *body* uses: the entry is not written
+    /// inside any module, so there is no module whose `use` declarations it
+    /// could be read against.
+    fn entry_point(&self, module: &str, name: &str) -> Option<Key> {
+        self.functions
+            .get(&(module.to_string(), name.to_string()))
+            .copied()
+    }
+
+    /// Lowers everything numbered, and everything that lowering numbers.
+    ///
+    /// The ids are handed out in the order the declarations were reached, so
+    /// walking them in order is walking the worklist in the order it grew,
+    /// and the loop ends when a pass over the last body added nothing.
+    fn reachable(mut self) -> Result<Program, Unsupported> {
+        let mut functions = Vec::with_capacity(self.reached.len());
+        while functions.len() < self.reached.len() {
+            functions.push(self.function(FunctionId(functions.len() as u32))?);
+        }
+        Ok(Program {
+            functions,
+            constants: self.constants,
+        })
     }
 
     /// Interns a constant, so that one value is one [`ConstId`] however many
@@ -184,9 +400,9 @@ impl<'a> Lowering<'a> {
     /// The function `module` reaches by the bare name `name`: its own
     /// declaration first, and the one a `use` imported under that name
     /// second, exactly as `Interpreter::find_function` does.
-    fn function_of(&self, module: &str, name: &str) -> Option<FunctionId> {
-        if let Some(id) = self.functions.get(&(module.to_string(), name.to_string())) {
-            return Some(*id);
+    fn function_of(&self, module: &str, name: &str) -> Option<Key> {
+        if let Some(key) = self.functions.get(&(module.to_string(), name.to_string())) {
+            return Some(*key);
         }
         let owner = self.checked.modules.get(module)?.imports.get(name)?;
         self.functions
@@ -226,14 +442,14 @@ impl<'a> Lowering<'a> {
     /// A type's methods usually live with the type; ADR 0006's orphan rule
     /// lets a conformance put one in the module that declares the trait
     /// instead, so the conformances are searched second.
-    fn method_of(&self, type_module: &str, type_name: &str, name: &str) -> Option<FunctionId> {
-        let key = (
+    fn method_of(&self, type_module: &str, type_name: &str, name: &str) -> Option<Key> {
+        let declared = (
             type_module.to_string(),
             type_name.to_string(),
             name.to_string(),
         );
-        if let Some(id) = self.methods.get(&key) {
-            return Some(*id);
+        if let Some(key) = self.methods.get(&declared) {
+            return Some(*key);
         }
         self.checked.modules.iter().find_map(|(module, resolved)| {
             let conforms = resolved.conformances.values().any(|conformance| {
@@ -288,7 +504,7 @@ impl<'a> Lowering<'a> {
     }
 
     /// The exported function `owner.name`, when `owner` exports one.
-    fn exported_function(&self, owner: &str, name: &str) -> Option<FunctionId> {
+    fn exported_function(&self, owner: &str, name: &str) -> Option<Key> {
         if self.checked.modules.get(owner)?.exported(name) != Some(true) {
             return None;
         }
@@ -308,7 +524,7 @@ impl<'a> Lowering<'a> {
 
     /// Lowers one function into its instructions.
     fn function(&mut self, id: FunctionId) -> Result<Function, Unsupported> {
-        let declared = &self.declared[id.0 as usize];
+        let declared = self.declaration(self.reached[id.0 as usize]);
         let module = declared.module;
         let name: Rc<str> = declared.name.as_str().into();
         let decl = declared.decl;
@@ -1239,8 +1455,8 @@ impl<'a, 'l> Body<'a, 'l> {
                 span,
             ));
         }
-        if let Some(id) = self.outer.function_of(self.module, name) {
-            return self.call_declared(id, None, args, span);
+        if let Some(key) = self.outer.function_of(self.module, name) {
+            return self.call_declared(key, None, args, span);
         }
         if let Some((owner, decl)) = self.outer.struct_of(self.module, name) {
             return self.make_struct(owner, decl, args, span);
@@ -1285,13 +1501,13 @@ impl<'a, 'l> Body<'a, 'l> {
                     ));
                 }
                 if let Some((owner, _)) = self.outer.struct_of(self.module, head) {
-                    if let Some(id) = self.outer.method_of(owner, head, name) {
-                        return self.call_declared(id, None, args, span);
+                    if let Some(key) = self.outer.method_of(owner, head, name) {
+                        return self.call_declared(key, None, args, span);
                     }
                 }
                 if let Some(owner) = self.outer.imported_module(self.module, head) {
-                    if let Some(id) = self.outer.exported_function(owner, name) {
-                        return self.call_declared(id, None, args, span);
+                    if let Some(key) = self.outer.exported_function(owner, name) {
+                        return self.call_declared(key, None, args, span);
                     }
                     if let Some(decl) = self.outer.exported_struct(owner, name) {
                         return self.make_struct(owner, decl, args, span);
@@ -1316,12 +1532,12 @@ impl<'a, 'l> Body<'a, 'l> {
     /// method needs pushed below its arguments.
     fn call_declared(
         &mut self,
-        id: FunctionId,
+        key: Key,
         receiver: Option<&'a Expr>,
         args: &'a [Arg],
         span: Span,
     ) -> Result<(), Unsupported> {
-        let declared = &self.outer.declared[id.0 as usize];
+        let declared = self.outer.declaration(key);
         let decl = declared.decl;
         let what = declared.name.clone();
 
@@ -1369,7 +1585,11 @@ impl<'a, 'l> Body<'a, 'l> {
             self.expr(&arg.value)?;
         }
         let argc = args.len() as u32 + u32::from(decl.receiver.is_some());
-        self.emit(Inst::Call { function: id, argc }, span);
+        // This is the whole of the reachability rule: the call being emitted
+        // is what makes the target part of the program, so the target is
+        // numbered here and nowhere else.
+        let function = self.outer.number(key);
+        self.emit(Inst::Call { function, argc }, span);
         Ok(())
     }
 
@@ -1510,7 +1730,21 @@ impl<'a, 'l> Body<'a, 'l> {
         let builtin_method = builtins::builtins()
             .iter()
             .any(|schema| schema.method(name).is_some());
-        if let Some(candidates) = self.outer.by_name.get(name) {
+        // Only the methods this module could be handed a receiver for: a
+        // method of a type no `use` brings here belongs to another program
+        // of the same package, and cannot be what this call means.
+        let candidates: Vec<Key> = self
+            .outer
+            .by_name
+            .get(name)
+            .map(|all| {
+                all.iter()
+                    .copied()
+                    .filter(|key| self.outer.could_dispatch(self.module, *key))
+                    .collect()
+            })
+            .unwrap_or_default();
+        if !candidates.is_empty() {
             if candidates.len() > 1 {
                 return Err(Unsupported::new(
                     format!("a call to `{name}`, which more than one type declares"),
@@ -1525,8 +1759,8 @@ impl<'a, 'l> Body<'a, 'l> {
                     span,
                 ));
             }
-            let id = candidates[0];
-            return self.call_declared(id, Some(receiver), args, span);
+            let key = candidates[0];
+            return self.call_declared(key, Some(receiver), args, span);
         }
         if builtin_method {
             self.expr(receiver)?;
@@ -1983,9 +2217,33 @@ mod tests {
         }
     }
 
+    /// The whole `examples/` package, checked.
+    ///
+    /// The evidence that a package is not a program: it holds eleven
+    /// `[run.<name>]` entries, and `callbacks/` holds a closure the lowering
+    /// refuses. Nothing about `hello` changes because of that.
+    fn examples() -> Checked {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples");
+        let mut sources = SourceMap::new();
+        let package = match cove_sema::package::load(&root, &mut sources) {
+            Ok(package) => package,
+            Err(items) => panic!(
+                "the examples package loads:\n{}",
+                rendered(&sources, &items)
+            ),
+        };
+        match cove_sema::resolve::resolve(&package) {
+            Ok(program) => program,
+            Err(items) => panic!(
+                "the examples package checks:\n{}",
+                rendered(&sources, &items)
+            ),
+        }
+    }
+
     /// The `benches/` package with only the module `name` kept.
     ///
-    /// Lowering is all-or-nothing over a program, so keeping one module at a
+    /// [`lower`] is all-or-nothing over a package, so keeping one module at a
     /// time is what lets a test say which entry lowers rather than only that
     /// some entry did not.
     fn bench(name: &str) -> Checked {
@@ -2898,6 +3156,138 @@ mod tests {
             "fn startup.main arity=0 frame=0\n\
              \x20  0  const Unit\n\
              \x20  1  return\n"
+        );
+    }
+
+    // ---------------------------------------------------- from an entry
+
+    /// The names of the functions a lowered program holds, in the order it
+    /// numbered them.
+    fn lowered_names(program: &Program) -> Vec<String> {
+        program
+            .functions
+            .iter()
+            .map(|function| format!("{}.{}", function.module, function.name))
+            .collect()
+    }
+
+    /// Issue #115 itself: `hello` is three lines and `callbacks/` holds a
+    /// closure, and the two share a package and nothing else.
+    #[test]
+    fn an_entry_lowers_past_a_construct_it_cannot_reach() {
+        let checked = examples();
+        let refused = lower(&checked).expect_err("`examples/` holds a program that does not lower");
+        assert_eq!(refused.what, "a closure");
+
+        let lowered = lower_entry(&checked, "hello", "main").expect("`hello.main` lowers");
+        validate(&lowered.program).expect("it holds the VM's invariants");
+        assert_eq!(
+            lowered_names(&lowered.program),
+            ["hello.main", "hello.greeting"]
+        );
+        assert_eq!(lowered.entry, FunctionId(0));
+        assert!(
+            lowered
+                .program
+                .function_named("callbacks", "main")
+                .is_none(),
+            "nothing `hello` cannot reach comes with it"
+        );
+    }
+
+    /// A program holds what its entry reaches and nothing beside it, so the
+    /// count is the measurement and the absence is the point.
+    #[test]
+    fn a_lowered_entry_holds_only_what_it_reaches() {
+        let source = "fn used() -> Int {\n  1\n}\n\nfn between() -> Int {\n  used()\n}\n\n\
+                      fn unreached() -> Int {\n  used()\n}\n\nfn main() -> Int {\n  between()\n}\n";
+        let checked = checked(source);
+
+        let lowered = lower_entry(&checked, "m", "main").expect("`m.main` lowers");
+        validate(&lowered.program).expect("it holds the VM's invariants");
+        // Numbered on discovery: the entry, then what its body called, then
+        // what that body called.
+        assert_eq!(
+            lowered_names(&lowered.program),
+            ["m.main", "m.between", "m.used"]
+        );
+        assert!(lowered.program.function_named("m", "unreached").is_none());
+
+        // The same package, lowered whole, holds the one the entry cannot
+        // reach as well.
+        let whole = lower(&checked).expect("the package lowers");
+        assert_eq!(
+            lowered_names(&whole),
+            ["m.between", "m.main", "m.unreached", "m.used"]
+        );
+    }
+
+    /// A declaration is numbered once, so a call back to something already
+    /// numbered adds nothing to walk and the worklist empties.
+    #[test]
+    fn recursion_and_mutual_recursion_terminate() {
+        let checked = checked(
+            "fn down(n: Int) -> Int {\n  if n == 0 {\n    0\n  } else {\n    up(n - 1)\n  }\n}\n\n\
+             fn up(n: Int) -> Int {\n  down(n - 1)\n}\n\n\
+             fn main() -> Int {\n  main2(3)\n}\n\n\
+             fn main2(n: Int) -> Int {\n  down(n) + main2(0)\n}\n",
+        );
+        let lowered = lower_entry(&checked, "m", "main").expect("`m.main` lowers");
+        validate(&lowered.program).expect("it holds the VM's invariants");
+        assert_eq!(
+            lowered_names(&lowered.program),
+            ["m.main", "m.main2", "m.down", "m.up"]
+        );
+    }
+
+    /// A method is reached through a call like anything else, so a method
+    /// only an unreached function calls is not part of the program.
+    #[test]
+    fn a_method_is_lowered_where_the_entry_reaches_it() {
+        let checked = checked(
+            "struct P {\n  x: Int\n}\n\n\
+             impl P {\n  fn reached(self) -> Int {\n    self.x\n  }\n\n  \
+             fn unreached(self) -> Int {\n    self.x + 1\n  }\n}\n\n\
+             fn aside() -> Int {\n  P(x: 2).unreached()\n}\n\n\
+             fn main() -> Int {\n  P(x: 1).reached()\n}\n",
+        );
+        let lowered = lower_entry(&checked, "m", "main").expect("`m.main` lowers");
+        validate(&lowered.program).expect("it holds the VM's invariants");
+        assert_eq!(lowered_names(&lowered.program), ["m.main", "m.P.reached"]);
+        assert!(lowered.program.function_named("m", "P.unreached").is_none());
+        assert!(lowered.program.function_named("m", "aside").is_none());
+    }
+
+    /// Narrowing what is lowered narrows nothing about what is refused: a
+    /// construct the entry reaches is reported in the words it always was.
+    #[test]
+    fn an_unsupported_construct_on_the_path_is_still_refused() {
+        let source = "fn helper() -> Result<Int, Error> {\n  \
+                      Err(Error(message: \"a\")).mapError(fn(e) {\n    \
+                      Error(message: \"b\")\n  })\n}\n\n\
+                      fn main() -> Result<Int, Error> {\n  helper()\n}\n";
+        let checked = checked(source);
+        let whole = lower(&checked).expect_err("the package does not lower");
+        let entry = lower_entry(&checked, "m", "main").expect_err("nor does the entry");
+        assert_eq!(entry.what, "a closure");
+        assert_eq!(entry.what, whole.what);
+        assert_eq!(entry.span, whole.span);
+    }
+
+    /// A `[run.<name>]` table is a file a person edits, so a name it gets
+    /// wrong is reported rather than crashed on.
+    #[test]
+    fn a_missing_entry_is_reported() {
+        let checked = checked("fn main() -> Int {\n  1\n}\n");
+        let missing = lower_entry(&checked, "m", "notMain").expect_err("there is no `m.notMain`");
+        assert_eq!(
+            missing.what,
+            "`m.notMain`, which this package does not declare"
+        );
+        let missing = lower_entry(&checked, "elsewhere", "main").expect_err("there is no module");
+        assert_eq!(
+            missing.what,
+            "`elsewhere.main`, which this package does not declare"
         );
     }
 

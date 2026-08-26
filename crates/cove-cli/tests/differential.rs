@@ -26,20 +26,24 @@
 //!
 //! # A case is a program, not a package
 //!
-//! `cove_ir::lower::lower` lowers a whole checked program and refuses all of
-//! it for one construct anywhere in it, which is right for a run — a program
-//! that lowered all but one of its functions could still reach the missing
-//! one — and wrong for a measurement, because `tests/e2e/` is seventy
-//! unrelated programs sharing one package for the convenience of the harness
-//! that runs them. So each case is lowered as the program it is: its entry's
-//! module, and the modules that module's `use` declarations reach,
-//! transitively. Nothing else about the package comes with it.
+//! `tests/e2e/` is seventy unrelated programs sharing one package for the
+//! convenience of the harness that runs them, so a case is measured as the
+//! program it is rather than as the package it sits in — and it is measured
+//! that way twice over.
 //!
-//! One consequence is worth naming rather than leaving to be discovered:
-//! `cove run --backend vm` lowers the whole package it is pointed at, so in a
-//! package that holds several programs it is refused by whichever program the
-//! VM cannot run, even when the entry selected could have run. That is a
-//! property of whole-package lowering, not of this harness.
+//! Checking is sliced by module: a case is parsed and checked as its entry's
+//! module plus the modules that module's `use` declarations reach,
+//! transitively. That slicing is not a workaround but the corpus's own
+//! shape: `tests/e2e/` keeps a dozen modules that deliberately do not check,
+//! each pinning a check-time diagnostic, and a package holding one of those
+//! does not check as a whole.
+//!
+//! Lowering is sliced by reachability: `cove_ir::lower::lower_entry` lowers
+//! what the entry can reach and nothing else, so a construct the VM cannot
+//! run refuses only the cases whose entry reaches it. This is the same call
+//! `cove run --backend vm` makes with the same entry, so what this harness
+//! measures and what the CLI runs are one program rather than two that could
+//! drift.
 //!
 //! # What is compared, and what is not
 //!
@@ -166,8 +170,12 @@ fn run_the_corpus() -> Report {
             continue;
         };
 
-        let ir = match cove_ir::lower::lower(&prepared.checked) {
-            Ok(ir) => ir,
+        let (module, entry) = prepared.entry();
+        // The same call `cove run --backend vm` makes, with the same entry:
+        // what is lowered is what this entry reaches, so the harness and the
+        // CLI mean one thing by "the program this entry is".
+        let ir = match cove_ir::lower::lower_entry(&prepared.checked, module, entry) {
+            Ok(lowered) => lowered.program,
             Err(why) => {
                 report.refused.push((case.name.clone(), why.what.clone()));
                 continue;
@@ -181,7 +189,6 @@ fn run_the_corpus() -> Report {
         }
         report.lowered.push(case.name.clone());
 
-        let (module, entry) = prepared.entry();
         let oracle = run_on_ast(&case, &prepared, module, entry);
         let backend = run_on_vm(&case, &prepared, &ir, module, entry);
         if oracle != backend {

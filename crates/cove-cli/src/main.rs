@@ -79,8 +79,10 @@ runtime; `cove build --help` says so in full, and ADR 0009 says why.
 instead of the tree-walking interpreter. The interpreter is the default and
 the oracle; the VM cannot run every construct yet, so a program it cannot run
 is refused before anything happens rather than finished on the interpreter,
-and the refusal names the construct and points at it. `--stats` reports how
-long lowering took apart from how long the run took.
+and the refusal names the construct and points at it. What is lowered is what
+the entry can reach, so a construct elsewhere in the package refuses only the
+entries that reach it. `--stats` reports how long lowering took apart from
+how long the run took.
 
 `cove test` runs every `test fn` in the package, reports each one, and exits
 non-zero when any failed. `--filter` runs only the tests whose qualified name
@@ -1108,11 +1110,23 @@ pub(crate) fn execute_entry(
     // could be observed by. A construct the lowering refuses stops the
     // command with the construct named, and never quietly finishes on the
     // interpreter.
+    //
+    // What is lowered is what this entry reaches, which is the program this
+    // command was asked to run. A package holds as many programs as it has
+    // `[run.<name>]` tables, and a closure in one of the others is not a
+    // reason this one cannot run. The differential harness lowers a case the
+    // same way, so the two agree about what an entry's program is.
     let lowered = match flags.backend {
         Backend::Ast => None,
         Backend::Vm => {
             let started = Instant::now();
-            let ir = cove_ir::lower::lower(program).map_err(ExecuteError::Unsupported)?;
+            // The entry's id is not carried to the VM: `run_entry` is the one
+            // seam both backends are reached through and it takes a name, so
+            // threading an id past it would make the two calls differ by more
+            // than which backend they build.
+            let ir = cove_ir::lower::lower_entry(program, module, entry)
+                .map_err(ExecuteError::Unsupported)?
+                .program;
             let lower = started.elapsed();
             let started = Instant::now();
             // The VM trusts what it is handed, so what hands it anything
@@ -1250,6 +1264,9 @@ pub(crate) fn execute_entry(
 /// execution, and the two costs are separable only because they happen at
 /// separate times: lowering runs once per program, execution runs for as long
 /// as the program does.
+///
+/// The program is what the entry reaches, so the figure measures what was
+/// lowered rather than what the package happened to hold beside it.
 struct Lowered {
     ir: cove_ir::Program,
     lower: Duration,
