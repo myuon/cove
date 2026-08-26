@@ -943,6 +943,19 @@ impl Ty {
                     aargs.iter().zip(bargs).map(|(a, b)| a.join(b)).collect(),
                 )
             }
+            (Ty::Fn(a), Ty::Fn(b))
+                if a.is_async == b.is_async && a.params.len() == b.params.len() =>
+            {
+                Ty::func(
+                    a.is_async,
+                    a.params
+                        .iter()
+                        .zip(&b.params)
+                        .map(|(a, b)| a.join(b))
+                        .collect(),
+                    a.ret.join(&b.ret),
+                )
+            }
             _ => self.clone(),
         }
     }
@@ -3936,7 +3949,23 @@ impl<'a> Checker<'a> {
         self.ret_stated = outer_stated;
         self.scopes.pop();
 
-        Ty::func(is_async, param_types, declared_ret.unwrap_or(body_ty))
+        let value = Ty::func(is_async, param_types, declared_ret.unwrap_or(body_ty));
+        // A function value given to a place that is not a function type is a
+        // mismatch like any other, and this is where it is reported.
+        // `Checker::expr` hands the expectation to this method rather than
+        // checking the result against it afterwards, because a lambda *reads*
+        // the expectation to type its parameters; so the check that skips is
+        // made here, for exactly the expectations a lambda could not read. An
+        // expected function type is left alone — a disagreeing one has
+        // already been reported against the parameters and the body, which
+        // says where it disagrees — and so is an unknown, which agrees with
+        // everything by construction.
+        if let Some(expected) = expected {
+            if !matches!(expected.ty, Ty::Fn(_)) && !expected.ty.is_wild() {
+                self.expect(&value, expected, span);
+            }
+        }
+        value
     }
 
     // -------------------------------------------------------------- calls
@@ -10451,6 +10480,23 @@ fn run() -> Int {
 ",
         );
         assert_eq!(error.code, UNKNOWN_METHOD);
+    }
+
+    /// A function value given to a place that is not a function type is a
+    /// mismatch like any other. `Checker::expr` hands the expectation to
+    /// `Checker::lambda` rather than checking the result against it, because
+    /// a lambda reads the expectation to type its parameters — and the check
+    /// that skipped used to be skipped for good, so the value was silently
+    /// accepted.
+    #[test]
+    fn a_function_value_given_to_a_place_that_is_not_one_is_a_mismatch() {
+        for source in [
+            "fn run() -> Int {\n  let x: Int = fn(n: Int) { n }\n  x\n}\n",
+            "fn run() -> Int {\n  let x: Int = fn(n: Int) { return n }\n  x\n}\n",
+        ] {
+            let error = rejects(source);
+            assert_eq!(error.code, MISMATCH, "{source}");
+        }
     }
 
     /// A placeholder is the one unknown that must never be observable, and
