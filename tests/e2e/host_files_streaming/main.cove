@@ -1,0 +1,27 @@
+use console.println
+use files
+
+/// Writes a file a line at a time, reads it back a line at a time, and
+/// removes what it wrote, so the run leaves nothing behind.
+export fn main() -> Result<Unit, Error> {
+  let writer = files.create("streamed.txt")?
+  writer.writeLine("first")?
+  writer.writeLine("second")?
+  writer.write("third with no newline")?
+  writer.close()?
+
+  let reader = files.open("streamed.txt")?
+  var count = 0
+  var next = reader.readLine()?
+  while next.isSome() {
+    count += 1
+    println("line {count}: {next.unwrapOr("")}")?
+    next = reader.readLine()?
+  }
+  reader.close()?
+  println("lines {count}")?
+
+  files.delete("streamed.txt")?
+  println("exists at end {files.exists("streamed.txt")}")?
+  Ok(())
+}

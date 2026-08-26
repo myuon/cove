@@ -356,7 +356,8 @@ pub const CLOCK: ModuleSchema = ModuleSchema {
 
 // -------------------------------------------------------------------- files
 
-/// `files`: reading and writing a rooted directory.
+/// `files`: reading and writing a rooted directory, whole and a line at a
+/// time.
 ///
 /// This is the first host whose operations disagree about [`Effect`], and the
 /// disagreement is real: `read`, `exists`, and `list` leave the filesystem
@@ -370,6 +371,14 @@ pub const CLOCK: ModuleSchema = ModuleSchema {
 /// `clock.sleep` is: abandoning one leaves nothing outside the run different.
 /// `write` and `delete` are not, because a call already in flight may already
 /// have reached the disk.
+///
+/// `open` and `create` issue the two resource kinds, so a program can move a
+/// file that it does not want to hold. Neither is task-safe, and they are the
+/// first shipped resources that are not: a reader is a position in a file and
+/// a writer is a position in another, so two tasks taking turns at one of
+/// them each receive some of the lines and neither receives the file. ADR
+/// 0018 says why that is a mistake to refuse rather than a race to serialize,
+/// and why a reader answers lines rather than bytes.
 pub const FILES: ModuleSchema = ModuleSchema {
     name: "files",
     capability: "files",
@@ -429,9 +438,106 @@ pub const FILES: ModuleSchema = ModuleSchema {
             recordable: true,
             result_is_task_safe: true,
         },
+        OperationSchema {
+            name: "open",
+            params: &[HostType::String],
+            variadic: false,
+            result: HostType::Result(&HostType::Named("files.Reader"), &HostType::Error),
+            capability: "files",
+            effect: Effect::Read,
+            cancellable: true,
+            recordable: true,
+            // The reader belongs to the task that opened it, so the handle
+            // this answers with is one no task boundary lets through.
+            result_is_task_safe: false,
+        },
+        OperationSchema {
+            name: "create",
+            params: &[HostType::String],
+            variadic: false,
+            result: HostType::Result(&HostType::Named("files.Writer"), &HostType::Error),
+            capability: "files",
+            // Creating truncates whatever was there, which is the reason
+            // `write` and `delete` are irreversible and not cancellable.
+            effect: Effect::IrreversibleWrite,
+            cancellable: false,
+            recordable: true,
+            result_is_task_safe: false,
+        },
     ],
     types: &[],
-    resources: &[],
+    resources: &[
+        ResourceSchema {
+            name: "Reader",
+            task_safe: false,
+            operations: &[
+                OperationSchema {
+                    name: "readLine",
+                    params: &[],
+                    variadic: false,
+                    result: HostType::Result(
+                        &HostType::Option(&HostType::String),
+                        &HostType::Error,
+                    ),
+                    capability: "files",
+                    effect: Effect::Read,
+                    cancellable: true,
+                    recordable: true,
+                    result_is_task_safe: true,
+                },
+                OperationSchema {
+                    name: "close",
+                    params: &[],
+                    variadic: false,
+                    result: HostType::Result(&HostType::Unit, &HostType::Error),
+                    capability: "files",
+                    effect: Effect::ReversibleWrite,
+                    cancellable: false,
+                    recordable: true,
+                    result_is_task_safe: true,
+                },
+            ],
+        },
+        ResourceSchema {
+            name: "Writer",
+            task_safe: false,
+            operations: &[
+                OperationSchema {
+                    name: "write",
+                    params: &[HostType::String],
+                    variadic: false,
+                    result: HostType::Result(&HostType::Unit, &HostType::Error),
+                    capability: "files",
+                    effect: Effect::IrreversibleWrite,
+                    cancellable: false,
+                    recordable: true,
+                    result_is_task_safe: true,
+                },
+                OperationSchema {
+                    name: "writeLine",
+                    params: &[HostType::String],
+                    variadic: false,
+                    result: HostType::Result(&HostType::Unit, &HostType::Error),
+                    capability: "files",
+                    effect: Effect::IrreversibleWrite,
+                    cancellable: false,
+                    recordable: true,
+                    result_is_task_safe: true,
+                },
+                OperationSchema {
+                    name: "close",
+                    params: &[],
+                    variadic: false,
+                    result: HostType::Result(&HostType::Unit, &HostType::Error),
+                    capability: "files",
+                    effect: Effect::ReversibleWrite,
+                    cancellable: false,
+                    recordable: true,
+                    result_is_task_safe: true,
+                },
+            ],
+        },
+    ],
 };
 
 // ------------------------------------------------------------------ process

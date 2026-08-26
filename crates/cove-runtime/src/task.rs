@@ -969,6 +969,24 @@ mod tests {
         assert_eq!(found.type_name, "test.Connection");
     }
 
+    /// The same rule against a shipped schema rather than a fictitious one.
+    /// ADR 0018 gives `files.Reader` `task_safe: false` because a reader is a
+    /// position in a file, and two tasks taking turns at one position each
+    /// receive some of the lines and neither receives the file. The refusal
+    /// is what makes that a mistake the run reports rather than an
+    /// interleaving no test can pin.
+    #[test]
+    fn a_files_reader_is_refused_at_a_task_boundary() {
+        let handle = ResourceHandle::new("files", &cove_schema::hosts::FILES.resources[0], 1);
+        let found = Transfer::of(&Value::Resource(handle))
+            .expect_err("a `files.Reader` may not cross a task boundary");
+        assert_eq!(found.type_name, "files.Reader");
+        assert_eq!(
+            found.help("spawning"),
+            "`files.Reader` is a host resource whose Host API schema declares it not task-safe; open one in the task that uses it rather than spawning"
+        );
+    }
+
     /// The correction for a host resource is not "wrap it in `Shared`" — the
     /// host already decided this resource's state stays with the task that
     /// opened it — so `NotTaskSafe::help` reads a `.` in the type name, which
