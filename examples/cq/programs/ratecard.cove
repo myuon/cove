@@ -1,0 +1,83 @@
+use cq.csv.splitRecord
+use cq.diag.Detail
+use cq.rows.Cell
+use cq.rows.Step
+
+/// What the rate-card transformation carries between records.
+///
+/// Only whether the header has gone past. A CSV file names its columns on its
+/// first line, and a reader that is handed one line at a time has to remember
+/// that it has seen it.
+export struct RateCard {
+  seenHeader: Bool
+  rows: Int
+}
+
+/// The empty state a run starts from.
+export fn emptyRateCard() -> RateCard {
+  RateCard(seenHeader: false, rows: 0)
+}
+
+/// The columns a rate card must have, in the order it must have them.
+fn expectedColumns() -> Array<String> {
+  ["property", "season", "nightlyRate", "notes"]
+}
+
+/// Reads one CSV line, checking the header and normalizing every row after
+/// it.
+export fn foldRateCard(
+  state: RateCard,
+  line: String,
+  number: Int,
+) -> Result<Step<RateCard>, Detail> {
+  let fields = splitRecord(line)?
+  if !state.seenHeader {
+    checkHeader(fields)?
+    return Ok(Step(
+      state: RateCard(seenHeader: true, rows: state.rows),
+      rows: [],
+    ))
+  }
+  if fields.length() != expectedColumns().length() {
+    return Err(Detail(column: 1, message: "this row has {fields.length()} fields and the header names {expectedColumns().length()}"))
+  }
+  let property = fields.get(0).unwrapOr("")
+  let season = fields.get(1).unwrapOr("")
+  let rate = rateOf(fields.get(2).unwrapOr(""))?
+  let notes = fields.get(3).unwrapOr("")
+  Ok(Step(state: RateCard(seenHeader: true, rows: state.rows + 1), rows: [[Cell.Text(property), Cell.Text(season), Cell.Decimal(rate, 2), Cell.Text(notes)]]))
+}
+
+/// Writes nothing at the end: every row went out as it was read.
+export fn finishRateCard(state: RateCard) -> Array<Array<Cell>> {
+  []
+}
+
+/// Reports a header that is not the one this transformation reads.
+///
+/// Checking it is worth doing rather than skipping: a rate card whose columns
+/// moved would otherwise be read as a rate card whose values moved, and the
+/// output would be wrong rather than refused.
+fn checkHeader(fields: Array<String>) -> Result<Unit, Detail> {
+  let expected = expectedColumns()
+  if fields.length() != expected.length() {
+    return Err(Detail(column: 1, message: "the header has {fields.length()} columns and this program reads {expected.length()}"))
+  }
+  var at = 0
+  for column in expected {
+    let found = fields.get(at).unwrapOr("")
+    if found.trim() != column {
+      return Err(Detail(column: at + 1, message: "column {at + 1} of the header is `{found}` and should be `{column}`"))
+    }
+    at += 1
+  }
+  Ok(())
+}
+
+/// Reads a nightly rate, which must be a number.
+fn rateOf(text: String) -> Result<Float, Detail> {
+  match Float.parse(text.trim()) {
+    Ok(rate) => Ok(rate)
+    Err(_) => Err(Detail(column: 1, message: "`{text}` is not a nightly rate"))
+  }
+}

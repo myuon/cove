@@ -1,0 +1,33 @@
+/// Where in one line something went wrong, and what.
+///
+/// A parser knows the column and not the line: it is handed one record at a
+/// time and has no idea which. `locate` is what supplies the rest, at the one
+/// place in the program that is counting.
+export struct Detail {
+  column: Int
+  message: String
+}
+
+/// A detail, once the record it came from is known.
+export struct Diagnostic {
+  source: String
+  line: Int
+  column: Int
+  message: String
+}
+
+/// Places `detail` at line `line` of `source`.
+export fn locate(detail: Detail, source: String, line: Int) -> Diagnostic {
+  Diagnostic(
+    source: source,
+    line: line,
+    column: detail.column,
+    message: detail.message,
+  )
+}
+
+/// Reports `diagnostic` the way a compiler reports one, so an editor that
+/// already knows how to jump to `file:line:column` can jump to a bad record.
+export fn describe(diagnostic: Diagnostic) -> String {
+  "{diagnostic.source}:{diagnostic.line}:{diagnostic.column}: {diagnostic.message}"
+}

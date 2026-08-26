@@ -1,0 +1,38 @@
+use cq.diag.Detail
+use cq.json.parse
+use cq.records.Status
+use cq.records.bookingFrom
+use cq.rows.Cell
+use cq.rows.Step
+
+/// What the confirmed-bookings transformation carries between records.
+///
+/// Nothing, and the type says so. This program writes as it reads, one row per
+/// record it keeps, so no part of the input outlives the line it arrived on.
+export struct NoState {
+  kept: Int
+}
+
+/// The empty state a run starts from.
+export fn emptyConfirmed() -> NoState {
+  NoState(kept: 0)
+}
+
+/// Keeps one record when it is confirmed, and writes it out at once.
+export fn foldConfirmed(
+  state: NoState,
+  line: String,
+  number: Int,
+) -> Result<Step<NoState>, Detail> {
+  let booking = bookingFrom(parse(line)?)?
+  match booking.status {
+    Status.Confirmed => Ok(Step(state: NoState(kept: state.kept + 1), rows: [[Cell.Text(booking.id), Cell.Text(booking.guest), Cell.Text(booking.property), Cell.Text(booking.checkIn), Cell.Count(booking.nights), Cell.Decimal(booking.revenue(), 2)]]))
+    _ => Ok(Step(state: state, rows: []))
+  }
+}
+
+/// Writes nothing at the end, because everything was written on the way
+/// through.
+export fn finishConfirmed(state: NoState) -> Array<Array<Cell>> {
+  []
+}

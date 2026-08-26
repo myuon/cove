@@ -33,7 +33,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::io::{BufRead, ErrorKind, Read, Write};
 use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Mutex, MutexGuard};
+use std::sync::{Arc, Mutex, MutexGuard};
 
 use crate::error::RuntimeError;
 use crate::host::{HostApi, Reentry, ResourceHandle};
@@ -116,7 +116,7 @@ enum FileSource {
     /// The real filesystem is the operating system's to synchronize; this
     /// tree is the host's own state, so the host locks it. Two tasks writing
     /// at once therefore take turns here exactly as they do on disk.
-    InMemory(Mutex<BTreeMap<String, String>>),
+    InMemory(Arc<Mutex<BTreeMap<String, String>>>),
 }
 
 /// What `files` declares about itself.
@@ -147,7 +147,21 @@ impl Files {
     /// write it, and its value is the file's contents. A path with no key of
     /// its own but with keys below it is a directory.
     pub fn in_memory(files: BTreeMap<String, String>) -> Self {
-        Files::with_source(FileSource::InMemory(Mutex::new(files)))
+        Files::with_source(FileSource::InMemory(Arc::new(Mutex::new(files))))
+    }
+
+    /// The fake tree as this host holds it, for a test to read back.
+    ///
+    /// A test drives the program and then asks this what the run left behind,
+    /// which is the only way to assert on a file the program wrote rather
+    /// than on the console line that says it did. A rooted host answers an
+    /// empty tree: what a run wrote is on the filesystem, under the root the
+    /// test chose, where the test can go and read it.
+    pub fn tree(&self) -> Tree {
+        match &self.source {
+            FileSource::InMemory(files) => Tree(Arc::clone(files)),
+            FileSource::Rooted(_) => Tree(Arc::new(Mutex::new(BTreeMap::new()))),
+        }
     }
 
     fn with_source(source: FileSource) -> Self {
@@ -421,6 +435,22 @@ impl Files {
                 }
             }
         }
+    }
+}
+
+/// A fake host's tree, for a test to read back.
+///
+/// This is [`crate::http::Served`]'s counterpart for `files`: a handle on the
+/// state the fake kept, so a test asks it what happened rather than reaching
+/// into the host, which is the program's boundary and not the thing under
+/// test.
+#[derive(Clone)]
+pub struct Tree(Arc<Mutex<BTreeMap<String, String>>>);
+
+impl Tree {
+    /// Every file this host holds, by `/`-separated relative path.
+    pub fn files(&self) -> BTreeMap<String, String> {
+        stored(&self.0).clone()
     }
 }
 

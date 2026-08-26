@@ -1,0 +1,201 @@
+/// What `splitRecord` makes of `line`: each field in brackets, or the failure
+/// it reported as `column: message`.
+///
+/// The brackets are what make an empty field visible, since a record of three
+/// fields where the middle one is empty and a record of two are otherwise the
+/// same text. One helper for both answers is what lets a test that expected
+/// fields report the diagnostic it got instead.
+fn splitOf(line: String) -> String {
+  match splitRecord(line) {
+    Ok(fields) => {
+      var parts = Vector.of()
+      for field in fields {
+        parts.push("[{field}]")
+      }
+      "".join(parts.freeze())
+    }
+    Err(detail) => "{detail.column}: {detail.message}"
+  }
+}
+
+/// A line of ordinary values is the values, split at every comma, with
+/// whatever spacing the input chose kept: trimming would be this program
+/// deciding a value was not meant.
+test fn splitsPlainFields() -> Result<Unit, Error> {
+  assertEqual(splitOf("a,b,c"), "[a][b][c]")?
+  assertEqual(
+    splitOf("seaside-cottage,low,109.00"),
+    "[seaside-cottage][low][109.00]",
+  )?
+  assertEqual(splitOf("  spaced  ,b"), "[  spaced  ][b]")?
+  Ok(())
+}
+
+/// A field with nothing between its commas is an empty field rather than no
+/// field, so a row keeps its shape when a value is missing.
+test fn splitsAnEmptyField() -> Result<Unit, Error> {
+  assertEqual(splitOf("a,,c"), "[a][][c]")?
+  Ok(())
+}
+
+/// An empty line is one empty field, not zero fields, because the line was
+/// there and its single value was blank.
+test fn splitsAnEmptyLineIntoOneEmptyField() -> Result<Unit, Error> {
+  assertEqual(splitOf(""), "[]")?
+  Ok(())
+}
+
+/// A quoted field may hold the delimiter, which is the whole reason quoting
+/// exists, so the comma inside it does not end the field.
+test fn splitsAQuotedFieldHoldingAComma() -> Result<Unit, Error> {
+  assertEqual(splitOf("a,\"b,c\",d"), "[a][b,c][d]")?
+  assertEqual(
+    splitOf("orchard-barn,high,124.00,\"Closed for repairs, 12 March\""),
+    "[orchard-barn][high][124.00][Closed for repairs, 12 March]",
+  )?
+  Ok(())
+}
+
+/// A doubled quote inside a quoted field is one literal quote, which is how
+/// RFC 4180 writes a quote and how `formatRecord` writes one back.
+test fn splitsADoubledQuoteAsOneQuote() -> Result<Unit, Error> {
+  assertEqual(splitOf("\"say \"\"hi\"\"\""), "[say \"hi\"]")?
+  assertEqual(
+    splitOf("harbour-loft,high,219.00,\"Says \"\"quiet\"\" on the listing\""),
+    "[harbour-loft][high][219.00][Says \"quiet\" on the listing]",
+  )?
+  Ok(())
+}
+
+/// A line ending in a comma has an empty field after it, so a row that leaves
+/// its last column blank still has that column.
+test fn splitsATrailingEmptyField() -> Result<Unit, Error> {
+  assertEqual(
+    splitOf("harbour-loft,low,164.00,"),
+    "[harbour-loft][low][164.00][]",
+  )?
+  Ok(())
+}
+
+/// A quote may open a field and may not appear inside an unquoted one, and
+/// the column names the quote rather than the field it was found in.
+test fn refusesAQuoteInsideAnUnquotedField() -> Result<Unit, Error> {
+  assertEqual(
+    splitOf("a,b\"c"),
+    "4: a quote may only open a field, not appear inside an unquoted one",
+  )?
+  Ok(())
+}
+
+/// A quoted field still open when the line ends is refused rather than
+/// continued onto the next line, because the reader upstream hands over one
+/// line at a time and a record that spanned two would make it know about
+/// quoting.
+test fn refusesAQuotedFieldTheLineNeverCloses() -> Result<Unit, Error> {
+  assertEqual(
+    splitOf("a,\"b,c"),
+    "7: a quoted field was still open when the line ended",
+  )?
+  Ok(())
+}
+
+/// Text after a quoted field's closing quote is refused, and the column names
+/// the character that had no business being there.
+///
+/// The failure this pins is not that something went unsupported: `"a"x,b` used
+/// to be *accepted*, with a first field of `ax`, because a splitter that had
+/// just read a closing quote was back where an unquoted field begins. Reading
+/// bad input as a different value is the worst thing a data tool can do, so a
+/// quoted field ends at a `,` or at the end of the record and nowhere else.
+test fn refusesTextAfterAQuotedFieldsClosingQuote() -> Result<Unit, Error> {
+  assertEqual(
+    splitOf("\"a\"x,b"),
+    "4: a quoted field must end at a `,` or at the end of the record, and `x` follows this one",
+  )?
+  Ok(())
+}
+
+/// A quoted field that ends at a comma or at the end of the record is the
+/// field it quoted, so the rule above refuses the malformed record without
+/// costing the well-formed one.
+test fn splitsAQuotedFieldThatEndsWhereItMay() -> Result<Unit, Error> {
+  assertEqual(splitOf("\"a\",b"), "[a][b]")?
+  assertEqual(splitOf("\"a\""), "[a]")?
+  Ok(())
+}
+
+/// An empty quoted field is the same rule with nothing inside it: `""x` is
+/// refused where `x` stands, and `""` alone is one empty field.
+///
+/// This is the same defect as `"a"x,b` rather than a second one, and it is
+/// worth its own test because a splitter could carry the closing quote's
+/// meaning in the field it had gathered, which for an empty field is nothing
+/// to carry it in.
+test fn refusesTextAfterAnEmptyQuotedField() -> Result<Unit, Error> {
+  assertEqual(
+    splitOf("\"\"x"),
+    "3: a quoted field must end at a `,` or at the end of the record, and `x` follows this one",
+  )?
+  assertEqual(splitOf("\"\""), "[]")?
+  Ok(())
+}
+
+/// A space after a closing quote is refused like any other character, because
+/// a splitter that trimmed it would be guessing.
+///
+/// The record says the field ended and then says it did not, and the two
+/// readings -- `a` with stray spacing, or `a ` -- are different values. An
+/// unquoted field keeps whatever spacing the input chose, so silently dropping
+/// this space would be the one place where spacing stopped meaning anything.
+test fn refusesASpaceAfterAQuotedFieldsClosingQuote() -> Result<Unit, Error> {
+  assertEqual(
+    splitOf("\"a\" ,b"),
+    "4: a quoted field must end at a `,` or at the end of the record, and ` ` follows this one",
+  )?
+  Ok(())
+}
+
+/// A doubled quote inside a quoted field still round trips both ways, so the
+/// state that refuses `"a"x` has not made the quote RFC 4180 does allow
+/// unreadable.
+///
+/// The two directions are asserted together because they are one property: the
+/// splitter reads `"a""b",c` as `a"b` and `c`, and `formatRecord` writes those
+/// two fields back as exactly that line.
+test fn splitsAndWritesADoubledQuoteBothWays() -> Result<Unit, Error> {
+  assertEqual(splitOf("\"a\"\"b\",c"), "[a\"b][c]")?
+  assertEqual(formatRecord(["a\"b", "c"]), "\"a\"\"b\",c")?
+  Ok(())
+}
+
+/// A field is quoted only when leaving it bare would change what it says, so
+/// a file of ordinary values reads as a file of ordinary values.
+test fn quotesOnlyTheFieldsThatHaveToBe() -> Result<Unit, Error> {
+  assertEqual(formatRecord(["a", "b", "c"]), "a,b,c")?
+  assertEqual(formatRecord(["plain", ""]), "plain,")?
+  assertEqual(formatRecord(["has,comma"]), "\"has,comma\"")?
+  assertEqual(formatRecord(["has\"quote"]), "\"has\"\"quote\"")?
+  assertEqual(formatRecord(["two\nlines"]), "\"two\nlines\"")?
+  assertEqual(formatRecord(["carriage\rreturn"]), "\"carriage\rreturn\"")?
+  assertEqual(formatRecord(["  spaced  "]), "  spaced  ")?
+  Ok(())
+}
+
+/// A record written by `formatRecord` reads back as itself, whatever is in
+/// it, which is the property that lets `cq` write a CSV another run of `cq`
+/// can read.
+test fn roundTripsARecordWithEveryAwkwardFieldInIt() -> Result<Unit, Error> {
+  let record = [
+    "plain",
+    "",
+    "has,comma",
+    "has\"quote\"",
+    "  spaced  ",
+    "\"already quoted\"",
+    "",
+  ]
+  match splitRecord(formatRecord(record)) {
+    Ok(fields) => assertEqual(fields, record)
+    Err(detail) => Err(Error("{detail.column}: {detail.message}"))
+  }
+}

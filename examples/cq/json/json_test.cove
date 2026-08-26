@@ -1,0 +1,349 @@
+/// The text a value takes after `parse` and then `render`, or the failure
+/// `parse` reported as `column: message`.
+///
+/// One helper answers both, so a round trip that stopped being one says which
+/// diagnostic it got instead of merely differing from what was expected.
+fn roundTrip(text: String) -> String {
+  match parse(text) {
+    Ok(value) => render(value)
+    Err(detail) => "{detail.column}: {detail.message}"
+  }
+}
+
+/// The failure `parse` reports for `text`, as `column: message`.
+///
+/// The column and the message are pinned together because a diagnostic is
+/// only useful as a pair: a message that survives while its column drifts
+/// points an editor at the wrong character, and that is the same regression
+/// as losing the message.
+fn failure(text: String) -> String {
+  match parse(text) {
+    Ok(value) => "parsed as {render(value)}"
+    Err(detail) => "{detail.column}: {detail.message}"
+  }
+}
+
+/// `text` wrapped in `depth` levels of array.
+fn nested(depth: Int) -> String {
+  var text = "1"
+  for i in 0..<depth {
+    text = "[{text}]"
+  }
+  text
+}
+
+/// Every kind of JSON value survives being read and written again, so a
+/// record that passes through `cq` unchanged comes out as the record that
+/// went in.
+test fn roundTripsEveryKindOfValue() -> Result<Unit, Error> {
+  assertEqual(roundTrip("\{\"id\":\"B-1\"\}"), "\{\"id\":\"B-1\"\}")?
+  assertEqual(roundTrip("[1,2,3]"), "[1,2,3]")?
+  assertEqual(
+    roundTrip("\{\"a\":\{\"b\":[true,null]\}\}"),
+    "\{\"a\":\{\"b\":[true,null]\}\}",
+  )?
+  assertEqual(roundTrip("null"), "null")?
+  assertEqual(roundTrip("true"), "true")?
+  assertEqual(roundTrip("false"), "false")?
+  assertEqual(roundTrip("-12.5"), "-12.5")?
+  Ok(())
+}
+
+/// An empty object and an empty array are values in their own right, and come
+/// back as themselves rather than as nothing.
+test fn roundTripsTheEmptyContainers() -> Result<Unit, Error> {
+  assertEqual(roundTrip("\{\}"), "\{\}")?
+  assertEqual(roundTrip("[]"), "[]")?
+  Ok(())
+}
+
+/// An exponent is read as the number it names and written back in full,
+/// because this parser keeps the value rather than the spelling.
+///
+/// So this is the one round trip that is not the identity, and pinning it is
+/// what stops that from being discovered by a diff over an output file.
+test fn readsAnExponentAsTheNumberItNames() -> Result<Unit, Error> {
+  assertEqual(roundTrip("1.5e2"), "150")?
+  assertEqual(roundTrip("2E-3"), "0.002")?
+  Ok(())
+}
+
+/// Object fields come back in ascending order by key whatever order they
+/// arrived in, so two runs over the same input write the same bytes and a
+/// golden test over the output is possible.
+test fn ordersObjectFieldsByKey() -> Result<Unit, Error> {
+  assertEqual(
+    roundTrip("\{\"b\":1,\"a\":2,\"c\":3\}"),
+    "\{\"a\":2,\"b\":1,\"c\":3\}",
+  )?
+  Ok(())
+}
+
+/// A number that is whole is written without a decimal point, because a
+/// reader that takes `nights` as an integer should get `3` and not `3.0`.
+test fn writesAWholeNumberWithoutADecimalPoint() -> Result<Unit, Error> {
+  assertEqual(roundTrip("3"), "3")?
+  assertEqual(roundTrip("3.0"), "3")?
+  assertEqual(roundTrip("184.0"), "184")?
+  assertEqual(roundTrip("-7.0"), "-7")?
+  assertEqual(roundTrip("129.5"), "129.5")?
+  Ok(())
+}
+
+/// The five escapes this parser reads are the five it writes, so a string
+/// holding any of them makes it through a round trip unchanged.
+///
+/// The value here is the awkward one on purpose: a quote, a backslash, a
+/// newline, a tab, and a carriage return in one string, since an escape that
+/// is dropped or doubled shows up as a shorter or longer string rather than
+/// as a parse failure.
+test fn roundTripsEveryEscapeItReads() -> Result<Unit, Error> {
+  assertEqual(
+    roundTrip("\"q\\\"b\\\\s\\nn\\tt\\rr\""),
+    "\"q\\\"b\\\\s\\nn\\tt\\rr\"",
+  )?
+  Ok(())
+}
+
+/// A line with anything after its value is refused rather than read as the
+/// value with a comment on it, because a JSON Lines record is a whole line.
+test fn refusesContentAfterTheValue() -> Result<Unit, Error> {
+  assertEqual(failure("1 2"), "3: this line has more after the JSON value")?
+  assertEqual(
+    failure("\{\"a\":1\} \{\}"),
+    "9: this line has more after the JSON value",
+  )?
+  Ok(())
+}
+
+/// A field name must be followed by `:`, and the column names the character
+/// that was there instead.
+test fn refusesAFieldNameWithoutAColon() -> Result<Unit, Error> {
+  assertEqual(failure("\{\"a\" 1\}"), "6: a field name must be followed by `:`")?
+  Ok(())
+}
+
+/// A field name with no value after it is refused where the value should have
+/// started.
+test fn refusesAFieldWithNoValue() -> Result<Unit, Error> {
+  assertEqual(failure("\{\"a\":\}"), "6: `\}` does not start a JSON value")?
+  Ok(())
+}
+
+/// A string the line ends inside is refused at the end of the line, since
+/// this reader is handed one line at a time and a record may not span two.
+test fn refusesAStringTheLineNeverCloses() -> Result<Unit, Error> {
+  assertEqual(failure("\{\"a\":\"b"), "8: this string was never closed")?
+  Ok(())
+}
+
+/// An array the line ends inside is refused where the `,` or `]` should have
+/// been.
+test fn refusesAnArrayTheLineNeverCloses() -> Result<Unit, Error> {
+  assertEqual(failure("[1,2"), "5: expected `,` or `]` after an element")?
+  Ok(())
+}
+
+/// An empty line holds no value, and says so at the first column rather than
+/// answering some emptier value.
+test fn refusesAnEmptyLine() -> Result<Unit, Error> {
+  assertEqual(failure(""), "1: a JSON value was expected and the line ended")?
+  assertEqual(failure("   "), "4: a JSON value was expected and the line ended")?
+  Ok(())
+}
+
+/// A literal that only starts like one of the three JSON names is refused as
+/// that name, so `nul` reports what was expected rather than what was found.
+test fn refusesALiteralThatIsNotOneOfTheThree() -> Result<Unit, Error> {
+  assertEqual(failure("nul"), "4: expected `null`")?
+  assertEqual(failure("tru"), "4: expected `true`")?
+  assertEqual(failure("fals"), "5: expected `false`")?
+  Ok(())
+}
+
+/// A number that stops early is refused where it stopped.
+///
+/// The scanner stops at the end of the number rather than gathering every
+/// character that could appear in one, so `1-2` is a number followed by
+/// something the line had no room for rather than one malformed run.
+test fn refusesARunThatIsNotANumber() -> Result<Unit, Error> {
+  assertEqual(failure("1-2"), "2: this line has more after the JSON value")?
+  assertEqual(failure("[ 1e]"), "5: an exponent needs a digit after it")?
+  Ok(())
+}
+
+/// A number must be spelled the way JSON spells one, and a run that is not is
+/// refused rather than read as the number it resembles.
+///
+/// `+1`, `01`, `.5`, and `1.` are each a `Float` literal Cove's `Float.parse`
+/// accepts and JSON does not write. Leaving the judgement to `Float.parse`
+/// therefore read every one of them as a value the input never held -- bad
+/// input accepted as a different value, not an unsupported spelling refused --
+/// so the grammar `[-] int [frac] [exp]` is walked here instead.
+test fn refusesANumberJsonWouldNotWrite() -> Result<Unit, Error> {
+  assertEqual(failure("+1"), "1: `+` does not start a JSON value")?
+  assertEqual(failure(".5"), "1: `.` does not start a JSON value")?
+  assertEqual(failure("01"), "2: a number may not have a leading zero")?
+  assertEqual(failure("1."), "3: a decimal point needs a digit after it")?
+  Ok(())
+}
+
+/// The same rule holds for a number inside a record, and the column counts
+/// from the start of the line rather than from the start of the number.
+///
+/// A diagnostic an editor can jump to is the whole point of carrying a column,
+/// and a number is nearly always found inside something else.
+test fn refusesALeadingZeroInsideARecord() -> Result<Unit, Error> {
+  assertEqual(
+    failure("\{\"a\":01\}"),
+    "7: a number may not have a leading zero",
+  )?
+  Ok(())
+}
+
+/// An exponent needs a digit after it, whether the line ended first or a sign
+/// was all that followed, and the column names where the digit should be.
+test fn refusesAnExponentWithNoDigit() -> Result<Unit, Error> {
+  assertEqual(failure("1e"), "3: an exponent needs a digit after it")?
+  assertEqual(failure("1e+"), "4: an exponent needs a digit after it")?
+  assertEqual(failure("[ 1e]"), "5: an exponent needs a digit after it")?
+  Ok(())
+}
+
+/// A `-` with no digit after it is refused where the digit should be, rather
+/// than read as a zero or as the start of something else.
+test fn refusesASignWithNoDigit() -> Result<Unit, Error> {
+  assertEqual(failure("-"), "2: a number needs a digit here")?
+  Ok(())
+}
+
+/// A number JSON spells correctly and a `Float` cannot hold is refused at the
+/// column the number started on.
+///
+/// `1e999` passes the grammar and parses to an infinity, which is not a value
+/// any input meant. Answering it would be this program inventing a number the
+/// file does not contain, so `isFinite` refuses it and the record is reported
+/// like any other bad one.
+test fn refusesANumberTooLargeForAFloat() -> Result<Unit, Error> {
+  assertEqual(failure("1e999"), "1: `1e999` is too large for a `Float` to hold")?
+  assertEqual(
+    failure("-1e999"),
+    "1: `-1e999` is too large for a `Float` to hold",
+  )?
+  Ok(())
+}
+
+/// Every number JSON does write is read as the number it names, because a
+/// grammar checked by hand has to be pinned from both sides: one that refuses
+/// `01` and also refuses `0` would be no better than the one it replaced.
+///
+/// Each answer is the text the value renders back to rather than the text it
+/// arrived as, so `-0` is `0` and an exponent is its value written out.
+test fn readsEveryNumberJsonDoesWrite() -> Result<Unit, Error> {
+  assertEqual(roundTrip("0"), "0")?
+  assertEqual(roundTrip("-0"), "0")?
+  assertEqual(roundTrip("0.5"), "0.5")?
+  assertEqual(roundTrip("123"), "123")?
+  assertEqual(roundTrip("-1.25e-3"), "-0.00125")?
+  assertEqual(roundTrip("1E3"), "1000")?
+  assertEqual(roundTrip("1e+3"), "1000")?
+  assertEqual(roundTrip("1e-3"), "0.001")?
+  Ok(())
+}
+
+/// The largest exponent a `Float` holds is read, and comes back as the whole
+/// number it names.
+///
+/// This is where the bound refusing `1e999` sits, so it is worth pinning that
+/// the bound is on the far side of `1e308` rather than anywhere nearer. The
+/// answer is 309 digits because this parser keeps the value and not the
+/// spelling, and it ends in `.0` because the value is past what an `Int` holds
+/// and so is written as the `Float` it is.
+test fn readsTheLargestExponentAFloatHolds() -> Result<Unit, Error> {
+  assertEqual(
+    roundTrip("1e308"),
+    "100000000000000001097906362944045541740492309677311846336810682903157585404911491537163328978494688899061249669721172515611590283743140088328307009198146046031271664502933027185697489699588559043338384466165001178426897626212945177628091195786707458122783970171784415105291802893207873272974885715430223118336.0",
+  )?
+  Ok(())
+}
+
+/// A control character inside a string is refused where it stands, and its
+/// escape is read as the character it names.
+///
+/// JSON writes every character below U+0020 as an escape and never as itself,
+/// so a literal tab between two quotes is a string JSON did not write. Reading
+/// it anyway would put a value into the program that the file does not hold,
+/// which is the same defect as accepting `"a"x` in a CSV: bad input taken as a
+/// different value rather than refused. The escaped forms still round trip, so
+/// what is refused is the spelling and not the character.
+test fn refusesAnUnescapedControlCharacter() -> Result<Unit, Error> {
+  assertEqual(
+    failure("\"a\tb\""),
+    "3: a string may not hold an unescaped control character",
+  )?
+  assertEqual(roundTrip("\"a\\tb\""), "\"a\\tb\"")?
+  assertEqual(
+    failure("\"a\rb\""),
+    "3: a string may not hold an unescaped control character",
+  )?
+  assertEqual(roundTrip("\"a\\rb\""), "\"a\\rb\"")?
+  Ok(())
+}
+
+/// A `\u` escape is refused rather than dropped or passed through, because a
+/// tool that quietly corrupts one record in a hundred thousand is worse than
+/// one that stops.
+test fn refusesAUnicodeEscape() -> Result<Unit, Error> {
+  assertEqual(failure("\"\\u0041\""), "4: `\\u` escapes are not supported")?
+  Ok(())
+}
+
+/// A value nested deeper than the parser's bound is refused rather than
+/// recursed into, so a crafted line ends in a diagnostic this program wrote
+/// instead of inside the interpreter.
+///
+/// The bound counts the value at the bottom too, so 63 arrays around a number
+/// is 64 levels and passes, and one more array is 65 and does not.
+test fn refusesNestingDeeperThanItsBound() -> Result<Unit, Error> {
+  assertEqual(roundTrip(nested(63)), nested(63))?
+  assertEqual(
+    failure(nested(64)),
+    "65: this value nests more than 64 levels deep",
+  )?
+  assertEqual(
+    failure(nested(500)),
+    "65: this value nests more than 64 levels deep",
+  )?
+  Ok(())
+}
+
+/// `field` answers the value under a name, `None` for a name an object does
+/// not carry, and `None` for a value that has no fields at all.
+test fn readsAFieldOnlyOutOfAnObject() -> Result<Unit, Error> {
+  let record = parseOr("\{\"a\":1,\"b\":\"two\"\}")
+  assertEqual(renderField(record, "b"), "\"two\"")?
+  assertEqual(renderField(record, "c"), "no field")?
+  assertEqual(renderField(parseOr("[1]"), "a"), "no field")?
+  assertEqual(renderField(parseOr("null"), "a"), "no field")?
+  Ok(())
+}
+
+/// The value `text` parses to, or `Json.Null` when it does not parse.
+///
+/// A test that reaches for this has already pinned that `text` parses, so the
+/// failing case is the one the assertion below reports rather than one this
+/// has to describe.
+fn parseOr(text: String) -> Json {
+  match parse(text) {
+    Ok(value) => value
+    Err(_) => Json.Null
+  }
+}
+
+/// The field `name` of `value` as JSON, or `no field` when there is none.
+fn renderField(value: Json, name: String) -> String {
+  match field(value, name) {
+    Some(found) => render(found)
+    None => "no field"
+  }
+}

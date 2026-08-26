@@ -330,6 +330,8 @@ mod tests {
             [
                 "callbacks",
                 "config",
+                "cq",
+                "cqSample",
                 "hello",
                 "restricted",
                 "server",

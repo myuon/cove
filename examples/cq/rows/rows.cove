@@ -1,0 +1,127 @@
+use cq.csv.formatRecord
+use cq.json.Json
+use cq.json.render
+
+/// One value in an output row.
+///
+/// A row is not an array of strings, because the two formats this program
+/// writes disagree about what a string is: CSV has only text, and JSON Lines
+/// distinguishes `3` from `"3"`. Deciding that once per value, here, is what
+/// lets one program's output go out in either format without the program
+/// knowing which.
+export enum Cell {
+  Text(String)
+  Count(Int)
+  Decimal(Float, Int)
+}
+
+/// A format this program writes.
+export enum Format {
+  Jsonl
+  Csv
+}
+
+impl Format {
+  /// The name the command line selects this format with.
+  export fn name(self) -> String {
+    match self {
+      Format.Jsonl => "jsonl"
+      Format.Csv => "csv"
+    }
+  }
+}
+
+/// Reads a format by name, or reports the two there are.
+export fn formatNamed(name: String) -> Result<Format, Error> {
+  match name {
+    "jsonl" => Ok(Format.Jsonl)
+    "csv" => Ok(Format.Csv)
+    other => Err(Error(
+      "`{other}` is not a format; the formats are `jsonl` and `csv`",
+    ))
+  }
+}
+
+/// Renders one row in `format`, under the column names `columns`.
+///
+/// CSV names its columns once, in a header the caller writes; JSON Lines names
+/// them on every record, which is why the column names are needed here and not
+/// only there.
+export fn renderRow(
+  format: Format,
+  columns: Array<String>,
+  cells: Array<Cell>,
+) -> String {
+  match format {
+    Format.Csv => {
+      var fields = Vector.of()
+      for cell in cells {
+        fields.push(asText(cell))
+      }
+      formatRecord(fields.freeze())
+    }
+    Format.Jsonl => {
+      var fields = Map.of()
+      var at = 0
+      for cell in cells {
+        fields = fields.inserted(
+          columns.get(at).unwrapOr("column{at}"),
+          asJson(cell),
+        )
+        at += 1
+      }
+      render(Json.Fields(fields))
+    }
+  }
+}
+
+/// The header line `format` starts a file with, if it has one.
+///
+/// JSON Lines has no header: every record carries its own field names, so a
+/// first line naming them would be a record that is not one.
+export fn header(format: Format, columns: Array<String>) -> Option<String> {
+  match format {
+    Format.Csv => Some(formatRecord(columns))
+    Format.Jsonl => None
+  }
+}
+
+/// The text a cell takes in a CSV field.
+fn asText(cell: Cell) -> String {
+  match cell {
+    Cell.Text(text) => text
+    Cell.Count(count) => "{count}"
+    Cell.Decimal(value, digits) => value.format(digits)
+  }
+}
+
+/// The JSON value a cell takes in a record.
+///
+/// A `Decimal` is rounded to the digits it declares before it is written,
+/// rather than written in full: a column that says it reports money to two
+/// places should report the same number in both formats, and the CSV is the
+/// one that cannot carry more.
+fn asJson(cell: Cell) -> Json {
+  match cell {
+    Cell.Text(text) => Json.Text(text)
+    Cell.Count(count) => Json.Number(count.toFloat())
+    Cell.Decimal(value, digits) => match Float.parse(value.format(digits)) {
+      Ok(rounded) => Json.Number(rounded)
+      Err(_) => Json.Number(value)
+    }
+  }
+}
+
+/// What one record produced: the state it left behind, and the rows to write
+/// for it now.
+///
+/// This is the one shape every transformation's step answers in, and it is
+/// what lets an aggregation and a filter be the same kind of thing. An
+/// aggregation returns no rows until its input runs out and everything it
+/// knows is in the state; a filter returns a row per record it keeps and
+/// carries almost nothing. The engine writes whatever comes back at once, so a
+/// filter over a hundred thousand records never holds more than one row.
+export struct Step<S> {
+  state: S
+  rows: Array<Array<Cell>>
+}

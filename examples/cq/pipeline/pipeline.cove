@@ -1,0 +1,131 @@
+use files
+use console.println
+use cq.diag.Detail
+use cq.diag.describe
+use cq.diag.locate
+use cq.rows.Cell
+use cq.rows.Format
+use cq.rows.Step
+use cq.rows.header
+use cq.rows.renderRow
+
+/// Where a run's output goes.
+///
+/// The console is not a file this host can open -- `files` is rooted, and a
+/// terminal has no path inside any root -- so writing to one and writing to
+/// the other are two different Host APIs, and this is the one place in the
+/// program that knows which is in use.
+export enum Sink {
+  Console
+  File(files.Writer)
+}
+
+/// What one run did.
+///
+/// Three counts and nothing else. A run over a hundred thousand records has a
+/// hundred thousand chances to be told something, and a report that kept them
+/// would be the thing this program exists not to do; each diagnostic is
+/// written when it happens and only the tally outlives it.
+///
+/// `read` counts the records that folded and `skipped` the ones that did not,
+/// so the two together are how many were taken from the input -- which is what
+/// `--limit` bounds.
+export struct Outcome {
+  read: Int
+  written: Int
+  skipped: Int
+}
+
+/// Reads every record of `reader`, folds it, and writes what comes back.
+///
+/// The loop holds one line, one step's rows, and the transformation's own
+/// state. Nothing accumulates that the transformation did not choose to
+/// accumulate, which is what makes the memory a run holds a property of the
+/// program rather than of the file.
+///
+/// A record that cannot be read stops the run, unless `skipInvalid`, in which
+/// case it is reported and counted and the next record is read. Stopping is
+/// the default because a summary computed from most of the input is a wrong
+/// answer that looks like a right one.
+export fn transform<S>(
+  reader: files.Reader,
+  sink: Sink,
+  source: String,
+  format: Format,
+  columns: Array<String>,
+  initial: S,
+  step: fn(state: S, line: String, number: Int) -> Result<Step<S>, Detail>,
+  finish: fn(state: S) -> Array<Array<Cell>>,
+  skipInvalid: Bool,
+  limit: Option<Int>,
+) -> Result<Outcome, Error> {
+  match header(format, columns) {
+    Some(line) => emit(sink, line)?
+    None => ()
+  }
+  var state = initial
+  var taken = 0
+  var read = 0
+  var written = 0
+  var skipped = 0
+  var number = 0
+  var reading = true
+  while reading {
+    match reader.readLine()? {
+      None => reading = false
+      Some(line) => {
+        number += 1
+        if line.trim().isEmpty() {
+          continue
+        }
+        // `limit` bounds the records taken from the input, whether or not
+        // they turn out to be readable. It is a bound on the work this run
+        // does, and counting only the good ones would make how much of the
+        // file was touched depend on how much of it was wrong.
+        if reachedLimit(limit, taken) {
+          reading = false
+          continue
+        }
+        taken += 1
+        match step(state, line, number) {
+          Ok(produced) => {
+            read += 1
+            state = produced.state
+            for row in produced.rows {
+              emit(sink, renderRow(format, columns, row))?
+              written += 1
+            }
+          }
+          Err(detail) => {
+            if !skipInvalid {
+              return Err(Error(describe(locate(detail, source, number))))
+            }
+            println(describe(locate(detail, source, number)))?
+            skipped += 1
+          }
+        }
+      }
+    }
+  }
+  for row in finish(state) {
+    emit(sink, renderRow(format, columns, row))?
+    written += 1
+  }
+  Ok(Outcome(read: read, written: written, skipped: skipped))
+}
+
+/// Writes one line wherever this run's output goes.
+fn emit(sink: Sink, line: String) -> Result<Unit, Error> {
+  match sink {
+    Sink.Console => println(line)
+    Sink.File(writer) => writer.writeLine(line)
+  }
+}
+
+/// Whether `taken` records is as many as this run was asked for.
+fn reachedLimit(limit: Option<Int>, taken: Int) -> Bool {
+  match limit {
+    Some(most) => taken >= most
+    None => false
+  }
+}

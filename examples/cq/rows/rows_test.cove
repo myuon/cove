@@ -1,0 +1,118 @@
+/// The columns the rows below are written under.
+fn columns() -> Array<String> {
+  ["property", "nights", "revenue"]
+}
+
+/// One row holding a `Text`, a `Count`, and a `Decimal`.
+fn row() -> Array<Cell> {
+  [Cell.Text("seaside-cottage"), Cell.Count(3), Cell.Decimal(388.5, 2)]
+}
+
+/// A row of the three kinds of cell renders as the values themselves in CSV
+/// and as a named record in JSON Lines, which is the whole reason a row is
+/// cells rather than strings.
+///
+/// The same row goes out both ways here, because the property that matters is
+/// that one transformation's output can be asked for in either format without
+/// the transformation knowing which.
+test fn rendersOneRowInBothFormats() -> Result<Unit, Error> {
+  assertEqual(
+    renderRow(Format.Csv, columns(), row()),
+    "seaside-cottage,3,388.50",
+  )?
+  assertEqual(
+    renderRow(Format.Jsonl, columns(), row()),
+    "\{\"nights\":3,\"property\":\"seaside-cottage\",\"revenue\":388.5\}",
+  )?
+  Ok(())
+}
+
+/// A `Count` is a number in JSON Lines and not a string, because a reader
+/// that takes `nights` as an integer should get one.
+test fn writesACountAsANumberRatherThanText() -> Result<Unit, Error> {
+  assertEqual(renderRow(Format.Jsonl, ["n"], [Cell.Count(0)]), "\{\"n\":0\}")?
+  assertEqual(
+    renderRow(Format.Jsonl, ["n"], [Cell.Text("0")]),
+    "\{\"n\":\"0\"\}",
+  )?
+  Ok(())
+}
+
+/// A `Text` holding a comma is quoted in CSV, where a bare comma would end
+/// the field, and left alone in JSON Lines, where quoting is the format's own
+/// and a comma means nothing.
+test fn quotesACommaInCsvAndNotInJsonLines() -> Result<Unit, Error> {
+  let cells = [Cell.Text("Closed for repairs, 12 March")]
+  assertEqual(
+    renderRow(Format.Csv, ["notes"], cells),
+    "\"Closed for repairs, 12 March\"",
+  )?
+  assertEqual(
+    renderRow(Format.Jsonl, ["notes"], cells),
+    "\{\"notes\":\"Closed for repairs, 12 March\"\}",
+  )?
+  Ok(())
+}
+
+/// A `Decimal` reports the same rounded number in both formats, because a
+/// column that says it reports money to two places should not report more of
+/// it in the format that could carry more.
+test fn roundsADecimalTheSameWayInBothFormats() -> Result<Unit, Error> {
+  let cells = [Cell.Decimal(1234.5678, 2)]
+  assertEqual(renderRow(Format.Csv, ["revenue"], cells), "1234.57")?
+  assertEqual(
+    renderRow(Format.Jsonl, ["revenue"], cells),
+    "\{\"revenue\":1234.57\}",
+  )?
+  Ok(())
+}
+
+/// A `Decimal` that rounds to a whole number still writes its declared places
+/// in CSV, where the column is a column of money, and writes the number
+/// itself in JSON Lines, where `3.00` is not a JSON number.
+test fn writesADecimalsPlacesInCsvAndItsValueInJsonLines(
+) -> Result<Unit, Error> {
+  let cells = [Cell.Decimal(3.0, 2)]
+  assertEqual(renderRow(Format.Csv, ["revenue"], cells), "3.00")?
+  assertEqual(renderRow(Format.Jsonl, ["revenue"], cells), "\{\"revenue\":3\}")?
+  Ok(())
+}
+
+/// CSV names its columns once, in a header, and JSON Lines names them on
+/// every record, so only one of the two formats has a first line.
+test fn givesCsvAHeaderAndJsonLinesNone() -> Result<Unit, Error> {
+  assertEqual(header(Format.Csv, columns()), Some("property,nights,revenue"))?
+  assertEqual(header(Format.Jsonl, columns()), None)?
+  Ok(())
+}
+
+/// A header is written through the same quoting every row is, so a column
+/// whose name holds a comma survives being named.
+test fn quotesAColumnNameThatNeedsIt() -> Result<Unit, Error> {
+  assertEqual(
+    header(Format.Csv, ["plain", "with,comma"]),
+    Some("plain,\"with,comma\""),
+  )?
+  Ok(())
+}
+
+/// A format answers the name `--output-format` selects it with, and reads
+/// back from that name, so what the command line says and what the program
+/// holds are the same two things.
+test fn readsAndNamesEachFormat() -> Result<Unit, Error> {
+  assertEqual(formatNamed("csv")?.name(), "csv")?
+  assertEqual(formatNamed("jsonl")?.name(), "jsonl")?
+  Ok(())
+}
+
+/// A format this program does not write is refused by name, and the message
+/// says which two there are rather than leaving the reader to guess.
+test fn refusesAFormatItDoesNotWrite() -> Result<Unit, Error> {
+  match formatNamed("xml") {
+    Ok(format) => Err(Error("`xml` was read as `{format.name()}`"))
+    Err(error) => assertEqual(
+      error.message,
+      "`xml` is not a format; the formats are `jsonl` and `csv`",
+    )
+  }
+}

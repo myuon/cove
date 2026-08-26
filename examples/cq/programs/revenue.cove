@@ -1,0 +1,70 @@
+use cq.diag.Detail
+use cq.json.parse
+use cq.records.Status
+use cq.records.bookingFrom
+use cq.rows.Cell
+use cq.rows.Step
+
+/// What a revenue summary accumulates.
+///
+/// One entry per property, and nothing else: the bookings themselves are read,
+/// counted, and dropped, so what this holds is bounded by how many properties
+/// the input mentions rather than by how long the input is.
+export struct Revenue {
+  properties: Map<String, Totals>
+}
+
+/// One property's running totals.
+struct Totals {
+  bookings: Int
+  nights: Int
+  revenue: Float
+}
+
+/// The empty summary a run starts from.
+export fn emptyRevenue() -> Revenue {
+  Revenue(properties: Map.of())
+}
+
+/// Folds one JSON Lines record into the summary.
+///
+/// A cancelled booking is read and then ignored. It is not an error -- a
+/// cancellation is an ordinary thing for a booking to be -- and it is not
+/// revenue either, so the count it does not join is the count of bookings that
+/// earned something.
+export fn foldRevenue(
+  state: Revenue,
+  line: String,
+  number: Int,
+) -> Result<Step<Revenue>, Detail> {
+  let booking = bookingFrom(parse(line)?)?
+  match booking.status {
+    Status.Cancelled => Ok(Step(state: state, rows: []))
+    _ => {
+      let before = state.properties.get(booking.property)
+      let totals = match before {
+        Some(found) => found
+        None => Totals(bookings: 0, nights: 0, revenue: 0.0)
+      }
+      let after = Totals(
+        bookings: totals.bookings + 1,
+        nights: totals.nights + booking.nights,
+        revenue: totals.revenue + booking.revenue(),
+      )
+      Ok(Step(state: Revenue(properties: state.properties.inserted(booking.property, after)), rows: []))
+    }
+  }
+}
+
+/// Writes one row per property, in ascending order by name.
+///
+/// The order is the `Map`'s own, which is ascending by key, so two runs over
+/// the same input produce the same file and a golden test is possible.
+export fn finishRevenue(state: Revenue) -> Array<Array<Cell>> {
+  var rows = Vector.of()
+  for entry in state.properties {
+    let totals = entry.value
+    rows.push([Cell.Text(entry.key), Cell.Count(totals.bookings), Cell.Count(totals.nights), Cell.Decimal(totals.revenue, 2), Cell.Decimal(totals.revenue / totals.nights.toFloat(), 2)])
+  }
+  rows.freeze()
+}

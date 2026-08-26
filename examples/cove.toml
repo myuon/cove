@@ -30,6 +30,14 @@ allow = ["console"]
 entry = "callbacks.main"
 allow = ["http", "database", "clock", "console"]
 
+[run.cq]
+entry = "cq.main"
+allow = ["console", "files", "process"]
+
+[run.cqSample]
+entry = "cq.sample"
+allow = ["console", "files", "process"]
+
 [run.statusCodes]
 entry = "codegen.statusCodes"
 allow = ["files"]

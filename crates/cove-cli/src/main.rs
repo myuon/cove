@@ -1639,8 +1639,12 @@ module config
     at config/load.cove:24:11
     requires env
 ";
+        // The next module's header is what pins the end of this one: without
+        // it a `config` that had grown a declaration would still contain the
+        // text above. Modules render in sorted order, so the terminator is
+        // whichever module now sorts next, and `cq` sorts between the two.
         assert!(
-            out.contains(&format!("{expected_config}module hello\n")),
+            out.contains(&format!("{expected_config}module cq\n")),
             "unexpected outline:\n{out}"
         );
     }
