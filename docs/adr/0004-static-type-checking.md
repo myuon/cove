@@ -20,7 +20,7 @@
   a program may read
 - Implemented by: PR #12; the declaration-parameter rule by PR #43; the Host
   API schema by PR #48; the first amendment by PR #51; the second by PR #54;
-  the third by PR #55
+  the third by PR #55; the fourth by PR #82
 - Implementation status: partial — see "What is not checked yet" below, which
   is now shorter than it was: the checker reads the Host API schema (#44), the
   builtin table it used to mirror (#49), the constructors, assertions, and
