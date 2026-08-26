@@ -5,3 +5,6 @@
 cq/data/bookings-large.jsonl
 cq/data/confirmed-large.jsonl
 cq/data/summary-large.csv
+
+# Scratch output from a profiling run; `examples/cq/README.md` says how.
+cq/data/prof.csv

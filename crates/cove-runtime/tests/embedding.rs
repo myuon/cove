@@ -42,6 +42,7 @@
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
+use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 
 use cove_diag::{render, Diagnostic, SourceMap};
@@ -389,7 +390,7 @@ impl HostApi for Directory {
         };
         self.lookups.lock().unwrap().push(id.to_string());
         Ok(match self.people.get(&**id) {
-            Some(seniority) => Value::ok(Value::Struct(Box::new(StructValue {
+            Some(seniority) => Value::ok(Value::Struct(Rc::new(StructValue {
                 type_name: "company.Employee".into(),
                 fields: vec![
                     ("name".into(), Value::Str(id.clone())),

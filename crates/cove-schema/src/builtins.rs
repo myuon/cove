@@ -77,6 +77,7 @@
 //! needs it, because an unused variant is a type nobody can produce.
 
 use std::fmt;
+use std::sync::OnceLock;
 
 /// A type in a builtin's signature, written in Cove's source vocabulary.
 ///
@@ -482,11 +483,24 @@ pub fn is_builtin_type(name: &str) -> bool {
 /// and no builtin type spells a mutating method the way another spells an
 /// immutable one.
 pub fn is_mutating_method(name: &str) -> bool {
-    BUILTINS.iter().any(|entry| {
-        entry
-            .methods
+    mutating_methods().contains(&name)
+}
+
+/// Every `var self` method name the table declares, gathered once.
+///
+/// The table is still the list; this is that list read out of it on the first
+/// call rather than walked again on every later one. The question is asked at
+/// each method call a program makes, and walking eighteen types' methods to
+/// answer it was 2.3% of `examples/cq`'s run before this existed (issue #104).
+fn mutating_methods() -> &'static [&'static str] {
+    static NAMES: OnceLock<Vec<&'static str>> = OnceLock::new();
+    NAMES.get_or_init(|| {
+        BUILTINS
             .iter()
-            .any(|method| method.mutating && method.name == name)
+            .flat_map(|entry| entry.methods.iter())
+            .filter(|method| method.mutating)
+            .map(|method| method.name)
+            .collect()
     })
 }
 

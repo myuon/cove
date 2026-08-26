@@ -551,7 +551,7 @@ impl Transfer {
                 type_name,
                 fields,
                 opaque,
-            } => Value::Struct(Box::new(StructValue {
+            } => Value::Struct(Rc::new(StructValue {
                 type_name: type_name.into(),
                 fields: fields
                     .into_iter()
@@ -667,7 +667,7 @@ mod tests {
             vec![
                 Value::Int(1),
                 Value::Str("two".into()),
-                Value::Struct(Box::new(StructValue {
+                Value::Struct(Rc::new(StructValue {
                     type_name: "test.Point".into(),
                     fields: vec![("x".into(), Value::Int(3))],
                     opaque: false,
@@ -683,7 +683,7 @@ mod tests {
 
     #[test]
     fn a_vector_reached_through_a_struct_is_named_by_its_path() {
-        let value = Value::Struct(Box::new(StructValue {
+        let value = Value::Struct(Rc::new(StructValue {
             type_name: "test.Draft".into(),
             fields: vec![(
                 "guests".into(),
@@ -755,12 +755,12 @@ mod tests {
     fn an_array_of_structs_crosses_and_round_trips() {
         let value = Value::Array(
             vec![
-                Value::Struct(Box::new(StructValue {
+                Value::Struct(Rc::new(StructValue {
                     type_name: "test.Point".into(),
                     fields: vec![("x".into(), Value::Int(1)), ("y".into(), Value::Int(2))],
                     opaque: false,
                 })),
-                Value::Struct(Box::new(StructValue {
+                Value::Struct(Rc::new(StructValue {
                     type_name: "test.Point".into(),
                     fields: vec![("x".into(), Value::Int(3)), ("y".into(), Value::Int(4))],
                     opaque: false,
@@ -783,7 +783,7 @@ mod tests {
     #[test]
     fn an_array_of_structs_is_refused_for_the_one_vector_it_holds() {
         let value = Value::Array(
-            vec![Value::Struct(Box::new(StructValue {
+            vec![Value::Struct(Rc::new(StructValue {
                 type_name: "test.Draft".into(),
                 fields: vec![(
                     "guests".into(),
@@ -877,7 +877,7 @@ mod tests {
     fn a_dyn_wrapping_a_struct_with_a_vector_is_refused_at_the_fields_path() {
         let value = Value::Dyn(Rc::new(DynValue {
             trait_name: "render.Display".into(),
-            value: Value::Struct(Box::new(StructValue {
+            value: Value::Struct(Rc::new(StructValue {
                 type_name: "test.Draft".into(),
                 fields: vec![(
                     "guests".into(),
@@ -922,7 +922,7 @@ mod tests {
             "test.mod",
             vec![(
                 "state",
-                Value::Struct(Box::new(StructValue {
+                Value::Struct(Rc::new(StructValue {
                     type_name: "test.Draft".into(),
                     fields: vec![(
                         "guests".into(),

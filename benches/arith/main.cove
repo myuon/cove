@@ -1,0 +1,21 @@
+/// The mechanism benchmarks' baseline: a loop that does arithmetic and
+/// nothing else.
+///
+/// Every other `mech_*` benchmark is this loop with one mechanism added, and
+/// the same 2,000,000 iterations, so the difference between two of them is
+/// the cost of what the second one does. This one reaches no collection, no
+/// struct, no call, and no string, so what it measures is the tree walk
+/// itself: reading a binding, evaluating a binary operator, and testing a
+/// condition.
+export fn main() -> Result<Unit, Error> {
+  var total = 0
+  var i = 0
+  while i < 2000000 {
+    if i % 7 == 0 {
+      total += 1
+    }
+    i += 1
+  }
+  assertEqual(total, 285715)?
+  Ok(())
+}

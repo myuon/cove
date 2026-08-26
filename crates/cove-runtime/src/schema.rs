@@ -195,6 +195,7 @@ mod tests {
     use super::*;
     use crate::host::ResourceHandle;
     use crate::value::StructValue;
+    use std::rc::Rc;
 
     // ------------------------------------------- what a declared type admits
     //
@@ -212,7 +213,7 @@ mod tests {
 
     /// A struct value named the way a host builds one: qualified by module.
     fn host_struct(type_name: &str, fields: Vec<(&str, Value)>) -> Value {
-        Value::Struct(Box::new(StructValue {
+        Value::Struct(Rc::new(StructValue {
             type_name: type_name.into(),
             fields: fields
                 .into_iter()

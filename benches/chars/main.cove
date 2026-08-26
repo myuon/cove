@@ -1,0 +1,24 @@
+/// Takes one line apart and scans it, the way a parser does.
+///
+/// This is the shape `examples/cq` spends 99% of its time in, reduced to the
+/// mechanism: `chars()` once per line, then one indexed read and one string
+/// comparison per character. It reads the same line 32,000 times rather than
+/// a file, so it measures the interpreter and reaches no host.
+export fn main() -> Result<Unit, Error> {
+  let line = "\{\"id\":\"B-000001\",\"nights\":5,\"rate\":129.5,\"status\":\"confirmed\"\}"
+  var quotes = 0
+  var round = 0
+  while round < 32000 {
+    let chars = line.chars()
+    var i = 0
+    while i < chars.length() {
+      if chars.get(i).unwrapOr("") == "\"" {
+        quotes += 1
+      }
+      i += 1
+    }
+    round += 1
+  }
+  assertEqual(quotes, 32000 * 12)?
+  Ok(())
+}

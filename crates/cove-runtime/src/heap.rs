@@ -977,7 +977,7 @@ mod tests {
         object
             .elements
             .borrow_mut()
-            .push(Value::Struct(Box::new(StructValue {
+            .push(Value::Struct(Rc::new(StructValue {
                 type_name: "test.Node".into(),
                 fields: vec![("next".into(), Value::Vector(object.clone()))],
                 opaque: false,

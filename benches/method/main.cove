@@ -1,0 +1,31 @@
+/// A struct with a method a benchmark calls.
+struct Cursor {
+  at: Int
+  step: Int
+}
+
+impl Cursor {
+  /// Reads the field, through a non-mutating receiver.
+  fn position(self) -> Int {
+    self.at
+  }
+}
+
+/// The baseline loop, reading a struct's field through a method.
+///
+/// The difference from `field` is what the call costs on top of the field it
+/// reads: binding a receiver, building an environment, and finding the
+/// declaration by name. `self` is passed by value, so this is also where a
+/// receiver copy would show if one were still made.
+export fn main() -> Result<Unit, Error> {
+  var cursor = Cursor(at: 0, step: 1)
+  var total = 0
+  while cursor.position() < 2000000 {
+    if cursor.position() % 7 == 0 {
+      total += cursor.step
+    }
+    cursor.at += cursor.step
+  }
+  assertEqual(total, 285715)?
+  Ok(())
+}

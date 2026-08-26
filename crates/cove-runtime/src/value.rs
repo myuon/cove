@@ -45,8 +45,30 @@ pub enum Value {
     /// way: ascending order. An element must satisfy the [`MapKey`]
     /// restriction, exactly like a map key.
     Set(Rc<BTreeSet<MapKey>>),
-    /// A struct value. Cloning copies each field by that field's own rule.
-    Struct(Box<StructValue>),
+    /// A struct value.
+    ///
+    /// The storage is shared and copied on write. Cloning a struct value is
+    /// the field-wise shallow copy the Language Card describes, and sharing
+    /// the fields until one of them is written is unobservable: a write goes
+    /// through a place, [`crate::interp`]'s `Place::with_mut` is the only way
+    /// to reach one, and it takes a private copy first when the storage has
+    /// another holder. Nothing else can tell the two apart, because `is` is
+    /// defined only for `Vector`.
+    ///
+    /// It is shared because it was copied on every non-mutating method call:
+    /// `self` is passed by value, and a copy was a `Box` and a `Vec` and a
+    /// clone of every field. That made a method call twice the cost of the
+    /// same code with the fields read directly, which issue #99 measured and
+    /// issue #104 set out to remove.
+    ///
+    /// This was a `Box<StructValue>` until issue #104. Nothing a Cove program
+    /// can write sees the difference, but an embedder building a struct value
+    /// writes `Rc::new` where it wrote `Box::new`, and one matching on the
+    /// variant binds an `&Rc<StructValue>` where it bound an
+    /// `&Box<StructValue>` — both deref to `StructValue`, so a body that only
+    /// reads fields needs no change. Mutating through one needs
+    /// [`Rc::make_mut`], which is what keeps the copy private.
+    Struct(Rc<StructValue>),
     /// An enum value, including `Option` and `Result`.
     Enum(Box<EnumValue>),
     /// A callback is an ordinary handle value.
@@ -426,7 +448,7 @@ impl MapKey {
                 case: case.as_str().into(),
                 payload: payload.iter().map(MapKey::to_value).collect(),
             })),
-            MapKey::Struct(type_name, fields, opaque) => Value::Struct(Box::new(StructValue {
+            MapKey::Struct(type_name, fields, opaque) => Value::Struct(Rc::new(StructValue {
                 type_name: type_name.as_str().into(),
                 fields: fields
                     .iter()
@@ -483,17 +505,42 @@ impl Value {
     /// `Ok(value)`
     pub fn ok(value: Value) -> Value {
         Value::Enum(Box::new(EnumValue {
-            type_name: RESULT.name.into(),
-            case: OK_CASE.name.into(),
+            type_name: Value::builtin_name(RESULT.name),
+            case: Value::builtin_name(OK_CASE.name),
             payload: vec![value],
         }))
+    }
+
+    /// The shared string `name`, made once per thread.
+    ///
+    /// `Option` and `Result` are built constantly -- every `Array.get`, every
+    /// `?`, every fallible builtin -- and each one turned two `&'static str`
+    /// into two freshly allocated `Rc<str>`. The strings are the same six
+    /// names every time, so they are made once and handed out by reference
+    /// count instead (issue #104). Per thread rather than global, because
+    /// `Rc` is not shareable across threads.
+    fn builtin_name(name: &'static str) -> Rc<str> {
+        thread_local! {
+            static NAMES: RefCell<Vec<(&'static str, Rc<str>)>> = const { RefCell::new(Vec::new()) };
+        }
+        NAMES.with(|names| {
+            let mut names = names.borrow_mut();
+            // The list is the six builtin enum and struct names, so a scan is
+            // shorter than hashing the string would be.
+            if let Some((_, shared)) = names.iter().find(|(known, _)| *known == name) {
+                return shared.clone();
+            }
+            let shared: Rc<str> = Rc::from(name);
+            names.push((name, shared.clone()));
+            shared
+        })
     }
 
     /// `Err(error)`
     pub fn err(error: Value) -> Value {
         Value::Enum(Box::new(EnumValue {
-            type_name: RESULT.name.into(),
-            case: ERR_CASE.name.into(),
+            type_name: Value::builtin_name(RESULT.name),
+            case: Value::builtin_name(ERR_CASE.name),
             payload: vec![error],
         }))
     }
@@ -501,8 +548,8 @@ impl Value {
     /// `Some(value)`
     pub fn some(value: Value) -> Value {
         Value::Enum(Box::new(EnumValue {
-            type_name: OPTION.name.into(),
-            case: SOME_CASE.name.into(),
+            type_name: Value::builtin_name(OPTION.name),
+            case: Value::builtin_name(SOME_CASE.name),
             payload: vec![value],
         }))
     }
@@ -510,17 +557,20 @@ impl Value {
     /// `None`
     pub fn none() -> Value {
         Value::Enum(Box::new(EnumValue {
-            type_name: OPTION.name.into(),
-            case: NONE_CASE.name.into(),
+            type_name: Value::builtin_name(OPTION.name),
+            case: Value::builtin_name(NONE_CASE.name),
             payload: Vec::new(),
         }))
     }
 
     /// The builtin `Error` struct.
     pub fn error(message: impl Into<String>) -> Value {
-        Value::Struct(Box::new(StructValue {
-            type_name: ERROR.name.into(),
-            fields: vec![(MESSAGE_FIELD.name.into(), Value::Str(message.into().into()))],
+        Value::Struct(Rc::new(StructValue {
+            type_name: Value::builtin_name(ERROR.name),
+            fields: vec![(
+                Value::builtin_name(MESSAGE_FIELD.name),
+                Value::Str(message.into().into()),
+            )],
             opaque: false,
         }))
     }
@@ -587,6 +637,50 @@ impl Value {
     }
 
     /// The name shown in diagnostics.
+    /// Whether `other` is a value of the same type as this one, without
+    /// naming either type.
+    ///
+    /// `==` has to refuse a comparison between two types before it compares
+    /// two values, and it asked that question by building both type names and
+    /// comparing the strings. Two allocations per comparison is a great deal
+    /// to pay for an answer that is a discriminant check and, for the two
+    /// declared kinds, one string comparison — and a parser compares
+    /// characters constantly, so this was measurable (issue #104). The names
+    /// are still built for the diagnostic, which happens once.
+    pub fn same_type_as(&self, other: &Value) -> bool {
+        match (self, other) {
+            (Value::Struct(left), Value::Struct(right)) => left.type_name == right.type_name,
+            (Value::Enum(left), Value::Enum(right)) => left.type_name == right.type_name,
+            (Value::Dyn(left), Value::Dyn(right)) => left.trait_name == right.trait_name,
+            (Value::Resource(left), Value::Resource(right)) => {
+                left.module == right.module && left.type_name == right.type_name
+            }
+            (Value::HostModule(left), Value::HostModule(right)) => left == right,
+            (Value::HostFn { module: lm, op: lo }, Value::HostFn { module: rm, op: ro }) => {
+                lm == rm && lo == ro
+            }
+            (Value::Type(left), Value::Type(right)) => left == right,
+            // Everything else is one type per variant, so the discriminants
+            // answering the same is the whole of the question.
+            _ => std::mem::discriminant(self) == std::mem::discriminant(other),
+        }
+    }
+
+    /// The name of the declared type this value is of, for a struct or an
+    /// enum, and `None` for everything else.
+    ///
+    /// A method declared in a package can only ever be found on one of those
+    /// two, so this is what receiver dispatch asks rather than
+    /// [`Value::type_name`]: a builtin receiver answers `None` and no name is
+    /// built at all, and a declared one hands back the name it already holds.
+    pub fn declared_type_name(&self) -> Option<&Rc<str>> {
+        match self {
+            Value::Struct(value) => Some(&value.type_name),
+            Value::Enum(value) => Some(&value.type_name),
+            _ => None,
+        }
+    }
+
     pub fn type_name(&self) -> String {
         match self {
             Value::Unit => "Unit".into(),
@@ -992,7 +1086,7 @@ mod tests {
     }
 
     fn point(x: i64, y: i64) -> Value {
-        Value::Struct(Box::new(StructValue {
+        Value::Struct(Rc::new(StructValue {
             type_name: "test.Point".into(),
             fields: vec![("x".into(), Value::Int(x)), ("y".into(), Value::Int(y))],
             opaque: false,
@@ -1075,7 +1169,7 @@ mod tests {
 
     #[test]
     fn a_struct_nested_inside_a_struct_is_a_valid_key_when_every_field_is() {
-        let line = Value::Struct(Box::new(StructValue {
+        let line = Value::Struct(Rc::new(StructValue {
             type_name: "test.Line".into(),
             fields: vec![("from".into(), point(0, 0)), ("to".into(), point(1, 1))],
             opaque: false,
@@ -1167,7 +1261,7 @@ mod tests {
 
     #[test]
     fn a_struct_containing_a_vector_is_rejected_naming_the_nested_field() {
-        let value = Value::Struct(Box::new(StructValue {
+        let value = Value::Struct(Rc::new(StructValue {
             type_name: "test.Point".into(),
             fields: vec![("tags".into(), Value::Vector(VectorStorage::new(Vec::new())))],
             opaque: false,

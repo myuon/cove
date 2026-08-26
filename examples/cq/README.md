@@ -187,9 +187,17 @@ table would have to agree about the state type, and these three do not.
 
 ## Measurements
 
-Taken on a release build (`cargo build --release -p cove-cli`), macOS on Apple
-silicon, over a generated 100,000-record file of 17 MB. Wall time and heap are
-what `cove run --stats` reports.
+Taken on a release build (`cargo build --release -p cove-cli`) over a generated
+100,000-record file of 17 MB, on:
+
+```text
+cpu    Intel(R) Core(TM) i7-10700K CPU @ 3.80GHz
+os     macOS 26.5.2 (x86_64)
+rustc  1.93.1 (01f6ddf75 2026-02-11)
+```
+
+Wall time, fuel, and heap are what `cove run --stats` reports; resident memory
+is `/usr/bin/time -l`'s.
 
 Generate the input first — it is not checked in, because seventeen megabytes is
 not something to keep in a repository. It comes from a seed, so two people
@@ -205,15 +213,19 @@ $ cove run cq --files-root cq/data --stats -- bookings-large.jsonl \
     --program revenue-summary --output summary-large.csv
 ```
 
-| run | records | wall | records/s | peak Cove heap | allocations | collections | GC pause | host calls | irreversible writes |
-| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| generate 100,000 records | 100,000 | 3.48 s | 28,700 | 106 B | 100,000 | 1,563 | 4.65 ms | 100,004 | 100,002 |
-| `revenue-summary` → CSV | 100,000 | 111.5 s | 900 | **0 B** | 8 | 1 | 2.72 µs | 100,011 | 6 |
-| `confirmed-bookings` → 66,825 JSON Lines | 100,000 | 120.5 s | 830 | 6,661 B | 66,825 | 1,045 | 14.9 ms | 166,832 | 66,827 |
+| run | records | wall | records/s | peak Cove heap | allocations | collections | GC pause | host calls | irreversible writes | RSS |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| generate 100,000 records | 100,000 | 3.48 s | 28,700 | 106 B | 100,000 | 1,563 | 4.65 ms | 100,004 | 100,002 | — |
+| `revenue-summary` → CSV | 100,000 | 90.8 s | 1,100 | **0 B** | 8 | 1 | 2.75 µs | 100,011 | 6 | 10.5 MB |
+| `confirmed-bookings` → 66,825 JSON Lines | 100,000 | 96.7 s | 1,030 | 6,661 B | 66,825 | 1,045 | 12.9 ms | 166,832 | 66,827 | 10.5 MB |
 
 Wall time is the median of three runs, which vary by well under a second once
 the file is in the page cache; everything else is identical from run to run,
-because the interpreter's work is.
+because the interpreter's work is. `scripts/perf-cq.sh` is the script that
+takes this table, so anybody can take it again.
+
+Recording a trace costs 2.6%: the same 20,000-record run is 17.8 s untraced and
+18.2 s with `--trace`.
 
 **What "peak Cove heap" is, and is not.** It is `--stats`'s `peak_bytes`, which
 is the mark-and-sweep collector's own heap — what a `Vector`, a `Map`, a
@@ -222,6 +234,12 @@ closure, or a task's state occupies. It is not the process's resident memory. A
 the reader's buffer and whatever the host holds, and none of the three appears
 in this number. Read it as what the collector was asked to manage, which is the
 only memory Cove's own numbers can speak for.
+
+The `RSS` column is the whole-process figure, from `/usr/bin/time -l`, and it
+is what the collector's zero does not say: the process holds about 10.5 MB —
+the binary, the program's sources, the reader's buffer, the allocator's arenas
+— steadily, whether the input is 17 MB or the 4 KB one. Both numbers are true
+and they answer different questions.
 
 The first column of that table is the point and the second is the problem.
 
@@ -247,6 +265,9 @@ measured by running the same loop with each stage added:
 | ... and parse each as JSON | 101.9 s | **99.8 s** |
 | ... and validate each into a `Booking` | 111.2 s | 9.3 s |
 
+(Those four are from before the sprint below; the shape did not change, only
+the scale.)
+
 Host I/O is not the cost: reading 17 MB a line at a time takes 0.59 s, which is
 29 MB/s through 100,000 grant-checked, schema-checked, budget-charged Host API
 calls. The cost is the interpreted per-character loop, and it is 99% of the run.
@@ -255,6 +276,163 @@ Checking JSON's number grammar rather than delegating it to `Float.parse` is
 part of that 99% and costs about 2.5% of the run's fuel — which is what
 refusing `01` and `1e999` is worth paying, and cheap next to what the scanner
 was already spending.
+
+## The performance sprint
+
+[Issue #104](https://github.com/myuon/cove/issues/104) ran a bounded sprint
+against these numbers before deciding anything about a new backend. What
+follows is what it measured, what it changed, and what it concluded. Every
+number here is reproducible with `scripts/perf-cq.sh` and
+`./target/release/cove-bench --iterations 20`.
+
+### Where the time went
+
+Profiling the real 20,000-record run and attributing each sample to the
+nearest interpreter frame said this, and it is not what wall time alone would
+have suggested:
+
+**About half of the run was allocation and deallocation.** `malloc` and `free`
+were 44% of self time, and 50% with Rust's allocation shims and the drop glue
+counted in. The other half was the tree walk itself.
+
+**The allocation was spread, not concentrated.** No single site was more than
+about 5%: `eval` 5.5%, `eval_block` 3.5%, `find_method` 3.4%, `invoke` 2.8%,
+`plain_values` 2.5%, `Env::declare` 1.8%, `Value::some` 1.8%. That shape is the
+finding — it says the interpreter allocates a little for almost everything it
+does, rather than doing one expensive thing often.
+
+### What was changed
+
+Five changes, none of them visible from Cove source, and none of them changing
+what any program means:
+
+- `is_mutating_method` walked all eighteen builtin types' method lists,
+  comparing strings, on every method call. It is memoized.
+- `Value::type_name` returned an owned `String`, and `==` called it twice to
+  check that two values were the same type. Type identity is now asked as a
+  question rather than answered as a name, and receiver dispatch asks for the
+  declared name only when there is one.
+- `chars()` allocated a fresh one-character string per character. ASCII
+  characters now come from a per-thread table.
+- A struct value was a `Box`, so every non-mutating method call copied the
+  box, the field vector, and every field. It is an `Rc` copied on write, and
+  the one place a field is written takes a private copy first.
+- `Option` and `Result` allocated two strings for their type and case names on
+  every construction, and `find_method` allocated two more for its lookup key.
+  Both are cached or reused.
+
+### What that bought
+
+| | before | after | |
+| --- | ---: | ---: | ---: |
+| `revenue-summary`, 100,000 records | 111.8 s | 90.8 s | **1.23×** |
+| `confirmed-bookings`, 100,000 records | 120.0 s | 96.7 s | **1.24×** |
+| trace overhead, 20,000 records | +10.2% | +2.6% | |
+| resident memory | 10.6 MB | 10.5 MB | unchanged |
+| managed heap, allocations, collections | | | unchanged |
+
+And on the mechanism benchmarks — each one the same 2,000,000-iteration loop
+with a single thing added, so a difference between two rows is what that thing
+costs (`benches/`, run by `cove-bench`):
+
+| benchmark | what it adds | before | after | |
+| --- | --- | ---: | ---: | ---: |
+| `arith` | nothing: the loop alone | 600 ms | 438 ms | 1.37× |
+| `arrayget` | an indexed read and its `Option` | 1,914 ms | 1,425 ms | 1.34× |
+| `field` | a struct field | 1,655 ms | 879 ms | **1.88×** |
+| `method` | a call around that field | 4,684 ms | 3,099 ms | 1.51× |
+| `call` | a call with no receiver | 1,895 ms | 1,749 ms | 1.08× |
+| `chars` | the per-character scan | 2,789 ms | 1,842 ms | 1.51× |
+
+### What that corrected
+
+[Issue #99](https://github.com/myuon/cove/issues/99) measured that reaching a
+character through a struct's *method* cost about twice what reaching it through
+a local did, and attributed the difference to the receiver being passed by
+value: `self` is a copy, and a copy was an allocation.
+
+That attribution was wrong, and the fix is what showed it. Making a struct
+copy-on-write removed the copy, and `field` duly got 1.88× faster — the largest
+win of the five. But the *ratio* barely moved:
+
+| | before | after |
+| --- | ---: | ---: |
+| local | 2.73 s | 1.86 s |
+| through a struct's field | 3.71 s | 2.48 s |
+| through a struct's method | 5.38 s | 3.63 s |
+| method over field | +45% | +46% |
+
+So the receiver copy was real and worth removing, and it was not what made a
+method expensive. The call is. `call` says the same thing from the other side:
+a call to a function with no receiver at all still costs about 1.3 seconds over
+2,000,000 iterations, which is roughly 650 ns a call, and `pure` — naive
+`fib(20)`, which is almost nothing but calls — agrees at about 790 ns.
+
+### What is left, and why it is not more shaving
+
+A call builds an environment, allocates a vector for its arguments, declares
+each parameter into a scope, and tears all of it down. **That machinery is what
+is left**, and it is structural rather than local:
+
+| | share of the run |
+| --- | ---: |
+| `Env::declare` and `Env::pop` | 5.4% |
+| `eval_args` and `invoke` | 4.0% |
+| `plain_values` | 2.3% |
+| allocation attributable to those | ~10% |
+| one full name lookup | 3.8–5.5% |
+
+The run evaluates about 700 million AST nodes in 91 seconds, which is 130 ns a
+node. Removing *every* remaining allocation would leave the tree walk, which is
+the other half, so the ceiling for this kind of work is around 2× — and the
+sprint's target was 10×.
+
+The next real gain is a redesign, and
+[issue #105](https://github.com/myuon/cove/issues/105) scopes it. Note what the
+table above says about the order: **resolving names to slots
+([#107](https://github.com/myuon/cove/issues/107)) is worth at most about
+1.06× on its own.** It is worth doing because
+[#108](https://github.com/myuon/cove/issues/108)'s slot-based call frames need
+resolved bindings to build on, not because name lookup is where the time goes.
+The two should be measured together.
+
+### How that last number was found
+
+The paragraph above used to end differently. It said the interpreter is slow
+"because it is a tree walker that looks everything up by name" and quoted
+`Env::lookup`:
+
+```rust
+fn lookup(&self, name: &str) -> Option<&Place> {
+    self.scopes.iter().rev()
+        .find_map(|scope| scope.bindings.iter().rev().find(|(n, _)| &**n == name))
+        .map(|(_, place)| place)
+}
+```
+
+That was read off the code rather than measured, and it was wrong. `Env::lookup`
+never appears in a profile at all, because it is inlined, and the functions
+holding it are small — `eval_ident` 1.14% inclusive, `resolve_place_opt` 1.84%,
+`resolve_place` 1.57%. But an inclusive profile of an inlined function
+undercounts it, so that settles nothing either way.
+
+What settles it is cheap: make the suspect do its work N times and read the
+slope.
+
+| scans per lookup | wall |
+| ---: | ---: |
+| 1 | 17.76 s |
+| 2 | 18.73 s |
+| 5 | 20.46 s |
+
+0.68 s a scan by the five-point slope, and 0.97 s by the doubling — which
+overstates it, because the second scan runs on a warm cache. One full name
+lookup is 3.8–5.5% of the run.
+
+This is the second hypothesis in this document that a measurement corrected;
+the receiver copy above was the first. Both were plausible from the code and
+both were wrong about how much they mattered, which is the argument for the
+mechanism benchmarks rather than for reading more carefully.
 
 ## Findings
 

@@ -1,0 +1,24 @@
+/// A struct with a field a benchmark reads.
+struct Cursor {
+  at: Int
+  step: Int
+}
+
+/// The baseline loop, reading and writing a struct's fields.
+///
+/// The difference from `arith` is what a field costs: resolving a place
+/// through a struct rather than to a binding directly. Read beside `method`,
+/// which does the same work behind a call, it is the two halves of the
+/// receiver question issue #99 asked.
+export fn main() -> Result<Unit, Error> {
+  var cursor = Cursor(at: 0, step: 1)
+  var total = 0
+  while cursor.at < 2000000 {
+    if cursor.at % 7 == 0 {
+      total += cursor.step
+    }
+    cursor.at += cursor.step
+  }
+  assertEqual(total, 285715)?
+  Ok(())
+}

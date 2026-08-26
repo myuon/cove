@@ -64,6 +64,7 @@
 use std::collections::BTreeMap;
 use std::io::{BufRead, BufReader, ErrorKind, Read, Write};
 use std::net::{TcpListener, TcpStream};
+use std::rc::Rc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -720,7 +721,7 @@ impl HostApi for Http {
 
 /// `http.Response(status: ..., body: ...)`.
 fn response(status: i64, body: &str) -> Value {
-    Value::Struct(Box::new(StructValue {
+    Value::Struct(Rc::new(StructValue {
         type_name: "http.Response".into(),
         fields: vec![
             ("status".into(), Value::Int(status)),
@@ -732,7 +733,7 @@ fn response(status: i64, body: &str) -> Value {
 
 /// `http.Request(method: ..., path: ..., body: ...)`.
 fn request(method: &str, path: &str, body: &str) -> Value {
-    Value::Struct(Box::new(StructValue {
+    Value::Struct(Rc::new(StructValue {
         type_name: "http.Request".into(),
         fields: vec![
             ("method".into(), method_value(method)),
@@ -1320,7 +1321,7 @@ mod tests {
     /// One `http.Route`, as Cove source would build it: a method, a path,
     /// and a handler the host never looks inside.
     fn route(method: &str, path: &str) -> Value {
-        Value::Struct(Box::new(StructValue {
+        Value::Struct(Rc::new(StructValue {
             type_name: "http.Route".into(),
             fields: vec![
                 (
@@ -1652,7 +1653,7 @@ mod tests {
     #[test]
     fn json_encodes_a_struct_as_an_object() {
         let http = Http::denied();
-        let payload = Value::Struct(Box::new(StructValue {
+        let payload = Value::Struct(Rc::new(StructValue {
             type_name: "demo.Point".into(),
             fields: vec![("x".into(), Value::Int(1)), ("y".into(), Value::Int(2))],
             opaque: false,
