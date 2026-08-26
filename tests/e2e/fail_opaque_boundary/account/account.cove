@@ -1,0 +1,21 @@
+/// An identifier that exports its name and nothing about its shape.
+///
+/// Two fields, so that a caller guessing at the initializer is guessing at
+/// something it has no way to know: which labels there are, how many, and
+/// what they hold.
+export opaque struct AccountId {
+  prefix: String
+  number: Int
+}
+
+impl AccountId {
+  /// Builds an identifier.
+  export fn of(number: Int) -> AccountId {
+    AccountId(prefix: "acct", number: number)
+  }
+
+  /// The identifier as text.
+  export fn text(self) -> String {
+    "{self.prefix}-{self.number}"
+  }
+}

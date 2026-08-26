@@ -179,6 +179,16 @@ pub struct StructValue {
     pub type_name: Rc<str>,
     /// Fields in declaration order.
     pub fields: Vec<(Rc<str>, Value)>,
+    /// Whether the type was declared `export opaque struct`, in which case
+    /// the value renders as its name alone (ADR 0014).
+    ///
+    /// The flag rides on the value because rendering is context-free: a
+    /// `Display` has no idea which module is watching, and a value formatted
+    /// in the module that declares it can be handed to one that may not name
+    /// its fields. So the representation is hidden from every reader,
+    /// including the declaring module, which publishes a readable form by
+    /// exporting a method that builds one.
+    pub opaque: bool,
 }
 
 impl StructValue {
@@ -253,8 +263,10 @@ pub enum MapKey {
     /// converted the same way.
     EnumCase(String, String, Vec<MapKey>),
     /// A struct, keyed by type name, with every field converted the same
-    /// way, in declaration order.
-    Struct(String, Vec<(String, MapKey)>),
+    /// way, in declaration order, and whether its type is opaque — a key is
+    /// rendered back as a value for `keys()` and for `Display`, and a value
+    /// of an opaque type shows only its name wherever it is read from.
+    Struct(String, Vec<(String, MapKey)>, bool),
     /// An array, with every element converted the same way. An array is
     /// fixed-length and immutable, so its equality cannot change.
     Array(Vec<MapKey>),
@@ -325,7 +337,11 @@ impl MapKey {
     /// anchor a nested path to; a `Struct` or `Enum` invents one from its own
     /// type name the first time a path is needed.
     fn convert(anchor: Option<&str>, value: &Value) -> Result<MapKey, InvalidKey> {
-        match value {
+        // Through the `dyn Trait` wrapper first. Two values `==` calls equal
+        // have to be interchangeable as keys, and equality already looks
+        // through it, so a written `dyn Trait` and a lambda's inferred one
+        // key as the same thing they compare as: the value they hold.
+        match value.erased() {
             Value::Unit => Ok(MapKey::Unit),
             Value::Bool(b) => Ok(MapKey::Bool(*b)),
             Value::Int(n) => Ok(MapKey::Int(*n)),
@@ -354,7 +370,7 @@ impl MapKey {
                     let child = Self::convert(Some(&format!("{base}.{name}")), field)?;
                     fields.push((name.to_string(), child));
                 }
-                Ok(MapKey::Struct(s.type_name.to_string(), fields))
+                Ok(MapKey::Struct(s.type_name.to_string(), fields, s.opaque))
             }
             Value::Array(items) => {
                 let base = anchor.unwrap_or_default();
@@ -410,12 +426,13 @@ impl MapKey {
                 case: case.as_str().into(),
                 payload: payload.iter().map(MapKey::to_value).collect(),
             })),
-            MapKey::Struct(type_name, fields) => Value::Struct(Box::new(StructValue {
+            MapKey::Struct(type_name, fields, opaque) => Value::Struct(Box::new(StructValue {
                 type_name: type_name.as_str().into(),
                 fields: fields
                     .iter()
                     .map(|(name, key)| (name.as_str().into(), key.to_value()))
                     .collect(),
+                opaque: *opaque,
             })),
             MapKey::Array(items) => Value::Array(items.iter().map(MapKey::to_value).collect()),
             MapKey::Set(items) => Value::Set(Rc::new(items.clone())),
@@ -504,6 +521,7 @@ impl Value {
         Value::Struct(Box::new(StructValue {
             type_name: ERROR.name.into(),
             fields: vec![(MESSAGE_FIELD.name.into(), Value::Str(message.into().into()))],
+            opaque: false,
         }))
     }
 
@@ -596,9 +614,24 @@ impl Value {
         }
     }
 
+    /// The value a trait object holds, or this value when it is not one.
+    ///
+    /// A `dyn Trait` wrapper records where a value was converted, and the
+    /// checker decides where that is: a written type converts and a lambda's
+    /// inferred result does not, though both have type `dyn Trait`. Nothing
+    /// a program can ask should be able to tell those two apart, so
+    /// everything that compares, renders, or keys a value looks through the
+    /// wrapper first.
+    pub fn erased(&self) -> &Value {
+        match self {
+            Value::Dyn(d) => d.value.erased(),
+            other => other,
+        }
+    }
+
     /// Value equality. Identity, when available, is explicit and separate.
     pub fn eq_value(&self, other: &Value) -> bool {
-        match (self, other) {
+        match (self.erased(), other.erased()) {
             (Value::Unit, Value::Unit) => true,
             (Value::Bool(a), Value::Bool(b)) => a == b,
             (Value::Int(a), Value::Int(b)) => a == b,
@@ -655,11 +688,6 @@ impl Value {
             // handle has no contents to compare, so naming the same thing is
             // the whole of being the same value.
             (Value::Resource(a), Value::Resource(b)) => a.names_same(b),
-            // Two trait objects are equal when they were taken at the same
-            // trait and hold equal values.
-            (Value::Dyn(a), Value::Dyn(b)) => {
-                a.trait_name == b.trait_name && a.value.eq_value(&b.value)
-            }
             // `==` means value equality regardless of mutability, so `Vector`
             // compares its current elements structurally, exactly like
             // `Array`. Storage identity — whether two handles are the same
@@ -732,6 +760,14 @@ impl fmt::Display for Value {
                     };
                 }
                 let short = s.type_name.rsplit('.').next().unwrap_or(&s.type_name);
+                // An opaque type renders as its name and nothing else. Its
+                // fields are the module's own business, and a rendering is
+                // read by whoever the string reaches, so showing them here
+                // would publish through `println` what the checker refuses
+                // to publish through a field access.
+                if s.opaque {
+                    return f.write_str(short);
+                }
                 write!(f, "{short}(")?;
                 for (i, (name, value)) in s.fields.iter().enumerate() {
                     if i > 0 {
@@ -959,6 +995,7 @@ mod tests {
         Value::Struct(Box::new(StructValue {
             type_name: "test.Point".into(),
             fields: vec![("x".into(), Value::Int(x)), ("y".into(), Value::Int(y))],
+            opaque: false,
         }))
     }
 
@@ -1030,7 +1067,8 @@ mod tests {
                 vec![
                     ("x".to_string(), MapKey::Int(1)),
                     ("y".to_string(), MapKey::Int(2)),
-                ]
+                ],
+                false
             )
         );
     }
@@ -1040,6 +1078,7 @@ mod tests {
         let line = Value::Struct(Box::new(StructValue {
             type_name: "test.Line".into(),
             fields: vec![("from".into(), point(0, 0)), ("to".into(), point(1, 1))],
+            opaque: false,
         }));
         let key = MapKey::from_value(&line).expect("nested structs of Ints are a valid key");
         assert_eq!(
@@ -1054,7 +1093,8 @@ mod tests {
                             vec![
                                 ("x".to_string(), MapKey::Int(0)),
                                 ("y".to_string(), MapKey::Int(0)),
-                            ]
+                            ],
+                            false
                         )
                     ),
                     (
@@ -1064,10 +1104,12 @@ mod tests {
                             vec![
                                 ("x".to_string(), MapKey::Int(1)),
                                 ("y".to_string(), MapKey::Int(1)),
-                            ]
+                            ],
+                            false
                         )
                     ),
-                ]
+                ],
+                false
             )
         );
     }
@@ -1128,6 +1170,7 @@ mod tests {
         let value = Value::Struct(Box::new(StructValue {
             type_name: "test.Point".into(),
             fields: vec![("tags".into(), Value::Vector(VectorStorage::new(Vec::new())))],
+            opaque: false,
         }));
         let invalid = MapKey::from_value(&value).unwrap_err();
         assert_eq!(invalid.type_name, "Vector");
@@ -1155,6 +1198,7 @@ mod tests {
                     ("x".to_string(), MapKey::Int(1)),
                     ("y".to_string(), MapKey::Int(2)),
                 ],
+                false,
             ),
         ] {
             let value = key.to_value();

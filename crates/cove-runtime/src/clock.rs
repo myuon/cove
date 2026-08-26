@@ -17,12 +17,10 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
-use cove_sema::Capability;
-
 use crate::budget::Cancellation;
 use crate::error::RuntimeError;
 use crate::host::{HostApi, Reentry};
-use crate::schema::{ModuleSchema, OperationSchema};
+use crate::schema::ModuleSchema;
 use crate::value::Value;
 
 /// How often a watchdog looks at the work it is bounding.
@@ -255,16 +253,8 @@ impl Clock {
 }
 
 impl HostApi for Clock {
-    fn name(&self) -> &str {
-        "clock"
-    }
-
-    fn capability(&self) -> Capability {
-        Capability::new("clock")
-    }
-
-    fn schema(&self) -> &[OperationSchema] {
-        SCHEMA.operations
+    fn module_schema(&self) -> ModuleSchema {
+        SCHEMA
     }
 
     fn call_with(

@@ -2,6 +2,9 @@
 //!
 //! The tree mirrors the surface language described by `docs/LANGUAGE_CARD.md`.
 //! Where the Language Card and ADR 0001 disagree, the Language Card wins.
+//! What each form below *means* — how it is typed, how it evaluates, and
+//! which errors it can produce — is stated once in
+//! `docs/LANGUAGE_REFERENCE.md`.
 
 use cove_diag::{Span, Spanned};
 
@@ -35,6 +38,14 @@ pub struct Item {
     /// comparable thing — who may call this — so a declaration carries at
     /// most one of the two, and only a `fn` carries `test` at all.
     pub is_test: bool,
+    /// `export opaque struct User { ... }`: the export publishes the type's
+    /// name and its exported methods, and nothing about how it is built.
+    ///
+    /// `opaque` narrows an `export` rather than standing in for one, so it
+    /// only ever appears together with one, and only on a struct: exporting
+    /// an enum exports its cases, because a `match` over them is what the
+    /// enum is for. See ADR 0014.
+    pub is_opaque: bool,
     pub kind: ItemKind,
     pub span: Span,
 }
@@ -408,8 +419,9 @@ pub enum ExprKind {
         scrutinee: Box<Expr>,
         arms: Vec<MatchArm>,
     },
-    /// A loop is an expression: it evaluates to `Unit` unless a `break expr`
-    /// inside it says otherwise.
+    /// A loop is an expression. It evaluates to `Unit`, because it can
+    /// reach its end without breaking and there is nothing at that end to
+    /// produce but `Unit`.
     For {
         binding: Ident,
         iterable: Box<Expr>,
@@ -420,8 +432,9 @@ pub enum ExprKind {
         body: Block,
     },
     Return(Option<Box<Expr>>),
-    /// `break` / `break expr`. Exits the nearest enclosing loop, which then
-    /// evaluates to `Unit` or to `expr`. Resolve rejects this outside a loop.
+    /// `break` / `break expr`. Exits the nearest enclosing loop, which is
+    /// `Unit` however it leaves: `expr` is evaluated for its effects and its
+    /// value discarded. Resolve rejects a `break` outside a loop.
     Break(Option<Box<Expr>>),
     /// `continue`. Skips to the next iteration of the nearest enclosing loop.
     /// Resolve rejects this outside a loop.

@@ -34,11 +34,9 @@ use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 
-use cove_sema::Capability;
-
 use crate::error::RuntimeError;
 use crate::host::{HostApi, Reentry, ResourceHandle};
-use crate::schema::{ModuleSchema, OperationSchema, ResourceSchema};
+use crate::schema::ModuleSchema;
 use crate::value::Value;
 
 /// `database`: querying a database, when the host has one.
@@ -137,16 +135,8 @@ impl Database {
 }
 
 impl HostApi for Database {
-    fn name(&self) -> &str {
-        "database"
-    }
-
-    fn capability(&self) -> Capability {
-        Capability::new("database")
-    }
-
-    fn schema(&self) -> &[OperationSchema] {
-        SCHEMA.operations
+    fn module_schema(&self) -> ModuleSchema {
+        SCHEMA
     }
 
     fn call(&self, op: &str, args: Vec<Value>) -> Result<Value, RuntimeError> {
@@ -165,10 +155,6 @@ impl HostApi for Database {
             }
             _ => unreachable!("checked by HostRegistry::call"),
         }
-    }
-
-    fn resources(&self) -> &[ResourceSchema] {
-        SCHEMA.resources
     }
 
     fn call_resource(
@@ -326,7 +312,12 @@ mod tests {
     #[test]
     fn signatures_read_like_source() {
         let database = Database::denied();
-        let rendered: Vec<String> = database.schema().iter().map(|op| op.signature()).collect();
+        let rendered: Vec<String> = database
+            .module_schema()
+            .operations
+            .iter()
+            .map(|op| op.signature())
+            .collect();
         assert_eq!(
             rendered,
             [

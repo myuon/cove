@@ -62,7 +62,7 @@ pub mod builtins;
 pub mod hosts;
 
 pub use builtins::{builtin, free_builtin, is_builtin_type};
-pub use hosts::{module, shipped};
+pub use hosts::{module, shipped, HostSchemas};
 
 /// A type in a Host API signature, written in Cove's source vocabulary.
 ///
@@ -112,6 +112,24 @@ pub enum HostType {
     /// meaning does not depend on which value it was given. `http.json`
     /// renders whatever it is handed, and a callback a host stores and calls
     /// later is a value the host never looks inside.
+    ///
+    /// What it promises, and what it costs, are different at the two ends of
+    /// a signature, and both are worth stating exactly.
+    ///
+    /// In a *parameter* it promises that every value is accepted: no
+    /// argument of any type is a mistake, the compiler rejects none, and the
+    /// boundary rejects none either. Nothing is given up by it, because
+    /// there was never a constraint to check.
+    ///
+    /// In a *result* it says the operation may answer with a value of any
+    /// type. That does cost something: from the call onwards the program
+    /// holds a value no schema described, so the compiler cannot prove what
+    /// a field read off it, a call made on it, or a place it is stored into
+    /// will do. Those are checked at run time and by nothing before it.
+    /// `cove check` reports each such call rather than letting the silence
+    /// pass for a proof — as a note, because a schema declaring `Any` is a
+    /// deliberate design decision and not a fault in the program that calls
+    /// it.
     Any,
 }
 
@@ -374,6 +392,45 @@ impl ResourceSchema {
 /// depend on, and `cove trace` and `cove replay` read it with nothing running
 /// at all. A live module is asked through `HostApi`, whose answers are these
 /// same tables.
+///
+/// # A schema assembled at run time has to leak
+///
+/// Every field here is `&'static`, and so is every payload a [`HostType`]
+/// inside one points at. A schema written as a `const` — every module the
+/// toolchain ships, and every one in the tests — costs nothing for that: it
+/// was in the binary already, and being [`Copy`] is what lets a caller hold a
+/// schema while it goes on reading whatever it asked.
+///
+/// A module whose shape is only known once the process is running pays,
+/// though. A name from configuration, operations from a plugin manifest,
+/// resources from a table list discovered at connect time — none of that is
+/// `'static`, and `HostApi::module_schema` hands the table back by value, so
+/// there is nowhere to borrow from. Such a host leaks what it assembled:
+///
+/// ```
+/// # use cove_schema::{ModuleSchema, OperationSchema};
+/// # let configured_name = String::from("company");
+/// # let operations: Vec<OperationSchema> = Vec::new();
+/// let schema = ModuleSchema {
+///     name: String::leak(configured_name),
+///     capability: "company",
+///     operations: Vec::leak(operations),
+///     types: &[],
+///     resources: &[],
+/// };
+/// ```
+///
+/// Every `&'static str` inside each operation is another one, so a
+/// non-trivial module has several. Build the schema once — a `OnceLock`
+/// beside the host, filled the first time it is asked — and hand the same
+/// copy out afterwards: a leak per module for the life of a process is what
+/// `'static` costs here, and a host that leaks one per call is leaking per
+/// call.
+///
+/// The alternative is a lifetime parameter, which is not free: it reaches
+/// every crate that names this type. `Cow` is not the alternative — `Box::new`
+/// is not const-constructible, so the shipped tables could not stay `const`.
+/// [Issue #86](https://github.com/myuon/cove/issues/86) carries that decision.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ModuleSchema {
     /// The name Cove source uses, such as `console`.

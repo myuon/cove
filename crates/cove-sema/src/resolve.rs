@@ -48,6 +48,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use cove_diag::{Diagnostic, Span, Spanned};
+use cove_schema::HostSchemas;
 use cove_syntax::ast::{
     Block, EnumDecl, Expr, ExprKind, FnDecl, Item, ItemKind, MatchArm, Pattern, PatternKind,
     Receiver, Stmt, StmtKind, StrPart, StructDecl, TraitDecl, TraitMethod, TypeAlias,
@@ -136,6 +137,15 @@ impl FnEntry {
 pub struct StructEntry {
     pub decl: Arc<StructDecl>,
     pub exported: bool,
+    /// `export opaque struct`: the export carries the type's name and its
+    /// exported methods, and no way to build or read one.
+    ///
+    /// The flag is recorded here rather than derived at each use because
+    /// every consumer asks the same question of it — the type checker, which
+    /// refuses a cross-module construction or field access, and `cove
+    /// outline` and `cove api snapshot`, which leave the representation out
+    /// of what they publish.
+    pub opaque: bool,
     pub doc: Option<String>,
 }
 
@@ -314,9 +324,22 @@ impl ResolvedModule {
 #[derive(Debug, Default)]
 pub struct Program {
     pub modules: BTreeMap<String, ResolvedModule>,
-    /// Non-fatal diagnostics, such as missing doc comments on exported
-    /// declarations.
-    pub warnings: Vec<Diagnostic>,
+    /// Every diagnostic that does not stop the package: the resolver's own
+    /// warnings, such as a missing doc comment on an exported declaration,
+    /// and the type checker's warnings *and notes*.
+    ///
+    /// It is called `notices` rather than `warnings` because it holds two
+    /// severities and they ask for different things. A warning is a doubt,
+    /// and `cove check --deny-warnings` refuses a package that has one. A
+    /// note is not: it is the compiler naming something it deliberately did
+    /// not prove — a Host API result a schema declared `Any`, a variadic
+    /// operation used as a value — which no strictness setting can turn into
+    /// a proof. Every consumer therefore filters on the exact
+    /// [`cove_diag::Severity`] rather than on this field's length.
+    ///
+    /// It never holds an [`cove_diag::Severity::Error`]: an error is
+    /// returned as `Err` and the package does not resolve.
+    pub notices: Vec<Diagnostic>,
     /// The package's call graph: for each declaration, every declaration it
     /// may call, and how precisely the call site named it.
     ///
@@ -480,6 +503,18 @@ pub struct DeclaredMethod<'a> {
 /// 6. every body is checked against everything now known, including enums
 ///    reached through an import.
 pub fn resolve(package: &Package) -> Result<Program, Vec<Diagnostic>> {
+    resolve_with(package, &HostSchemas::new())
+}
+
+/// Resolves `package` against `schemas`, the host modules this compilation
+/// may name.
+///
+/// This is [`resolve`] with the one thing an embedder can change: the set of
+/// Host API descriptions the resolver reads. A module in `schemas` is a host
+/// module here in every sense a shipped one is -- it may not be shadowed by
+/// a package module, a `use` of it is not warned about, and a call into it
+/// requires the capability its own table declares.
+pub fn resolve_with(package: &Package, schemas: &HostSchemas) -> Result<Program, Vec<Diagnostic>> {
     let mut program = Program::default();
     let mut errors = Vec::new();
     let mut warnings = Vec::new();
@@ -494,8 +529,24 @@ pub fn resolve(package: &Package) -> Result<Program, Vec<Diagnostic>> {
 
     let mut call_sites: BTreeMap<Node, Vec<CallShape>> = BTreeMap::new();
     let mut edges: Vec<ImportEdge> = Vec::new();
+    // Modules a warning has already been issued for, so a package where
+    // several `use`s (in one module or several) name the same undescribed
+    // host module is told once rather than once per `use`. `package.modules`
+    // is a `BTreeMap`, so this loop visits modules in name order and the
+    // warning always lands on the first `use` of the alphabetically first
+    // module that names it, which is what makes the outcome deterministic
+    // enough to test.
+    let mut warned_hosts: BTreeSet<String> = BTreeSet::new();
     for (name, module) in &package.modules {
-        let uses = resolve_uses(name, module, &surfaces, &mut errors);
+        let uses = resolve_uses(
+            name,
+            module,
+            &surfaces,
+            schemas,
+            &mut errors,
+            &mut warnings,
+            &mut warned_hosts,
+        );
         edges.extend(uses.edges.iter().cloned());
         let (resolved, calls) = resolve_module(
             name,
@@ -503,6 +554,7 @@ pub fn resolve(package: &Package) -> Result<Program, Vec<Diagnostic>> {
             uses,
             &surfaces,
             &opaque_fields,
+            schemas,
             &mut errors,
             &mut warnings,
         );
@@ -518,10 +570,10 @@ pub fn resolve(package: &Package) -> Result<Program, Vec<Diagnostic>> {
     merge_open_calls(&mut program, &unresolved);
     propagate_capabilities(&mut program, &call_graph);
     program.call_graph = call_graph;
-    check_bodies(&program, &mut errors, &mut warnings);
+    check_bodies(&program, schemas, &mut errors, &mut warnings);
 
     if errors.is_empty() {
-        program.warnings = warnings;
+        program.notices = warnings;
         Ok(program)
     } else {
         errors.extend(warnings);
@@ -529,12 +581,14 @@ pub fn resolve(package: &Package) -> Result<Program, Vec<Diagnostic>> {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn resolve_module(
     name: &str,
     module: &crate::package::Module,
     uses: ModuleUses,
     surfaces: &BTreeMap<&str, Surface>,
     opaque_fields: &OpaqueFields,
+    schemas: &HostSchemas,
     errors: &mut Vec<Diagnostic>,
     warnings: &mut Vec<Diagnostic>,
 ) -> (ResolvedModule, BTreeMap<FnKey, Vec<CallShape>>) {
@@ -579,6 +633,7 @@ fn resolve_module(
                         &resolved.host_uses,
                         &resolved.host_items,
                         opaque_fields,
+                        schemas,
                     );
                     call_sites.insert(FnKey::Fn(decl.name.node.clone()), calls);
                     resolved.functions.insert(
@@ -615,6 +670,7 @@ fn resolve_module(
                         StructEntry {
                             decl: Arc::new(decl.clone()),
                             exported: item.exported,
+                            opaque: item.is_opaque,
                             doc: item.doc.clone(),
                         },
                     );
@@ -839,6 +895,7 @@ fn resolve_module(
                 &mut method_spans,
                 &mut call_sites,
                 opaque_fields,
+                schemas,
                 errors,
             );
             continue;
@@ -875,6 +932,7 @@ fn resolve_module(
                         &resolved.host_uses,
                         &resolved.host_items,
                         opaque_fields,
+                        schemas,
                     );
                     call_sites.insert(
                         FnKey::Method(type_name.clone(), decl.name.node.clone()),
@@ -923,19 +981,21 @@ fn resolve_module(
 
 /// The host modules a package may name without declaring them.
 ///
-/// This is [`cove_schema::hosts::SHIPPED`], the one description of the host
-/// modules the toolchain ships, rather than a list kept here in step with it:
-/// the compiler cannot ask the runtime, which depends on it, but it can read
-/// the schema both of them do. It used to be a hand-written array with a
+/// This is [`HostSchemas`], the one description of the host modules this
+/// compilation can see, rather than a list kept here in step with it: the
+/// compiler cannot ask the runtime, which depends on it, but it can read the
+/// schema both of them do. It used to be a hand-written array with a
 /// cross-crate test to catch the drift, written after `http` had already
 /// drifted out of it and let a package module shadow the host module in
 /// silence.
 ///
 /// It is only consulted to refuse a package module that would shadow a host
 /// module. A `use` naming a module that is not here is still accepted, since
-/// a host may register any module it likes.
-pub fn host_modules() -> impl Iterator<Item = &'static str> {
-    cove_schema::shipped().iter().map(|module| module.name)
+/// a host may register any module it likes. Such a `use` warns instead: a
+/// module no schema describes is checked by nothing until the run reaches the
+/// boundary.
+pub fn host_modules(schemas: &HostSchemas) -> impl Iterator<Item = &'static str> + '_ {
+    schemas.names()
 }
 
 /// What one module offers a `use` in another: every top-level declaration it
@@ -1103,7 +1163,10 @@ fn resolve_uses(
     name: &str,
     module: &crate::package::Module,
     surfaces: &BTreeMap<&str, Surface>,
+    schemas: &HostSchemas,
     errors: &mut Vec<Diagnostic>,
+    warnings: &mut Vec<Diagnostic>,
+    warned_hosts: &mut BTreeSet<String>,
 ) -> ModuleUses {
     let mut uses = ModuleUses::default();
     let mut bound: BTreeMap<String, (Bound, Span)> = BTreeMap::new();
@@ -1117,7 +1180,7 @@ fn resolve_uses(
             let last = segments.last().expect("a `use` path is never empty");
 
             if surfaces.contains_key(path.as_str()) {
-                if let Some(diagnostic) = shadowed_host(&path, span) {
+                if let Some(diagnostic) = shadowed_host(&path, schemas, span) {
                     errors.push(diagnostic);
                     continue;
                 }
@@ -1146,7 +1209,7 @@ fn resolve_uses(
             if segments.len() >= 2 {
                 let owner = segments[..segments.len() - 1].join(".");
                 if let Some(surface) = surfaces.get(owner.as_str()) {
-                    if let Some(diagnostic) = shadowed_host(&owner, span) {
+                    if let Some(diagnostic) = shadowed_host(&owner, schemas, span) {
                         errors.push(diagnostic);
                         continue;
                     }
@@ -1179,10 +1242,12 @@ fn resolve_uses(
 
             match segments.len() {
                 1 => {
+                    warn_unchecked_host_once(&path, schemas, span, warned_hosts, warnings);
                     uses.host_uses.insert(path);
                 }
                 2 => {
                     let host = segments[0].to_string();
+                    warn_unchecked_host_once(&host, schemas, span, warned_hosts, warnings);
                     uses.host_uses.insert(host.clone());
                     bind(
                         &mut bound,
@@ -1275,12 +1340,63 @@ fn same_origin(a: &Bound, b: &Bound) -> bool {
     }
 }
 
+/// Warns about a `use` of a host module no schema describes.
+///
+/// Such a module is the one case the checker genuinely cannot answer for: a
+/// host may register anything, and until this compilation is handed its
+/// table, every call into it is unknown here and checked for the first time
+/// at the boundary. That fallback is deliberate and stays, but a program
+/// resting on it should say so rather than read like one that checked.
+fn unchecked_host_module(module: &str, schemas: &HostSchemas, span: Span) -> Option<Diagnostic> {
+    if schemas.module(module).is_some() {
+        return None;
+    }
+    Some(
+        Diagnostic::warning(
+            "cove::resolve::unchecked_host",
+            format!("no Host API schema describes the host module `{module}`, so calls into it are unchecked"),
+        )
+        .at(span)
+        .rule(
+            "A Host API call is checked against its module's schema; the checker reads the shipped schemas and any an embedder supplies.",
+        )
+        .help(format!(
+            "if `{module}` is an embedder's module, hand its `ModuleSchema` to the compiler with `Compiler::new().with_host_schema(...)`; otherwise check the spelling"
+        )),
+    )
+}
+
+/// Warns about `module` once per package, on the first `use` that named it.
+///
+/// A `use` of an undescribed host module says the same thing every time it
+/// is written, whether that is twice in one module (`use company` and
+/// `use company.employee`) or once in each of several modules, so repeating
+/// the warning would only inflate a `cove check --deny-warnings` count
+/// without telling the reader anything new. `warned_hosts` is the memory
+/// that makes it fire once: shared across every module of the package by the
+/// caller, and updated here exactly when a warning is actually produced.
+fn warn_unchecked_host_once(
+    module: &str,
+    schemas: &HostSchemas,
+    span: Span,
+    warned_hosts: &mut BTreeSet<String>,
+    warnings: &mut Vec<Diagnostic>,
+) {
+    if warned_hosts.contains(module) {
+        return;
+    }
+    if let Some(warning) = unchecked_host_module(module, schemas, span) {
+        warned_hosts.insert(module.to_string());
+        warnings.push(warning);
+    }
+}
+
 /// Refuses a module that shares its name with a host module.
 ///
 /// Modules resolve first, so such a module would silently make the host
 /// module unreachable for the whole package.
-fn shadowed_host(module: &str, span: Span) -> Option<Diagnostic> {
-    if !host_modules().any(|host| host == module) {
+fn shadowed_host(module: &str, schemas: &HostSchemas, span: Span) -> Option<Diagnostic> {
+    if !host_modules(schemas).any(|host| host == module) {
         return None;
     }
     Some(
@@ -1585,6 +1701,7 @@ fn check_conformance(
     method_spans: &mut BTreeMap<(String, String), Span>,
     call_sites: &mut BTreeMap<FnKey, Vec<CallShape>>,
     opaque_fields: &OpaqueFields,
+    schemas: &HostSchemas,
     errors: &mut Vec<Diagnostic>,
 ) {
     let Conformance {
@@ -1647,6 +1764,7 @@ fn check_conformance(
             method_spans,
             call_sites,
             opaque_fields,
+            schemas,
             errors,
         );
     }
@@ -1715,6 +1833,7 @@ fn check_conformance(
             method_spans,
             call_sites,
             opaque_fields,
+            schemas,
             errors,
         );
     }
@@ -1744,6 +1863,7 @@ fn record_method(
     method_spans: &mut BTreeMap<(String, String), Span>,
     call_sites: &mut BTreeMap<FnKey, Vec<CallShape>>,
     opaque_fields: &OpaqueFields,
+    schemas: &HostSchemas,
     errors: &mut Vec<Diagnostic>,
 ) {
     let key = (type_name.to_string(), decl.name.node.clone());
@@ -1773,6 +1893,7 @@ fn record_method(
         &resolved.host_uses,
         &resolved.host_items,
         opaque_fields,
+        schemas,
     );
     call_sites.insert(
         FnKey::Method(type_name.to_string(), decl.name.node.clone()),
@@ -1959,6 +2080,7 @@ fn analyze_body(
     host_uses: &BTreeSet<String>,
     host_items: &BTreeMap<String, String>,
     opaque_fields: &OpaqueFields,
+    schemas: &HostSchemas,
 ) -> (BTreeSet<Capability>, Vec<CallShape>, BTreeSet<OpenCall>) {
     let generics: BTreeSet<String> = decl
         .generics
@@ -1969,6 +2091,7 @@ fn analyze_body(
         host_uses,
         host_items,
         opaque_fields,
+        schemas,
         enums: None,
         capabilities: BTreeSet::new(),
         calls: Vec::new(),
@@ -2197,11 +2320,23 @@ type EnumsInScope<'a> = BTreeMap<&'a str, &'a EnumEntry>;
 /// This reuses [`walk_block`] rather than a second traversal: the only
 /// difference from the walk [`analyze_body`] already did is that `enums` is
 /// filled in this time, so [`check_match_arms`] actually runs.
-fn check_bodies(program: &Program, errors: &mut Vec<Diagnostic>, warnings: &mut Vec<Diagnostic>) {
+fn check_bodies(
+    program: &Program,
+    schemas: &HostSchemas,
+    errors: &mut Vec<Diagnostic>,
+    warnings: &mut Vec<Diagnostic>,
+) {
     for resolved in program.modules.values() {
         let enums = enums_in_scope(program, resolved);
         for entry in resolved.functions.values() {
-            check_body(&entry.decl.body, resolved, &enums, errors, warnings);
+            check_body(
+                &entry.decl.body,
+                resolved,
+                &enums,
+                schemas,
+                errors,
+                warnings,
+            );
         }
         for entry in resolved.methods.values() {
             // A default body belongs to the trait that declares it, so it is
@@ -2209,13 +2344,20 @@ fn check_bodies(program: &Program, errors: &mut Vec<Diagnostic>, warnings: &mut 
             // the module that declares the trait, whose enums are the ones
             // its arms can name.
             if entry.from_trait_default.is_none() {
-                check_body(&entry.decl.body, resolved, &enums, errors, warnings);
+                check_body(
+                    &entry.decl.body,
+                    resolved,
+                    &enums,
+                    schemas,
+                    errors,
+                    warnings,
+                );
             }
         }
         for entry in resolved.traits.values() {
             for method in &entry.decl.methods {
                 if let Some(body) = &method.default {
-                    check_body(body, resolved, &enums, errors, warnings);
+                    check_body(body, resolved, &enums, schemas, errors, warnings);
                 }
             }
         }
@@ -2249,6 +2391,7 @@ fn check_body(
     body: &Block,
     resolved: &ResolvedModule,
     enums: &EnumsInScope,
+    schemas: &HostSchemas,
     errors: &mut Vec<Diagnostic>,
     warnings: &mut Vec<Diagnostic>,
 ) {
@@ -2256,6 +2399,7 @@ fn check_body(
     let mut walk = BodyWalk {
         host_uses: &resolved.host_uses,
         host_items: &resolved.host_items,
+        schemas,
         enums: Some(enums),
         capabilities: BTreeSet::new(),
         calls: Vec::new(),
@@ -2289,6 +2433,9 @@ fn check_body(
 struct BodyWalk<'a> {
     host_uses: &'a BTreeSet<String>,
     host_items: &'a BTreeMap<String, String>,
+    /// The host modules this compilation can see, which is what turns a call
+    /// into the capability it requires.
+    schemas: &'a HostSchemas,
     enums: Option<&'a EnumsInScope<'a>>,
     capabilities: BTreeSet<Capability>,
     calls: Vec<CallShape>,
@@ -2538,7 +2685,9 @@ fn walk_expr(expr: &Expr, walk: &mut BodyWalk) {
             trailing,
             ..
         } => {
-            if let Some(capability) = call_capability(callee, walk.host_uses, walk.host_items) {
+            if let Some(capability) =
+                call_capability(callee, walk.host_uses, walk.host_items, walk.schemas)
+            {
                 walk.capabilities.insert(capability);
             }
             match call_shape(callee) {
@@ -3465,24 +3614,49 @@ fn propagate_capabilities(
 
 /// If `callee` is a call to a host module (`console.println(...)`) or an
 /// unqualified host item (`println(...)`), the capability it requires.
+///
+/// The capability is the one the *operation's* schema declares, not the
+/// module's, because that is the rule `HostRegistry::call_with` and
+/// `call_resource` enforce at the boundary: they read
+/// `OperationSchema::capability` and fall back to the module's only when the
+/// operation itself is not in the schema. Deriving the module's capability
+/// here instead would let the checker under-report what a call costs — an
+/// embedder may gate one operation of a module more tightly than the module
+/// as a whole, such as a `company` module whose `directory` operations need
+/// only `directory` while `payroll` needs `payroll` — and a program that
+/// requested only what the checker asked for would then be refused at run
+/// time. A module no schema describes falls back to its name, which is the
+/// only thing about it this compilation knows.
 fn call_capability(
     callee: &Expr,
     host_uses: &BTreeSet<String>,
     host_items: &BTreeMap<String, String>,
+    schemas: &HostSchemas,
 ) -> Option<Capability> {
-    match &callee.kind {
-        ExprKind::Field { base, .. } => {
-            if let ExprKind::Ident(name) = &base.kind {
-                if host_uses.contains(name.as_str()) {
-                    return Some(Capability::new(name.clone()));
-                }
+    let (module, operation) = match &callee.kind {
+        ExprKind::Field { base, name } => match &base.kind {
+            ExprKind::Ident(module_name) if host_uses.contains(module_name.as_str()) => {
+                (module_name.clone(), name.node.clone())
             }
-            None
-        }
-        ExprKind::Ident(name) => host_items
-            .get(name)
-            .map(|host| Capability::new(host.clone())),
-        _ => None,
+            _ => return None,
+        },
+        ExprKind::Ident(name) => (host_items.get(name)?.clone(), name.clone()),
+        _ => return None,
+    };
+    Some(operation_capability(&module, &operation, schemas))
+}
+
+/// The capability a call to `module`'s `operation` requires, matching the
+/// rule the Host API boundary enforces: the operation's own capability when
+/// its schema declares one, the module's otherwise, and the module's name
+/// when no schema describes the module at all.
+fn operation_capability(module: &str, operation: &str, schemas: &HostSchemas) -> Capability {
+    match schemas.module(module) {
+        Some(schema) => match schema.operation(operation) {
+            Some(op) => Capability::new(op.capability),
+            None => Capability::new(schema.capability),
+        },
+        None => Capability::new(module),
     }
 }
 
@@ -3492,6 +3666,7 @@ mod tests {
     use crate::config::Config;
     use crate::package::{Module, Unit};
     use cove_diag::SourceMap;
+    use cove_schema::{Effect, HostType, ModuleSchema, OperationSchema};
     use std::path::PathBuf;
 
     /// Builds a single module out of inline source texts, one per unit,
@@ -3565,6 +3740,36 @@ mod tests {
             .into_iter()
             .find(|d| d.code == code)
             .unwrap_or_else(|| panic!("expected a `{code}` diagnostic"))
+    }
+
+    /// Resolves a package of inline modules against a Host API schema an
+    /// embedder supplied, rather than the shipped set alone.
+    fn resolve_modules_with(
+        modules: &[(&str, &str)],
+        schemas: &HostSchemas,
+    ) -> Result<Program, Vec<Diagnostic>> {
+        let package = package_of_modules(
+            modules
+                .iter()
+                .map(|(name, source)| module_from_sources(name, &[source]))
+                .collect(),
+        );
+        resolve_with(&package, schemas)
+    }
+
+    #[track_caller]
+    fn resolve_ok_with(modules: &[(&str, &str)], schemas: &HostSchemas) -> Program {
+        match resolve_modules_with(modules, schemas) {
+            Ok(program) => program,
+            Err(errors) => panic!(
+                "expected the package to resolve, found: {}",
+                errors
+                    .iter()
+                    .map(|d| format!("{}: {}", d.code, d.message))
+                    .collect::<Vec<_>>()
+                    .join("; ")
+            ),
+        }
     }
 
     #[test]
@@ -3886,7 +4091,7 @@ impl Snapshot for Booking {
         ));
         let program = resolve(&package).expect("resolves");
         let names: Vec<&str> = program
-            .warnings
+            .notices
             .iter()
             .filter(|d| d.code == "cove::resolve::missing_doc")
             .map(|d| d.message.as_str())
@@ -4157,7 +4362,7 @@ impl Show for B {
     /// names out.
     #[test]
     fn every_shipped_host_module_is_refused_as_a_package_module() {
-        for host in host_modules() {
+        for host in host_modules(&HostSchemas::new()) {
             let diagnostic = resolve_err(
                 &[
                     (host, "/// Does something.\nexport fn thing() {\n}\n"),
@@ -4247,6 +4452,83 @@ impl Show for B {
         assert_eq!(
             program.modules["app"].host_items.get("println"),
             Some(&"other".to_string())
+        );
+    }
+
+    /// A package where the same undescribed host module is named by two
+    /// `use`s in one module (unqualified, then qualified to an item) *and*
+    /// by a `use` in a second module gets one `unchecked_host` warning, not
+    /// three: repeating the warning per `use` would inflate a
+    /// `cove check --deny-warnings` count for one unknown module.
+    ///
+    /// The single warning is pinned to the first `use` of the
+    /// alphabetically first module that names the module, because
+    /// `package.modules` is a `BTreeMap`: module `a` sorts before `b`, and
+    /// within `a` its first unit's `use company` sorts before its second
+    /// unit's `use company.employee`.
+    #[test]
+    fn unchecked_host_warns_once_per_module_not_once_per_use() {
+        let module_a = module_from_sources(
+            "a",
+            &[
+                "use company\n\n/// Calls into `company`.\nexport fn f() {\n  company.employee()\n}\n",
+                "use company.employee\n\n/// Calls the unqualified import.\nexport fn g() {\n  employee()\n}\n",
+            ],
+        );
+        let first_use_file = module_a.units[0].file;
+        let module_b = module_from_sources(
+            "b",
+            &["use company\n\n/// Also calls into `company`.\nexport fn h() {\n  company.employee()\n}\n"],
+        );
+        let package = package_of_modules(vec![module_a, module_b]);
+        let program = resolve(&package).expect("resolves despite the unchecked host warning");
+        let warnings: Vec<_> = program
+            .notices
+            .iter()
+            .filter(|d| d.code == "cove::resolve::unchecked_host")
+            .collect();
+        assert_eq!(
+            warnings.len(),
+            1,
+            "expected exactly one unchecked_host warning, found {warnings:?}"
+        );
+        assert_eq!(
+            warnings[0].primary.expect("warning has a span").file,
+            first_use_file,
+            "the warning should point at module `a`'s first `use company`"
+        );
+    }
+
+    #[test]
+    fn unchecked_host_warns_once_per_distinct_module() {
+        let program = resolve_ok(&[
+            (
+                "a",
+                "use company\n\n/// Calls into `company`.\nexport fn f() {\n  company.employee()\n}\n",
+            ),
+            (
+                "b",
+                "use vendor\n\n/// Calls into `vendor`.\nexport fn g() {\n  vendor.order()\n}\n",
+            ),
+        ]);
+        let modules_warned: BTreeSet<&str> = program
+            .notices
+            .iter()
+            .filter(|d| d.code == "cove::resolve::unchecked_host")
+            .map(|d| {
+                if d.message.contains("`company`") {
+                    "company"
+                } else if d.message.contains("`vendor`") {
+                    "vendor"
+                } else {
+                    panic!("unexpected unchecked_host warning: {}", d.message)
+                }
+            })
+            .collect();
+        assert_eq!(
+            modules_warned,
+            BTreeSet::from(["company", "vendor"]),
+            "two distinct undescribed host modules should each warn once"
         );
     }
 
@@ -4502,7 +4784,7 @@ impl Show for B {
                  match level {\n    LogLevel.Debug => \"debug\"\n    LogLevel.Info => \"info\"\n  }\n}\n",
             ),
         ]);
-        assert!(program.warnings.is_empty());
+        assert!(program.notices.is_empty());
     }
 
     #[test]
@@ -4870,7 +5152,7 @@ export struct Booking {
         let package = package_of(module);
         let program = resolve(&package).expect("resolves even with a warning");
         assert!(program
-            .warnings
+            .notices
             .iter()
             .any(|d| d.code == "cove::resolve::missing_doc"));
     }
@@ -4880,7 +5162,7 @@ export struct Booking {
         let module = module_from_sources("private", &["fn helper() {\n}\n"]);
         let package = package_of(module);
         let program = resolve(&package).expect("resolves");
-        assert!(program.warnings.is_empty());
+        assert!(program.notices.is_empty());
     }
 
     #[test]
@@ -4971,6 +5253,81 @@ export struct Booking {
         assert!(resolved.functions["main"]
             .required_capabilities
             .contains(&Capability::new("console")));
+    }
+
+    /// An embedder's schema for a module named after neither of its
+    /// operations: the module's own capability is `directory`, but the
+    /// `payroll` operation is gated on `payroll` instead. This is the shape
+    /// the boundary (`HostRegistry::call_with`) actually enforces, and the
+    /// checker must derive the same capability or an embedder could grant
+    /// exactly what the checker asked for and still be refused at run time.
+    const COMPANY: ModuleSchema = ModuleSchema {
+        name: "company",
+        capability: "directory",
+        operations: &[
+            OperationSchema {
+                name: "employee",
+                params: &[],
+                variadic: false,
+                result: HostType::Unit,
+                capability: "directory",
+                effect: Effect::Read,
+                cancellable: false,
+                recordable: true,
+                result_is_task_safe: true,
+            },
+            OperationSchema {
+                name: "payroll",
+                params: &[],
+                variadic: false,
+                result: HostType::Unit,
+                capability: "payroll",
+                effect: Effect::Read,
+                cancellable: false,
+                recordable: true,
+                result_is_task_safe: true,
+            },
+        ],
+        types: &[],
+        resources: &[],
+    };
+
+    #[test]
+    fn required_capabilities_use_the_operation_s_capability_not_the_module_s() {
+        let schemas = HostSchemas::new().with(COMPANY);
+        let program = resolve_ok_with(
+            &[(
+                "app",
+                "use company\n\n/// Entry point.\nexport fn main() {\n  company.payroll()\n}\n",
+            )],
+            &schemas,
+        );
+        let main = &program.modules["app"].functions["main"];
+        assert!(main
+            .required_capabilities
+            .contains(&Capability::new("payroll")));
+        assert!(!main
+            .required_capabilities
+            .contains(&Capability::new("directory")));
+    }
+
+    #[test]
+    fn required_capabilities_fall_back_to_the_module_s_capability_for_an_undeclared_operation() {
+        let schemas = HostSchemas::new().with(COMPANY);
+        let program = resolve_ok_with(
+            &[(
+                "app",
+                "use company\n\n/// Entry point; calls an operation the schema does not declare.\nexport fn main() {\n  company.other()\n}\n",
+            )],
+            &schemas,
+        );
+        let main = &program.modules["app"].functions["main"];
+        assert!(main
+            .required_capabilities
+            .contains(&Capability::new("directory")));
+        assert!(!main
+            .required_capabilities
+            .contains(&Capability::new("payroll")));
     }
 
     #[test]
@@ -5350,7 +5707,7 @@ export struct Booking {
         );
         let package = package_of(module);
         let program = resolve(&package).expect("resolves");
-        assert!(program.warnings.is_empty());
+        assert!(program.notices.is_empty());
     }
 
     #[test]
@@ -5389,7 +5746,7 @@ export struct Booking {
         let package = package_of(module);
         let program = resolve(&package).expect("resolves");
         assert!(!program
-            .warnings
+            .notices
             .iter()
             .any(|d| d.code == "cove::resolve::non_exhaustive_match"));
     }
@@ -5508,7 +5865,7 @@ export struct Booking {
         let package = package_of(module);
         let program = resolve(&package).expect("resolves; only a warning");
         assert!(program
-            .warnings
+            .notices
             .iter()
             .any(|d| d.code == "cove::resolve::unreachable_match_arm"));
     }
@@ -5547,7 +5904,7 @@ export struct Booking {
         let package = package_of(module);
         let program = resolve(&package).expect("resolves");
         assert!(!program
-            .warnings
+            .notices
             .iter()
             .any(|d| d.code == "cove::resolve::non_exhaustive_match"));
     }
@@ -5604,7 +5961,7 @@ export struct Booking {
         let package = package_of(module);
         let program = resolve(&package).expect("resolves; only a warning");
         assert!(program
-            .warnings
+            .notices
             .iter()
             .any(|d| d.code == "cove::resolve::unreachable_match_arm"));
     }
@@ -5665,7 +6022,7 @@ export struct Booking {
         let package = package_of(module);
         let program = resolve(&package).expect("resolves");
         assert!(!program
-            .warnings
+            .notices
             .iter()
             .any(|d| d.code == "cove::resolve::non_exhaustive_match"));
     }
@@ -5685,7 +6042,7 @@ export struct Booking {
         let package = package_of(module);
         let program = resolve(&package).expect("resolves; the enum cannot be determined");
         assert!(!program
-            .warnings
+            .notices
             .iter()
             .any(|d| d.code.starts_with("cove::resolve::") && d.code.contains("match")));
     }

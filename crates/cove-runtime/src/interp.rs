@@ -127,7 +127,7 @@ const STACK_MARGIN: usize = 3;
 /// How much stack the runtime gives every thread it runs Cove on.
 ///
 /// A tree-walking interpreter spends native stack per Cove frame, so
-/// [`MAX_CALL_DEPTH`] keeps its promise only on a stack big enough to hold
+/// `MAX_CALL_DEPTH` keeps its promise only on a stack big enough to hold
 /// that many frames. Nothing gave the runtime such a stack before: a spawned
 /// task took the platform default of 2 MiB, and the entry took whatever the
 /// process main thread happened to have, which is 8 MiB on macOS and Linux
@@ -137,7 +137,7 @@ const STACK_MARGIN: usize = 3;
 /// with no capability granted at all could end the process by recursing.
 ///
 /// So the size is derived from the limits rather than chosen beside them.
-/// Raising [`MAX_CALL_DEPTH`] raises this, which is the relationship the
+/// Raising `MAX_CALL_DEPTH` raises this, which is the relationship the
 /// limit's promise rests on, and it is now arithmetic rather than a
 /// coincidence that held on one thread of one profile. It works out at about
 /// 106 MiB in a debug build and about 8 MiB in a release one.
@@ -170,12 +170,12 @@ pub const STACK_SIZE: usize =
 /// Runs `body` on a thread the runtime sized, and hands back what it
 /// produced.
 ///
-/// This is how a host runs Cove on a stack [`MAX_CALL_DEPTH`] fits on. The
+/// This is how a host runs Cove on a stack `MAX_CALL_DEPTH` fits on. The
 /// process main thread is not one: its size is the platform's business, it is
 /// 1 MiB on Windows, and no `main` can change it after the fact. So every
 /// path the toolchain has into a Cove program — `cove run`, `cove test`,
 /// `cove generate`, `cove replay`, a `cove build` binary, and `cove-bench` —
-/// does its whole run inside one of these, and [`Interpreter::spawn`] gives a
+/// does its whole run inside one of these, and `Interpreter::spawn` gives a
 /// task thread the same size, so no thread this runtime evaluates Cove on has
 /// a stack it did not choose.
 ///
@@ -243,8 +243,9 @@ enum Control {
     /// `return` unwinds to the enclosing function call.
     Return(Value),
     /// `break` / `break expr` unwinds to the nearest enclosing loop, which
-    /// then evaluates to this value.
-    Break(Value),
+    /// evaluates to `()` however it leaves. An operand is evaluated where it
+    /// is written and its value discarded, so there is nothing to carry.
+    Break,
     /// `continue` unwinds to the nearest enclosing loop's next iteration.
     Continue,
 }
@@ -276,7 +277,7 @@ fn finish(result: Eval) -> Result<Value, RuntimeError> {
         Ok(value) => Ok(value),
         Err(Control::Return(value)) => Ok(value),
         Err(Control::Error(error)) => Err(error),
-        Err(Control::Break(_)) => {
+        Err(Control::Break) => {
             unreachable!("`break` outside a loop is rejected before execution")
         }
         Err(Control::Continue) => {
@@ -718,14 +719,14 @@ impl<'a> Interpreter<'a> {
     /// host embedding the runtime — so this is where a run's terminal event
     /// is written, and writing it here is what makes "every run has one" true
     /// rather than a claim about the paths somebody remembered. It wraps
-    /// [`Interpreter::enter`] rather than living inside it so that a run that
+    /// `Interpreter::enter` rather than living inside it so that a run that
     /// never reached its entry — one that named a function this package does
     /// not declare, say — still ends with an event saying so.
     ///
     /// # Run this on a thread with at least [`STACK_SIZE`] bytes
     ///
     /// The interpreter is a recursive tree walker, so a Cove program spends
-    /// native stack as it nests calls, and [`MAX_CALL_DEPTH`] stops it before
+    /// native stack as it nests calls, and `MAX_CALL_DEPTH` stops it before
     /// that stack runs out. What "before" means depends on how much stack
     /// there is. The runtime sizes every thread it creates itself, so a
     /// spawned task and everything the toolchain runs are covered; a thread
@@ -1214,6 +1215,7 @@ impl<'a> Interpreter<'a> {
         Ok(Value::Struct(Box::new(StructValue {
             type_name: format!("{module}.{}", declared.name).into(),
             fields,
+            opaque: false,
         })))
     }
 
@@ -1733,7 +1735,16 @@ impl<'a> Interpreter<'a> {
                     .into());
                 };
                 if test {
-                    self.eval_block(env, then_branch)
+                    let value = self.eval_block(env, then_branch)?;
+                    // An `if` with no `else` produces `()`. There is no
+                    // second branch to give the missing case a value, so the
+                    // branch that ran does not get to supply one either:
+                    // the same expression would otherwise mean one thing to
+                    // the checker and another here.
+                    Ok(match else_branch {
+                        Some(_) => value,
+                        None => Value::Unit,
+                    })
                 } else {
                     match else_branch {
                         Some(branch) => self.eval(env, branch),
@@ -1776,9 +1787,6 @@ impl<'a> Interpreter<'a> {
                 body,
             } => {
                 let items = self.iterable_items(env, iterable)?;
-                // A loop is an expression: it evaluates to `Unit` unless a
-                // `break expr` inside it says otherwise.
-                let mut result_value = Value::Unit;
                 for item in items {
                     // Once per iteration, at the back edge: this is the
                     // safepoint that bounds a `for` over an unbounded
@@ -1790,15 +1798,18 @@ impl<'a> Interpreter<'a> {
                     env.pop();
                     match result {
                         Ok(_) => {}
-                        Err(Control::Break(value)) => {
-                            result_value = value;
-                            break;
-                        }
+                        // A `for` runs out of items, so it can reach its end
+                        // without breaking and there is nothing there to
+                        // produce but `()`. Its value is therefore `()`
+                        // however it leaves, and a `break` operand is
+                        // evaluated for its effects alone -- the same rule
+                        // an `if` with no `else` follows. See issue #87.
+                        Err(Control::Break) => break,
                         Err(Control::Continue) => continue,
                         Err(other) => return Err(other),
                     }
                 }
-                Ok(result_value)
+                Ok(Value::Unit)
             }
             ExprKind::While { condition, body } => loop {
                 let test = self.eval(env, condition)?;
@@ -1819,7 +1830,12 @@ impl<'a> Interpreter<'a> {
                 self.charge_safepoint(span)?;
                 match self.eval_block(env, body) {
                     Ok(_) => {}
-                    Err(Control::Break(value)) => return Ok(value),
+                    // A `while` can reach its end without breaking, so it is
+                    // `()` however it leaves and a `break` operand is
+                    // evaluated for its effects alone. `while true` is no
+                    // exception: nothing about the condition makes it a
+                    // different form. See issue #87.
+                    Err(Control::Break) => return Ok(Value::Unit),
                     Err(Control::Continue) => continue,
                     Err(other) => return Err(other),
                 }
@@ -1832,11 +1848,13 @@ impl<'a> Interpreter<'a> {
                 Err(Control::Return(value))
             }
             ExprKind::Break(value) => {
-                let value = match value {
-                    Some(expr) => self.eval(env, expr)?,
-                    None => Value::Unit,
-                };
-                Err(Control::Break(value))
+                // The operand is evaluated here, for its effects, and its
+                // value is discarded: the loop it leaves is `()` however it
+                // leaves, so there is nowhere for a value to go.
+                if let Some(expr) = value {
+                    self.eval(env, expr)?;
+                }
+                Err(Control::Break)
             }
             ExprKind::Continue => Err(Control::Continue),
             ExprKind::Lambda {
@@ -2292,6 +2310,7 @@ impl<'a> Interpreter<'a> {
                     Value::Struct(Box::new(StructValue {
                         type_name: MAP_ENTRY.name.into(),
                         fields: vec![("key".into(), key.to_value()), ("value".into(), value.clone())],
+                        opaque: false,
                     }))
                 })
                 .collect()),
@@ -2957,7 +2976,20 @@ impl<'a> Interpreter<'a> {
         Ok(Value::Struct(Box::new(StructValue {
             type_name: format!("{module}.{}", decl.name.node).into(),
             fields,
+            opaque: self.is_opaque(module, &decl.name.node),
         })))
+    }
+
+    /// Whether `module` declared this struct `export opaque struct`, which
+    /// is what makes a value of it render as its name alone (ADR 0014).
+    ///
+    /// The checker refuses to let another module name a field; this is the
+    /// other half, and it applies to every reader including the declaring
+    /// module, because a rendered string goes wherever it is passed.
+    fn is_opaque(&self, module: &str, name: &str) -> bool {
+        self.resolved(module)
+            .and_then(|resolved| resolved.structs.get(name))
+            .is_some_and(|entry| entry.opaque)
     }
 
     fn eval_args(
@@ -3245,10 +3277,35 @@ impl Callable for Interpreter<'_> {
 /// operation rather than producing a defined-but-wrong value. There are no
 /// implicit numeric, string, or boolean conversions, so mixed operands are
 /// rejected too.
+/// Whether a value is one an `impl Trait for Type` can be written for, and
+/// so one a `dyn Trait` can be holding. Traits are implemented for structs
+/// and enums; nothing else in the value domain can be behind a trait object.
+fn conformable(value: &Value) -> bool {
+    matches!(value, Value::Struct(_) | Value::Enum(_))
+}
+
 fn binary(op: BinaryOp, lhs: Value, rhs: Value, span: Span) -> Result<Value, RuntimeError> {
     match op {
         BinaryOp::Eq | BinaryOp::Ne => {
-            if lhs.type_name() != rhs.type_name() {
+            // Through the `dyn Trait` wrapper: a written `dyn Trait` is
+            // wrapped here and a lambda's inferred one is not, though the
+            // checker gives both the same type, so a comparison reaching
+            // one compares what it holds. Erasing settles that pair on its
+            // own, since both sides then name the concrete type.
+            //
+            // What erasing cannot settle is two trait objects over
+            // *different* concrete types, which the checker agreed about and
+            // this guard would refuse. Only a struct or an enum can be
+            // behind a trait object, because only those can carry an `impl`,
+            // so the guard is dropped for exactly that pair and stands
+            // everywhere else — including against a value whose type the
+            // checker abstained about, which is where dropping it wholesale
+            // turned an error into a silent `false`.
+            let objects = (matches!(lhs, Value::Dyn(_)) || matches!(rhs, Value::Dyn(_)))
+                && conformable(lhs.erased())
+                && conformable(rhs.erased());
+            let (lhs, rhs) = (lhs.erased(), rhs.erased());
+            if !objects && lhs.type_name() != rhs.type_name() {
                 return Err(RuntimeError::new(format!(
                     "cannot compare `{}` with `{}`",
                     lhs.type_name(),
@@ -3257,7 +3314,7 @@ fn binary(op: BinaryOp, lhs: Value, rhs: Value, span: Span) -> Result<Value, Run
                 .at(span)
                 .with_rule("`==` means value equality between values of the same type."));
             }
-            let equal = lhs.eq_value(&rhs);
+            let equal = lhs.eq_value(rhs);
             Ok(Value::Bool(if op == BinaryOp::Eq { equal } else { !equal }))
         }
         // `is` is narrower than `==`: same shared storage, not same value.
@@ -3265,6 +3322,12 @@ fn binary(op: BinaryOp, lhs: Value, rhs: Value, span: Span) -> Result<Value, Run
         // else has no identity `is` can answer, which is a distinct error
         // from a type mismatch.
         BinaryOp::Is => {
+            // Through the wrapper here too, so that `is` names what it is
+            // looking at rather than where the value was converted. No trait
+            // object can hold a `Vector` today — a trait is implemented for a
+            // struct or an enum — so this changes only which type name the
+            // failure below reports.
+            let (lhs, rhs) = (lhs.erased(), rhs.erased());
             if lhs.type_name() != rhs.type_name() {
                 return Err(RuntimeError::new(format!(
                     "cannot compare the identity of `{}` with `{}`",
@@ -3274,9 +3337,9 @@ fn binary(op: BinaryOp, lhs: Value, rhs: Value, span: Span) -> Result<Value, Run
                 .at(span)
                 .with_rule("`is` compares identity between values of the same type."));
             }
-            match (&lhs, &rhs) {
+            match (lhs, rhs) {
                 (Value::Vector(a), Value::Vector(b)) => Ok(Value::Bool(Rc::ptr_eq(a, b))),
-                _ => Err(identity_not_available(&lhs, span)),
+                _ => Err(identity_not_available(lhs, span)),
             }
         }
         BinaryOp::And | BinaryOp::Or => unreachable!("short-circuited in `eval`"),
@@ -3413,6 +3476,7 @@ fn init_map_entry(args: Vec<EvaluatedArg>, span: Span) -> Result<Value, RuntimeE
     Ok(Value::Struct(Box::new(StructValue {
         type_name: MAP_ENTRY.name.into(),
         fields,
+        opaque: false,
     })))
 }
 
@@ -4461,6 +4525,59 @@ fn renderAll(values: Array<dyn Display>) -> String {
         // A trait object shows the value it holds: the wrapper is a
         // representation, not something the program put there.
         assert_eq!(value.to_string(), "Booking(id: 3)");
+    }
+
+    #[test]
+    fn a_trait_object_keys_as_the_value_it_holds() {
+        // `==` looks through the wrapper, so keying has to look through it
+        // too: two values the language calls equal have to be usable in the
+        // same places. The written `dyn Display` below is wrapped and the
+        // one the function value produces is not, and neither difference is
+        // one a program is allowed to see.
+        let output = run_with_traits(
+            "  let written: dyn Display = Booking(id: 1)\n  let make: fn(Int) -> dyn Display = fn(id) { Booking(id: id) }\n  let inferred = make(1)\n  console.println(\"{written == inferred}\")?\n  console.println(\"{Set.of(written) == Set.of(inferred)}\")?",
+        )
+        .output;
+        assert_eq!(output, "true\ntrue\n");
+    }
+
+    #[test]
+    fn a_trait_object_is_still_incomparable_with_an_unrelated_value() {
+        // The wrapper explains one mismatch and no other. Where the checker
+        // abstained about one side — a host operation whose schema declares
+        // `Any`, say — an unknown matches every type, so nothing static
+        // refused the comparison and this guard is the only thing left. It
+        // must report, not answer `false`.
+        let (sources, program) = program_of(&format!(
+            "{TRAITS}\nexport fn main() -> dyn Display {{\n  Booking(id: 3)\n}}\n"
+        ));
+        let object = run_in(
+            &program,
+            &sources,
+            "test",
+            "main",
+            &[],
+            &["console"],
+            BTreeMap::new(),
+        )
+        .value();
+        let span = Span::new(cove_diag::FileId(0), 0, 0);
+        let error = binary(BinaryOp::Eq, object.clone(), Value::Int(1), span)
+            .expect_err("a trait object and an `Int` are not the same type");
+        assert_eq!(error.message, "cannot compare `test.Booking` with `Int`");
+        // Two trait objects over different concrete types keep answering
+        // `false`, which is what dropping the guard was for.
+        let other = Value::Dyn(Rc::new(DynValue {
+            trait_name: "test.Display".into(),
+            value: Value::Struct(Box::new(StructValue {
+                type_name: "test.Receipt".into(),
+                fields: vec![("total".into(), Value::Int(2))],
+                opaque: false,
+            })),
+        }));
+        let answer = binary(BinaryOp::Eq, object, other, span)
+            .expect("two trait objects at one trait are comparable");
+        assert!(answer.eq_value(&Value::Bool(false)));
     }
 
     #[test]
@@ -5524,21 +5641,27 @@ export fn main() -> Result<Unit, Error> {
     }
 
     #[test]
-    fn a_for_loop_evaluates_to_the_value_of_break() {
+    fn a_for_loop_is_unit_however_it_leaves() {
+        // A `for` can reach its end without breaking, so `break` stops it
+        // and supplies nothing: the operand is evaluated for its effects and
+        // its value discarded, which is what the checker says the loop
+        // produces too.
         let source = r#"
 use console.println
 
 export fn main() -> Result<Unit, Error> {
+  var seen = 0
   let found = for value in [1, 2, 3, 4] {
+    seen = value
     if value == 3 {
       break value * 10
     }
   }
-  console.println("{found}")?
+  console.println("{seen} {found}")?
   Ok(())
 }
 "#;
-        assert_eq!(run_entry_of(source, "main", &[]).output, "30\n");
+        assert_eq!(run_entry_of(source, "main", &[]).output, "3 ()\n");
     }
 
     #[test]
@@ -5578,7 +5701,10 @@ export fn main() -> Result<Unit, Error> {
     }
 
     #[test]
-    fn a_while_loop_evaluates_to_the_value_of_break() {
+    fn a_while_true_is_unit_like_every_other_loop() {
+        // `while true` is an ordinary `while`: the `break` stops it and
+        // supplies nothing, so the loop is `()` here exactly as the checker
+        // says it is.
         let source = r#"
 use console.println
 
@@ -5590,11 +5716,52 @@ export fn main() -> Result<Unit, Error> {
       break count
     }
   }
-  console.println("{found}")?
+  console.println("{count} {found}")?
   Ok(())
 }
 "#;
-        assert_eq!(run_entry_of(source, "main", &[]).output, "3\n");
+        assert_eq!(run_entry_of(source, "main", &[]).output, "3 ()\n");
+    }
+
+    #[test]
+    fn a_while_that_can_reach_its_end_is_unit_however_it_leaves() {
+        let source = r#"
+use console.println
+
+export fn main() -> Result<Unit, Error> {
+  var count = 0
+  let found = while count < 10 {
+    count += 1
+    if count == 3 {
+      break count
+    }
+  }
+  console.println("{count} {found}")?
+  Ok(())
+}
+"#;
+        assert_eq!(run_entry_of(source, "main", &[]).output, "3 ()\n");
+    }
+
+    #[test]
+    fn an_if_with_no_else_is_unit_even_when_its_branch_runs() {
+        let source = r#"
+use console.println
+
+export fn main() -> Result<Unit, Error> {
+  var ran = false
+  let taken = if true {
+    ran = true
+    1
+  }
+  let skipped = if false {
+    2
+  }
+  console.println("{ran} {taken} {skipped}")?
+  Ok(())
+}
+"#;
+        assert_eq!(run_entry_of(source, "main", &[]).output, "true () ()\n");
     }
 
     // ------------------------------------------------------------ rule 11
@@ -6051,6 +6218,118 @@ export fn main() -> Result<Unit, Error> {
   console.println("{colours.contains(Colour.Named("teal"))} {colours.contains(Colour.Named("blue"))}")?"#,
         );
         assert_eq!(run.output, "true false\n");
+    }
+
+    /// A source module declaring an opaque type, together with a plain
+    /// struct of the same shape to render beside it.
+    const OPAQUE: &str = r#"
+use console.println
+
+/// A token.
+export opaque struct Token {
+  raw: String
+  count: Int
+}
+
+/// A token with nothing to hide.
+export struct Label {
+  raw: String
+  count: Int
+}
+"#;
+
+    /// An opaque type renders as its name and nothing else — in the module
+    /// that declares it as much as in any other, because a rendered string
+    /// goes wherever it is passed and carries no module with it. A module
+    /// that wants a readable form exports a method that returns one. See
+    /// ADR 0014.
+    #[test]
+    fn an_opaque_value_renders_as_its_name_alone() {
+        let source = format!(
+            "{OPAQUE}{}",
+            r#"
+/// Entry point.
+export fn main() -> Result<Unit, Error> {
+  let token = Token(raw: "secret", count: 1)
+  let label = Label(raw: "secret", count: 1)
+  println("{token}")?
+  println("{label}")?
+  Ok(())
+}
+"#
+        );
+        let run = run_entry_of(&source, "main", &[]);
+        assert_eq!(run.output, "Token\nLabel(raw: secret, count: 1)\n");
+    }
+
+    /// The rendering rule holds wherever a value is rebuilt from its parts:
+    /// a key taken back out of a `Set` is the value that went in, opacity
+    /// included.
+    #[test]
+    fn an_opaque_value_taken_out_of_a_set_still_renders_as_its_name() {
+        let source = format!(
+            "{OPAQUE}{}",
+            r#"
+/// Entry point.
+export fn main() -> Result<Unit, Error> {
+  for token in Set.of(Token(raw: "secret", count: 1)) {
+    println("{token}")?
+  }
+  Ok(())
+}
+"#
+        );
+        let run = run_entry_of(&source, "main", &[]);
+        assert_eq!(run.output, "Token\n");
+    }
+
+    /// Opacity and the `dyn Trait` wrapper compose: keying looks through the
+    /// wrapper, so two trait objects over the same opaque value are one key,
+    /// and what comes back out is still opaque, so it renders as its name
+    /// alone. Neither rule undoes the other — the wrapper is a representation
+    /// and opacity is a property of the value inside it.
+    #[test]
+    fn a_trait_object_over_an_opaque_value_keys_and_renders_as_that_value() {
+        let source = format!(
+            "{OPAQUE}{}",
+            r#"
+/// Something that can describe itself.
+trait Described {
+  fn describe(self) -> String
+}
+
+impl Described for Token {
+  fn describe(self) -> String { "token {self.count}" }
+}
+
+impl Described for Label {
+  fn describe(self) -> String { "label {self.count}" }
+}
+
+/// Entry point.
+export fn main() -> Result<Unit, Error> {
+  let token: dyn Described = Token(raw: "secret", count: 1)
+  let label: dyn Described = Label(raw: "secret", count: 1)
+  let keys = Set.of(token, label)
+  println("{keys.contains(Token(raw: "secret", count: 1))}")?
+  println("{token}")?
+  for key in keys {
+    println("{key}")?
+  }
+  Ok(())
+}
+"#
+        );
+        let run = run_entry_of(&source, "main", &[]);
+        // `contains` answers `true` for the bare value: keying looked through
+        // the wrapper, which is what `==` already says about the two of them.
+        // Every rendering of the opaque one is its bare name — held in the
+        // wrapper, and rebuilt from the key on the way back out of the set —
+        // while the ordinary struct beside it still shows its fields.
+        assert_eq!(
+            run.output,
+            "true\nToken\nLabel(raw: secret, count: 1)\nToken\n"
+        );
     }
 
     #[test]

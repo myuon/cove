@@ -1,0 +1,11 @@
+error[cove::type::mismatch]: expected `Int`, found `()`
+  --> <e2e>/fail_if_without_else_value/main/main.cove:10:20
+   |
+10 |   let bound: Int = if n > 0 {
+   |                    ^^^^^^^^^^
+  --> <e2e>/fail_if_without_else_value/main/main.cove:10:14
+   |
+10 |   let bound: Int = if n > 0 {
+   |              ^^^ the declared type is `Int`
+  rule: Types are nominal and the only implicit conversion is to `dyn Trait`: a value must otherwise already have the type its place asks for.
+1 error(s)

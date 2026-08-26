@@ -69,11 +69,10 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use cove_schema::builtins::RESULT;
-use cove_sema::Capability;
 
 use crate::error::RuntimeError;
 use crate::host::{HostApi, Reentry, ResourceHandle};
-use crate::schema::{ModuleSchema, OperationSchema, ResourceSchema, TypeSchema};
+use crate::schema::ModuleSchema;
 use crate::value::{EnumValue, StructValue, Value};
 
 /// How long the real host is willing to spend reading one whole request.
@@ -635,24 +634,8 @@ fn stale(handle: &ResourceHandle, op: &str) -> RuntimeError {
 }
 
 impl HostApi for Http {
-    fn name(&self) -> &str {
-        "http"
-    }
-
-    fn capability(&self) -> Capability {
-        Capability::new("http")
-    }
-
-    fn schema(&self) -> &[OperationSchema] {
-        SCHEMA.operations
-    }
-
-    fn types(&self) -> &[TypeSchema] {
-        SCHEMA.types
-    }
-
-    fn resources(&self) -> &[ResourceSchema] {
-        SCHEMA.resources
+    fn module_schema(&self) -> ModuleSchema {
+        SCHEMA
     }
 
     /// `fetch` is the one module-level operation that waits, so it is the one
@@ -743,6 +726,7 @@ fn response(status: i64, body: &str) -> Value {
             ("status".into(), Value::Int(status)),
             ("body".into(), Value::Str(body.into())),
         ],
+        opaque: false,
     }))
 }
 
@@ -755,6 +739,7 @@ fn request(method: &str, path: &str, body: &str) -> Value {
             ("path".into(), Value::Str(path.into())),
             ("body".into(), Value::Str(body.into())),
         ],
+        opaque: false,
     }))
 }
 
@@ -1349,6 +1334,7 @@ mod tests {
                 ("path".into(), Value::Str(path.into())),
                 ("handler".into(), Value::Unit),
             ],
+            opaque: false,
         }))
     }
 
@@ -1669,6 +1655,7 @@ mod tests {
         let payload = Value::Struct(Box::new(StructValue {
             type_name: "demo.Point".into(),
             fields: vec![("x".into(), Value::Int(1)), ("y".into(), Value::Int(2))],
+            opaque: false,
         }));
         let answer = http.call("json", vec![Value::Int(200), payload]).unwrap();
         assert_eq!(response_body(answer), "{\"x\":1,\"y\":2}");

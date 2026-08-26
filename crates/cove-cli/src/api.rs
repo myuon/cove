@@ -209,10 +209,10 @@ impl Decl {
 }
 
 /// The name a header declares: `export async fn greet(name: String)` names
-/// `greet`, and `export struct Widget<T>` names `Widget`.
+/// `greet`, and `export opaque struct Widget<T>` names `Widget`.
 fn header_name(header: &str) -> &str {
     let mut rest = header;
-    for prefix in ["export ", "async "] {
+    for prefix in ["export ", "opaque ", "async "] {
         rest = rest.strip_prefix(prefix).unwrap_or(rest);
     }
     let rest = rest.split_once(' ').map_or(rest, |(_, tail)| tail);
@@ -235,18 +235,27 @@ pub(crate) fn derive(program: &Program) -> Interface {
             decls.push(function_decl(entry));
         }
         for (type_name, entry) in resolved.structs.iter().filter(|(_, e)| e.exported) {
-            let members = entry
-                .decl
-                .fields
-                .iter()
-                .map(|field| format!("field {}: {}", field.name.node, field.ty))
-                .collect();
+            // An opaque struct records no fields. They are not part of what
+            // a caller may depend on, so a change to them must not move the
+            // interface hash, and the way to guarantee that is to leave them
+            // out of the body the hash covers.
+            let members = if entry.opaque {
+                Vec::new()
+            } else {
+                entry
+                    .decl
+                    .fields
+                    .iter()
+                    .map(|field| format!("field {}: {}", field.name.node, field.ty))
+                    .collect()
+            };
             decls.push(type_decl(
                 program,
                 name,
                 type_name,
                 format!(
-                    "export struct {type_name}{}",
+                    "export {}struct {type_name}{}",
+                    if entry.opaque { "opaque " } else { "" },
                     generics_suffix(&entry.decl.generics)
                 ),
                 entry.doc.clone(),
@@ -712,8 +721,13 @@ fn facts(decl: &Decl) -> Facts<'_> {
 /// requirements already get.
 ///
 /// Compatible is the rest: a new export, a new conformance, a new trait
-/// requirement that has a default body, a capability no longer required, and
-/// a doc change.
+/// requirement that has a default body, a capability no longer required, a
+/// doc change, and an `export opaque struct` that stopped being opaque.
+///
+/// An opaque struct records no fields at all, so changing its representation
+/// produces no difference to classify: what a caller depends on is its name
+/// and its exported operations, and those are what the snapshot holds. That
+/// is the point of the modifier — see ADR 0014.
 pub(crate) fn diff(recorded: &Interface, current: &Interface) -> Vec<Change> {
     let old = flatten(recorded);
     let new = flatten(current);
@@ -744,9 +758,37 @@ pub(crate) fn diff(recorded: &Interface, current: &Interface) -> Vec<Change> {
     changes
 }
 
+/// Whether two headers are the same declaration with only its `opaque`
+/// modifier changed, and what that costs a caller.
+///
+/// Adding `opaque` withdraws the representation, which breaks every caller
+/// that named a field or wrote the labeled constructor. Removing it only
+/// publishes what was already there, so nothing a caller wrote stops
+/// working.
+fn opacity_change(was: &str, now: &str) -> Option<(Severity, &'static str)> {
+    let was = was.strip_prefix("export ")?;
+    let now = now.strip_prefix("export ")?;
+    if now.strip_prefix("opaque ") == Some(was) {
+        return Some((
+            Severity::Breaking,
+            "became opaque, so its fields and its labeled constructor are no longer public",
+        ));
+    }
+    if was.strip_prefix("opaque ") == Some(now) {
+        return Some((
+            Severity::Compatible,
+            "is no longer opaque, so its representation became public",
+        ));
+    }
+    None
+}
+
 /// Compares one declaration that both interfaces have.
 fn compare(path: &str, was: &Facts, now: &Facts, changes: &mut Vec<Change>) {
-    if was.header != now.header {
+    let opacity = opacity_change(was.header, now.header);
+    if let Some((severity, detail)) = opacity {
+        changes.push(Change::new(severity, path, detail));
+    } else if was.header != now.header {
         changes.push(Change {
             severity: Severity::Breaking,
             path: path.to_string(),
@@ -756,6 +798,14 @@ fn compare(path: &str, was: &Facts, now: &Facts, changes: &mut Vec<Change>) {
                 format!("now `{}`", now.header),
             ],
         });
+    }
+
+    // A type that just gained or lost `opaque` has every field appear or
+    // disappear at once, because an opaque type records none. That is the
+    // change already reported, not a second one.
+    if opacity.is_some() {
+        compare_tail(path, was, now, changes);
+        return;
     }
 
     let old_members: BTreeSet<&str> = was.members.iter().map(String::as_str).collect();
@@ -785,6 +835,13 @@ fn compare(path: &str, was: &Facts, now: &Facts, changes: &mut Vec<Change>) {
         ));
     }
 
+    compare_tail(path, was, now, changes);
+}
+
+/// Compares everything about a declaration other than its header and its
+/// members: the traits it conforms to, the capabilities it requires, and its
+/// doc.
+fn compare_tail(path: &str, was: &Facts, now: &Facts, changes: &mut Vec<Change>) {
     for name in was.conforms.difference(&now.conforms) {
         changes.push(Change::new(
             Severity::Breaking,
@@ -1075,6 +1132,129 @@ export fn greeting(name: String) -> String {
     fn only(changes: &[Change]) -> &Change {
         assert_eq!(changes.len(), 1, "expected one change, got {changes:?}");
         &changes[0]
+    }
+
+    /// A module whose exported type keeps its representation to itself.
+    const OPAQUE: &str = "\
+/// A token.
+export opaque struct Token {
+  raw: String
+}
+
+impl Token {
+  /// Builds a token.
+  export fn of(raw: String) -> Token {
+    Token(raw: raw)
+  }
+
+  /// The token as text.
+  export fn text(self) -> String {
+    self.raw
+  }
+}
+";
+
+    /// The same public operations over a different representation.
+    const OPAQUE_REPRESENTATION_CHANGED: &str = "\
+/// A token.
+export opaque struct Token {
+  scheme: String
+  body: String
+}
+
+impl Token {
+  /// Builds a token.
+  export fn of(raw: String) -> Token {
+    Token(scheme: \"bearer\", body: raw)
+  }
+
+  /// The token as text.
+  export fn text(self) -> String {
+    self.body
+  }
+}
+";
+
+    /// The interfaces two sources derive, and the differences between them.
+    fn changes_between(name: &str, before: &str, after: &str) -> Vec<Change> {
+        let old_dir = TempDir::new(&format!("api-before-{name}"));
+        let recorded = interface_of(&one_module(&old_dir, before));
+        let new_dir = TempDir::new(&format!("api-after-{name}"));
+        let current = interface_of(&one_module(&new_dir, after));
+        diff(&recorded, &current)
+    }
+
+    /// An opaque type's fields are not part of what a caller may depend on,
+    /// so the snapshot records the type's name and its operations and says
+    /// nothing about how it is built.
+    #[test]
+    fn an_opaque_struct_records_no_fields() {
+        let dir = TempDir::new("api-opaque");
+        let text = snapshot_of(&one_module(&dir, OPAQUE));
+        assert!(
+            text.contains("export opaque struct Token"),
+            "the header does not mark the type opaque:\n{text}"
+        );
+        assert!(
+            !text.contains("field raw"),
+            "an opaque type's representation reached the snapshot:\n{text}"
+        );
+        assert!(
+            text.contains("export fn of(raw: String) -> Token")
+                && text.contains("export fn text(self) -> String"),
+            "the type's exported operations are missing:\n{text}"
+        );
+    }
+
+    /// The whole point of the modifier: the fields may change underneath a
+    /// caller, and neither the hash nor the diff has anything to report.
+    #[test]
+    fn changing_an_opaque_type_s_representation_changes_nothing() {
+        let before = TempDir::new("api-opaque-was");
+        let recorded = interface_of(&one_module(&before, OPAQUE));
+        let after = TempDir::new("api-opaque-now");
+        let current = interface_of(&one_module(&after, OPAQUE_REPRESENTATION_CHANGED));
+
+        assert_eq!(recorded.hash(), current.hash());
+        assert!(
+            diff(&recorded, &current).is_empty(),
+            "{:?}",
+            diff(&recorded, &current)
+        );
+    }
+
+    /// The control: a public representation is part of the interface, so
+    /// the same edit to a plain `export struct` is breaking.
+    #[test]
+    fn changing_a_public_struct_s_representation_is_breaking() {
+        let changes = changes_between(
+            "public-representation",
+            &OPAQUE.replace("export opaque struct", "export struct"),
+            &OPAQUE_REPRESENTATION_CHANGED.replace("export opaque struct", "export struct"),
+        );
+        assert!(
+            changes
+                .iter()
+                .any(|change| change.severity == Severity::Breaking),
+            "{changes:?}"
+        );
+    }
+
+    #[test]
+    fn making_an_exported_struct_opaque_is_breaking_and_the_reverse_is_compatible() {
+        let public = OPAQUE.replace("export opaque struct", "export struct");
+
+        let hiding = changes_between("became-opaque", &public, OPAQUE);
+        let change = only(&hiding);
+        assert_eq!(change.severity, Severity::Breaking);
+        assert_eq!(change.path, "app.Token");
+        assert!(change.detail[0].contains("became opaque"), "{change:?}");
+
+        let publishing = changes_between("became-public", OPAQUE, &public);
+        let change = only(&publishing);
+        assert_eq!(change.severity, Severity::Compatible);
+        assert_eq!(change.path, "app.Token");
+        assert!(change.detail[0].contains("no longer opaque"), "{change:?}");
     }
 
     #[test]

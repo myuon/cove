@@ -79,6 +79,10 @@ struct Bail;
 struct ItemModifiers {
     exported: bool,
     is_test: bool,
+    /// Where `opaque` was written, kept rather than reduced to a flag
+    /// because the checks that reject it — on a declaration that is not an
+    /// exported struct — can only run once the declaration itself is read.
+    opaque: Option<Span>,
 }
 
 type PResult<T> = Result<T, Bail>;
@@ -669,6 +673,7 @@ impl<'a> Parser<'a> {
             TokenKind::Keyword(
                 Keyword::Export
                 | Keyword::Test
+                | Keyword::Opaque
                 | Keyword::Struct
                 | Keyword::Enum
                 | Keyword::Trait
@@ -840,31 +845,41 @@ impl Parser<'_> {
                 .help("Remove `test`, or move the behaviour into a `test fn`."),
             );
         }
+        let is_opaque = self.check_opaque(&modifiers, &kind, span);
         Ok(Item {
             doc,
             exported: modifiers.exported,
             is_test: modifiers.is_test,
+            is_opaque,
             kind,
             span,
         })
     }
 
-    /// Reads the `export` or `test` in front of a declaration.
+    /// Reads the `export`, `test`, and `opaque` in front of a declaration.
     ///
-    /// The two occupy one position and answer one question — who may call
-    /// this — so a declaration carries at most one of them, written once.
+    /// `export` and `test` occupy one position and answer one question —
+    /// who may call this — so a declaration carries at most one of them,
+    /// written once. `opaque` answers the next question rather than the same
+    /// one — how much of an export a caller sees — so it joins an `export`
+    /// instead of competing with it, and [`Parser::check_opaque`] judges it
+    /// once the declaration it describes has been read.
+    ///
     /// Every modifier is read before anything is reported, rather than
     /// stopping at the first, so recovery continues at the declaration
     /// itself however the mistake was written.
     fn parse_item_modifiers(&mut self) -> ItemModifiers {
         let mut exported: Option<Span> = None;
         let mut is_test: Option<Span> = None;
+        let mut opaque: Option<Span> = None;
         loop {
             let span = self.span();
             let (seen, keyword) = if self.at_keyword(Keyword::Export) {
                 (&mut exported, Keyword::Export)
             } else if self.at_keyword(Keyword::Test) {
                 (&mut is_test, Keyword::Test)
+            } else if self.at_keyword(Keyword::Opaque) {
+                (&mut opaque, Keyword::Opaque)
             } else {
                 break;
             };
@@ -901,7 +916,45 @@ impl Parser<'_> {
             // downstream sees a declaration that is both.
             exported: exported.is_some() && is_test.is_none(),
             is_test: is_test.is_some(),
+            opaque,
         }
+    }
+
+    /// Reports an `opaque` that does not describe an exported struct.
+    ///
+    /// `opaque` says what an `export` hides, so it has nothing to say about
+    /// a declaration that is not exported — that one is module-private
+    /// already — and nothing to say about an enum, whose cases are the
+    /// interface a caller matches on.
+    fn check_opaque(&mut self, modifiers: &ItemModifiers, kind: &ItemKind, span: Span) -> bool {
+        let Some(opaque) = modifiers.opaque else {
+            return false;
+        };
+        if !matches!(kind, ItemKind::Struct(_)) {
+            self.error(
+                Diagnostic::error(
+                    "cove::parse::opaque_not_a_struct",
+                    "`opaque` marks a struct, not this declaration",
+                )
+                .at(span)
+                .rule("`opaque` hides a struct's representation; an exported enum always exports its cases, and every other declaration is its own interface.")
+                .help("Remove `opaque`, or wrap the representation in a struct and export that."),
+            );
+            return false;
+        }
+        if !modifiers.exported {
+            self.error(
+                Diagnostic::error(
+                    "cove::parse::opaque_not_exported",
+                    "`opaque` describes an export, and this declaration is not exported",
+                )
+                .at(opaque)
+                .rule("A declaration without `export` is module-private, so there is no boundary for `opaque` to draw.")
+                .help("Write `export opaque struct`, or remove `opaque`."),
+            );
+            return false;
+        }
+        true
     }
 
     /// Reports a `test fn` written anywhere but at the top level of a file.
@@ -2477,6 +2530,59 @@ mod tests {
         let diagnostics = errors("export export fn f() {}");
         assert_eq!(codes(&diagnostics), ["cove::parse::repeated_modifier"]);
         assert!(diagnostics[0].message.contains("`export` is written twice"));
+    }
+
+    /// `opaque` is read as a modifier wherever it is written, and `cove fmt`
+    /// is what settles the order it is written in.
+    #[test]
+    fn parses_an_opaque_export_written_either_way_round() {
+        for source in [
+            "export opaque struct User { id: Int }",
+            "opaque export struct User { id: Int }",
+        ] {
+            let unit = ok(source);
+            let item = &unit.items[0];
+            assert!(item.exported, "{source}");
+            assert!(item.is_opaque, "{source}");
+        }
+    }
+
+    #[test]
+    fn a_plain_export_is_not_opaque() {
+        let unit = ok("export struct User { id: Int }");
+        assert!(!unit.items[0].is_opaque);
+    }
+
+    #[test]
+    fn rejects_opaque_on_a_declaration_that_is_not_a_struct() {
+        for source in [
+            "export opaque enum Status { Pending }",
+            "export opaque fn f() {}",
+            "export opaque type Handler = fn() -> Int",
+        ] {
+            let diagnostics = errors(source);
+            assert_eq!(
+                codes(&diagnostics),
+                ["cove::parse::opaque_not_a_struct"],
+                "{source}"
+            );
+        }
+    }
+
+    /// A declaration without `export` is module-private already, so
+    /// `opaque` would draw a boundary that is already drawn.
+    #[test]
+    fn rejects_opaque_without_export() {
+        let diagnostics = errors("opaque struct User { id: Int }");
+        assert_eq!(codes(&diagnostics), ["cove::parse::opaque_not_exported"]);
+        assert!(diagnostics[0].message.contains("not exported"));
+    }
+
+    #[test]
+    fn rejects_opaque_written_twice() {
+        let diagnostics = errors("export opaque opaque struct User { id: Int }");
+        assert_eq!(codes(&diagnostics), ["cove::parse::repeated_modifier"]);
+        assert!(diagnostics[0].message.contains("`opaque` is written twice"));
     }
 
     #[test]

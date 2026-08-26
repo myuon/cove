@@ -28,13 +28,12 @@ use std::sync::{Arc, Mutex};
 use cove_runtime::host::{HostApi, HostRegistry};
 use cove_runtime::interp::Interpreter;
 use cove_runtime::runtime::Runtime;
-use cove_runtime::schema::{ModuleSchema, OperationSchema, ResourceSchema, TypeSchema};
+use cove_runtime::schema::ModuleSchema;
 use cove_runtime::Transfer;
 use cove_runtime::{
     value_to_json, Budget, Cancellation, Grants, Limits, ResourceHandle, RunOutcome, RuntimeError,
     Value, ValueCapture,
 };
-use cove_sema::Capability;
 
 use crate::trace::{self, Outcome, Trace};
 use crate::CliError;
@@ -379,24 +378,8 @@ struct ReplayHost {
 }
 
 impl HostApi for ReplayHost {
-    fn name(&self) -> &str {
-        self.declared.name
-    }
-
-    fn capability(&self) -> Capability {
-        Capability::new(self.declared.capability)
-    }
-
-    fn schema(&self) -> &[OperationSchema] {
-        self.declared.operations
-    }
-
-    fn types(&self) -> &[TypeSchema] {
-        self.declared.types
-    }
-
-    fn resources(&self) -> &[ResourceSchema] {
-        self.declared.resources
+    fn module_schema(&self) -> ModuleSchema {
+        *self.declared
     }
 
     fn call(&self, op: &str, args: Vec<Value>) -> Result<Value, RuntimeError> {
@@ -649,7 +632,8 @@ mod tests {
         // The real `Console` would have written to its output; this one has
         // no output to write to, which is the point.
         assert!(Console::new(Vec::new())
-            .schema()
+            .module_schema()
+            .operations
             .iter()
             .any(|op| op.name == "println"));
     }
