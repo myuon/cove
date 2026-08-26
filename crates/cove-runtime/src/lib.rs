@@ -1,5 +1,6 @@
 //! The Cove runtime: values, Host API dispatch, and the MVP interpreter.
 
+pub mod bindings;
 pub mod budget;
 pub mod builtins;
 pub mod clock;
@@ -19,6 +20,7 @@ pub mod task;
 pub mod trace;
 pub mod value;
 
+pub use bindings::Bindings;
 pub use budget::{Budget, Cancellation, Limits, Stopped};
 pub use clock::{Clock, VirtualTime};
 pub use database::Database;

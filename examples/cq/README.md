@@ -434,6 +434,70 @@ the receiver copy above was the first. Both were plausible from the code and
 both were wrong about how much they mattered, which is the argument for the
 mechanism benchmarks rather than for reading more carefully.
 
+## Phase A: resolved bindings
+
+[Issue #107](https://github.com/myuon/cove/issues/107) is the first phase of
+the redesign: resolve every local and parameter reference to a frame index
+before the run, so the interpreter stops searching for it by name. It was
+expected to be worth about 1.06× on its own — the section above measures name
+lookup at 3.8–5.5% — and to earn its keep as groundwork for
+[#108](https://github.com/myuon/cove/issues/108)'s call frames.
+
+It came to two changes, and measuring them apart says something neither of
+them says alone.
+
+**A block scope became a mark rather than a vector.** `Env` now holds one flat
+list of every binding a call has declared, and a block records where it begins
+in that list instead of owning a vector of its own. A reverse scan of one flat
+list visits bindings in exactly the order scanning scopes-then-bindings did, so
+nothing about lookup changed — but a `push` no longer allocates.
+
+**Every local reference got a frame index**, worked out before the run by a
+pass that mirrors the interpreter's scoping step for step, and used as an
+accelerator only: an index the pass could not work out, or one whose binding
+does not carry the expected name, falls back to the search that was always
+there.
+
+| | `#106` | flat frame | + resolved indices |
+| --- | ---: | ---: | ---: |
+| `cq revenue-summary`, 100,000 records | 90.8 s | 83.7 s | **82.8 s** |
+| `pure` | 17.30 ms | 16.12 ms | 16.25 ms |
+| `arith` | 437.85 ms | 450.73 ms | 465.27 ms |
+| `arrayget` | 1,424.82 ms | 1,463.72 ms | 1,462.77 ms |
+| `field` | 878.91 ms | 856.26 ms | 885.59 ms |
+| `method` | 3,098.83 ms | 2,835.76 ms | 2,880.19 ms |
+| `call` | 1,748.91 ms | 1,597.13 ms | 1,639.20 ms |
+| `chars` | 1,842.03 ms | 1,860.52 ms | 1,915.61 ms |
+
+**The flat frame is the whole win.** It is 1.09× on the application, and on the
+mechanism benchmarks it lands where it should: `method` 1.09×, `call` 1.10×,
+`pure` 1.07× — the call-heavy ones, because a call no longer allocates a vector
+per block it enters.
+
+**The resolved indices are worth about 1% on the application and cost 2–3% on
+the mechanism benchmarks.** `arith` is 3% slower with them than without.
+
+That is not a disappointing result, it is a specific one. A resolved read costs
+two bounds-checked loads to find the index plus a name comparison to confirm
+it; the search it replaces is a reverse walk of a list that, in these programs,
+is a handful of entries long. Replacing a short scan with an indirection and a
+comparison is not obviously a saving, and here it is not one.
+
+It becomes one when the index is *free* — baked into the node rather than
+looked up beside it — and when nothing has to be confirmed because the frame is
+a contiguous stack whose layout is the thing being indexed. That is
+[#108](https://github.com/myuon/cove/issues/108). So phase A's value is exactly
+what it was scoped as after the correction above — groundwork — and now that is
+measured rather than assumed. If #108's design ends up not wanting a
+precomputed index, this pass should be removed rather than maintained.
+
+The name comparison stays, and is why a resolved read is not free. It is what
+makes a resolver bug cost time instead of meaning: a wrong index that lands on
+a different binding falls back to the search. Debug builds go further and
+assert that the resolved place is the one the search would have found — over
+the whole test suite and 8.3 million reads of `cq`, the two never disagreed —
+which costs those builds about 10% and is worth it.
+
 ## Findings
 
 ### Per-character work costs about 1.4 µs

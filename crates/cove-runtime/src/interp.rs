@@ -26,10 +26,11 @@ use cove_diag::{SourceMap, Span};
 use cove_schema::builtins::{FreeBuiltinKind, MAP_ENTRY, NONE_CASE, OPTION, RESULT};
 use cove_sema::resolve::{Program, ResolvedModule};
 use cove_syntax::ast::{
-    Arg, BinaryOp, Block, EnumDecl, Expr, ExprKind, FnDecl, Ident, ItemKind, Param, Pattern,
-    PatternKind, Receiver, StmtKind, StrPart, StructDecl, Type, TypeKind, UnaryOp,
+    Arg, BinaryOp, Block, EnumDecl, Expr, ExprId, ExprKind, FnDecl, Ident, ItemKind, Param,
+    Pattern, PatternKind, Receiver, StmtKind, StrPart, StructDecl, Type, TypeKind, UnaryOp,
 };
 
+use crate::bindings::Bindings;
 use crate::budget::{Cancellation, Stopped};
 use crate::builtins::{self, Callable};
 use crate::error::RuntimeError;
@@ -365,15 +366,8 @@ impl Place {
     }
 }
 
-/// One block scope: the bindings declared in it, and where they begin in this
-/// thread's root list.
-struct Scope {
-    bindings: Vec<(Rc<str>, Place)>,
-    roots_mark: usize,
-}
-
-/// One lexical environment: the module a body resolves names in, and a stack
-/// of block scopes holding places.
+/// One lexical environment: the module a body resolves names in, the bindings
+/// the body received, and the bindings it has declared.
 ///
 /// Every binding an environment declares is registered in its interpreter's
 /// [`Roots`], and leaving a block — or dropping the whole environment when a
@@ -385,9 +379,38 @@ struct Scope {
 ///
 /// The list belongs to one interpreter, and ADR 0008 gives each task an
 /// interpreter of its own, so these are one task's roots and no others'.
+///
+/// # Why the bindings are one flat list and a block is a mark
+///
+/// A block scope used to be a vector of its own. It is now a mark into
+/// `frame`, and `frame` holds every binding this call has declared, in the
+/// order it declared them. The two are the same thing to a lookup — scanning
+/// scopes in reverse and then bindings in reverse visits exactly the order
+/// scanning one flat list in reverse does — and they are not the same thing to
+/// a pass that runs before the program does: an index into one flat list per
+/// call is something [`crate::bindings`] can work out ahead of time, and an
+/// index into whichever vector a block happened to own is not.
+///
+/// # Why captures are not in it
+///
+/// A closure receives its captures at the moment it is created, and *how many*
+/// it receives is decided then too: only the names its body mentions and that
+/// were live get captured. So a capture's position is a run-time fact, and
+/// putting captures in `frame` would make every index after them a run-time
+/// fact as well. They live in their own list, searched after `frame` and so
+/// found only when the body declared nothing of that name — which is the order
+/// they had when they were declared into the first scope ahead of the
+/// parameters.
 struct Env {
     module: Rc<str>,
-    scopes: Vec<Scope>,
+    /// What a closure body was handed by the environment that created it, in
+    /// the order [`Env::captures`] produced them.
+    captures: Vec<(Rc<str>, Place)>,
+    /// Every binding this call has declared, in declaration order.
+    frame: Vec<(Rc<str>, Place)>,
+    /// One entry per open block scope: where it begins in `frame`, and where
+    /// it begins in `roots`.
+    marks: Vec<(usize, usize)>,
     roots: Rc<RefCell<Roots>>,
     /// Where this environment's own bindings begin in `roots`.
     base: usize,
@@ -398,10 +421,9 @@ impl Env {
         let base = roots.borrow().len();
         Env {
             module,
-            scopes: vec![Scope {
-                bindings: Vec::new(),
-                roots_mark: base,
-            }],
+            captures: Vec::new(),
+            frame: Vec::new(),
+            marks: Vec::new(),
             roots,
             base,
         }
@@ -409,33 +431,53 @@ impl Env {
 
     fn push(&mut self) {
         let roots_mark = self.roots.borrow().len();
-        self.scopes.push(Scope {
-            bindings: Vec::new(),
-            roots_mark,
-        });
+        self.marks.push((self.frame.len(), roots_mark));
     }
 
     fn pop(&mut self) {
-        if let Some(scope) = self.scopes.pop() {
-            self.roots.borrow_mut().truncate(scope.roots_mark);
+        if let Some((frame_mark, roots_mark)) = self.marks.pop() {
+            self.frame.truncate(frame_mark);
+            self.roots.borrow_mut().truncate(roots_mark);
         }
     }
 
+    /// Declares a binding this call made.
     fn declare(&mut self, name: Rc<str>, place: Place) {
         self.roots.borrow_mut().push(place.slot.clone());
-        self.scopes
-            .last_mut()
-            .expect("an environment always has one scope")
-            .bindings
-            .push((name, place));
+        self.frame.push((name, place));
+    }
+
+    /// Declares a binding this call was handed by a closure's captures.
+    ///
+    /// Separate from [`Env::declare`] only so that the two lists stay
+    /// separate; a capture is rooted exactly as anything else is.
+    fn declare_capture(&mut self, name: Rc<str>, place: Place) {
+        self.roots.borrow_mut().push(place.slot.clone());
+        self.captures.push((name, place));
     }
 
     fn lookup(&self, name: &str) -> Option<&Place> {
-        self.scopes
+        self.frame
             .iter()
             .rev()
-            .find_map(|scope| scope.bindings.iter().rev().find(|(n, _)| &**n == name))
+            .chain(self.captures.iter().rev())
+            .find(|(n, _)| &**n == name)
             .map(|(_, place)| place)
+    }
+
+    /// The binding at `index` of this call's own bindings, when it is the one
+    /// [`crate::bindings`] resolved that reference to.
+    ///
+    /// The name is checked rather than assumed. A resolver that disagreed with
+    /// the interpreter about which binding a reference denotes would otherwise
+    /// read some other binding of the same frame silently, and this is the one
+    /// place that disagreement could be caught; a mismatch falls back to the
+    /// search, so being wrong here costs time and never meaning.
+    fn at(&self, index: usize, name: &str) -> Option<&Place> {
+        match self.frame.get(index) {
+            Some((declared, place)) if &**declared == name => Some(place),
+            _ => None,
+        }
     }
 
     /// The bindings a closure body can read, by value at creation time.
@@ -443,22 +485,24 @@ impl Env {
     /// Only names the body mentions are captured. What a closure holds is
     /// therefore what actually has to cross a task boundary when the closure
     /// is spawned, rather than every binding that happened to be in scope.
+    ///
+    /// The walk is outermost first, so a name declared twice leaves the
+    /// innermost value in the capture — and captures are visited before this
+    /// call's own bindings for the same reason they are searched after them.
     fn captures(
         &self,
         mentioned: &BTreeSet<String>,
         span: Span,
     ) -> Result<Vec<(Rc<str>, Value)>, RuntimeError> {
         let mut captured: Vec<(Rc<str>, Value)> = Vec::new();
-        for scope in &self.scopes {
-            for (name, place) in &scope.bindings {
-                if !mentioned.contains(&**name) {
-                    continue;
-                }
-                let value = place.read(span)?;
-                match captured.iter_mut().find(|(n, _)| n == name) {
-                    Some(slot) => slot.1 = value,
-                    None => captured.push((name.clone(), value)),
-                }
+        for (name, place) in self.captures.iter().chain(self.frame.iter()) {
+            if !mentioned.contains(&**name) {
+                continue;
+            }
+            let value = place.read(span)?;
+            match captured.iter_mut().find(|(n, _)| n == name) {
+                Some(slot) => slot.1 = value,
+                None => captured.push((name.clone(), value)),
             }
         }
         Ok(captured)
@@ -524,6 +568,10 @@ pub struct Interpreter<'a> {
     pub program: &'a Program,
     pub sources: &'a SourceMap,
     pub hosts: &'a HostRegistry,
+    /// Which frame index each name reference denotes, where that could be
+    /// worked out before the run. Resolved once by the [`Runtime`] and shared
+    /// by every task of the run; see [`crate::bindings`].
+    bindings: &'a Bindings,
     /// What every thread of this run shares, so a `spawn` can hand a task
     /// thread everything it needs to run a body.
     runtime: &'a Runtime,
@@ -599,6 +647,7 @@ impl<'a> Interpreter<'a> {
             program: runtime.program(),
             sources: runtime.sources(),
             hosts: runtime.hosts(),
+            bindings: runtime.bindings(),
             runtime,
             depth: 0,
             cancellation: None,
@@ -1335,7 +1384,7 @@ impl<'a> Interpreter<'a> {
     ) -> Result<Value, RuntimeError> {
         let mut env = Env::new(target.module.clone(), Rc::clone(&self.roots));
         for (name, value) in target.captures {
-            env.declare(name.clone(), Place::binding(value.clone(), false));
+            env.declare_capture(name.clone(), Place::binding(value.clone(), false));
         }
 
         match (target.receiver, receiver) {
@@ -1647,7 +1696,7 @@ impl<'a> Interpreter<'a> {
                 }
                 Ok(Value::Str(text.into()))
             }
-            ExprKind::Ident(name) => self.eval_ident(env, name, span),
+            ExprKind::Ident(name) => self.eval_ident(env, name, expr.id, span),
             ExprKind::ArrayLit(items) => {
                 let mut values = Vec::with_capacity(items.len());
                 for item in items {
@@ -2353,8 +2402,90 @@ impl<'a> Interpreter<'a> {
         }
     }
 
-    fn eval_ident(&mut self, env: &mut Env, name: &str, span: Span) -> Eval {
-        if let Some(place) = env.lookup(name) {
+    /// The place a name denotes in this call, by resolved index where there
+    /// is one and by name search otherwise.
+    ///
+    /// The index is an accelerator and never an authority: an index that
+    /// [`crate::bindings`] did not work out, and one whose binding does not
+    /// carry this name, both fall through to the search that has always been
+    /// here. What this answers is therefore exactly what [`Env::lookup`]
+    /// answers, and the fallback is what makes that true rather than hoped
+    /// for.
+    ///
+    /// `id` and `span` identify the reference: the span says which file, and
+    /// the id numbers the expression within it.
+    fn lookup_local<'e>(
+        &self,
+        env: &'e Env,
+        name: &str,
+        id: ExprId,
+        span: Span,
+    ) -> Option<&'e Place> {
+        if let Some(index) = self.bindings.frame_index(span, id) {
+            if let Some(place) = env.at(index as usize, name) {
+                self.check_agreement(env, name, place, span);
+                self.note_resolved();
+                return Some(place);
+            }
+        }
+        let found = env.lookup(name);
+        // A name that is not a local at all — a function, a type, a host
+        // module — was never a local read, so it is neither a resolution nor
+        // a fallback.
+        if found.is_some() {
+            self.note_fallback();
+        }
+        found
+    }
+
+    /// Fails the run if the resolved index named a different binding than
+    /// the search would have found.
+    ///
+    /// [`Env::at`]'s name check makes a wrong index harmless, and this makes
+    /// it *visible*: a wrong index that happens to land on a binding of the
+    /// same name would otherwise read a stranger's cell and be caught by
+    /// nothing. Every test and every example runs a debug build, so this is
+    /// the whole test suite checking the two agree rather than a claim that
+    /// they do.
+    ///
+    /// Debug builds only, because it does both lookups to compare them,
+    /// which is precisely the work this pass exists to avoid.
+    #[cfg(debug_assertions)]
+    fn check_agreement(&self, env: &Env, name: &str, place: &Place, span: Span) {
+        let searched = env.lookup(name);
+        assert!(
+            searched.is_some_and(|searched| std::ptr::eq(searched, place)),
+            "`{name}` at {span:?} resolved to a binding the search does not find"
+        );
+    }
+
+    /// See the debug-build definition above.
+    #[cfg(not(debug_assertions))]
+    fn check_agreement(&self, _env: &Env, _name: &str, _place: &Place, _span: Span) {}
+
+    /// Counts one local read the resolved index answered.
+    #[cfg(debug_assertions)]
+    fn note_resolved(&self) {
+        self.runtime.resolution().note_resolved();
+    }
+
+    /// Counting is a debug-build measurement of the interpreter, so a release
+    /// build does not carry it.
+    #[cfg(not(debug_assertions))]
+    fn note_resolved(&self) {}
+
+    /// Counts one local read the name search answered.
+    #[cfg(debug_assertions)]
+    fn note_fallback(&self) {
+        self.runtime.resolution().note_fallback();
+    }
+
+    /// See [`Interpreter::note_resolved`].
+    #[cfg(not(debug_assertions))]
+    fn note_fallback(&self) {}
+
+    fn eval_ident(&mut self, env: &mut Env, name: &str, id: ExprId, span: Span) -> Eval {
+        if let Some(place) = self.lookup_local(env, name, id, span) {
             return Ok(place.read(span)?);
         }
         if name == NONE_CASE.name {
@@ -2412,7 +2543,7 @@ impl<'a> Interpreter<'a> {
 
     fn eval_field(&mut self, env: &mut Env, base: &Expr, name: &str, span: Span) -> Eval {
         if let ExprKind::Ident(head) = &base.kind {
-            if env.lookup(head).is_none() {
+            if self.lookup_local(env, head, base.id, base.span).is_none() {
                 let module = env.module.clone();
                 if let Some((owner, decl)) = self.find_enum(&module, head) {
                     return Ok(self.enum_case(&owner, &decl, name, Vec::new(), span)?);
@@ -2545,7 +2676,7 @@ impl<'a> Interpreter<'a> {
     ) -> Eval {
         match &callee.kind {
             ExprKind::Ident(name) => {
-                if let Some(place) = env.lookup(name) {
+                if let Some(place) = self.lookup_local(env, name, callee.id, callee.span) {
                     let value = place.read(span)?;
                     let args = self.eval_args(env, args, trailing)?;
                     return Ok(self.call_value_slots(value, args, span)?);
@@ -2620,7 +2751,7 @@ impl<'a> Interpreter<'a> {
             }
             ExprKind::Field { base, name } => {
                 if let ExprKind::Ident(head) = &base.kind {
-                    if env.lookup(head).is_none() {
+                    if self.lookup_local(env, head, base.id, base.span).is_none() {
                         let module = env.module.clone();
                         if self.is_host_module(&module, head) {
                             // `http.Route(method: ..., path: ...)` initializes
@@ -3097,7 +3228,7 @@ impl<'a> Interpreter<'a> {
     /// Resolves an lvalue, or reports why the expression is not a place.
     fn resolve_place(&mut self, env: &mut Env, expr: &Expr) -> Result<Place, Control> {
         match &expr.kind {
-            ExprKind::Ident(name) => match env.lookup(name) {
+            ExprKind::Ident(name) => match self.lookup_local(env, name, expr.id, expr.span) {
                 Some(place) => Ok(place.clone()),
                 None => Err(
                     RuntimeError::new(format!("cannot find `{name}` in this scope"))
@@ -3128,7 +3259,7 @@ impl<'a> Interpreter<'a> {
     /// Resolves an lvalue when the expression denotes one, without failing.
     fn resolve_place_opt(&mut self, env: &mut Env, expr: &Expr) -> Result<Option<Place>, Control> {
         match &expr.kind {
-            ExprKind::Ident(name) => Ok(env.lookup(name).cloned()),
+            ExprKind::Ident(name) => Ok(self.lookup_local(env, name, expr.id, expr.span).cloned()),
             ExprKind::Field { base, name } => {
                 let Some(base_place) = self.resolve_place_opt(env, base)? else {
                     return Ok(None);
@@ -9426,5 +9557,221 @@ export fn main() -> Result<Unit, Error> {
         assert_eq!(run.summary().collections, 0);
         assert_eq!(run.summary().allocated_objects, 0);
         assert!(run.collections().is_empty());
+    }
+    // ------------------------------------------- resolved binding indices
+
+    /// Hazard: `let x` twice is two cells, not one. A closure created
+    /// between them captured the first, and the name after them reads the
+    /// second, so a resolver that gave the two one index would change both.
+    #[test]
+    fn a_shadowed_local_is_a_second_cell_and_a_closure_between_them_keeps_the_first() {
+        let source = r#"
+use console.println
+
+export fn main() -> Result<Unit, Error> {
+  let x = 1
+  let read = fn() {
+    x
+  }
+  let x = 2
+  console.println("{read()} {x}")?
+  Ok(())
+}
+"#;
+        assert_eq!(run_entry_of(source, "main", &[]).output, "1 2\n");
+    }
+
+    /// Hazard: a local shadows a host module only from where it is declared.
+    /// A call written above it reaches the host, which is what resolving in
+    /// declaration order reproduces and what pre-declaring a block's `let`s
+    /// would break.
+    #[test]
+    fn a_host_module_called_before_a_local_of_its_name_still_reaches_the_host() {
+        let source = r#"
+use console.println
+
+export fn main() -> Result<Unit, Error> {
+  console.println("host")?
+  let console = 1
+  println("{console}")?
+  Ok(())
+}
+"#;
+        assert_eq!(run_entry_of(source, "main", &[]).output, "host\n1\n");
+    }
+
+    /// Hazard: a local `fn` becomes a closure before its name is declared, so
+    /// it cannot call itself. Resolving the name it is about to be bound to
+    /// would give the language recursion it does not have.
+    #[test]
+    fn a_local_fn_cannot_call_itself() {
+        let error = error_of(
+            "  fn step(n: Int) -> Int {\n    step(n)\n  }\n  console.println(\"{step(1)}\")?\n",
+        );
+        assert!(
+            error.message.contains("cannot find `step` in this scope"),
+            "{}",
+            error.message
+        );
+    }
+
+    /// Hazard: a `for` binding is a fresh cell per iteration. A closure made
+    /// in one iteration therefore holds that iteration's value, and a later
+    /// iteration cannot write over it.
+    #[test]
+    fn each_iteration_of_a_for_captures_its_own_binding() {
+        let source = r#"
+use console.println
+
+export fn main() -> Result<Unit, Error> {
+  var seen = ""
+  var first = fn() {
+    -1
+  }
+  for i in 0..<2 {
+    let read = fn() {
+      i
+    }
+    if i == 0 {
+      first = read
+    }
+    seen = "{seen}{read()}"
+  }
+  console.println("{seen} {first()}")?
+  Ok(())
+}
+"#;
+        assert_eq!(run_entry_of(source, "main", &[]).output, "01 0\n");
+    }
+
+    /// Hazard: a `var` parameter binds the caller's place rather than a copy,
+    /// so what the callee writes through its own frame index is the caller's
+    /// cell.
+    #[test]
+    fn a_var_parameter_still_aliases_the_caller_s_place() {
+        let source = r#"
+use console.println
+
+export fn main() -> Result<Unit, Error> {
+  var total = 1
+  bump(var total)
+  bump(var total)
+  console.println("{total}")?
+  Ok(())
+}
+
+fn bump(var n: Int) {
+  n += 1
+}
+"#;
+        assert_eq!(run_entry_of(source, "main", &[]).output, "3\n");
+    }
+
+    /// A method reads `self` from index 0 and its first parameter from index
+    /// 1, and a `var self` writes through the receiver's own place.
+    #[test]
+    fn a_method_reads_self_and_its_parameter_from_the_frame() {
+        let source = r#"
+use console.println
+
+export struct Counter {
+  count: Int
+}
+
+impl Counter {
+  export fn plus(self, step: Int) -> Int {
+    self.count + step
+  }
+
+  export fn bump(var self, step: Int) {
+    self.count += step
+  }
+}
+
+export fn main() -> Result<Unit, Error> {
+  var counter = Counter(count: 1)
+  counter.bump(2)
+  console.println("{counter.plus(3)}")?
+  Ok(())
+}
+"#;
+        assert_eq!(run_entry_of(source, "main", &[]).output, "6\n");
+    }
+
+    /// A closure reads its own parameters from its frame and its captures
+    /// from beside it, and the two do not collide however they are ordered.
+    #[test]
+    fn a_closure_reads_its_parameters_and_its_captures() {
+        let source = r#"
+use console.println
+
+export fn main() -> Result<Unit, Error> {
+  let base = 10
+  let add = fn(n: Int) {
+    n + base
+  }
+  console.println("{add(1)}")?
+  Ok(())
+}
+"#;
+        assert_eq!(run_entry_of(source, "main", &[]).output, "11\n");
+    }
+
+    /// The counters exist to show that the resolved path is the one a plain
+    /// program takes. An ordinary loop over locals reads nothing that is not
+    /// a parameter, a `for` binding, or a `let`, so every one of its local
+    /// reads resolves and none falls back.
+    #[cfg(debug_assertions)]
+    #[test]
+    fn an_ordinary_loop_over_locals_resolves_every_local_read() {
+        let source = r#"
+export fn main() -> Int {
+  var total = 0
+  for i in 0..<20 {
+    let doubled = i * 2
+    total += doubled
+  }
+  total
+}
+"#;
+        let (sources, program) = program_of(source);
+        let hosts = HostRegistry::new(Grants::new(Vec::<String>::new()));
+        let runtime = Runtime::new(program, sources, Arc::new(hosts));
+        let value = Interpreter::new(&runtime)
+            .run_entry("test", "main", Vec::new())
+            .expect("the program ran");
+        assert_eq!(value.to_string(), "380");
+
+        let counts = runtime.resolution_counts();
+        assert_eq!(counts.fell_back, 0, "{counts:?}");
+        assert!(counts.resolved >= 60, "{counts:?}");
+        assert_eq!(counts.resolved_fraction(), Some(1.0));
+    }
+
+    /// A run that resolves nothing still means the same, which is what makes
+    /// this an accelerator: the same program, run against an empty table,
+    /// produces the same answer by searching for every name.
+    #[cfg(debug_assertions)]
+    #[test]
+    fn a_name_the_resolver_declined_is_found_by_the_search_instead() {
+        let source = r#"
+export fn main() -> Int {
+  let outer = 7
+  let read = fn() {
+    outer
+  }
+  read()
+}
+"#;
+        let (sources, program) = program_of(source);
+        let hosts = HostRegistry::new(Grants::new(Vec::<String>::new()));
+        let runtime = Runtime::new(program, sources, Arc::new(hosts));
+        let value = Interpreter::new(&runtime)
+            .run_entry("test", "main", Vec::new())
+            .expect("the program ran");
+        // `outer` is a capture of the closure, so it is not in the frame and
+        // is read by the search that has always been here.
+        assert_eq!(value.to_string(), "7");
+        assert!(runtime.resolution_counts().fell_back > 0);
     }
 }

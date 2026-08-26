@@ -16,6 +16,7 @@ use std::sync::{Arc, Mutex};
 use cove_diag::SourceMap;
 use cove_sema::resolve::Program;
 
+use crate::bindings::Bindings;
 use crate::heap::HeapStats;
 use crate::host::HostRegistry;
 use crate::trace::{NullSink, TraceEvent, TraceSink};
@@ -46,12 +47,28 @@ pub struct Runtime {
     /// contended here while a task runs: a thread accumulates locally and
     /// takes this lock once, when its heap ends.
     heap: Arc<Mutex<HeapStats>>,
+    /// Which frame index each name reference of `program` denotes, where that
+    /// could be worked out before the run.
+    ///
+    /// Resolved once, here, because it is a fact about the program and every
+    /// task of the run reads the same program. A task thread is handed this
+    /// with the rest of the run's shared state rather than resolving a body
+    /// again when it runs one.
+    bindings: Arc<Bindings>,
+    /// How many local reads this run resolved and how many it searched for.
+    ///
+    /// One set of counters for the whole run, for the same reason the heap
+    /// totals are: a task is a thread, and what the run did is the sum of
+    /// what its threads did.
+    #[cfg(debug_assertions)]
+    resolution: Arc<crate::bindings::ResolutionStats>,
 }
 
 impl Runtime {
     /// A run over `program`, reporting against `sources` and calling through
     /// `hosts`, with tracing switched off.
     pub fn new(program: Arc<Program>, sources: Arc<SourceMap>, hosts: Arc<HostRegistry>) -> Self {
+        let bindings = Arc::new(Bindings::of(&program));
         Runtime {
             program,
             sources,
@@ -59,6 +76,9 @@ impl Runtime {
             trace: Arc::new(NullSink),
             next_task_id: Arc::new(AtomicU64::new(1)),
             heap: Arc::new(Mutex::new(HeapStats::default())),
+            bindings,
+            #[cfg(debug_assertions)]
+            resolution: Arc::new(crate::bindings::ResolutionStats::default()),
         }
     }
 
@@ -75,6 +95,24 @@ impl Runtime {
 
     pub fn sources(&self) -> &SourceMap {
         &self.sources
+    }
+
+    /// What this run resolved its name references to before it started.
+    pub fn bindings(&self) -> &Bindings {
+        &self.bindings
+    }
+
+    /// The counters every task of this run adds to as it reads locals.
+    #[cfg(debug_assertions)]
+    pub fn resolution(&self) -> &crate::bindings::ResolutionStats {
+        &self.resolution
+    }
+
+    /// How many local reads this run has resolved by index, and how many it
+    /// searched for by name.
+    #[cfg(debug_assertions)]
+    pub fn resolution_counts(&self) -> crate::bindings::ResolutionCounts {
+        self.resolution.counts()
     }
 
     /// The host boundary, so a caller can read a run's counters after it

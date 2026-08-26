@@ -241,8 +241,17 @@ struct Parser<'a> {
     depth: u32,
 }
 
+/// Builds an expression with no id yet.
+///
+/// The parser does not number expressions: `number_unit` does, in one pass
+/// over the finished tree, so that the numbering is a property of the file
+/// rather than of the order the parser happened to build things in.
 fn expr(kind: ExprKind, span: Span) -> Expr {
-    Expr { kind, span }
+    Expr {
+        id: ExprId::UNSET,
+        kind,
+        span,
+    }
 }
 
 /// A place expression names storage: a variable or a field of a place.
