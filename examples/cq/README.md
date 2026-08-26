@@ -434,6 +434,67 @@ the receiver copy above was the first. Both were plausible from the code and
 both were wrong about how much they mattered, which is the argument for the
 mechanism benchmarks rather than for reading more carefully.
 
+## Pre-VM groundwork: a block scope is a mark
+
+[Issue #105](https://github.com/myuon/cove/issues/105)'s redesign runs the
+program on a dedicated VM ([#108](https://github.com/myuon/cove/issues/108))
+over a resolved executable IR
+([#107](https://github.com/myuon/cove/issues/107)). One change to the AST
+interpreter is worth making before any of that, because it is what the VM's
+frames want anyway.
+
+**A block scope used to be a vector of its own**, allocated on entering the
+block and dropped on leaving it. It is now a mark into one flat list of every
+binding the call has declared. The two are the same thing to a lookup —
+scanning scopes in reverse and then each scope's bindings in reverse visits
+exactly the order scanning one flat list in reverse does — and they are not the
+same thing to a call, which now enters and leaves a block without allocating.
+
+| | before | after | |
+| --- | ---: | ---: | ---: |
+| `cq revenue-summary`, 100,000 records | 90.8 s | 83.5 s | **1.09×** |
+| `method` | 3,098.83 ms | 2,835.76 ms | 1.09× |
+| `call` | 1,748.91 ms | 1,597.13 ms | 1.10× |
+| `pure` | 17.30 ms | 16.12 ms | 1.07× |
+
+The call-heavy benchmarks move most, which is the shape to expect: a call
+enters a block for every one of them.
+
+### The measurement that decided what *not* to ship
+
+The same work tried a second change: give every local reference a frame index,
+worked out before the run by a pass mirroring the interpreter's scoping, so a
+read indexes rather than searches. It was built, it was correct — 100% of
+`cq`'s local reads took the resolved path, with zero fallbacks, and a debug
+assertion checked the resolved place against the search over 8.3 million reads
+without one disagreement — and it was measured separately:
+
+| | flat frame | + resolved indices |
+| --- | ---: | ---: |
+| `cq revenue-summary`, 100,000 records | 83.5 s | 82.8 s |
+| `arith` | 450.73 ms | 465.27 ms |
+| `arrayget` | 1,463.72 ms | 1,462.77 ms |
+| `field` | 856.26 ms | 885.59 ms |
+| `method` | 2,835.76 ms | 2,880.19 ms |
+| `call` | 1,597.13 ms | 1,639.20 ms |
+| `chars` | 1,860.52 ms | 1,915.61 ms |
+
+**About 1% on the application, and 2–3% *slower* on most of the mechanism
+benchmarks.** A resolved read costs two bounds-checked loads to find the index
+and a name comparison to confirm it; the search it replaces walks a list that,
+in these programs, is a handful of entries long. Replacing a short scan with an
+indirection and a comparison is not obviously a saving, and here it is not one.
+
+So it is not shipped. It becomes a saving when the index is *free* — part of
+the instruction rather than looked up beside it — and when nothing needs
+confirming because the frame is a contiguous stack whose layout is the thing
+being indexed. That is the VM, not this interpreter, and the AST interpreter's
+job is to stay a readable oracle the VM can be checked against rather than to
+become a second thing to keep fast.
+
+That is the third hypothesis on this page that a measurement decided, after the
+receiver copy and name lookup itself. All three were plausible from the code.
+
 ## Findings
 
 ### Per-character work costs about 1.4 µs
