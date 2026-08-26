@@ -68,8 +68,9 @@
 //!
 //! Two variants are not types a program can write:
 //!
-//! - [`Ty::Unknown`] is *the checker does not know*. It compares equal to
-//!   every type, and every operation on it produces `Unknown` again, so one
+//! - [`Ty::Unknown`] is *the checker does not know*, and carries an
+//!   [`Unknown`] saying why. It compares equal to every type whatever the
+//!   reason, and every operation on it produces an unknown again, so one
 //!   unknown never becomes a cascade of wrong errors.
 //! - [`Ty::Never`] is the type of an expression that does not produce a
 //!   value, such as `return`. It also compares equal to every type, because
@@ -78,15 +79,17 @@
 //! # The four kinds of unknown
 //!
 //! `Unknown` is one variant doing four jobs, and telling them apart is what
-//! makes a successful `cove check` worth reading. Every place this pass
-//! produces one names its kind by which constructor it calls, and the kind
-//! decides what the reader is told:
+//! makes a successful `cove check` worth reading. The kind is *carried by the
+//! type*, not implied by which constructor built it, so a form can ask what
+//! the silence around it is made of — and so one kind can be asserted never
+//! to escape:
 //!
 //! | kind | constructor | `cove check` |
 //! |------|-------------|--------------|
-//! | recovery | `Ty::recovery` | silent |
-//! | dynamic boundary | `Ty::dynamic_boundary` | warning |
-//! | unconstrained API | `Ty::unconstrained` | note |
+//! | [`Unknown::Recovery`] | `Ty::recovery` | silent |
+//! | [`Unknown::DynamicBoundary`] | `Ty::dynamic_boundary` | silent here; see below |
+//! | [`Unknown::Unconstrained`] | `Ty::unconstrained` | note, warning, or silent |
+//! | [`Unknown::Placeholder`] | `Ty::placeholder` | must not escape |
 //! | language gap | *none* | warning or error |
 //!
 //! **Recovery** is an unknown the checker owes no further word about,
@@ -94,7 +97,10 @@
 //! the constructor, or upstream where the unknown being propagated came
 //! from. Every "the receiver is already unknown, so abstain" branch is one
 //! of these, and none of them adds a diagnostic. This is the job that keeps
-//! one mistake from printing as ten.
+//! one mistake from printing as ten. Its reach goes one step further than
+//! the branch that builds it: the arguments of a rejected call are walked
+//! against a recovery expectation, so an empty array or an unannotated
+//! lambda parameter written inside one is not reported as a second mistake.
 //!
 //! **A dynamic boundary** is a host this build ships no schema for. ADR
 //! 0001's Host API schema is [`cove_schema`], which this crate reads:
@@ -102,20 +108,48 @@
 //! a *shipped* host module is checked against the same description the
 //! boundary dispatches it through. What stays unknown is a module the
 //! toolchain does not ship — an embedding registers its host modules at run
-//! time and names them in no table a compiler could read. Such a call
-//! ([`UNCHECKED_HOST_CALL`]) and such a type ([`HOST_TYPE`]) both warn,
-//! because the silence is a fact about this *build* and not about the
-//! language; `host_schema` is the one place an embedder-supplied schema
-//! would have to reach to turn them all back into ordinary checks.
+//! time and names them in no table a compiler could read.
 //!
-//! **An unconstrained API** is a shipped schema saying, in
+//! Nothing is reported per call into one. The fact is about the `use` that
+//! named the module and about the build that could not see it: no edit to
+//! `sensors.read` can fix it, the remedy is one thing to say however many
+//! calls a program makes, and it is the same remedy for a call, a member
+//! read, and a value passed in. Issue #74 puts that warning at the `use`,
+//! where it belongs. What this pass owes such a call is the abstention
+//! itself, handed to the arguments as their expected type, so that a
+//! callback registered with an unschema'd host — the shape an embedding is
+//! written in — is not asked to state a type nothing on this side could have
+//! stated. A *type* named through such a module still warns
+//! ([`HOST_TYPE`]), as it did before this classification existed.
+//!
+//! `Checker::host_schema` is the one place an embedder-supplied schema has
+//! to reach to turn all of that back into ordinary checking.
+//!
+//! **An unconstrained** unknown is a type nothing that has been read states.
+//! It has two sources. One is a shipped schema saying, in
 //! `cove_schema::HostType::Any`, that there is nothing here that depends on
-//! a type. In a parameter that costs nothing: the operation accepts every
-//! value, so no check was skipped. In a result it costs the rest of the
-//! program — from the call onwards a value no schema described is being
-//! passed around — so the call is noted ([`UNCONSTRAINED_RESULT`]). A note
-//! rather than a warning, because the schema chose this and no strictness
-//! setting can make the checker prove what nobody stated.
+//! a type: in a parameter that costs nothing, because the operation accepts
+//! every value, and in a result or a field it costs the rest of the program,
+//! so those are noted ([`UNCONSTRAINED_RESULT`], [`UNCONSTRAINED_FIELD`]). A
+//! note rather than a warning, because the schema chose this and no
+//! strictness setting can make the checker prove what nobody stated. The
+//! other is a type parameter no argument, annotation, or expected type
+//! settles. Where the program could have said and did not — an empty array,
+//! a bare `None`, a struct's parameter no field mentions — that warns
+//! ([`UNCONSTRAINED`]); where nothing was asked of it at all, `Ok(1)` in a
+//! place expecting no `Result`, it is carried silently, which is the second
+//! hole named under *What a clean check guarantees* below.
+//!
+//! **A placeholder** is not a fourth kind of not-knowing; it is the marker
+//! for a position no reachable program observes. Some are internal
+//! positions the surrounding form settles before reading them, and some are
+//! branches no reachable program takes at all. `Checker::expr` and
+//! `Checker::declare` assert in debug builds that one never reaches a type
+//! a program can observe, so the claim each site makes about itself is one
+//! the test suite holds it to rather than a comment. Two sites used to break
+//! it — a struct's type parameter that no field mentions, and
+//! `Result.mapError`'s expected callback result — and each let a program
+//! check clean and then be wrong at run time.
 //!
 //! **A language gap** is information the checker should have been given and
 //! was not. These are the ones that used to pass silently, and none of them
@@ -127,44 +161,67 @@
 //!   reaches a module through `use` like everything else, so the assumption
 //!   named no real way for the name to arrive and only let an unknown
 //!   through to validate whatever was done with it;
-//! - a type, a module, or a host operation written where a value belongs is
-//!   an error ([`NOT_A_VALUE`]). `Vector` in `Vector.of(1, 2)` is understood
-//!   as part of the call; a bare `Vector`, `console`, or `Counter` is not a
-//!   form with a type in this system, and never was;
+//! - a type or a module written where a value belongs is an error
+//!   ([`NOT_A_VALUE`]). `Vector` in `Vector.of(1, 2)` is understood as part
+//!   of the call; a bare `Vector`, `console`, or `Counter` is not a form
+//!   with a type in this system, and never was. A host *operation* is not
+//!   one of these: it is a value, and reading the schema gives it the
+//!   function type it declares, so `let log = console.println` keeps working
+//!   and a call through the value is checked. The one exception is a
+//!   variadic operation, which no `fn` type in this language can describe —
+//!   the language's own gap, said out loud as a note
+//!   ([`VARIADIC_AS_VALUE`]) rather than hidden or refused;
 //! - an early `return` in a function value nothing expects is an error
 //!   ([`LAMBDA_RETURN`]). Such a lambda takes its result from its body's
 //!   value, so a `return` produces one where the body's value is not, and
-//!   nothing written anywhere says what the two have to agree on;
-//! - an unannotated lambda parameter, an empty array literal, and a bare
-//!   `None`, each in a place that expects nothing in particular, warn
-//!   ([`UNCONSTRAINED`]). These are warnings rather than errors because the
-//!   value is still usable and the operations that do not depend on the
-//!   missing type are still checked — and because writing the type is always
-//!   available, which is what each `help` says.
+//!   nothing written anywhere says what the two have to agree on. "Nothing
+//!   expects it" is asked of the expected *result* type: an expectation this
+//!   pass abstained about answers for it, and one whose own result is a
+//!   placeholder does not;
+//! - an unannotated lambda parameter, an empty array literal, a bare `None`,
+//!   and a struct's type parameter no field mentions, each in a place that
+//!   expects nothing in particular, warn ([`UNCONSTRAINED`]). These are
+//!   warnings rather than errors because the value is still usable and the
+//!   operations that do not depend on the missing type are still checked —
+//!   and because writing the type is always available, which is what each
+//!   `help` says. "Expects nothing in particular" excludes a place this pass
+//!   already abstained about, and a sibling or a branch that settles the
+//!   type counts as saying it: `[[], [1]]` and
+//!   `if c { None } else { Some(1) }` are proved, and are silent.
 //!
-//! Two things are deliberately *not* unknowns. The value a `scope` binds is
+//! One thing is deliberately *not* an unknown: the value a `scope` binds is
 //! [`Ty::Scope`], a type the language gives no name to but this pass knows
-//! exactly; and a few internal positions — a type argument a call is about
-//! to unify, a return type a body is about to supply — hold
-//! `Ty::placeholder`, which is settled before anything reads it.
+//! exactly.
 //!
 //! # What a clean check guarantees
 //!
-//! `cove check` reporting nothing at all means every type in the package was
-//! proved: every struct field, declared parameter, call to a declared or
-//! imported function, and Host API call was checked against a written or
-//! schema-declared type, and no value reached an operation without one.
+//! `cove check` reporting nothing at all means every type the package wrote
+//! down was checked: every struct field, declared parameter, call to a
+//! declared or imported function, and call into a Host API module this build
+//! ships a schema for was checked against a written or schema-declared type.
 //!
-//! A check whose only output is *notes* means the same, except at the calls
-//! the notes name: there a shipped schema declared `Any`, and what the
-//! program does with the value from that point on is the boundary's to
-//! check.
+//! Two silences are not covered by that, and both are named here rather than
+//! left to be discovered:
 //!
-//! A check with *warnings* means one of two things happened, and the warning
-//! says which: the package reaches a host this build ships no schema for, or
-//! it left the checker something to infer that nothing written settles.
-//! `cove check --deny-warnings` is exactly the request that neither has
-//! happened.
+//! - a host module this build ships no schema for. Nothing about a call into
+//!   one is proved, and nothing is said about it here either, because the
+//!   fact belongs to the `use` that names the module — issue #74 is what
+//!   puts a warning there. Until that lands, a package reaching such a host
+//!   has one unproved boundary per `use` and a clean check does not say so;
+//! - a type parameter of a builtin constructor that nothing settles. `Ok(1)`
+//!   in a place expecting no `Result` is a `Result<Int, _>`, and the `_` is
+//!   carried rather than reported. Closing this means deciding what `Ok(1)`
+//!   alone should mean, which is a language question and not this pass's to
+//!   answer.
+//!
+//! A check whose only output is *notes* means the same, except at the places
+//! the notes name: a shipped schema declared `Any` there, or a variadic host
+//! operation was used as a value, and what the program does with the value
+//! from that point on is the boundary's to check.
+//!
+//! A check with *warnings* means the package left the checker something to
+//! infer that nothing written settles. `cove check --deny-warnings` is
+//! exactly the request that it did not.
 //!
 //! What none of these guarantee is anything the runtime keeps for itself:
 //! mutability, argument order, task safety of a host resource, and every
@@ -300,19 +357,23 @@ pub const TASK_SAFETY: &str = "cove::type::task_safety";
 /// A declaration's parameter has no written type. Unlike a lambda's, it has
 /// no expected type at a call site to infer from.
 pub const MISSING_PARAMETER_TYPE: &str = "cove::type::missing_parameter_type";
-/// A call reaches a host module this build ships no schema for, so only the
-/// boundary can check it (warning).
-pub const UNCHECKED_HOST_CALL: &str = "cove::type::unchecked_host_call";
 /// A host operation whose schema declares its result `Any`, so the checker
 /// can prove nothing about the value it produced (note).
 pub const UNCONSTRAINED_RESULT: &str = "cove::type::unconstrained_result";
-/// A type, a module, or a host operation is written where a value belongs.
+/// A host type's field whose schema declares it `Any`, so the checker can
+/// prove nothing about the value read from it (note).
+pub const UNCONSTRAINED_FIELD: &str = "cove::type::unconstrained_field";
+/// A variadic host operation used as a value, which no function type in this
+/// language can describe (note).
+pub const VARIADIC_AS_VALUE: &str = "cove::type::variadic_as_value";
+/// A type or a module is written where a value belongs.
 pub const NOT_A_VALUE: &str = "cove::type::not_a_value";
 /// A function value uses `return`, with nothing saying what it produces.
 pub const LAMBDA_RETURN: &str = "cove::type::lambda_return";
 /// Nothing written anywhere says what a type is: an unannotated lambda
-/// parameter, an empty array literal, or a bare `None`, in a place that
-/// expects nothing in particular (warning).
+/// parameter, an empty array literal, a bare `None`, or a struct's type
+/// parameter no field mentions, in a place that expects nothing in
+/// particular (warning).
 pub const UNCONSTRAINED: &str = "cove::type::unconstrained";
 
 /// The Language Card sentence a task-safety diagnostic quotes.
@@ -571,11 +632,60 @@ fn qualify(ty: &Ty, module: &str) -> Ty {
 
 // ------------------------------------------------------------------- types
 
+/// Why the checker does not know a type.
+///
+/// This is the classification the module documentation describes, carried by
+/// the type rather than implied by which constructor built it. Every kind
+/// compares equal to every type — telling them apart decides what a reader is
+/// told, never what type-checks — so the only thing this changes about the
+/// checking rules is that a form can ask whether the unknown standing in for
+/// its context has already been accounted for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Unknown {
+    /// An error was already reported about this place, or about the value
+    /// this one was derived from. Silent.
+    Recovery,
+    /// A host module this build ships no schema for. The remedy is at the
+    /// `use` that names the module, not here.
+    DynamicBoundary,
+    /// Nothing that has been read states this type: a shipped schema's
+    /// `HostType::Any`, or a type parameter no argument, annotation, or
+    /// expected type settles.
+    Unconstrained,
+    /// A position no reachable program observes.
+    ///
+    /// This is not a classification of a program's type. It marks the
+    /// internal positions the surrounding form settles before anything reads
+    /// them and the ones no reachable program produces at all, and
+    /// `Checker::expr` and `Checker::declare` assert in debug builds that
+    /// one never reaches a type a program can observe. If one ever does, the
+    /// assertion names the site rather than leaving the unknown to validate
+    /// whatever came after it.
+    Placeholder,
+}
+
+impl Unknown {
+    /// Whether the checker has already said whatever it has to say about the
+    /// place this unknown stands for.
+    ///
+    /// Every kind but [`Unknown::Placeholder`] has: a recovery unknown has a
+    /// diagnostic above it, a dynamic boundary belongs to a `use` naming a
+    /// module this build cannot see, and an unconstrained one is either a
+    /// schema's own `Any` or a parameter reported where it was left open. So
+    /// a form given to a place typed by one of those adds nothing by
+    /// complaining that the place said nothing — that is the whole content of
+    /// the diagnostic already given. A placeholder has said nothing anywhere,
+    /// which is why it must never reach a place a form can be given to.
+    fn is_accounted_for(self) -> bool {
+        !matches!(self, Unknown::Placeholder)
+    }
+}
+
 /// A Cove type.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Ty {
     /// The checker could not determine this type; see the module docs.
-    Unknown,
+    Unknown(Unknown),
     /// The type of an expression that never produces a value, such as
     /// `return`.
     Never,
@@ -658,51 +768,100 @@ impl Ty {
     /// recovery unknown therefore never carries a diagnostic of its own,
     /// which is what keeps one mistake from becoming a page of them.
     fn recovery() -> Ty {
-        Ty::Unknown
+        Ty::Unknown(Unknown::Recovery)
     }
 
     /// An unknown that belongs to a host this build ships no schema for.
     ///
     /// An embedding registers its host modules at run time and names them in
     /// no table a compiler could read, so a call into one, or a value of a
-    /// type from one, is checked at the boundary rather than here. Every one
-    /// of these is warned about where it enters a program, because the
-    /// checker's silence is a fact about this *build* rather than about the
-    /// language: see [`host_schema`] for where a schema an embedder supplies
-    /// would replace it.
+    /// type from one, is checked at the boundary rather than here. Nothing is
+    /// reported where one of these is produced: the silence is a fact about
+    /// this *build*, the remedy is to hand the module's schema to the
+    /// compiler, and the place to say so is the `use` that named the module
+    /// (issue #74). `Checker::host_schema` is where a schema an embedder
+    /// supplies would arrive and turn all of it back into ordinary checking.
     fn dynamic_boundary() -> Ty {
-        Ty::Unknown
+        Ty::Unknown(Unknown::DynamicBoundary)
     }
 
-    /// An unknown a shipped schema deliberately admitted: `HostType::Any`.
+    /// An unknown nothing that has been read states.
     ///
-    /// The schema is not missing a type; it is saying there is nothing here
-    /// that depends on one. Nothing is lost where `Any` is a *parameter* —
-    /// the operation accepts every value, so there was no check to skip —
-    /// and a *result* declared `Any` is noted at its call site, because from
-    /// there on the program is working with a value whose type nothing
-    /// stated.
+    /// It has two sources. One is a shipped schema's `HostType::Any`, which
+    /// is not a missing type but a statement that there is nothing here that
+    /// depends on one: nothing is lost where it is a *parameter*, because the
+    /// operation accepts every value, and a *result* or a *field* declared
+    /// `Any` is noted where it is read, because from there on the program is
+    /// working with a value whose type nothing stated.
+    ///
+    /// The other is a type parameter no argument, annotation, or expected
+    /// type settles. Where the program could have said and did not — an empty
+    /// array, a bare `None`, a struct parameter no field mentions — that
+    /// warns where it is written; where nothing was asked of it at all, it is
+    /// carried, which the module documentation names as one of the two things
+    /// a clean check does not cover.
     fn unconstrained() -> Ty {
-        Ty::Unknown
+        Ty::Unknown(Unknown::Unconstrained)
     }
 
     /// An unknown no program type is read from.
     ///
-    /// This is not a fifth classification. It marks the few positions the
-    /// surrounding form settles before anything looks at them — a type
-    /// argument a call is about to unify, a return type a body is about to
-    /// supply — and the few no reachable program produces at all. Each site
-    /// says which of the two it is; if one ever escaped into a type a
-    /// program can observe, it would be a language gap, and a language gap
-    /// is reported rather than produced.
+    /// This is not a fourth kind of not-knowing. It marks the few positions
+    /// the surrounding form settles before anything looks at them — a return
+    /// type a body is about to supply, a receiver only asked whether it is
+    /// there — and the few no reachable program produces at all. Each site
+    /// says which of the two it is, and `Checker::expr` and
+    /// `Checker::declare` hold it to that claim in debug builds: a
+    /// placeholder in the type of an expression or of a binding is a bug in
+    /// this pass, not a fact about the program.
     fn placeholder() -> Ty {
-        Ty::Unknown
+        Ty::Unknown(Unknown::Placeholder)
     }
 
     /// Whether this type carries no information, so a diagnostic about it
     /// would be a guess.
     fn is_wild(&self) -> bool {
-        matches!(self, Ty::Unknown | Ty::Never)
+        matches!(self, Ty::Unknown(_) | Ty::Never)
+    }
+
+    /// Whether a value given to a place of this type needs no diagnostic of
+    /// its own about the place saying nothing.
+    ///
+    /// See `Unknown::is_accounted_for`. `Never` is here for the same
+    /// reason: a place that never receives a value is one no diagnostic
+    /// describes.
+    fn is_accounted_for(&self) -> bool {
+        match self {
+            Ty::Unknown(kind) => kind.is_accounted_for(),
+            Ty::Never => true,
+            _ => false,
+        }
+    }
+
+    /// Whether an [`Unknown::Placeholder`] is anywhere inside this type.
+    ///
+    /// This is what turns the classification from a convention into
+    /// something the test suite holds: a placeholder stands for a position
+    /// nothing reads, so finding one in a type a program can observe means
+    /// the site that built it was wrong about itself.
+    fn holds_placeholder(&self) -> bool {
+        match self {
+            Ty::Unknown(kind) => matches!(kind, Unknown::Placeholder),
+            Ty::Array(inner)
+            | Ty::Vector(inner)
+            | Ty::Set(inner)
+            | Ty::Option(inner)
+            | Ty::Task(inner)
+            | Ty::Shared(inner) => inner.holds_placeholder(),
+            Ty::Map(k, v) | Ty::MapEntry(k, v) | Ty::Result(k, v) => {
+                k.holds_placeholder() || v.holds_placeholder()
+            }
+            Ty::Struct(_, args) | Ty::Enum(_, args) => {
+                args.iter().any(|arg| arg.holds_placeholder())
+            }
+            Ty::Fn(f) => f.params.iter().any(Ty::holds_placeholder) || f.ret.holds_placeholder(),
+            _ => false,
+        }
     }
 
     /// Nominal equality, with `Unknown` and `Never` equal to everything.
@@ -745,10 +904,45 @@ impl Ty {
     /// The more informative of two types that already [`Ty::matches`], used
     /// where two branches must agree: a known type wins over `Unknown`, and
     /// any type wins over `Never`.
+    ///
+    /// It reaches inside a shared shape as well, because that is where the
+    /// information usually is: `[[], [1]]` joins `Array<_>` with
+    /// `Array<Int>`, and answering `Array<_>` would leave the array's
+    /// elements unchecked for the rest of the program even though one of
+    /// them said exactly what they are.
     fn join(&self, other: &Ty) -> Ty {
         match (self, other) {
             (Ty::Never, other) | (other, Ty::Never) => other.clone(),
-            (Ty::Unknown, other) | (other, Ty::Unknown) => other.clone(),
+            (Ty::Unknown(_), other) | (other, Ty::Unknown(_)) => other.clone(),
+            (Ty::Array(a), Ty::Array(b)) => Ty::Array(Box::new(a.join(b))),
+            (Ty::Vector(a), Ty::Vector(b)) => Ty::Vector(Box::new(a.join(b))),
+            (Ty::Set(a), Ty::Set(b)) => Ty::Set(Box::new(a.join(b))),
+            (Ty::Option(a), Ty::Option(b)) => Ty::Option(Box::new(a.join(b))),
+            (Ty::Task(a), Ty::Task(b)) => Ty::Task(Box::new(a.join(b))),
+            (Ty::Shared(a), Ty::Shared(b)) => Ty::Shared(Box::new(a.join(b))),
+            (Ty::Map(ak, av), Ty::Map(bk, bv)) => {
+                Ty::Map(Box::new(ak.join(bk)), Box::new(av.join(bv)))
+            }
+            (Ty::MapEntry(ak, av), Ty::MapEntry(bk, bv)) => {
+                Ty::MapEntry(Box::new(ak.join(bk)), Box::new(av.join(bv)))
+            }
+            (Ty::Result(ak, av), Ty::Result(bk, bv)) => {
+                Ty::Result(Box::new(ak.join(bk)), Box::new(av.join(bv)))
+            }
+            (Ty::Struct(a, aargs), Ty::Struct(b, bargs))
+                if a == b && aargs.len() == bargs.len() =>
+            {
+                Ty::Struct(
+                    a.clone(),
+                    aargs.iter().zip(bargs).map(|(a, b)| a.join(b)).collect(),
+                )
+            }
+            (Ty::Enum(a, aargs), Ty::Enum(b, bargs)) if a == b && aargs.len() == bargs.len() => {
+                Ty::Enum(
+                    a.clone(),
+                    aargs.iter().zip(bargs).map(|(a, b)| a.join(b)).collect(),
+                )
+            }
             _ => self.clone(),
         }
     }
@@ -798,7 +992,7 @@ impl fmt::Display for Ty {
         match self {
             // An unknown type reads as `_` because that is how an
             // unconstrained position is written in Cove source.
-            Ty::Unknown => f.write_str("_"),
+            Ty::Unknown(_) => f.write_str("_"),
             Ty::Never => f.write_str("!"),
             Ty::Unit => f.write_str("()"),
             Ty::Bool => f.write_str("Bool"),
@@ -981,6 +1175,17 @@ impl Expected {
             }),
         }
     }
+
+    /// An expectation with nothing to point at, made of an unknown the
+    /// checker has already accounted for.
+    ///
+    /// It never disagrees with anything, so it has no mismatch to label. What
+    /// it does carry is the answer to *why* the place says nothing, which is
+    /// what `Checker::accounted_for` reads: the diagnostic explaining that
+    /// silence has already been given, or belongs somewhere else entirely.
+    fn abstained(ty: Ty) -> Expected {
+        Expected { ty, origin: None }
+    }
 }
 
 // ---------------------------------------------------------------- checking
@@ -1036,6 +1241,9 @@ struct Checker<'a> {
     /// whatever its body's value turns out to be — and which therefore has
     /// nothing for an early `return` to agree with.
     ret_stated: bool,
+    /// Whether the walk currently running is a `Checker::probe`, whose
+    /// diagnostics are discarded.
+    probing: bool,
 }
 
 impl<'a> Checker<'a> {
@@ -1064,7 +1272,67 @@ impl<'a> Checker<'a> {
             ret: Ty::placeholder(),
             ret_span: Span::new(cove_diag::FileId(0), 0, 0),
             ret_stated: false,
+            probing: false,
         }
+    }
+
+    /// The Host API schema of the module named `module`, or `None` when this
+    /// build has none for it.
+    ///
+    /// Every abstention this pass makes about a host goes through here, so
+    /// this is the one seam an embedder-supplied schema has to reach:
+    /// answering from a table the embedding registered, as well as from
+    /// `cove_schema`'s shipped one, turns each of those abstentions into an
+    /// ordinary check without any other part of this pass changing. Until
+    /// then the answer is the shipped table alone, and what it does not name
+    /// is a [`Ty::dynamic_boundary`].
+    ///
+    /// It is a method taking `&self` and answering with an *owned*
+    /// [`ModuleSchema`] rather than a free function answering with a
+    /// `&'static` one, and both halves of that are the seam. A table an
+    /// embedder registers is owned by the compilation, not by the binary, so
+    /// it has no `'static` borrow to hand back; and a set of them is
+    /// something the checker is given rather than something it looks up in a
+    /// global. `ModuleSchema` is [`Copy`] and everything inside it is
+    /// `'static`, so answering by value costs nothing and the schemas
+    /// reached *through* the answer — operations, types, resources — are
+    /// still `&'static`.
+    fn host_schema(&self, module: &str) -> Option<ModuleSchema> {
+        cove_schema::module(module).copied()
+    }
+
+    /// The schema of the host type `qualified` names, when it is one a host
+    /// hands over rather than one it keeps.
+    fn host_declared_type(&self, qualified: &str) -> Option<&'static TypeSchema> {
+        let (module, name) = qualified.split_once('.')?;
+        self.host_schema(module)?.declared_type(name)
+    }
+
+    /// The schema of the host resource `qualified` names.
+    fn host_resource(&self, qualified: &str) -> Option<&'static ResourceSchema> {
+        let (module, name) = qualified.split_once('.')?;
+        self.host_schema(module)?.resource(name)
+    }
+
+    /// Walks something to find out its type, reporting nothing.
+    ///
+    /// A form whose type a sibling settles has to be walked once to learn
+    /// that and once to be checked against it, and only the second walk
+    /// describes the program. Nothing else about a walk is observable —
+    /// diagnostics are appended to one vector that nothing reads until the
+    /// pass ends, and every scope a walk pushes it pops — so truncating that
+    /// vector is all undoing one takes.
+    ///
+    /// A probe never probes again. One level of it finds the same type a
+    /// nested one would, and disabling the nested ones is what keeps a walk
+    /// of nested literals from doubling per level.
+    fn probe<T>(&mut self, f: impl FnOnce(&mut Self) -> T) -> T {
+        let mark = self.diagnostics.len();
+        let outer = std::mem::replace(&mut self.probing, true);
+        let found = f(self);
+        self.probing = outer;
+        self.diagnostics.truncate(mark);
+        found
     }
 
     // ------------------------------------------------------------ imports
@@ -2085,13 +2353,27 @@ impl<'a> Checker<'a> {
         self.type_params = outer;
         self.expanding.pop();
         let resolved = (generics, ty);
-        self.aliases.insert(name.to_string(), resolved.clone());
+        // Expanding an alias can report — a bound written on its parameters
+        // is refused here — and the cache would then answer the second walk
+        // without reporting again. A probe's diagnostics are discarded, so
+        // caching from inside one would discard the diagnostic for good.
+        if !self.probing {
+            self.aliases.insert(name.to_string(), resolved.clone());
+        }
         resolved
     }
 
     // ------------------------------------------------------------ scopes
 
     fn declare(&mut self, name: &str, ty: Ty) {
+        // The other half of the placeholder invariant `Checker::expr`
+        // asserts: a binding's type is read by every later use of the name,
+        // so a placeholder reaching one is a site that was wrong about
+        // itself.
+        debug_assert!(
+            !ty.holds_placeholder(),
+            "a placeholder unknown escaped into the type of `{name}`: `{ty}`"
+        );
         if let Some(scope) = self.scopes.last_mut() {
             scope.insert(name.to_string(), Binding { ty });
         }
@@ -2143,9 +2425,12 @@ impl<'a> Checker<'a> {
                     None => {
                         let inferred = self.expr(value, None);
                         // A binding whose initializer never produces a value
-                        // has no type to infer; stop rather than guess.
+                        // has no type to infer; stop rather than guess. Every
+                        // use of the name is in code the initializer's
+                        // `return` or `break` made unreachable, so there is
+                        // nothing left to say about any of them.
                         if inferred == Ty::Never {
-                            Ty::placeholder()
+                            Ty::recovery()
                         } else {
                             inferred
                         }
@@ -2195,7 +2480,24 @@ impl<'a> Checker<'a> {
 
     /// Checks an expression, against `expected` when the surrounding form
     /// imposes one, and returns its type.
+    ///
+    /// An expression's type is the most observable thing this pass produces:
+    /// it is what the next form is checked against and what a binding holding
+    /// the value keeps. [`Unknown::Placeholder`] claims to reach neither, so
+    /// one arriving here means a construction site was wrong about itself,
+    /// and the assertion names it in the test suite rather than letting the
+    /// unknown validate whatever comes next.
     fn expr(&mut self, expr: &Expr, expected: Option<&Expected>) -> Ty {
+        let ty = self.expr_type(expr, expected);
+        debug_assert!(
+            !ty.holds_placeholder(),
+            "a placeholder unknown escaped into the type of an expression at {:?}: `{ty}`",
+            expr.span
+        );
+        ty
+    }
+
+    fn expr_type(&mut self, expr: &Expr, expected: Option<&Expected>) -> Ty {
         let span = expr.span;
         let ty = match &expr.kind {
             ExprKind::Int(_) => Ty::Int,
@@ -2328,6 +2630,35 @@ impl<'a> Checker<'a> {
         ty
     }
 
+    /// Whether the place a value is being given to has already been
+    /// accounted for, so a form that finds nothing there should stay quiet.
+    ///
+    /// The `UNCONSTRAINED` warnings all say the same thing — nothing written
+    /// settles this type — and that is only worth saying when the silence is
+    /// the program's. An expectation the checker itself could not state
+    /// carries its own explanation already: an argument of a call whose
+    /// callee was just rejected, a block whose type a schema declared `Any`,
+    /// a call into a host module this build has no schema for. Repeating the
+    /// gap underneath one of those turns one fact into two diagnostics, which
+    /// is what the recovery classification exists to prevent.
+    ///
+    /// See `Unknown::is_accounted_for` for which unknowns qualify.
+    fn accounted_for(expected: Option<&Expected>) -> bool {
+        expected.is_some_and(|e| e.ty.is_accounted_for())
+    }
+
+    /// The unknown standing for a place this pass abstained about, or a
+    /// recovery unknown when the place has a type but not a usable one.
+    ///
+    /// Both are silent; keeping the kind is what lets a later reader of the
+    /// type say which silence it came from.
+    fn abstention_of(expected: Option<&Expected>) -> Ty {
+        match expected.map(|e| &e.ty) {
+            Some(Ty::Unknown(kind)) if kind.is_accounted_for() => Ty::Unknown(*kind),
+            _ => Ty::recovery(),
+        }
+    }
+
     /// Reports a type that does not match what the surrounding form asked
     /// for, pointing at the expression and labelling what imposed it.
     fn expect(&mut self, found: &Ty, expected: &Expected, span: Span) {
@@ -2376,29 +2707,110 @@ impl<'a> Checker<'a> {
                 // `None` carries nothing, so it is the only value whose own
                 // type its own text cannot settle.
                 _ => {
-                    self.diagnostics.push(unconstrained(
-                        "nothing says what this `None` is an `Option` of".to_string(),
-                        format!("write the type on the place that holds it, as in `let value: Option<Int> = {name}`"),
-                        span,
-                    ));
-                    Ty::Option(Box::new(Ty::recovery()))
+                    if !Checker::accounted_for(expected) {
+                        self.diagnostics.push(unconstrained(
+                            "nothing says what this `None` is an `Option` of".to_string(),
+                            format!("write the type on the place that holds it, as in `let value: Option<Int> = {name}`"),
+                            span,
+                        ));
+                    }
+                    Ty::Option(Box::new(Ty::unconstrained()))
                 }
             };
         }
         if let Some(sig) = self.functions.get(&self.key(name)) {
             return sig.as_value();
         }
-        // A type, a module, or a host operation used as a value has no
-        // type in this system; the forms that give it meaning (`Vector.of`,
-        // `MapEntry(key:, value:)`, `console.println`, `booking.create`) are
-        // understood at the call itself. Writing one bare is a mistake with
-        // a name, so it is named rather than turned into an unknown that
-        // would let whatever was done with it check.
+        // A host operation is a value. The interpreter has always bound one
+        // and called it later — `Value::HostFn` is exactly that — and the
+        // schema says what it takes and what it answers, so this is a place
+        // where reading the schema turns something that used to be unknown
+        // into an ordinary function type rather than into a refusal.
+        if let Some(module) = self.module.host_items.get(name).cloned() {
+            return self.host_operation_value(&module, name, span);
+        }
+        // A type or a module used as a value has no type in this system; the
+        // forms that give it meaning (`Vector.of`, `MapEntry(key:, value:)`,
+        // `Booking(id: 1)`, `lib.create(...)`) are understood at the call
+        // itself. Writing one bare is a mistake with a name, so it is named
+        // rather than turned into an unknown that would let whatever was
+        // done with it check.
         if let Some(what) = self.namespace(name) {
             self.diagnostics.push(not_a_value(name, what, span));
             return Ty::recovery();
         }
         self.unresolved_name(name, span)
+    }
+
+    /// `console.println` written where a value belongs, or a bare `println`
+    /// that `use console.println` brought into scope.
+    ///
+    /// A host module's members are its operations and its types. An operation
+    /// is a value — the interpreter binds one as `Value::HostFn` and calls it
+    /// later — so it is given the function type its schema declares, which
+    /// checks a call made through the value exactly as a direct call is
+    /// checked. A type is not a value, for the same reason a bare `Vector` is
+    /// not.
+    fn host_operation_value(&mut self, module: &str, name: &str, span: Span) -> Ty {
+        let shown = format!("{module}.{name}");
+        let Some(schema) = self.host_schema(module) else {
+            // No schema to read: what the host exposes under this name is
+            // between it and the boundary, and the `use` that named the
+            // module is where that is answered (#74).
+            return Ty::dynamic_boundary();
+        };
+        let Some(operation) = schema.operation(name) else {
+            if schema.declared_type(name).is_some() || schema.resource(name).is_some() {
+                self.diagnostics
+                    .push(not_a_value(&shown, Namespace::HostType, span));
+                return Ty::recovery();
+            }
+            self.diagnostics.push(
+                Diagnostic::error(
+                    UNKNOWN_HOST_OPERATION,
+                    format!("host module `{module}` has no operation `{name}`"),
+                )
+                .at(span)
+                .rule(HOST_SCHEMA_RULE)
+                .help(format!(
+                    "`{module}` exposes {}",
+                    list(&operation_names(schema.operations))
+                )),
+            );
+            return Ty::recovery();
+        };
+        if operation.variadic {
+            // A variadic operation has no function type in this language, so
+            // the value cannot be given one. Cove has no variadic `fn` type
+            // to write, which makes this the language's own gap rather than
+            // the program's: the call through the value still runs, and the
+            // boundary still counts the arguments. Said out loud as a note,
+            // for the same reason a schema's `Any` is one.
+            self.diagnostics.push(
+                Diagnostic::note(
+                    VARIADIC_AS_VALUE,
+                    format!(
+                        "`{shown}` is variadic, so this value has no function type here"
+                    ),
+                )
+                .at(span)
+                .rule("A function type in Cove names a fixed list of parameters; a Host API operation may declare a variadic one, which no `fn` type can be written for.")
+                .help(format!(
+                    "calling `{shown}` directly is checked against its schema; a call made through this value is checked by the boundary and by nothing here, so write `fn(value: {}) {{ {shown}(value) }}` to have one that is",
+                    operation
+                        .params
+                        .first()
+                        .map(host_ty)
+                        .unwrap_or(Ty::Unit)
+                )),
+            );
+            return Ty::unconstrained();
+        }
+        Ty::func(
+            false,
+            operation.params.iter().map(host_ty).collect(),
+            host_ty(&operation.result),
+        )
     }
 
     /// The type of a name nothing in scope explains.
@@ -2437,33 +2849,65 @@ impl<'a> Checker<'a> {
     /// What `name` names, when it names something values are reached
     /// *through* rather than something that is one.
     ///
-    /// The order follows [`Checker::ident`]'s: a local binding and a
+    /// The order follows `Checker::ident`'s: a local binding and a
     /// declared function are values and have already answered by the time
     /// this is asked.
-    fn namespace(&self, name: &str) -> Option<&'static str> {
-        if self.module.structs.contains_key(name) || self.module.enums.contains_key(name) {
-            Some("a type")
+    fn namespace(&self, name: &str) -> Option<Namespace> {
+        if self.module.structs.contains_key(name) {
+            Some(Namespace::Struct)
+        } else if self.module.enums.contains_key(name) {
+            Some(Namespace::Enum)
         } else if self.is_imported(name) {
-            Some("an imported type")
+            Some(self.declared_shape(&self.key(name)))
         } else if cove_schema::is_builtin_type(name) || name == MAP_ENTRY.name {
-            Some("a builtin type")
+            Some(Namespace::BuiltinType)
         } else if self.module.host_uses.contains(name) {
-            Some("a host module")
-        } else if self.module.host_items.contains_key(name) {
-            Some("a host operation")
+            Some(Namespace::HostModule)
         } else if self.module.module_imports.contains_key(name) {
-            Some("a module")
+            Some(Namespace::Module)
         } else {
             None
         }
     }
 
+    /// Whether the declaration `key` names is a struct, an enum, or something
+    /// whose shape decides nothing about how a value of it is written.
+    ///
+    /// A trait and a type alias reach the last of these: neither is
+    /// constructed and neither has cases, so the correction can only point at
+    /// the associated functions.
+    fn declared_shape(&self, key: &str) -> Namespace {
+        if self.structs.contains_key(key) {
+            Namespace::Struct
+        } else if self.enums.contains_key(key) {
+            Namespace::Enum
+        } else {
+            Namespace::Type
+        }
+    }
+
     fn array_literal(&mut self, items: &[Expr], span: Span, expected: Option<&Expected>) -> Ty {
-        let element_hint = match expected.map(|e| &e.ty) {
+        let mut element_hint = match expected.map(|e| &e.ty) {
             Some(Ty::Array(inner)) => Some((**inner).clone()),
             _ => None,
         };
-        if items.is_empty() && element_hint.is_none() {
+        // With no expected element type a sibling may still settle one, and
+        // which sibling is not known until every one has been walked:
+        // `[[], [1]]` is an `Array<Array<Int>>` and nothing in it was left
+        // unproved. So the items are walked once with nothing reported, to
+        // find the element type out, and then again for real against it.
+        if element_hint.is_none() && items.len() > 1 && !self.probing {
+            let found = self.probe(|checker| {
+                items.iter().fold(Ty::recovery(), |element, item| {
+                    let ty = checker.expr(item, None);
+                    element.join(&ty)
+                })
+            });
+            if !found.is_wild() {
+                element_hint = Some(found);
+            }
+        }
+        if items.is_empty() && element_hint.is_none() && !Checker::accounted_for(expected) {
             // An empty literal has no element to read a type off and no
             // expected type to be given one, so `Array<_>` is as far as the
             // checker gets and every element-typed operation on it after
@@ -2475,7 +2919,12 @@ impl<'a> Checker<'a> {
                 span,
             ));
         }
-        let mut element = element_hint.clone().unwrap_or_else(Ty::recovery);
+        let mut element = element_hint
+            .clone()
+            .unwrap_or_else(|| match items.is_empty() {
+                true => Ty::unconstrained(),
+                false => Ty::recovery(),
+            });
         for item in items {
             let hint = element_hint
                 .clone()
@@ -2524,21 +2973,11 @@ impl<'a> Checker<'a> {
                 }
                 if self.module.host_uses.contains(head.as_str()) {
                     // A host module's members are its operations and its
-                    // types. Neither is a value, so a build that ships the
-                    // schema says so; one that does not cannot tell this
-                    // from a member only the host knows, and leaves it to
-                    // the boundary.
-                    if host_schema(head).is_some() {
-                        self.diagnostics.push(not_a_value(
-                            &format!("{head}.{}", name.node),
-                            "a host operation or type",
-                            span,
-                        ));
-                        return Ty::recovery();
-                    }
-                    self.diagnostics
-                        .push(unchecked_host_member(head, &name.node, span));
-                    return Ty::dynamic_boundary();
+                    // types. An operation is a value and the schema says
+                    // which one; a type is not, exactly as a bare `Vector`
+                    // is not. A build with no schema for the module can tell
+                    // neither, and leaves both to the boundary.
+                    return self.host_operation_value(head, &name.node, span);
                 }
                 if self.module.module_imports.contains_key(head.as_str()) {
                     let Some(key) = self.qualified_key(head, &name.node, span) else {
@@ -2550,9 +2989,10 @@ impl<'a> Checker<'a> {
                     return match self.functions.get(&key) {
                         Some(sig) => sig.as_value(),
                         None => {
+                            let shape = self.declared_shape(&key);
                             self.diagnostics.push(not_a_value(
                                 &format!("{head}.{}", name.node),
-                                "a type",
+                                shape,
                                 span,
                             ));
                             Ty::recovery()
@@ -2567,7 +3007,7 @@ impl<'a> Checker<'a> {
 
     fn field_of(&mut self, base_ty: &Ty, name: &Ident, span: Span) -> Ty {
         match base_ty {
-            Ty::Unknown => Ty::recovery(),
+            Ty::Unknown(_) => Ty::recovery(),
             Ty::Struct(struct_name, args) => {
                 // A `Ty::Struct` is only ever built from a key this table
                 // answers, so there is no reachable program without one.
@@ -2946,11 +3386,11 @@ impl<'a> Checker<'a> {
     fn try_expr(&mut self, inner: &Expr, span: Span) -> Ty {
         let ty = self.expr(inner, None);
         match &ty {
-            Ty::Unknown | Ty::Never => Ty::recovery(),
+            Ty::Unknown(_) | Ty::Never => Ty::recovery(),
             Ty::Result(ok, error) => {
                 let (ok, error) = ((**ok).clone(), (**error).clone());
                 match self.ret.clone() {
-                    Ty::Unknown => {}
+                    Ty::Unknown(_) => {}
                     Ty::Result(_, ret_error) if error.matches(&ret_error) => {}
                     Ty::Result(_, ret_error) => self.diagnostics.push(
                         Diagnostic::error(
@@ -2982,7 +3422,7 @@ impl<'a> Checker<'a> {
             Ty::Option(inner_ty) => {
                 let inner_ty = (**inner_ty).clone();
                 match self.ret.clone() {
-                    Ty::Unknown | Ty::Option(_) => {}
+                    Ty::Unknown(_) | Ty::Option(_) => {}
                     other => self.diagnostics.push(
                         Diagnostic::error(
                             TRY_RETURN,
@@ -3028,7 +3468,7 @@ impl<'a> Checker<'a> {
     fn await_expr(&mut self, inner: &Expr, span: Span) -> Ty {
         let ty = self.expr(inner, None);
         match &ty {
-            Ty::Unknown | Ty::Never => Ty::recovery(),
+            Ty::Unknown(_) | Ty::Never => Ty::recovery(),
             Ty::Task(inner_ty) => (**inner_ty).clone(),
             other => {
                 self.diagnostics.push(
@@ -3082,8 +3522,32 @@ impl<'a> Checker<'a> {
             }
             return Ty::Unit;
         };
-        let then_ty = self.block(then_branch, expected);
-        let else_ty = self.expr(else_branch, expected);
+        // With no expectation the branches are only answerable to each other,
+        // and either of them may be the one that says what the value is:
+        // `if c { None } else { Some(1) }` is an `Option<Int>` and nothing in
+        // it was left unproved. Which branch says so is not known until both
+        // have been walked, so with nothing expected they are walked once
+        // with nothing reported and then again against what that found.
+        let settled = match expected {
+            Some(_) => None,
+            None if self.probing => None,
+            None => self
+                .probe(|checker| {
+                    let then_ty = checker.block(then_branch, None);
+                    let else_ty = checker.expr(else_branch, None);
+                    then_ty
+                        .matches(&else_ty)
+                        .then(|| then_ty.join(&else_ty))
+                        .filter(|ty| !ty.is_wild())
+                })
+                .map(|ty| {
+                    let label = format!("both branches produce `{ty}`");
+                    Expected::new(ty, span, label)
+                }),
+        };
+        let hint = expected.or(settled.as_ref());
+        let then_ty = self.block(then_branch, hint);
+        let else_ty = self.expr(else_branch, hint);
         // With an expectation, both branches were already checked against it
         // and a disagreement was reported there; without one, the branches
         // are only answerable to each other.
@@ -3180,7 +3644,7 @@ impl<'a> Checker<'a> {
     fn variant_pattern(&mut self, span: Span, path: &[Ident], payload: &[Pattern], scrutinee: &Ty) {
         let case = path.last().expect("a variant path is never empty");
         let payload_types: Option<Vec<Ty>> = match scrutinee {
-            Ty::Unknown | Ty::Never => None,
+            Ty::Unknown(_) | Ty::Never => None,
             // The language's own enums declare their cases in
             // `cove_schema::builtins`, and a case's payload is written in the
             // parameters the scrutinee binds: `Some` carries a `T`, so
@@ -3217,7 +3681,7 @@ impl<'a> Checker<'a> {
             // A host module's enum has cases and nothing inside them: the
             // schema writes `cases: &["Get", "Post"]` and gives them no
             // payload to bind.
-            Ty::Host(declared) => match host_declared_type(declared) {
+            Ty::Host(declared) => match self.host_declared_type(declared) {
                 Some(schema) if schema.cases.contains(&case.node.as_str()) => Some(Vec::new()),
                 Some(schema) if schema.is_enum() => {
                     let known: Vec<String> =
@@ -3327,7 +3791,7 @@ impl<'a> Checker<'a> {
     fn for_expr(&mut self, binding: &Ident, iterable: &Expr, body: &Block) -> Ty {
         let ty = self.expr(iterable, None);
         let element = match &ty {
-            Ty::Unknown | Ty::Never => Ty::recovery(),
+            Ty::Unknown(_) | Ty::Never => Ty::recovery(),
             Ty::Array(inner) | Ty::Vector(inner) | Ty::Set(inner) => (**inner).clone(),
             Ty::Range => Ty::Int,
             // A `Map` iterates in ascending key order, binding each pair as
@@ -3378,6 +3842,26 @@ impl<'a> Checker<'a> {
         // made. No expected type at all is the language gap, and it is the
         // only case this pass has to name.
         let stated = expected.is_some();
+        // What the place holding this value says it *produces*, which is a
+        // narrower question than what it says about the value.
+        let stated_ret: Option<Ty> = match (hint.as_ref(), expected) {
+            // A written or schema-declared result type, or one this pass
+            // abstained about, which is an answer as well.
+            (Some(func), _) if !func.ret.holds_placeholder() => Some(func.ret.clone()),
+            // An expected function type whose own result this pass left
+            // open: `Result.mapError`'s callback produces whatever its body
+            // produces, and the expectation states its parameters only. So
+            // nothing anywhere says what an early `return` in it has to
+            // agree with, which is the gap `LAMBDA_RETURN` names.
+            (Some(_), _) => None,
+            // Not a function type at all. An expectation this pass abstained
+            // about answers for the whole value, its result included; any
+            // other one is a mismatch reported where the value is given, and
+            // saying a second time that the result is unstated would be the
+            // same mistake twice.
+            (None, Some(_)) => Some(Checker::abstention_of(expected)),
+            (None, None) => None,
+        };
         if let Some(func) = &hint {
             if func.params.len() != params.len() {
                 self.diagnostics.push(
@@ -3409,7 +3893,7 @@ impl<'a> Checker<'a> {
                 // parameter.
                 None => match hint.as_ref().and_then(|f| f.params.get(index)) {
                     Some(ty) => ty.clone(),
-                    None if stated => Ty::recovery(),
+                    None if stated => Checker::abstention_of(expected),
                     None => {
                         self.diagnostics.push(unconstrained(
                             format!("nothing says what `{}` is", param.name.node),
@@ -3429,19 +3913,22 @@ impl<'a> Checker<'a> {
 
         // The expected type decides the result only when it has one to give;
         // otherwise the body does.
-        let declared_ret = hint
-            .as_ref()
-            .map(|f| f.ret.clone())
-            .filter(|ty| !ty.is_wild());
+        let declared_ret = stated_ret.clone().filter(|ty| !ty.is_wild());
         let outer_ret = std::mem::replace(
             &mut self.ret,
-            declared_ret.clone().unwrap_or_else(Ty::placeholder),
+            stated_ret.clone().unwrap_or_else(Ty::placeholder),
         );
         let outer_span = std::mem::replace(&mut self.ret_span, span);
-        let outer_stated = std::mem::replace(&mut self.ret_stated, stated);
-        let expected_body = declared_ret.clone().map(|ty| {
-            let label = format!("this function value produces `{ty}`");
-            Expected::new(ty, span, label)
+        let outer_stated = std::mem::replace(&mut self.ret_stated, stated_ret.is_some());
+        let expected_body = stated_ret.clone().map(|ty| match ty.is_wild() {
+            // An abstention passed on rather than dropped: a body given to a
+            // place this pass said nothing about is not asked to state a type
+            // nothing outside it stated either.
+            true => Expected::abstained(ty),
+            false => {
+                let label = format!("this function value produces `{ty}`");
+                Expected::new(ty, span, label)
+            }
         });
         let body_ty = self.block(body, expected_body.as_ref());
         self.ret = outer_ret;
@@ -3473,7 +3960,9 @@ impl<'a> Checker<'a> {
             ExprKind::Field { base, name } => {
                 if let ExprKind::Ident(head) = &base.kind {
                     if self.lookup(head).is_none() {
-                        if let Some(ty) = self.call_qualified(head, name, args, trailing, span) {
+                        if let Some(ty) =
+                            self.call_qualified(head, name, args, trailing, span, expected)
+                        {
                             return ty;
                         }
                     }
@@ -3506,7 +3995,7 @@ impl<'a> Checker<'a> {
             return self.call_signature(&sig, &format!("`{name}`"), explicit, args, trailing, span);
         }
         if let Some(sig) = self.structs.get(&key).cloned() {
-            return self.struct_init(&key, &sig, args, trailing, span);
+            return self.struct_init(&key, &sig, args, trailing, span, expected);
         }
         if self.enums.contains_key(&key) {
             let cases = first_case_of(self.enums.get(&key));
@@ -3683,6 +4172,7 @@ impl<'a> Checker<'a> {
         args: &[Arg],
         trailing: Option<&Expr>,
         span: Span,
+        expected: Option<&Expected>,
     ) -> Option<Ty> {
         if self.module.host_uses.contains(head) {
             return Some(self.host_call(head, &name.node, args, trailing, span));
@@ -3706,7 +4196,7 @@ impl<'a> Checker<'a> {
                 ));
             }
             if let Some(sig) = self.structs.get(&key).cloned() {
-                return Some(self.struct_init(&key, &sig, args, trailing, span));
+                return Some(self.struct_init(&key, &sig, args, trailing, span, expected));
             }
             // The module exports the name, but as something no call reaches:
             // an enum, a trait, or an alias.
@@ -3798,25 +4288,22 @@ impl<'a> Checker<'a> {
         trailing: Option<&Expr>,
         span: Span,
     ) -> Ty {
-        let Some(schema) = host_schema(module) else {
+        let Some(schema) = self.host_schema(module) else {
             // A module this build ships no schema for. Its operations are
-            // between the host that registered it and the boundary, which
-            // is the one thing `cove check` cannot do for a program: say so
-            // rather than let the call read as checked.
-            self.diagnostics.push(
-                Diagnostic::warning(
-                    UNCHECKED_HOST_CALL,
-                    format!(
-                        "`{module}.{name}` reaches a host module this build has no schema for, so this call is unchecked"
-                    ),
-                )
-                .at(span)
-                .rule(HOST_SCHEMA_RULE)
-                .help(format!(
-                    "the arguments and the result of `{module}.{name}` are checked by the boundary at run time, which holds `{module}` to the schema it registered with; nothing is proved about them here"
-                )),
-            );
-            self.check_args_freely(args, trailing);
+            // between the host that registered it and the boundary, which is
+            // the one thing `cove check` cannot do for a program.
+            //
+            // Nothing is reported *here*. The fact is about the `use` that
+            // named the module and about the build that could not see it, not
+            // about this call: no edit to `module.name` can fix it, and the
+            // remedy — handing the module's `ModuleSchema` to the compiler —
+            // is one thing to say however many calls a program makes. Issue
+            // #74 puts that warning at the `use`, where the remedy is.
+            //
+            // What the arguments are given is the abstention itself, so a
+            // callback into such a host — the shape an embedding is written
+            // in — is not asked to state a type nothing on this side stated.
+            self.check_args_abstained(args, trailing, Ty::dynamic_boundary());
             return Ty::dynamic_boundary();
         };
         if let Some(operation) = schema.operation(name) {
@@ -3912,7 +4399,10 @@ impl<'a> Checker<'a> {
                 .help(declared_signature(shown, operation)),
             );
             self.check_args_freely(args, trailing);
-            return self.host_result(operation, shown, span);
+            // The call was just rejected, so it produces nothing to say
+            // anything about: noting that its result is unconstrained would
+            // be a second diagnostic about a call that will never run.
+            return host_ty(&operation.result);
         }
         let last = operation.params.len().saturating_sub(1);
         let params: Vec<ParamSig> = operation
@@ -4018,7 +4508,7 @@ impl<'a> Checker<'a> {
     /// `http.Request` written as a type.
     fn host_named_type(&mut self, module: &str, name: &str, arguments: usize, span: Span) -> Ty {
         let qualified = format!("{module}.{name}");
-        let Some(schema) = host_schema(module) else {
+        let Some(schema) = self.host_schema(module) else {
             self.diagnostics.push(unchecked_host_type(&qualified, span));
             return Ty::dynamic_boundary();
         };
@@ -4065,7 +4555,7 @@ impl<'a> Checker<'a> {
         case: &Ident,
         span: Span,
     ) -> Option<Ty> {
-        let schema = host_schema(module)?.declared_type(declared)?;
+        let schema = self.host_schema(module)?.declared_type(declared)?;
         if !schema.is_enum() {
             return None;
         }
@@ -4124,7 +4614,7 @@ impl<'a> Checker<'a> {
 
     /// `request.path`: a field of a host type, typed from the schema.
     fn host_field(&mut self, declared: &str, name: &Ident, span: Span) -> Ty {
-        let Some(schema) = host_declared_type(declared) else {
+        let Some(schema) = self.host_declared_type(declared) else {
             // A resource keeps its state on the far side of the boundary, so
             // there is nothing in it to read: everything it answers, it
             // answers as an operation.
@@ -4140,7 +4630,31 @@ impl<'a> Checker<'a> {
             return Ty::recovery();
         };
         match schema.fields.iter().find(|f| f.name == name.node) {
-            Some(field) => host_ty(&field.ty),
+            Some(field) => {
+                // The other end of the `Any` promise. A schema may declare a
+                // *field* `Any` as readily as a result — `http.Route.handler`
+                // is one — and reading it leaves the program holding a value
+                // no schema described, exactly as calling an `Any`-result
+                // operation does. Same fact, same note.
+                if contains_any(&field.ty) {
+                    self.diagnostics.push(
+                        Diagnostic::note(
+                            UNCONSTRAINED_FIELD,
+                            format!(
+                                "`{declared}` declares `{}` as `{}`, so nothing here says what this field holds",
+                                name.node, field.ty
+                            ),
+                        )
+                        .at(span)
+                        .rule("A Host API schema declares `Any` where its meaning does not depend on the type of a value: the schema promises to carry the value, not to describe it.")
+                        .help(format!(
+                            "whatever the program does with `{}.{}` is checked at run time and by nothing here",
+                            declared, name.node
+                        )),
+                    );
+                }
+                host_ty(&field.ty)
+            }
             None => {
                 let known: Vec<String> = schema.fields.iter().map(|f| f.name.to_string()).collect();
                 self.diagnostics.push(
@@ -4171,7 +4685,7 @@ impl<'a> Checker<'a> {
         trailing: Option<&Expr>,
         span: Span,
     ) -> Ty {
-        if let Some(resource) = host_resource(declared) {
+        if let Some(resource) = self.host_resource(declared) {
             if let Some(operation) = resource.operation(&name.node) {
                 return self.call_host_operation(
                     operation,
@@ -4282,8 +4796,19 @@ impl<'a> Checker<'a> {
         self.call_builtin(&sig, "`MapEntry`", args, trailing, span)
     }
 
+    /// The type arguments the place holding this value states, when it
+    /// states any: `let t: Tagged<String> = Tagged(n: 1)` settles `T` even
+    /// though no field mentions it.
+    fn expected_arguments(name: &str, expected: Option<&Expected>) -> Vec<Ty> {
+        match expected.map(|e| &e.ty) {
+            Some(Ty::Struct(other, args)) if other.as_ref() == name => args.clone(),
+            _ => Vec::new(),
+        }
+    }
+
     /// `Type(field: value, ...)`, the synthesized labeled call the card
     /// describes.
+    #[allow(clippy::too_many_arguments)]
     fn struct_init(
         &mut self,
         name: &str,
@@ -4291,8 +4816,10 @@ impl<'a> Checker<'a> {
         args: &[Arg],
         trailing: Option<&Expr>,
         span: Span,
+        expected: Option<&Expected>,
     ) -> Ty {
         let generics: Vec<Rc<str>> = sig.generics.clone();
+        let stated = Checker::expected_arguments(name, expected);
         let subst = self.match_arguments(
             &sig.fields,
             &generics,
@@ -4303,16 +4830,37 @@ impl<'a> Checker<'a> {
             &format!("`{name}`"),
             "the field",
         );
-        Ty::Struct(
-            name.into(),
-            generics
-                .iter()
+        let arguments = generics
+            .iter()
+            .enumerate()
+            .map(|(index, g)| {
                 // The fields were just checked, which is what settles the
-                // parameters they mention; one no field mentions is settled
-                // by the place the value is given to.
-                .map(|g| subst.get(g).cloned().unwrap_or(Ty::placeholder()))
-                .collect(),
-        )
+                // parameters they mention; one no field mentions can only be
+                // settled by the place the value is given to.
+                if let Some(ty) = subst.get(g) {
+                    return ty.clone();
+                }
+                if let Some(ty) = stated.get(index).filter(|ty| !ty.is_wild()) {
+                    return ty.clone();
+                }
+                // Nothing settles it, and the value carries it anyway: every
+                // later use of this binding at that parameter's position is
+                // checked against nothing. That is the same gap an empty
+                // array literal and a bare `None` leave, and it is named the
+                // same way rather than left to spread as a silent unknown.
+                if !Checker::accounted_for(expected) {
+                    self.diagnostics.push(unconstrained(
+                        format!("nothing says what `{g}` is in `{name}<{g}>`"),
+                        format!(
+                            "write the type on the place that holds it, as in `let value: {name}<Int> = ...`, or give the value to a place that declares one"
+                        ),
+                        span,
+                    ));
+                }
+                Ty::unconstrained()
+            })
+            .collect();
+        Ty::Struct(name.into(), arguments)
     }
 
     /// Checks a call against a declared signature, unifying the callee's type
@@ -4361,7 +4909,7 @@ impl<'a> Checker<'a> {
         callee_span: Span,
     ) -> Ty {
         match callee {
-            Ty::Unknown | Ty::Never => {
+            Ty::Unknown(_) | Ty::Never => {
                 self.check_args_freely(args, trailing);
                 Ty::recovery()
             }
@@ -4641,8 +5189,15 @@ impl<'a> Checker<'a> {
     }
 
     /// A signature type with every type parameter still unbound replaced by
-    /// `Unknown`, so it can be used as an expectation without pretending the
-    /// call site has decided what the parameter is.
+    /// an unconstrained unknown, so it can be used as an expectation without
+    /// pretending the call site has decided what the parameter is.
+    ///
+    /// The unknown is [`Ty::unconstrained`] rather than a placeholder because
+    /// it *is* read: an argument is checked against it, and a lambda takes
+    /// its parameter types from it. What it says is exactly what
+    /// "unconstrained" means — nothing read so far states this type — and
+    /// saying so is what keeps a form given to such a place from being asked
+    /// to explain a silence that is not its own.
     fn open(&self, ty: &Ty, generics: &[Rc<str>], subst: &BTreeMap<Rc<str>, Ty>) -> Ty {
         if generics.is_empty() {
             return ty.clone();
@@ -4652,7 +5207,7 @@ impl<'a> Checker<'a> {
             .map(|g| {
                 (
                     g.clone(),
-                    subst.get(g).cloned().unwrap_or(Ty::placeholder()),
+                    subst.get(g).cloned().unwrap_or(Ty::unconstrained()),
                 )
             })
             .collect();
@@ -4677,7 +5232,7 @@ impl<'a> Checker<'a> {
             let ty = self.expr(&arg.value, None);
             let spread_element = match &ty {
                 Ty::Array(inner) | Ty::Vector(inner) => (**inner).clone(),
-                Ty::Unknown | Ty::Never => Ty::recovery(),
+                Ty::Unknown(_) | Ty::Never => Ty::recovery(),
                 other => {
                     self.diagnostics.push(
                         Diagnostic::error(
@@ -4756,11 +5311,21 @@ impl<'a> Checker<'a> {
             ExprKind::Block(block) => {
                 let ret = match expected {
                     Some(Ty::Fn(func)) => Some(func.ret.clone()),
+                    // A block given to a place this pass abstained about is
+                    // a body with an explanation of its own, made where the
+                    // abstention was. Passing it down is what keeps an empty
+                    // array or a bare `None` inside `clock.timeout(1s) { .. }`
+                    // from being asked to state a type nothing outside it
+                    // stated either.
+                    Some(ty) if ty.is_accounted_for() => Some(ty.clone()),
                     _ => None,
                 };
-                let hint = ret.clone().filter(|ty| !ty.is_wild()).map(|ty| {
-                    let label = format!("the trailing closure produces `{ty}`");
-                    Expected::new(ty, trailing.span, label)
+                let hint = ret.clone().map(|ty| match ty.is_wild() {
+                    true => Expected::abstained(ty),
+                    false => {
+                        let label = format!("the trailing closure produces `{ty}`");
+                        Expected::new(ty, trailing.span, label)
+                    }
                 });
                 let ty = self.block(block, hint.as_ref());
                 Ty::func(
@@ -4770,9 +5335,12 @@ impl<'a> Checker<'a> {
                 )
             }
             _ => {
-                let hint = expected.cloned().map(|ty| {
-                    let label = format!("the trailing argument is `{ty}`");
-                    Expected::new(ty, trailing.span, label)
+                let hint = expected.cloned().map(|ty| match ty.is_accounted_for() {
+                    true => Expected::abstained(ty),
+                    false => {
+                        let label = format!("the trailing argument is `{ty}`");
+                        Expected::new(ty, trailing.span, label)
+                    }
                 });
                 self.expr(trailing, hint.as_ref())
             }
@@ -4782,11 +5350,30 @@ impl<'a> Checker<'a> {
     /// Checks every argument of a call whose callee has no signature, so an
     /// error inside one is still reported.
     fn check_args_freely(&mut self, args: &[Arg], trailing: Option<&Expr>) {
+        self.check_args_abstained(args, trailing, Ty::recovery());
+    }
+
+    /// Walks every argument of a call this pass has stopped checking,
+    /// against an unknown that says why.
+    ///
+    /// Each argument is still walked, because a mistake inside one is a
+    /// mistake wherever the call went wrong. What it is *not* is walked
+    /// against nothing: a place typed by an unknown the checker has already
+    /// accounted for is a place with an explanation, and giving the argument
+    /// that explanation is what stops one rejected call from also reporting
+    /// the empty array, the bare `None`, and the unannotated lambda
+    /// parameter it happened to be written with.
+    ///
+    /// The two callers are the two reasons a call stops being checked: an
+    /// error already reported about it ([`Ty::recovery`]), and a host module
+    /// this build ships no schema for ([`Ty::dynamic_boundary`]).
+    fn check_args_abstained(&mut self, args: &[Arg], trailing: Option<&Expr>, why: Ty) {
+        let expected = Expected::abstained(why.clone());
         for arg in args {
-            self.expr(&arg.value, None);
+            self.expr(&arg.value, Some(&expected));
         }
         if let Some(trailing) = trailing {
-            self.trailing_type(trailing, None);
+            self.trailing_type(trailing, Some(&why));
         }
     }
 
@@ -5027,7 +5614,7 @@ impl<'a> Checker<'a> {
         span: Span,
     ) -> Ty {
         match receiver {
-            Ty::Unknown | Ty::Never => {
+            Ty::Unknown(_) | Ty::Never => {
                 self.check_args_freely(args, trailing);
                 return Ty::recovery();
             }
@@ -5349,7 +5936,7 @@ fn check_entries(
             }
         }
 
-        if !matches!(sig.ret, Ty::Unit | Ty::Result(_, _) | Ty::Unknown) {
+        if !matches!(sig.ret, Ty::Unit | Ty::Result(_, _) | Ty::Unknown(_)) {
             diagnostics.push(
                 Diagnostic::error(
                     ENTRY,
@@ -5454,7 +6041,7 @@ struct ConformanceView<'c> {
 /// silence into an error.
 fn conforms(ty: &Ty, trait_name: &str, view: &ConformanceView<'_>) -> bool {
     match ty {
-        Ty::Unknown | Ty::Never => true,
+        Ty::Unknown(_) | Ty::Never => true,
         Ty::Struct(name, _) | Ty::Enum(name, _) => view
             .declared
             .contains(&(trait_name.to_string(), name.to_string())),
@@ -5575,7 +6162,8 @@ fn trait_signature(sig: &FnSig, name: &str) -> String {
 /// written with.
 ///
 /// A short argument list means the arity was already reported, so the
-/// padding stands in a position no correct program reaches.
+/// padding is a recovery unknown: the diagnostic exists and this stands
+/// where the argument the program did not write would have.
 fn substitution(generics: &[Rc<str>], args: &[Ty]) -> BTreeMap<Rc<str>, Ty> {
     generics
         .iter()
@@ -5583,7 +6171,7 @@ fn substitution(generics: &[Rc<str>], args: &[Ty]) -> BTreeMap<Rc<str>, Ty> {
         .zip(
             args.iter()
                 .cloned()
-                .chain(std::iter::repeat(Ty::placeholder())),
+                .chain(std::iter::repeat(Ty::recovery())),
         )
         .collect()
 }
@@ -5596,7 +6184,7 @@ fn expand_alias(generics: Vec<Rc<str>>, ty: Ty, arguments: Vec<Ty>) -> Ty {
         .zip(
             fit(arguments, 0)
                 .into_iter()
-                .chain(std::iter::repeat(Ty::placeholder())),
+                .chain(std::iter::repeat(Ty::recovery())),
         )
         .collect();
     ty.substitute(&subst)
@@ -5683,48 +6271,90 @@ fn operation_names(operations: &'static [OperationSchema]) -> Vec<String> {
         .collect()
 }
 
-/// The Host API schema of the module named `module`, or `None` when this
-/// build ships none.
+/// What a name that is not a value is instead.
 ///
-/// Every abstention this pass makes about a host goes through here, so this
-/// is the one seam an embedder-supplied schema has to reach: answering from
-/// a table the embedding registered, as well as from `cove_schema`'s shipped
-/// one, turns each of those abstentions into an ordinary check without any
-/// other part of this pass changing. Until then the answer is the shipped
-/// table alone, and what it does not name is a [`Ty::dynamic_boundary`].
-fn host_schema(module: &str) -> Option<&'static ModuleSchema> {
-    cove_schema::module(module)
+/// This is an enum rather than the sentence it prints because the sentence
+/// and the correction have to agree: a module is reached *into* and a type is
+/// made *of*, and choosing between those by comparing the printed words is
+/// how one of them came to offer a correction the language does not have.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Namespace {
+    /// A struct, whether this module declares it or `use` reaches it: a
+    /// value of one is *constructed*.
+    Struct,
+    /// An enum, likewise: a value of one is one of its *cases*.
+    Enum,
+    /// `Vector`, `Map`, `MapEntry`: a type the language defines, whose values
+    /// come from the associated functions it declares.
+    BuiltinType,
+    /// A type a host module declares, such as `http.Request`.
+    HostType,
+    /// A type whose shape the site reporting it does not have to hand.
+    Type,
+    /// A host module named by `use`, such as `console`.
+    HostModule,
+    /// Another module of the package, imported whole.
+    Module,
 }
 
-/// The schema of the host type `qualified` names, when it is one a host hands
-/// over rather than one it keeps.
-fn host_declared_type(qualified: &str) -> Option<&'static TypeSchema> {
-    let (module, name) = qualified.split_once('.')?;
-    host_schema(module)?.declared_type(name)
+impl Namespace {
+    /// How the diagnostic names it: `` `Vector` is a builtin type ``.
+    fn what(self) -> &'static str {
+        match self {
+            Namespace::Struct => "a struct",
+            Namespace::Enum => "an enum",
+            Namespace::BuiltinType => "a builtin type",
+            Namespace::HostType => "a host type",
+            Namespace::Type => "a type",
+            Namespace::HostModule => "a host module",
+            Namespace::Module => "a module",
+        }
+    }
+
+    /// The correction, which has to name a form the language actually has.
+    ///
+    /// This is the whole reason the kind is an enum. Choosing between these
+    /// by comparing the printed noun is how one of them came to offer
+    /// `console.println.<name>(...)`, which is not a Cove form at all.
+    fn correction(self, name: &str) -> String {
+        match self {
+            Namespace::Struct => {
+                format!("construct one, as in `{name}(field: value)`, or name a value instead")
+            }
+            Namespace::Enum => {
+                format!("name one of its cases, as in `{name}.<case>`, or name a value instead")
+            }
+            Namespace::BuiltinType | Namespace::Type => format!(
+                "call an associated function of it, as in `{name}.<name>(...)`, or name a value instead"
+            ),
+            Namespace::HostType => format!(
+                "construct one, as in `{name}(field: value)`, or call the operation that answers one"
+            ),
+            Namespace::HostModule | Namespace::Module => {
+                format!("name something in it, as in `{name}.<name>(...)`, or name a value instead")
+            }
+        }
+    }
 }
 
-/// The schema of the host resource `qualified` names.
-fn host_resource(qualified: &str) -> Option<&'static ResourceSchema> {
-    let (module, name) = qualified.split_once('.')?;
-    host_schema(module)?.resource(name)
-}
-
-/// A type, a module, or a host operation written where a value belongs.
+/// A type or a module written where a value belongs.
 ///
 /// Each of these is a name a value can be reached *through*, and the forms
 /// that reach one — `Vector.of(1)`, `console.println("x")`, `Booking(id: 1)`
 /// — say so at the call. Bare, it is not a value and has no type, which used
 /// to be an unknown and is now a mistake with a name.
-fn not_a_value(name: &str, what: &str, span: Span) -> Diagnostic {
-    let help = if what == "a host operation" {
-        format!("call it, as in `{name}(...)`")
-    } else {
-        format!("reach a value through it, as in `{name}.<name>(...)`, or name a value instead")
-    };
-    Diagnostic::error(NOT_A_VALUE, format!("`{name}` is {what}, not a value"))
-        .at(span)
-        .rule("A value is a literal, a binding, a call, or a constructed struct or enum case. A type, a module, and a host operation are names other forms read; none of them is a value on its own.")
-        .help(help)
+///
+/// A host *operation* is deliberately not here: it is a value, typed from its
+/// schema by `Checker::host_operation_value`.
+fn not_a_value(name: &str, what: Namespace, span: Span) -> Diagnostic {
+    let help = what.correction(name);
+    Diagnostic::error(
+        NOT_A_VALUE,
+        format!("`{name}` is {}, not a value", what.what()),
+    )
+    .at(span)
+    .rule("A value is a literal, a binding, a call, or a constructed struct or enum case. A type and a module are names other forms read; neither is a value on its own.")
+    .help(help)
 }
 
 /// Nothing written anywhere settles a type the checker was asked to infer.
@@ -5740,25 +6370,6 @@ fn unconstrained(message: String, help: String, span: Span) -> Diagnostic {
         .at(span)
         .rule("A type the checker infers is inferred from something written: a value, an annotation, or the type of the place the value is given to.")
         .help(help)
-}
-
-/// A member read off a host module this build ships no schema for.
-///
-/// `sensors.reading` may be an operation, a type, or nothing at all: with no
-/// schema to read there is no way to tell, and the boundary is what will
-/// answer.
-fn unchecked_host_member(module: &str, name: &str, span: Span) -> Diagnostic {
-    Diagnostic::warning(
-        UNCHECKED_HOST_CALL,
-        format!(
-            "`{module}.{name}` reaches a host module this build has no schema for, so it is unchecked"
-        ),
-    )
-    .at(span)
-    .rule(HOST_SCHEMA_RULE)
-    .help(format!(
-        "what `{module}` exposes under `{name}` is between the host that registered it and the boundary; nothing is proved about it here"
-    ))
 }
 
 /// Whether a declared host type is, or contains, [`HostType::Any`].
@@ -5897,10 +6508,16 @@ fn free_builtin(name: &str, kind: FreeBuiltinKind) -> Option<&'static FreeBuilti
 /// A free builtin binds every parameter it names itself — there is no
 /// receiver to read one off — and exactly two things can settle one: the type
 /// the call site expects, and an argument. An unsettled parameter is
-/// [`Ty::placeholder`] rather than a [`Ty::Param`], because nothing declared
+/// [`Ty::unconstrained`] rather than a [`Ty::Param`], because nothing declared
 /// it for a call site to instantiate: `Ok(1)` written where nothing expects
 /// a `Result` genuinely does not know what its error type is, and what
 /// settles it is the place the value is given to.
+///
+/// It is an *unconstrained* unknown and not a placeholder because it does
+/// escape: `Ok(1)` in a place that expects nothing produces a
+/// `Result<Int, _>` the program goes on holding. That is one of the two
+/// admitted holes in what a clean check guarantees, named in the module
+/// documentation above.
 ///
 /// The spans are here because a diagnostic points at whatever settled the
 /// parameter it is complaining about: `assertEqual("a", 1)` says the `1`
@@ -5917,7 +6534,7 @@ impl FreeBindings {
             types: schema
                 .generics
                 .iter()
-                .map(|name| (*name, Ty::placeholder()))
+                .map(|name| (*name, Ty::unconstrained()))
                 .collect(),
             origins: BTreeMap::new(),
         }
@@ -9211,12 +9828,16 @@ export fn handle(request: http.Payload) -> Int {
 
     /// A host module this build ships no schema for is the one host call the
     /// checker still abstains from: an embedding registers its modules at run
-    /// time, and the boundary is what holds such a host to its word. What is
-    /// new is that the abstention is said out loud.
+    /// time, and the boundary is what holds such a host to its word.
+    ///
+    /// This pass says nothing about it. The fact belongs to the `use` that
+    /// named the module — no edit to `sensors.read` can fix it, and the
+    /// remedy is one thing to say however many calls a program makes — and
+    /// #74 puts the warning there. What this pass owes is silence per call
+    /// and a `Ty::dynamic_boundary` that says why.
     #[test]
-    fn a_call_into_a_host_module_with_no_schema_warns_and_suppresses_what_follows() {
-        let warning = warns(
-            "\
+    fn a_call_into_a_host_module_with_no_schema_is_not_reported_at_the_call() {
+        let source = "\
 use console.println
 use sensors
 
@@ -9225,32 +9846,52 @@ export fn main() -> Result<Unit, Error> {
   println(\"{value + 1}\")?
   Ok(())
 }
-",
-        );
-        assert_eq!(warning.code, UNCHECKED_HOST_CALL);
-        assert_eq!(
-            warning.message,
-            "`sensors.read` reaches a host module this build has no schema for, so this call is unchecked"
+";
+        accepts(source);
+        assert!(warnings_of(source).is_empty());
+        assert!(notes_of(source).is_empty());
+    }
+
+    /// The shape an embedding is written in: a callback a host stores and
+    /// calls later, registered with a module this build has no schema for.
+    ///
+    /// Nothing on this side states what the callback takes or produces, and
+    /// nothing can: that is the abstention, not a gap in the program. So the
+    /// unannotated parameter is not reported and the early `return` is not
+    /// an error, either of which would have refused a program that runs.
+    #[test]
+    fn a_callback_into_a_host_module_with_no_schema_is_not_reported() {
+        let source = "\
+use sensors
+
+fn run() -> Int {
+  sensors.watch(fn(reading) { return 1 })
+  1
+}
+";
+        accepts(source);
+        assert!(
+            warnings_of(source).is_empty(),
+            "{:?}",
+            warnings_of(source)
+                .iter()
+                .map(|d| d.code.clone())
+                .collect::<Vec<_>>()
         );
     }
 
     #[test]
-    fn a_member_of_a_host_module_with_no_schema_read_as_a_value_warns() {
-        let warning = warns(
-            "\
+    fn a_member_of_a_host_module_with_no_schema_read_as_a_value_is_not_reported() {
+        let source = "\
 use sensors
 
 fn run() -> Int {
   let reading = sensors.latest
   1
 }
-",
-        );
-        assert_eq!(warning.code, UNCHECKED_HOST_CALL);
-        assert_eq!(
-            warning.message,
-            "`sensors.latest` reaches a host module this build has no schema for, so it is unchecked"
-        );
+";
+        accepts(source);
+        assert!(warnings_of(source).is_empty());
     }
 
     #[test]
@@ -9275,24 +9916,91 @@ fn handle(reading: sensors.Reading) -> Int {
         );
     }
 
-    /// A member of a module the build *does* ship a schema for is a mistake
-    /// with a name, not an abstention: the schema says what is there.
+    /// A host *operation* is a value, and the schema says which one.
+    ///
+    /// The interpreter has always bound one and called it later, so refusing
+    /// the form would remove a capability the language has. Reading the
+    /// schema instead turns what used to be an unknown into the operation's
+    /// own function type, so a call made through the value is checked exactly
+    /// as a direct call is.
     #[test]
-    fn a_host_operation_read_as_a_value_is_an_error() {
+    fn a_host_operation_read_as_a_value_has_the_type_its_schema_declares() {
+        let source = "\
+use console.println
+use http
+
+export fn main() -> Result<Unit, Error> {
+  let get = http.fetch
+  let body = get(\"https://example.com\")?
+  println(\"{body}\")?
+  Ok(())
+}
+";
+        accepts(source);
+        assert!(warnings_of(source).is_empty());
+        assert!(notes_of(source).is_empty());
+    }
+
+    /// The value is a real function type, so a call through it is checked.
+    #[test]
+    fn a_call_through_a_host_operation_value_is_checked() {
         let error = rejects(
             "\
+use http
+
+fn run() -> Int {
+  let get = http.fetch
+  get(1)
+  1
+}
+",
+        );
+        assert_eq!(error.code, MISMATCH);
+    }
+
+    /// A *variadic* operation is the one this language has no function type
+    /// for, so the value keeps working and the gap is a note rather than a
+    /// refusal or a silence.
+    #[test]
+    fn a_variadic_host_operation_used_as_a_value_is_noted() {
+        let source = "\
 use console
 
 fn run() -> Int {
   let write = console.println
   1
 }
+";
+        accepts(source);
+        assert!(warnings_of(source).is_empty());
+        let notes = notes_of(source);
+        assert_eq!(notes.len(), 1);
+        assert_eq!(notes[0].code, VARIADIC_AS_VALUE);
+        assert_eq!(
+            notes[0].message,
+            "`console.println` is variadic, so this value has no function type here"
+        );
+    }
+
+    /// A host *type* is not a value, exactly as a bare `Vector` is not, and
+    /// the correction names a form the language has.
+    #[test]
+    fn a_host_type_read_as_a_value_is_an_error() {
+        let error = rejects(
+            "\
+use http
+
+fn run() -> Int {
+  let route = http.Route
+  1
+}
 ",
         );
         assert_eq!(error.code, NOT_A_VALUE);
+        assert_eq!(error.message, "`http.Route` is a host type, not a value");
         assert_eq!(
-            error.message,
-            "`console.println` is a host operation or type, not a value"
+            error.help.unwrap(),
+            "construct one, as in `http.Route(field: value)`, or call the operation that answers one"
         );
     }
 
@@ -9368,6 +10076,48 @@ export fn main() -> Result<Unit, Error> {
         );
     }
 
+    /// The other end of the `Any` promise: a schema may declare a *field*
+    /// `Any`, and reading one leaves the program holding a value no schema
+    /// described, exactly as calling an `Any`-result operation does.
+    /// `http.Route.handler` is the one the shipped schema declares.
+    #[test]
+    fn a_host_field_declared_any_is_noted_where_it_is_read() {
+        let source = "\
+use http
+
+fn readHandler(route: http.Route) -> Int {
+  let handler = route.handler
+  1
+}
+";
+        accepts(source);
+        assert!(warnings_of(source).is_empty());
+        let notes = notes_of(source);
+        assert_eq!(notes.len(), 1);
+        assert_eq!(notes[0].code, UNCONSTRAINED_FIELD);
+        assert_eq!(
+            notes[0].message,
+            "`http.Route` declares `handler` as `Any`, so nothing here says what this field holds"
+        );
+    }
+
+    /// A rejected call produces nothing to say anything about, so the note
+    /// about its result is not also printed: one mistake, one diagnostic.
+    #[test]
+    fn an_arity_error_on_an_any_result_operation_is_not_also_noted() {
+        let source = "\
+use clock
+
+export fn main() -> Result<Unit, Error> {
+  clock.timeout(1s, 2, 3)?
+  Ok(())
+}
+";
+        let error = rejects(source);
+        assert_eq!(error.code, ARITY);
+        assert!(notes_of(source).is_empty());
+    }
+
     // ---- language gap: reported, never silent
 
     #[test]
@@ -9416,10 +10166,10 @@ fn run() -> Int {
 ",
         );
         assert_eq!(error.code, NOT_A_VALUE);
-        assert_eq!(error.message, "`Counter` is a type, not a value");
+        assert_eq!(error.message, "`Counter` is a struct, not a value");
         assert_eq!(
             error.help.unwrap(),
-            "reach a value through it, as in `Counter.<name>(...)`, or name a value instead"
+            "construct one, as in `Counter(field: value)`, or name a value instead"
         );
     }
 
@@ -9570,6 +10320,227 @@ fn run(value: Missing) -> Int {
 ",
         );
         assert_eq!(error.code, UNKNOWN_TYPE);
+    }
+
+    /// An argument of a call that was just rejected is given to a place this
+    /// pass has nothing to say about, so the gaps inside it are not reported
+    /// as if they were the program's second mistake.
+    #[test]
+    fn the_arguments_of_a_rejected_call_are_not_reported_again() {
+        let source = "\
+fn run() -> Int {
+  missing([], None, fn(n) { n })
+  1
+}
+";
+        let error = rejects(source);
+        assert_eq!(error.code, UNKNOWN_NAME);
+        assert!(warnings_of(source).is_empty());
+    }
+
+    /// A body given to a place a schema declared `Any` is a body with an
+    /// answer of its own, made at the call: the note says exactly that
+    /// nothing about this value was proved. Its own value is not asked a
+    /// second time to state a type nothing outside it stated either.
+    #[test]
+    fn a_gap_in_the_value_of_a_body_a_schema_declared_any_is_not_reported() {
+        let source = "\
+use clock
+
+export fn main() -> Result<Unit, Error> {
+  clock.timeout(1s) {
+    []
+  }?
+  Ok(())
+}
+";
+        accepts(source);
+        assert!(warnings_of(source).is_empty());
+    }
+
+    // -------------------------------- unknowns that must not escape
+    //
+    // `Unknown::Placeholder` claims to reach no type a program observes, and
+    // `Checker::expr` and `Checker::declare` assert it in debug builds. These
+    // pin the two places that used to break the claim, each of which used to
+    // check clean and then be wrong at run time.
+
+    /// A struct's type parameter that no field mentions used to become a
+    /// placeholder, which compares equal to everything: `needsString` below
+    /// wants a `Tagged<String>` and used to accept a `Tagged<_>`.
+    #[test]
+    fn a_struct_type_parameter_nothing_settles_is_reported() {
+        let source = "\
+struct Tagged<T> { n: Int }
+
+fn needsString(t: Tagged<String>) -> Int { t.n }
+
+fn run() -> Int {
+  let p = Tagged(n: 1)
+  needsString(p)
+}
+";
+        accepts(source);
+        let warning = warns(source);
+        assert_eq!(warning.code, UNCONSTRAINED);
+        assert_eq!(warning.message, "nothing says what `T` is in `Tagged<T>`");
+    }
+
+    /// The place holding the value settles it, whether it is an annotation
+    /// or the parameter of the call it is given to.
+    #[test]
+    fn a_struct_type_parameter_the_place_states_is_settled() {
+        for body in [
+            "  let p: Tagged<String> = Tagged(n: 1)\n  needsString(p)",
+            "  needsString(Tagged(n: 1))",
+        ] {
+            let source = format!(
+                "\
+struct Tagged<T> {{ n: Int }}
+
+fn needsString(t: Tagged<String>) -> Int {{ t.n }}
+
+fn run() -> Int {{
+{body}
+}}
+"
+            );
+            accepts(&source);
+            assert!(warnings_of(&source).is_empty(), "{source}");
+        }
+    }
+
+    /// `Result.mapError`'s callback produces whatever its body produces, so
+    /// the expectation states its parameters and leaves its result open. An
+    /// early `return` in it therefore has nothing to agree with — which used
+    /// to check clean and then fail at run time, because the placeholder
+    /// result propagated into the `Err` binding's type.
+    #[test]
+    fn a_return_in_a_map_error_callback_is_reported() {
+        let error = rejects(
+            "\
+fn attempt() -> Result<Int, Error> { Ok(1) }
+
+fn run() -> Int {
+  let r = attempt().mapError { return 42 }
+  match r {
+    Ok(v) => v
+    Err(e) => e.length()
+  }
+}
+",
+        );
+        assert_eq!(error.code, LAMBDA_RETURN);
+    }
+
+    /// Without the `return` the checker gets the type right, and says so
+    /// about what is done with it.
+    #[test]
+    fn a_map_error_callback_that_ends_with_its_value_types_the_failure() {
+        let error = rejects(
+            "\
+fn attempt() -> Result<Int, Error> { Ok(1) }
+
+fn run() -> Int {
+  let r = attempt().mapError { 42 }
+  match r {
+    Ok(v) => v
+    Err(e) => e.length()
+  }
+}
+",
+        );
+        assert_eq!(error.code, UNKNOWN_METHOD);
+    }
+
+    /// A placeholder is the one unknown that must never be observable, and
+    /// it is now a value rather than a convention, so the difference can be
+    /// asked about.
+    #[test]
+    fn only_a_placeholder_answers_that_it_must_not_escape() {
+        assert!(Ty::placeholder().holds_placeholder());
+        assert!(!Ty::recovery().holds_placeholder());
+        assert!(!Ty::dynamic_boundary().holds_placeholder());
+        assert!(!Ty::unconstrained().holds_placeholder());
+        // And it is found however deeply it is buried, which is what makes
+        // the assertions in `expr` and `declare` worth having.
+        assert!(Ty::Array(Box::new(Ty::Option(Box::new(Ty::placeholder())))).holds_placeholder());
+        assert!(Ty::func(false, vec![Ty::Int], Ty::placeholder()).holds_placeholder());
+        // Every other kind is one the checker has already accounted for, so
+        // a form given to a place typed by one adds nothing by complaining.
+        assert!(Ty::recovery().is_accounted_for());
+        assert!(Ty::dynamic_boundary().is_accounted_for());
+        assert!(Ty::unconstrained().is_accounted_for());
+        assert!(!Ty::placeholder().is_accounted_for());
+    }
+
+    // ------------------- a gap a sibling or a branch settles is no gap
+
+    /// `[[], [1]]` is an `Array<Array<Int>>`: the sibling says what the
+    /// empty literal holds, so nothing was left unproved and nothing is
+    /// reported. The element type is the joined one, not `Array<_>`.
+    #[test]
+    fn an_empty_array_a_sibling_settles_is_not_reported() {
+        let source = "\
+fn run() -> Int {
+  let rows = [[], [1]]
+  rows.length()
+}
+";
+        accepts(source);
+        assert!(warnings_of(source).is_empty());
+        // The join reached inside the shared shape, so the elements are
+        // still checked from here on.
+        let error = rejects(
+            "\
+fn run() -> Int {
+  let rows = [[], [1]]
+  let first: Array<String> = rows[0]
+  1
+}
+",
+        );
+        assert_eq!(error.code, MISMATCH);
+    }
+
+    #[test]
+    fn a_none_a_sibling_settles_is_not_reported() {
+        let source = "\
+fn run() -> Int {
+  let values = [None, Some(1)]
+  values.length()
+}
+";
+        accepts(source);
+        assert!(warnings_of(source).is_empty());
+    }
+
+    #[test]
+    fn a_none_the_other_branch_settles_is_not_reported() {
+        let source = "\
+fn run() -> Int {
+  let value = if true { None } else { Some(1) }
+  value.unwrapOr(0)
+}
+";
+        accepts(source);
+        assert!(warnings_of(source).is_empty());
+    }
+
+    /// Branches that genuinely disagree are still one diagnostic, not one
+    /// per branch: the probe only supplies an expectation when the two
+    /// already agree.
+    #[test]
+    fn branches_that_disagree_are_still_reported_once() {
+        let error = rejects(
+            "\
+fn run() -> Int {
+  let value = if true { 1 } else { \"two\" }
+  1
+}
+",
+        );
+        assert_eq!(error.code, BRANCHES);
     }
 
     // ------------------------------------------------- entry shape

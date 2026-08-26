@@ -276,8 +276,14 @@ pub(crate) fn load(start: Option<&Path>) -> Result<(SourceMap, Package, Program)
 
     // `cove check` type-checks, and `cove run` refuses to execute a package
     // that does not check. Type warnings and notes join the resolver's
-    // warnings, so `cove check` reports them the same way; it counts them
-    // apart, because only a warning is a doubt `--deny-warnings` acts on.
+    // warnings in `Program::notices`, so `cove check` reports them the same
+    // way; it counts them apart, because only a warning is a doubt
+    // `--deny-warnings` acts on.
+    //
+    // Only `cove check` prints them. A command that runs a program reports
+    // what stops it and nothing else — that was already true of the
+    // resolver's warnings, and notes join them on the same footing. Reading
+    // out what the checker chose not to prove is what `cove check` is for.
     let (errors, warnings): (Vec<Diagnostic>, Vec<Diagnostic>) =
         cove_sema::typeck::check(&package, &program)
             .into_iter()
@@ -290,7 +296,7 @@ pub(crate) fn load(start: Option<&Path>) -> Result<(SourceMap, Package, Program)
             items,
         });
     }
-    program.warnings.extend(warnings);
+    program.notices.extend(warnings);
 
     Ok((sources, package, program))
 }
@@ -459,15 +465,22 @@ fn cmd_check(args: &[String]) -> Result<(), CliError> {
     let (sources, package, program) = load(path)?;
     let modules = program.modules.len();
     let files: usize = package.modules.values().map(|m| m.units.len()).sum();
-    for diagnostic in &program.warnings {
+    for diagnostic in &program.notices {
         eprint!("{}", render(&sources, diagnostic));
     }
-    let warnings = program
-        .warnings
-        .iter()
-        .filter(|d| d.severity == cove_diag::Severity::Warning)
-        .count();
-    let notes = program.warnings.len() - warnings;
+    // Each count filters on the exact severity. Subtracting one from the
+    // length would give the same answer only for as long as `notices` holds
+    // nothing else, and what a third severity would then produce is a wrong
+    // number rather than a compiler error.
+    let count = |severity| {
+        program
+            .notices
+            .iter()
+            .filter(|d| d.severity == severity)
+            .count()
+    };
+    let warnings = count(cove_diag::Severity::Warning);
+    let notes = count(cove_diag::Severity::Note);
     println!("{}", check_summary(modules, files, warnings, notes));
 
     // `--deny-warnings` and `cove.toml`'s `[check]` table only ever add
@@ -1829,7 +1842,7 @@ module shapes
     }
 
     #[test]
-    fn program_warnings_feed_the_check_summary() {
+    fn program_notices_feed_the_check_summary() {
         let dir = TempDir::new("undocumented");
         write(dir.path(), "cove.toml", "");
         write(
@@ -1850,9 +1863,9 @@ export fn main() -> Result<Unit, Error> {
 ",
         );
         let (_, _, program) = load_fixture(dir.path());
-        assert_eq!(program.warnings.len(), 3);
+        assert_eq!(program.notices.len(), 3);
         assert_eq!(
-            check_summary(1, 1, program.warnings.len(), 0),
+            check_summary(1, 1, program.notices.len(), 0),
             "checked 1 module(s), 1 file(s), 3 warning(s)"
         );
     }
