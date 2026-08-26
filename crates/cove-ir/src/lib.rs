@@ -33,6 +33,7 @@
 
 pub mod lower;
 
+use std::collections::BTreeMap;
 use std::fmt;
 use std::rc::Rc;
 
@@ -98,6 +99,17 @@ pub struct Function {
     /// Parallel to `code` rather than inside `Inst`, so that an instruction
     /// stays small and a span costs nothing to skip.
     pub spans: Vec<Span>,
+    /// The spans of an instruction's arguments, by instruction index, for the
+    /// instructions whose diagnostic quotes source.
+    ///
+    /// An instruction's own span covers the whole call it came from, so a
+    /// diagnostic that quotes the source of one *argument* — which is what a
+    /// failing `assert` does, and the whole reason `assert` is a builtin
+    /// rather than a library function — cannot be written from it. This is
+    /// where the argument's own source is, and it is recorded only where such
+    /// a diagnostic exists: a span nothing quotes would be a cost with no
+    /// reader.
+    pub arg_spans: BTreeMap<u32, Vec<Span>>,
     /// Where the function itself was declared, for a diagnostic about the
     /// function rather than about one of its instructions.
     pub span: Span,
@@ -107,6 +119,14 @@ impl Function {
     /// The span of the instruction at `pc`, or the function's own.
     pub fn span_at(&self, pc: usize) -> Span {
         self.spans.get(pc).copied().unwrap_or(self.span)
+    }
+
+    /// The spans of the arguments of the instruction at `pc`, and nothing
+    /// where that instruction has no diagnostic that quotes them.
+    pub fn arg_spans_at(&self, pc: usize) -> &[Span] {
+        self.arg_spans
+            .get(&(pc as u32))
+            .map_or(&[][..], Vec::as_slice)
     }
 }
 
@@ -206,7 +226,12 @@ pub enum Inst {
     /// a real place model first, and this instruction is not it.
     SetField(ConstId),
     /// Builds one of the builtin constructors: `Ok`, `Err`, `Some`, or
-    /// `Error`, over one value, or `None` over none.
+    /// `Error`, over one value, or `None` over none; and runs the two
+    /// assertions, `assert` and `assertEqual`.
+    ///
+    /// A failing assertion quotes the source text of its condition, so the
+    /// spans of an assertion's arguments are recorded in
+    /// [`Function::arg_spans`] beside it.
     MakeBuiltin { name: ConstId, argc: u32 },
     /// `expr?`: pops a `Result` or `Option`, pushes its payload, or returns
     /// the failure from this call.

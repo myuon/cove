@@ -36,16 +36,18 @@
 //!
 //! Closures and trailing closures, `match`, `scope`/`spawn`/`await`, `var`
 //! parameters, traits and `dyn`, the `Map` and `Set` constructors, `Shared`,
-//! `snapshot`, a range used as a value, assignment to a field, and any call
-//! whose target cannot be named at lowering time. Each is reported in the
-//! words a Cove programmer writes it in.
+//! `snapshot`, a range used as a value, assignment to a field of anything
+//! but a local, and any call whose target cannot be named at lowering time.
+//! Each is reported in the words a Cove programmer writes it in.
 //!
-//! Assignment to a field is the one on that list that is not a matter of
-//! this pass being unfinished. The IR has `GetField` and nothing on the
-//! other side of it, and the alternative — rebuilding the struct around the
-//! new value — needs the receiver's type, which is the one thing a lowering
-//! with no type table cannot name. It is reported rather than approximated,
-//! and it is what stops `benches/field` and `benches/method`.
+//! # What is refused because the program is wrong
+//!
+//! Two of the refusals are not about this pass being unfinished. A write to
+//! a `let` binding, and a method call whose name a builtin type and a
+//! declared type both answer to, are reported because the alternative is a
+//! backend that accepts what the oracle refuses or that guesses which of two
+//! targets was meant. ADR 0012 ranks the oracle above a backend, so refusing
+//! to lower is the answer and approximating is not.
 
 use std::collections::BTreeMap;
 use std::rc::Rc;
@@ -323,16 +325,21 @@ impl<'a> Lowering<'a> {
             if receiver.is_var {
                 return Err(Unsupported::new("a `var self` receiver", receiver.span));
             }
-            body.declare(Some("self"));
+            // A receiver is read-only in the body: a `var self` receiver is
+            // refused above, so nothing writes through this one.
+            body.declare(Some("self"), false);
         }
         for param in &decl.params {
             reject_parameter(param.is_var, param.variadic, param.ty.as_ref(), param.span)?;
-            body.declare(Some(param.name.node.as_str()));
+            // An ordinary parameter receives a shallow copy and is a
+            // read-only place inside the body, exactly as the interpreter
+            // declares one; a `var` parameter is refused above.
+            body.declare(Some(param.name.node.as_str()), false);
         }
 
         body.block(&decl.body)?;
         body.emit_final_return(decl.body.span);
-        let (code, spans, frame_size) = body.finish();
+        let (code, spans, arg_spans, frame_size) = body.finish();
 
         Ok(Function {
             module: module.into(),
@@ -343,6 +350,7 @@ impl<'a> Lowering<'a> {
             captures: Vec::new(),
             code,
             spans,
+            arg_spans,
             span: decl.span,
         })
     }
@@ -350,14 +358,21 @@ impl<'a> Lowering<'a> {
 
 // --------------------------------------------------------------- one body
 
-/// One live binding: the slot it occupies, and the name that reaches it.
+/// One live binding: the slot it occupies, the name that reaches it, and
+/// whether source may write it.
 ///
 /// A hidden binding has no name. A `for` header needs somewhere to keep what
 /// it walks, and those places are slots like any other — they simply cannot
 /// be reached from source, because no Cove name resolves to them.
+///
+/// `writable` is `is_var` carried through the lowering: a `var` binds a
+/// mutable place and everything else — a `let`, a parameter, a receiver, a
+/// `for` binding — binds a read-only one, which is the interpreter's
+/// `Place::binding` read at lowering time rather than at run time.
 struct Binding<'a> {
     name: Option<&'a str>,
     slot: u32,
+    writable: bool,
 }
 
 /// A jump target, resolved once the instruction it points at exists.
@@ -406,6 +421,9 @@ struct Body<'a, 'l> {
     labels: Vec<Label>,
     patches: Vec<(usize, usize)>,
     loops: Vec<LoopFrame>,
+    /// The argument spans of the instructions whose diagnostic quotes source,
+    /// which today is the two assertions and nothing else.
+    arg_spans: BTreeMap<u32, Vec<Span>>,
 }
 
 impl<'a, 'l> Body<'a, 'l> {
@@ -421,11 +439,12 @@ impl<'a, 'l> Body<'a, 'l> {
             labels: Vec::new(),
             patches: Vec::new(),
             loops: Vec::new(),
+            arg_spans: BTreeMap::new(),
         }
     }
 
     /// The finished instructions, with every jump pointing at a real one.
-    fn finish(mut self) -> (Vec<Inst>, Vec<Span>, u32) {
+    fn finish(mut self) -> (Vec<Inst>, Vec<Span>, BTreeMap<u32, Vec<Span>>, u32) {
         for (pc, label) in &self.patches {
             let target = self.labels[*label]
                 .at
@@ -435,7 +454,7 @@ impl<'a, 'l> Body<'a, 'l> {
                 other => unreachable!("a patch points at a jump, not {other:?}"),
             }
         }
-        (self.code, self.spans, self.frame_size)
+        (self.code, self.spans, self.arg_spans, self.frame_size)
     }
 
     // ------------------------------------------------------------ emitting
@@ -525,22 +544,36 @@ impl<'a, 'l> Body<'a, 'l> {
     /// Declares a binding, which always takes a slot of its own.
     ///
     /// Shadowing declares rather than overwrites, exactly as `Env::declare`
-    /// does, so `let x = 1; let x = 2` is two slots.
-    fn declare(&mut self, name: Option<&'a str>) -> u32 {
+    /// does, so `let x = 1; let x = 2` is two slots. `writable` is what a
+    /// write to the binding is checked against, and only a `var` is.
+    fn declare(&mut self, name: Option<&'a str>, writable: bool) -> u32 {
         let slot = self.live.len() as u32;
-        self.live.push(Binding { name, slot });
+        self.live.push(Binding {
+            name,
+            slot,
+            writable,
+        });
         self.frame_size = self.frame_size.max(slot + 1);
         slot
     }
 
-    /// The slot `name` reaches: the most recent declaration of it, because a
-    /// lookup scans from the top and a shadow was declared later.
-    fn lookup(&self, name: &str) -> Option<u32> {
+    /// The binding `name` reaches: the most recent declaration of it, because
+    /// a lookup scans from the top and a shadow was declared later.
+    fn binding(&self, name: &str) -> Option<&Binding<'a>> {
         self.live
             .iter()
             .rev()
             .find(|binding| binding.name == Some(name))
-            .map(|binding| binding.slot)
+    }
+
+    /// The slot `name` reaches.
+    fn lookup(&self, name: &str) -> Option<u32> {
+        self.binding(name).map(|binding| binding.slot)
+    }
+
+    /// Whether source may write the binding `name` reaches.
+    fn is_writable(&self, name: &str) -> bool {
+        self.binding(name).is_some_and(|binding| binding.writable)
     }
 
     // ---------------------------------------------------------- statements
@@ -566,7 +599,7 @@ impl<'a, 'l> Body<'a, 'l> {
     fn statement(&mut self, statement: &'a Stmt) -> Result<(), Unsupported> {
         match &statement.kind {
             StmtKind::Let {
-                is_var: _,
+                is_var,
                 name,
                 ty,
                 value,
@@ -577,7 +610,7 @@ impl<'a, 'l> Body<'a, 'l> {
                 // The value is lowered before the name exists, which is what
                 // makes `let x = x` read the outer `x`.
                 self.expr(value)?;
-                let slot = self.declare(Some(name.node.as_str()));
+                let slot = self.declare(Some(name.node.as_str()), *is_var);
                 self.emit(Inst::StoreLocal(slot), statement.span);
                 Ok(())
             }
@@ -866,6 +899,9 @@ impl<'a, 'l> Body<'a, 'l> {
                 span,
             ));
         };
+        if !self.is_writable(name) {
+            return Err(read_only_place(name, span));
+        }
         match op {
             None => self.expr(value)?,
             Some(op) => {
@@ -912,6 +948,11 @@ impl<'a, 'l> Body<'a, 'l> {
                 span,
             ));
         };
+        if !self.is_writable(name) {
+            // A field of a read-only binding is a read-only place too, which
+            // is what `Place::field` carries down from its base.
+            return Err(read_only_place(&format!("{name}.{field}"), span));
+        }
         let field = self.outer.name(field);
         self.emit(Inst::LoadLocal(slot), base_span);
         match op {
@@ -1025,8 +1066,8 @@ impl<'a, 'l> Body<'a, 'l> {
                 end,
                 inclusive_end,
             } => {
-                let cursor = self.declare(None);
-                let limit = self.declare(None);
+                let cursor = self.declare(None, false);
+                let limit = self.declare(None, false);
                 self.expr(start)?;
                 self.emit(Inst::StoreLocal(cursor), start.span);
                 self.expr(end)?;
@@ -1040,9 +1081,9 @@ impl<'a, 'l> Body<'a, 'l> {
                 )
             }
             _ => {
-                let sequence = self.declare(None);
-                let length = self.declare(None);
-                let cursor = self.declare(None);
+                let sequence = self.declare(None, false);
+                let length = self.declare(None, false);
+                let cursor = self.declare(None, false);
                 self.expr(iterable)?;
                 self.emit(Inst::StoreLocal(sequence), iterable.span);
                 self.emit(Inst::LoadLocal(sequence), iterable.span);
@@ -1057,7 +1098,9 @@ impl<'a, 'l> Body<'a, 'l> {
 
         // The binding belongs to the scope the body sees, and the body's own
         // block opens a scope inside this one.
-        let element = self.declare(Some(binding));
+        // A `for` binding is read-only, which is what the interpreter
+        // declares one as.
+        let element = self.declare(Some(binding), false);
 
         let top = self.label();
         let next = self.label();
@@ -1365,6 +1408,13 @@ impl<'a, 'l> Body<'a, 'l> {
     ///
     /// `Shared(...)` is the free builtin that is not here: it makes a value
     /// with storage shared across tasks, which nothing in this IR expresses.
+    ///
+    /// The two assertions carry their arguments' spans as well as their own.
+    /// A failing `assert` quotes the source text of its condition — that is
+    /// what makes it a builtin rather than a library function — and the
+    /// instruction's own span covers the whole call, so the argument's span
+    /// is recorded beside it in [`crate::Function::arg_spans`]. The
+    /// interpreter reads exactly these spans, out of the same `SourceMap`.
     fn make_builtin(&mut self, name: &str, args: &'a [Arg], span: Span) -> Result<(), Unsupported> {
         if !matches!(
             name,
@@ -1372,10 +1422,12 @@ impl<'a, 'l> Body<'a, 'l> {
         ) {
             return Err(Unsupported::new(format!("`{name}`"), span));
         }
+        let quotes_its_arguments = matches!(name, "assert" | "assertEqual");
         for arg in args {
             self.expr(&arg.value)?;
         }
         let name = self.outer.name(name);
+        let pc = self.code.len();
         self.emit(
             Inst::MakeBuiltin {
                 name,
@@ -1383,6 +1435,14 @@ impl<'a, 'l> Body<'a, 'l> {
             },
             span,
         );
+        // `emit` keeps nothing where control cannot arrive, so the spans are
+        // recorded against the instruction that was actually written.
+        if quotes_its_arguments && self.code.len() > pc {
+            self.arg_spans.insert(
+                pc as u32,
+                args.iter().map(|arg| arg.value.span).collect::<Vec<_>>(),
+            );
+        }
         Ok(())
     }
 
@@ -1415,10 +1475,16 @@ impl<'a, 'l> Body<'a, 'l> {
 
     /// `receiver.name(...)`, where the receiver is a value.
     ///
-    /// The interpreter finds a declared method from the receiver's runtime
-    /// type and falls back to the builtin table. Nothing here knows a
-    /// receiver's type, so a declared method is found by name — and a name
-    /// more than one type declares is reported rather than guessed at.
+    /// The interpreter tries a declared method of the receiver's *runtime*
+    /// type first and falls back to the builtin table, so which of the two
+    /// applies is a fact about the receiver. Nothing here knows a receiver's
+    /// type, so a declared method is found by name — and a name that could
+    /// reach two answers is reported rather than guessed at, whether the two
+    /// are two declarations or one declaration and a builtin.
+    ///
+    /// Guessing would be the one mistake a second backend must not make:
+    /// `[1, 2, 3].length()` is the builtin's `3` on the oracle, and a `Call`
+    /// to a declared `Box.length` is a different program.
     fn method_call(
         &mut self,
         receiver: &'a Expr,
@@ -1438,6 +1504,12 @@ impl<'a, 'l> Body<'a, 'l> {
                 span,
             ));
         }
+        // Which types declare a method of this name is a question for the
+        // shared table rather than for a list written here, so a builtin
+        // that gains a method gains this refusal with it.
+        let builtin_method = builtins::builtins()
+            .iter()
+            .any(|schema| schema.method(name).is_some());
         if let Some(candidates) = self.outer.by_name.get(name) {
             if candidates.len() > 1 {
                 return Err(Unsupported::new(
@@ -1445,13 +1517,18 @@ impl<'a, 'l> Body<'a, 'l> {
                     span,
                 ));
             }
+            if builtin_method {
+                return Err(Unsupported::new(
+                    format!(
+                        "a call to `{name}`, which a builtin type and a declared type both have"
+                    ),
+                    span,
+                ));
+            }
             let id = candidates[0];
             return self.call_declared(id, Some(receiver), args, span);
         }
-        if builtins::builtins()
-            .iter()
-            .any(|schema| schema.method(name).is_some())
-        {
+        if builtin_method {
             self.expr(receiver)?;
             for arg in args {
                 self.expr(&arg.value)?;
@@ -1538,6 +1615,27 @@ fn arguments_in_order(
     Ok(())
 }
 
+/// A write to a place the program is not allowed to write.
+///
+/// This refuses at lowering time what the interpreter refuses at run time —
+/// ``cannot assign to `x`, which is a read-only place`` — because a backend
+/// that performed the write would be more permissive than the oracle ADR
+/// 0012 ranks above it, and being wrong in the other direction is the only
+/// direction a second backend may be wrong in.
+///
+/// The wording says the program is wrong rather than that the VM is
+/// incapable, because it is. The right home for the check is the checker,
+/// where a read-only place is a static fact rather than a runtime one;
+/// `cove-sema` catches neither backend's case today — mutability is not a
+/// type, so `cove check` does not enforce it — and whoever moves it there
+/// deletes this and the interpreter's own refusal both.
+fn read_only_place(place: &str, span: Span) -> Unsupported {
+    Unsupported::new(
+        format!("assignment to `{place}`, which is a read-only place"),
+        span,
+    )
+}
+
 /// The source binary operator as the IR carries it, or `None` for the two
 /// that short-circuit and so are not operators here at all.
 fn binary_op(op: SourceBinary) -> Option<BinaryOp> {
@@ -1614,7 +1712,8 @@ fn reject_parameter(
 /// The VM trusts its input completely — that is most of what makes it worth
 /// having — so this is where the trust is earned. Every jump lands on an
 /// instruction, every slot is inside the frame, every id names something,
-/// every function ends in a `Return`, and the operand stack has one depth at
+/// every recorded argument span belongs to an instruction that exists, every
+/// function ends in a `Return`, and the operand stack has one depth at
 /// every instruction control can reach: a join point arrived at with two
 /// different depths is a bug in the lowering, and finding it here is the
 /// difference between a failed test and a VM reading a value that is not
@@ -1648,6 +1747,14 @@ fn validate_function(program: &Program, id: FunctionId) -> Result<(), String> {
     }
     if !matches!(function.code.last(), Some(Inst::Return)) {
         return Err("does not end in a `return`".to_string());
+    }
+    for at in function.arg_spans.keys() {
+        if *at as usize >= function.code.len() {
+            return Err(format!(
+                "carries argument spans for instruction {at} of {}",
+                function.code.len()
+            ));
+        }
     }
 
     let length = function.code.len();
@@ -2403,6 +2510,40 @@ mod tests {
         );
     }
 
+    /// An assertion carries the spans of its arguments, and nothing else
+    /// does.
+    ///
+    /// A failing `assert` quotes the source text of its condition — that is
+    /// what makes it a builtin rather than a library function — and an
+    /// instruction's own span covers the whole call, so the argument's span
+    /// is recorded beside the instruction. A constructor quotes nothing, so
+    /// it carries nothing: a span no diagnostic reads would be a cost with
+    /// no reader.
+    #[test]
+    fn an_assertion_carries_the_spans_of_its_arguments() {
+        let source = "fn f() -> Result<Unit, Error> {\n  assertEqual(1 + 1, 3)?\n  Ok(())\n}\n";
+        let program = lower(&checked(source)).expect("it lowers");
+        validate(&program).expect("it holds the invariants");
+        let function = program.function(program.function_named("m", "f").expect("`f` is lowered"));
+        let made: Vec<usize> = function
+            .code
+            .iter()
+            .enumerate()
+            .filter(|(_, inst)| matches!(inst, Inst::MakeBuiltin { .. }))
+            .map(|(pc, _)| pc)
+            .collect();
+        let [assertion, constructor] = made[..] else {
+            panic!("the body builds the assertion and the `Ok`: {made:?}");
+        };
+        let quoted: Vec<&str> = function
+            .arg_spans_at(assertion)
+            .iter()
+            .map(|span| &source[span.start as usize..span.end as usize])
+            .collect();
+        assert_eq!(quoted, ["1 + 1", "3"]);
+        assert!(function.arg_spans_at(constructor).is_empty());
+    }
+
     /// `None` is the one builtin case written as a bare name rather than as
     /// a call, so it is the one that builds from no arguments.
     #[test]
@@ -2630,6 +2771,22 @@ mod tests {
                 "a call to `g` that does not supply one argument for every parameter",
                 "fn g(a: Int, b: Int = 2) -> Int {\n  a\n}\n\nfn f() -> Int {\n  g(1)\n}\n",
             ),
+            (
+                "assignment to `x`, which is a read-only place",
+                "fn f() -> Int {\n  let x = 1\n  x = 2\n  x\n}\n",
+            ),
+            (
+                "assignment to `n`, which is a read-only place",
+                "fn f(n: Int) -> Int {\n  n = 2\n  n\n}\n",
+            ),
+            (
+                "assignment to `p.x`, which is a read-only place",
+                "struct P {\n  x: Int\n}\n\nfn f() -> Int {\n  let p = P(x: 1)\n  p.x = 2\n  p.x\n}\n",
+            ),
+            (
+                "a call to `length`, which a builtin type and a declared type both have",
+                "struct Box {\n  n: Int\n}\n\nimpl Box {\n  fn length(self) -> Int {\n    self.n\n  }\n}\n\nfn f() -> Int {\n  [1, 2, 3].length()\n}\n",
+            ),
         ];
         for (what, source) in cases {
             assert_eq!(refused(source), what, "for:\n{source}");
@@ -2670,14 +2827,13 @@ mod tests {
         }
     }
 
-    /// The other two are stopped by one construct, and it is the same one:
-    /// `cursor.at += cursor.step`.
+    /// The other two lower through the instruction that writes a field, and
+    /// it is one construct they share: `cursor.at += cursor.step`.
     ///
-    /// Writing a field needs an instruction that writes a field, and the IR
-    /// has `GetField` and nothing on the other side. Rebuilding the struct
-    /// instead would need the receiver's type, which is exactly what a
-    /// lowering with no type table cannot name — so this is reported rather
-    /// than approximated.
+    /// [`crate::Inst::SetField`] is what they reach, so this asserts that
+    /// they reach it rather than only that they lowered — a lowering that
+    /// arrived at the same answer some other way would be a different
+    /// program with the same result.
     #[test]
     fn field_and_method_lower_through_a_written_field() {
         for name in ["field", "method"] {
@@ -2806,6 +2962,21 @@ mod tests {
         assert_eq!(
             validate(&program).expect_err("a missing return is refused"),
             "m.f: does not end in a `return`"
+        );
+    }
+
+    #[test]
+    fn validate_refuses_argument_spans_for_an_instruction_that_does_not_exist() {
+        let mut program = lower(&checked(
+            "fn f() -> Result<Unit, Error> {\n  assert(1 > 2)?\n  Ok(())\n}\n",
+        ))
+        .expect("it lowers");
+        let function = &mut program.functions[0];
+        let span = function.span;
+        function.arg_spans.insert(99, vec![span]);
+        assert_eq!(
+            validate(&program).expect_err("spans for no instruction are refused"),
+            "m.f: carries argument spans for instruction 99 of 9"
         );
     }
 

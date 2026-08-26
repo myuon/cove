@@ -57,7 +57,7 @@ use crate::value::{Closure, DynValue, EnumValue, RangeBounds, StructValue, Value
 /// frames, the number there bounds bytes, and neither may be changed without
 /// reading the other. See [`STACK_SIZE`] for the measured per-frame cost the
 /// two are derived from.
-const MAX_CALL_DEPTH: usize = 256;
+pub(crate) const MAX_CALL_DEPTH: usize = 256;
 
 /// The native stack one Cove frame costs, so that [`STACK_SIZE`] can be
 /// derived from [`MAX_CALL_DEPTH`] instead of chosen beside it.
@@ -738,10 +738,7 @@ impl<'a> Interpreter<'a> {
     /// The source text `span` covers, for a diagnostic that quotes the code
     /// it is about.
     fn source_text(&self, span: Span) -> &str {
-        let file = self.sources.get(span.file);
-        file.text
-            .get(span.start as usize..span.end as usize)
-            .unwrap_or("?")
+        source_text(self.sources, span)
     }
 
     /// An interpreter for the body of the spawned task `id`, which stops when
@@ -3368,7 +3365,12 @@ fn conformable(value: &Value) -> bool {
     matches!(value, Value::Struct(_) | Value::Enum(_))
 }
 
-fn binary(op: BinaryOp, lhs: Value, rhs: Value, span: Span) -> Result<Value, RuntimeError> {
+pub(crate) fn binary(
+    op: BinaryOp,
+    lhs: Value,
+    rhs: Value,
+    span: Span,
+) -> Result<Value, RuntimeError> {
     match op {
         BinaryOp::Eq | BinaryOp::Ne => {
             // Through the `dyn Trait` wrapper: a written `dyn Trait` is
@@ -3505,7 +3507,7 @@ fn binary(op: BinaryOp, lhs: Value, rhs: Value, span: Span) -> Result<Value, Run
     }
 }
 
-fn unary(op: UnaryOp, value: Value, span: Span) -> Result<Value, RuntimeError> {
+pub(crate) fn unary(op: UnaryOp, value: Value, span: Span) -> Result<Value, RuntimeError> {
     match (op, value) {
         (UnaryOp::Not, Value::Bool(value)) => Ok(Value::Bool(!value)),
         (UnaryOp::Neg, Value::Int(value)) => Ok(Value::Int(
@@ -4030,7 +4032,7 @@ impl Reentry for Callback<'_, '_> {
 ///
 /// The host that raised the flag reports what the bound was — `clock.timeout`
 /// says it timed out — so this message is only what the body itself can say.
-fn work_stopped(span: Span) -> RuntimeError {
+pub(crate) fn work_stopped(span: Span) -> RuntimeError {
     RuntimeError::new("this work was stopped before it finished")
         .at(span)
         .with_rule(
@@ -4154,11 +4156,23 @@ fn no_snapshot_conformance(value: &Value, span: Span) -> RuntimeError {
     )
 }
 
-fn no_field(type_name: &str, field: &str, span: Span) -> RuntimeError {
+/// The source text `span` covers, for a diagnostic that quotes the code it is
+/// about.
+///
+/// Both backends quote an assertion's condition, and both reach it through
+/// here, so neither can word it differently from the other.
+pub(crate) fn source_text(sources: &SourceMap, span: Span) -> &str {
+    let file = sources.get(span.file);
+    file.text
+        .get(span.start as usize..span.end as usize)
+        .unwrap_or("?")
+}
+
+pub(crate) fn no_field(type_name: &str, field: &str, span: Span) -> RuntimeError {
     RuntimeError::new(format!("`{type_name}` has no field `{field}`")).at(span)
 }
 
-fn not_a_struct(value: &Value, field: &str, span: Span) -> RuntimeError {
+pub(crate) fn not_a_struct(value: &Value, field: &str, span: Span) -> RuntimeError {
     RuntimeError::new(format!("`{}` has no field `{field}`", value.type_name()))
         .at(span)
         .with_rule("Only struct fields are places.")
