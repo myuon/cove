@@ -14,7 +14,9 @@ The project is currently in the design and MVP exploration stage. The initial
 design is recorded in [ADR 0001](docs/adr/0001-mvp-language-design.md).
 
 - [Philosophy](docs/PHILOSOPHY.md)
-- [Language Card](docs/LANGUAGE_CARD.md)
+- [Language Card](docs/LANGUAGE_CARD.md) — a one-page map of the language
+- [Language Reference](docs/LANGUAGE_REFERENCE.md) — one rule per expression
+  and pattern form, held to the implementation by a conformance suite
 - [Architecture decisions](docs/adr/) — each one carries its status, the pull
   request that implemented it, how much of it is built, and what has since
   amended or superseded it
@@ -32,7 +34,12 @@ implementation to give.
 ```console
 $ cd examples
 $ cove check
-checked 11 module(s), 11 file(s)
+note[cove::type::unconstrained_result]: `clock.timeout` declares its result `Result<Any, Error>`, so nothing here says what this call produced
+  --> examples/tasks/load.cove:20:18
+   |
+20 |     let result = clock.timeout(500ms) {
+   |                  ^^^^^^^^^^^^^^^^^^^^^^
+checked 11 module(s), 11 file(s), 1 note(s)
 $ cove run hello
 Hello, world!
 $ cove test
@@ -59,6 +66,19 @@ limit, and runtime budgets for fuel, deadlines, host calls, and concurrency
 with tracing. A Host API call is checked against the schema its operation
 declares at both ends: `cove check` checks its arguments where they are
 written, and the boundary checks them again, along with what the host answered.
+Where the checker does *not* know a type it says which kind of not-knowing it
+is. An operation whose schema declares its result `Any` is noted, as is a
+field declared the same way. Anything the language should have been told --
+an unannotated lambda parameter nothing expects, an empty array literal, an
+early `return` in a lambda nothing expects, a name nothing declares -- is a
+warning or an error rather than an unknown that quietly validates whatever
+follows. A clean `cove check` therefore means every type the package wrote
+down was checked, with two silences it names rather than hides: a host module
+no schema describes -- neither a shipped one nor one an embedder handed over
+-- which is warned about at the `use` that names it, and a builtin
+constructor's type parameter that nothing settles. A `--deny-warnings` run
+leaves only the notes, which name exactly what a schema, or the language,
+chose not to say.
 A host resource handle is a name for something the host owns -- a module, a
 resource kind, an identity number, and the task-safety its schema declares --
 never the resource itself, and every operation called on one goes through the
@@ -67,9 +87,13 @@ same schema check, the same budget charge, and the same trace; a handle whose
 resource has been closed reports a diagnostic rather than acting on whatever
 now occupies the slot. A host module may also declare plain-data types in a
 `TypeSchema`, which Cove source names and initializes with labels exactly like
-its own structs and enums. `Reentry` lets a host that was handed a Cove closure
-run it on the task that made the call, on that task's stack, against that run's
-budget, with no second thread and no scheduler. `cove trace` reads a recorded
+its own structs and enums. An embedding's own modules are checked the same
+way: `HostApi::module_schema` and `cove_sema::Compiler::with_host_schema`
+take one `ModuleSchema`, so registering a module and checking a program
+written against it read the same table rather than two descriptions that can
+drift. `Reentry` lets a host that was handed a Cove closure run it on the
+task that made the call, on that task's stack, against that run's budget,
+with no second thread and no scheduler. `cove trace` reads a recorded
 trace back and summarises it, and `cove replay` runs an entry again with every
 host answering from the trace -- reproducing a resource handle by handing back
 the recorded name -- and reports a divergence when the program asks for
@@ -128,7 +152,10 @@ actually execute in
 [ADR 0008](docs/adr/0008-concurrent-task-execution.md), which replaced ADR
 0003's sequential phase, and how a host hands out a resource handle and
 reenters a Cove closure in
-[ADR 0013](docs/adr/0013-host-resource-handles.md).
+[ADR 0013](docs/adr/0013-host-resource-handles.md), and how an embedding's own
+host modules become ones `cove check` can see in
+[ADR 0017](docs/adr/0017-embedder-host-api-schemas.md), which supersedes ADR
+0001's account of what a compiler cannot see.
 
 Syntax is still provisional and may change.
 
@@ -147,10 +174,10 @@ against the profile list on its own:
   see the tests in `crates/cove-runtime/src/host.rs` and
   `crates/cove-runtime/src/budget.rs`.
 - [x] **Embedded — MVP required.** A host outside `cove-runtime` can supply
-  its own capability implementation and its own limits, and see both a
-  successful run and a denial; see
-  `crates/cove-runtime/tests/embedding.rs`, which `cargo test --workspace`
-  (and CI) runs.
+  its own capability implementation and its own limits, see both a successful
+  run and a denial, and have `cove check` check a program against a module of
+  its own before running it; see `crates/cove-runtime/tests/embedding.rs`,
+  which `cargo test --workspace` (and CI) runs.
 - [ ] **Wasm — deferred.** No crate in this workspace builds for or runs on
   Wasm. For the MVP, Wasm is only a semantic-portability constraint on the
   language and backend design, not a working target; a production Wasm

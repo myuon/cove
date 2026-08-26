@@ -69,11 +69,10 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use cove_schema::builtins::RESULT;
-use cove_sema::Capability;
 
 use crate::error::RuntimeError;
 use crate::host::{HostApi, Reentry, ResourceHandle};
-use crate::schema::{ModuleSchema, OperationSchema, ResourceSchema, TypeSchema};
+use crate::schema::ModuleSchema;
 use crate::value::{EnumValue, StructValue, Value};
 
 /// How long the real host is willing to spend reading one whole request.
@@ -635,24 +634,8 @@ fn stale(handle: &ResourceHandle, op: &str) -> RuntimeError {
 }
 
 impl HostApi for Http {
-    fn name(&self) -> &str {
-        "http"
-    }
-
-    fn capability(&self) -> Capability {
-        Capability::new("http")
-    }
-
-    fn schema(&self) -> &[OperationSchema] {
-        SCHEMA.operations
-    }
-
-    fn types(&self) -> &[TypeSchema] {
-        SCHEMA.types
-    }
-
-    fn resources(&self) -> &[ResourceSchema] {
-        SCHEMA.resources
+    fn module_schema(&self) -> ModuleSchema {
+        SCHEMA
     }
 
     /// `fetch` is the one module-level operation that waits, so it is the one

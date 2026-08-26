@@ -18,6 +18,11 @@
   budget is removed", which retracts the memory limit this ADR lists under
   "Runtime resource control" below, leaving the collector's measurements as
   observability rather than an enforced bound
+- Superseded in part by
+  [ADR 0017](0017-embedder-host-api-schemas.md), which replaces this ADR's
+  account of which host modules a compiler can see: an embedder hands its own
+  `ModuleSchema` to the checker, so a module an embedding registers is no
+  longer one the compiler cannot see
 - Implemented by: [ADR 0002](0002-implementation-language-and-backend.md)
   through [ADR 0013](0013-host-resource-handles.md), each of which decides and
   builds a part of this one

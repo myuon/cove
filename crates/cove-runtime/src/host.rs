@@ -75,39 +75,82 @@ use crate::value::Value;
 /// documentation, so an embedder knows the run's deadline does not bound that
 /// call and can decide what to do about it. What is not acceptable is a host
 /// that blocks indefinitely and says nothing.
+///
+/// # Migrating from the five-accessor form
+///
+/// This trait used to ask a module to describe itself five times — `name()`,
+/// `capability()`, `schema()`, `types()`, and `resources()`. It asks once
+/// now, through [`HostApi::module_schema`], and the five are gone rather than
+/// defaulted: a defaulted accessor is an overridable one, and an overridable
+/// one is a second description of the module, which the checker and the
+/// boundary could then read differently. An implementation written against
+/// the old shape fails to compile with `not all trait items implemented`,
+/// which is the intended way to find out.
+///
+/// The migration is to delete all five and write the table they were reading
+/// from:
+///
+/// ```
+/// # use cove_runtime::error::RuntimeError;
+/// # use cove_runtime::host::HostApi;
+/// # use cove_runtime::schema::ModuleSchema;
+/// # use cove_runtime::value::Value;
+/// # struct Company;
+/// const COMPANY: ModuleSchema = ModuleSchema {
+///     name: "company",
+///     capability: "directory",
+///     operations: &[],
+///     types: &[],
+///     resources: &[],
+/// };
+///
+/// impl HostApi for Company {
+///     fn module_schema(&self) -> ModuleSchema {
+///         COMPANY
+///     }
+///
+///     fn call(&self, op: &str, args: Vec<Value>) -> Result<Value, RuntimeError> {
+///         # let _ = (op, args);
+///         // unchanged
+///         # Ok(Value::Unit)
+///     }
+/// }
+/// ```
+///
+/// `name` is the string `name()` returned, `capability` is the string behind
+/// the `Capability` `capability()` returned, and the three slices are what
+/// `schema()`, `types()`, and `resources()` returned. `call`, `call_with`,
+/// and `call_resource` are untouched.
+///
+/// The one thing that gets harder is a schema assembled at run time. The old
+/// accessors handed back borrows of `self`, so a host could keep a `String`
+/// and a `Vec<OperationSchema>` and return references into itself;
+/// [`ModuleSchema`] is `Copy` with `'static` contents, so a module whose
+/// shape comes from configuration or a manifest builds its table once, leaks
+/// it, and hands out the same copy. [`ModuleSchema`]'s own documentation
+/// spells that pattern out.
 pub trait HostApi: Send + Sync {
-    /// The name Cove source uses, such as `console`.
-    fn name(&self) -> &str;
-
-    /// The capability a host must grant for this module.
-    fn capability(&self) -> Capability;
-
-    /// The operations this module exposes, and everything the runtime needs
-    /// to know about each of them.
+    /// The whole of what this module declares about itself: the name Cove
+    /// source uses, the capability a host must grant for it, the operations
+    /// it exposes, the types it declares, and the kinds of resource it can
+    /// open.
     ///
-    /// The schema is the module's declaration of itself: a host cannot expose
-    /// an operation without saying what it takes, what it produces, what it
-    /// costs the outside world, and whether its result may cross a task
-    /// boundary.
-    fn schema(&self) -> &[OperationSchema];
-
-    /// The types this module declares, which Cove source may name and
-    /// initialize: `http.Method.Get`, `http.Route(method: ..., path: ...)`.
+    /// The schema is the module's declaration of itself: a host cannot
+    /// expose an operation without saying what it takes, what it produces,
+    /// what it costs the outside world, and whether its result may cross a
+    /// task boundary. The boundary holds every call to it, so an operation
+    /// arriving in `call` has already been checked against what is declared
+    /// here.
     ///
-    /// A host type is ordinary data. Declaring none, which is the default, is
-    /// what most modules do: `console` has nothing to say about types.
-    fn types(&self) -> &[TypeSchema] {
-        &[]
-    }
-
-    /// The kinds of resource this module can open, and what a handle to each
-    /// of them answers.
-    ///
-    /// Declaring none, which is the default, says that this module hands back
-    /// only values.
-    fn resources(&self) -> &[ResourceSchema] {
-        &[]
-    }
+    /// One table rather than five methods, because this exact value is also
+    /// what the *checker* reads: `cove_sema::Compiler::with_host_schema`
+    /// takes a [`ModuleSchema`], so the description a run enforces and the
+    /// description `cove check` checked a call against are the same bytes
+    /// for an embedder's module as they already are for a shipped one. This
+    /// is the only way to ask a module what it declares — there is nothing
+    /// else on this trait to override instead, so a module cannot describe
+    /// itself one way to the boundary and another way to the checker.
+    fn module_schema(&self) -> ModuleSchema;
 
     /// Invokes one operation.
     ///
@@ -157,7 +200,7 @@ pub trait HostApi: Send + Sync {
         let _ = (args, back);
         Err(RuntimeError::new(format!(
             "host module `{}` issues no resource handles, so `{}.{op}` cannot be called",
-            self.name(),
+            self.module_schema().name,
             handle.qualified_type()
         )))
     }
@@ -616,7 +659,7 @@ impl HostRegistry {
     }
 
     pub fn contains(&self, name: &str) -> bool {
-        self.modules.iter().any(|m| m.name() == name)
+        self.modules.iter().any(|m| m.module_schema().name == name)
     }
 
     /// Installs where trace events go. Replaces any sink installed earlier;
@@ -664,21 +707,58 @@ impl HostRegistry {
         self.irreversible_writes.load(Ordering::Relaxed)
     }
 
-    /// Looks up which host module exposes `op`, for unqualified `use` imports.
-    pub fn module_for_operation(&self, op: &str) -> Option<&str> {
+    /// The table every registered module declares itself with.
+    ///
+    /// This is the pairing the checker needs. An embedding registers its
+    /// hosts here and hands these same values to `cove_sema::Compiler`, so
+    /// the program is checked against the descriptions this registry is
+    /// about to enforce rather than against a second set written out beside
+    /// them:
+    ///
+    /// ```ignore
+    /// let program = Compiler::new()
+    ///     .with_host_schemas(hosts.module_schemas())
+    ///     .compile(&package)?;
+    /// ```
+    ///
+    /// A registry that has two modules registered under one name still
+    /// dispatches a call to only one of them: every lookup below that finds
+    /// a module by name — `contains`, `schema_for`, `host_type`, `call`,
+    /// `call_with`, `call_resource`, `module_for_operation` — takes the
+    /// first one registered. So this keeps only the first schema registered
+    /// under each name too, rather than handing the checker a second
+    /// description of a module the runtime will never reach through: the
+    /// list it hands back describes exactly what this registry dispatches
+    /// to, not everything that was ever registered.
+    pub fn module_schemas(&self) -> Vec<ModuleSchema> {
+        let mut seen = BTreeSet::new();
         self.modules
             .iter()
-            .find(|m| m.schema().iter().any(|entry| entry.name == op))
-            .map(|m| m.name())
+            .map(|module| module.module_schema())
+            .filter(|schema| seen.insert(schema.name))
+            .collect()
+    }
+
+    /// Looks up which host module exposes `op`, for unqualified `use` imports.
+    pub fn module_for_operation(&self, op: &str) -> Option<&'static str> {
+        self.modules.iter().find_map(|m| {
+            let schema = m.module_schema();
+            schema
+                .operations
+                .iter()
+                .any(|entry| entry.name == op)
+                .then_some(schema.name)
+        })
     }
 
     /// The schema of one operation, if the module and the operation both
     /// exist.
-    pub fn schema_for(&self, module: &str, op: &str) -> Option<&OperationSchema> {
+    pub fn schema_for(&self, module: &str, op: &str) -> Option<&'static OperationSchema> {
         self.modules
             .iter()
-            .find(|m| m.name() == module)?
-            .schema()
+            .find(|m| m.module_schema().name == module)?
+            .module_schema()
+            .operations
             .iter()
             .find(|entry| entry.name == op)
     }
@@ -691,8 +771,9 @@ impl HostRegistry {
     pub fn host_type(&self, module: &str, name: &str) -> Option<TypeSchema> {
         self.modules
             .iter()
-            .find(|m| m.name() == module)?
-            .types()
+            .find(|m| m.module_schema().name == module)?
+            .module_schema()
+            .types
             .iter()
             .find(|declared| declared.name == name)
             .copied()
@@ -747,12 +828,17 @@ impl HostRegistry {
         back: &mut dyn Reentry,
     ) -> Result<Value, RuntimeError> {
         let task = back.task();
-        let Some(entry) = self.modules.iter().find(|m| m.name() == module) else {
+        let Some(entry) = self
+            .modules
+            .iter()
+            .find(|m| m.module_schema().name == module)
+        else {
             return Err(RuntimeError::new(format!("unknown host module `{module}`"))
                 .with_outcome(RunOutcome::HostBoundary));
         };
-        let declared = entry
-            .schema()
+        let schema = entry.module_schema();
+        let declared = schema
+            .operations
             .iter()
             .find(|entry| entry.name == op)
             .copied();
@@ -761,15 +847,15 @@ impl HostRegistry {
         // call into an ungranted module is still reported as ungranted rather
         // than as a misspelling.
         let capability = match &declared {
-            Some(schema) => Capability::new(schema.capability),
-            None => entry.capability(),
+            Some(op_schema) => Capability::new(op_schema.capability),
+            None => Capability::new(schema.capability),
         };
         let callee = Callee {
             module: module.to_string(),
             op: op.to_string(),
             receiver: None,
             owner: format!("host module `{module}`"),
-            known: entry.schema().iter().map(|e| e.name).collect(),
+            known: schema.operations.iter().map(|e| e.name).collect(),
         };
         self.dispatch(task, &callee, declared, capability, args, |args| {
             entry.call_with(op, args, back)
@@ -793,7 +879,11 @@ impl HostRegistry {
     ) -> Result<Value, RuntimeError> {
         let task = back.task();
         let qualified = handle.qualified_type();
-        let Some(entry) = self.modules.iter().find(|m| m.name() == handle.module) else {
+        let Some(entry) = self
+            .modules
+            .iter()
+            .find(|m| m.module_schema().name == handle.module)
+        else {
             return Err(
                 RuntimeError::new(format!("unknown host module `{}`", handle.module))
                     .with_help(format!(
@@ -802,8 +892,9 @@ impl HostRegistry {
                     .with_outcome(RunOutcome::HostBoundary),
             );
         };
-        let Some(resource) = entry
-            .resources()
+        let schema = entry.module_schema();
+        let Some(resource) = schema
+            .resources
             .iter()
             .find(|resource| resource.name == handle.type_name)
         else {
@@ -815,8 +906,8 @@ impl HostRegistry {
         };
         let declared = resource.operation(op).copied();
         let capability = match &declared {
-            Some(schema) => Capability::new(schema.capability),
-            None => entry.capability(),
+            Some(op_schema) => Capability::new(op_schema.capability),
+            None => Capability::new(schema.capability),
         };
         let callee = Callee {
             module: handle.module.clone(),
@@ -1095,16 +1186,8 @@ impl<W: Write + Send> Console<W> {
 }
 
 impl<W: Write + Send> HostApi for Console<W> {
-    fn name(&self) -> &str {
-        "console"
-    }
-
-    fn capability(&self) -> Capability {
-        Capability::new("console")
-    }
-
-    fn schema(&self) -> &[OperationSchema] {
-        CONSOLE_SCHEMA.operations
+    fn module_schema(&self) -> ModuleSchema {
+        CONSOLE_SCHEMA
     }
 
     fn call(&self, op: &str, args: Vec<Value>) -> Result<Value, RuntimeError> {
@@ -1156,16 +1239,8 @@ impl Env {
 }
 
 impl HostApi for Env {
-    fn name(&self) -> &str {
-        "env"
-    }
-
-    fn capability(&self) -> Capability {
-        Capability::new("env")
-    }
-
-    fn schema(&self) -> &[OperationSchema] {
-        ENV_SCHEMA.operations
+    fn module_schema(&self) -> ModuleSchema {
+        ENV_SCHEMA
     }
 
     fn call(&self, op: &str, args: Vec<Value>) -> Result<Value, RuntimeError> {
@@ -1252,16 +1327,8 @@ fn is_plain_document_name(name: &str) -> bool {
 }
 
 impl HostApi for Documents {
-    fn name(&self) -> &str {
-        "documents"
-    }
-
-    fn capability(&self) -> Capability {
-        Capability::new("documents")
-    }
-
-    fn schema(&self) -> &[OperationSchema] {
-        DOCUMENTS_SCHEMA.operations
+    fn module_schema(&self) -> ModuleSchema {
+        DOCUMENTS_SCHEMA
     }
 
     fn call(&self, op: &str, args: Vec<Value>) -> Result<Value, RuntimeError> {
@@ -1734,6 +1801,95 @@ mod tests {
         assert_eq!(hosts.result_is_task_safe("network", "read"), None);
     }
 
+    /// A host used only to give two modules the same name, so
+    /// [`module_schemas_describes_the_module_dispatch_will_actually_reach`]
+    /// can tell which one a lookup actually reached: its answer to `ping` is
+    /// baked in rather than computed, so the test reads it off the return
+    /// value instead of having to ask the host anything more.
+    struct DuplicateNamed {
+        schema: ModuleSchema,
+        answer: &'static str,
+    }
+
+    impl HostApi for DuplicateNamed {
+        fn module_schema(&self) -> ModuleSchema {
+            self.schema
+        }
+
+        fn call(&self, _op: &str, _args: Vec<Value>) -> Result<Value, RuntimeError> {
+            Ok(Value::Str(self.answer.into()))
+        }
+    }
+
+    static DUPLICATE_FIRST_OPERATIONS: &[OperationSchema] = &[OperationSchema {
+        name: "ping",
+        params: &[],
+        variadic: false,
+        result: HostType::String,
+        capability: "duplicate-first",
+        effect: Effect::Read,
+        cancellable: false,
+        recordable: true,
+        result_is_task_safe: true,
+    }];
+
+    static DUPLICATE_FIRST: ModuleSchema = ModuleSchema {
+        name: "duplicate",
+        capability: "duplicate-first",
+        operations: DUPLICATE_FIRST_OPERATIONS,
+        types: &[],
+        resources: &[],
+    };
+
+    static DUPLICATE_SECOND_OPERATIONS: &[OperationSchema] = &[OperationSchema {
+        name: "ping",
+        params: &[],
+        variadic: false,
+        result: HostType::String,
+        capability: "duplicate-second",
+        effect: Effect::Read,
+        cancellable: false,
+        recordable: true,
+        result_is_task_safe: true,
+    }];
+
+    static DUPLICATE_SECOND: ModuleSchema = ModuleSchema {
+        name: "duplicate",
+        capability: "duplicate-second",
+        operations: DUPLICATE_SECOND_OPERATIONS,
+        types: &[],
+        resources: &[],
+    };
+
+    /// [`HostRegistry::module_schemas`] hands the checker one schema per
+    /// name, and every dispatch method resolves a duplicate name by taking
+    /// the first module registered under it — so the schema this hands out
+    /// for a duplicated name had better be the first module's, the same one
+    /// [`HostRegistry::call`] reaches, or the checker would be checking a
+    /// call against a module the runtime never dispatches to.
+    #[test]
+    fn module_schemas_describes_the_module_dispatch_will_actually_reach() {
+        let mut hosts = HostRegistry::new(Grants::new(["duplicate-first", "duplicate-second"]));
+        hosts.register(Box::new(DuplicateNamed {
+            schema: DUPLICATE_FIRST,
+            answer: "first",
+        }));
+        hosts.register(Box::new(DuplicateNamed {
+            schema: DUPLICATE_SECOND,
+            answer: "second",
+        }));
+
+        assert_eq!(hosts.module_schemas(), vec![DUPLICATE_FIRST]);
+
+        match hosts
+            .call("duplicate", "ping", Vec::new())
+            .expect("the call should be allowed")
+        {
+            Value::Str(text) => assert_eq!(&*text, "first"),
+            other => panic!("expected a Str, found {other:?}"),
+        }
+    }
+
     /// Every module a run registers declares itself out of
     /// [`cove_schema::hosts::SHIPPED`] rather than out of a table of its own.
     ///
@@ -1745,6 +1901,13 @@ mod tests {
     /// compiler's list of host modules with no diagnostic anywhere. A test
     /// used to compare the two lists; there is one list now, and this is what
     /// keeps it one.
+    ///
+    /// A module agreeing with the table in isolation is not the same claim
+    /// as a registry holding every shipped module agreeing with it too, so
+    /// this also registers all eight and checks the registry's own dispatch
+    /// tables — `contains`, `schema_for`, `host_type` — against the same
+    /// table, the way [`HostRegistry::call`] and [`HostRegistry::call_with`]
+    /// read them.
     #[test]
     fn every_module_a_run_registers_declares_itself_out_of_the_shared_schema() {
         let modules: Vec<Box<dyn HostApi>> = vec![
@@ -1764,16 +1927,33 @@ mod tests {
             "a module the schema describes is one a run registers, and the reverse"
         );
         for (module, declared) in modules.iter().zip(shipped_schema()) {
-            assert_eq!(module.name(), declared.name);
-            assert_eq!(module.capability().as_str(), declared.capability);
-            assert_eq!(module.schema(), declared.operations, "`{}`", declared.name);
-            assert_eq!(module.types(), declared.types, "`{}`", declared.name);
-            assert_eq!(
-                module.resources(),
-                declared.resources,
-                "`{}`",
-                declared.name
-            );
+            assert_eq!(&module.module_schema(), declared, "`{}`", declared.name);
+        }
+
+        let mut hosts = HostRegistry::new(Grants::new(Vec::<String>::new()));
+        for module in modules {
+            hosts.register(module);
+        }
+        for declared in shipped_schema() {
+            assert!(hosts.contains(declared.name), "`{}`", declared.name);
+            for op in declared.operations {
+                assert_eq!(
+                    hosts.schema_for(declared.name, op.name),
+                    Some(op),
+                    "`{}.{}`",
+                    declared.name,
+                    op.name
+                );
+            }
+            for ty in declared.types {
+                assert_eq!(
+                    hosts.host_type(declared.name, ty.name),
+                    Some(*ty),
+                    "`{}.{}`",
+                    declared.name,
+                    ty.name
+                );
+            }
         }
     }
 
@@ -2016,21 +2196,19 @@ mod tests {
         }
     }
 
+    /// The module this test host declares itself with, which is the one
+    /// the registry holds it to.
+    const WAYWARD: ModuleSchema = ModuleSchema {
+        name: "wayward",
+        capability: "wayward",
+        operations: WAYWARD_SCHEMA,
+        types: &[],
+        resources: WAYWARD_RESOURCES,
+    };
+
     impl HostApi for Wayward {
-        fn name(&self) -> &str {
-            "wayward"
-        }
-
-        fn capability(&self) -> Capability {
-            Capability::new("wayward")
-        }
-
-        fn schema(&self) -> &[OperationSchema] {
-            WAYWARD_SCHEMA
-        }
-
-        fn resources(&self) -> &[ResourceSchema] {
-            WAYWARD_RESOURCES
+        fn module_schema(&self) -> ModuleSchema {
+            WAYWARD
         }
 
         fn call(&self, op: &str, _args: Vec<Value>) -> Result<Value, RuntimeError> {
