@@ -276,6 +276,10 @@ pub struct Program {
     pub modules: BTreeMap<String, ResolvedModule>,
     /// Non-fatal diagnostics, such as missing doc comments on exported
     /// declarations.
+    ///
+    /// The type checker's warnings and notes join these, so a caller that
+    /// reports them counts the two apart: only a warning is a doubt
+    /// `--deny-warnings` acts on.
     pub warnings: Vec<Diagnostic>,
     /// The package's call graph: for each declaration, every declaration it
     /// may call, and how precisely the call site named it.

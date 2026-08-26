@@ -5,14 +5,16 @@
 - Amended by: [ADR 0005](0005-module-to-module-imports.md), which gave the
   checker the import environment "Checking is per-module" said it would need,
   [ADR 0006](0006-traits-and-dispatch.md), which turned "parametric and
-  unbounded" into parametric with bounds, and this ADR's own three amendments
+  unbounded" into parametric with bounds, and this ADR's own four amendments
   below — "Amendment (2026-08-25): one builtin table", which unmirrors the
   builtin method table "What is not checked yet" recorded,
   "Amendment (2026-08-25): the builtins that are called on nothing", which
-  unmirrors the three lists the first one left, and
+  unmirrors the three lists the first one left,
   "Amendment (2026-08-25): what a builtin type is made of", which unmirrors
   the builtin enums' cases and declares the builtin structs' fields, closing
-  the sequence
+  that sequence, and "Amendment (2026-08-26): four kinds of unknown", which
+  splits `Ty::Unknown`'s two jobs into four and decides what each one costs a
+  reader of `cove check`
 - Amends: [ADR 0001](0001-mvp-language-design.md)'s account of the builtin
   `Error`, which the third amendment settles as a struct carrying a `message`
   a program may read
@@ -23,7 +25,8 @@
   is now shorter than it was: the checker reads the Host API schema (#44), the
   builtin table it used to mirror (#49), the constructors, assertions, and
   sequence names it mirrored after that (#50), and the builtin enums' cases
-  and structs' fields (#53)
+  and structs' fields (#53). What remains of it is classified rather than
+  merely listed, by the fourth amendment (#76)
 
 ## Context
 
@@ -182,7 +185,9 @@ bounds, becomes `Unknown` too, because a type carrying no constraint and *the
 checker does not know* are the same thing at a call site. And a host
 resource's declared task-safety is enforced by the runtime alone; no shipped
 resource declares itself unsafe to cross a task boundary, so there is nothing
-to check yet.
+to check yet. The fourth amendment revisits the first two of those three: they
+are not the same kind of not-knowing, and saying so is what makes them
+readable in `cove check`.
 
 "Annotations are mandatory at boundaries" used to have a second exception,
 worth recording now that it is closed: a declaration's parameter could omit
@@ -367,3 +372,97 @@ the sequence [#48](https://github.com/myuon/cove/issues/48),
 [#49](https://github.com/myuon/cove/issues/49),
 [#50](https://github.com/myuon/cove/issues/50), and
 [#53](https://github.com/myuon/cove/issues/53) was working toward.
+
+## Amendment (2026-08-26): four kinds of unknown
+
+`Ty::Unknown` was one variant doing two jobs. It suppressed cascades after a
+reported error, and it stood for everything the checker deliberately did not
+know: a host module with no schema, a schema's `HostType::Any`, a capitalized
+name nothing declares, a type written where a value belongs, a lambda
+parameter with no expected type, a lambda's early `return`. Because all of
+them compared equal to every type, a successful `cove check` could not be read:
+it might mean the package was proved, or it might mean an unknown had spread
+far enough to validate whatever was written after it.
+[Issue #76](https://github.com/myuon/cove/issues/76) asks for the inventory
+and the split. This is it.
+
+**Four kinds, and the kind decides what the reader is told.** Every place the
+pass produces an unknown now names its kind by which constructor it calls:
+`Ty::recovery`, `Ty::dynamic_boundary`, `Ty::unconstrained`, or — for the few
+internal positions the surrounding form settles before anything reads them —
+`Ty::placeholder`. A *language gap* has no constructor at all, which is the
+point: it is reported, not produced.
+
+| kind | what it means | `cove check` |
+|------|---------------|--------------|
+| recovery | everything there was to say was said, here or upstream | silent |
+| dynamic boundary | a host this build ships no schema for | warning |
+| unconstrained API | a shipped schema's `HostType::Any` | note |
+| language gap | information the checker should have been given | warning or error |
+
+**Recovery is defined by its silence.** It covers both "the diagnostic is a
+few lines above" and "the unknown being propagated was classified where it
+arose", because the rule it enforces is the same one in both cases: add
+nothing. One mistake is one diagnostic however far its unknown travels, which
+`a_recovery_unknown_is_reported_once_however_far_it_spreads` pins.
+
+**A dynamic boundary is a fact about the build, so it warns.** A call into an
+unshipped host module used to be silent; it warns now
+(`cove::type::unchecked_host_call`), as a type from one already did
+(`cove::type::host_type`). Every such abstention goes through one function,
+`host_schema`, which answers from `cove_schema`'s shipped table alone. That is
+deliberately the only seam: giving the checker schemas an embedder registered
+— [issue #74](https://github.com/myuon/cove/issues/74) — is a matter of
+answering from that table too, and every warning here becomes an ordinary
+check without another line of this pass changing.
+
+**`HostType::Any` is a promise, so it is a note.** The promise is worth
+stating exactly, because the two ends of a signature are not symmetric. In a
+*parameter*, `Any` says every value is accepted: no argument is a mistake,
+neither the compiler nor the boundary rejects one, and nothing is given up
+because there was no constraint to check. In a *result*, it says the operation
+may answer with a value of any type — and from that call onwards the program
+holds a value no schema described, so a field read off it, a call made on it,
+or a place it is stored into is checked at run time and by nothing before it.
+The call is noted (`cove::type::unconstrained_result`), naming the schema's own
+signature. A note and not a warning: a schema declaring `Any` is a design
+decision, not a fault in the program calling it, so no strictness setting
+should be able to fail on one. `cove-diag` gains `Severity::Note` for exactly
+this, and `cove check` counts notes apart from warnings; `--deny-warnings`
+acts on warnings only.
+
+**A language gap is reported.** Each of these used to pass silently:
+
+- a name nothing in scope explains is an error, whatever its case. A
+  capitalized one used to be assumed to come from a host and warn — but a host
+  reaches a module through `use` like everything else, so the assumption named
+  no real way for the name to arrive and only let an unknown through;
+- a type, a module, or a host operation written where a value belongs is an
+  error (`cove::type::not_a_value`). `Vector` in `Vector.of(1, 2)` is
+  understood as part of the call; a bare `Vector`, `console`, or `Counter` is
+  not a form with a type in this system, and never was;
+- an early `return` in a function value nothing expects is an error
+  (`cove::type::lambda_return`). Such a lambda takes its result from its
+  body's value, so a `return` produces one where the body's value is not, and
+  nothing written says what the two must agree on. A function value the place
+  holding it types is unaffected, which is the correction the diagnostic
+  offers. A lambda the checker has *already* abstained about — the block
+  `clock.timeout` bounds, whose type the schema declared `Any` — is not
+  reported twice;
+- an unannotated lambda parameter, an empty array literal, and a bare `None`,
+  each where nothing in particular is expected, warn
+  (`cove::type::unconstrained`). Warnings rather than errors, because the
+  value is still usable, the operations that do not depend on the missing type
+  are still checked, and writing the type is always available.
+
+**What a clean check now guarantees**, which is the sentence the whole change
+exists to make true: `cove check` reporting nothing means every type in the
+package was proved. A run whose only output is notes means the same except at
+the calls the notes name. A run with warnings means the package either reaches
+a host this build cannot see or left something to infer that nothing written
+settles — and `--deny-warnings` is exactly the request that neither happened.
+
+Four of the repository's own programs turned out to be leaning on a gap and
+now say what they meant: a handler array in `examples/callbacks`, and an empty
+array, an `Option`, and a closure parameter in `tests/e2e`. That is the
+amendment paying for itself on the day it landed.

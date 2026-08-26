@@ -244,3 +244,11 @@ cove generate  run explicit, capability-controlled code generation
 
 Compiler errors should state the Cove rule, point to the relevant source, and
 show a textual correction when one is unambiguous.
+
+A diagnostic is an error, a warning, or a note. An error is a program the
+toolchain refuses. A warning is one it accepts and doubts, which
+`cove check --deny-warnings` refuses instead. A note is one it accepts and
+does not doubt: it names something the compiler deliberately did not prove —
+a Host API result whose schema declares `Any`, above all — so no strictness
+setting turns one into a failure. A `cove check` that reports nothing has
+proved every type in the package.

@@ -131,7 +131,7 @@ async fn retry<T>(
 
 /// Builds immutable subscriptions with scoped temporary mutation.
 fn buildEvents() -> EventBus {
-  let handlers = [
+  let handlers: Array<EventHandler> = [
     async fn(event) {
       console.println("event: {event}")?
       Ok(())
