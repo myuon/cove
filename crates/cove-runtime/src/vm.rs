@@ -52,13 +52,14 @@ use cove_syntax::ast::{BinaryOp, UnaryOp};
 use crate::budget::{Cancellation, Stopped};
 use crate::builtins::{self, Callable};
 use crate::error::RuntimeError;
-use crate::heap::Heap;
+use crate::heap::{Heap, HeapStats};
 use crate::host::{HostRegistry, Reentry};
 use crate::interp::{
-    binary, no_field, not_a_struct, source_text, unary, work_stopped, MAX_CALL_DEPTH,
+    binary, no_field, not_a_struct, returned_error_message, source_text, unary, work_stopped,
+    MAX_CALL_DEPTH,
 };
 use crate::runtime::{Runtime, ENTRY_TASK};
-use crate::trace::{Timing, TraceEvent};
+use crate::trace::{RunOutcome, Timing, TraceEvent};
 use crate::value::{StructValue, Value};
 
 /// Fuel charged for executing one instruction.
@@ -242,6 +243,92 @@ impl<'a> Vm<'a> {
             wait: timing.wait(),
         });
         outcome
+    }
+
+    /// Runs the entry `module.name` on the VM, handing it the process
+    /// arguments, and reports how the run ended.
+    ///
+    /// This is the seam a backend is chosen at.
+    /// [`crate::interp::Interpreter::run_entry`] takes the same three things
+    /// and answers the same way, so selecting a backend selects which of the
+    /// two to build and decides nothing else. Issue #111 gates the VM's
+    /// adoption on the two agreeing, and two answers reached through
+    /// differently shaped calls would be comparing the calls as well.
+    ///
+    /// A program the lowering refused never reaches here — ADR 0019's rule is
+    /// that a VM run fails before any side effect — so the only entry this
+    /// cannot find is one the caller named and the lowering did not emit.
+    pub fn run_entry(
+        &mut self,
+        module: &str,
+        name: &str,
+        args: Vec<Rc<str>>,
+    ) -> Result<Value, RuntimeError> {
+        let outcome = self.invoke_entry(module, name, args);
+        let (classification, message) = match &outcome {
+            // Cove's entry returns `Result<Unit, Error>`, so an `Err` is the
+            // program saying what it was written to say, exactly as it is on
+            // the interpreter: a failure of the program's work rather than of
+            // the run.
+            Ok(value) if value.is_err() => (RunOutcome::Error, returned_error_message(value)),
+            Ok(_) => (RunOutcome::Success, None),
+            Err(error) => (error.outcome, Some(error.message.clone())),
+        };
+        self.runtime.trace(TraceEvent::RunEnded {
+            outcome: classification,
+            message,
+        });
+        outcome
+    }
+
+    /// The entry itself: finding it, and turning the process arguments into
+    /// the one value it may take.
+    ///
+    /// What an entry may declare is the language's rule and not a backend's,
+    /// so the shape checked here and the words it is refused in are
+    /// [`crate::interp::Interpreter`]'s.
+    fn invoke_entry(
+        &mut self,
+        module: &str,
+        name: &str,
+        args: Vec<Rc<str>>,
+    ) -> Result<Value, RuntimeError> {
+        let id = self.program.function_named(module, name).ok_or_else(|| {
+            RuntimeError::new(format!("this package does not declare `{module}.{name}`"))
+        })?;
+        let entry = self.program.function(id);
+        let arguments = match entry.arity {
+            0 => Vec::new(),
+            1 => vec![Value::Array(args.into_iter().map(Value::Str).collect())],
+            other => {
+                return Err(RuntimeError::new(format!(
+                    "entry `{module}.{name}` declares {other} parameters"
+                ))
+                .at(entry.span)
+                .with_rule(
+                    "An entry function takes either no parameters or one `Array<String>` of process arguments.",
+                )
+                .with_help(format!(
+                    "write `fn {name}()` or `fn {name}(args: Array<String>)`"
+                )));
+            }
+        };
+        self.run(id, arguments)
+    }
+
+    /// What this run allocated, and what the rest of the run allocated
+    /// beside it.
+    ///
+    /// Read exactly as [`crate::interp::Interpreter::heap_stats`] reads it:
+    /// the totals are the runtime's, because every retired task folded its
+    /// own into them, and the live figures are this VM's, because its heap
+    /// has not been retired yet.
+    pub fn heap_stats(&self) -> HeapStats {
+        let mut stats = self.runtime.heap_stats();
+        let mine = self.heap.stats();
+        stats.live_bytes = mine.live_bytes;
+        stats.live_objects = mine.live_objects;
+        stats
     }
 
     /// Where the most recent failed assertion was written, together with the
@@ -973,7 +1060,7 @@ mod tests {
     use super::*;
     use std::collections::BTreeMap;
     use std::io::Write;
-    use std::path::{Path, PathBuf};
+    use std::path::PathBuf;
     use std::sync::{Arc, Mutex};
 
     use cove_diag::SourceMap;
@@ -1860,90 +1947,15 @@ mod tests {
     }
 
     // -------------------------------------------------------- benchmarks
-
-    /// The `benches/` package with only the module `name` kept.
-    fn bench(name: &str) -> (Arc<SourceMap>, Arc<Checked>) {
-        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../benches");
-        let mut sources = SourceMap::new();
-        let mut package = match cove_sema::package::load(&root, &mut sources) {
-            Ok(package) => package,
-            Err(items) => panic!("the benches package loads:\n{}", rendered(&sources, &items)),
-        };
-        let module = package
-            .modules
-            .remove(name)
-            .unwrap_or_else(|| panic!("`benches/{name}` is a module of the package"));
-        package.modules = BTreeMap::from([(name.to_string(), module)]);
-        match cove_sema::resolve::resolve(&package) {
-            Ok(program) => (Arc::new(sources), Arc::new(program)),
-            Err(items) => panic!(
-                "the benches package checks:\n{}",
-                rendered(&sources, &items)
-            ),
-        }
-    }
-
-    /// ADR 0012's benchmark entry `name`, run on both backends.
-    ///
-    /// One test per entry rather than one loop over all eight, so a failure
-    /// names the entry and so the eight run beside each other rather than one
-    /// after another.
-    fn bench_agrees(name: &str) {
-        let (sources, checked) = bench(name);
-        let (interpreted, lowered) = on_both(&checked, &sources, name, None);
-        assert_eq!(
-            format!("{:?}", interpreted.answer),
-            format!("{:?}", lowered.answer),
-            "`benches/{name}` answered differently"
-        );
-        assert_eq!(
-            interpreted.output, lowered.output,
-            "`benches/{name}` printed differently"
-        );
-        assert_eq!(
-            lowered.value(),
-            "Enum(EnumValue { type_name: \"Result\", case: \"Ok\", payload: [Unit] })",
-            "`benches/{name}` answers `Ok(())`"
-        );
-    }
-
-    #[test]
-    fn bench_pure_agrees() {
-        bench_agrees("pure");
-    }
-
-    #[test]
-    fn bench_hostheavy_agrees() {
-        bench_agrees("hostheavy");
-    }
-
-    #[test]
-    fn bench_arith_agrees() {
-        bench_agrees("arith");
-    }
-
-    #[test]
-    fn bench_arrayget_agrees() {
-        bench_agrees("arrayget");
-    }
-
-    #[test]
-    fn bench_field_agrees() {
-        bench_agrees("field");
-    }
-
-    #[test]
-    fn bench_method_agrees() {
-        bench_agrees("method");
-    }
-
-    #[test]
-    fn bench_call_agrees() {
-        bench_agrees("call");
-    }
-
-    #[test]
-    fn bench_chars_agrees() {
-        bench_agrees("chars");
-    }
+    //
+    // The `benches/` entries used to be checked here, one agreement test
+    // each. `crates/cove-cli/tests/differential.rs` now runs the whole corpus
+    // — every `tests/e2e` case and every `examples/` and `benches/` entry —
+    // through both backends and compares the value, the console, the outcome,
+    // and the filesystem the run left, so these were the same ground covered
+    // less thoroughly and twice, at half a minute of every `cargo test`.
+    //
+    // What stays here is what is about the VM itself rather than about the two
+    // backends agreeing: one instruction, one construct, one refusal at a
+    // time.
 }

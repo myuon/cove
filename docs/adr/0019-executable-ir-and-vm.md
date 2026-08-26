@@ -8,8 +8,16 @@
   ADR leans on it: the ranking of the specification above the oracle above a
   backend is what makes a second backend safe to have, and the five gates are
   untouched
-- Implemented by: PR #PLACEHOLDER
-- Implementation status: in progress — see "What is built and what is not"
+- Implemented by: [PR #114](https://github.com/myuon/cove/pull/114)
+- Implementation status: the architecture is built and the VM is not yet the
+  default. `crates/cove-ir` lowers and validates; `cove_runtime::vm` executes;
+  `cove run --backend vm` selects it; and
+  `crates/cove-cli/tests/differential.rs` runs the whole corpus through both
+  backends. Of 119 cases, 43 lower and agree on both, 51 are refused by name,
+  and 25 do not check, so there is nothing to run. The refusals are the
+  roadmap, and the harness prints them grouped by construct.
+  [Issue #111](https://github.com/myuon/cove/issues/111) is the gate that would
+  make the VM the default, and it has not been passed
 
 ## Context
 
@@ -153,6 +161,41 @@ Until #111 passes, the interpreter is the default backend and the VM is
 selected explicitly. A construct the IR does not yet cover is named as
 unsupported at lowering time, which is what lets the VM grow one construct at a
 time without ever being wrong about what it ran.
+
+### What it bought, on what it can run
+
+Mean wall time over the `benches/` package, both backends, same machine:
+
+| benchmark | AST | VM | |
+| --- | ---: | ---: | ---: |
+| `pure` — nothing but calls | 16.43 ms | 4.11 ms | **4.0×** |
+| `call` — a call per iteration | 1,598 ms | 590 ms | **2.71×** |
+| `method` — a call around a field | 2,871 ms | 1,238 ms | **2.32×** |
+| `chars` — a per-character scan | 1,869 ms | 1,020 ms | 1.83× |
+| `arrayget` — an indexed read | 1,448 ms | 980 ms | 1.48× |
+| `arith` — the loop alone | 451 ms | 380 ms | 1.19× |
+| `hostheavy` — Host dispatch | 4.86 ms | 4.08 ms | 1.19× |
+| `field` — a struct field | 864 ms | 800 ms | 1.08× |
+
+The order is the argument. What improves most is what is most about calling —
+`pure` is almost nothing but calls, and it is four times faster — and what
+improves least is what a call barely touches. That is the prediction this ADR
+made from #104's measurements, and it is the shape that came back.
+
+Lowering the whole package is 50 µs, four orders of magnitude below any
+execution figure, which is why lowering is allowed to be slow and is not.
+
+What it cannot run is the other half of the number. Of a 119-case corpus, 43
+lower and agree; 51 are refused by name, most often for an associated function
+of a builtin type, a `match`, a closure, or a task scope. That list is the
+roadmap, and it is printed by the differential harness rather than kept
+anywhere it could go stale.
+
+One thing the refusals are not is per-entry.
+[Issue #115](https://github.com/myuon/cove/issues/115) records it: the unit
+being lowered is the package and the unit being run is an entry, so one closure
+anywhere refuses every program in that package. Refusing is right and its scope
+is wrong.
 
 ## Alternatives considered
 

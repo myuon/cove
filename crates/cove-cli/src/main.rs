@@ -7,12 +7,13 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::rc::Rc;
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use cove_diag::{render, Diagnostic, SourceMap, Span};
 use cove_runtime::embed::{register_hosts, HostSetup};
 use cove_runtime::host::HostRegistry;
 use cove_runtime::interp::Interpreter;
+use cove_runtime::vm::Vm;
 use cove_runtime::{
     create_trace_file, Budget, Cancellation, HeapStats, JsonlSink, Limits, NullSink, Runtime,
     TraceEvent, TraceHeader, TraceSink, ValueCapture,
@@ -74,6 +75,13 @@ limits are the ones `[run.<name>]` recorded when it was built, and a
 and this toolchain's own source, because an executable has to link the
 runtime; `cove build --help` says so in full, and ADR 0009 says why.
 
+`cove run --backend vm` runs the entry on the dedicated VM of ADR 0019
+instead of the tree-walking interpreter. The interpreter is the default and
+the oracle; the VM cannot run every construct yet, so a program it cannot run
+is refused before anything happens rather than finished on the interpreter,
+and the refusal names the construct and points at it. `--stats` reports how
+long lowering took apart from how long the run took.
+
 `cove test` runs every `test fn` in the package, reports each one, and exits
 non-zero when any failed. `--filter` runs only the tests whose qualified name
 contains the given substring. Each test is granted exactly the capabilities
@@ -127,7 +135,8 @@ literal `--` is a program argument, even if it looks like a flag):
   --trace <path>        write a JSONL trace to <path>, or `-` for stderr
   --trace-values <mode> `full` (the default) records each host call's arguments and result, which is what `cove replay` needs; `redacted` records only their types
   --max-tasks <n>       stop the run when it would hold more than <n> tasks at once
-  --stats               print fuel spent, host calls, irreversible writes, elapsed time, host-call wait, and the heap to stderr
+  --backend <ast|vm>    which backend runs the entry: `ast`, the tree-walking interpreter and the default, or `vm`, the dedicated VM of ADR 0019
+  --stats               print the backend's lowering and execution times, then fuel spent, host calls, irreversible writes, elapsed time, host-call wait, and the heap, to stderr
   --files-root <path>   the one directory the `files` host may reach; defaults to `files/` in the package
   --allow-exec <path>   an absolute path `process.run` may start; repeat to allow more, and omit to allow none
 ";
@@ -958,11 +967,32 @@ fn cmd_run(args: &[String]) -> Result<(), CliError> {
     match execute_entry(&package, &program, &sources, run, module, entry, flags) {
         Ok(value) => report_exit(value),
         Err(ExecuteError::Setup(message)) => Err(CliError::Message(message)),
+        Err(ExecuteError::Unsupported(why)) => Err(CliError::Diagnostics {
+            items: vec![unsupported_by_backend(&why)],
+            sources,
+        }),
         Err(ExecuteError::Runtime(error)) => Err(CliError::Diagnostics {
             items: vec![runtime_failure(&program, module, entry, &error)],
             sources,
         }),
     }
+}
+
+/// The diagnostic a construct the VM cannot run is refused with.
+///
+/// It names the construct and points at it, because the only useful thing to
+/// say about a backend that cannot run a program is which part of the program
+/// it was. It is an error rather than a note because ADR 0019 forbids the
+/// alternative: a run that continued here would be a run that finished on the
+/// interpreter while reporting the VM, and every measurement and every
+/// conformance claim taken from it would be about a mixture.
+pub(crate) fn unsupported_by_backend(why: &cove_ir::Unsupported) -> Diagnostic {
+    Diagnostic::error("cove::backend::unsupported", why.to_string())
+        .at(why.span)
+        .rule(
+            "A run on the VM either finishes on the VM or fails before any side effect; it never falls back to the interpreter.",
+        )
+        .help("run it on the interpreter with `--backend ast`, which is the default")
 }
 
 /// The diagnostic a run's failure is reported as, with what a
@@ -1038,12 +1068,20 @@ pub(crate) fn lookup_entry<'a>(
 /// How [`execute_entry`] can fail: setting up its execution -- such as
 /// creating the file `--trace` names -- or the entry itself failing.
 ///
-/// These are kept apart because only the second carries a [`SourceMap`]
+/// These are kept apart because only the last two carry a [`SourceMap`]
 /// span: a setup failure is the CLI's own message, while a runtime failure
-/// is a diagnostic pointing into the program that ran.
+/// and a refused lowering both point into the program.
 pub(crate) enum ExecuteError {
     Setup(String),
     Runtime(cove_runtime::RuntimeError),
+    /// `--backend vm` was asked for a construct the lowering does not cover.
+    ///
+    /// Its own variant because it is neither of the others: nothing ran, so
+    /// it is not a runtime failure, and it points into the program, so it is
+    /// not the CLI's own message. ADR 0019's no-silent-fallback rule is what
+    /// makes it a failure at all rather than a reason to use the other
+    /// backend.
+    Unsupported(cove_ir::Unsupported),
 }
 
 /// Runs `run`'s entry under the capabilities `[run.<name>] allow` grants and
@@ -1064,6 +1102,34 @@ pub(crate) fn execute_entry(
     entry: &str,
     flags: RunFlags,
 ) -> Result<cove_runtime::Value, ExecuteError> {
+    // ADR 0019's rule is that a VM run either finishes on the VM or fails
+    // before any side effect, so `--backend vm` lowers here: before a host is
+    // registered, before a trace file is created, before anything the program
+    // could be observed by. A construct the lowering refuses stops the
+    // command with the construct named, and never quietly finishes on the
+    // interpreter.
+    let lowered = match flags.backend {
+        Backend::Ast => None,
+        Backend::Vm => {
+            let started = Instant::now();
+            let ir = cove_ir::lower::lower(program).map_err(ExecuteError::Unsupported)?;
+            let lower = started.elapsed();
+            let started = Instant::now();
+            // The VM trusts what it is handed, so what hands it anything
+            // checks first. A lowering that broke an invariant would be this
+            // crate's bug, and a bug is worth a message rather than a
+            // mis-execution.
+            cove_ir::lower::validate(&ir).map_err(|why| {
+                ExecuteError::Setup(format!("the lowering of this program is not valid: {why}"))
+            })?;
+            Some(Lowered {
+                ir,
+                lower,
+                validate: started.elapsed(),
+            })
+        }
+    };
+
     // `files/` in the package is the narrow default, next to the
     // `documents/` the reader host already uses; `--files-root` is how a run
     // that means something else says so.
@@ -1150,20 +1216,65 @@ pub(crate) fn execute_entry(
 
     let runtime =
         Runtime::new(Arc::clone(program), Arc::clone(sources), Arc::new(hosts)).with_trace(sink);
-    let mut interpreter = Interpreter::new(&runtime);
-    let outcome = interpreter.run_entry(module, entry, program_args);
-    let heap = interpreter.heap_stats();
+
+    // One entry, one of two backends, and the same three arguments either
+    // way: `run_entry` is the seam ADR 0019 puts them behind, so what differs
+    // between a `--backend ast` run and a `--backend vm` run is which one is
+    // built and nothing else about how it is called.
+    let started = Instant::now();
+    let (outcome, heap) = match &lowered {
+        Some(lowered) => {
+            let mut vm = Vm::new(&runtime, runtime.hosts(), &lowered.ir);
+            let outcome = vm.run_entry(module, entry, program_args);
+            (outcome, vm.heap_stats())
+        }
+        None => {
+            let mut interpreter = Interpreter::new(&runtime);
+            let outcome = interpreter.run_entry(module, entry, program_args);
+            (outcome, interpreter.heap_stats())
+        }
+    };
+    let execution = started.elapsed();
 
     if flags.stats {
+        print_backend_stats(flags.backend, lowered.as_ref(), execution);
         print_stats(runtime.hosts(), &wait_total, &heap);
     }
 
     outcome.map_err(ExecuteError::Runtime)
 }
 
-/// A `--fuel`, `--deadline`, `--max-host-calls`, `--trace`, `--stats`,
-/// `--files-root`, or `--allow-exec` flag to `cove run`, parsed from anywhere
-/// after the run name.
+/// What `--backend vm` produced before the run, and what producing it cost.
+///
+/// Issue #111 asks for a compile/lower breakdown apart from steady-state
+/// execution, and the two costs are separable only because they happen at
+/// separate times: lowering runs once per program, execution runs for as long
+/// as the program does.
+struct Lowered {
+    ir: cove_ir::Program,
+    lower: Duration,
+    validate: Duration,
+}
+
+/// Prints which backend ran the entry and what each phase cost, for
+/// `--stats`.
+///
+/// The interpreter reports no lowering time because it does none: it walks
+/// the checked program directly, and a zero there would read as a measurement
+/// rather than as the absence of a phase.
+fn print_backend_stats(backend: Backend, lowered: Option<&Lowered>, execution: Duration) {
+    match lowered {
+        Some(lowered) => eprintln!(
+            "backend: {backend} lower={:?} validate={:?} execute={:?}",
+            lowered.lower, lowered.validate, execution
+        ),
+        None => eprintln!("backend: {backend} lower=none execute={execution:?}"),
+    }
+}
+
+/// A `--backend`, `--fuel`, `--deadline`, `--max-host-calls`, `--trace`,
+/// `--stats`, `--files-root`, or `--allow-exec` flag to `cove run`, parsed
+/// from anywhere after the run name.
 ///
 /// The last two are the authority a `cove.toml` cannot yet express: a
 /// `[run.<name>]` table grants coarse capabilities by name, and neither the
@@ -1179,6 +1290,10 @@ pub(crate) fn execute_entry(
 /// alone, skip it," so `cove run` cannot yet be interrupted through
 /// `Cancellation` from outside; only the limits below can stop a run.
 pub(crate) struct RunFlags {
+    /// Which backend runs the entry. `ast` is the default because ADR 0012
+    /// ranks the oracle above a backend and issue #111 is the gate that has
+    /// not yet been passed.
+    backend: Backend,
     fuel: Option<u64>,
     deadline: Option<Duration>,
     max_host_calls: Option<u64>,
@@ -1203,6 +1318,7 @@ impl RunFlags {
     /// more and nothing a flag could add.
     pub(crate) fn none() -> RunFlags {
         RunFlags {
+            backend: Backend::Ast,
             fuel: None,
             deadline: None,
             max_host_calls: None,
@@ -1214,6 +1330,38 @@ impl RunFlags {
             allow_exec: Vec::new(),
             program_args: Vec::new(),
         }
+    }
+}
+
+/// Which of the two backends ADR 0019 leaves in place runs the entry.
+///
+/// The interpreter is the default and stays the default until issue #111's
+/// gate is passed: it is the oracle, and a backend checked against it is
+/// presumed wrong when the two disagree.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum Backend {
+    /// The tree-walking interpreter.
+    Ast,
+    /// The dedicated VM, over the executable IR.
+    Vm,
+}
+
+impl Backend {
+    fn parse(value: &str) -> Option<Backend> {
+        match value {
+            "ast" => Some(Backend::Ast),
+            "vm" => Some(Backend::Vm),
+            _ => None,
+        }
+    }
+}
+
+impl std::fmt::Display for Backend {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Backend::Ast => "ast",
+            Backend::Vm => "vm",
+        })
     }
 }
 
@@ -1241,6 +1389,7 @@ impl TraceTarget {
 /// keeps working exactly as it always has.
 fn parse_run_flags(args: &[String]) -> Result<RunFlags, CliError> {
     let mut flags = RunFlags {
+        backend: Backend::Ast,
         fuel: None,
         deadline: None,
         max_host_calls: None,
@@ -1305,6 +1454,14 @@ fn parse_run_flags(args: &[String]) -> Result<RunFlags, CliError> {
                 flags.trace_values = ValueCapture::parse(&value).ok_or_else(|| {
                     CliError::Message(format!(
                         "`--trace-values` must be `full` or `redacted`, found `{value}`"
+                    ))
+                })?;
+            }
+            "--backend" => {
+                let value = flag_value(args, &mut i, "--backend")?;
+                flags.backend = Backend::parse(&value).ok_or_else(|| {
+                    CliError::Message(format!(
+                        "`--backend` must be `ast` or `vm`, found `{value}`"
                     ))
                 })?;
             }
@@ -1931,6 +2088,39 @@ module auth
             [PathBuf::from("/bin/echo"), PathBuf::from("/bin/cat")]
         );
         assert_eq!(flags.program_args, ["first", "second"]);
+    }
+
+    /// The interpreter is the default backend, and stays the default until
+    /// issue #111's gate is passed: ADR 0012 ranks the oracle above a
+    /// backend, so a run nobody chose a backend for gets the oracle.
+    #[test]
+    fn a_run_that_names_no_backend_gets_the_interpreter() {
+        assert_eq!(flags(&["input.txt"]).backend, Backend::Ast);
+        assert_eq!(RunFlags::none().backend, Backend::Ast);
+    }
+
+    #[test]
+    fn the_backend_is_read_from_anywhere_after_the_name() {
+        let chosen = flags(&["first", "--backend", "vm", "second"]);
+        assert_eq!(chosen.backend, Backend::Vm);
+        assert_eq!(chosen.program_args, ["first", "second"]);
+        assert_eq!(flags(&["--backend", "ast"]).backend, Backend::Ast);
+    }
+
+    /// A backend nobody has written is a typo, and a typo that fell through
+    /// to the default would run the program on the other backend while
+    /// looking like it had done what was asked.
+    #[test]
+    fn an_unknown_backend_is_refused_rather_than_defaulted() {
+        let error = parse_run_flags(&["--backend".to_string(), "jit".to_string()])
+            .err()
+            .expect("an unknown backend should be refused");
+        match error {
+            CliError::Message(message) => {
+                assert_eq!(message, "`--backend` must be `ast` or `vm`, found `jit`")
+            }
+            _ => panic!("expected a message"),
+        }
     }
 
     /// A relative name would be resolved against `PATH` or the working

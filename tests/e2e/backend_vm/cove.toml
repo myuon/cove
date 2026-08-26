@@ -1,0 +1,3 @@
+[run.backend_vm]
+entry = "main.main"
+allow = ["console"]

@@ -1,0 +1,8 @@
+error[cove::backend::unsupported]: the VM cannot run a closure yet
+  --> <e2e>/backend_unsupported/main/main.cove:12:32
+   |
+12 |   let double: fn(Int) -> Int = fn(n) {
+   |                                ^^^^^^^
+  rule: A run on the VM either finishes on the VM or fails before any side effect; it never falls back to the interpreter.
+  help: run it on the interpreter with `--backend ast`, which is the default
+1 error(s)

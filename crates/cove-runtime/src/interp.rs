@@ -3883,7 +3883,7 @@ fn run_task(
 /// The `Error` inside prints as its own message, which is the same text `cove
 /// run` reports and the same text the program would have printed, so a trace
 /// and a terminal say the same thing about the same failure.
-fn returned_error_message(value: &Value) -> Option<String> {
+pub(crate) fn returned_error_message(value: &Value) -> Option<String> {
     let Value::Enum(result) = value else {
         return None;
     };

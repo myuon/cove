@@ -1,0 +1,17 @@
+use console.println
+
+/// A program the VM cannot run, asked for on the VM.
+///
+/// ADR 0019's no-silent-fallback rule is what this case pins: a run that
+/// names a construct the lowering does not cover fails before anything
+/// happens, naming the construct and pointing at it, rather than quietly
+/// finishing on the interpreter. The `println` below never runs, and the
+/// empty `expected.out` beside this file is how the case says so.
+export fn main() -> Result<Unit, Error> {
+  println("this line never runs")?
+  let double: fn(Int) -> Int = fn(n) {
+    n * 2
+  }
+  println("doubled {double(21)}")?
+  Ok(())
+}

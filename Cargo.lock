@@ -7,6 +7,7 @@ name = "cove-bench"
 version = "0.1.0"
 dependencies = [
  "cove-diag",
+ "cove-ir",
  "cove-runtime",
  "cove-sema",
 ]
@@ -16,6 +17,7 @@ name = "cove-cli"
 version = "0.1.0"
 dependencies = [
  "cove-diag",
+ "cove-ir",
  "cove-runtime",
  "cove-sema",
  "cove-syntax",
