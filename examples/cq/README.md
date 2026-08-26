@@ -388,12 +388,41 @@ about 700 million AST nodes in 91 seconds, which is 130 ns a node. Removing
 half, so the ceiling for this kind of work is around 2× — and the sprint's
 target was 10×.
 
-The next real gain needs names resolved to slots before the program runs and a
-value representation that does not allocate per operation. That is a redesign,
-and [issue #105](https://github.com/myuon/cove/issues/105) scopes it with these
-measurements as the expected benefit. The interpreter is not the bottleneck
-because it is a tree walker; it is the bottleneck because it is a tree walker
-that looks everything up by name.
+The next real gain is a redesign, and
+[issue #105](https://github.com/myuon/cove/issues/105) scopes it with these
+measurements as the expected benefit.
+
+### One correction, measured afterwards
+
+An earlier draft of this section ended by saying the interpreter is slow
+"because it is a tree walker that looks everything up by name", and quoted
+`Env::lookup` as the illustration. The first half is right and the second is
+not, and the way to find out was to measure it rather than to read it.
+
+Making `Env::lookup` do its scan twice, and then five times, and taking the
+slope over the same 20,000-record run:
+
+| scans per lookup | wall |
+| ---: | ---: |
+| 1 | 17.76 s |
+| 2 | 18.73 s |
+| 5 | 20.46 s |
+
+That is 0.68 s a scan by the five-point slope and 0.97 s by the doubling, so
+one full name lookup is **3.8–5.5% of the run** — the doubling overstates it,
+because the second scan runs on a warm cache. Removing name lookup *entirely*
+would therefore buy at most about 1.06×.
+
+What the quote pointed at is real and small. What is actually large is the
+machinery around a call: `Env::declare` and `Env::pop` are 5.4% between them,
+`plain_values` 2.3%, `eval_args` and `invoke` 4.0%, and the allocation inside
+those is another ~10% — and the `call` benchmark puts one call at about
+650 ns whatever it does. Building and tearing down an environment costs
+several times more than searching one.
+
+The lesson is the one this whole section is about: an inclusive profile of an
+inlined function undercounts it, and the cheap experiment — make the suspect
+do its work N times and read the slope — is what settles it.
 
 ## Findings
 
