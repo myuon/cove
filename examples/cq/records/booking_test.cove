@@ -1,0 +1,165 @@
+use cq.json.parse
+
+/// The booking `line` holds, or the failure that stopped it, as an `Error`
+/// carrying `column: message`.
+///
+/// A `Detail` is not an `Error`, so a test that wants `?` needs this: the two
+/// stages a record goes through, parsing and reading, both report a `Detail`,
+/// and a test cares which message came back rather than which stage produced
+/// it.
+fn bookingOf(line: String) -> Result<Booking, Error> {
+  let record = match parse(line) {
+    Ok(value) => value
+    Err(detail) => return Err(Error("{detail.column}: {detail.message}"))
+  }
+  match bookingFrom(record) {
+    Ok(booking) => Ok(booking)
+    Err(detail) => Err(Error("{detail.column}: {detail.message}"))
+  }
+}
+
+/// What reading `line` reports, which is either the booking's own identifier
+/// or the failure that named the field at fault.
+fn failure(line: String) -> String {
+  match bookingOf(line) {
+    Ok(booking) => "read `{booking.id}`"
+    Err(error) => error.message
+  }
+}
+
+/// A complete record reads as a booking with every field typed, so nothing
+/// past this point has to ask whether `nights` was a number.
+test fn readsACompleteBooking() -> Result<Unit, Error> {
+  let booking = bookingOf("\{\"id\":\"B-0001\",\"guest\":\"Ada Lovelace\",\"property\":\"seaside-cottage\",\"checkIn\":\"2026-03-01\",\"nights\":3,\"guests\":1,\"rate\":129.5,\"status\":\"confirmed\",\"channel\":\"direct\"\}")?
+  assertEqual(booking.id, "B-0001")?
+  assertEqual(booking.guest, "Ada Lovelace")?
+  assertEqual(booking.property, "seaside-cottage")?
+  assertEqual(booking.checkIn, "2026-03-01")?
+  assertEqual(booking.nights, 3)?
+  assertEqual(booking.guests, 1)?
+  assertEqual(booking.rate, 129.5)?
+  assertEqual(booking.status.name(), "confirmed")?
+  assertEqual(booking.channel, "direct")?
+  Ok(())
+}
+
+/// A whole number that arrived with a decimal point is still a count, since
+/// JSON has one number type and `3` and `3.0` are the same value in it.
+test fn readsAWholeNumberWrittenWithADecimalPoint() -> Result<Unit, Error> {
+  let booking = bookingOf(withNights("3.0"))?
+  assertEqual(booking.nights, 3)?
+  Ok(())
+}
+
+/// A missing field is reported by name, so the person holding the file knows
+/// which column to go and look at.
+test fn namesAFieldTheRecordDoesNotHave() -> Result<Unit, Error> {
+  assertEqual(failure(without("guest")), "1: this record has no `guest` field")?
+  assertEqual(failure("\{\}"), "1: this record has no `id` field")?
+  Ok(())
+}
+
+/// A field of the wrong type is reported by name, with what it should have
+/// been and what it was.
+test fn namesAFieldOfTheWrongType() -> Result<Unit, Error> {
+  assertEqual(
+    failure(withNights("\"two\"")),
+    "1: `nights` must be a number, and is a string",
+  )?
+  assertEqual(
+    failure(withNights("null")),
+    "1: `nights` must be a number, and is null",
+  )?
+  assertEqual(
+    failure(withNights("[3]")),
+    "1: `nights` must be a number, and is an array",
+  )?
+  assertEqual(
+    failure(withNights("\{\}")),
+    "1: `nights` must be a number, and is an object",
+  )?
+  assertEqual(
+    failure(withNights("true")),
+    "1: `nights` must be a number, and is a boolean",
+  )?
+  Ok(())
+}
+
+/// A `nights` that is a number and is not whole is refused, because the
+/// difference between a count and a measurement is what this field is for.
+test fn refusesANightsThatIsNotWhole() -> Result<Unit, Error> {
+  assertEqual(
+    failure(withNights("3.5")),
+    "1: `nights` is 3.5, which is not a whole number",
+  )?
+  Ok(())
+}
+
+/// A status this program has never heard of is reported rather than averaged
+/// into one of the three it knows.
+test fn refusesAStatusItDoesNotKnow() -> Result<Unit, Error> {
+  assertEqual(
+    failure(withStatus("\"waitlisted\"")),
+    "1: `status` is `waitlisted`, which is not `confirmed`, `pending`, or `cancelled`",
+  )?
+  Ok(())
+}
+
+/// All three statuses read, and each answers the word it was read from, so
+/// what `cq` writes back is what the input said.
+test fn readsEachStatusAndNamesItBack() -> Result<Unit, Error> {
+  assertEqual(
+    bookingOf(withStatus("\"confirmed\""))?.status.name(),
+    "confirmed",
+  )?
+  assertEqual(bookingOf(withStatus("\"pending\""))?.status.name(), "pending")?
+  assertEqual(
+    bookingOf(withStatus("\"cancelled\""))?.status.name(),
+    "cancelled",
+  )?
+  Ok(())
+}
+
+/// A booking is worth its nightly rate for every night of it, which is the
+/// one arithmetic every transformation in this package builds on.
+test fn revenueIsTheRateForEveryNight() -> Result<Unit, Error> {
+  assertEqual(bookingOf(withNights("3"))?.revenue(), 388.5)?
+  assertEqual(bookingOf(withNights("1"))?.revenue(), 129.5)?
+  assertEqual(bookingOf(withNights("0"))?.revenue(), 0.0)?
+  Ok(())
+}
+
+/// A complete record, with `nights` written as `text` says.
+fn withNights(text: String) -> String {
+  "\{\"id\":\"B-0001\",\"guest\":\"Ada Lovelace\",\"property\":\"seaside-cottage\",\"checkIn\":\"2026-03-01\",\"nights\":{text},\"guests\":1,\"rate\":129.5,\"status\":\"confirmed\",\"channel\":\"direct\"\}"
+}
+
+/// A complete record, with `status` written as `text` says.
+fn withStatus(text: String) -> String {
+  "\{\"id\":\"B-0001\",\"guest\":\"Ada Lovelace\",\"property\":\"seaside-cottage\",\"checkIn\":\"2026-03-01\",\"nights\":3,\"guests\":1,\"rate\":129.5,\"status\":{text},\"channel\":\"direct\"\}"
+}
+
+/// A complete record with the field `name` left out of it.
+fn without(name: String) -> String {
+  var fields = Vector.of()
+  for entry in complete() {
+    if entry.key != name {
+      fields.push("\"{entry.key}\":{entry.value}")
+    }
+  }
+  "\{{",".join(fields.freeze())}\}"
+}
+
+/// Every field a complete record carries, as its JSON text.
+fn complete() -> Map<String, String> {
+  Map.of()
+    .inserted("id", "\"B-0001\"")
+    .inserted("guest", "\"Ada Lovelace\"")
+    .inserted("property", "\"seaside-cottage\"")
+    .inserted("checkIn", "\"2026-03-01\"")
+    .inserted("nights", "3")
+    .inserted("guests", "1")
+    .inserted("rate", "129.5")
+    .inserted("status", "\"confirmed\"")
+    .inserted("channel", "\"direct\"")
+}

@@ -1,0 +1,98 @@
+use cq.rows.Format
+
+/// Which transformation a run performs.
+///
+/// A program is a case of an enum rather than a file this run loads, because
+/// Cove has no way to load a module at run time: a package is resolved,
+/// checked, and linked before anything executes. So `--program` names one of
+/// the transformations this package declares, and adding one is a change to
+/// this enum and a `match` arm that the checker will not let anybody forget.
+export enum Program {
+  RevenueSummary
+  ConfirmedBookings
+  RateCard
+}
+
+impl Program {
+  /// The name `--program` selects this transformation with.
+  export fn name(self) -> String {
+    match self {
+      Program.RevenueSummary => "revenue-summary"
+      Program.ConfirmedBookings => "confirmed-bookings"
+      Program.RateCard => "rate-card"
+    }
+  }
+
+  /// What this transformation does, in one line, for `--help`.
+  export fn summary(self) -> String {
+    match self {
+      Program.RevenueSummary => "group bookings by property and total their nights and revenue"
+      Program.ConfirmedBookings => "keep the confirmed bookings and report what each one is worth"
+      Program.RateCard => "read a seasonal rate card and normalize it"
+    }
+  }
+
+  /// The format this transformation reads.
+  export fn reads(self) -> Format {
+    match self {
+      Program.RevenueSummary => Format.Jsonl
+      Program.ConfirmedBookings => Format.Jsonl
+      Program.RateCard => Format.Csv
+    }
+  }
+
+  /// The format this transformation writes when nothing says otherwise.
+  ///
+  /// A default rather than a requirement: every transformation's output is a
+  /// row of cells, and a cell renders in either format, so `--output-format`
+  /// may always override this.
+  export fn writes(self) -> Format {
+    match self {
+      Program.RevenueSummary => Format.Csv
+      Program.ConfirmedBookings => Format.Jsonl
+      Program.RateCard => Format.Jsonl
+    }
+  }
+
+  /// The columns this transformation's output carries, in order.
+  export fn columns(self) -> Array<String> {
+    match self {
+      Program.RevenueSummary => [
+        "property",
+        "bookings",
+        "nights",
+        "revenue",
+        "averageNightlyRate",
+      ]
+      Program.ConfirmedBookings => [
+        "id",
+        "guest",
+        "property",
+        "checkIn",
+        "nights",
+        "revenue",
+      ]
+      Program.RateCard => ["property", "season", "nightlyRate", "notes"]
+    }
+  }
+}
+
+/// Every transformation this package declares, in the order `--help` lists
+/// them.
+export fn programs() -> Array<Program> {
+  [Program.RevenueSummary, Program.ConfirmedBookings, Program.RateCard]
+}
+
+/// Reads a transformation by name, or reports the ones there are.
+export fn programNamed(name: String) -> Result<Program, Error> {
+  for program in programs() {
+    if program.name() == name {
+      return Ok(program)
+    }
+  }
+  var names = Vector.of()
+  for program in programs() {
+    names.push("`{program.name()}`")
+  }
+  Err(Error("`{name}` is not a program; the programs are {", ".join(names.freeze())}"))
+}

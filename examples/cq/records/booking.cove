@@ -1,0 +1,140 @@
+use cq.diag.Detail
+use cq.json.Json
+use cq.json.field
+
+/// A booking, as this program requires one to be.
+///
+/// Every field is required and every field has a type. That is the point of
+/// the type: past this struct nothing in the program has to ask whether
+/// `nights` was a number, and nothing has to decide what to do when it was
+/// not. The decision is made once, here, where the record is still next to the
+/// line it came from.
+export struct Booking {
+  id: String
+  guest: String
+  property: String
+  checkIn: String
+  nights: Int
+  guests: Int
+  rate: Float
+  status: Status
+  channel: String
+}
+
+/// What a booking's `status` field may say.
+///
+/// An unrecognized status is an error rather than a case, because a status
+/// this program has never heard of is a fact about the input that the program
+/// should report rather than average.
+export enum Status {
+  Confirmed
+  Pending
+  Cancelled
+}
+
+impl Booking {
+  /// What this booking is worth, which is its nightly rate for every night of
+  /// it.
+  export fn revenue(self) -> Float {
+    self.nights.toFloat() * self.rate
+  }
+}
+
+impl Status {
+  /// The word this status is written with, which is the word it was read
+  /// from.
+  export fn name(self) -> String {
+    match self {
+      Status.Confirmed => "confirmed"
+      Status.Pending => "pending"
+      Status.Cancelled => "cancelled"
+    }
+  }
+}
+
+/// Reads a booking out of one parsed record.
+///
+/// The column is 1 for every failure here, and that is a limitation rather
+/// than a choice: a `Json` value has forgotten where in the line it was
+/// written, so the most this can say is which record was wrong and which field
+/// of it. Carrying a span on every value is what a diagnostic layer would do,
+/// and this program does not have one.
+export fn bookingFrom(record: Json) -> Result<Booking, Detail> {
+  Ok(Booking(id: text(record, "id")?, guest: text(record, "guest")?, property: text(record, "property")?, checkIn: text(record, "checkIn")?, nights: whole(record, "nights")?, guests: whole(record, "guests")?, rate: number(record, "rate")?, status: status(record)?, channel: text(record, "channel")?))
+}
+
+/// Reads the string field `name`.
+fn text(record: Json, name: String) -> Result<String, Detail> {
+  match required(record, name)? {
+    Json.Text(value) => Ok(value)
+    other => Err(wrongType(name, "a string", other))
+  }
+}
+
+/// Reads the number field `name`.
+fn number(record: Json, name: String) -> Result<Float, Detail> {
+  match required(record, name)? {
+    Json.Number(value) => Ok(value)
+    other => Err(wrongType(name, "a number", other))
+  }
+}
+
+/// Reads the number field `name` as a whole number.
+///
+/// JSON has one number type, so `3` and `3.0` arrive identically and both are
+/// this field; `3.5` is not, and saying so is the difference between a count
+/// and a measurement.
+fn whole(record: Json, name: String) -> Result<Int, Detail> {
+  let value = number(record, name)?
+  match value.toInt() {
+    Ok(rounded) => {
+      if rounded.toFloat() == value {
+        Ok(rounded)
+      } else {
+        Err(Detail(column: 1, message: "`{name}` is {value}, which is not a whole number"))
+      }
+    }
+    Err(error) => Err(Detail(
+      column: 1,
+      message: "`{name}` is {value}: {error.message}",
+    ))
+  }
+}
+
+/// Reads the `status` field as one of the three this program knows.
+fn status(record: Json) -> Result<Status, Detail> {
+  match text(record, "status")? {
+    "confirmed" => Ok(Status.Confirmed)
+    "pending" => Ok(Status.Pending)
+    "cancelled" => Ok(Status.Cancelled)
+    other => Err(Detail(column: 1, message: "`status` is `{other}`, which is not `confirmed`, `pending`, or `cancelled`"))
+  }
+}
+
+/// The field `name`, or the error that says it is missing.
+fn required(record: Json, name: String) -> Result<Json, Detail> {
+  match field(record, name) {
+    Some(value) => Ok(value)
+    None => Err(Detail(column: 1, message: "this record has no `{name}` field"))
+  }
+}
+
+/// The error for a field that is there and is the wrong kind of thing.
+fn wrongType(name: String, expected: String, found: Json) -> Detail {
+  Detail(
+    column: 1,
+    message: "`{name}` must be {expected}, and is {describe(found)}",
+  )
+}
+
+/// What kind of thing a value is, for a message that has to name it.
+fn describe(value: Json) -> String {
+  match value {
+    Json.Null => "null"
+    Json.Bool(_) => "a boolean"
+    Json.Number(_) => "a number"
+    Json.Text(_) => "a string"
+    Json.Items(_) => "an array"
+    Json.Fields(_) => "an object"
+  }
+}

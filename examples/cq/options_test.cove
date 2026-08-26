@@ -1,0 +1,232 @@
+/// The message `readOptions` refused `arguments` with, or what it made of
+/// them when it did not refuse.
+///
+/// Argument parsing is where a person is most likely to be wrong, and the
+/// message they get is the whole of what they will see, so every case below
+/// pins the exact text rather than merely that something failed.
+fn refusal(arguments: Array<String>) -> String {
+  match readOptions(arguments) {
+    Ok(options) => "read `{options.program.name()}` over `{options.input}`"
+    Err(error) => error.message
+  }
+}
+
+/// A well-formed command line, with `extra` appended to it.
+fn withExtra(extra: Array<String>) -> Array<String> {
+  var arguments = Vector.of()
+  arguments.push("bookings.jsonl")
+  arguments.push("--program")
+  arguments.push("revenue-summary")
+  for argument in extra {
+    arguments.push(argument)
+  }
+  arguments.freeze()
+}
+
+/// Each of the three transformations is selected by the name it answers to,
+/// and by nothing else.
+test fn selectsEachProgramByName() -> Result<Unit, Error> {
+  assertEqual(
+    readOptions(["in.jsonl", "--program", "revenue-summary"])?.program.name(),
+    "revenue-summary",
+  )?
+  assertEqual(
+    readOptions(["in.jsonl", "--program", "confirmed-bookings"])?.program.name(),
+    "confirmed-bookings",
+  )?
+  assertEqual(
+    readOptions(["in.csv", "--program", "rate-card"])?.program.name(),
+    "rate-card",
+  )?
+  Ok(())
+}
+
+/// The input may be named positionally or by `--input`, and either way it is
+/// the file the run reads.
+test fn takesItsInputPositionallyOrByOption() -> Result<Unit, Error> {
+  assertEqual(
+    readOptions(["bookings.jsonl", "--program", "rate-card"])?.input,
+    "bookings.jsonl",
+  )?
+  assertEqual(
+    readOptions(["--program", "rate-card", "--input", "bookings.jsonl"])?.input,
+    "bookings.jsonl",
+  )?
+  Ok(())
+}
+
+/// A program this package does not declare is refused by name, and the
+/// message lists the ones there are rather than pointing at `--help`.
+test fn refusesAProgramItDoesNotDeclare() -> Result<Unit, Error> {
+  assertEqual(
+    refusal(["in.jsonl", "--program", "revenue"]),
+    "`revenue` is not a program; the programs are `revenue-summary`, `confirmed-bookings`, `rate-card`",
+  )?
+  Ok(())
+}
+
+/// A format this program does not write is refused where it was written, so
+/// the run stops before it opens the file rather than after.
+test fn refusesAnOutputFormatItDoesNotWrite() -> Result<Unit, Error> {
+  assertEqual(
+    refusal(withExtra(["--output-format", "xml"])),
+    "`xml` is not a format; the formats are `jsonl` and `csv`",
+  )?
+  Ok(())
+}
+
+/// A command line that names no program is refused, because there is no
+/// transformation it would be reasonable to guess at.
+test fn refusesACommandLineWithNoProgram() -> Result<Unit, Error> {
+  assertEqual(
+    refusal(["bookings.jsonl"]),
+    "`--program` is required; run with `--help`",
+  )?
+  Ok(())
+}
+
+/// A command line that names no input is refused, and says so rather than
+/// reading from somewhere it was not pointed at.
+test fn refusesACommandLineWithNoInput() -> Result<Unit, Error> {
+  assertEqual(
+    refusal(["--program", "revenue-summary"]),
+    "no input file was named; run with `--help`",
+  )?
+  Ok(())
+}
+
+/// A second bare argument is a second input, and `cq` reads one file, so it
+/// is refused rather than silently replacing the first.
+test fn refusesASecondInput() -> Result<Unit, Error> {
+  assertEqual(
+    refusal(withExtra(["second.jsonl"])),
+    "`second.jsonl` is a second input; `cq` reads one file",
+  )?
+  Ok(())
+}
+
+/// An option the command line ends after is refused naming the option, not
+/// the value, since the value is the thing that is not there.
+test fn refusesAnOptionTheCommandLineEndsAfter() -> Result<Unit, Error> {
+  assertEqual(
+    refusal(["in.jsonl", "--program"]),
+    "`--program` needs a value, and the command line ended",
+  )?
+  assertEqual(
+    refusal(withExtra(["--limit"])),
+    "`--limit` needs a value, and the command line ended",
+  )?
+  Ok(())
+}
+
+/// An option followed by another option is refused rather than swallowing it,
+/// so a forgotten value is reported instead of turning `--skip-invalid` into
+/// a file name.
+test fn refusesAnOptionWhoseValueIsAnotherOption() -> Result<Unit, Error> {
+  assertEqual(
+    refusal(["--input", "--program", "revenue-summary"]),
+    "`--input` needs a value, and `--program` is another option",
+  )?
+  assertEqual(
+    refusal(withExtra(["--output", "--skip-invalid"])),
+    "`--output` needs a value, and `--skip-invalid` is another option",
+  )?
+  Ok(())
+}
+
+/// A limit is a count, so a negative one is refused and a value that is not a
+/// whole number is refused differently, because they are different mistakes.
+test fn refusesALimitThatIsNotACount() -> Result<Unit, Error> {
+  assertEqual(
+    refusal(withExtra(["--limit", "-1"])),
+    "`--limit` cannot be `-1`, which is negative",
+  )?
+  assertEqual(
+    refusal(withExtra(["--limit", "half"])),
+    "`--limit` cannot be `half`, which is not a whole number",
+  )?
+  Ok(())
+}
+
+/// A limit of zero is a run that reads nothing, which is a thing to ask for
+/// rather than a mistake, so it is accepted.
+test fn acceptsALimitOfZero() -> Result<Unit, Error> {
+  assertEqual(readOptions(withExtra(["--limit", "0"]))?.limit, Some(0))?
+  assertEqual(readOptions(withExtra([]))?.limit, None)?
+  Ok(())
+}
+
+/// An option this program does not have is refused by name and points at
+/// `--help`, which is where the ones it does have are listed.
+test fn refusesAnOptionItDoesNotHave() -> Result<Unit, Error> {
+  assertEqual(
+    refusal(withExtra(["--verbose"])),
+    "`--verbose` is not an option; run with `--help`",
+  )?
+  Ok(())
+}
+
+/// Omitting `--output-format` takes the program's own default, which is what
+/// makes each transformation write the format its output is naturally in.
+test fn takesTheProgramsDefaultOutputFormat() -> Result<Unit, Error> {
+  assertEqual(
+    readOptions(["in.jsonl", "--program", "revenue-summary"])?.format.name(),
+    "csv",
+  )?
+  assertEqual(
+    readOptions(["in.jsonl", "--program", "confirmed-bookings"])?.format.name(),
+    "jsonl",
+  )?
+  assertEqual(
+    readOptions(["in.csv", "--program", "rate-card"])?.format.name(),
+    "jsonl",
+  )?
+  Ok(())
+}
+
+/// `--output-format` overrides that default, because every transformation's
+/// output is a row of cells and a cell renders in either format.
+test fn letsOutputFormatOverrideThatDefault() -> Result<Unit, Error> {
+  assertEqual(
+    readOptions([
+      "in.jsonl",
+      "--program",
+      "revenue-summary",
+      "--output-format",
+      "jsonl",
+    ])?
+      .format
+      .name(),
+    "jsonl",
+  )?
+  assertEqual(
+    readOptions(["in.csv", "--program", "rate-card", "--output-format", "csv"])?
+      .format
+      .name(),
+    "csv",
+  )?
+  Ok(())
+}
+
+/// A command line with nothing on it asks for the usage text, and so does one
+/// that says `--help` or `-h` anywhere in it.
+test fn readsWhenTheCommandLineWantsHelp() -> Result<Unit, Error> {
+  assert(wantsHelp([]))?
+  assert(wantsHelp(["--help"]))?
+  assert(wantsHelp(["-h"]))?
+  assert(wantsHelp(withExtra(["--help"])))?
+  assert(!wantsHelp(withExtra([])))?
+  Ok(())
+}
+
+/// The usage text names every program this package declares, so a
+/// transformation added to the enum is listed without anybody remembering to
+/// list it.
+test fn usageNamesEveryProgram() -> Result<Unit, Error> {
+  let text = usage()
+  assert(text.contains("revenue-summary"))?
+  assert(text.contains("confirmed-bookings"))?
+  assert(text.contains("rate-card"))?
+  assert(text.contains("--skip-invalid"))?
+  Ok(())
+}

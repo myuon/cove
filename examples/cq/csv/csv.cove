@@ -1,0 +1,91 @@
+use cq.diag.Detail
+
+/// Splits one CSV line into its fields.
+///
+/// The rules are RFC 4180's, with one deliberate exception. A field may be
+/// quoted with `"`, a quoted field may contain commas, and `""` inside a
+/// quoted field is one literal quote. An unquoted field is taken exactly as
+/// written, including any spaces around it: trimming would be this program
+/// deciding that a value the input chose to include was not meant.
+///
+/// The exception is that a record may not span lines. RFC 4180 lets a quoted
+/// field contain a newline, and the reader upstream of this hands over one
+/// line at a time, so a quoted field that is still open when the line ends is
+/// reported rather than continued. Making it work means the reader and the
+/// splitter having to agree about quoting, which is the format leaking into
+/// the layer whose whole job is not to know about it.
+export fn splitRecord(line: String) -> Result<Array<String>, Detail> {
+  var fields = Vector.of()
+  let chars = line.chars()
+  var at = 0
+  var field = ""
+  var quoted = false
+  var reading = true
+  while reading {
+    let character = chars.get(at).unwrapOr("")
+    if character == "" {
+      if quoted {
+        return Err(Detail(column: at + 1, message: "a quoted field was still open when the line ended"))
+      }
+      fields.push(field)
+      reading = false
+    } else {
+      if quoted {
+        if character == "\"" {
+          if chars.get(at + 1).unwrapOr("") == "\"" {
+            field = "{field}\""
+            at += 2
+          } else {
+            quoted = false
+            at += 1
+          }
+        } else {
+          field = "{field}{character}"
+          at += 1
+        }
+      } else {
+        if character == "," {
+          fields.push(field)
+          field = ""
+          at += 1
+        } else {
+          if character == "\"" && field.isEmpty() {
+            quoted = true
+            at += 1
+          } else {
+            if character == "\"" {
+              return Err(Detail(column: at + 1, message: "a quote may only open a field, not appear inside an unquoted one"))
+            }
+            field = "{field}{character}"
+            at += 1
+          }
+        }
+      }
+    }
+  }
+  Ok(fields.freeze())
+}
+
+/// Renders `fields` as one CSV line, without its terminator.
+export fn formatRecord(fields: Array<String>) -> String {
+  var rendered = Vector.of()
+  for field in fields {
+    rendered.push(formatField(field))
+  }
+  ",".join(rendered.freeze())
+}
+
+/// Renders one field, quoting it only when leaving it bare would change what
+/// it says.
+///
+/// A field is quoted when it holds a comma, a quote, or either half of a line
+/// ending, and left alone otherwise, so a file of ordinary values reads as a
+/// file of ordinary values.
+fn formatField(field: String) -> String {
+  if field.contains(",") || field.contains("\"") || field.contains("\n") ||
+    field.contains("\r") {
+    "\"{field.replace("\"", "\"\"")}\""
+  } else {
+    field
+  }
+}

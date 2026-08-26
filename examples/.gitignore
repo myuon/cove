@@ -1,0 +1,7 @@
+# `cq`'s measured input and output. `examples/cq/README.md` says how to make
+# them: they are generated from a seed rather than checked in, because a
+# hundred thousand records is seventeen megabytes and a repository is a bad
+# place to keep one.
+cq/data/bookings-large.jsonl
+cq/data/confirmed-large.jsonl
+cq/data/summary-large.csv

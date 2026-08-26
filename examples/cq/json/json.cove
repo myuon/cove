@@ -1,0 +1,396 @@
+use cq.diag.Detail
+
+/// A JSON value.
+///
+/// JSON has one number type, so this does too: an integer that arrived in the
+/// input is a `Number` like any other, and a program that needs an `Int` asks
+/// for one at the point where it knows that is what the field means. Putting
+/// the distinction here instead would be inventing a JSON that the format does
+/// not have.
+export enum Json {
+  Null
+  Bool(Bool)
+  Number(Float)
+  Text(String)
+  Items(Array<Json>)
+  Fields(Map<String, Json>)
+}
+
+/// How deeply one value may nest before this parser refuses it.
+///
+/// The parser recurses through arrays and objects, so the depth of the input
+/// decides the depth of the Cove call stack. A bound here is what keeps a
+/// crafted line from ending the run inside the interpreter rather than in a
+/// diagnostic this program wrote.
+fn maxDepth() -> Int {
+  64
+}
+
+/// Parses `text` as one complete JSON value.
+///
+/// The whole of `text` must be that value: trailing content is an error rather
+/// than something the caller is left to notice, because a line of JSON Lines
+/// that has more after the record is not a record with a comment on it.
+export fn parse(text: String) -> Result<Json, Detail> {
+  var scan = Scanner(chars: text.chars(), at: 0)
+  scan.skipSpace()
+  let value = parseValue(var scan, depth: 1)?
+  scan.skipSpace()
+  if !scan.done() {
+    return Err(scan.fail("this line has more after the JSON value"))
+  }
+  Ok(value)
+}
+
+/// Renders `value` as JSON on one line, which is what a JSON Lines record is.
+///
+/// Object fields come out in `Map` order, which is ascending by key, so two
+/// runs over the same input write the same bytes.
+export fn render(value: Json) -> String {
+  match value {
+    Json.Null => "null"
+    Json.Bool(yes) => "{yes}"
+    Json.Number(number) => renderNumber(number)
+    Json.Text(text) => quote(text)
+    Json.Items(items) => {
+      var parts = Vector.of()
+      for item in items {
+        parts.push(render(item))
+      }
+      "[{",".join(parts.freeze())}]"
+    }
+    Json.Fields(fields) => {
+      var parts = Vector.of()
+      for entry in fields {
+        parts.push("{quote(entry.key)}:{render(entry.value)}")
+      }
+      "\{{",".join(parts.freeze())}\}"
+    }
+  }
+}
+
+/// The field `name` of an object, or `None` for anything else.
+///
+/// A value that is not an object has no fields rather than an empty set of
+/// them, and both answer `None` here; a caller that needs to tell the two
+/// apart matches on the value itself.
+export fn field(value: Json, name: String) -> Option<Json> {
+  match value {
+    Json.Fields(fields) => fields.get(name)
+    _ => None
+  }
+}
+
+// ------------------------------------------------------------------ scanning
+
+/// A position in the characters being parsed.
+struct Scanner {
+  chars: Array<String>
+  at: Int
+}
+
+impl Scanner {
+  /// The character at the cursor, or `""` when there is none left.
+  ///
+  /// `""` is not a character any input can contain, so it is a safe stand-in
+  /// for the end of the text and saves every caller a separate length check.
+  fn peek(self) -> String {
+    self.chars.get(self.at).unwrapOr("")
+  }
+
+  /// Whether every character has been consumed.
+  fn done(self) -> Bool {
+    self.at >= self.chars.length()
+  }
+
+  /// Consumes one character.
+  fn take(var self) {
+    self.at += 1
+  }
+
+  /// Consumes any run of JSON whitespace.
+  fn skipSpace(var self) {
+    while isSpace(self.peek()) {
+      self.at += 1
+    }
+  }
+
+  /// An error at the cursor, whose column counts characters from 1.
+  fn fail(self, message: String) -> Detail {
+    Detail(column: self.at + 1, message: message)
+  }
+
+  /// Consumes `word` when it is next, and reports what was there when it is
+  /// not.
+  fn word(var self, word: String) -> Result<Unit, Error> {
+    for expected in word.chars() {
+      if self.peek() != expected {
+        return Err(Error("expected `{word}`"))
+      }
+      self.at += 1
+    }
+    Ok(())
+  }
+}
+
+/// Whether `character` is whitespace between JSON tokens.
+fn isSpace(character: String) -> Bool {
+  character == " " || character == "\t" || character == "\r" ||
+    character == "\n"
+}
+
+// ------------------------------------------------------------------- parsing
+
+/// Parses one value at `depth` levels of nesting.
+fn parseValue(var scan: Scanner, depth: Int) -> Result<Json, Detail> {
+  if depth > maxDepth() {
+    return Err(scan.fail("this value nests more than {maxDepth()} levels deep"))
+  }
+  let head = scan.peek()
+  if head == "\{" {
+    return parseObject(var scan, depth: depth)
+  }
+  if head == "[" {
+    return parseArray(var scan, depth: depth)
+  }
+  if head == "\"" {
+    return Ok(Json.Text(parseText(var scan)?))
+  }
+  if head == "t" {
+    scan.word("true").mapError { scan.fail("expected `true`") }?
+    return Ok(Json.Bool(true))
+  }
+  if head == "f" {
+    scan.word("false").mapError { scan.fail("expected `false`") }?
+    return Ok(Json.Bool(false))
+  }
+  if head == "n" {
+    scan.word("null").mapError { scan.fail("expected `null`") }?
+    return Ok(Json.Null)
+  }
+  if head == "" {
+    return Err(scan.fail("a JSON value was expected and the line ended"))
+  }
+  parseNumber(var scan)
+}
+
+/// Parses `{ ... }` at `depth` levels of nesting.
+fn parseObject(var scan: Scanner, depth: Int) -> Result<Json, Detail> {
+  scan.take()
+  var fields = Map.of()
+  scan.skipSpace()
+  if scan.peek() == "\}" {
+    scan.take()
+    return Ok(Json.Fields(fields))
+  }
+  var more = true
+  while more {
+    scan.skipSpace()
+    if scan.peek() != "\"" {
+      return Err(scan.fail("a field name must be a quoted string"))
+    }
+    let name = parseText(var scan)?
+    scan.skipSpace()
+    if scan.peek() != ":" {
+      return Err(scan.fail("a field name must be followed by `:`"))
+    }
+    scan.take()
+    scan.skipSpace()
+    let value = parseValue(var scan, depth: depth + 1)?
+    fields = fields.inserted(name, value)
+    scan.skipSpace()
+    match scan.peek() {
+      "," => scan.take()
+      "\}" => {
+        scan.take()
+        more = false
+      }
+      _ => return Err(scan.fail("expected `,` or `\}` after a field"))
+    }
+  }
+  Ok(Json.Fields(fields))
+}
+
+/// Parses `[ ... ]` at `depth` levels of nesting.
+fn parseArray(var scan: Scanner, depth: Int) -> Result<Json, Detail> {
+  scan.take()
+  var items = Vector.of()
+  scan.skipSpace()
+  if scan.peek() == "]" {
+    scan.take()
+    return Ok(Json.Items(items.freeze()))
+  }
+  var more = true
+  while more {
+    scan.skipSpace()
+    items.push(parseValue(var scan, depth: depth + 1)?)
+    scan.skipSpace()
+    match scan.peek() {
+      "," => scan.take()
+      "]" => {
+        scan.take()
+        more = false
+      }
+      _ => return Err(scan.fail("expected `,` or `]` after an element"))
+    }
+  }
+  Ok(Json.Items(items.freeze()))
+}
+
+/// Parses a quoted string, starting at the opening quote.
+///
+/// The text is built by re-interpolation, `text = "\{text\}\{character\}"`,
+/// which copies everything read so far on every character and is therefore
+/// quadratic in the length of the field. That is the idiom Cove points at --
+/// `+` on two strings is refused, and its help says to interpolate -- and
+/// there is no string builder to reach for instead.
+///
+/// The linear alternative, pushing each character onto a `Vector<String>` and
+/// joining once, was measured slower: over the 100,000-record sample it cost
+/// 6% more wall time and moved 86 MB through 28,000 collections, to save
+/// copying that, on fields of twenty characters, was never the expensive part.
+/// So the quadratic form stays on purpose, and the host's one-mebibyte line
+/// bound is what keeps its worst case from being unbounded. `README.md`
+/// records both numbers.
+fn parseText(var scan: Scanner) -> Result<String, Detail> {
+  scan.take()
+  var text = ""
+  var reading = true
+  while reading {
+    let character = scan.peek()
+    if character == "" {
+      return Err(scan.fail("this string was never closed"))
+    }
+    if character == "\"" {
+      scan.take()
+      reading = false
+    } else {
+      if character == "\\" {
+        scan.take()
+        text = "{text}{escape(var scan)?}"
+      } else {
+        scan.take()
+        text = "{text}{character}"
+      }
+    }
+  }
+  Ok(text)
+}
+
+/// Reads what follows a backslash inside a string.
+///
+/// Three of JSON's escapes are refused rather than half-supported.
+///
+/// `\u0041` means reading four hexadecimal digits and building a character
+/// from the number they spell, and Cove has neither: `Int.parse` reads decimal
+/// only, and no operation makes a character out of a code point. `\b` and
+/// `\f` name characters Cove's own string literals cannot write.
+///
+/// Reporting all three is honest. Dropping the escape or passing it through
+/// would put a wrong string into a program that asked for a right one, and a
+/// data tool that quietly corrupts one record in a hundred thousand is worse
+/// than one that stops.
+fn escape(var scan: Scanner) -> Result<String, Detail> {
+  let character = scan.peek()
+  scan.take()
+  match character {
+    "\"" => Ok("\"")
+    "\\" => Ok("\\")
+    "/" => Ok("/")
+    "n" => Ok("\n")
+    "t" => Ok("\t")
+    "r" => Ok("\r")
+    "u" => Err(scan.fail("`\\u` escapes are not supported"))
+    "b" => Err(scan.fail("`\\b` is a character Cove cannot write"))
+    "f" => Err(scan.fail("`\\f` is a character Cove cannot write"))
+    "" => Err(scan.fail("a backslash ended the line"))
+    _ => Err(scan.fail("`\\{character}` is not a JSON escape"))
+  }
+}
+
+/// Parses a number, which is every value that is not one of the other five.
+fn parseNumber(var scan: Scanner) -> Result<Json, Detail> {
+  let start = scan.at
+  var digits = ""
+  var reading = true
+  while reading {
+    let character = scan.peek()
+    if isNumeric(character) {
+      digits = "{digits}{character}"
+      scan.take()
+    } else {
+      reading = false
+    }
+  }
+  if digits.isEmpty() {
+    return Err(scan.fail("`{scan.peek()}` does not start a JSON value"))
+  }
+  match Float.parse(digits) {
+    Ok(number) => Ok(Json.Number(number))
+    Err(_) => Err(Detail(
+      column: start + 1,
+      message: "`{digits}` is not a number",
+    ))
+  }
+}
+
+/// Whether `character` may appear in a JSON number.
+///
+/// This admits more than JSON does -- `1-2` and `1e` both pass -- because the
+/// shape of the run is checked once, by `Float.parse`, rather than twice.
+fn isNumeric(character: String) -> Bool {
+  if character.isEmpty() {
+    return false
+  }
+  character >= "0" && character <= "9" || character == "-" || character == "+" ||
+    character == "." || character == "e" || character == "E"
+}
+
+// ------------------------------------------------------------------ printing
+
+/// Renders a number the way JSON writes one.
+///
+/// A `Float` that is whole prints as `4.0` in Cove and has to print as `4` in
+/// JSON, because a reader that takes `nights` as an integer should get one
+/// back.
+fn renderNumber(number: Float) -> String {
+  match number.toInt() {
+    Ok(whole) => {
+      if whole.toFloat() == number {
+        "{whole}"
+      } else {
+        "{number}"
+      }
+    }
+    Err(_) => "{number}"
+  }
+}
+
+/// Renders `text` as a quoted JSON string.
+///
+/// Text with nothing to escape -- which is nearly all text -- is quoted
+/// without being taken apart, so the common case costs one interpolation
+/// rather than one per character.
+fn quote(text: String) -> String {
+  if !needsEscaping(text) {
+    return "\"{text}\""
+  }
+  var parts = Vector.of()
+  for character in text.chars() {
+    match character {
+      "\"" => parts.push("\\\"")
+      "\\" => parts.push("\\\\")
+      "\n" => parts.push("\\n")
+      "\t" => parts.push("\\t")
+      "\r" => parts.push("\\r")
+      _ => parts.push(character)
+    }
+  }
+  "\"{"".join(parts.freeze())}\""
+}
+
+/// Whether `text` holds anything a JSON string has to write as an escape.
+fn needsEscaping(text: String) -> Bool {
+  text.contains("\"") || text.contains("\\") || text.contains("\n") ||
+    text.contains("\t") || text.contains("\r")
+}

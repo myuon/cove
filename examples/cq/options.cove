@@ -1,0 +1,167 @@
+use cq.programs.Program
+use cq.programs.programNamed
+use cq.programs.programs
+use cq.rows.Format
+use cq.rows.formatNamed
+
+/// What one run of `cq` was asked to do.
+struct Options {
+  input: String
+  program: Program
+  output: Option<String>
+  format: Format
+  skipInvalid: Bool
+  limit: Option<Int>
+}
+
+/// Reads the command line, or reports what is wrong with it.
+///
+/// Nothing here touches a host. Argument parsing that reads the environment or
+/// the filesystem is argument parsing that cannot be tested without one, and
+/// this is the part of the program most worth testing: it is where a person is
+/// most likely to be wrong, and where the message they get is the whole of
+/// what they will see.
+fn readOptions(arguments: Array<String>) -> Result<Options, Error> {
+  var input: Option<String> = None
+  var program: Option<Program> = None
+  var output: Option<String> = None
+  var format: Option<Format> = None
+  var skipInvalid = false
+  var limit: Option<Int> = None
+  var at = 0
+  while at < arguments.length() {
+    let argument = arguments.get(at).unwrapOr("")
+    match argument {
+      "--program" => {
+        program = Some(programNamed(valueAfter(arguments, at)?)?)
+        at += 2
+      }
+      "--input" => {
+        input = Some(valueAfter(arguments, at)?)
+        at += 2
+      }
+      "--output" => {
+        output = Some(valueAfter(arguments, at)?)
+        at += 2
+      }
+      "--output-format" => {
+        format = Some(formatNamed(valueAfter(arguments, at)?)?)
+        at += 2
+      }
+      "--limit" => {
+        limit = Some(countAfter(arguments, at)?)
+        at += 2
+      }
+      "--skip-invalid" => {
+        skipInvalid = true
+        at += 1
+      }
+      other => {
+        if other.startsWith("--") {
+          return Err(Error("`{other}` is not an option; run with `--help`"))
+        }
+        if input.isSome() {
+          return Err(Error("`{other}` is a second input; `cq` reads one file"))
+        }
+        input = Some(other)
+        at += 1
+      }
+    }
+  }
+  let chosen = match program {
+    Some(found) => found
+    None => return Err(Error("`--program` is required; run with `--help`"))
+  }
+  Ok(Options(
+    input: match input {
+      Some(path) => path
+      None => return Err(Error("no input file was named; run with `--help`"))
+    },
+    program: chosen,
+    output: output,
+    format: match format {
+      Some(chosenFormat) => chosenFormat
+      None => chosen.writes()
+    },
+    skipInvalid: skipInvalid,
+    limit: limit,
+  ))
+}
+
+/// Whether `arguments` asks for the usage text rather than a run.
+fn wantsHelp(arguments: Array<String>) -> Bool {
+  for argument in arguments {
+    if argument == "--help" || argument == "-h" {
+      return true
+    }
+  }
+  arguments.isEmpty()
+}
+
+/// The usage text, which names every program this package declares rather
+/// than a list kept beside them.
+fn usage() -> String {
+  var lines = Vector.of()
+  lines.push("cq -- a typed streaming transformation over JSON Lines and CSV")
+  lines.push("")
+  lines.push("usage: cq <input> --program <name> [options]")
+  lines.push("")
+  lines.push("programs:")
+  for program in programs() {
+    lines.push("  {padded(program.name(), 20)}{program.summary()} (reads {program.reads().name()})")
+  }
+  lines.push("")
+  lines.push("options:")
+  lines.push("  --input <path>          the file to read, if not given first")
+  lines.push("  --output <path>         write here instead of the console")
+  lines.push(
+    "  --output-format <name>  `jsonl` or `csv`; each program has a default",
+  )
+  lines.push("  --limit <count>         stop after this many records")
+  lines.push("  --skip-invalid          report a bad record and keep going")
+  lines.push("  --help                  this text")
+  "\n".join(lines.freeze())
+}
+
+/// The argument after the option at `at`, or the error that names what is
+/// missing.
+fn valueAfter(arguments: Array<String>, at: Int) -> Result<String, Error> {
+  let option = arguments.get(at).unwrapOr("")
+  match arguments.get(at + 1) {
+    Some(value) => {
+      if value.startsWith("--") {
+        Err(Error("`{option}` needs a value, and `{value}` is another option"))
+      } else {
+        Ok(value)
+      }
+    }
+    None => Err(Error("`{option}` needs a value, and the command line ended"))
+  }
+}
+
+/// The count after the option at `at`.
+fn countAfter(arguments: Array<String>, at: Int) -> Result<Int, Error> {
+  let option = arguments.get(at).unwrapOr("")
+  let text = valueAfter(arguments, at)?
+  match Int.parse(text) {
+    Ok(count) => {
+      if count < 0 {
+        Err(Error("`{option}` cannot be `{text}`, which is negative"))
+      } else {
+        Ok(count)
+      }
+    }
+    Err(_) => Err(Error(
+      "`{option}` cannot be `{text}`, which is not a whole number",
+    ))
+  }
+}
+
+/// `text` padded on the right to `width` characters, for a column of names.
+fn padded(text: String, width: Int) -> String {
+  var padding = ""
+  for i in text.length()..<width {
+    padding = "{padding} "
+  }
+  "{text}{padding}"
+}

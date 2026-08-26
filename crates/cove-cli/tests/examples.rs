@@ -39,6 +39,7 @@ use cove_runtime::files::Files;
 use cove_runtime::host::{Console, Documents, Env, Grants, HostRegistry};
 use cove_runtime::http::{Http, ScriptedRequest};
 use cove_runtime::interp::Interpreter;
+use cove_runtime::process::{Process, ProcessLog};
 use cove_runtime::runtime::Runtime;
 use cove_runtime::value::Value;
 use cove_sema::resolve::Program;
@@ -101,6 +102,12 @@ struct Ran {
     console: Vec<String>,
     /// Every response the program served, in order, as `<status> <body>`.
     served: Vec<String>,
+    /// The fake filesystem as the run left it, by path.
+    ///
+    /// A program that was told to write a file says on the console that it
+    /// did, and the console line is not the file. This is what lets a test
+    /// assert on what actually landed.
+    files: BTreeMap<String, String>,
 }
 
 impl Ran {
@@ -136,6 +143,8 @@ fn run(entry: &str, allow: &[&str], fakes: Fakes) -> Ran {
     let console = Buffer::default();
     let http = Http::recorded(fakes.bodies, fakes.requests);
     let served = http.served();
+    let files = Files::in_memory(fakes.files);
+    let tree = files.tree();
 
     // Every module is registered whether or not this entry needs it, exactly
     // as `cove run` and `cove test` register them: the grants are what decide,
@@ -145,10 +154,18 @@ fn run(entry: &str, allow: &[&str], fakes: Fakes) -> Ran {
     hosts.register(Box::new(Console::new(console.clone())));
     hosts.register(Box::new(Env::new(fakes.env)));
     hosts.register(Box::new(Documents::in_memory(fakes.documents)));
-    hosts.register(Box::new(Files::in_memory(fakes.files)));
+    hosts.register(Box::new(files));
     hosts.register(Box::new(Clock::virtual_clock(VirtualTime::new())));
     hosts.register(Box::new(Database::recorded(fakes.rows)));
     hosts.register(Box::new(http));
+    // An entry that takes its arguments as a parameter is handed them below;
+    // one that reads them through `process.args` needs the same list here, so
+    // the two ways of asking are the same list either way.
+    hosts.register(Box::new(Process::recorded(
+        fakes.args.clone(),
+        BTreeMap::new(),
+        ProcessLog::new(),
+    )));
 
     let args: Vec<Rc<str>> = fakes.args.iter().map(|arg| arg.as_str().into()).collect();
     let runtime = Runtime::new(resolved, sources, Arc::new(hosts));
@@ -159,6 +176,7 @@ fn run(entry: &str, allow: &[&str], fakes: Fakes) -> Ran {
         value,
         console: console.lines(),
         served: served.responses(),
+        files: tree.files(),
     }
 }
 
@@ -536,4 +554,338 @@ fn codegen_derives_a_module_from_the_file_it_was_given() {
     assert!(generated.contains("Ok"), "{generated}");
     assert!(generated.contains("NotFound"), "{generated}");
     assert!(generated.contains("404"), "{generated}");
+}
+
+// ------------------------------------------------------------------------ cq
+//
+// `cq` is the one program here big enough to have inputs of its own, and they
+// are checked in at `examples/cq/data/`. The tests below hand the fakes those
+// same bytes through `include_str!` rather than a copy, so a fixture edited on
+// disk and an assertion written here cannot drift apart without one of these
+// tests saying so.
+
+/// The bookings `examples/cq/data/bookings.jsonl` holds, as the fake
+/// filesystem's contents under the name the command line gives it.
+const BOOKINGS: &str = include_str!("../../../examples/cq/data/bookings.jsonl");
+
+/// The same bookings with three records this program refuses in among them.
+const MALFORMED: &str = include_str!("../../../examples/cq/data/bookings-malformed.jsonl");
+
+/// The seasonal rate card `rate-card` reads.
+const RATES: &str = include_str!("../../../examples/cq/data/rates.csv");
+
+/// One fake filesystem holding `contents` at `path`.
+fn file(path: &str, contents: &str) -> BTreeMap<String, String> {
+    BTreeMap::from([(path.to_string(), contents.to_string())])
+}
+
+/// Runs `cq.main` with `args` over a filesystem holding `files`.
+fn cq(args: &[&str], files: BTreeMap<String, String>) -> Ran {
+    run(
+        "cq.main",
+        &["console", "files", "process"],
+        Fakes {
+            args: args.iter().map(|arg| arg.to_string()).collect(),
+            files,
+            ..Fakes::default()
+        },
+    )
+}
+
+/// The message a Cove entry that answered `Err` carried.
+fn err(value: &Value) -> String {
+    let Value::Enum(result) = value else {
+        panic!("expected a `Result`, found {value}");
+    };
+    assert_eq!(&*result.case, "Err", "expected `Err(...)`, found {value}");
+    result.payload[0].to_string()
+}
+
+/// `revenue-summary` groups the bookings it read by property, in ascending
+/// order by name, and says on the console what the run did.
+///
+/// The order is the summary's own `Map` order rather than the input's, which
+/// is what makes this a golden assertion rather than a set comparison: two
+/// runs over the same file write the same bytes.
+#[test]
+fn cq_summarizes_revenue_by_property() {
+    let ran = cq(
+        &["bookings.jsonl", "--program", "revenue-summary"],
+        file("bookings.jsonl", BOOKINGS),
+    );
+
+    assert!(ok(&ran.value).eq_value(&Value::Unit), "{}", ran.value);
+    assert_eq!(
+        ran.console,
+        [
+            "property,bookings,nights,revenue,averageNightlyRate",
+            "harbour-loft,8,12,2208.00,184.00",
+            "orchard-barn,6,34,3272.50,96.25",
+            "seaside-cottage,8,28,3626.00,129.50",
+            "cq: read 24 records, wrote 3 rows to the console",
+        ],
+        "{:?}",
+        ran.console
+    );
+}
+
+/// `rate-card` reads a CSV and writes JSON Lines, which is the crossing this
+/// program exists to show: the header is consumed rather than written out,
+/// each rate becomes a number, and a note holding a comma or a quote survives
+/// the change of format.
+#[test]
+fn cq_normalizes_the_rate_card_into_json_lines() {
+    let ran = cq(
+        &["rates.csv", "--program", "rate-card"],
+        file("rates.csv", RATES),
+    );
+
+    assert!(ok(&ran.value).eq_value(&Value::Unit), "{}", ran.value);
+    assert_eq!(
+        ran.console,
+        [
+            r#"{"nightlyRate":109,"notes":"Two bedrooms, sea view","property":"seaside-cottage","season":"low"}"#,
+            r#"{"nightlyRate":159,"notes":"Minimum stay 3 nights","property":"seaside-cottage","season":"high"}"#,
+            r#"{"nightlyRate":164,"notes":"","property":"harbour-loft","season":"low"}"#,
+            r#"{"nightlyRate":219,"notes":"Says \"quiet\" on the listing","property":"harbour-loft","season":"high"}"#,
+            r#"{"nightlyRate":86.5,"notes":"Dog friendly","property":"orchard-barn","season":"low"}"#,
+            r#"{"nightlyRate":124,"notes":"Closed for repairs, 12–14 March","property":"orchard-barn","season":"high"}"#,
+            "cq: read 7 records, wrote 6 rows to the console",
+        ],
+        "{:?}",
+        ran.console
+    );
+}
+
+/// `--limit` stops the run after that many records, so the rows are the ones
+/// the first three bookings produce and the report says three were read.
+#[test]
+fn cq_stops_after_the_limit_it_was_given() {
+    let ran = cq(
+        &[
+            "bookings.jsonl",
+            "--program",
+            "confirmed-bookings",
+            "--limit",
+            "3",
+        ],
+        file("bookings.jsonl", BOOKINGS),
+    );
+
+    assert!(ok(&ran.value).eq_value(&Value::Unit), "{}", ran.value);
+    assert_eq!(
+        ran.console,
+        [
+            r#"{"checkIn":"2026-03-01","guest":"Ada Lovelace","id":"B-0001","nights":3,"property":"seaside-cottage","revenue":388.5}"#,
+            r#"{"checkIn":"2026-03-02","guest":"Grace Hopper","id":"B-0002","nights":2,"property":"harbour-loft","revenue":368}"#,
+            r#"{"checkIn":"2026-03-03","guest":"Alan Turing","id":"B-0003","nights":5,"property":"orchard-barn","revenue":481.25}"#,
+            "cq: read 3 records, wrote 3 rows to the console",
+        ],
+        "{:?}",
+        ran.console
+    );
+}
+
+/// A record this program cannot read stops the run, and the failure it
+/// answers is the `file:line:column: message` an editor can jump to.
+///
+/// Stopping is the default because a summary computed from most of a file is
+/// a wrong answer that looks like a right one. The header has already been
+/// written by then, which is what a streaming program does and is why the
+/// console is asserted too.
+#[test]
+fn cq_stops_at_the_first_record_it_cannot_read() {
+    let ran = cq(
+        &["bookings-malformed.jsonl", "--program", "revenue-summary"],
+        file("bookings-malformed.jsonl", MALFORMED),
+    );
+
+    assert_eq!(
+        err(&ran.value),
+        "bookings-malformed.jsonl:3:1: `nights` must be a number, and is a string"
+    );
+    assert_eq!(
+        ran.console,
+        ["property,bookings,nights,revenue,averageNightlyRate"],
+        "{:?}",
+        ran.console
+    );
+}
+
+/// `--skip-invalid` reports each bad record where it stands and keeps going,
+/// so the same file yields three diagnostics, a summary over the records that
+/// were good, and a report that counts the three it skipped.
+///
+/// The three are one per kind of failure the file holds: a field of the wrong
+/// type, a line that is not JSON at all, and a record missing a field. The
+/// blank line in that file is none of them — it is skipped without being
+/// counted, which is why the report says seven read rather than eight.
+#[test]
+fn cq_reports_and_skips_the_records_it_cannot_read() {
+    let ran = cq(
+        &[
+            "bookings-malformed.jsonl",
+            "--program",
+            "revenue-summary",
+            "--skip-invalid",
+        ],
+        file("bookings-malformed.jsonl", MALFORMED),
+    );
+
+    assert!(ok(&ran.value).eq_value(&Value::Unit), "{}", ran.value);
+    assert_eq!(
+        ran.console,
+        [
+            "property,bookings,nights,revenue,averageNightlyRate",
+            "bookings-malformed.jsonl:3:1: `nights` must be a number, and is a string",
+            "bookings-malformed.jsonl:6:35: expected `,` or `}` after a field",
+            "bookings-malformed.jsonl:9:1: this record has no `id` field",
+            "harbour-loft,2,3,552.00,184.00",
+            "orchard-barn,1,5,481.25,96.25",
+            "seaside-cottage,3,10,1295.00,129.50",
+            "cq: read 7 records and skipped 3, wrote 3 rows to the console",
+        ],
+        "{:?}",
+        ran.console
+    );
+}
+
+/// `--output` sends the rows to a file and leaves only the report on the
+/// console, so what has to be asserted is what landed in the filesystem.
+///
+/// The console line saying a file was written is not the file, and a program
+/// that printed it without writing anything would pass a test that read only
+/// the console.
+#[test]
+fn cq_writes_to_the_file_it_was_given_rather_than_the_console() {
+    let ran = cq(
+        &[
+            "bookings.jsonl",
+            "--program",
+            "revenue-summary",
+            "--output",
+            "summary.csv",
+            "--limit",
+            "4",
+        ],
+        file("bookings.jsonl", BOOKINGS),
+    );
+
+    assert!(ok(&ran.value).eq_value(&Value::Unit), "{}", ran.value);
+    assert_eq!(
+        ran.console,
+        ["cq: read 4 records, wrote 3 rows to summary.csv"],
+        "{:?}",
+        ran.console
+    );
+    assert_eq!(
+        ran.files.get("summary.csv").map(String::as_str),
+        Some(concat!(
+            "property,bookings,nights,revenue,averageNightlyRate\n",
+            "harbour-loft,2,3,552.00,184.00\n",
+            "orchard-barn,1,5,481.25,96.25\n",
+            "seaside-cottage,1,3,388.50,129.50\n",
+        )),
+        "{:?}",
+        ran.files
+    );
+    // The input is still there, unchanged: a run that reads one file and
+    // writes another must not have touched the one it read.
+    assert_eq!(
+        ran.files.get("bookings.jsonl").map(String::as_str),
+        Some(BOOKINGS)
+    );
+}
+
+/// `--help` prints the usage text and reads nothing, and the text names every
+/// program the package declares rather than a list kept beside them.
+#[test]
+fn cq_prints_its_usage_when_asked_for_help() {
+    let ran = cq(&["--help"], BTreeMap::new());
+
+    assert!(ok(&ran.value).eq_value(&Value::Unit), "{}", ran.value);
+    assert_eq!(
+        ran.console,
+        [
+            "cq -- a typed streaming transformation over JSON Lines and CSV",
+            "",
+            "usage: cq <input> --program <name> [options]",
+            "",
+            "programs:",
+            "  revenue-summary     group bookings by property and total their nights and revenue (reads jsonl)",
+            "  confirmed-bookings  keep the confirmed bookings and report what each one is worth (reads jsonl)",
+            "  rate-card           read a seasonal rate card and normalize it (reads csv)",
+            "",
+            "options:",
+            "  --input <path>          the file to read, if not given first",
+            "  --output <path>         write here instead of the console",
+            "  --output-format <name>  `jsonl` or `csv`; each program has a default",
+            "  --limit <count>         stop after this many records",
+            "  --skip-invalid          report a bad record and keep going",
+            "  --help                  this text",
+        ],
+        "{:?}",
+        ran.console
+    );
+}
+
+/// `cq.sample` writes records `cq.main` can read, which is the one thing a
+/// generator has to get right.
+///
+/// It builds its JSON by interpolation rather than through `cq.json`, so
+/// nothing but this makes the two agree: a generator whose output its own
+/// reader refuses is the failure most worth catching, and it would not show
+/// up in either half's own tests. The file the first run left behind is
+/// handed to the second exactly as it stands, so what is asserted is that the
+/// bytes crossed.
+#[test]
+fn cq_reads_back_the_sample_it_generated() {
+    let generated = run(
+        "cq.sample",
+        &["console", "files", "process"],
+        Fakes {
+            args: vec!["4".to_string(), "sample.jsonl".to_string()],
+            ..Fakes::default()
+        },
+    );
+
+    assert!(
+        ok(&generated.value).eq_value(&Value::Unit),
+        "{}",
+        generated.value
+    );
+    assert_eq!(generated.console, ["cq: wrote 4 records to sample.jsonl"]);
+    assert_eq!(
+        generated.files.get("sample.jsonl").map(String::as_str),
+        Some(concat!(
+            r#"{"id":"B-000001","guest":"Donald Knuth","property":"seaside-cottage","checkIn":"2026-03-19","nights":5,"guests":3,"rate":129.5,"status":"confirmed","channel":"agency"}"#,
+            "\n",
+            r#"{"id":"B-000002","guest":"Donald Knuth","property":"seaside-cottage","checkIn":"2026-03-20","nights":6,"guests":2,"rate":129.5,"status":"pending","channel":"direct"}"#,
+            "\n",
+            r#"{"id":"B-000003","guest":"Alan Turing","property":"harbour-loft","checkIn":"2026-03-21","nights":7,"guests":2,"rate":184.0,"status":"confirmed","channel":"direct"}"#,
+            "\n",
+            r#"{"id":"B-000004","guest":"Frances Allen","property":"harbour-loft","checkIn":"2026-03-26","nights":5,"guests":1,"rate":184.0,"status":"confirmed","channel":"agency"}"#,
+            "\n",
+        )),
+        "{:?}",
+        generated.files
+    );
+
+    let read = cq(
+        &["sample.jsonl", "--program", "confirmed-bookings"],
+        generated.files,
+    );
+
+    assert!(ok(&read.value).eq_value(&Value::Unit), "{}", read.value);
+    assert_eq!(
+        read.console,
+        [
+            r#"{"checkIn":"2026-03-19","guest":"Donald Knuth","id":"B-000001","nights":5,"property":"seaside-cottage","revenue":647.5}"#,
+            r#"{"checkIn":"2026-03-21","guest":"Alan Turing","id":"B-000003","nights":7,"property":"harbour-loft","revenue":1288}"#,
+            r#"{"checkIn":"2026-03-26","guest":"Frances Allen","id":"B-000004","nights":5,"property":"harbour-loft","revenue":920}"#,
+            "cq: read 4 records, wrote 3 rows to the console",
+        ],
+        "{:?}",
+        read.console
+    );
 }

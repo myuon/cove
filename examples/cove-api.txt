@@ -4,7 +4,7 @@
 # against the interface the current source derives, so check it in and let a
 # reviewer read the difference. Do not edit it by hand.
 cove-api 1
-hash fnv1a64:2fd4345f745c9498
+hash fnv1a64:22446a5b3413dbfe
 
 module callbacks
   /// Task-safe application dependencies captured by request handlers.
@@ -67,6 +67,303 @@ module config
   /// Loads configuration from the host environment.
   export fn loadConfig() -> Result<Config, ConfigError>
     requires env
+
+module cq
+  /// Runs one transformation over one file.
+  ///
+  /// Everything a run needs is decided before a byte is read: which
+  /// transformation, which file, which format, and where the output goes. What
+  /// happens after that is one loop that never holds more than one record.
+  export fn main() -> Result<Unit, Error>
+    requires console, files, process
+    capability-open
+  /// Writes a deterministic sample of bookings, for measuring.
+  ///
+  /// The large input this example's numbers were taken over is not checked in --
+  /// a hundred thousand records is fifteen megabytes, and a repository is a bad
+  /// place to keep one. It is generated instead, by this, from a seed, so the
+  /// file two people measure over is the same file.
+  ///
+  /// The writer is the same `files.Writer` the transformations write through, so
+  /// generating the input is itself a streaming job: this holds one record at a
+  /// time exactly as `cq` does.
+  export fn sample() -> Result<Unit, Error>
+    requires console, files, process
+
+module cq.csv
+  /// Renders `fields` as one CSV line, without its terminator.
+  export fn formatRecord(fields: Array<String>) -> String
+  /// Splits one CSV line into its fields.
+  ///
+  /// The rules are RFC 4180's, with one deliberate exception. A field may be
+  /// quoted with `"`, a quoted field may contain commas, and `""` inside a
+  /// quoted field is one literal quote. An unquoted field is taken exactly as
+  /// written, including any spaces around it: trimming would be this program
+  /// deciding that a value the input chose to include was not meant.
+  ///
+  /// The exception is that a record may not span lines. RFC 4180 lets a quoted
+  /// field contain a newline, and the reader upstream of this hands over one
+  /// line at a time, so a quoted field that is still open when the line ends is
+  /// reported rather than continued. Making it work means the reader and the
+  /// splitter having to agree about quoting, which is the format leaking into
+  /// the layer whose whole job is not to know about it.
+  export fn splitRecord(line: String) -> Result<Array<String>, Detail>
+
+module cq.diag
+  /// Where in one line something went wrong, and what.
+  ///
+  /// A parser knows the column and not the line: it is handed one record at a
+  /// time and has no idea which. `locate` is what supplies the rest, at the one
+  /// place in the program that is counting.
+  export struct Detail
+    field column: Int
+    field message: String
+  /// A detail, once the record it came from is known.
+  export struct Diagnostic
+    field source: String
+    field line: Int
+    field column: Int
+    field message: String
+  /// Reports `diagnostic` the way a compiler reports one, so an editor that
+  /// already knows how to jump to `file:line:column` can jump to a bad record.
+  export fn describe(diagnostic: Diagnostic) -> String
+  /// Places `detail` at line `line` of `source`.
+  export fn locate(detail: Detail, source: String, line: Int) -> Diagnostic
+
+module cq.json
+  /// A JSON value.
+  ///
+  /// JSON has one number type, so this does too: an integer that arrived in the
+  /// input is a `Number` like any other, and a program that needs an `Int` asks
+  /// for one at the point where it knows that is what the field means. Putting
+  /// the distinction here instead would be inventing a JSON that the format does
+  /// not have.
+  export enum Json
+    case Null
+    case Bool(Bool)
+    case Number(Float)
+    case Text(String)
+    case Items(Array<Json>)
+    case Fields(Map<String, Json>)
+  /// The field `name` of an object, or `None` for anything else.
+  ///
+  /// A value that is not an object has no fields rather than an empty set of
+  /// them, and both answer `None` here; a caller that needs to tell the two
+  /// apart matches on the value itself.
+  export fn field(value: Json, name: String) -> Option<Json>
+  /// Parses `text` as one complete JSON value.
+  ///
+  /// The whole of `text` must be that value: trailing content is an error rather
+  /// than something the caller is left to notice, because a line of JSON Lines
+  /// that has more after the record is not a record with a comment on it.
+  export fn parse(text: String) -> Result<Json, Detail>
+  /// Renders `value` as JSON on one line, which is what a JSON Lines record is.
+  ///
+  /// Object fields come out in `Map` order, which is ascending by key, so two
+  /// runs over the same input write the same bytes.
+  export fn render(value: Json) -> String
+
+module cq.pipeline
+  /// What one run did.
+  ///
+  /// Three counts and nothing else. A run over a hundred thousand records has a
+  /// hundred thousand chances to be told something, and a report that kept them
+  /// would be the thing this program exists not to do; each diagnostic is
+  /// written when it happens and only the tally outlives it.
+  export struct Outcome
+    field read: Int
+    field written: Int
+    field skipped: Int
+  /// Where a run's output goes.
+  ///
+  /// The console is not a file this host can open -- `files` is rooted, and a
+  /// terminal has no path inside any root -- so writing to one and writing to
+  /// the other are two different Host APIs, and this is the one place in the
+  /// program that knows which is in use.
+  export enum Sink
+    case Console
+    case File(files.Writer)
+  /// Reads every record of `reader`, folds it, and writes what comes back.
+  ///
+  /// The loop holds one line, one step's rows, and the transformation's own
+  /// state. Nothing accumulates that the transformation did not choose to
+  /// accumulate, which is what makes the memory a run holds a property of the
+  /// program rather than of the file.
+  ///
+  /// A record that cannot be read stops the run, unless `skipInvalid`, in which
+  /// case it is reported and counted and the next record is read. Stopping is
+  /// the default because a summary computed from most of the input is a wrong
+  /// answer that looks like a right one.
+  export fn transform<S>(reader: files.Reader, sink: Sink, source: String, format: Format, columns: Array<String>, initial: S, step: fn(state: S, line: String, number: Int) -> Result<Step<S>, Detail>, finish: fn(state: S) -> Array<Array<Cell>>, skipInvalid: Bool, limit: Option<Int>) -> Result<Outcome, Error>
+    requires console
+    capability-open
+
+module cq.programs
+  /// What the confirmed-bookings transformation carries between records.
+  ///
+  /// Nothing, and the type says so. This program writes as it reads, one row per
+  /// record it keeps, so no part of the input outlives the line it arrived on.
+  export struct NoState
+    field kept: Int
+  /// Which transformation a run performs.
+  ///
+  /// A program is a case of an enum rather than a file this run loads, because
+  /// Cove has no way to load a module at run time: a package is resolved,
+  /// checked, and linked before anything executes. So `--program` names one of
+  /// the transformations this package declares, and adding one is a change to
+  /// this enum and a `match` arm that the checker will not let anybody forget.
+  export enum Program
+    case RevenueSummary
+    case ConfirmedBookings
+    case RateCard
+    /// The columns this transformation's output carries, in order.
+    export fn columns(self) -> Array<String>
+    /// The name `--program` selects this transformation with.
+    export fn name(self) -> String
+    /// The format this transformation reads.
+    export fn reads(self) -> Format
+    /// What this transformation does, in one line, for `--help`.
+    export fn summary(self) -> String
+    /// The format this transformation writes when nothing says otherwise.
+    ///
+    /// A default rather than a requirement: every transformation's output is a
+    /// row of cells, and a cell renders in either format, so `--output-format`
+    /// may always override this.
+    export fn writes(self) -> Format
+  /// What the rate-card transformation carries between records.
+  ///
+  /// Only whether the header has gone past. A CSV file names its columns on its
+  /// first line, and a reader that is handed one line at a time has to remember
+  /// that it has seen it.
+  export struct RateCard
+    field seenHeader: Bool
+    field rows: Int
+  /// What a revenue summary accumulates.
+  ///
+  /// One entry per property, and nothing else: the bookings themselves are read,
+  /// counted, and dropped, so what this holds is bounded by how many properties
+  /// the input mentions rather than by how long the input is.
+  export struct Revenue
+    field properties: Map<String, Totals>
+  /// The empty state a run starts from.
+  export fn emptyConfirmed() -> NoState
+  /// The empty state a run starts from.
+  export fn emptyRateCard() -> RateCard
+  /// The empty summary a run starts from.
+  export fn emptyRevenue() -> Revenue
+  /// Writes nothing at the end, because everything was written on the way
+  /// through.
+  export fn finishConfirmed(state: NoState) -> Array<Array<Cell>>
+  /// Writes nothing at the end: every row went out as it was read.
+  export fn finishRateCard(state: RateCard) -> Array<Array<Cell>>
+  /// Writes one row per property, in ascending order by name.
+  ///
+  /// The order is the `Map`'s own, which is ascending by key, so two runs over
+  /// the same input produce the same file and a golden test is possible.
+  export fn finishRevenue(state: Revenue) -> Array<Array<Cell>>
+  /// Keeps one record when it is confirmed, and writes it out at once.
+  export fn foldConfirmed(state: NoState, line: String, number: Int) -> Result<Step<NoState>, Detail>
+  /// Reads one CSV line, checking the header and normalizing every row after
+  /// it.
+  export fn foldRateCard(state: RateCard, line: String, number: Int) -> Result<Step<RateCard>, Detail>
+  /// Folds one JSON Lines record into the summary.
+  ///
+  /// A cancelled booking is read and then ignored. It is not an error -- a
+  /// cancellation is an ordinary thing for a booking to be -- and it is not
+  /// revenue either, so the count it does not join is the count of bookings that
+  /// earned something.
+  export fn foldRevenue(state: Revenue, line: String, number: Int) -> Result<Step<Revenue>, Detail>
+  /// Reads a transformation by name, or reports the ones there are.
+  export fn programNamed(name: String) -> Result<Program, Error>
+  /// Every transformation this package declares, in the order `--help` lists
+  /// them.
+  export fn programs() -> Array<Program>
+
+module cq.records
+  /// A booking, as this program requires one to be.
+  ///
+  /// Every field is required and every field has a type. That is the point of
+  /// the type: past this struct nothing in the program has to ask whether
+  /// `nights` was a number, and nothing has to decide what to do when it was
+  /// not. The decision is made once, here, where the record is still next to the
+  /// line it came from.
+  export struct Booking
+    field id: String
+    field guest: String
+    field property: String
+    field checkIn: String
+    field nights: Int
+    field guests: Int
+    field rate: Float
+    field status: Status
+    field channel: String
+    /// What this booking is worth, which is its nightly rate for every night of
+    /// it.
+    export fn revenue(self) -> Float
+  /// What a booking's `status` field may say.
+  ///
+  /// An unrecognized status is an error rather than a case, because a status
+  /// this program has never heard of is a fact about the input that the program
+  /// should report rather than average.
+  export enum Status
+    case Confirmed
+    case Pending
+    case Cancelled
+    /// The word this status is written with, which is the word it was read
+    /// from.
+    export fn name(self) -> String
+  /// Reads a booking out of one parsed record.
+  ///
+  /// The column is 1 for every failure here, and that is a limitation rather
+  /// than a choice: a `Json` value has forgotten where in the line it was
+  /// written, so the most this can say is which record was wrong and which field
+  /// of it. Carrying a span on every value is what a diagnostic layer would do,
+  /// and this program does not have one.
+  export fn bookingFrom(record: Json) -> Result<Booking, Detail>
+
+module cq.rows
+  /// One value in an output row.
+  ///
+  /// A row is not an array of strings, because the two formats this program
+  /// writes disagree about what a string is: CSV has only text, and JSON Lines
+  /// distinguishes `3` from `"3"`. Deciding that once per value, here, is what
+  /// lets one program's output go out in either format without the program
+  /// knowing which.
+  export enum Cell
+    case Text(String)
+    case Count(Int)
+    case Decimal(Float, Int)
+  /// A format this program writes.
+  export enum Format
+    case Jsonl
+    case Csv
+    /// The name the command line selects this format with.
+    export fn name(self) -> String
+  /// What one record produced: the state it left behind, and the rows to write
+  /// for it now.
+  ///
+  /// This is the one shape every transformation's step answers in, and it is
+  /// what lets an aggregation and a filter be the same kind of thing. An
+  /// aggregation returns no rows until its input runs out and everything it
+  /// knows is in the state; a filter returns a row per record it keeps and
+  /// carries almost nothing. The engine writes whatever comes back at once, so a
+  /// filter over a hundred thousand records never holds more than one row.
+  export struct Step<S>
+    field state: S
+    field rows: Array<Array<Cell>>
+  /// Reads a format by name, or reports the two there are.
+  export fn formatNamed(name: String) -> Result<Format, Error>
+  /// The header line `format` starts a file with, if it has one.
+  ///
+  /// JSON Lines has no header: every record carries its own field names, so a
+  /// first line naming them would be a record that is not one.
+  export fn header(format: Format, columns: Array<String>) -> Option<String>
+  /// Renders one row in `format`, under the column names `columns`.
+  ///
+  /// CSV names its columns once, in a header the caller writes; JSON Lines names
+  /// them on every record, which is why the column names are needed here and not
+  /// only there.
+  export fn renderRow(format: Format, columns: Array<String>, cells: Array<Cell>) -> String
 
 module hello
   /// Returns a greeting for `name`.

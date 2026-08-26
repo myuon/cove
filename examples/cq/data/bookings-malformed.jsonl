@@ -1,0 +1,11 @@
+{"id":"B-0001","guest":"Ada Lovelace","property":"seaside-cottage","checkIn":"2026-03-01","nights":3,"guests":1,"rate":129.5,"status":"confirmed","channel":"direct"}
+{"id":"B-0002","guest":"Grace Hopper","property":"harbour-loft","checkIn":"2026-03-02","nights":2,"guests":2,"rate":184.0,"status":"confirmed","channel":"agency"}
+{"id":"B-0100","guest":"Nobody","property":"harbour-loft","checkIn":"2026-03-09","nights":"two","guests":1,"rate":184.0,"status":"confirmed","channel":"direct"}
+{"id":"B-0003","guest":"Alan Turing","property":"orchard-barn","checkIn":"2026-03-03","nights":5,"guests":3,"rate":96.25,"status":"confirmed","channel":"direct"}
+{"id":"B-0004","guest":"Barbara Liskov","property":"harbour-loft","checkIn":"2026-03-04","nights":1,"guests":4,"rate":184.0,"status":"confirmed","channel":"direct"}
+{"id":"B-0101","guest":"Unclosed,"property":"orchard-barn"
+{"id":"B-0005","guest":"Edsger Dijkstra","property":"seaside-cottage","checkIn":"2026-03-05","nights":4,"guests":1,"rate":129.5,"status":"confirmed","channel":"agency"}
+{"id":"B-0006","guest":"Katherine Johnson","property":"orchard-barn","checkIn":"2026-03-06","nights":7,"guests":2,"rate":96.25,"status":"cancelled","channel":"agency"}
+{"guest":"No Identifier","property":"seaside-cottage","checkIn":"2026-03-20","nights":2,"guests":1,"rate":129.5,"status":"confirmed","channel":"direct"}
+
+{"id":"B-0007","guest":"Donald Knuth","property":"seaside-cottage","checkIn":"2026-03-07","nights":3,"guests":3,"rate":129.5,"status":"confirmed","channel":"direct"}

@@ -3,7 +3,7 @@
 These programs are executable design tests for Cove. The syntax is still
 provisional.
 
-All eight run today; asynchronous execution is no longer what blocks any of
+All nine run today; asynchronous execution is no longer what blocks any of
 them -- tasks run on threads.
 
 What a run of the last three does depends on the hosts it was given, and
@@ -16,7 +16,7 @@ reports a connection error; run `server` first and it has something to reach,
 though `server` routes only `/health`, so what comes back is a pair of 404s
 rather than bookings and prices. The two are not written to compose.
 
-`crates/cove-cli/tests/examples.rs` runs every one of the eight against
+`crates/cove-cli/tests/examples.rs` runs every one of the nine against
 deterministic fake hosts instead -- a listener with a scripted queue of
 requests, a `fetch` with recorded answers, a clock that moves only when
 something moves it, and a database of canned rows -- which is where their
@@ -41,6 +41,14 @@ asserted. `clock.every`'s own behavior is pinned exactly by the unit tests in
 `crates/cove-runtime/src/clock.rs`, which drive it with no second thread to
 race.
 
+`cq/` is the odd one out and is meant to be. The others are each a few dozen
+lines aimed at one hypothesis; `cq/` is a program of a size somebody might
+actually write, and its purpose is to find out whether writing one is
+comfortable. `examples/cq/README.md` is where that answer lives, along with
+wall-clock, heap, allocation, and records-per-second numbers over a
+100,000-record input -- the first measurement this repository has of Cove doing
+a real job rather than a benchmark. Reading it is the point of it.
+
 Together they test the core product hypotheses:
 
 | Program | What it validates |
@@ -53,6 +61,7 @@ Together they test the core product hypotheses:
 | `values/` | Struct copies, Vector aliases, immutable Arrays, and freeze |
 | `traits/` | Nominal traits, generic bounds, and both dispatch forms |
 | `callbacks/` | Routers, middleware, events, timers, retries, and task-safe captures |
+| `cq/` | A whole practical program: streaming JSON Lines and CSV transformation, typed records, actionable diagnostics, and measured throughput. [Its own README](cq/README.md) records what it found |
 | `text/` | Not a program: the module `restricted/` imports, for `export` and capabilities across a boundary, and the package's own `test fn` declarations |
 | `codegen/` | `cove generate`: a capability-controlled generator that reads `files/status_codes.txt` |
 | `httpstatus/` | Not written by hand: `codegen.statusCodes`'s output, checked in and kept honest by `cove generate --check` |
@@ -66,7 +75,7 @@ A module may name another module's exported declarations with `use`, so
 required capabilities are derived from the package's call graph, not one
 module's.
 The first implementation milestone, making `hello/` run, is done, and so is
-the one that follows it: all eight programs now have defined behavior in
+the one that follows it: all nine programs now have defined behavior in
 both diagnostics and execution, whether that behavior is a clean run, like
 `hello`'s, or a documented refusal, like `callbacks`' immediate stop when
 `database.connect` finds no real database behind `cove run` to connect to.

@@ -1,0 +1,114 @@
+use console.println
+use files
+use process.args
+use cq.pipeline.Outcome
+use cq.pipeline.Sink
+use cq.pipeline.transform
+use cq.programs.Program
+use cq.programs.emptyConfirmed
+use cq.programs.emptyRateCard
+use cq.programs.emptyRevenue
+use cq.programs.finishConfirmed
+use cq.programs.finishRateCard
+use cq.programs.finishRevenue
+use cq.programs.foldConfirmed
+use cq.programs.foldRateCard
+use cq.programs.foldRevenue
+
+/// Runs one transformation over one file.
+///
+/// Everything a run needs is decided before a byte is read: which
+/// transformation, which file, which format, and where the output goes. What
+/// happens after that is one loop that never holds more than one record.
+export fn main() -> Result<Unit, Error> {
+  let arguments = args()
+  if wantsHelp(arguments) {
+    println(usage())?
+    return Ok(())
+  }
+  let options = readOptions(arguments)?
+  let reader = files.open(options.input)?
+  let sink = match options.output {
+    Some(path) => Sink.File(files.create(path)?)
+    None => Sink.Console
+  }
+  let outcome = run(options, reader, sink)
+  reader.close()?
+  match sink {
+    Sink.File(writer) => writer.close()?
+    Sink.Console => ()
+  }
+  report(options, outcome?)
+}
+
+/// Chooses the transformation and runs it.
+///
+/// Each arm is a fully typed pipeline over a state of its own: `Revenue` holds
+/// one entry per property, `NoState` holds a count, and `RateCard` holds
+/// whether the header has gone by. There is no shared accumulator they all
+/// have to fit into, which is the reason this is a `match` rather than a table
+/// of function values -- a table would have to agree about the state type, and
+/// these three do not.
+fn run(
+  options: Options,
+  reader: files.Reader,
+  sink: Sink,
+) -> Result<Outcome, Error> {
+  let columns = options.program.columns()
+  match options.program {
+    Program.RevenueSummary => transform(
+      reader: reader,
+      sink: sink,
+      source: options.input,
+      format: options.format,
+      columns: columns,
+      initial: emptyRevenue(),
+      step: foldRevenue,
+      finish: finishRevenue,
+      skipInvalid: options.skipInvalid,
+      limit: options.limit,
+    )
+    Program.ConfirmedBookings => transform(
+      reader: reader,
+      sink: sink,
+      source: options.input,
+      format: options.format,
+      columns: columns,
+      initial: emptyConfirmed(),
+      step: foldConfirmed,
+      finish: finishConfirmed,
+      skipInvalid: options.skipInvalid,
+      limit: options.limit,
+    )
+    Program.RateCard => transform(
+      reader: reader,
+      sink: sink,
+      source: options.input,
+      format: options.format,
+      columns: columns,
+      initial: emptyRateCard(),
+      step: foldRateCard,
+      finish: finishRateCard,
+      skipInvalid: options.skipInvalid,
+      limit: options.limit,
+    )
+  }
+}
+
+/// Says what the run did, on the console rather than in the output.
+///
+/// It goes to the console even when the output does too, because a report that
+/// went into the output would be a row that is not one, and `console` has no
+/// second stream to put it on.
+fn report(options: Options, outcome: Outcome) -> Result<Unit, Error> {
+  let where = match options.output {
+    Some(path) => path
+    None => "the console"
+  }
+  if outcome.skipped > 0 {
+    println("cq: read {outcome.read} records and skipped {outcome.skipped}, wrote {outcome.written} rows to {where}")?
+  } else {
+    println("cq: read {outcome.read} records, wrote {outcome.written} rows to {where}")?
+  }
+  Ok(())
+}
