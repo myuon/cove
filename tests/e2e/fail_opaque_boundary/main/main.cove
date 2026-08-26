@@ -1,0 +1,14 @@
+use console.println
+use account.AccountId
+
+/// Reaches past an opaque export, in both of the ways that are refused.
+///
+/// `account` exports `AccountId` and the operations declared for it, and
+/// not its representation, so the synthesized labeled constructor and the
+/// field are both out of reach here. This case lives in its own package so
+/// that failing to check cannot take down every other case.
+export fn main() -> Result<Unit, Error> {
+  let id = AccountId(number: 41)
+  println("{id.number}")?
+  Ok(())
+}

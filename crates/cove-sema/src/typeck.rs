@@ -192,6 +192,12 @@ pub const TYPE_ARGUMENTS: &str = "cove::type::type_arguments";
 pub const ALIAS_CYCLE: &str = "cove::type::alias_cycle";
 /// A field access names no field of the receiver's type.
 pub const UNKNOWN_FIELD: &str = "cove::type::unknown_field";
+/// A field of an `export opaque struct` is named outside the module that
+/// declares it.
+pub const OPAQUE_FIELD: &str = "cove::type::opaque_field";
+/// The synthesized labeled constructor of an `export opaque struct` is
+/// called outside the module that declares it.
+pub const OPAQUE_CONSTRUCTION: &str = "cove::type::opaque_construction";
 /// A method call names no method of the receiver's type.
 pub const UNKNOWN_METHOD: &str = "cove::type::unknown_method";
 /// An associated call names no associated function of the type.
@@ -414,6 +420,18 @@ fn qualified_name(name: &Rc<str>, module: &str) -> Rc<str> {
     } else {
         format!("{module}.{name}").into()
     }
+}
+
+/// Splits a table key into the module that declares the type and the type's
+/// own name, when the key names a type this module did not declare.
+///
+/// A checker keys its own module's declarations by their bare name and every
+/// imported one by `module.Name`, so a key that carries a module in front is
+/// exactly a declaration written somewhere else. That is the whole test an
+/// opaque type's boundary needs: inside the declaring module the key is
+/// bare, and the representation is in reach.
+fn foreign_type(key: &str) -> Option<(&str, &str)> {
+    key.rsplit_once('.')
 }
 
 /// Everything one module offers the modules that import it: the signatures
@@ -817,6 +835,13 @@ impl FnSig {
 struct StructSig {
     generics: Vec<Rc<str>>,
     fields: Vec<ParamSig>,
+    /// `export opaque struct`: the fields below belong to the declaring
+    /// module alone.
+    ///
+    /// They are still recorded, because the declaring module's own bodies
+    /// are checked against them and a field's type still has to resolve.
+    /// What `opaque` changes is who may name one: see [`foreign_type`].
+    opaque: bool,
 }
 
 /// An enum's cases, in declaration order.
@@ -1006,6 +1031,122 @@ impl<'a> Checker<'a> {
         Some(format!("{owner_name}.{name}"))
     }
 
+    // ------------------------------------------------------- opaque types
+
+    /// The exported operations of the type `module.type_name` that a caller
+    /// outside `module` may use, written as it would call them.
+    ///
+    /// `with_receiver` picks between the two halves of the interface an
+    /// opaque type has: its associated functions, which are how a caller
+    /// builds one, and its methods, which are how a caller reads one.
+    fn exported_operations(
+        &self,
+        module: &str,
+        type_name: &str,
+        with_receiver: bool,
+    ) -> Vec<String> {
+        self.program
+            .methods_of(module, type_name)
+            .into_iter()
+            .filter(|declared| {
+                declared.entry.exported && declared.entry.decl.receiver.is_some() == with_receiver
+            })
+            .map(|declared| {
+                if with_receiver {
+                    format!("{}()", declared.name)
+                } else {
+                    format!("{type_name}.{}()", declared.name)
+                }
+            })
+            .collect()
+    }
+
+    /// The `help` line that points a caller at what an opaque type does
+    /// export, or at the fact that it exports nothing of that kind.
+    fn opaque_help(
+        &self,
+        module: &str,
+        type_name: &str,
+        with_receiver: bool,
+        instead: &str,
+        nothing: &str,
+    ) -> String {
+        let operations = self.exported_operations(module, type_name, with_receiver);
+        if operations.is_empty() {
+            format!(
+                "module `{module}` exports no {nothing} for `{type_name}`, so ask it to export one"
+            )
+        } else {
+            format!("{instead} {}", list(&operations))
+        }
+    }
+
+    /// Reports a use of an opaque type's representation from outside the
+    /// module that declares it, and answers whether it did.
+    ///
+    /// `export opaque struct` publishes a name and the methods declared for
+    /// it, so a caller reaching for a field or for the synthesized labeled
+    /// constructor is reaching for something that was deliberately not
+    /// exported. The declaring module is unaffected: its own key for the
+    /// type is bare, which is what [`foreign_type`] tests.
+    fn reject_opaque_field(&mut self, key: &str, sig: &StructSig, field: &str, span: Span) -> bool {
+        if !sig.opaque {
+            return false;
+        }
+        let Some((module, type_name)) = foreign_type(key) else {
+            return false;
+        };
+        let help = self.opaque_help(
+            module,
+            type_name,
+            true,
+            "read the value through an exported method, such as",
+            "method",
+        );
+        self.diagnostics.push(
+            Diagnostic::error(
+                OPAQUE_FIELD,
+                format!("`{type_name}` is opaque here, so its field `{field}` cannot be read"),
+            )
+            .at(span)
+            .rule(
+                "An `export opaque struct` exports its name and its exported methods; its fields belong to the module that declares it.",
+            )
+            .help(help),
+        );
+        true
+    }
+
+    /// Reports a call to the synthesized labeled constructor of an opaque
+    /// type from outside the module that declares it. See
+    /// [`Checker::reject_opaque_field`].
+    fn reject_opaque_construction(&mut self, key: &str, sig: &StructSig, span: Span) {
+        if !sig.opaque {
+            return;
+        }
+        let Some((module, type_name)) = foreign_type(key) else {
+            return;
+        };
+        let help = self.opaque_help(
+            module,
+            type_name,
+            false,
+            "build the value through an exported associated function, such as",
+            "constructor",
+        );
+        self.diagnostics.push(
+            Diagnostic::error(
+                OPAQUE_CONSTRUCTION,
+                format!("`{type_name}` is opaque here, so it cannot be built field by field"),
+            )
+            .at(span)
+            .rule(
+                "An `export opaque struct` does not export the labeled constructor its fields synthesize; only the module that declares it may write one.",
+            )
+            .help(help),
+        );
+    }
+
     /// Brings every declaration of every module this one imports from into
     /// its tables, under the canonical `module.Name` keys.
     ///
@@ -1063,6 +1204,7 @@ impl<'a> Checker<'a> {
                                     ..field.clone()
                                 })
                                 .collect(),
+                            opaque: sig.opaque,
                         },
                     )
                 })
@@ -1244,8 +1386,9 @@ impl<'a> Checker<'a> {
 
         let struct_names: Vec<String> = self.module.structs.keys().cloned().collect();
         for name in struct_names {
-            let decl = self.module.structs[&name].decl.clone();
-            let sig = self.struct_sig(&decl);
+            let entry = &self.module.structs[&name];
+            let (decl, opaque) = (entry.decl.clone(), entry.opaque);
+            let sig = self.struct_sig(&decl, opaque);
             self.structs.insert(name, sig);
         }
 
@@ -1430,7 +1573,7 @@ impl<'a> Checker<'a> {
 
     // ------------------------------------------------------ declarations
 
-    fn struct_sig(&mut self, decl: &StructDecl) -> StructSig {
+    fn struct_sig(&mut self, decl: &StructDecl, opaque: bool) -> StructSig {
         let outer = std::mem::take(&mut self.type_params);
         self.reject_bounds(&decl.generics, "struct");
         let generics = self.enter_generics(&decl.generics);
@@ -1446,7 +1589,11 @@ impl<'a> Checker<'a> {
             })
             .collect();
         self.type_params = outer;
-        StructSig { generics, fields }
+        StructSig {
+            generics,
+            fields,
+            opaque,
+        }
     }
 
     fn enum_sig(&mut self, decl: &EnumDecl) -> EnumSig {
@@ -2341,6 +2488,9 @@ impl<'a> Checker<'a> {
                 };
                 let sig = sig.clone();
                 let subst = substitution(&sig.generics, args);
+                if self.reject_opaque_field(struct_name, &sig, &name.node, span) {
+                    return Ty::Unknown;
+                }
                 match sig.fields.iter().find(|f| f.name == name.node) {
                     Some(field) => field.ty.substitute(&subst),
                     None => {
@@ -3966,6 +4116,10 @@ impl<'a> Checker<'a> {
         trailing: Option<&Expr>,
         span: Span,
     ) -> Ty {
+        // The arguments are checked either way: an opaque type refuses the
+        // call, but a mistake inside it is still a mistake worth naming, and
+        // the result is still this struct.
+        self.reject_opaque_construction(name, sig, span);
         let generics: Vec<Rc<str>> = sig.generics.clone();
         let subst = self.match_arguments(
             &sig.fields,
@@ -9175,6 +9329,145 @@ fn secret() -> Int {
             ),
         ]);
         assert_eq!(error.code, MISMATCH);
+    }
+
+    /// A module that exports a nominal type and not its representation:
+    /// `Token.of` and `text` are the only ways in from outside.
+    const OPAQUE: &str = "\
+/// A token, whose representation is this module's own business.
+export opaque struct Token {
+  raw: String
+}
+
+/// Reads the representation from the module that declares it.
+fn rawOf(token: Token) -> String {
+  token.raw
+}
+
+impl Token {
+  /// Builds a token.
+  export fn of(raw: String) -> Token {
+    Token(raw: raw)
+  }
+
+  /// The token as text.
+  export fn text(self) -> String {
+    rawOf(self)
+  }
+}
+";
+
+    /// The same interface over a different representation. A caller written
+    /// against [`OPAQUE`] must not be able to tell the two apart.
+    const OPAQUE_REPRESENTATION_CHANGED: &str = "\
+/// A token, whose representation is this module's own business.
+export opaque struct Token {
+  scheme: String
+  body: String
+}
+
+impl Token {
+  /// Builds a token.
+  export fn of(raw: String) -> Token {
+    Token(scheme: \"bearer\", body: raw)
+  }
+
+  /// The token as text.
+  export fn text(self) -> String {
+    self.body
+  }
+}
+";
+
+    /// The module that declares an opaque type is unaffected by it: it
+    /// writes the synthesized constructor and reads the fields as it would
+    /// for any struct.
+    #[test]
+    fn the_declaring_module_builds_and_inspects_an_opaque_type() {
+        accepts_modules(&[("auth", OPAQUE)]);
+    }
+
+    #[test]
+    fn another_module_may_not_build_an_opaque_type_field_by_field() {
+        for caller in [
+            "use auth.Token\n\n/// Entry point.\nexport fn main() -> Token {\n  Token(raw: \"t\")\n}\n",
+            "use auth\n\n/// Entry point.\nexport fn main() -> auth.Token {\n  auth.Token(raw: \"t\")\n}\n",
+        ] {
+            let error = rejects_modules(&[("auth", OPAQUE), ("app", caller)]);
+            assert_eq!(error.code, OPAQUE_CONSTRUCTION, "{caller}");
+            // The help names what the module did export instead.
+            assert!(error
+                .help
+                .as_ref()
+                .expect("the diagnostic offers a correction")
+                .contains("Token.of()"));
+        }
+    }
+
+    #[test]
+    fn another_module_may_not_read_an_opaque_type_s_field() {
+        let error = rejects_modules(&[
+            ("auth", OPAQUE),
+            (
+                "app",
+                "use auth.Token\n\n/// Entry point.\nexport fn main(token: Token) -> String {\n  token.raw\n}\n",
+            ),
+        ]);
+        assert_eq!(error.code, OPAQUE_FIELD);
+        assert!(error
+            .help
+            .as_ref()
+            .expect("the diagnostic offers a correction")
+            .contains("text()"));
+    }
+
+    /// Assignment reaches the field through the same check, so a caller
+    /// cannot write what it may not read.
+    #[test]
+    fn another_module_may_not_assign_an_opaque_type_s_field() {
+        let error = rejects_modules(&[
+            ("auth", OPAQUE),
+            (
+                "app",
+                "use auth.Token\n\n/// Entry point.\nexport fn main(var token: Token) {\n  token.raw = \"other\"\n}\n",
+            ),
+        ]);
+        assert_eq!(error.code, OPAQUE_FIELD);
+    }
+
+    /// The type's name and its exported operations are what an opaque
+    /// export is for, so all of them still work across the boundary.
+    #[test]
+    fn another_module_uses_an_opaque_type_through_its_exported_operations() {
+        accepts_modules(&[
+            ("auth", OPAQUE),
+            (
+                "app",
+                "use auth.Token\n\n/// Entry point.\nexport fn main() -> String {\n  Token.of(\"t\").text()\n}\n",
+            ),
+        ]);
+    }
+
+    /// The point of the modifier: the representation is free to change
+    /// underneath a caller that only names the type and its operations.
+    #[test]
+    fn an_opaque_type_s_representation_may_change_without_touching_its_callers() {
+        let caller = "use auth.Token\n\n/// Entry point.\nexport fn main() -> String {\n  Token.of(\"t\").text()\n}\n";
+        accepts_modules(&[("auth", OPAQUE), ("app", caller)]);
+        accepts_modules(&[("auth", OPAQUE_REPRESENTATION_CHANGED), ("app", caller)]);
+    }
+
+    /// A plain `export struct` is unchanged: its representation is public,
+    /// which is what every module written before `opaque` depends on.
+    #[test]
+    fn a_plain_exported_struct_still_exposes_its_representation() {
+        accepts_modules(&[
+            ("levels", LEVELS),
+            (
+                "app",
+                "use levels.Config\nuse levels.LogLevel\n\n/// Entry point.\nexport fn main() -> Int {\n  Config(port: 1, level: LogLevel.Info).port\n}\n",
+            ),
+        ]);
     }
 
     #[test]

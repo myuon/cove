@@ -1,0 +1,30 @@
+/// An account identifier whose representation is this module's own.
+///
+/// The type is exported and the way it is built is not, so another module
+/// can hold, compare, and print an `AccountId` without ever learning that
+/// it is a prefix and a number rather than, say, one string.
+export opaque struct AccountId {
+  prefix: String
+  number: Int
+}
+
+impl AccountId {
+  /// Builds an identifier, refusing a number that cannot be one.
+  export fn of(number: Int) -> Result<AccountId, Error> {
+    if number <= 0 {
+      return Err(Error("an account number starts at 1, got {number}"))
+    }
+
+    Ok(AccountId(prefix: "acct", number: number))
+  }
+
+  /// The identifier as text.
+  export fn text(self) -> String {
+    "{self.prefix}-{self.number}"
+  }
+}
+
+/// Reads the representation, which the declaring module may always do.
+export fn sortKey(id: AccountId) -> Int {
+  id.number
+}

@@ -35,6 +35,14 @@ pub struct Item {
     /// comparable thing — who may call this — so a declaration carries at
     /// most one of the two, and only a `fn` carries `test` at all.
     pub is_test: bool,
+    /// `export opaque struct User { ... }`: the export publishes the type's
+    /// name and its exported methods, and nothing about how it is built.
+    ///
+    /// `opaque` narrows an `export` rather than standing in for one, so it
+    /// only ever appears together with one, and only on a struct: exporting
+    /// an enum exports its cases, because a `match` over them is what the
+    /// enum is for. See ADR 0014.
+    pub is_opaque: bool,
     pub kind: ItemKind,
     pub span: Span,
 }
