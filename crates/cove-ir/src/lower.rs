@@ -28,9 +28,9 @@
 //!   elements, and struct fields.
 //! - **A struct's fields are pushed in declaration order.** `assign_labels`
 //!   in the interpreter refuses a label written out of declaration order, so
-//!   a call it accepts already stands in that order; [`arguments_in_order`]
-//!   is that rule, and a call it cannot put in order is reported rather than
-//!   rearranged.
+//!   a call it accepts already stands in that order; `arguments_in_order`
+//!   below is that rule, and a call it cannot put in order is reported rather
+//!   than rearranged.
 //!
 //! # What is not lowered
 //!
