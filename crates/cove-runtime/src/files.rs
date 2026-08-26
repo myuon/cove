@@ -752,7 +752,12 @@ mod tests {
     #[test]
     fn signatures_read_like_source() {
         let files = Files::in_memory(BTreeMap::new());
-        let rendered: Vec<String> = files.schema().iter().map(|op| op.signature()).collect();
+        let rendered: Vec<String> = files
+            .module_schema()
+            .operations
+            .iter()
+            .map(|op| op.signature())
+            .collect();
         assert_eq!(
             rendered,
             [
@@ -770,7 +775,7 @@ mod tests {
     #[test]
     fn reads_and_writes_declare_different_effects() {
         let files = Files::in_memory(BTreeMap::new());
-        for op in files.schema() {
+        for op in files.module_schema().operations {
             let expected = match op.name {
                 "read" | "exists" | "list" => Effect::Read,
                 "write" | "delete" => Effect::IrreversibleWrite,

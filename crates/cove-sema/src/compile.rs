@@ -29,7 +29,7 @@
 //! ```
 //!
 //! The value handed over is the same `ModuleSchema` the module registers
-//! with at run time — [`cove_runtime::HostApi::module_schema`] answers with
+//! with at run time — `cove_runtime::HostApi::module_schema` answers with
 //! it, and `HostRegistry` enforces it — so the description the checker reads
 //! and the one the boundary holds a call to cannot drift apart. Restating
 //! one of them is what drift is made of.
@@ -84,6 +84,28 @@ impl Compiler {
         schemas: impl IntoIterator<Item = ModuleSchema>,
     ) -> Compiler {
         self.schemas.extend(schemas);
+        self
+    }
+
+    /// Reads `schemas` and nothing else, replacing whatever this pipeline
+    /// was reading.
+    ///
+    /// This is how an embedding whose registry is its own says so.
+    /// [`with_host_schema`](Compiler::with_host_schema) and
+    /// [`with_host_schemas`](Compiler::with_host_schemas) *add* to the
+    /// shipped tables, which is right for a run that registers the shipped
+    /// hosts and some of its own. A run that registers neither wants
+    /// `cove_schema::HostSchemas::only`, so that a `use files` in a program
+    /// it is about to run is reported by the checker rather than by the
+    /// boundary:
+    ///
+    /// ```ignore
+    /// let program = Compiler::new()
+    ///     .with_schemas(HostSchemas::only(hosts.module_schemas()))
+    ///     .compile(&package)?;
+    /// ```
+    pub fn with_schemas(mut self, schemas: HostSchemas) -> Compiler {
+        self.schemas = schemas;
         self
     }
 

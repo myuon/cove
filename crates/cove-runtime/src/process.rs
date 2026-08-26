@@ -495,7 +495,12 @@ mod tests {
     #[test]
     fn signatures_read_like_source() {
         let process = Process::real(Vec::new(), Vec::new());
-        let rendered: Vec<String> = process.schema().iter().map(|op| op.signature()).collect();
+        let rendered: Vec<String> = process
+            .module_schema()
+            .operations
+            .iter()
+            .map(|op| op.signature())
+            .collect();
         assert_eq!(
             rendered,
             [
@@ -511,7 +516,7 @@ mod tests {
     #[test]
     fn ending_the_run_is_not_recordable() {
         let process = Process::real(Vec::new(), Vec::new());
-        for op in process.schema() {
+        for op in process.module_schema().operations {
             assert_eq!(op.recordable, op.name != "exit", "`process.{}`", op.name);
         }
     }

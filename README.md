@@ -68,11 +68,12 @@ resource has been closed reports a diagnostic rather than acting on whatever
 now occupies the slot. A host module may also declare plain-data types in a
 `TypeSchema`, which Cove source names and initializes with labels exactly like
 its own structs and enums. An embedding's own modules are checked the same
-way: `HostApi::module_schema` and `cove_sema::Compiler::with_host_schema` take
-one `ModuleSchema`, so registering a module and checking a program written
-against it read the same table rather than two descriptions that can drift. `Reentry` lets a host that was handed a Cove closure
-run it on the task that made the call, on that task's stack, against that run's
-budget, with no second thread and no scheduler. `cove trace` reads a recorded
+way: `HostApi::module_schema` and `cove_sema::Compiler::with_host_schema`
+take one `ModuleSchema`, so registering a module and checking a program
+written against it read the same table rather than two descriptions that can
+drift. `Reentry` lets a host that was handed a Cove closure run it on the
+task that made the call, on that task's stack, against that run's budget,
+with no second thread and no scheduler. `cove trace` reads a recorded
 trace back and summarises it, and `cove replay` runs an entry again with every
 host answering from the trace -- reproducing a resource handle by handing back
 the recorded name -- and reports a divergence when the program asks for
@@ -131,7 +132,10 @@ actually execute in
 [ADR 0008](docs/adr/0008-concurrent-task-execution.md), which replaced ADR
 0003's sequential phase, and how a host hands out a resource handle and
 reenters a Cove closure in
-[ADR 0013](docs/adr/0013-host-resource-handles.md).
+[ADR 0013](docs/adr/0013-host-resource-handles.md), and how an embedding's own
+host modules become ones `cove check` can see in
+[ADR 0017](docs/adr/0017-embedder-host-api-schemas.md), which supersedes ADR
+0001's account of what a compiler cannot see.
 
 Syntax is still provisional and may change.
 

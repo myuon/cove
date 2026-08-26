@@ -52,7 +52,7 @@ use cove_runtime::{
     OperationSchema, Runtime, RuntimeError, TypeSchema, Value,
 };
 use cove_sema::resolve::Program;
-use cove_sema::{Capability, Compiler, Config, Module, Package, Unit};
+use cove_sema::{Capability, Compiler, Config, HostSchemas, Module, Package, Unit};
 
 /// A `documents` implementation a host defines for itself: a fixed set of
 /// named notes and a log of every read the host observed. Nothing here comes
@@ -542,4 +542,83 @@ fn a_host_the_checker_was_not_handed_is_left_to_the_boundary_with_a_warning() {
     .run_entry("app", "main", Vec::new())
     .expect("the boundary checks what the checker could not");
     assert_eq!(value.to_string(), "Ok(7)");
+}
+
+/// An embedding whose registry is its own says so, and then a shipped module
+/// it did not register is as unknown to the checker as any other name.
+///
+/// This is the other half of pairing a checker with a registry.
+/// `with_host_schemas` *adds* to the shipped tables, which is what a run that
+/// registers the shipped hosts and some of its own wants. This embedding
+/// registers `company` and nothing else, so the shipped tables describe
+/// nothing it is going to run: without `HostSchemas::only`, a program writing
+/// `files.write` would check cleanly against a `files` module this run has
+/// not got, and the first mention of the problem would be the boundary's
+/// `unknown host module`, at run time -- the one failure handing schemas to
+/// the checker is meant to prevent.
+#[test]
+fn an_embedding_whose_registry_is_its_own_does_not_check_against_a_module_it_has_not_got() {
+    let lookups = Arc::new(Mutex::new(Vec::new()));
+    let hosts = directory(Arc::clone(&lookups));
+    let text = "\
+use company
+use files
+
+/// Writes what the directory says, through a host this run has not got.
+export fn main() -> Result<Unit, Error> {
+  let found = company.employee(\"ada\")?
+  files.write(\"seniority.txt\", \"7\")?
+  Ok(())
+}
+";
+
+    // The default set answers for `files` out of the shipped tables, and says
+    // nothing about a module the run will refuse.
+    let (_, package) = package_of(text);
+    let open = Compiler::new()
+        .with_host_schemas(hosts.module_schemas())
+        .compile(&package)
+        .expect("the shipped `files` table makes this look like a checked call");
+    assert!(
+        !open
+            .warnings
+            .iter()
+            .any(|item| item.message.contains("`files`")),
+        "the shipped fallback has nothing to warn about"
+    );
+
+    // Closing the set leaves `files` described by nothing, which is what it
+    // is: the checker warns at the `use`, before anything runs.
+    let (sources, package) = package_of(text);
+    let closed = Compiler::new()
+        .with_schemas(HostSchemas::only(hosts.module_schemas()))
+        .compile(&package)
+        .expect("an undescribed module is a warning, not an error");
+    let rendered: String = closed
+        .warnings
+        .iter()
+        .map(|item| render(&sources, item))
+        .collect();
+    assert!(
+        rendered.contains("no Host API schema describes the host module `files`"),
+        "{rendered}"
+    );
+    assert!(
+        !rendered.contains("host module `company`"),
+        "`company` is registered, so it is described: {rendered}"
+    );
+
+    // And the boundary agrees with what the closed set said.
+    let error = Interpreter::new(&Runtime::new(
+        Arc::new(closed),
+        Arc::new(sources),
+        Arc::new(hosts),
+    ))
+    .run_entry("app", "main", Vec::new())
+    .expect_err("the run has no `files` module to dispatch to");
+    assert!(
+        error.message.contains("unknown host module `files`"),
+        "{}",
+        error.message
+    );
 }

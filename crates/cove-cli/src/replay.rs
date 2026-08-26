@@ -632,7 +632,8 @@ mod tests {
         // The real `Console` would have written to its output; this one has
         // no output to write to, which is the point.
         assert!(Console::new(Vec::new())
-            .schema()
+            .module_schema()
+            .operations
             .iter()
             .any(|op| op.name == "println"));
     }

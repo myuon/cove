@@ -36,7 +36,7 @@ use std::sync::Mutex;
 
 use crate::error::RuntimeError;
 use crate::host::{HostApi, Reentry, ResourceHandle};
-use crate::schema::{ModuleSchema, ResourceSchema};
+use crate::schema::ModuleSchema;
 use crate::value::Value;
 
 /// `database`: querying a database, when the host has one.
@@ -155,10 +155,6 @@ impl HostApi for Database {
             }
             _ => unreachable!("checked by HostRegistry::call"),
         }
-    }
-
-    fn resources(&self) -> &[ResourceSchema] {
-        SCHEMA.resources
     }
 
     fn call_resource(
@@ -316,7 +312,12 @@ mod tests {
     #[test]
     fn signatures_read_like_source() {
         let database = Database::denied();
-        let rendered: Vec<String> = database.schema().iter().map(|op| op.signature()).collect();
+        let rendered: Vec<String> = database
+            .module_schema()
+            .operations
+            .iter()
+            .map(|op| op.signature())
+            .collect();
         assert_eq!(
             rendered,
             [
