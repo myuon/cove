@@ -102,28 +102,32 @@
 //! against a recovery expectation, so an empty array or an unannotated
 //! lambda parameter written inside one is not reported as a second mistake.
 //!
-//! **A dynamic boundary** is a host this build ships no schema for. ADR
-//! 0001's Host API schema is [`cove_schema`], which this crate reads:
+//! **A dynamic boundary** is a host no Host API schema describes. ADR 0001's
+//! Host API schema is [`cove_schema`], which this crate reads:
 //! `console.println`, `http.Request`, and every other operation and type of
-//! a *shipped* host module is checked against the same description the
-//! boundary dispatches it through. What stays unknown is a module the
-//! toolchain does not ship — an embedding registers its host modules at run
-//! time and names them in no table a compiler could read.
+//! a shipped host module is checked against the same description the
+//! boundary dispatches it through — and so is every operation and type of a
+//! module an *embedder* describes, because ADR 0017 lets an embedding hand
+//! its own [`cove_schema::ModuleSchema`] to `Compiler::with_host_schema` and
+//! this pass reads the two the same way. What stays unknown is a module
+//! neither table names: a host may register whatever it likes, and one it
+//! never described is one no compiler could read.
 //!
 //! Nothing is reported per call into one. The fact is about the `use` that
-//! named the module and about the build that could not see it: no edit to
-//! `sensors.read` can fix it, the remedy is one thing to say however many
+//! named the module and about the compilation that was not shown it: no edit
+//! to `sensors.read` can fix it, the remedy is one thing to say however many
 //! calls a program makes, and it is the same remedy for a call, a member
-//! read, and a value passed in. Issue #74 puts that warning at the `use`,
-//! where it belongs. What this pass owes such a call is the abstention
-//! itself, handed to the arguments as their expected type, so that a
-//! callback registered with an unschema'd host — the shape an embedding is
-//! written in — is not asked to state a type nothing on this side could have
-//! stated. A *type* named through such a module still warns
+//! read, and a value passed in. `cove::resolve::unchecked_host` puts that
+//! warning at the `use`, where it belongs. What this pass owes such a call
+//! is the abstention itself, handed to the arguments as their expected type,
+//! so that a callback registered with an unschema'd host — the shape an
+//! embedding is written in — is not asked to state a type nothing on this
+//! side could have stated. A *type* named through such a module still warns
 //! ([`HOST_TYPE`]), as it did before this classification existed.
 //!
 //! `Checker::host_schema` is the one place an embedder-supplied schema has
-//! to reach to turn all of that back into ordinary checking.
+//! to reach, and reaching it is all it takes to turn any of that back into
+//! ordinary checking.
 //!
 //! **An unconstrained** unknown is a type nothing that has been read states.
 //! It has two sources. One is a shipped schema saying, in
@@ -197,17 +201,19 @@
 //!
 //! `cove check` reporting nothing at all means every type the package wrote
 //! down was checked: every struct field, declared parameter, call to a
-//! declared or imported function, and call into a Host API module this build
-//! ships a schema for was checked against a written or schema-declared type.
+//! declared or imported function, and call into a Host API module some
+//! schema describes — shipped or embedder-supplied — was checked against a
+//! written or schema-declared type.
 //!
 //! Two silences are not covered by that, and both are named here rather than
 //! left to be discovered:
 //!
-//! - a host module this build ships no schema for. Nothing about a call into
-//!   one is proved, and nothing is said about it here either, because the
-//!   fact belongs to the `use` that names the module — issue #74 is what
-//!   puts a warning there. Until that lands, a package reaching such a host
-//!   has one unproved boundary per `use` and a clean check does not say so;
+//! - a host module no schema describes. Nothing about a call into one is
+//!   proved, and nothing is said about it here either, because the fact
+//!   belongs to the `use` that names the module, where
+//!   `cove::resolve::unchecked_host` warns about it once. So a package
+//!   reaching such a host does not have a clean check: it has one warning
+//!   per `use`, naming the module whose schema was never handed over;
 //! - a type parameter of a builtin constructor that nothing settles. `Ok(1)`
 //!   in a place expecting no `Result` is a `Result<Int, _>`, and the `_` is
 //!   carried rather than reported. Closing this means deciding what `Ok(1)`
@@ -275,7 +281,9 @@ use cove_schema::builtins::{
     BuiltinSchema, BuiltinType, FreeBuiltinKind, FreeBuiltinSchema, MethodSchema, ParamSchema,
     MAP_ENTRY, NONE_CASE, SCOPE,
 };
-use cove_schema::{HostType, ModuleSchema, OperationSchema, ResourceSchema, TypeSchema};
+use cove_schema::{
+    HostSchemas, HostType, ModuleSchema, OperationSchema, ResourceSchema, TypeSchema,
+};
 use cove_syntax::ast::{
     Arg, BinaryOp, Block, EnumDecl, Expr, ExprKind, FnDecl, GenericParam, Ident, ItemKind,
     MatchArm, Param, Pattern, PatternKind, Stmt, StmtKind, StrPart, StructDecl, TraitMethod, Type,
@@ -406,12 +414,23 @@ const TASK_SAFETY_RULE: &str = "Immutable task-safe values such as arrays may cr
 /// already resolved signatures by the time its own declarations are. ADR
 /// 0005 forbids import cycles, which is what makes such an order exist.
 pub fn check(package: &Package, program: &Program) -> Vec<Diagnostic> {
+    check_with(package, program, &HostSchemas::new())
+}
+
+/// Type-checks a resolved program against `schemas`, the host modules this
+/// compilation may name.
+///
+/// This is [`check`] with the one thing an embedder can change. A module in
+/// `schemas` is checked exactly as a shipped one is: its operations' arity,
+/// argument types, and results; the fields of the types it declares; the
+/// cases of its enums; and the operations its resources answer.
+pub fn check_with(package: &Package, program: &Program, schemas: &HostSchemas) -> Vec<Diagnostic> {
     let mut diagnostics = Vec::new();
     let mut envs: BTreeMap<&str, ImportEnv> = BTreeMap::new();
     let mut checked: BTreeMap<&str, Checker> = BTreeMap::new();
     for name in import_order(program) {
         let module = &program.modules[name];
-        let mut checker = Checker::new(module, program);
+        let mut checker = Checker::new(module, program, schemas);
         checker.import(&envs);
         checker.prepare();
         envs.insert(name, checker.export_env());
@@ -657,8 +676,9 @@ pub enum Unknown {
     /// An error was already reported about this place, or about the value
     /// this one was derived from. Silent.
     Recovery,
-    /// A host module this build ships no schema for. The remedy is at the
-    /// `use` that names the module, not here.
+    /// A host module no schema describes — neither a shipped one nor one an
+    /// embedder handed over. The remedy is at the `use` that names the
+    /// module, not here.
     DynamicBoundary,
     /// Nothing that has been read states this type: a shipped schema's
     /// `HostType::Any`, or a type parameter no argument, annotation, or
@@ -783,16 +803,19 @@ impl Ty {
         Ty::Unknown(Unknown::Recovery)
     }
 
-    /// An unknown that belongs to a host this build ships no schema for.
+    /// An unknown that belongs to a host no schema describes.
     ///
-    /// An embedding registers its host modules at run time and names them in
-    /// no table a compiler could read, so a call into one, or a value of a
-    /// type from one, is checked at the boundary rather than here. Nothing is
-    /// reported where one of these is produced: the silence is a fact about
-    /// this *build*, the remedy is to hand the module's schema to the
-    /// compiler, and the place to say so is the `use` that named the module
-    /// (issue #74). `Checker::host_schema` is where a schema an embedder
-    /// supplies would arrive and turn all of it back into ordinary checking.
+    /// A host may register any module it likes, and one whose schema no
+    /// compilation was shown is named in no table this pass could read, so a
+    /// call into it, or a value of a type from it, is checked at the boundary
+    /// rather than here. Nothing is reported where one of these is produced:
+    /// the silence is a fact about this *compilation*, the remedy is to hand
+    /// the module's schema to the compiler with
+    /// `cove_sema::Compiler::with_host_schema`, and the place to say so is
+    /// the `use` that named the module, where
+    /// `cove::resolve::unchecked_host` says it once. `Checker::host_schema`
+    /// is where an embedder-supplied schema arrives and turns all of it back
+    /// into ordinary checking.
     fn dynamic_boundary() -> Ty {
         Ty::Unknown(Unknown::DynamicBoundary)
     }
@@ -1232,6 +1255,10 @@ struct Checker<'a> {
     /// The whole program, for the declarations of the modules this one
     /// imports from.
     program: &'a Program,
+    /// The host modules this compilation can see: the shipped ones, and any
+    /// an embedder handed to the compiler. A call into a module that is not
+    /// here is the one call this checker leaves to the boundary.
+    schemas: &'a HostSchemas,
     diagnostics: Vec<Diagnostic>,
     functions: BTreeMap<String, FnSig>,
     methods: BTreeMap<(String, String), FnSig>,
@@ -1272,10 +1299,15 @@ struct Checker<'a> {
 }
 
 impl<'a> Checker<'a> {
-    fn new(module: &'a ResolvedModule, program: &'a Program) -> Checker<'a> {
+    fn new(
+        module: &'a ResolvedModule,
+        program: &'a Program,
+        schemas: &'a HostSchemas,
+    ) -> Checker<'a> {
         Checker {
             module,
             program,
+            schemas,
             diagnostics: Vec::new(),
             functions: BTreeMap::new(),
             methods: BTreeMap::new(),
@@ -1302,15 +1334,16 @@ impl<'a> Checker<'a> {
     }
 
     /// The Host API schema of the module named `module`, or `None` when this
-    /// build has none for it.
+    /// compilation was shown none for it.
     ///
     /// Every abstention this pass makes about a host goes through here, so
-    /// this is the one seam an embedder-supplied schema has to reach:
-    /// answering from a table the embedding registered, as well as from
-    /// `cove_schema`'s shipped one, turns each of those abstentions into an
-    /// ordinary check without any other part of this pass changing. Until
-    /// then the answer is the shipped table alone, and what it does not name
-    /// is a [`Ty::dynamic_boundary`].
+    /// this is the one seam an embedder-supplied schema has to reach. It
+    /// answers from the [`HostSchemas`] the compilation was given: the
+    /// modules an embedder handed over first, then — unless the set was
+    /// built with `HostSchemas::only` — the ones the toolchain ships. That
+    /// is what turns each of those abstentions into an ordinary check
+    /// without any other part of this pass changing, and what a name no
+    /// table answers for still gets is a [`Ty::dynamic_boundary`].
     ///
     /// It is a method taking `&self` and answering with an *owned*
     /// [`ModuleSchema`] rather than a free function answering with a
@@ -1323,7 +1356,7 @@ impl<'a> Checker<'a> {
     /// reached *through* the answer — operations, types, resources — are
     /// still `&'static`.
     fn host_schema(&self, module: &str) -> Option<ModuleSchema> {
-        cove_schema::module(module).copied()
+        self.schemas.module(module)
     }
 
     /// The schema of the host type `qualified` names, when it is one a host
@@ -2666,7 +2699,7 @@ impl<'a> Checker<'a> {
     /// the program's. An expectation the checker itself could not state
     /// carries its own explanation already: an argument of a call whose
     /// callee was just rejected, a block whose type a schema declared `Any`,
-    /// a call into a host module this build has no schema for. Repeating the
+    /// a call into a host module no schema describes. Repeating the
     /// gap underneath one of those turns one fact into two diagnostics, which
     /// is what the recovery classification exists to prevent.
     ///
@@ -4333,16 +4366,18 @@ impl<'a> Checker<'a> {
         span: Span,
     ) -> Ty {
         let Some(schema) = self.host_schema(module) else {
-            // A module this build ships no schema for. Its operations are
-            // between the host that registered it and the boundary, which is
-            // the one thing `cove check` cannot do for a program.
+            // A module no schema describes — neither a shipped one nor one
+            // the embedder handed over. Its operations are between the host
+            // that registered it and the boundary, which is the one thing
+            // `cove check` cannot do for a program.
             //
             // Nothing is reported *here*. The fact is about the `use` that
-            // named the module and about the build that could not see it, not
-            // about this call: no edit to `module.name` can fix it, and the
-            // remedy — handing the module's `ModuleSchema` to the compiler —
-            // is one thing to say however many calls a program makes. Issue
-            // #74 puts that warning at the `use`, where the remedy is.
+            // named the module and about the compilation that was not shown
+            // it, not about this call: no edit to `module.name` can fix it,
+            // and the remedy — handing the module's `ModuleSchema` to the
+            // compiler — is one thing to say however many calls a program
+            // makes. `cove::resolve::unchecked_host` puts that warning at
+            // the `use`, where the remedy is.
             //
             // What the arguments are given is the abstention itself, so a
             // callback into such a host — the shape an embedding is written
@@ -5410,7 +5445,7 @@ impl<'a> Checker<'a> {
     ///
     /// The two callers are the two reasons a call stops being checked: an
     /// error already reported about it ([`Ty::recovery`]), and a host module
-    /// this build ships no schema for ([`Ty::dynamic_boundary`]).
+    /// no schema describes ([`Ty::dynamic_boundary`]).
     fn check_args_abstained(&mut self, args: &[Arg], trailing: Option<&Expr>, why: Ty) {
         let expected = Expected::abstained(why.clone());
         for arg in args {
@@ -6426,19 +6461,20 @@ fn contains_any(declared: &HostType) -> bool {
     }
 }
 
-/// A type reached through a host module this build ships no schema for.
+/// A type reached through a host module no schema describes.
 ///
 /// This is the warning that used to greet every host type. It is now what
-/// greets only the ones the checker genuinely cannot answer for: an embedding
-/// may register any module it likes, and a program written against one is
-/// checked by the boundary at run time and by nothing before it.
+/// greets only the ones the checker genuinely cannot answer for: an
+/// embedding may register any module it likes, and one whose schema the
+/// compiler was not handed is checked by the boundary at run time and by
+/// nothing before it.
 fn unchecked_host_type(shown: &str, span: Span) -> Diagnostic {
     Diagnostic::warning(
         HOST_TYPE,
-        format!("`{shown}` comes from a host module this build has no schema for, so values of it are unchecked"),
+        format!("`{shown}` comes from a host module no Host API schema describes, so values of it are unchecked"),
     )
     .at(span)
-    .rule("A Host API's types come from its schema; the checker reads the schema of the host modules the toolchain ships.")
+    .rule("A Host API's types come from its schema; the checker reads the shipped schemas and any an embedder supplies.")
     .help("the checker treats this type as unknown; every operation on it is left to the runtime, which holds the host to the schema it registered with")
 }
 
@@ -9902,17 +9938,19 @@ export fn handle(request: http.Payload) -> Int {
     // documentation lists which construction site is which; these say what
     // the difference is worth to someone reading `cove check`.
 
-    // ---- dynamic boundary: a host this build ships no schema for
+    // ---- dynamic boundary: a host no schema describes
 
-    /// A host module this build ships no schema for is the one host call the
-    /// checker still abstains from: an embedding registers its modules at run
-    /// time, and the boundary is what holds such a host to its word.
+    /// A host module no schema describes is the one host call the checker
+    /// still abstains from: an embedder that hands its module's schema over
+    /// gets it checked like any other, and one that does not leaves the
+    /// boundary to hold the host to its word.
     ///
     /// This pass says nothing about it. The fact belongs to the `use` that
     /// named the module — no edit to `sensors.read` can fix it, and the
     /// remedy is one thing to say however many calls a program makes — and
-    /// #74 puts the warning there. What this pass owes is silence per call
-    /// and a `Ty::dynamic_boundary` that says why.
+    /// `cove::resolve::unchecked_host` puts the warning there. What this
+    /// pass owes is silence per call and a `Ty::dynamic_boundary` that says
+    /// why.
     #[test]
     fn a_call_into_a_host_module_with_no_schema_is_not_reported_at_the_call() {
         let source = "\
@@ -9931,7 +9969,7 @@ export fn main() -> Result<Unit, Error> {
     }
 
     /// The shape an embedding is written in: a callback a host stores and
-    /// calls later, registered with a module this build has no schema for.
+    /// calls later, registered with a module no schema describes.
     ///
     /// Nothing on this side states what the callback takes or produces, and
     /// nothing can: that is the abstention, not a gap in the program. So the
@@ -9986,11 +10024,11 @@ fn handle(reading: sensors.Reading) -> Int {
         assert_eq!(warning.code, HOST_TYPE);
         assert_eq!(
             warning.message,
-            "`sensors.Reading` comes from a host module this build has no schema for, so values of it are unchecked"
+            "`sensors.Reading` comes from a host module no Host API schema describes, so values of it are unchecked"
         );
         assert_eq!(
             warning.rule.as_deref().unwrap(),
-            "A Host API's types come from its schema; the checker reads the schema of the host modules the toolchain ships."
+            "A Host API's types come from its schema; the checker reads the shipped schemas and any an embedder supplies."
         );
     }
 

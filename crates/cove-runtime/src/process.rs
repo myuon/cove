@@ -20,11 +20,9 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard};
 
-use cove_sema::Capability;
-
 use crate::error::RuntimeError;
 use crate::host::HostApi;
-use crate::schema::{ModuleSchema, OperationSchema};
+use crate::schema::ModuleSchema;
 use crate::value::Value;
 
 /// What a program asked a fake process to do, shared between the host and
@@ -208,16 +206,8 @@ impl Process {
 }
 
 impl HostApi for Process {
-    fn name(&self) -> &str {
-        "process"
-    }
-
-    fn capability(&self) -> Capability {
-        Capability::new("process")
-    }
-
-    fn schema(&self) -> &[OperationSchema] {
-        SCHEMA.operations
+    fn module_schema(&self) -> ModuleSchema {
+        SCHEMA
     }
 
     fn call(&self, op: &str, args: Vec<Value>) -> Result<Value, RuntimeError> {
@@ -505,7 +495,12 @@ mod tests {
     #[test]
     fn signatures_read_like_source() {
         let process = Process::real(Vec::new(), Vec::new());
-        let rendered: Vec<String> = process.schema().iter().map(|op| op.signature()).collect();
+        let rendered: Vec<String> = process
+            .module_schema()
+            .operations
+            .iter()
+            .map(|op| op.signature())
+            .collect();
         assert_eq!(
             rendered,
             [
@@ -521,7 +516,7 @@ mod tests {
     #[test]
     fn ending_the_run_is_not_recordable() {
         let process = Process::real(Vec::new(), Vec::new());
-        for op in process.schema() {
+        for op in process.module_schema().operations {
             assert_eq!(op.recordable, op.name != "exit", "`process.{}`", op.name);
         }
     }

@@ -500,8 +500,9 @@ crosses, because a resource's declared task-safety is not part of its type.
 
 The checker produces *unknown* deliberately, never as a shrug, and only here:
 
-- a host module this build ships no schema for, and a host operation whose
-  schema declares `Any`;
+- a host module no schema describes — the toolchain ships schemas for its own
+  modules and an embedding hands over its own, and what neither names is left
+  to the boundary — and a host operation whose schema declares `Any`;
 - a capitalized name nothing in scope explains, which is assumed to come from
   the host (`cove::type::unresolved_name`, `cove::type::unknown_type`);
 - a type or a module used as a value: `Vector` in `Vector.of(1, 2)` is

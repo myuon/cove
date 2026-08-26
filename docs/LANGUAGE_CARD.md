@@ -194,9 +194,11 @@ arguments again before the host is reached and the host's answer after. A
 value that is not one the declared type admits, followed all the way down
 through `Array`, `Option`, `Result`, and a declared type's name, stops the
 run rather than travelling on. `Any` admits everything, and a declared
-type's fields are not checked by the boundary. A host module the toolchain
-does not ship is one the compiler cannot see, so a call into it is checked at
-the boundary alone.
+type's fields are not checked by the boundary. An embedding registers host
+modules of its own and hands their schemas to the compiler, which checks calls
+into them exactly as it checks calls into the shipped ones. A host module no
+schema describes is one the compiler cannot see: a call into it is checked at
+the boundary alone, and `cove check` warns that it is.
 
 `cove test` is such a host: it grants each test the capabilities its call
 graph requires, taking every implementation's fake form so a suite is
@@ -266,6 +268,6 @@ does not doubt: it names something the compiler deliberately did not prove —
 a Host API result or field whose schema declares `Any`, above all — so no
 strictness setting turns one into a failure. A `cove check` that reports
 nothing has checked every type the package wrote down, and the two things it
-still cannot prove — a host module the build ships no schema for, and a
-builtin constructor's type parameter nothing settles — are named in
-`cove_sema::typeck` rather than left to be found.
+still cannot prove — a host module no schema describes, shipped or supplied
+by an embedder, and a builtin constructor's type parameter nothing settles —
+are named in `cove_sema::typeck` rather than left to be found.

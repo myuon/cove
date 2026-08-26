@@ -9,8 +9,9 @@
 //!
 //! A host outside this workspace declares itself the same way, in its own
 //! crate: nothing here is privileged, and [`SHIPPED`] is only the list of the
-//! modules `cove run` wires up. The compiler cannot see an embedder's tables,
-//! which is why the boundary checks a call as well as the checker.
+//! modules `cove run` wires up. An embedder hands its own tables to the
+//! checker through [`HostSchemas`], and the ones it does not hand over are
+//! why the boundary checks a call as well as the checker.
 
 use crate::{
     Effect, FieldSchema, HostType, ModuleSchema, OperationSchema, ResourceSchema, TypeSchema,
@@ -38,6 +39,162 @@ pub fn shipped() -> &'static [ModuleSchema] {
 /// likes, and the compiler says only that it cannot check what it cannot see.
 pub fn module(name: &str) -> Option<&'static ModuleSchema> {
     SHIPPED.iter().find(|module| module.name == name)
+}
+
+/// The host modules one compilation may name: the ones the toolchain ships,
+/// plus any an embedder added.
+///
+/// The shipped tables answer for `cove check` on their own, and did so
+/// alone until this existed: a module `SHIPPED` did not name was `Unknown`
+/// to the checker and checked by the boundary and nothing else. An embedder
+/// is not a lesser kind of host, though — embedding is why `HostApi` is a
+/// trait — so a module it registers should be checked exactly as a shipped
+/// one is, and the only thing missing was a way to hand its table over.
+/// This is that way.
+///
+/// A custom module answers before a shipped one of the same name. An
+/// embedding that replaces `documents` with an implementation of its own
+/// registers a description of its own with it, and the description a run
+/// enforces is the one the checker has to read: a checker reading the
+/// shipped table there would be checking a module nothing is going to run.
+///
+/// A set built with [`HostSchemas::only`] answers for the modules it was
+/// given and no others. That is for an embedding that registers a registry of
+/// its own: a set that still fell back to [`SHIPPED`] would tell such a
+/// program that `files.write` is a checked call, when the run it is about to
+/// make has no `files` module to dispatch it to.
+///
+/// The tables are [`Copy`] and their contents are `'static`, so this owns
+/// only the list. Looking one up hands back the entry itself rather than a
+/// borrow, which is what lets a caller hold a schema while it goes on
+/// reading whatever it asked.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HostSchemas {
+    /// Only the added modules. The shipped ones are read from [`SHIPPED`]
+    /// rather than copied in, so a default set and a set with one addition
+    /// describe the shipped modules with the same bytes.
+    custom: Vec<ModuleSchema>,
+    /// Whether a name this set was not given falls back to [`SHIPPED`].
+    ///
+    /// True for every set built the ordinary way, because every `cove`
+    /// command runs the shipped hosts. An embedding whose registry is its
+    /// own says otherwise through [`HostSchemas::only`], and then a shipped
+    /// name it did not register is as unknown here as any other.
+    shipped: bool,
+}
+
+impl Default for HostSchemas {
+    fn default() -> HostSchemas {
+        HostSchemas {
+            custom: Vec::new(),
+            shipped: true,
+        }
+    }
+}
+
+impl HostSchemas {
+    /// The shipped modules and nothing else, which is what every command
+    /// that is not an embedding reads.
+    pub fn new() -> HostSchemas {
+        HostSchemas::default()
+    }
+
+    /// Exactly the modules in `schemas`, with no fallback to [`SHIPPED`].
+    ///
+    /// This is what an embedding hands over when its registry is its own
+    /// rather than the shipped one plus additions. `HostRegistry` dispatches
+    /// only what was registered with it, so a checker that still read the
+    /// shipped tables would check `files.write` against a description of a
+    /// module the run has not got and report nothing, leaving the boundary's
+    /// `unknown host module` to be the first mention of it — which is the
+    /// one failure moving schemas to the checker is meant to prevent.
+    ///
+    /// A shipped module the embedding does register is described here the
+    /// same as any other: it is in `schemas` because the registry has it.
+    pub fn only(schemas: impl IntoIterator<Item = ModuleSchema>) -> HostSchemas {
+        let mut set = HostSchemas {
+            custom: Vec::new(),
+            shipped: false,
+        };
+        set.extend(schemas);
+        set
+    }
+
+    /// Whether a name this set was not given is answered from [`SHIPPED`].
+    pub fn reads_shipped(&self) -> bool {
+        self.shipped
+    }
+
+    /// Adds `schema`, taking the set by value so a pipeline can be
+    /// configured in one expression.
+    pub fn with(mut self, schema: ModuleSchema) -> HostSchemas {
+        self.insert(schema);
+        self
+    }
+
+    /// Adds `schema`, replacing any module already added under that name.
+    ///
+    /// Replacing rather than appending keeps one name to one description:
+    /// two tables under one name would make every lookup depend on which was
+    /// added first, which is the drift this crate exists to prevent.
+    pub fn insert(&mut self, schema: ModuleSchema) {
+        match self
+            .custom
+            .iter_mut()
+            .find(|existing| existing.name == schema.name)
+        {
+            Some(existing) => *existing = schema,
+            None => self.custom.push(schema),
+        }
+    }
+
+    /// The module `name` describes itself with, if this set has one.
+    ///
+    /// A name that is not here is not an error: a host may register any
+    /// module it likes, and a checker reading this says only that it cannot
+    /// check what it was not shown.
+    pub fn module(&self, name: &str) -> Option<ModuleSchema> {
+        self.custom
+            .iter()
+            .find(|module| module.name == name)
+            .copied()
+            .or_else(|| self.shipped.then(|| module(name).copied()).flatten())
+    }
+
+    /// Only the modules an embedder added.
+    pub fn custom(&self) -> &[ModuleSchema] {
+        &self.custom
+    }
+
+    /// Every module name this set answers for, added ones first.
+    ///
+    /// A custom module that takes a shipped module's name is named once: it
+    /// is one module, described by whichever table answers for it.
+    pub fn names(&self) -> impl Iterator<Item = &'static str> + '_ {
+        let custom = self.custom.iter().map(|module| module.name);
+        let shipped = SHIPPED
+            .iter()
+            .filter(|_| self.shipped)
+            .map(|module| module.name)
+            .filter(|name| !self.custom.iter().any(|module| module.name == *name));
+        custom.chain(shipped)
+    }
+}
+
+impl Extend<ModuleSchema> for HostSchemas {
+    fn extend<I: IntoIterator<Item = ModuleSchema>>(&mut self, schemas: I) {
+        for schema in schemas {
+            self.insert(schema);
+        }
+    }
+}
+
+impl FromIterator<ModuleSchema> for HostSchemas {
+    fn from_iter<I: IntoIterator<Item = ModuleSchema>>(schemas: I) -> HostSchemas {
+        let mut set = HostSchemas::new();
+        set.extend(schemas);
+        set
+    }
 }
 
 // ------------------------------------------------------------------ console
@@ -648,6 +805,104 @@ mod tests {
                 owner.name
             );
         }
+    }
+
+    /// A module this workspace does not ship, described by its embedder.
+    const COMPANY: ModuleSchema = ModuleSchema {
+        name: "company",
+        capability: "company",
+        operations: &[OperationSchema {
+            name: "employee",
+            params: &[HostType::String],
+            variadic: false,
+            result: HostType::Result(&HostType::String, &HostType::Error),
+            capability: "company",
+            effect: Effect::Read,
+            cancellable: false,
+            recordable: true,
+            result_is_task_safe: true,
+        }],
+        types: &[],
+        resources: &[],
+    };
+
+    #[test]
+    fn a_default_set_answers_for_the_shipped_modules_only() {
+        let schemas = HostSchemas::new();
+        assert_eq!(schemas.module("console"), Some(CONSOLE));
+        assert!(schemas.module("company").is_none());
+        assert!(schemas.custom().is_empty());
+    }
+
+    #[test]
+    fn an_added_module_is_answered_for_like_a_shipped_one() {
+        let schemas = HostSchemas::new().with(COMPANY);
+        assert_eq!(schemas.module("company"), Some(COMPANY));
+        assert_eq!(schemas.module("console"), Some(CONSOLE));
+        assert_eq!(schemas.custom(), [COMPANY]);
+    }
+
+    /// An embedding that replaces a shipped module's implementation replaces
+    /// its description with it, so the checker reads the table the run will
+    /// actually enforce rather than the one nothing is going to serve.
+    #[test]
+    fn an_added_module_answers_before_a_shipped_one_of_the_same_name() {
+        const OURS: ModuleSchema = ModuleSchema {
+            name: "documents",
+            ..COMPANY
+        };
+        let schemas = HostSchemas::new().with(OURS);
+        assert_eq!(schemas.module("documents"), Some(OURS));
+        assert_eq!(
+            schemas.names().filter(|name| *name == "documents").count(),
+            1
+        );
+    }
+
+    /// One name means one description, whichever order the tables arrived
+    /// in: two under one name would make every lookup depend on the order.
+    #[test]
+    fn adding_a_module_twice_keeps_the_last_description() {
+        const LATER: ModuleSchema = ModuleSchema {
+            capability: "payroll",
+            ..COMPANY
+        };
+        let schemas = HostSchemas::new().with(COMPANY).with(LATER);
+        assert_eq!(schemas.custom(), [LATER]);
+    }
+
+    /// An embedding whose registry is its own is described by its own
+    /// tables and nothing else. The shipped fallback is right for a set that
+    /// adds to the shipped hosts and wrong for one that replaces them: it
+    /// would report `files.write` as a checked call in a run that has no
+    /// `files` module to dispatch it to.
+    #[test]
+    fn a_set_of_only_an_embedder_s_modules_does_not_answer_for_a_shipped_one() {
+        let schemas = HostSchemas::only([COMPANY]);
+        assert_eq!(schemas.module("company"), Some(COMPANY));
+        assert_eq!(schemas.module("files"), None);
+        assert!(!schemas.reads_shipped());
+        let names: Vec<&str> = schemas.names().collect();
+        assert_eq!(names, ["company"]);
+    }
+
+    /// A shipped module an embedding does register is described here like
+    /// any other module it registered: it is in the set because the registry
+    /// has it, not because it is shipped.
+    #[test]
+    fn a_shipped_module_an_embedding_registers_is_in_a_set_of_only_its_own() {
+        let schemas = HostSchemas::only([COMPANY, CONSOLE]);
+        assert_eq!(schemas.module("console"), Some(CONSOLE));
+        assert_eq!(schemas.module("env"), None);
+    }
+
+    #[test]
+    fn every_module_a_set_answers_for_is_named_once() {
+        let schemas = HostSchemas::new().with(COMPANY);
+        let names: Vec<&str> = schemas.names().collect();
+        assert_eq!(names.first(), Some(&"company"));
+        assert!(names.contains(&"http"));
+        assert_eq!(names.len(), SHIPPED.len() + 1);
     }
 
     /// What `cove trace`, `cove replay`, and `cove check` read instead of a
