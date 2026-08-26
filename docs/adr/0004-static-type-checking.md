@@ -13,6 +13,9 @@
   "Amendment (2026-08-25): what a builtin type is made of", which unmirrors
   the builtin enums' cases and declares the builtin structs' fields, closing
   the sequence
+- Superseded in part by [ADR 0016](0016-four-kinds-of-unknown.md), which
+  replaces "Two types no program can write"'s account of `Unknown` — one kind
+  of not-knowing, and a capitalized name no module declares among them
 - Amends: [ADR 0001](0001-mvp-language-design.md)'s account of the builtin
   `Error`, which the third amendment settles as a struct carrying a `message`
   a program may read

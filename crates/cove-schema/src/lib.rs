@@ -112,6 +112,24 @@ pub enum HostType {
     /// meaning does not depend on which value it was given. `http.json`
     /// renders whatever it is handed, and a callback a host stores and calls
     /// later is a value the host never looks inside.
+    ///
+    /// What it promises, and what it costs, are different at the two ends of
+    /// a signature, and both are worth stating exactly.
+    ///
+    /// In a *parameter* it promises that every value is accepted: no
+    /// argument of any type is a mistake, the compiler rejects none, and the
+    /// boundary rejects none either. Nothing is given up by it, because
+    /// there was never a constraint to check.
+    ///
+    /// In a *result* it says the operation may answer with a value of any
+    /// type. That does cost something: from the call onwards the program
+    /// holds a value no schema described, so the compiler cannot prove what
+    /// a field read off it, a call made on it, or a place it is stored into
+    /// will do. Those are checked at run time and by nothing before it.
+    /// `cove check` reports each such call rather than letting the silence
+    /// pass for a proof — as a note, because a schema declaring `Any` is a
+    /// deliberate design decision and not a fault in the program that calls
+    /// it.
     Any,
 }
 

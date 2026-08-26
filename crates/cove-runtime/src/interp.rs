@@ -127,7 +127,7 @@ const STACK_MARGIN: usize = 3;
 /// How much stack the runtime gives every thread it runs Cove on.
 ///
 /// A tree-walking interpreter spends native stack per Cove frame, so
-/// [`MAX_CALL_DEPTH`] keeps its promise only on a stack big enough to hold
+/// `MAX_CALL_DEPTH` keeps its promise only on a stack big enough to hold
 /// that many frames. Nothing gave the runtime such a stack before: a spawned
 /// task took the platform default of 2 MiB, and the entry took whatever the
 /// process main thread happened to have, which is 8 MiB on macOS and Linux
@@ -137,7 +137,7 @@ const STACK_MARGIN: usize = 3;
 /// with no capability granted at all could end the process by recursing.
 ///
 /// So the size is derived from the limits rather than chosen beside them.
-/// Raising [`MAX_CALL_DEPTH`] raises this, which is the relationship the
+/// Raising `MAX_CALL_DEPTH` raises this, which is the relationship the
 /// limit's promise rests on, and it is now arithmetic rather than a
 /// coincidence that held on one thread of one profile. It works out at about
 /// 106 MiB in a debug build and about 8 MiB in a release one.
@@ -170,12 +170,12 @@ pub const STACK_SIZE: usize =
 /// Runs `body` on a thread the runtime sized, and hands back what it
 /// produced.
 ///
-/// This is how a host runs Cove on a stack [`MAX_CALL_DEPTH`] fits on. The
+/// This is how a host runs Cove on a stack `MAX_CALL_DEPTH` fits on. The
 /// process main thread is not one: its size is the platform's business, it is
 /// 1 MiB on Windows, and no `main` can change it after the fact. So every
 /// path the toolchain has into a Cove program — `cove run`, `cove test`,
 /// `cove generate`, `cove replay`, a `cove build` binary, and `cove-bench` —
-/// does its whole run inside one of these, and [`Interpreter::spawn`] gives a
+/// does its whole run inside one of these, and `Interpreter::spawn` gives a
 /// task thread the same size, so no thread this runtime evaluates Cove on has
 /// a stack it did not choose.
 ///
@@ -719,14 +719,14 @@ impl<'a> Interpreter<'a> {
     /// host embedding the runtime — so this is where a run's terminal event
     /// is written, and writing it here is what makes "every run has one" true
     /// rather than a claim about the paths somebody remembered. It wraps
-    /// [`Interpreter::enter`] rather than living inside it so that a run that
+    /// `Interpreter::enter` rather than living inside it so that a run that
     /// never reached its entry — one that named a function this package does
     /// not declare, say — still ends with an event saying so.
     ///
     /// # Run this on a thread with at least [`STACK_SIZE`] bytes
     ///
     /// The interpreter is a recursive tree walker, so a Cove program spends
-    /// native stack as it nests calls, and [`MAX_CALL_DEPTH`] stops it before
+    /// native stack as it nests calls, and `MAX_CALL_DEPTH` stops it before
     /// that stack runs out. What "before" means depends on how much stack
     /// there is. The runtime sizes every thread it creates itself, so a
     /// spawned task and everything the toolchain runs are covered; a thread

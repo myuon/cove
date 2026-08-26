@@ -124,10 +124,18 @@ impl SourceMap {
 }
 
 /// How seriously a diagnostic should be taken.
+///
+/// The three are ordered by what they ask of a reader. An error is a program
+/// the toolchain refuses. A warning is a program it accepts and doubts, so
+/// `cove check --deny-warnings` refuses it instead. A note is a program it
+/// accepts and does not doubt: the compiler is saying what it deliberately
+/// did not prove, which is a fact about the language rather than a suspicion
+/// about this program, so no strictness setting turns one into a failure.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Severity {
     Error,
     Warning,
+    Note,
 }
 
 impl fmt::Display for Severity {
@@ -135,6 +143,7 @@ impl fmt::Display for Severity {
         match self {
             Severity::Error => f.write_str("error"),
             Severity::Warning => f.write_str("warning"),
+            Severity::Note => f.write_str("note"),
         }
     }
 }
@@ -177,6 +186,19 @@ impl Diagnostic {
     pub fn warning(code: impl Into<String>, message: impl Into<String>) -> Self {
         Diagnostic {
             severity: Severity::Warning,
+            ..Diagnostic::error(code, message)
+        }
+    }
+
+    /// Something the toolchain deliberately did not check, said out loud.
+    ///
+    /// A note is not a complaint. It reports a place where a rule of the
+    /// language, or a promise a schema made, leaves the compiler nothing to
+    /// prove, so that a run which succeeds still says which of its silences
+    /// were chosen ones.
+    pub fn note(code: impl Into<String>, message: impl Into<String>) -> Self {
+        Diagnostic {
+            severity: Severity::Note,
             ..Diagnostic::error(code, message)
         }
     }

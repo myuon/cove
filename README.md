@@ -34,7 +34,12 @@ implementation to give.
 ```console
 $ cd examples
 $ cove check
-checked 11 module(s), 11 file(s)
+note[cove::type::unconstrained_result]: `clock.timeout` declares its result `Result<Any, Error>`, so nothing here says what this call produced
+  --> examples/tasks/load.cove:20:18
+   |
+20 |     let result = clock.timeout(500ms) {
+   |                  ^^^^^^^^^^^^^^^^^^^^^^
+checked 11 module(s), 11 file(s), 1 note(s)
 $ cove run hello
 Hello, world!
 $ cove test
@@ -61,6 +66,18 @@ limit, and runtime budgets for fuel, deadlines, host calls, and concurrency
 with tracing. A Host API call is checked against the schema its operation
 declares at both ends: `cove check` checks its arguments where they are
 written, and the boundary checks them again, along with what the host answered.
+Where the checker does *not* know a type it says which kind of not-knowing it
+is. An operation whose schema declares its result `Any` is noted, as is a
+field declared the same way. Anything the language should have been told --
+an unannotated lambda parameter nothing expects, an empty array literal, an
+early `return` in a lambda nothing expects, a name nothing declares -- is a
+warning or an error rather than an unknown that quietly validates whatever
+follows. A clean `cove check` therefore means every type the package wrote
+down was checked, with two silences it names rather than hides: a host module
+this build ships no schema for, which is answered at the `use` that names it,
+and a builtin constructor's type parameter that nothing settles. A
+`--deny-warnings` run leaves only the notes, which name exactly what a schema,
+or the language, chose not to say.
 A host resource handle is a name for something the host owns -- a module, a
 resource kind, an identity number, and the task-safety its schema declares --
 never the resource itself, and every operation called on one goes through the

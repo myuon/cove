@@ -14,7 +14,7 @@ fn adder(by: Int) -> fn(Int) -> Int {
 
 /// Prints lambdas bound, passed, returned, and capturing by value.
 export fn main() -> Result<Unit, Error> {
-  let double = fn(n) {
+  let double: fn(Int) -> Int = fn(n) {
     n * 2
   }
   println("bound {double(4)}")?
