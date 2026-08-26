@@ -215,10 +215,11 @@ remainder by zero. `Float` arithmetic is IEEE 754 and traps on nothing:
 
 `place = value`, `place += value`
 
-- **Resolves to** a place: a name, or a field of a place. Nothing else is
-  written to, and the parser refuses the rest
-  (`cove::parse::invalid_assignment_target`) before the checker's
-  `cove::type::not_a_place` is reached.
+- **Resolves to** a place: a name, or a field of a place. The parser refuses
+  everything else (`cove::parse::invalid_assignment_target`), and a package
+  that does not parse never reaches the checker, so the checker's
+  `cove::type::not_a_place` is a second net that `cove check` does not reach
+  through this door.
 - **Types as** `()`. The value is checked against the place's type; a compound
   assignment computes what the operator would produce and checks *that*
   against the place's type.
@@ -403,16 +404,23 @@ scope tasks {
 | --- | --- | --- | --- |
 | `_` | nothing | anything | always |
 | `other` | `other` | the scrutinee's type | always |
-| `1`, `"a"`, `true` | nothing | must match the scrutinee's type | equal values |
+| `1`, `"a"`, `true`, `-n` | nothing | must match the scrutinee's type | equal values |
 | `Ok(v)`, `Status.Active(n)` | its sub-patterns | the case's payload types, opened with the scrutinee's type arguments | the same case |
 
 A pattern's bindings are immutable and scoped to its arm. A binding pattern
-and `_` are both catch-alls, so an arm after either is unreachable. A literal
-pattern is a literal: it can never name a variable, because the parser only
-builds one from a literal token or a negated numeric literal. A variant
+and `_` are both catch-alls, so an arm after either is unreachable. A variant
 pattern's path may be bare (`Ok`), qualified by its enum (`Status.Active`), or
 module-qualified; a bare case name that two enums in scope both declare is one
 resolution abstains about.
+
+A "literal" pattern is a literal token — or a `-` followed by anything `-`
+applies to, which is more than the name suggests. That second form is an
+ordinary expression, checked like one and evaluated in the arm's enclosing
+scope every time the pattern is tried, so `-n` matches the negation of
+whatever `n` currently holds and `-f()` calls `f`. This is recorded here
+because it is what both passes do, not because it is a form the language set
+out to have; narrowing it to a negated numeric literal would be a change to
+the language rather than a fix to either pass.
 
 Errors: `cove::type::pattern`, `cove::type::payload_arity`,
 `cove::resolve::unknown_enum_case`. At run time, a payload arity the checker

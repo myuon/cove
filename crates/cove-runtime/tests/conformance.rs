@@ -360,6 +360,17 @@ static RULES: &[Rule] = &[
         value: "6",
         refusal: Refusal::Reported("Bool"),
     },
+    // A `-` pattern holds an ordinary expression, evaluated in the arm's
+    // enclosing scope each time the pattern is tried, so it can name a
+    // binding. The reference records that it is wider than "a literal".
+    Rule {
+        section: "Patterns",
+        decls: "",
+        body: "let bound = 1\nmatch -1 {\n  -bound => \"negated\"\n  _ => \"other\"\n}",
+        ty: "String",
+        value: "negated",
+        refusal: Refusal::Reported("Int"),
+    },
     Rule {
         section: "Patterns",
         decls: "enum Status {\n  Pending\n  Active(Int)\n}\n\n",
