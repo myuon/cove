@@ -1,0 +1,15 @@
+use console.println
+
+/// Asks an `if` with no `else` for a value it does not have.
+///
+/// An `if` with no `else` produces `()`, whichever way its condition goes,
+/// so the branch's `1` never reaches the binding. It lives in its own
+/// package so that failure cannot take down every other case.
+export fn main() -> Result<Unit, Error> {
+  let n = 1
+  let bound: Int = if n > 0 {
+    1
+  }
+  println("{bound}")?
+  Ok(())
+}

@@ -1,15 +1,18 @@
 use console.println
 
-/// Shows a loop is an expression: `break expr` supplies its value, a loop
-/// that never breaks yields `Unit`, and `continue` skips to the next
-/// iteration.
+/// Shows what a loop is worth: every loop produces `Unit`, whatever its
+/// `break` carries — an operand there is evaluated for its effects and its
+/// value discarded — and `continue` skips to the next iteration.
 export fn main() -> Result<Unit, Error> {
-  let firstMultipleOfThree = for value in [1, 2, 3, 4, 5] {
+  var firstMultipleOfThree = 0
+  let scanned = for value in [1, 2, 3, 4, 5] {
     if value % 3 == 0 {
+      firstMultipleOfThree = value
       break value
     }
   }
   println("first multiple of three: {firstMultipleOfThree}")?
+  println("the `for` that found it is worth {scanned}")?
 
   let neverBreaks = for value in [1, 2] {
     value
@@ -32,7 +35,7 @@ export fn main() -> Result<Unit, Error> {
       break attempts
     }
   }
-  println("while settled after {settled} attempt(s)")?
+  println("while settled after {attempts} attempt(s), and is worth {settled}")?
 
   Ok(())
 }

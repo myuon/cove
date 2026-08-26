@@ -275,9 +275,22 @@ impl ResolvedModule {
 #[derive(Debug, Default)]
 pub struct Program {
     pub modules: BTreeMap<String, ResolvedModule>,
-    /// Non-fatal diagnostics, such as missing doc comments on exported
-    /// declarations.
-    pub warnings: Vec<Diagnostic>,
+    /// Every diagnostic that does not stop the package: the resolver's own
+    /// warnings, such as a missing doc comment on an exported declaration,
+    /// and the type checker's warnings *and notes*.
+    ///
+    /// It is called `notices` rather than `warnings` because it holds two
+    /// severities and they ask for different things. A warning is a doubt,
+    /// and `cove check --deny-warnings` refuses a package that has one. A
+    /// note is not: it is the compiler naming something it deliberately did
+    /// not prove — a Host API result a schema declared `Any`, a variadic
+    /// operation used as a value — which no strictness setting can turn into
+    /// a proof. Every consumer therefore filters on the exact
+    /// [`cove_diag::Severity`] rather than on this field's length.
+    ///
+    /// It never holds an [`cove_diag::Severity::Error`]: an error is
+    /// returned as `Err` and the package does not resolve.
+    pub notices: Vec<Diagnostic>,
     /// The package's call graph: for each declaration, every declaration it
     /// may call, and how precisely the call site named it.
     ///
@@ -506,7 +519,7 @@ pub fn resolve_with(package: &Package, schemas: &HostSchemas) -> Result<Program,
     check_bodies(&program, schemas, &mut errors, &mut warnings);
 
     if errors.is_empty() {
-        program.warnings = warnings;
+        program.notices = warnings;
         Ok(program)
     } else {
         errors.extend(warnings);
@@ -3385,7 +3398,7 @@ impl Snapshot for Booking {
         ));
         let program = resolve(&package).expect("resolves");
         let names: Vec<&str> = program
-            .warnings
+            .notices
             .iter()
             .filter(|d| d.code == "cove::resolve::missing_doc")
             .map(|d| d.message.as_str())
@@ -3777,7 +3790,7 @@ impl Show for B {
         let package = package_of_modules(vec![module_a, module_b]);
         let program = resolve(&package).expect("resolves despite the unchecked host warning");
         let warnings: Vec<_> = program
-            .warnings
+            .notices
             .iter()
             .filter(|d| d.code == "cove::resolve::unchecked_host")
             .collect();
@@ -3806,7 +3819,7 @@ impl Show for B {
             ),
         ]);
         let modules_warned: BTreeSet<&str> = program
-            .warnings
+            .notices
             .iter()
             .filter(|d| d.code == "cove::resolve::unchecked_host")
             .map(|d| {
@@ -4078,7 +4091,7 @@ impl Show for B {
                  match level {\n    LogLevel.Debug => \"debug\"\n    LogLevel.Info => \"info\"\n  }\n}\n",
             ),
         ]);
-        assert!(program.warnings.is_empty());
+        assert!(program.notices.is_empty());
     }
 
     #[test]
@@ -4446,7 +4459,7 @@ export struct Booking {
         let package = package_of(module);
         let program = resolve(&package).expect("resolves even with a warning");
         assert!(program
-            .warnings
+            .notices
             .iter()
             .any(|d| d.code == "cove::resolve::missing_doc"));
     }
@@ -4456,7 +4469,7 @@ export struct Booking {
         let module = module_from_sources("private", &["fn helper() {\n}\n"]);
         let package = package_of(module);
         let program = resolve(&package).expect("resolves");
-        assert!(program.warnings.is_empty());
+        assert!(program.notices.is_empty());
     }
 
     #[test]
@@ -4683,7 +4696,7 @@ export struct Booking {
         );
         let package = package_of(module);
         let program = resolve(&package).expect("resolves");
-        assert!(program.warnings.is_empty());
+        assert!(program.notices.is_empty());
     }
 
     #[test]
@@ -4722,7 +4735,7 @@ export struct Booking {
         let package = package_of(module);
         let program = resolve(&package).expect("resolves");
         assert!(!program
-            .warnings
+            .notices
             .iter()
             .any(|d| d.code == "cove::resolve::non_exhaustive_match"));
     }
@@ -4841,7 +4854,7 @@ export struct Booking {
         let package = package_of(module);
         let program = resolve(&package).expect("resolves; only a warning");
         assert!(program
-            .warnings
+            .notices
             .iter()
             .any(|d| d.code == "cove::resolve::unreachable_match_arm"));
     }
@@ -4880,7 +4893,7 @@ export struct Booking {
         let package = package_of(module);
         let program = resolve(&package).expect("resolves");
         assert!(!program
-            .warnings
+            .notices
             .iter()
             .any(|d| d.code == "cove::resolve::non_exhaustive_match"));
     }
@@ -4937,7 +4950,7 @@ export struct Booking {
         let package = package_of(module);
         let program = resolve(&package).expect("resolves; only a warning");
         assert!(program
-            .warnings
+            .notices
             .iter()
             .any(|d| d.code == "cove::resolve::unreachable_match_arm"));
     }
@@ -4998,7 +5011,7 @@ export struct Booking {
         let package = package_of(module);
         let program = resolve(&package).expect("resolves");
         assert!(!program
-            .warnings
+            .notices
             .iter()
             .any(|d| d.code == "cove::resolve::non_exhaustive_match"));
     }
@@ -5018,7 +5031,7 @@ export struct Booking {
         let package = package_of(module);
         let program = resolve(&package).expect("resolves; the enum cannot be determined");
         assert!(!program
-            .warnings
+            .notices
             .iter()
             .any(|d| d.code.starts_with("cove::resolve::") && d.code.contains("match")));
     }

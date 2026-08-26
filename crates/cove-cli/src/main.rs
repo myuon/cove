@@ -265,8 +265,15 @@ pub(crate) fn load(start: Option<&Path>) -> Result<(SourceMap, Package, Program)
         }
     };
     // `cove check` type-checks, and `cove run` refuses to execute a package
-    // that does not check. Type warnings join the resolver's on the program,
-    // so `cove check` reports and counts them the same way.
+    // that does not check. Type warnings and notes join the resolver's
+    // warnings in `Program::notices`, so `cove check` reports them the same
+    // way; it counts them apart, because only a warning is a doubt
+    // `--deny-warnings` acts on.
+    //
+    // Only `cove check` prints them. A command that runs a program reports
+    // what stops it and nothing else — that was already true of the
+    // resolver's warnings, and notes join them on the same footing. Reading
+    // out what the checker chose not to prove is what `cove check` is for.
     //
     // A `cove` command reads the shipped Host API schemas and no others: a
     // package on disk names no embedder, and `Compiler` is where a schema
@@ -448,28 +455,52 @@ fn cmd_check(args: &[String]) -> Result<(), CliError> {
     let (sources, package, program) = load(path)?;
     let modules = program.modules.len();
     let files: usize = package.modules.values().map(|m| m.units.len()).sum();
-    for warning in &program.warnings {
-        eprint!("{}", render(&sources, warning));
+    for diagnostic in &program.notices {
+        eprint!("{}", render(&sources, diagnostic));
     }
-    println!("{}", check_summary(modules, files, program.warnings.len()));
+    // Each count filters on the exact severity. Subtracting one from the
+    // length would give the same answer only for as long as `notices` holds
+    // nothing else, and what a third severity would then produce is a wrong
+    // number rather than a compiler error.
+    let count = |severity| {
+        program
+            .notices
+            .iter()
+            .filter(|d| d.severity == severity)
+            .count()
+    };
+    let warnings = count(cove_diag::Severity::Warning);
+    let notes = count(cove_diag::Severity::Note);
+    println!("{}", check_summary(modules, files, warnings, notes));
 
     // `--deny-warnings` and `cove.toml`'s `[check]` table only ever add
     // strictness, never relax it, so a run that asks for either denies
     // warnings: a CI invocation requesting stricter behavior always wins.
+    // Notes are not denied by either, because a note is not a doubt about
+    // the program: it is the checker naming something it deliberately did
+    // not prove, and no strictness setting can make it prove one.
     let deny_warnings = deny_warnings_flag || package.config.check.deny_warnings;
-    if deny_warnings && !program.warnings.is_empty() {
+    if deny_warnings && warnings > 0 {
         return Err(CliError::WarningsDenied);
     }
     Ok(())
 }
 
 /// The one-line summary `cove check` prints to stdout.
-fn check_summary(modules: usize, files: usize, warnings: usize) -> String {
+///
+/// Warnings and notes are counted apart because they ask for different
+/// things: a warning is something to fix, and a note is a place the checker
+/// says it proved nothing — an unconstrained Host API result, most of all —
+/// which is a fact about the language rather than a fault in the program.
+fn check_summary(modules: usize, files: usize, warnings: usize, notes: usize) -> String {
+    let mut out = format!("checked {modules} module(s), {files} file(s)");
     if warnings > 0 {
-        format!("checked {modules} module(s), {files} file(s), {warnings} warning(s)")
-    } else {
-        format!("checked {modules} module(s), {files} file(s)")
+        out.push_str(&format!(", {warnings} warning(s)"));
     }
+    if notes > 0 {
+        out.push_str(&format!(", {notes} note(s)"));
+    }
+    out
 }
 
 fn cmd_outline(path: Option<&Path>) -> Result<(), CliError> {
@@ -1775,19 +1806,33 @@ module shapes
 
     #[test]
     fn check_summary_omits_warning_count_when_there_are_none() {
-        assert_eq!(check_summary(7, 7, 0), "checked 7 module(s), 7 file(s)");
+        assert_eq!(check_summary(7, 7, 0, 0), "checked 7 module(s), 7 file(s)");
     }
 
     #[test]
     fn check_summary_mentions_warning_count_when_present() {
         assert_eq!(
-            check_summary(7, 7, 3),
+            check_summary(7, 7, 3, 0),
             "checked 7 module(s), 7 file(s), 3 warning(s)"
         );
     }
 
+    /// A note is counted apart, because `--deny-warnings` does not act on
+    /// one: it names something the checker deliberately did not prove.
     #[test]
-    fn program_warnings_feed_the_check_summary() {
+    fn check_summary_counts_notes_apart_from_warnings() {
+        assert_eq!(
+            check_summary(7, 7, 0, 1),
+            "checked 7 module(s), 7 file(s), 1 note(s)"
+        );
+        assert_eq!(
+            check_summary(7, 7, 2, 1),
+            "checked 7 module(s), 7 file(s), 2 warning(s), 1 note(s)"
+        );
+    }
+
+    #[test]
+    fn program_notices_feed_the_check_summary() {
         let dir = TempDir::new("undocumented");
         write(dir.path(), "cove.toml", "");
         write(
@@ -1808,9 +1853,9 @@ export fn main() -> Result<Unit, Error> {
 ",
         );
         let (_, _, program) = load_fixture(dir.path());
-        assert_eq!(program.warnings.len(), 3);
+        assert_eq!(program.notices.len(), 3);
         assert_eq!(
-            check_summary(1, 1, program.warnings.len()),
+            check_summary(1, 1, program.notices.len(), 0),
             "checked 1 module(s), 1 file(s), 3 warning(s)"
         );
     }

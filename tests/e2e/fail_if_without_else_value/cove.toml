@@ -1,0 +1,3 @@
+[run.fail_if_without_else_value]
+entry = "main.main"
+allow = ["console"]

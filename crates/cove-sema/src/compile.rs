@@ -127,11 +127,12 @@ impl Compiler {
 
     /// Resolves and type-checks `package`, which is what `cove check` does.
     ///
-    /// Warnings from both halves are carried on the returned program rather
-    /// than mixed into its errors, so a caller can report them without
-    /// having to decide which of them stopped anything. A failure reports
-    /// the errors first and the warnings after, because a reader looking for
-    /// what went wrong should not have to read past what merely could.
+    /// Warnings and notes from both halves are carried on the returned
+    /// program's [`Program::notices`] rather than mixed into its errors, so
+    /// a caller can report them without having to decide which of them
+    /// stopped anything. A failure reports the errors first and the warnings
+    /// after, because a reader looking for what went wrong should not have
+    /// to read past what merely could.
     pub fn compile(&self, package: &Package) -> Result<Program, Vec<Diagnostic>> {
         let mut program = self.resolve(package)?;
         let (errors, warnings): (Vec<Diagnostic>, Vec<Diagnostic>) = self
@@ -143,7 +144,7 @@ impl Compiler {
             items.extend(warnings);
             return Err(items);
         }
-        program.warnings.extend(warnings);
+        program.notices.extend(warnings);
         Ok(program)
     }
 }
@@ -271,9 +272,9 @@ export fn seniority(id: String) -> Result<Int, Error> {
             .compile(&package)
             .expect("a well-typed program against a supplied schema checks");
         assert!(
-            program.warnings.is_empty(),
+            program.notices.is_empty(),
             "a described module warns about nothing: {:?}",
-            program.warnings
+            program.notices
         );
     }
 
@@ -403,7 +404,7 @@ export fn size() -> Result<Int, Error> {
             .compile(&package)
             .expect("an unknown host module is not an error");
         let rendered: String = program
-            .warnings
+            .notices
             .iter()
             .map(|item| render(&sources, item))
             .collect();
@@ -413,7 +414,7 @@ export fn size() -> Result<Int, Error> {
         );
         assert!(
             program
-                .warnings
+                .notices
                 .iter()
                 .all(|item| item.severity == Severity::Warning),
             "an undescribed host module warns rather than fails"

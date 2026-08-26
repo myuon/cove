@@ -450,7 +450,7 @@ fn a_registered_host_s_own_schema_checks_the_program_that_calls_it() {
     let (sources, checked) = compiled(&hosts, SENIORITY);
     let program = checked.expect("a well-typed program against a supplied schema checks");
     assert!(
-        program.warnings.is_empty(),
+        program.notices.is_empty(),
         "a module the checker was handed warns about nothing"
     );
 
@@ -525,7 +525,7 @@ fn a_host_the_checker_was_not_handed_is_left_to_the_boundary_with_a_warning() {
         .expect("a module the checker cannot see is not an error");
 
     let rendered: String = program
-        .warnings
+        .notices
         .iter()
         .map(|item| render(&sources, item))
         .collect();
@@ -581,7 +581,7 @@ export fn main() -> Result<Unit, Error> {
         .expect("the shipped `files` table makes this look like a checked call");
     assert!(
         !open
-            .warnings
+            .notices
             .iter()
             .any(|item| item.message.contains("`files`")),
         "the shipped fallback has nothing to warn about"
@@ -595,7 +595,7 @@ export fn main() -> Result<Unit, Error> {
         .compile(&package)
         .expect("an undescribed module is a warning, not an error");
     let rendered: String = closed
-        .warnings
+        .notices
         .iter()
         .map(|item| render(&sources, item))
         .collect();

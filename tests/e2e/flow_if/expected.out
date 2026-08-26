@@ -3,3 +3,5 @@ bound 1
 statement one
 statement with else other
 an `if` with no `else` and a false condition is ()
+its branch ran: true
+an `if` with no `else` whose branch ran is ()
