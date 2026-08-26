@@ -1,0 +1,14 @@
+# An ordinary plugin layout: `lib` declares a trait and holds one of its
+# values in a `dyn Trait` *field*, `plugin` supplies the conformance, and
+# `app` wires the two together. `lib` cannot reach `plugin`, so nothing in
+# `lib`'s own call graph leads to the `console` the conformance needs.
+#
+# ADR 0015: `lib.Box.show` dispatches through a field whose type its producer
+# chose, so it is capability-open, and `app.main` is capability-open because
+# it calls it. Reporting `app.main` with neither a `requires` line nor the
+# marker would be a lower bound presented as the whole list, which is the one
+# outcome the decision rules out. `cove outline` is the case that pins it.
+
+[run.app]
+entry = "app.main"
+allow = []

@@ -162,13 +162,13 @@ Cove code has no ambient I/O authority when embedded. File, network, clock,
 process, database, and similar operations are typed Host APIs. The compiler
 reports which capabilities each function requires from its call graph.
 
-That report is a **lower bound**. Every capability it names is genuinely
-reachable, and it is the whole list only for a function whose calls the
-compiler can all follow. A function that calls a value — a `fn`-typed
-parameter, a closure taken out of a collection — or dispatches through a
-`dyn Trait` or a bounded generic parameter is reported as **capability-open**,
-because what runs is chosen by its caller. `cove outline` and `cove api` mark
-such a function distinctly, and so is anything that calls one.
+That report is a **lower bound**. It is the whole list only for a function
+whose calls the compiler can all follow, and even then it can still name a
+capability no particular run reaches. A function that calls a value — a
+`fn`-typed parameter, a closure taken out of a collection — or dispatches
+through a `dyn Trait` or a bounded generic parameter is reported as
+**capability-open**, because what runs is chosen by its caller. `cove outline`
+and `cove api` mark such a function, and mark anything that calls one.
 
 A lambda is charged to the function that *writes* it, so a callback that
 prints already requires `console` wherever it was built, whatever later

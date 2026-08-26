@@ -29,6 +29,17 @@ pub struct RuntimeError {
     /// [`RunOutcome::Success`] or [`RunOutcome::Error`], which are what a run
     /// that did not fail reports.
     pub outcome: RunOutcome,
+    /// The capability the Host API boundary refused this call for, when a
+    /// capability was the reason.
+    ///
+    /// [`RunOutcome::HostBoundary`] is set for everything the boundary
+    /// rejects — an unknown module, an operation that does not exist, an
+    /// argument or result the schema does not admit, an exhausted budget —
+    /// so it cannot answer whether this particular run was simply not
+    /// granted enough. This field can: only the grant check in
+    /// [`crate::host::HostRegistry`] sets it, and only with the capability it
+    /// refused.
+    pub denied_capability: Option<String>,
 }
 
 impl RuntimeError {
@@ -39,6 +50,7 @@ impl RuntimeError {
             rule: None,
             help: None,
             outcome: RunOutcome::Invariant,
+            denied_capability: None,
         }
     }
 
@@ -65,6 +77,17 @@ impl RuntimeError {
     /// it passes through on the way.
     pub fn with_outcome(mut self, outcome: RunOutcome) -> Self {
         self.outcome = outcome;
+        self
+    }
+
+    /// Records `capability` as the one the Host API boundary refused this
+    /// call for.
+    ///
+    /// Call this only from the grant check itself: it is what lets a caller
+    /// tell "this run was simply not granted enough" apart from the rest of
+    /// what [`RunOutcome::HostBoundary`] covers.
+    pub fn with_denied_capability(mut self, capability: impl Into<String>) -> Self {
+        self.denied_capability = Some(capability.into());
         self
     }
 

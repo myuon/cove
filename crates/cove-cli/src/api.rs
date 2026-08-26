@@ -43,12 +43,12 @@ pub(crate) const DEFAULT_SNAPSHOT: &str = "cove-api.txt";
 /// recognised rather than misread.
 const FORMAT: &str = "cove-api 1";
 
-/// The comment block a written snapshot opens with, telling a reader what
-/// the file is for and that it is not edited by hand.
 /// The line a capability-open declaration carries in a snapshot; see
 /// [`Decl::open`].
 const CAPABILITY_OPEN: &str = "capability-open";
 
+/// The comment block a written snapshot opens with, telling a reader what
+/// the file is for and that it is not edited by hand.
 const PREAMBLE: &str = "\
 # The public interface of this package, derived from source.
 #
@@ -181,7 +181,7 @@ struct Decl {
     requires: Vec<String>,
     /// Whether `requires` is a floor rather than the whole of it, because
     /// this declaration reaches a call the compiler cannot follow (ADR
-    /// 0014). It is part of the interface for the same reason `requires` is:
+    /// 0015). It is part of the interface for the same reason `requires` is:
     /// a caller's host has to grant what it will actually need, and a
     /// declaration that stopped being able to say so is a change a reviewer
     /// must see.

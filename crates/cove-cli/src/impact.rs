@@ -22,7 +22,7 @@
 //! A call through a function value or a `dyn` receiver leads to a
 //! declaration nothing here names, so a capability-open target's `requires`
 //! line is a floor: the entries below it may have to grant more than it
-//! lists. ADR 0014 states the guarantee; this report repeats it wherever it
+//! lists. ADR 0015 states the guarantee; this report repeats it wherever it
 //! prints a derived set.
 
 use std::collections::{BTreeMap, BTreeSet};

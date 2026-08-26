@@ -60,10 +60,11 @@ with tracing. A derived capability requirement is a lower bound rather than
 an exact set: a declaration that calls a function value, or dispatches through
 a `dyn Trait` or a bounded generic parameter, is reported as capability-open,
 because what it will run is chosen by its caller
-([ADR 0014](docs/adr/0014-capability-analysis-for-higher-order-calls.md)).
+([ADR 0015](docs/adr/0015-capability-analysis-for-higher-order-calls.md)).
 Grant enforcement at the boundary is what decides, either way. A Host API call
-is checked against the schema its operation declares at both ends: `cove check` checks its arguments where they are
-written, and the boundary checks them again, along with what the host answered.
+is checked against the schema its operation declares at both ends:
+`cove check` checks its arguments where they are written, and the boundary
+checks them again, along with what the host answered.
 A host resource handle is a name for something the host owns -- a module, a
 resource kind, an identity number, and the task-safety its schema declares --
 never the resource itself, and every operation called on one goes through the

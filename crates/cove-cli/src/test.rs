@@ -7,7 +7,7 @@
 //!
 //! # A capability-open test
 //!
-//! "Exactly those" is a floor, not a ceiling (ADR 0014). A test that reaches
+//! "Exactly those" is a floor, not a ceiling (ADR 0015). A test that reaches
 //! a call the compiler cannot follow — a closure invoked through a
 //! parameter, a `dyn Trait` method — may ask for a capability the derived
 //! set does not name, and the boundary refuses it, because the runtime's
@@ -48,7 +48,6 @@ use cove_runtime::interp::Interpreter;
 use cove_runtime::process::{Process, ProcessLog};
 use cove_runtime::runtime::Runtime;
 use cove_runtime::value::Value;
-use cove_runtime::RunOutcome;
 use cove_sema::capability::open_reasons;
 use cove_sema::resolve::DeclaredTest;
 
@@ -195,8 +194,12 @@ fn run_test(
             let mut diagnostic = error.to_diagnostic();
             diagnostic.message =
                 format!("test `{}` failed: {}", test.qualified_name(), error.message);
-            if error.outcome == RunOutcome::HostBoundary && test.entry.is_capability_open() {
-                diagnostic.help = Some(capability_open_help(test));
+            if error.denied_capability.is_some() && test.entry.is_capability_open() {
+                let note = capability_open_help(test);
+                diagnostic.help = Some(match diagnostic.help {
+                    Some(help) => format!("{help}; {note}"),
+                    None => note,
+                });
             }
             Some(diagnostic)
         }
@@ -463,7 +466,7 @@ mod tests {
         assert_eq!(run_all(dir.path(), &["clock"])[0].1, None);
     }
 
-    /// The case ADR 0014 is about, from the runner's side: the closure is
+    /// The case ADR 0015 is about, from the runner's side: the closure is
     /// invoked through a parameter, so no edge leads from `run` to what it
     /// runs — but the closure is *written* in the test, so `console` is
     /// derived there and the runner grants it a fake console. The floor is
@@ -567,6 +570,13 @@ test fn describesThroughDynDispatch() -> Result<Unit, Error> {
             diagnostic.message
         );
         let help = diagnostic.help.expect("a refusal explains itself");
+        // The note is added to the runtime's own help rather than put in
+        // place of it: "add `console` to `allow`" is the actionable half, and
+        // overwriting it would trade the fix for the explanation.
+        assert!(
+            help.starts_with("add `console` to `allow`"),
+            "the boundary's own help survives: {help}"
+        );
         assert!(help.contains("capability-open"), "{help}");
         // The `dyn` dispatch is one hop away, in `render.describe`, so what
         // this test carries is the reason that reached it.

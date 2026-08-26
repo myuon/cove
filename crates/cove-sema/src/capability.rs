@@ -29,7 +29,7 @@ impl fmt::Display for Capability {
 /// Why a declaration's derived capability set is a lower bound rather than
 /// the whole of what calling it can reach.
 ///
-/// ADR 0014 makes a derived set a lower bound and nothing more: it names the
+/// ADR 0015 makes a derived set a lower bound and nothing more: it names the
 /// capabilities the call graph can see, and a call the call graph cannot
 /// follow is reported here rather than left out in silence. A declaration
 /// carrying none of these is *capability-closed* — the call graph followed
