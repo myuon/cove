@@ -62,7 +62,7 @@ pub mod builtins;
 pub mod hosts;
 
 pub use builtins::{builtin, free_builtin, is_builtin_type};
-pub use hosts::{module, shipped};
+pub use hosts::{module, shipped, HostSchemas};
 
 /// A type in a Host API signature, written in Cove's source vocabulary.
 ///

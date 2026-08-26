@@ -180,9 +180,11 @@ arguments again before the host is reached and the host's answer after. A
 value that is not one the declared type admits, followed all the way down
 through `Array`, `Option`, `Result`, and a declared type's name, stops the
 run rather than travelling on. `Any` admits everything, and a declared
-type's fields are not checked by the boundary. A host module the toolchain
-does not ship is one the compiler cannot see, so a call into it is checked at
-the boundary alone.
+type's fields are not checked by the boundary. An embedding registers host
+modules of its own and hands their schemas to the compiler, which checks calls
+into them exactly as it checks calls into the shipped ones. A host module no
+schema describes is one the compiler cannot see: a call into it is checked at
+the boundary alone, and `cove check` warns that it is.
 
 `cove test` is such a host: it grants each test the capabilities its call
 graph requires, taking every implementation's fake form so a suite is

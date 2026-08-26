@@ -264,7 +264,14 @@ pub(crate) fn load(start: Option<&Path>) -> Result<(SourceMap, Package, Program)
             })
         }
     };
-    let mut program = match cove_sema::resolve::resolve(&package) {
+    // `cove check` type-checks, and `cove run` refuses to execute a package
+    // that does not check. Type warnings join the resolver's on the program,
+    // so `cove check` reports and counts them the same way.
+    //
+    // A `cove` command reads the shipped Host API schemas and no others: a
+    // package on disk names no embedder, and `Compiler` is where a schema
+    // would be added if a package ever gained a way to declare one.
+    let program = match cove_sema::Compiler::new().compile(&package) {
         Ok(program) => program,
         Err(items) => {
             return Err(CliError::Diagnostics {
@@ -273,23 +280,6 @@ pub(crate) fn load(start: Option<&Path>) -> Result<(SourceMap, Package, Program)
             })
         }
     };
-
-    // `cove check` type-checks, and `cove run` refuses to execute a package
-    // that does not check. Type warnings join the resolver's, so `cove check`
-    // reports and counts them the same way.
-    let (errors, warnings): (Vec<Diagnostic>, Vec<Diagnostic>) =
-        cove_sema::typeck::check(&package, &program)
-            .into_iter()
-            .partition(|d| d.severity == cove_diag::Severity::Error);
-    if !errors.is_empty() {
-        let mut items = errors;
-        items.extend(warnings);
-        return Err(CliError::Diagnostics {
-            sources: sources.into(),
-            items,
-        });
-    }
-    program.warnings.extend(warnings);
 
     Ok((sources, package, program))
 }

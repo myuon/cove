@@ -67,7 +67,10 @@ same schema check, the same budget charge, and the same trace; a handle whose
 resource has been closed reports a diagnostic rather than acting on whatever
 now occupies the slot. A host module may also declare plain-data types in a
 `TypeSchema`, which Cove source names and initializes with labels exactly like
-its own structs and enums. `Reentry` lets a host that was handed a Cove closure
+its own structs and enums. An embedding's own modules are checked the same
+way: `HostApi::module_schema` and `cove_sema::Compiler::with_host_schema` take
+one `ModuleSchema`, so registering a module and checking a program written
+against it read the same table rather than two descriptions that can drift. `Reentry` lets a host that was handed a Cove closure
 run it on the task that made the call, on that task's stack, against that run's
 budget, with no second thread and no scheduler. `cove trace` reads a recorded
 trace back and summarises it, and `cove replay` runs an entry again with every
@@ -147,10 +150,10 @@ against the profile list on its own:
   see the tests in `crates/cove-runtime/src/host.rs` and
   `crates/cove-runtime/src/budget.rs`.
 - [x] **Embedded — MVP required.** A host outside `cove-runtime` can supply
-  its own capability implementation and its own limits, and see both a
-  successful run and a denial; see
-  `crates/cove-runtime/tests/embedding.rs`, which `cargo test --workspace`
-  (and CI) runs.
+  its own capability implementation and its own limits, see both a successful
+  run and a denial, and have `cove check` check a program against a module of
+  its own before running it; see `crates/cove-runtime/tests/embedding.rs`,
+  which `cargo test --workspace` (and CI) runs.
 - [ ] **Wasm — deferred.** No crate in this workspace builds for or runs on
   Wasm. For the MVP, Wasm is only a semantic-portability constraint on the
   language and backend design, not a working target; a production Wasm

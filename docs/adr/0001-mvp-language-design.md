@@ -292,9 +292,13 @@ whether it is a read, reversible write, or irreversible write.
 the runtime both depend on, rather than a description in one of them and a
 copy in the other. Both ends read it and both ends enforce it — `cove check`
 checks a call's arguments where they are written, and the boundary checks them
-again for the host modules a compiler cannot see, which is every module an
-embedding registers. [ADR 0013](0013-host-resource-handles.md)'s two
-amendments decide the whole of that.
+again for the host modules a compiler cannot see. An embedding's modules need
+not be among those: `HostApi::module_schema` and `Compiler::with_host_schema`
+take the same `ModuleSchema`, so registering a module and checking a program
+against it use one table rather than two descriptions that can drift. A module
+whose schema the compiler was never given keeps the boundary-only fallback,
+and `cove check` warns that it has. [ADR 0013](0013-host-resource-handles.md)'s
+two amendments decide the whole of that.
 
 ## Runtime resource control
 

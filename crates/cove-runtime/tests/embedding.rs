@@ -27,24 +27,32 @@
 //! are held in memory.
 //!
 //! A host that takes a shipped module's name takes its description with it,
-//! which is what lets the compiler check a program written against it. A host
-//! that registers a module of its own is one the compiler has never heard of
-//! and checks nothing about -- and is exactly why the boundary checks a
-//! call's arguments as well: the schema this file declares below is enforced
-//! against every call made through it, whether or not any compiler read it.
+//! which is what lets the compiler check a program written against it. A
+//! module of the embedder's own used to be one the compiler had never heard
+//! of, and the boundary was the first and only thing to look at a call into
+//! it. It need not be: `HostApi::module_schema` is one `ModuleSchema`, and
+//! `cove_sema::Compiler` takes that same value, so the second half of this
+//! file registers a `company` module and checks a program against the very
+//! table the registry will hold it to. Neither description is restated, so
+//! neither can drift.
+//!
+//! The boundary still checks, because a host may register a module the
+//! checker was never handed -- the last case below is one -- and because a
+//! host is held to its schema whether or not any compiler read it.
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
-use cove_diag::SourceMap;
+use cove_diag::{render, Diagnostic, SourceMap};
 use cove_runtime::interp::Interpreter;
+use cove_runtime::value::StructValue;
 use cove_runtime::{
-    Budget, Effect, Grants, HostApi, HostRegistry, HostType, Limits, OperationSchema, Runtime,
-    RuntimeError, Value,
+    Budget, Effect, FieldSchema, Grants, HostApi, HostRegistry, HostType, Limits, ModuleSchema,
+    OperationSchema, Runtime, RuntimeError, TypeSchema, Value,
 };
 use cove_sema::resolve::Program;
-use cove_sema::{Capability, Config, Module, Package, Unit};
+use cove_sema::{Capability, Compiler, Config, Module, Package, Unit};
 
 /// A `documents` implementation a host defines for itself: a fixed set of
 /// named notes and a log of every read the host observed. Nothing here comes
@@ -57,28 +65,26 @@ struct HostOwnedDocuments {
 
 /// The one operation this test host exposes, described the same way a
 /// shipped host describes itself.
-static DOCUMENTS_SCHEMA: &[OperationSchema] = &[OperationSchema {
-    name: "read",
-    params: &[HostType::String],
-    variadic: false,
-    result: HostType::Result(&HostType::String, &HostType::Error),
+const DOCUMENTS_SCHEMA: ModuleSchema = ModuleSchema {
+    name: "documents",
     capability: "documents",
-    effect: Effect::Read,
-    cancellable: false,
-    recordable: true,
-    result_is_task_safe: true,
-}];
+    operations: &[OperationSchema {
+        name: "read",
+        params: &[HostType::String],
+        variadic: false,
+        result: HostType::Result(&HostType::String, &HostType::Error),
+        capability: "documents",
+        effect: Effect::Read,
+        cancellable: false,
+        recordable: true,
+        result_is_task_safe: true,
+    }],
+    types: &[],
+    resources: &[],
+};
 
 impl HostApi for HostOwnedDocuments {
-    fn name(&self) -> &str {
-        "documents"
-    }
-
-    fn capability(&self) -> Capability {
-        Capability::new("documents")
-    }
-
-    fn schema(&self) -> &[OperationSchema] {
+    fn module_schema(&self) -> ModuleSchema {
         DOCUMENTS_SCHEMA
     }
 
@@ -115,8 +121,8 @@ export fn main() -> Result<String, Error> {
     )
 }
 
-/// Parses and resolves a one-module package written inline.
-fn program_of(text: &str) -> (Arc<SourceMap>, Arc<Program>) {
+/// Parses a one-module package written inline, entirely in memory.
+fn package_of(text: &str) -> (SourceMap, Package) {
     let mut sources = SourceMap::new();
     let path = PathBuf::from("app/main.cove");
     let file = sources.add(path.clone(), text);
@@ -130,11 +136,19 @@ fn program_of(text: &str) -> (Arc<SourceMap>, Arc<Program>) {
             units: vec![Unit { file, path, ast }],
         },
     );
-    let package = Package {
-        root: PathBuf::new(),
-        config: Config::default(),
-        modules,
-    };
+    (
+        sources,
+        Package {
+            root: PathBuf::new(),
+            config: Config::default(),
+            modules,
+        },
+    )
+}
+
+/// Parses and resolves a one-module package written inline.
+fn program_of(text: &str) -> (Arc<SourceMap>, Arc<Program>) {
+    let (sources, package) = package_of(text);
     let program = cove_sema::resolve::resolve(&package).expect("the fixture resolves");
     (Arc::new(sources), Arc::new(program))
 }
@@ -308,4 +322,224 @@ export fn main() -> Result<Unit, Error> {
         message.starts_with("call depth limit of"),
         "the run was stopped by the depth limit rather than by the stack: {message}"
     );
+}
+
+// ---------------------------------------------------------------------------
+// A module of the embedder's own, checked before it is run.
+//
+// Everything above registers `documents`, whose name and description the
+// toolchain ships. `company` below is nobody's but this file's: no `cove`
+// command has heard of it, and until the compiler is handed its table,
+// nothing checks a call into it before the boundary does.
+
+/// What `company` declares about itself: one operation, one type of its own,
+/// and a capability that is not its own name.
+///
+/// This is the only description of the module in this file. It is what
+/// `Directory` registers with, and it is what the compiler is handed, so
+/// there is no second copy to keep in step.
+const COMPANY: ModuleSchema = ModuleSchema {
+    name: "company",
+    capability: "directory",
+    operations: &[OperationSchema {
+        name: "employee",
+        params: &[HostType::String],
+        variadic: false,
+        result: HostType::Result(&HostType::Named("company.Employee"), &HostType::Error),
+        capability: "directory",
+        effect: Effect::Read,
+        cancellable: false,
+        recordable: true,
+        result_is_task_safe: true,
+    }],
+    types: &[TypeSchema {
+        name: "Employee",
+        cases: &[],
+        fields: &[
+            FieldSchema {
+                name: "name",
+                ty: HostType::String,
+            },
+            FieldSchema {
+                name: "seniority",
+                ty: HostType::Int,
+            },
+        ],
+    }],
+    resources: &[],
+};
+
+/// The embedder's own host module: a staff directory it keeps in memory.
+struct Directory {
+    people: BTreeMap<&'static str, i64>,
+    /// Every lookup that reached the implementation, so a test can tell a
+    /// call the checker stopped from one that ran.
+    lookups: Arc<Mutex<Vec<String>>>,
+}
+
+impl HostApi for Directory {
+    fn module_schema(&self) -> ModuleSchema {
+        COMPANY
+    }
+
+    fn call(&self, op: &str, args: Vec<Value>) -> Result<Value, RuntimeError> {
+        assert_eq!(op, "employee", "the only operation `company` declares");
+        let [Value::Str(id)] = args.as_slice() else {
+            unreachable!("checked by HostRegistry::call")
+        };
+        self.lookups.lock().unwrap().push(id.to_string());
+        Ok(match self.people.get(&**id) {
+            Some(seniority) => Value::ok(Value::Struct(Box::new(StructValue {
+                type_name: "company.Employee".into(),
+                fields: vec![
+                    ("name".into(), Value::Str(id.clone())),
+                    ("seniority".into(), Value::Int(*seniority)),
+                ],
+            }))),
+            None => Value::err(Value::error(format!("no employee named `{id}`"))),
+        })
+    }
+}
+
+/// Registers `company` and grants it, which is the whole of what an
+/// embedding sets up.
+fn directory(lookups: Arc<Mutex<Vec<String>>>) -> HostRegistry {
+    // The capability granted is the one the schema declares, `directory`,
+    // and not the module's name.
+    let mut hosts = HostRegistry::new(Grants::new(vec!["directory"]));
+    hosts.register(Box::new(Directory {
+        people: BTreeMap::from([("ada", 7)]),
+        lookups,
+    }));
+    hosts
+}
+
+/// A program written against `company`, in every way well typed.
+const SENIORITY: &str = "\
+use company
+
+/// Reports how senior one employee is.
+export fn main() -> Result<Int, Error> {
+  let found = company.employee(\"ada\")?
+  Ok(found.seniority)
+}
+";
+
+/// The pairing, in one line: the compiler is handed the tables the registry
+/// was registered with, so the program is checked against the descriptions
+/// the run is about to enforce.
+///
+/// Nothing about `company` is written twice. `HostRegistry::module_schemas`
+/// hands back what each registered module declared, and
+/// `Compiler::with_host_schemas` takes it as it is.
+fn compiled(hosts: &HostRegistry, text: &str) -> (SourceMap, Result<Program, Vec<Diagnostic>>) {
+    let (sources, package) = package_of(text);
+    let checked = Compiler::new()
+        .with_host_schemas(hosts.module_schemas())
+        .compile(&package);
+    (sources, checked)
+}
+
+/// The well-typed half: a program calling a module no toolchain ships is
+/// checked at its call sites, derives the capability the schema declares,
+/// and then runs.
+#[test]
+fn a_registered_host_s_own_schema_checks_the_program_that_calls_it() {
+    let lookups = Arc::new(Mutex::new(Vec::new()));
+    let hosts = directory(Arc::clone(&lookups));
+    let (sources, checked) = compiled(&hosts, SENIORITY);
+    let program = checked.expect("a well-typed program against a supplied schema checks");
+    assert!(
+        program.warnings.is_empty(),
+        "a module the checker was handed warns about nothing"
+    );
+
+    // The capability derived from the call is the schema's, not the module
+    // name: `company` is gated on `directory`.
+    assert_eq!(
+        program.modules["app"].functions["main"].required_capabilities,
+        [Capability::new("directory")].into_iter().collect()
+    );
+
+    let value = Interpreter::new(&Runtime::new(
+        Arc::new(program),
+        Arc::new(sources),
+        Arc::new(hosts),
+    ))
+    .run_entry("app", "main", Vec::new())
+    .expect("the checked program runs");
+
+    assert_eq!(value.to_string(), "Ok(7)");
+    assert_eq!(*lookups.lock().unwrap(), vec!["ada".to_string()]);
+}
+
+/// The other half, and the point of the whole exercise: a mistake in a call
+/// into the embedder's own module is an error at its call site, reported
+/// before anything runs, exactly as it would be for `http.fetch`.
+#[test]
+fn a_mistake_in_a_call_into_a_registered_host_is_a_static_error() {
+    let lookups = Arc::new(Mutex::new(Vec::new()));
+    let hosts = directory(Arc::clone(&lookups));
+    let (sources, checked) = compiled(
+        &hosts,
+        "\
+use company
+
+/// Passes an `Int` where the schema declares a `String`, and reads a field
+/// `company.Employee` does not carry.
+export fn main() -> Result<Int, Error> {
+  let found = company.employee(3)?
+  Ok(found.tenure)
+}
+",
+    );
+    let items = checked.expect_err("a call the schema does not admit is an error");
+    let rendered: String = items.iter().map(|item| render(&sources, item)).collect();
+
+    assert!(
+        rendered.contains("expected `String`, found `Int`")
+            && rendered.contains("argument `#1` is `String`"),
+        "{rendered}"
+    );
+    assert!(
+        rendered.contains("`company.Employee` has no field `tenure`")
+            && rendered.contains("declares `name`, `seniority`"),
+        "{rendered}"
+    );
+    assert!(
+        lookups.lock().unwrap().is_empty(),
+        "a program the checker refused never reaches the host"
+    );
+}
+
+/// A host the checker was not handed keeps the fallback it always had: the
+/// call is unchecked until the boundary, the run still works, and the
+/// program is told so rather than left to assume it checked.
+#[test]
+fn a_host_the_checker_was_not_handed_is_left_to_the_boundary_with_a_warning() {
+    let lookups = Arc::new(Mutex::new(Vec::new()));
+    let hosts = directory(Arc::clone(&lookups));
+    let (sources, package) = package_of(SENIORITY);
+    let program = Compiler::new()
+        .compile(&package)
+        .expect("a module the checker cannot see is not an error");
+
+    let rendered: String = program
+        .warnings
+        .iter()
+        .map(|item| render(&sources, item))
+        .collect();
+    assert!(
+        rendered.contains("no Host API schema describes the host module `company`"),
+        "{rendered}"
+    );
+
+    let value = Interpreter::new(&Runtime::new(
+        Arc::new(program),
+        Arc::new(sources),
+        Arc::new(hosts),
+    ))
+    .run_entry("app", "main", Vec::new())
+    .expect("the boundary checks what the checker could not");
+    assert_eq!(value.to_string(), "Ok(7)");
 }

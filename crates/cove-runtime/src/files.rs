@@ -26,11 +26,9 @@ use std::io::ErrorKind;
 use std::path::{Component, Path, PathBuf};
 use std::sync::{Mutex, MutexGuard};
 
-use cove_sema::Capability;
-
 use crate::error::RuntimeError;
 use crate::host::HostApi;
-use crate::schema::{ModuleSchema, OperationSchema};
+use crate::schema::ModuleSchema;
 use crate::value::Value;
 
 /// `files`: reading, writing, listing, and removing files under one root.
@@ -349,16 +347,8 @@ fn result(outcome: Result<Value, String>) -> Value {
 }
 
 impl HostApi for Files {
-    fn name(&self) -> &str {
-        "files"
-    }
-
-    fn capability(&self) -> Capability {
-        Capability::new("files")
-    }
-
-    fn schema(&self) -> &[OperationSchema] {
-        SCHEMA.operations
+    fn module_schema(&self) -> ModuleSchema {
+        SCHEMA
     }
 
     fn call(&self, op: &str, args: Vec<Value>) -> Result<Value, RuntimeError> {

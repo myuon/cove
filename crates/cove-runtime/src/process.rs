@@ -20,11 +20,9 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard};
 
-use cove_sema::Capability;
-
 use crate::error::RuntimeError;
 use crate::host::HostApi;
-use crate::schema::{ModuleSchema, OperationSchema};
+use crate::schema::ModuleSchema;
 use crate::value::Value;
 
 /// What a program asked a fake process to do, shared between the host and
@@ -208,16 +206,8 @@ impl Process {
 }
 
 impl HostApi for Process {
-    fn name(&self) -> &str {
-        "process"
-    }
-
-    fn capability(&self) -> Capability {
-        Capability::new("process")
-    }
-
-    fn schema(&self) -> &[OperationSchema] {
-        SCHEMA.operations
+    fn module_schema(&self) -> ModuleSchema {
+        SCHEMA
     }
 
     fn call(&self, op: &str, args: Vec<Value>) -> Result<Value, RuntimeError> {

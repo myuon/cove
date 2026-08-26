@@ -76,37 +76,59 @@ use crate::value::Value;
 /// call and can decide what to do about it. What is not acceptable is a host
 /// that blocks indefinitely and says nothing.
 pub trait HostApi: Send + Sync {
+    /// The whole of what this module declares about itself: the name Cove
+    /// source uses, the capability a host must grant for it, the operations
+    /// it exposes, the types it declares, and the kinds of resource it can
+    /// open.
+    ///
+    /// The schema is the module's declaration of itself: a host cannot
+    /// expose an operation without saying what it takes, what it produces,
+    /// what it costs the outside world, and whether its result may cross a
+    /// task boundary. The boundary holds every call to it, so an operation
+    /// arriving in `call` has already been checked against what is declared
+    /// here.
+    ///
+    /// One table rather than five methods, because this exact value is also
+    /// what the *checker* reads: `cove_sema::Compiler::with_host_schema`
+    /// takes a [`ModuleSchema`], so the description a run enforces and the
+    /// description `cove check` checked a call against are the same bytes
+    /// for an embedder's module as they already are for a shipped one. Every
+    /// accessor below is derived from this, and none of them is meant to be
+    /// overridden: two descriptions of one module is the drift `cove-schema`
+    /// exists to prevent.
+    fn module_schema(&self) -> ModuleSchema;
+
     /// The name Cove source uses, such as `console`.
-    fn name(&self) -> &str;
+    fn name(&self) -> &str {
+        self.module_schema().name
+    }
 
     /// The capability a host must grant for this module.
-    fn capability(&self) -> Capability;
+    fn capability(&self) -> Capability {
+        Capability::new(self.module_schema().capability)
+    }
 
     /// The operations this module exposes, and everything the runtime needs
     /// to know about each of them.
-    ///
-    /// The schema is the module's declaration of itself: a host cannot expose
-    /// an operation without saying what it takes, what it produces, what it
-    /// costs the outside world, and whether its result may cross a task
-    /// boundary.
-    fn schema(&self) -> &[OperationSchema];
+    fn schema(&self) -> &[OperationSchema] {
+        self.module_schema().operations
+    }
 
     /// The types this module declares, which Cove source may name and
     /// initialize: `http.Method.Get`, `http.Route(method: ..., path: ...)`.
     ///
-    /// A host type is ordinary data. Declaring none, which is the default, is
-    /// what most modules do: `console` has nothing to say about types.
+    /// A host type is ordinary data, and most modules declare none:
+    /// `console` has nothing to say about types.
     fn types(&self) -> &[TypeSchema] {
-        &[]
+        self.module_schema().types
     }
 
     /// The kinds of resource this module can open, and what a handle to each
     /// of them answers.
     ///
-    /// Declaring none, which is the default, says that this module hands back
-    /// only values.
+    /// A module that declares none hands back only values.
     fn resources(&self) -> &[ResourceSchema] {
-        &[]
+        self.module_schema().resources
     }
 
     /// Invokes one operation.
@@ -664,6 +686,26 @@ impl HostRegistry {
         self.irreversible_writes.load(Ordering::Relaxed)
     }
 
+    /// The table every registered module declares itself with.
+    ///
+    /// This is the pairing the checker needs. An embedding registers its
+    /// hosts here and hands these same values to `cove_sema::Compiler`, so
+    /// the program is checked against the descriptions this registry is
+    /// about to enforce rather than against a second set written out beside
+    /// them:
+    ///
+    /// ```ignore
+    /// let program = Compiler::new()
+    ///     .with_host_schemas(hosts.module_schemas())
+    ///     .compile(&package)?;
+    /// ```
+    pub fn module_schemas(&self) -> Vec<ModuleSchema> {
+        self.modules
+            .iter()
+            .map(|module| module.module_schema())
+            .collect()
+    }
+
     /// Looks up which host module exposes `op`, for unqualified `use` imports.
     pub fn module_for_operation(&self, op: &str) -> Option<&str> {
         self.modules
@@ -1095,16 +1137,8 @@ impl<W: Write + Send> Console<W> {
 }
 
 impl<W: Write + Send> HostApi for Console<W> {
-    fn name(&self) -> &str {
-        "console"
-    }
-
-    fn capability(&self) -> Capability {
-        Capability::new("console")
-    }
-
-    fn schema(&self) -> &[OperationSchema] {
-        CONSOLE_SCHEMA.operations
+    fn module_schema(&self) -> ModuleSchema {
+        CONSOLE_SCHEMA
     }
 
     fn call(&self, op: &str, args: Vec<Value>) -> Result<Value, RuntimeError> {
@@ -1156,16 +1190,8 @@ impl Env {
 }
 
 impl HostApi for Env {
-    fn name(&self) -> &str {
-        "env"
-    }
-
-    fn capability(&self) -> Capability {
-        Capability::new("env")
-    }
-
-    fn schema(&self) -> &[OperationSchema] {
-        ENV_SCHEMA.operations
+    fn module_schema(&self) -> ModuleSchema {
+        ENV_SCHEMA
     }
 
     fn call(&self, op: &str, args: Vec<Value>) -> Result<Value, RuntimeError> {
@@ -1252,16 +1278,8 @@ fn is_plain_document_name(name: &str) -> bool {
 }
 
 impl HostApi for Documents {
-    fn name(&self) -> &str {
-        "documents"
-    }
-
-    fn capability(&self) -> Capability {
-        Capability::new("documents")
-    }
-
-    fn schema(&self) -> &[OperationSchema] {
-        DOCUMENTS_SCHEMA.operations
+    fn module_schema(&self) -> ModuleSchema {
+        DOCUMENTS_SCHEMA
     }
 
     fn call(&self, op: &str, args: Vec<Value>) -> Result<Value, RuntimeError> {
@@ -1764,16 +1782,7 @@ mod tests {
             "a module the schema describes is one a run registers, and the reverse"
         );
         for (module, declared) in modules.iter().zip(shipped_schema()) {
-            assert_eq!(module.name(), declared.name);
-            assert_eq!(module.capability().as_str(), declared.capability);
-            assert_eq!(module.schema(), declared.operations, "`{}`", declared.name);
-            assert_eq!(module.types(), declared.types, "`{}`", declared.name);
-            assert_eq!(
-                module.resources(),
-                declared.resources,
-                "`{}`",
-                declared.name
-            );
+            assert_eq!(&module.module_schema(), declared, "`{}`", declared.name);
         }
     }
 
@@ -2016,21 +2025,19 @@ mod tests {
         }
     }
 
+    /// The module this test host declares itself with, which is the one
+    /// the registry holds it to.
+    const WAYWARD: ModuleSchema = ModuleSchema {
+        name: "wayward",
+        capability: "wayward",
+        operations: WAYWARD_SCHEMA,
+        types: &[],
+        resources: WAYWARD_RESOURCES,
+    };
+
     impl HostApi for Wayward {
-        fn name(&self) -> &str {
-            "wayward"
-        }
-
-        fn capability(&self) -> Capability {
-            Capability::new("wayward")
-        }
-
-        fn schema(&self) -> &[OperationSchema] {
-            WAYWARD_SCHEMA
-        }
-
-        fn resources(&self) -> &[ResourceSchema] {
-            WAYWARD_RESOURCES
+        fn module_schema(&self) -> ModuleSchema {
+            WAYWARD
         }
 
         fn call(&self, op: &str, _args: Vec<Value>) -> Result<Value, RuntimeError> {

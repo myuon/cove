@@ -153,7 +153,7 @@ use cove_schema::builtins::{
     BuiltinSchema, BuiltinType, FreeBuiltinKind, FreeBuiltinSchema, MethodSchema, ParamSchema,
     MAP_ENTRY, NONE_CASE, SCOPE,
 };
-use cove_schema::{HostType, OperationSchema, ResourceSchema, TypeSchema};
+use cove_schema::{HostSchemas, HostType, OperationSchema, ResourceSchema, TypeSchema};
 use cove_syntax::ast::{
     Arg, BinaryOp, Block, EnumDecl, Expr, ExprKind, FnDecl, GenericParam, Ident, ItemKind,
     MatchArm, Param, Pattern, PatternKind, Stmt, StmtKind, StrPart, StructDecl, TraitMethod, Type,
@@ -266,12 +266,23 @@ const TASK_SAFETY_RULE: &str = "Immutable task-safe values such as arrays may cr
 /// already resolved signatures by the time its own declarations are. ADR
 /// 0005 forbids import cycles, which is what makes such an order exist.
 pub fn check(package: &Package, program: &Program) -> Vec<Diagnostic> {
+    check_with(package, program, &HostSchemas::new())
+}
+
+/// Type-checks a resolved program against `schemas`, the host modules this
+/// compilation may name.
+///
+/// This is [`check`] with the one thing an embedder can change. A module in
+/// `schemas` is checked exactly as a shipped one is: its operations' arity,
+/// argument types, and results; the fields of the types it declares; the
+/// cases of its enums; and the operations its resources answer.
+pub fn check_with(package: &Package, program: &Program, schemas: &HostSchemas) -> Vec<Diagnostic> {
     let mut diagnostics = Vec::new();
     let mut envs: BTreeMap<&str, ImportEnv> = BTreeMap::new();
     let mut checked: BTreeMap<&str, Checker> = BTreeMap::new();
     for name in import_order(program) {
         let module = &program.modules[name];
-        let mut checker = Checker::new(module, program);
+        let mut checker = Checker::new(module, program, schemas);
         checker.import(&envs);
         checker.prepare();
         envs.insert(name, checker.export_env());
@@ -886,6 +897,10 @@ struct Checker<'a> {
     /// The whole program, for the declarations of the modules this one
     /// imports from.
     program: &'a Program,
+    /// The host modules this compilation can see: the shipped ones, and any
+    /// an embedder handed to the compiler. A call into a module that is not
+    /// here is the one call this checker leaves to the boundary.
+    schemas: &'a HostSchemas,
     diagnostics: Vec<Diagnostic>,
     functions: BTreeMap<String, FnSig>,
     methods: BTreeMap<(String, String), FnSig>,
@@ -914,10 +929,15 @@ struct Checker<'a> {
 }
 
 impl<'a> Checker<'a> {
-    fn new(module: &'a ResolvedModule, program: &'a Program) -> Checker<'a> {
+    fn new(
+        module: &'a ResolvedModule,
+        program: &'a Program,
+        schemas: &'a HostSchemas,
+    ) -> Checker<'a> {
         Checker {
             module,
             program,
+            schemas,
             diagnostics: Vec::new(),
             functions: BTreeMap::new(),
             methods: BTreeMap::new(),
@@ -2980,7 +3000,7 @@ impl<'a> Checker<'a> {
             // A host module's enum has cases and nothing inside them: the
             // schema writes `cases: &["Get", "Post"]` and gives them no
             // payload to bind.
-            Ty::Host(declared) => match host_declared_type(declared) {
+            Ty::Host(declared) => match host_declared_type(declared, self.schemas) {
                 Some(schema) if schema.cases.contains(&case.node.as_str()) => Some(Vec::new()),
                 Some(schema) if schema.is_enum() => {
                     let known: Vec<String> =
@@ -3519,9 +3539,10 @@ impl<'a> Checker<'a> {
         trailing: Option<&Expr>,
         span: Span,
     ) -> Ty {
-        let Some(schema) = cove_schema::module(module) else {
-            // A module this build ships no schema for. Its operations are
-            // between the host that registered it and the boundary.
+        let Some(schema) = self.schemas.module(module) else {
+            // A module no schema describes. Its operations are between the
+            // host that registered it and the boundary; `use` already warned
+            // that nothing here can check them.
             self.check_args_freely(args, trailing);
             return Ty::Unknown;
         };
@@ -3694,7 +3715,7 @@ impl<'a> Checker<'a> {
     /// `http.Request` written as a type.
     fn host_named_type(&mut self, module: &str, name: &str, arguments: usize, span: Span) -> Ty {
         let qualified = format!("{module}.{name}");
-        let Some(schema) = cove_schema::module(module) else {
+        let Some(schema) = self.schemas.module(module) else {
             self.diagnostics.push(unchecked_host_type(&qualified, span));
             return Ty::Unknown;
         };
@@ -3741,7 +3762,7 @@ impl<'a> Checker<'a> {
         case: &Ident,
         span: Span,
     ) -> Option<Ty> {
-        let schema = cove_schema::module(module)?.declared_type(declared)?;
+        let schema = self.schemas.module(module)?.declared_type(declared)?;
         if !schema.is_enum() {
             return None;
         }
@@ -3798,7 +3819,7 @@ impl<'a> Checker<'a> {
 
     /// `request.path`: a field of a host type, typed from the schema.
     fn host_field(&mut self, declared: &str, name: &Ident, span: Span) -> Ty {
-        let Some(schema) = host_declared_type(declared) else {
+        let Some(schema) = host_declared_type(declared, self.schemas) else {
             // A resource keeps its state on the far side of the boundary, so
             // there is nothing in it to read: everything it answers, it
             // answers as an operation.
@@ -3845,7 +3866,7 @@ impl<'a> Checker<'a> {
         trailing: Option<&Expr>,
         span: Span,
     ) -> Ty {
-        if let Some(resource) = host_resource(declared) {
+        if let Some(resource) = host_resource(declared, self.schemas) {
             if let Some(operation) = resource.operation(&name.node) {
                 return self.call_host_operation(
                     operation,
@@ -5338,30 +5359,31 @@ fn operation_names(operations: &'static [OperationSchema]) -> Vec<String> {
 
 /// The schema of the host type `qualified` names, when it is one a host hands
 /// over rather than one it keeps.
-fn host_declared_type(qualified: &str) -> Option<&'static TypeSchema> {
+fn host_declared_type(qualified: &str, schemas: &HostSchemas) -> Option<&'static TypeSchema> {
     let (module, name) = qualified.split_once('.')?;
-    cove_schema::module(module)?.declared_type(name)
+    schemas.module(module)?.declared_type(name)
 }
 
 /// The schema of the host resource `qualified` names.
-fn host_resource(qualified: &str) -> Option<&'static ResourceSchema> {
+fn host_resource(qualified: &str, schemas: &HostSchemas) -> Option<&'static ResourceSchema> {
     let (module, name) = qualified.split_once('.')?;
-    cove_schema::module(module)?.resource(name)
+    schemas.module(module)?.resource(name)
 }
 
-/// A type reached through a host module this build ships no schema for.
+/// A type reached through a host module no schema describes.
 ///
 /// This is the warning that used to greet every host type. It is now what
-/// greets only the ones the checker genuinely cannot answer for: an embedding
-/// may register any module it likes, and a program written against one is
-/// checked by the boundary at run time and by nothing before it.
+/// greets only the ones the checker genuinely cannot answer for: an
+/// embedding may register any module it likes, and one whose schema the
+/// compiler was not handed is checked by the boundary at run time and by
+/// nothing before it.
 fn unchecked_host_type(shown: &str, span: Span) -> Diagnostic {
     Diagnostic::warning(
         HOST_TYPE,
-        format!("`{shown}` comes from a host module this build has no schema for, so values of it are unchecked"),
+        format!("`{shown}` comes from a host module no Host API schema describes, so values of it are unchecked"),
     )
     .at(span)
-    .rule("A Host API's types come from its schema; the checker reads the schema of the host modules the toolchain ships.")
+    .rule("A Host API's types come from its schema; the checker reads the shipped schemas and any an embedder supplies.")
     .help("the checker treats this type as unknown; every operation on it is left to the runtime, which holds the host to the schema it registered with")
 }
 
@@ -8785,11 +8807,11 @@ fn handle(reading: sensors.Reading) -> Int {
         assert_eq!(warnings[0].code, HOST_TYPE);
         assert_eq!(
             warnings[0].message,
-            "`sensors.Reading` comes from a host module this build has no schema for, so values of it are unchecked"
+            "`sensors.Reading` comes from a host module no Host API schema describes, so values of it are unchecked"
         );
         assert_eq!(
             warnings[0].rule.as_deref().unwrap(),
-            "A Host API's types come from its schema; the checker reads the schema of the host modules the toolchain ships."
+            "A Host API's types come from its schema; the checker reads the shipped schemas and any an embedder supplies."
         );
     }
 
