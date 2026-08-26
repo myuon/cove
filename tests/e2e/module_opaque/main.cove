@@ -1,0 +1,26 @@
+use console.println
+use module_opaque.account.AccountId
+use module_opaque.account.sortKey
+
+/// Uses an opaque type across a module boundary.
+///
+/// Everything here goes through what `account` exports: the type's name,
+/// its associated function, and its methods. The fields behind them are
+/// unreachable from this module, and `sortKey` is how `account` chooses to
+/// publish one of them.
+///
+/// Interpolating the value itself is not a way around that: an opaque type
+/// renders as its name alone, so `"{id}"` is `AccountId` and the readable
+/// form is the one `account` published as `text`.
+export fn main() -> Result<Unit, Error> {
+  let id = AccountId.of(41)?
+  println(id.text())?
+  println("{id}")?
+  println("{sortKey(id)}")?
+
+  match AccountId.of(0) {
+    Ok(other) => println(other.text())?
+    Err(error) => println(error.message)?
+  }
+  Ok(())
+}

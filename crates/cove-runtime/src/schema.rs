@@ -218,6 +218,7 @@ mod tests {
                 .into_iter()
                 .map(|(name, value)| (name.into(), value))
                 .collect(),
+            opaque: false,
         }))
     }
 

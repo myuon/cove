@@ -1,0 +1,22 @@
+error[cove::type::opaque_construction]: `AccountId` is opaque here, so it cannot be built field by field
+  --> <e2e>/fail_opaque_boundary/main/main.cove:18:12
+   |
+18 |   let id = AccountId(id: 41)
+   |            ^^^^^^^^^^^^^^^^^
+  rule: An `export opaque struct` does not export the labeled constructor its fields synthesize; only the module that declares it may write one.
+  help: build the value through an exported associated function, such as `AccountId.of()`
+error[cove::type::opaque_field]: `AccountId` is opaque here, so its field `number` cannot be read
+  --> <e2e>/fail_opaque_boundary/main/main.cove:19:13
+   |
+19 |   println("{id.number}")?
+   |             ^^^^^^^^^
+  rule: An `export opaque struct` exports its name and its exported methods; its fields belong to the module that declares it.
+  help: read the value through an exported method, such as `text()`
+error[cove::type::opaque_field]: `AccountId` is opaque here, so its field `prefix` cannot be assigned
+  --> <e2e>/fail_opaque_boundary/main/main.cove:22:3
+   |
+22 |   mine.prefix = "other"
+   |   ^^^^^^^^^^^
+  rule: An `export opaque struct` exports its name and its exported methods; its fields belong to the module that declares it.
+  help: change the value through an exported method, such as `text()`
+3 error(s)

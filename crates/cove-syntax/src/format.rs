@@ -648,6 +648,9 @@ impl<'a> Formatter<'a> {
         if item.exported {
             self.out.write("export ");
         }
+        if item.is_opaque {
+            self.out.write("opaque ");
+        }
         if item.is_test {
             self.out.write("test ");
         }
@@ -2307,6 +2310,23 @@ struct Tag {
 }
 
 struct Empty { }
+",
+        );
+    }
+
+    /// The modifiers are written in one order whichever order they were
+    /// read in, so an opaque export looks the same everywhere it appears.
+    #[test]
+    fn writes_the_opaque_modifier_after_export() {
+        reformats(
+            "
+opaque export struct User { id: Int, name: String }
+",
+            "
+export opaque struct User {
+  id: Int
+  name: String
+}
 ",
         );
     }

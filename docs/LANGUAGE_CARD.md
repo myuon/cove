@@ -160,6 +160,13 @@ Each directory is one module, and its name is derived from its path. All Cove
 files in that directory are implementation units of the same module. An
 `export` declaration is public; other declarations are module-private.
 
+`export opaque struct User { ... }` exports `User`'s name and its exported
+methods and associated functions only; its fields and its synthesized
+labeled constructor `User(...)` stay module-private. The declaring module is
+unaffected — inside it `User` is an ordinary struct, constructed and
+inspected like any other. Exporting an enum always exports its cases, so
+there is no opaque enum; wrap the variant in a struct instead.
+
 `cove outline` derives the typed public interface, definition locations, and
 required capabilities directly from source. `cove api snapshot` records that
 derived interface for compatibility checks without duplicating it by hand.

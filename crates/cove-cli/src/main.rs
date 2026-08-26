@@ -693,6 +693,10 @@ fn render_fn_block(sources: &SourceMap, root: &Path, entry: &FnEntry, indent: us
 
 /// Renders a struct's doc, header, definition location, fields, and any
 /// exported methods declared for it in an `impl` block.
+///
+/// An `export opaque struct` renders its header and its exported methods
+/// and no fields: the outline is the interface a caller may write against,
+/// and the representation of an opaque type is not part of it.
 #[allow(clippy::too_many_arguments)]
 fn render_struct_block(
     sources: &SourceMap,
@@ -706,8 +710,9 @@ fn render_struct_block(
     let mut out = String::new();
     doc_lines(&entry.doc, indent, &mut out);
     out.push_str(&format!(
-        "{:indent$}export struct {name}{}\n",
+        "{:indent$}export {}struct {name}{}\n",
         "",
+        if entry.opaque { "opaque " } else { "" },
         generics_suffix(&entry.decl.generics)
     ));
     out.push_str(&location_line(
@@ -716,14 +721,16 @@ fn render_struct_block(
         entry.decl.name.span,
         indent + 2,
     ));
-    for field in &entry.decl.fields {
-        out.push_str(&format!(
-            "{:indent$}{}: {}\n",
-            "",
-            field.name.node,
-            field.ty,
-            indent = indent + 2
-        ));
+    if !entry.opaque {
+        for field in &entry.decl.fields {
+            out.push_str(&format!(
+                "{:indent$}{}: {}\n",
+                "",
+                field.name.node,
+                field.ty,
+                indent = indent + 2
+            ));
+        }
     }
     out.push_str(&render_conformances(program, module, name, indent + 2));
     out.push_str(&render_methods(
@@ -1691,6 +1698,45 @@ module kitchen
     at kitchen/main.cove:35:11
     requires clock, console
 module private
+";
+        assert_eq!(out, expected);
+    }
+
+    /// The outline is the interface another module may write against, so an
+    /// opaque type shows its name and its exported methods and not the
+    /// fields that back them.
+    #[test]
+    fn outline_hides_an_opaque_type_s_representation() {
+        let dir = TempDir::new("opaque-outline");
+        write(dir.path(), "cove.toml", "");
+        write(
+            dir.path(),
+            "auth/token.cove",
+            "\
+/// A token.
+export opaque struct Token {
+  raw: String
+}
+
+impl Token {
+  /// The token as text.
+  export fn text(self) -> String {
+    self.raw
+  }
+}
+",
+        );
+        let (sources, package, program) = load_fixture(dir.path());
+        let out = render_outline(&sources, &package, &program);
+
+        let expected = "\
+module auth
+  /// A token.
+  export opaque struct Token
+    at auth/token.cove:2:22
+    /// The token as text.
+    export fn text(self) -> String
+      at auth/token.cove:8:13
 ";
         assert_eq!(out, expected);
     }

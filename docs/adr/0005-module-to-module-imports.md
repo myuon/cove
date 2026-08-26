@@ -4,6 +4,9 @@
 - Date: 2026-08-25
 - Amends: [ADR 0004](0004-static-type-checking.md), whose per-module checking
   gains the import environment it anticipated
+- Superseded in part by [ADR 0014](0014-opaque-exported-types.md), which
+  decides what exporting a struct publishes: `export opaque struct` publishes
+  the type's name and its exported methods, and not its representation
 - Implemented by: PR #15
 - Implementation status: complete
 

@@ -395,6 +395,7 @@ impl HostApi for Directory {
                     ("name".into(), Value::Str(id.clone())),
                     ("seniority".into(), Value::Int(*seniority)),
                 ],
+                opaque: false,
             }))),
             None => Value::err(Value::error(format!("no employee named `{id}`"))),
         })

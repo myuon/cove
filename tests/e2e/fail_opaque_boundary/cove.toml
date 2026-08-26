@@ -1,0 +1,3 @@
+[run.fail_opaque_boundary]
+entry = "main.main"
+allow = ["console"]

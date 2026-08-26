@@ -97,6 +97,15 @@ pub struct FnEntry {
 pub struct StructEntry {
     pub decl: Arc<StructDecl>,
     pub exported: bool,
+    /// `export opaque struct`: the export carries the type's name and its
+    /// exported methods, and no way to build or read one.
+    ///
+    /// The flag is recorded here rather than derived at each use because
+    /// every consumer asks the same question of it — the type checker, which
+    /// refuses a cross-module construction or field access, and `cove
+    /// outline` and `cove api snapshot`, which leave the representation out
+    /// of what they publish.
+    pub opaque: bool,
     pub doc: Option<String>,
 }
 
@@ -611,6 +620,7 @@ fn resolve_module(
                         StructEntry {
                             decl: Arc::new(decl.clone()),
                             exported: item.exported,
+                            opaque: item.is_opaque,
                             doc: item.doc.clone(),
                         },
                     );

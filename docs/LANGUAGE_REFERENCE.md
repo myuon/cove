@@ -64,8 +64,12 @@ because the wrapper explains that one mismatch and no other.
 A `.cove` file is a `SourceUnit`: `use` declarations, then items. Every file
 in a directory is an implementation unit of one module, named after its path.
 An item is a `fn`, `struct`, `enum`, `trait`, `impl`, or `type` alias, and is
-module-private unless `export`ed. `test fn` sits where `export` sits and
-excludes it. `impl Trait for Type` is the only way a conformance is declared.
+module-private unless `export`ed. `opaque` is a modifier on an exported
+struct: `export opaque struct` narrows what the export publishes to the
+type's name and its exported methods and associated functions, withholding
+the fields and the labeled constructor they synthesize (see Opaque structs,
+below). `test fn` sits where `export` sits and excludes it.
+`impl Trait for Type` is the only way a conformance is declared.
 
 Declaration-level errors: `cove::resolve::duplicate_declaration`,
 `cove::resolve::unknown_trait`, `cove::resolve::unknown_impl_type`,
@@ -75,6 +79,7 @@ Declaration-level errors: `cove::resolve::duplicate_declaration`,
 `cove::resolve::import_conflict`, `cove::resolve::ambiguous_use`,
 `cove::resolve::unknown_use`, `cove::resolve::private_declaration`,
 `cove::resolve::import_cycle`, `cove::resolve::module_shadows_host`,
+`cove::parse::opaque_not_exported`, `cove::parse::opaque_not_a_struct`,
 `cove::type::missing_parameter_type`, `cove::type::conformance_signature`,
 `cove::type::test`, `cove::type::entry`, and the
 `cove::resolve::missing_doc` warning.
@@ -159,8 +164,9 @@ Errors: `cove::type::mismatch` on an element that disagrees.
   methods and not fields, so a `dyn Trait` and a type parameter have none.
 - **Evaluates to** a copy of the field's value.
 - **Errors**: `cove::type::unknown_field`, `cove::type::unknown_case`,
-  `cove::type::unknown_member`, the `cove::type::host_type` warning. At run
-  time, `<type> has no field <name>`.
+  `cove::type::unknown_member`, `cove::type::opaque_field`, the
+  `cove::type::host_type` warning. At run time,
+  `<type> has no field <name>`.
 
 ### Calls
 
@@ -184,7 +190,8 @@ Errors: `cove::type::mismatch` on an element that disagrees.
 - **Errors**: `cove::type::arity`, `cove::type::missing_argument`,
   `cove::type::unknown_label`, `cove::type::mismatch`,
   `cove::type::not_callable`, `cove::type::unknown_method`,
-  `cove::type::unknown_associated_function`, `cove::type::payload_arity`,
+  `cove::type::unknown_associated_function`,
+  `cove::type::opaque_construction`, `cove::type::payload_arity`,
   `cove::type::receiver`, `cove::type::unsatisfied_bound`,
   `cove::type::unbounded_parameter`, `cove::type::dyn_associated_function`,
   `cove::type::dyn_mutating_method`, `cove::type::unknown_host_operation`,
@@ -466,6 +473,54 @@ equality, and use as a `Map` key or `Set` element all look through it, so a
 written `dyn Trait` and a lambda's inferred one behave identically. A trait
 object is a valid key exactly when the value it holds is one, and it keys as
 that value — which is what `==` already says about the two of them.
+
+### Opaque structs
+
+`export opaque struct Name { ... }` exports the type's name and its exported
+methods and associated functions, and withholds its fields and the labeled
+constructor they synthesize — a struct's fields are otherwise as public as
+its name, so this is a modifier that narrows an export rather than a second
+kind of one. [ADR 0014](adr/0014-opaque-exported-types.md) is the record of
+why.
+
+Inside the module that declares it, an opaque struct is an ordinary struct:
+`name.field` reads and `name.field = value` writes it, and the synthesized
+labeled constructor `Name(field: value, ...)` is callable, exactly as for a
+struct without `opaque` — because `opaque` describes a boundary between
+modules, and the declaring module is not on the far side of its own
+boundary. From any other module, only the name and the exported methods and
+associated functions resolve; naming a field or calling the constructor
+there is refused rather than typed:
+
+- reading or assigning a field is `cove::type::opaque_field`;
+- calling the labeled constructor is `cove::type::opaque_construction`.
+
+A refusal ends the diagnosis: the checker does not go on to match the call
+against fields the caller may not name, so a refused construction carries no
+"known labels" list and no `cove::type::missing_argument` for a field it
+withheld, and neither diagnostic quotes source from the declaring module. An
+argument written inside a refused construction is still checked on its own,
+since a mistake inside one is a mistake either way. The refused form's own
+type is a recovery *unknown* — an error was already reported, so nothing
+further is said about it.
+
+An opaque value renders as its bare type name and nothing else —
+`"{user}"` is `User` — unconditionally, including inside the declaring
+module, because a rendered string carries no module with it once it exists.
+The same holds wherever a value is rebuilt from its parts rather than
+handled directly: use as a `Map` key or `Set` element, and a crossing of a
+task boundary. Opacity composes with the `dyn Trait` wrapper rather than
+being undone by it: the wrapper is looked through first, so a `dyn Trait`
+holding an opaque value keys and renders as the value it holds — which is
+still opaque, and so still keys and renders as its bare type name. A module
+that wants its type to have a readable form exports a method returning one,
+which is the same answer as for a field: what the module publishes is what
+it wrote down.
+
+There is no opaque enum: exporting an enum always exports its cases, because
+a `match` a caller cannot write is not a smaller enum but a worse struct. A
+variant whose representation should be hidden is wrapped in a struct and
+exported as opaque instead.
 
 ## Copies, aliases, and identity
 

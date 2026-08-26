@@ -726,6 +726,7 @@ fn response(status: i64, body: &str) -> Value {
             ("status".into(), Value::Int(status)),
             ("body".into(), Value::Str(body.into())),
         ],
+        opaque: false,
     }))
 }
 
@@ -738,6 +739,7 @@ fn request(method: &str, path: &str, body: &str) -> Value {
             ("path".into(), Value::Str(path.into())),
             ("body".into(), Value::Str(body.into())),
         ],
+        opaque: false,
     }))
 }
 
@@ -1332,6 +1334,7 @@ mod tests {
                 ("path".into(), Value::Str(path.into())),
                 ("handler".into(), Value::Unit),
             ],
+            opaque: false,
         }))
     }
 
@@ -1652,6 +1655,7 @@ mod tests {
         let payload = Value::Struct(Box::new(StructValue {
             type_name: "demo.Point".into(),
             fields: vec![("x".into(), Value::Int(1)), ("y".into(), Value::Int(2))],
+            opaque: false,
         }));
         let answer = http.call("json", vec![Value::Int(200), payload]).unwrap();
         assert_eq!(response_body(answer), "{\"x\":1,\"y\":2}");

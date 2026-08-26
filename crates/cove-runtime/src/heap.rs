@@ -881,7 +881,7 @@ fn key_bytes(key: &MapKey) -> u64 {
         MapKey::EnumCase(type_name, case, payload) => {
             (type_name.len() + case.len()) as u64 + payload.iter().map(key_bytes).sum::<u64>()
         }
-        MapKey::Struct(type_name, fields) => {
+        MapKey::Struct(type_name, fields, _) => {
             type_name.len() as u64
                 + fields
                     .iter()
@@ -980,6 +980,7 @@ mod tests {
             .push(Value::Struct(Box::new(StructValue {
                 type_name: "test.Node".into(),
                 fields: vec![("next".into(), Value::Vector(object.clone()))],
+                opaque: false,
             })));
         let weak = Rc::downgrade(&object);
         drop(object);

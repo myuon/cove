@@ -1215,6 +1215,7 @@ impl<'a> Interpreter<'a> {
         Ok(Value::Struct(Box::new(StructValue {
             type_name: format!("{module}.{}", declared.name).into(),
             fields,
+            opaque: false,
         })))
     }
 
@@ -2309,6 +2310,7 @@ impl<'a> Interpreter<'a> {
                     Value::Struct(Box::new(StructValue {
                         type_name: MAP_ENTRY.name.into(),
                         fields: vec![("key".into(), key.to_value()), ("value".into(), value.clone())],
+                        opaque: false,
                     }))
                 })
                 .collect()),
@@ -2974,7 +2976,20 @@ impl<'a> Interpreter<'a> {
         Ok(Value::Struct(Box::new(StructValue {
             type_name: format!("{module}.{}", decl.name.node).into(),
             fields,
+            opaque: self.is_opaque(module, &decl.name.node),
         })))
+    }
+
+    /// Whether `module` declared this struct `export opaque struct`, which
+    /// is what makes a value of it render as its name alone (ADR 0014).
+    ///
+    /// The checker refuses to let another module name a field; this is the
+    /// other half, and it applies to every reader including the declaring
+    /// module, because a rendered string goes wherever it is passed.
+    fn is_opaque(&self, module: &str, name: &str) -> bool {
+        self.resolved(module)
+            .and_then(|resolved| resolved.structs.get(name))
+            .is_some_and(|entry| entry.opaque)
     }
 
     fn eval_args(
@@ -3461,6 +3476,7 @@ fn init_map_entry(args: Vec<EvaluatedArg>, span: Span) -> Result<Value, RuntimeE
     Ok(Value::Struct(Box::new(StructValue {
         type_name: MAP_ENTRY.name.into(),
         fields,
+        opaque: false,
     })))
 }
 
@@ -4556,6 +4572,7 @@ fn renderAll(values: Array<dyn Display>) -> String {
             value: Value::Struct(Box::new(StructValue {
                 type_name: "test.Receipt".into(),
                 fields: vec![("total".into(), Value::Int(2))],
+                opaque: false,
             })),
         }));
         let answer = binary(BinaryOp::Eq, object, other, span)
@@ -6201,6 +6218,118 @@ export fn main() -> Result<Unit, Error> {
   console.println("{colours.contains(Colour.Named("teal"))} {colours.contains(Colour.Named("blue"))}")?"#,
         );
         assert_eq!(run.output, "true false\n");
+    }
+
+    /// A source module declaring an opaque type, together with a plain
+    /// struct of the same shape to render beside it.
+    const OPAQUE: &str = r#"
+use console.println
+
+/// A token.
+export opaque struct Token {
+  raw: String
+  count: Int
+}
+
+/// A token with nothing to hide.
+export struct Label {
+  raw: String
+  count: Int
+}
+"#;
+
+    /// An opaque type renders as its name and nothing else — in the module
+    /// that declares it as much as in any other, because a rendered string
+    /// goes wherever it is passed and carries no module with it. A module
+    /// that wants a readable form exports a method that returns one. See
+    /// ADR 0014.
+    #[test]
+    fn an_opaque_value_renders_as_its_name_alone() {
+        let source = format!(
+            "{OPAQUE}{}",
+            r#"
+/// Entry point.
+export fn main() -> Result<Unit, Error> {
+  let token = Token(raw: "secret", count: 1)
+  let label = Label(raw: "secret", count: 1)
+  println("{token}")?
+  println("{label}")?
+  Ok(())
+}
+"#
+        );
+        let run = run_entry_of(&source, "main", &[]);
+        assert_eq!(run.output, "Token\nLabel(raw: secret, count: 1)\n");
+    }
+
+    /// The rendering rule holds wherever a value is rebuilt from its parts:
+    /// a key taken back out of a `Set` is the value that went in, opacity
+    /// included.
+    #[test]
+    fn an_opaque_value_taken_out_of_a_set_still_renders_as_its_name() {
+        let source = format!(
+            "{OPAQUE}{}",
+            r#"
+/// Entry point.
+export fn main() -> Result<Unit, Error> {
+  for token in Set.of(Token(raw: "secret", count: 1)) {
+    println("{token}")?
+  }
+  Ok(())
+}
+"#
+        );
+        let run = run_entry_of(&source, "main", &[]);
+        assert_eq!(run.output, "Token\n");
+    }
+
+    /// Opacity and the `dyn Trait` wrapper compose: keying looks through the
+    /// wrapper, so two trait objects over the same opaque value are one key,
+    /// and what comes back out is still opaque, so it renders as its name
+    /// alone. Neither rule undoes the other — the wrapper is a representation
+    /// and opacity is a property of the value inside it.
+    #[test]
+    fn a_trait_object_over_an_opaque_value_keys_and_renders_as_that_value() {
+        let source = format!(
+            "{OPAQUE}{}",
+            r#"
+/// Something that can describe itself.
+trait Described {
+  fn describe(self) -> String
+}
+
+impl Described for Token {
+  fn describe(self) -> String { "token {self.count}" }
+}
+
+impl Described for Label {
+  fn describe(self) -> String { "label {self.count}" }
+}
+
+/// Entry point.
+export fn main() -> Result<Unit, Error> {
+  let token: dyn Described = Token(raw: "secret", count: 1)
+  let label: dyn Described = Label(raw: "secret", count: 1)
+  let keys = Set.of(token, label)
+  println("{keys.contains(Token(raw: "secret", count: 1))}")?
+  println("{token}")?
+  for key in keys {
+    println("{key}")?
+  }
+  Ok(())
+}
+"#
+        );
+        let run = run_entry_of(&source, "main", &[]);
+        // `contains` answers `true` for the bare value: keying looked through
+        // the wrapper, which is what `==` already says about the two of them.
+        // Every rendering of the opaque one is its bare name — held in the
+        // wrapper, and rebuilt from the key on the way back out of the set —
+        // while the ordinary struct beside it still shows its fields.
+        assert_eq!(
+            run.output,
+            "true\nToken\nLabel(raw: secret, count: 1)\nToken\n"
+        );
     }
 
     #[test]
