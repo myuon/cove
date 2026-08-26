@@ -1033,6 +1033,7 @@ mod tests {
                 vec![Value::Struct(Box::new(crate::value::StructValue {
                     type_name: "Credentials".into(),
                     fields: vec![("token".into(), Value::Str("hunter2".into()))],
+                    opaque: false,
                 }))],
                 None,
             ),

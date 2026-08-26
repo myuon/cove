@@ -281,6 +281,9 @@ pub enum Transfer {
     Struct {
         type_name: String,
         fields: Vec<(String, Transfer)>,
+        /// Whether the type is opaque, so that a value rebuilt in the
+        /// receiving task keeps rendering as its name alone.
+        opaque: bool,
     },
     Enum {
         type_name: String,
@@ -446,6 +449,7 @@ impl Transfer {
                 Ok(Transfer::Struct {
                     type_name: structure.type_name.to_string(),
                     fields,
+                    opaque: structure.opaque,
                 })
             }
             Value::Enum(enumeration) => {
@@ -543,12 +547,17 @@ impl Transfer {
                     .collect(),
             )),
             Transfer::Set(items) => Value::Set(Rc::new(items)),
-            Transfer::Struct { type_name, fields } => Value::Struct(Box::new(StructValue {
+            Transfer::Struct {
+                type_name,
+                fields,
+                opaque,
+            } => Value::Struct(Box::new(StructValue {
                 type_name: type_name.into(),
                 fields: fields
                     .into_iter()
                     .map(|(name, value)| (name.into(), value.into_value()))
                     .collect(),
+                opaque,
             })),
             Transfer::Enum {
                 type_name,
@@ -661,6 +670,7 @@ mod tests {
                 Value::Struct(Box::new(StructValue {
                     type_name: "test.Point".into(),
                     fields: vec![("x".into(), Value::Int(3))],
+                    opaque: false,
                 })),
             ]
             .into(),
@@ -679,6 +689,7 @@ mod tests {
                 "guests".into(),
                 Value::Vector(VectorStorage::new(vec![Value::Int(1)])),
             )],
+            opaque: false,
         }));
         let found = Transfer::of(&value).expect_err("a vector may not cross");
         assert_eq!(found.path, ".guests");
@@ -747,10 +758,12 @@ mod tests {
                 Value::Struct(Box::new(StructValue {
                     type_name: "test.Point".into(),
                     fields: vec![("x".into(), Value::Int(1)), ("y".into(), Value::Int(2))],
+                    opaque: false,
                 })),
                 Value::Struct(Box::new(StructValue {
                     type_name: "test.Point".into(),
                     fields: vec![("x".into(), Value::Int(3)), ("y".into(), Value::Int(4))],
+                    opaque: false,
                 })),
             ]
             .into(),
@@ -776,6 +789,7 @@ mod tests {
                     "guests".into(),
                     Value::Vector(VectorStorage::new(vec![Value::Int(1)])),
                 )],
+                opaque: false,
             }))]
             .into(),
         );
@@ -869,6 +883,7 @@ mod tests {
                     "guests".into(),
                     Value::Vector(VectorStorage::new(Vec::new())),
                 )],
+                opaque: false,
             })),
         }));
         let found = Transfer::of(&value).expect_err("a vector inside a `Dyn` may not cross");
@@ -913,6 +928,7 @@ mod tests {
                         "guests".into(),
                         Value::Vector(VectorStorage::new(Vec::new())),
                     )],
+                    opaque: false,
                 })),
             )],
         );

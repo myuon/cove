@@ -522,6 +522,7 @@ fn decode_value(json: &Json) -> Result<Recorded, String> {
                             .map(Into::into)
                             .zip(values)
                             .collect(),
+                        opaque: false,
                     })),
                     shown,
                 ),

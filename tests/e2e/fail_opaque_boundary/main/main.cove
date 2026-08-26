@@ -1,14 +1,24 @@
 use console.println
 use account.AccountId
 
-/// Reaches past an opaque export, in both of the ways that are refused.
+/// Reaches past an opaque export, in each of the ways that are refused.
 ///
 /// `account` exports `AccountId` and the operations declared for it, and
 /// not its representation, so the synthesized labeled constructor and the
-/// field are both out of reach here. This case lives in its own package so
+/// fields are all out of reach here. This case lives in its own package so
 /// that failing to check cannot take down every other case.
+///
+/// The initializer below is written the way someone who does not know the
+/// representation would write it — a guessed label, and the other field
+/// left out. Each refusal is the whole diagnosis: nothing here lists the
+/// labels `account` declares, and nothing quotes its source, since telling
+/// this module what it guessed wrong would be publishing what `opaque`
+/// keeps.
 export fn main() -> Result<Unit, Error> {
-  let id = AccountId(number: 41)
+  let id = AccountId(id: 41)
   println("{id.number}")?
+
+  var mine = AccountId.of(41)
+  mine.prefix = "other"
   Ok(())
 }

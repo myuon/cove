@@ -1,8 +1,11 @@
 /// An account identifier whose representation is this module's own.
 ///
 /// The type is exported and the way it is built is not, so another module
-/// can hold, compare, and print an `AccountId` without ever learning that
-/// it is a prefix and a number rather than, say, one string.
+/// can hold and pass an `AccountId` without ever learning that it is a
+/// prefix and a number rather than, say, one string. That holds for
+/// printing too: an opaque value renders as `AccountId` and nothing more,
+/// wherever it is rendered, so `text` below is how this module chooses to
+/// publish a readable form.
 export opaque struct AccountId {
   prefix: String
   number: Int

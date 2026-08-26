@@ -150,8 +150,11 @@ files in that directory are implementation units of the same module. An
 methods and associated functions only; its fields and its synthesized labeled
 constructor `User(...)` stay module-private. The declaring module is
 unaffected — inside it `User` is an ordinary struct, constructed and inspected
-like any other. Exporting an enum always exports its cases, so there is no
-opaque enum; wrap the variant in a struct instead.
+like any other. A value of an opaque type renders as its name alone —
+`"{user}"` is `User`, everywhere including the declaring module, because a
+rendered string carries no module with it; a module that wants a readable form
+exports a method that returns one. Exporting an enum always exports its cases,
+so there is no opaque enum; wrap the variant in a struct instead.
 
 `cove outline` derives the typed public interface, definition locations, and
 required capabilities directly from source. `cove api snapshot` records that

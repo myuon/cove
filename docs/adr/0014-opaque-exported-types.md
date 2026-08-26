@@ -2,9 +2,11 @@
 
 - Status: Accepted
 - Date: 2026-08-26
-- Amends: [ADR 0005](0005-module-to-module-imports.md), whose "only exports
-  are visible" rule gains a second question for a struct — exported, and if
-  so, how much of it
+- Supersedes: [ADR 0005](0005-module-to-module-imports.md)'s account of what
+  exporting a struct publishes. There, a declaration was public or private and
+  exporting a struct published all of it — name, fields, and the constructor
+  they synthesize. Here an export answers two questions for a struct rather
+  than one: exported, and if so, how much of it.
 - Implemented by: the PR that closes issue #75
 - Implementation status: complete
 
@@ -139,6 +141,44 @@ Both diagnostics point the caller at the type's exported associated functions
 or methods — `User.create` and `label` in the example above — because that is
 the boundary the declaring module chose to publish instead.
 
+A refusal is the whole diagnosis. Checking stops at the refusal rather than
+going on to match the call against the fields, because a caller who does not
+know the representation is exactly the caller who guesses at the initializer,
+and answering that guess would publish through the diagnostic channel what
+`opaque` withholds: `known labels: name, visits`, one `missing_argument` per
+hidden field, and a source snippet quoting the declaring module's file.
+
+### An opaque value renders as its name
+
+`"{user}"` is `User`, with no fields shown, and so is every other rendering
+of the value — `println`, an assertion's failure message, a trace.
+
+The rule is unconditional: it holds inside the module that declares the type
+as much as outside it. A rendering could in principle be made to depend on
+who is watching, but nothing watching a string knows who produced it — a
+value formatted in its declaring module is an ordinary `String` that can be
+returned, stored, and printed anywhere. A boundary the checker enforces per
+module cannot be enforced per module at the point a string is *read*, so it
+is drawn once, at the point the string is made.
+
+The cost is that the declaring module loses the default rendering it would
+have had for its own type. The answer is the same one `opaque` gives
+everywhere: export a method.
+
+```cove
+impl User {
+  /// The form this module is willing to publish.
+  export fn label(self) -> String {
+    "{self.name} ({self.visits})"
+  }
+}
+```
+
+Without this, `println("{user}")` would print the field names, their order,
+and their values to a module that may not name a single one of them — and
+renaming a private field, which this ADR calls a compatible change, would
+break every caller that had formatted the value.
+
 ### There is no general visibility hierarchy
 
 No `public`/`private`/`protected`, and no per-field visibility. An exported
@@ -180,6 +220,44 @@ differently) — it can only tell that the representation was never part of the
 interface it hashes. That is the same bargain `opaque` makes everywhere else:
 the boundary is coarse on purpose, and the fineness that field-level export
 would have bought was rejected above.
+
+Four further consequences, none of them accidents:
+
+**An opaque type has no default readable rendering, and neither does the
+module that declares it.** `"{user}"` is `User` everywhere, as decided above,
+so a module that wants a value of its own opaque type to print as anything
+more informative has to export a method that says what. The gain is that this
+is the one rule that makes `cove api diff`'s silence honest: with the fields
+shown by every `println`, renaming a private field would break every caller
+that had formatted the value, and the tool that reports "no interface change"
+would be reporting it about a change that broke people.
+
+**`opaque` is now a keyword, and that is a source-compatibility break.** The
+lexer has no soft-keyword mechanism, so the name is reserved everywhere an
+identifier can appear: `let opaque = 1`, a parameter or field named `opaque`,
+and `fn opaque()` all stop parsing on code that compiled before. Only the
+position after a `.` is unaffected, matching how `test` already behaves.
+Nothing in this repository used the name, and reserving `test` was the same
+trade, taken for the same reason: reading `opaque` as a modifier only when a
+declaration follows would make the grammar's answer depend on how far ahead
+it has looked. The break is recorded here so that it is a decision rather
+than a surprise.
+
+**The boundary is per module, not per package.** A module and its own
+sibling submodule are strangers under this rule: `auth.internal` may not name
+a field of a type `auth` declares, exactly as an unrelated package could not.
+There is no friend, package-private, or `internal` escape hatch. This follows
+from ADR 0005 — a module is the unit of visibility, and `opaque` refines what
+an export carries rather than introducing a second unit — but it means a
+module that grows too large to hide a representation inside must publish the
+operations its submodules need, like any other caller.
+
+**Equality stays structural.** `==` on two values of an opaque type still
+compares them field by field, so a hidden field is observable in the sense
+that two values differing only in one compare unequal. What is not observable
+is which field, what it holds, or that it exists at all. A module that wants
+equality to mean something narrower defines the operation it wants and
+exports it.
 
 ## How this was decided
 

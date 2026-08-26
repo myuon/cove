@@ -434,6 +434,37 @@ fn foreign_type(key: &str) -> Option<(&str, &str)> {
     key.rsplit_once('.')
 }
 
+/// What a field expression is doing with the field it names: taking the
+/// value out, or being the place a value goes.
+///
+/// Both reach a field through the same check, so refusing one across an
+/// opaque boundary refuses the other — but the two need different words,
+/// since telling someone to "read the value through an exported method" is
+/// no answer to an assignment.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum FieldUse {
+    Read,
+    Write,
+}
+
+impl FieldUse {
+    /// What this use cannot do, for the message.
+    fn refused(self) -> &'static str {
+        match self {
+            FieldUse::Read => "read",
+            FieldUse::Write => "assigned",
+        }
+    }
+
+    /// How to do it through the interface instead, for the help.
+    fn correction(self) -> &'static str {
+        match self {
+            FieldUse::Read => "read the value through an exported method, such as",
+            FieldUse::Write => "change the value through an exported method, such as",
+        }
+    }
+}
+
 /// Everything one module offers the modules that import it: the signatures
 /// of its own declarations, keyed by the canonical `module.Name` a foreign
 /// declaration is known by, plus every foreign signature it imported in
@@ -936,6 +967,16 @@ struct Checker<'a> {
     /// and where it was written.
     ret: Ty,
     ret_span: Span,
+    /// The field expression currently being checked as the target of an
+    /// assignment, if any.
+    ///
+    /// A place is checked by the same walk as a value, so nothing about
+    /// `x.field` says whether it is being read or written — the assignment
+    /// above it is the only thing that knows. Recording its span is enough
+    /// to tell the two apart, because the reads on the way to a place carry
+    /// their own: in `a.b.c = v` the target is `a.b.c` and `a.b` is a read
+    /// like any other.
+    assigned_place: Option<Span>,
 }
 
 impl<'a> Checker<'a> {
@@ -961,6 +1002,7 @@ impl<'a> Checker<'a> {
             scopes: Vec::new(),
             ret: Ty::Unknown,
             ret_span: Span::new(cove_diag::FileId(0), 0, 0),
+            assigned_place: None,
         }
     }
 
@@ -1039,6 +1081,13 @@ impl<'a> Checker<'a> {
     /// `with_receiver` picks between the two halves of the interface an
     /// opaque type has: its associated functions, which are how a caller
     /// builds one, and its methods, which are how a caller reads one.
+    ///
+    /// Only what `module` itself declares counts. `methods_of` also answers
+    /// with the methods other modules attach to the type by conforming it to
+    /// a trait of their own, and one of those may be the very method being
+    /// written — a help that says "call `show()`" inside the body of `show`
+    /// is no help at all. What a caller needs is what the declaring module
+    /// published.
     fn exported_operations(
         &self,
         module: &str,
@@ -1049,7 +1098,9 @@ impl<'a> Checker<'a> {
             .methods_of(module, type_name)
             .into_iter()
             .filter(|declared| {
-                declared.entry.exported && declared.entry.decl.receiver.is_some() == with_receiver
+                declared.module == module
+                    && declared.entry.exported
+                    && declared.entry.decl.receiver.is_some() == with_receiver
             })
             .map(|declared| {
                 if with_receiver {
@@ -1089,24 +1140,28 @@ impl<'a> Checker<'a> {
     /// constructor is reaching for something that was deliberately not
     /// exported. The declaring module is unaffected: its own key for the
     /// type is bare, which is what [`foreign_type`] tests.
-    fn reject_opaque_field(&mut self, key: &str, sig: &StructSig, field: &str, span: Span) -> bool {
+    fn reject_opaque_field(
+        &mut self,
+        key: &str,
+        sig: &StructSig,
+        field: &str,
+        usage: FieldUse,
+        span: Span,
+    ) -> bool {
         if !sig.opaque {
             return false;
         }
         let Some((module, type_name)) = foreign_type(key) else {
             return false;
         };
-        let help = self.opaque_help(
-            module,
-            type_name,
-            true,
-            "read the value through an exported method, such as",
-            "method",
-        );
+        let help = self.opaque_help(module, type_name, true, usage.correction(), "method");
         self.diagnostics.push(
             Diagnostic::error(
                 OPAQUE_FIELD,
-                format!("`{type_name}` is opaque here, so its field `{field}` cannot be read"),
+                format!(
+                    "`{type_name}` is opaque here, so its field `{field}` cannot be {}",
+                    usage.refused()
+                ),
             )
             .at(span)
             .rule(
@@ -1118,14 +1173,14 @@ impl<'a> Checker<'a> {
     }
 
     /// Reports a call to the synthesized labeled constructor of an opaque
-    /// type from outside the module that declares it. See
-    /// [`Checker::reject_opaque_field`].
-    fn reject_opaque_construction(&mut self, key: &str, sig: &StructSig, span: Span) {
+    /// type from outside the module that declares it, and answers whether it
+    /// did. See [`Checker::reject_opaque_field`].
+    fn reject_opaque_construction(&mut self, key: &str, sig: &StructSig, span: Span) -> bool {
         if !sig.opaque {
-            return;
+            return false;
         }
         let Some((module, type_name)) = foreign_type(key) else {
-            return;
+            return false;
         };
         let help = self.opaque_help(
             module,
@@ -1145,6 +1200,7 @@ impl<'a> Checker<'a> {
             )
             .help(help),
         );
+        true
     }
 
     /// Brings every declaration of every module this one imports from into
@@ -2488,7 +2544,12 @@ impl<'a> Checker<'a> {
                 };
                 let sig = sig.clone();
                 let subst = substitution(&sig.generics, args);
-                if self.reject_opaque_field(struct_name, &sig, &name.node, span) {
+                let usage = if self.assigned_place == Some(span) {
+                    FieldUse::Write
+                } else {
+                    FieldUse::Read
+                };
+                if self.reject_opaque_field(struct_name, &sig, &name.node, usage, span) {
                     return Ty::Unknown;
                 }
                 match sig.fields.iter().find(|f| f.name == name.node) {
@@ -2831,7 +2892,17 @@ impl<'a> Checker<'a> {
             self.expr(value, None);
             return Ty::Unit;
         }
+        // The target is checked as the place it is, so a field refused
+        // across an opaque boundary is refused as a write rather than as a
+        // read. Only the target itself is the place: the value, and any
+        // field read on the way to the place, are checked as ordinary
+        // expressions.
+        let outer = std::mem::replace(
+            &mut self.assigned_place,
+            matches!(target.kind, ExprKind::Field { .. }).then_some(target.span),
+        );
         let target_ty = self.expr(target, None);
+        self.assigned_place = outer;
         match op {
             None => {
                 let expected = Expected::new(
@@ -4116,10 +4187,17 @@ impl<'a> Checker<'a> {
         trailing: Option<&Expr>,
         span: Span,
     ) -> Ty {
-        // The arguments are checked either way: an opaque type refuses the
-        // call, but a mistake inside it is still a mistake worth naming, and
-        // the result is still this struct.
-        self.reject_opaque_construction(name, sig, span);
+        // A refusal ends the diagnosis. Matching the arguments against
+        // fields this module may not name would answer the question it was
+        // just refused — the labels it guessed wrong would come back as
+        // `known labels: raw, count`, and a field it left out would be
+        // reported against the declaring module's source. The arguments
+        // themselves are still checked, since a mistake inside one is a
+        // mistake either way, and the result is still this struct.
+        if self.reject_opaque_construction(name, sig, span) {
+            self.check_args_freely(args, trailing);
+            return Ty::Struct(name.into(), vec![Ty::Unknown; sig.generics.len()]);
+        }
         let generics: Vec<Rc<str>> = sig.generics.clone();
         let subst = self.match_arguments(
             &sig.fields,
@@ -9433,6 +9511,61 @@ impl Token {
             ),
         ]);
         assert_eq!(error.code, OPAQUE_FIELD);
+        // A write is refused in the words of a write, and corrected in
+        // them: "read the value through a method" is no answer here.
+        assert!(
+            error.message.contains("cannot be assigned"),
+            "{}",
+            error.message
+        );
+        let help = error.help.expect("the diagnostic offers a correction");
+        assert!(help.starts_with("change the value"), "{help}");
+    }
+
+    /// The refusal is the whole diagnosis: a caller that guesses at the
+    /// representation is not told how close it came.
+    #[test]
+    fn a_refused_construction_does_not_disclose_the_fields() {
+        for call in ["Token(bogus: 1)", "Token()", "Token(scheme: \"bearer\")"] {
+            let caller = format!(
+                "use auth.Token\n\n/// Entry point.\nexport fn main() -> Token {{\n  {call}\n}}\n"
+            );
+            // `rejects_modules` insists on exactly one error, which is the
+            // point: no `unknown_label` naming the fields, and no
+            // `missing_argument` rendering the declaring module's source.
+            let error = rejects_modules(&[
+                ("auth", OPAQUE_REPRESENTATION_CHANGED),
+                ("app", caller.as_str()),
+            ]);
+            assert_eq!(error.code, OPAQUE_CONSTRUCTION, "{call}");
+            for hidden in ["scheme", "body"] {
+                let rendered = format!(
+                    "{}{}",
+                    error.message,
+                    error.help.clone().unwrap_or_default()
+                );
+                assert!(!rendered.contains(hidden), "{call} disclosed `{hidden}`");
+            }
+        }
+    }
+
+    /// The help names what the declaring module published, not what the
+    /// module being checked is in the middle of writing: a caller may
+    /// conform a foreign opaque type to a trait of its own, and being told
+    /// to call the method whose body is the error is no correction.
+    #[test]
+    fn the_help_names_only_the_declaring_module_s_methods() {
+        let error = rejects_modules(&[
+            ("auth", OPAQUE),
+            (
+                "app",
+                "use auth.Token\n\n/// A thing with a text form.\ntrait Show {\n  /// Shows it.\n  fn show(self) -> String\n}\n\nimpl Show for Token {\n  fn show(self) -> String { self.raw }\n}\n",
+            ),
+        ]);
+        assert_eq!(error.code, OPAQUE_FIELD);
+        let help = error.help.expect("the diagnostic offers a correction");
+        assert!(help.contains("text()"), "{help}");
+        assert!(!help.contains("show()"), "{help}");
     }
 
     /// The type's name and its exported operations are what an opaque
