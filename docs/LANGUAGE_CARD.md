@@ -162,6 +162,20 @@ Cove code has no ambient I/O authority when embedded. File, network, clock,
 process, database, and similar operations are typed Host APIs. The compiler
 reports which capabilities each function requires from its call graph.
 
+That report is a **lower bound**. Every capability it names is genuinely
+reachable, and it is the whole list only for a function whose calls the
+compiler can all follow. A function that calls a value — a `fn`-typed
+parameter, a closure taken out of a collection — or dispatches through a
+`dyn Trait` or a bounded generic parameter is reported as **capability-open**,
+because what runs is chosen by its caller. `cove outline` and `cove api` mark
+such a function distinctly, and so is anything that calls one.
+
+A lambda is charged to the function that *writes* it, so a callback that
+prints already requires `console` wherever it was built, whatever later
+invokes it. Function types carry no latent capability set, and no static
+result decides anything: the runtime refuses a Host API call the run was not
+granted, and that check is the only authority.
+
 The host chooses the entry function and grants authority at the execution
 boundary:
 
@@ -186,7 +200,9 @@ the boundary alone.
 
 `cove test` is such a host: it grants each test the capabilities its call
 graph requires, taking every implementation's fake form so a suite is
-deterministic, and `[test] allow_real = [...]` names the exceptions.
+deterministic, and `[test] allow_real = [...]` names the exceptions. It grants
+a capability-open test that same lower bound rather than widening it, and says
+so when the boundary then refuses a call.
 
 ## Tasks and resource control
 

@@ -4,7 +4,7 @@
 # against the interface the current source derives, so check it in and let a
 # reviewer read the difference. Do not edit it by hand.
 cove-api 1
-hash fnv1a64:9daaca44b37a71ce
+hash fnv1a64:2fd4345f745c9498
 
 module callbacks
   /// Task-safe application dependencies captured by request handlers.
@@ -38,6 +38,7 @@ module callbacks
   /// Runs a server with immutable routes and structured background work.
   export async fn main() -> Result<Unit, Error>
     requires clock, console, database, http
+    capability-open
 
 module codegen
   /// Builds the `httpstatus.StatusCode` module from `files/status_codes.txt`,
@@ -168,15 +169,18 @@ module traits
   /// function takes one entry rather than a mixed collection: every value it
   /// sees has the same type.
   export fn headline<T: Summary>(entry: T) -> String
+    capability-open
   /// Prints a report built both ways.
   export fn main() -> Result<Unit, Error>
     requires console
+    capability-open
   /// Renders a report of entries whose types may differ.
   ///
   /// `dyn Summary` values carry their implementation, so `line` is resolved
   /// from each value rather than from the signature. That is what lets one
   /// array hold a `Booking` and a `Receipt` at once.
   export fn report(entries: Array<dyn Summary>) -> String
+    capability-open
 
 module values
   /// Completed immutable booking data.

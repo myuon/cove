@@ -15,6 +15,15 @@
 //! one that does not exist. An edge derived that way is marked
 //! [`CallPrecision::Approximate`], and every caller this report can only
 //! reach through one is labelled rather than presented as a fact.
+//!
+//! # Capability-openness
+//!
+//! The other half of that honesty is what the graph could not follow at all.
+//! A call through a function value or a `dyn` receiver leads to a
+//! declaration nothing here names, so a capability-open target's `requires`
+//! line is a floor: the entries below it may have to grant more than it
+//! lists. ADR 0014 states the guarantee; this report repeats it wherever it
+//! prints a derived set.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
@@ -22,6 +31,8 @@ use std::path::Path;
 use cove_diag::SourceMap;
 use cove_sema::package::Package;
 use cove_sema::resolve::{CallPrecision, FnEntry, FnKey, Node, Program};
+
+use cove_sema::capability::open_reasons;
 
 use crate::{fn_signature, load, location_line, CliError};
 
@@ -222,6 +233,12 @@ fn render_impact(
             2,
         ));
         out.push_str(&format!("  requires {}\n", capability_list(&required)));
+        if entry.is_capability_open() {
+            out.push_str(&format!(
+                "  capability-open: {}\n",
+                open_reasons(&entry.open_calls)
+            ));
+        }
     }
 
     // Listed by the name the report prints, which is not the order the
@@ -249,10 +266,14 @@ fn render_impact(
         out.push_str(&format!("  {module}\n"));
     }
 
-    out.push_str(&render_entries(package, target, &reached, &required));
+    let open = entry.is_some_and(FnEntry::is_capability_open);
+    out.push_str(&render_entries(package, target, &reached, &required, open));
 
     if reached.values().any(|reach| *reach == Reach::Approximate) {
         out.push_str(APPROXIMATION_NOTE);
+    }
+    if entry.is_some_and(FnEntry::is_capability_open) {
+        out.push_str(CAPABILITY_OPEN_NOTE);
     }
     out
 }
@@ -264,6 +285,7 @@ fn render_entries(
     target: &Node,
     reached: &BTreeMap<&Node, Reach>,
     required: &[String],
+    open: bool,
 ) -> String {
     let mut affected: Vec<(&str, &str, Reach, &Vec<String>)> = Vec::new();
     for (name, run) in &package.config.runs {
@@ -290,7 +312,14 @@ fn render_entries(
         out.push_str(&format!("  [run.{name}] {entry}{}\n", label(reach)));
         out.push_str(&format!("    allow = {}\n", capability_list(allow)));
         if required.is_empty() {
-            out.push_str("    it requires no capability, so this entry's grants do not change\n");
+            // "Requires nothing" is only the end of the story when the
+            // compiler could follow every call. For a capability-open
+            // target it means "nothing the compiler could see".
+            out.push_str(if open {
+                "    it requires no capability the compiler can follow, but it is capability-open, so this entry's grants may still fall short\n"
+            } else {
+                "    it requires no capability, so this entry's grants do not change\n"
+            });
             continue;
         }
         for capability in required {
@@ -322,6 +351,15 @@ fn label(reach: Reach) -> &'static str {
         Reach::Approximate => "  (approximate)",
     }
 }
+
+/// What `capability-open` means, printed once when the target is one.
+const CAPABILITY_OPEN_NOTE: &str = "\n\
+capability-open marks a declaration that calls something the call graph
+cannot follow: a function value, or a method on a value whose implementation
+its caller chose. Its `requires` line is a floor rather than the whole list,
+so an entry above may still be refused at the Host boundary for a capability
+that does not appear here.
+";
 
 /// What `(approximate)` means, printed once when the report contains one.
 const APPROXIMATION_NOTE: &str = "\n\
@@ -449,6 +487,50 @@ export fn main() -> Result<Unit, Error> {
             out.contains("    requires console — not granted; the runtime would reject the call\n"),
             "{out}"
         );
+    }
+
+    /// `cove impact` reads the same derived set every other command does, so
+    /// it says the same thing about it: this target's `requires` line is a
+    /// floor, and the entry below may still be refused for something the
+    /// line does not name.
+    #[test]
+    fn impact_marks_a_capability_open_target_and_explains_it() {
+        let dir = TempDir::new("impact-capability-open");
+        write(
+            dir.path(),
+            "cove.toml",
+            "[run.app]\nentry = \"app.main\"\nallow = [\"console\"]\n",
+        );
+        write(
+            dir.path(),
+            "app/main.cove",
+            "\
+use console.println
+
+/// Runs whatever it was handed.
+export fn run(work: fn() -> Unit) {
+  work()
+}
+
+/// Hands `run` a closure that prints.
+export fn main() {
+  run(fn() {
+    console.println(\"hi\")
+  })
+}
+",
+        );
+
+        let out = report(dir.path(), "run");
+        assert!(
+            out.contains("  requires nothing\n  capability-open: calls a function value\n"),
+            "{out}"
+        );
+        assert!(
+            out.contains("but it is capability-open, so this entry's grants may still fall short"),
+            "{out}"
+        );
+        assert!(out.contains(CAPABILITY_OPEN_NOTE), "{out}");
     }
 
     #[test]

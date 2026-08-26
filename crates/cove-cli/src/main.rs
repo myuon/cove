@@ -14,9 +14,10 @@ use cove_runtime::embed::{register_hosts, HostSetup};
 use cove_runtime::host::HostRegistry;
 use cove_runtime::interp::Interpreter;
 use cove_runtime::{
-    create_trace_file, Budget, Cancellation, HeapStats, JsonlSink, Limits, NullSink, Runtime,
-    TraceEvent, TraceHeader, TraceSink, ValueCapture,
+    create_trace_file, Budget, Cancellation, HeapStats, JsonlSink, Limits, NullSink, RunOutcome,
+    Runtime, TraceEvent, TraceHeader, TraceSink, ValueCapture,
 };
+use cove_sema::capability::open_reasons;
 use cove_sema::config::RunConfig;
 use cove_sema::package::Package;
 use cove_sema::resolve::{
@@ -642,8 +643,14 @@ pub(crate) fn fn_signature(entry: &FnEntry) -> String {
     sig
 }
 
-/// Renders a function or method's doc, signature, definition location, and
-/// required capabilities.
+/// Renders a function or method's doc, signature, definition location,
+/// required capabilities, and whether that list is a floor rather than the
+/// whole of it.
+///
+/// A capability-open declaration says so on a line of its own rather than
+/// leaving a reader to assume `requires` is exhaustive: ADR 0014 makes the
+/// derived set a lower bound, and a report that hid the difference would be
+/// the one thing that decision rules out.
 fn render_fn_block(sources: &SourceMap, root: &Path, entry: &FnEntry, indent: usize) -> String {
     let mut out = String::new();
     doc_lines(&entry.doc, indent, &mut out);
@@ -664,6 +671,14 @@ fn render_fn_block(sources: &SourceMap, root: &Path, entry: &FnEntry, indent: us
             "{:indent$}requires {}\n",
             "",
             caps.join(", "),
+            indent = indent + 2
+        ));
+    }
+    if entry.is_capability_open() {
+        out.push_str(&format!(
+            "{:indent$}capability-open: {}\n",
+            "",
+            open_reasons(&entry.open_calls),
             indent = indent + 2
         ));
     }
@@ -916,10 +931,41 @@ fn cmd_run(args: &[String]) -> Result<(), CliError> {
         Ok(value) => report_exit(value),
         Err(ExecuteError::Setup(message)) => Err(CliError::Message(message)),
         Err(ExecuteError::Runtime(error)) => Err(CliError::Diagnostics {
+            items: vec![runtime_failure(&program, module, entry, &error)],
             sources,
-            items: vec![error.to_diagnostic()],
         }),
     }
+}
+
+/// The diagnostic a run's failure is reported as, with what a
+/// capability-open entry owes a refusal at the Host boundary.
+///
+/// The runtime decides what a call may do and its answer stands. What it
+/// cannot say is why the static report did not warn about this call first,
+/// and for an entry whose call graph contains an indirect call the answer is
+/// that it could not: ADR 0014 makes the derived set a floor, so a refusal
+/// here is exactly the case that floor was honest about.
+pub(crate) fn runtime_failure(
+    program: &Program,
+    module: &str,
+    entry: &str,
+    error: &cove_runtime::RuntimeError,
+) -> Diagnostic {
+    let mut diagnostic = error.to_diagnostic();
+    let open = program
+        .lookup_fn(module, entry)
+        .is_some_and(FnEntry::is_capability_open);
+    if !open || error.outcome != RunOutcome::HostBoundary {
+        return diagnostic;
+    }
+    let note = format!(
+        "`{module}.{entry}` is capability-open, so `cove outline` reports the capabilities it needs as a floor rather than the whole list; a call reached through a function value or a `dyn` receiver is not in it"
+    );
+    diagnostic.help = Some(match diagnostic.help {
+        Some(help) => format!("{help}; {note}"),
+        None => note,
+    });
+    diagnostic
 }
 
 /// Looks up `[run.<name>]`, reporting every known run name when there is no
@@ -1670,6 +1716,51 @@ module kitchen
     at kitchen/main.cove:35:11
     requires clock, console
 module private
+";
+        assert_eq!(out, expected);
+    }
+
+    /// `requires` is a floor whenever a declaration reaches a call the
+    /// compiler cannot follow, so the outline says which it is rather than
+    /// letting a reader read the line above as the whole list.
+    #[test]
+    fn outline_marks_a_capability_open_declaration() {
+        let dir = TempDir::new("outline-capability-open");
+        write(dir.path(), "cove.toml", "");
+        write(
+            dir.path(),
+            "app/main.cove",
+            "\
+use console.println
+
+/// Runs whatever it was handed, which may be anything at all.
+export fn run(work: fn() -> Unit) {
+  work()
+}
+
+/// Hands `run` a closure that prints.
+export fn main() {
+  run(fn() {
+    console.println(\"hi\")
+  })
+}
+",
+        );
+        let (sources, package, program) = load_fixture(dir.path());
+        let out = render_outline(&sources, &package, &program);
+
+        let expected = "\
+module app
+  /// Runs whatever it was handed, which may be anything at all.
+  export fn run(work: fn() -> Unit)
+    at app/main.cove:4:11
+    capability-open: calls a function value
+
+  /// Hands `run` a closure that prints.
+  export fn main()
+    at app/main.cove:9:11
+    requires console
+    capability-open: calls a capability-open declaration
 ";
         assert_eq!(out, expected);
     }

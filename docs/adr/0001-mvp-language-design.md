@@ -17,7 +17,10 @@
   [ADR 0011](0011-garbage-collection.md)'s "Amendment (2026-08-25): the memory
   budget is removed", which retracts the memory limit this ADR lists under
   "Runtime resource control" below, leaving the collector's measurements as
-  observability rather than an enforced bound
+  observability rather than an enforced bound; and
+  [ADR 0014](0014-capability-analysis-for-higher-order-calls.md), which makes
+  the capability set this ADR has the compiler derive a lower bound, and has a
+  function containing an indirect call say so
 - Implemented by: [ADR 0002](0002-implementation-language-and-backend.md)
   through [ADR 0013](0013-host-resource-handles.md), each of which decides and
   builds a part of this one

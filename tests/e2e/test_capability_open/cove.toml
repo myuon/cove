@@ -1,0 +1,4 @@
+# A package whose tests invoke a closure through a parameter, run by
+# `cove test`. ADR 0014: `higher.run` is capability-open, and the closure it
+# runs is charged to the test that wrote it, which is why the runner grants
+# `console` and the host call goes through.
