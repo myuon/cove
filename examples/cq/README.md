@@ -371,8 +371,36 @@ a call to a function with no receiver at all still costs about 1.3 seconds over
 ### What is left, and why it is not more shaving
 
 A call builds an environment, allocates a vector for its arguments, declares
-each parameter into a scope, and tears all of it down. Every name inside that
-body is then found by scanning the scopes in reverse and comparing strings:
+each parameter into a scope, and tears all of it down. **That machinery is what
+is left**, and it is structural rather than local:
+
+| | share of the run |
+| --- | ---: |
+| `Env::declare` and `Env::pop` | 5.4% |
+| `eval_args` and `invoke` | 4.0% |
+| `plain_values` | 2.3% |
+| allocation attributable to those | ~10% |
+| one full name lookup | 3.8–5.5% |
+
+The run evaluates about 700 million AST nodes in 91 seconds, which is 130 ns a
+node. Removing *every* remaining allocation would leave the tree walk, which is
+the other half, so the ceiling for this kind of work is around 2× — and the
+sprint's target was 10×.
+
+The next real gain is a redesign, and
+[issue #105](https://github.com/myuon/cove/issues/105) scopes it. Note what the
+table above says about the order: **resolving names to slots
+([#107](https://github.com/myuon/cove/issues/107)) is worth at most about
+1.06× on its own.** It is worth doing because
+[#108](https://github.com/myuon/cove/issues/108)'s slot-based call frames need
+resolved bindings to build on, not because name lookup is where the time goes.
+The two should be measured together.
+
+### How that last number was found
+
+The paragraph above used to end differently. It said the interpreter is slow
+"because it is a tree walker that looks everything up by name" and quoted
+`Env::lookup`:
 
 ```rust
 fn lookup(&self, name: &str) -> Option<&Place> {
@@ -382,25 +410,14 @@ fn lookup(&self, name: &str) -> Option<&Place> {
 }
 ```
 
-That is the cost, and it is structural rather than local. The run evaluates
-about 700 million AST nodes in 91 seconds, which is 130 ns a node. Removing
-*every* remaining allocation would leave the tree walk, which is the other
-half, so the ceiling for this kind of work is around 2× — and the sprint's
-target was 10×.
+That was read off the code rather than measured, and it was wrong. `Env::lookup`
+never appears in a profile at all, because it is inlined, and the functions
+holding it are small — `eval_ident` 1.14% inclusive, `resolve_place_opt` 1.84%,
+`resolve_place` 1.57%. But an inclusive profile of an inlined function
+undercounts it, so that settles nothing either way.
 
-The next real gain is a redesign, and
-[issue #105](https://github.com/myuon/cove/issues/105) scopes it with these
-measurements as the expected benefit.
-
-### One correction, measured afterwards
-
-An earlier draft of this section ended by saying the interpreter is slow
-"because it is a tree walker that looks everything up by name", and quoted
-`Env::lookup` as the illustration. The first half is right and the second is
-not, and the way to find out was to measure it rather than to read it.
-
-Making `Env::lookup` do its scan twice, and then five times, and taking the
-slope over the same 20,000-record run:
+What settles it is cheap: make the suspect do its work N times and read the
+slope.
 
 | scans per lookup | wall |
 | ---: | ---: |
@@ -408,21 +425,14 @@ slope over the same 20,000-record run:
 | 2 | 18.73 s |
 | 5 | 20.46 s |
 
-That is 0.68 s a scan by the five-point slope and 0.97 s by the doubling, so
-one full name lookup is **3.8–5.5% of the run** — the doubling overstates it,
-because the second scan runs on a warm cache. Removing name lookup *entirely*
-would therefore buy at most about 1.06×.
+0.68 s a scan by the five-point slope, and 0.97 s by the doubling — which
+overstates it, because the second scan runs on a warm cache. One full name
+lookup is 3.8–5.5% of the run.
 
-What the quote pointed at is real and small. What is actually large is the
-machinery around a call: `Env::declare` and `Env::pop` are 5.4% between them,
-`plain_values` 2.3%, `eval_args` and `invoke` 4.0%, and the allocation inside
-those is another ~10% — and the `call` benchmark puts one call at about
-650 ns whatever it does. Building and tearing down an environment costs
-several times more than searching one.
-
-The lesson is the one this whole section is about: an inclusive profile of an
-inlined function undercounts it, and the cheap experiment — make the suspect
-do its work N times and read the slope — is what settles it.
+This is the second hypothesis in this document that a measurement corrected;
+the receiver copy above was the first. Both were plausible from the code and
+both were wrong about how much they mattered, which is the argument for the
+mechanism benchmarks rather than for reading more carefully.
 
 ## Findings
 

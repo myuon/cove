@@ -60,6 +60,14 @@ pub enum Value {
     /// clone of every field. That made a method call twice the cost of the
     /// same code with the fields read directly, which issue #99 measured and
     /// issue #104 set out to remove.
+    ///
+    /// This was a `Box<StructValue>` until issue #104. Nothing a Cove program
+    /// can write sees the difference, but an embedder building a struct value
+    /// writes `Rc::new` where it wrote `Box::new`, and one matching on the
+    /// variant binds an `&Rc<StructValue>` where it bound an
+    /// `&Box<StructValue>` — both deref to `StructValue`, so a body that only
+    /// reads fields needs no change. Mutating through one needs
+    /// [`Rc::make_mut`], which is what keeps the copy private.
     Struct(Rc<StructValue>),
     /// An enum value, including `Option` and `Result`.
     Enum(Box<EnumValue>),
