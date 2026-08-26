@@ -13,5 +13,8 @@ export fn main() -> Result<Unit, Error> {
   println("negative division {-7 / 2} remainder {-7 % 2}")?
   println("comparison {1 < 2} {2 <= 2} {3 > 4} {3 >= 4}")?
   println("equality {1 == 1} {1 != 1}")?
+  println("toFloat {7.toFloat()} {(-3).toFloat()}")?
+  println("abs {(-7).abs()} {7.abs()}")?
+  println("min {3.min(5)} max {3.max(5)}")?
   Ok(())
 }

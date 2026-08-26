@@ -265,6 +265,21 @@ pub fn call_associated(
                 Err(_) => Value::err(Value::error(format!("`{text}` is not an Int"))),
             })
         }
+        // Mirrors `Int.parse` exactly in shape. Rust's `f64::from_str`
+        // accepts `inf`, `-inf`, and `NaN`, which is why this does too, and
+        // it rejects the `_` digit separators a `Float` literal may be
+        // written with — the same thing `Int.parse` above already does,
+        // not a new choice made here.
+        ("Float", "parse") => {
+            let args = expect_args("Float.parse", args, 1, span)?;
+            let Value::Str(text) = &args[0] else {
+                return Err(type_error("Float.parse", "text", "String", &args[0], span));
+            };
+            Ok(match text.parse::<f64>() {
+                Ok(value) => Value::ok(Value::Float(value)),
+                Err(_) => Value::err(Value::error(format!("`{text}` is not a Float"))),
+            })
+        }
         _ => Err(
             RuntimeError::new(format!("`{type_name}` has no associated function `{name}`"))
                 .at(span),
@@ -637,6 +652,73 @@ pub fn call_method(
                 _ => Err(no_method("Result", name, span)),
             }
         }
+        Value::Int(n) => match name {
+            "toFloat" => {
+                expect_args(name, args, 0, span)?;
+                Ok(Value::Float(*n as f64))
+            }
+            "abs" => {
+                expect_args(name, args, 0, span)?;
+                Ok(Value::Int(
+                    n.checked_abs()
+                        .ok_or_else(|| crate::interp::overflow("abs", span))?,
+                ))
+            }
+            "min" => {
+                let args = expect_args("Int.min", args, 1, span)?;
+                let Value::Int(other) = &args[0] else {
+                    return Err(type_error("Int.min", "other", "Int", &args[0], span));
+                };
+                Ok(Value::Int((*n).min(*other)))
+            }
+            "max" => {
+                let args = expect_args("Int.max", args, 1, span)?;
+                let Value::Int(other) = &args[0] else {
+                    return Err(type_error("Int.max", "other", "Int", &args[0], span));
+                };
+                Ok(Value::Int((*n).max(*other)))
+            }
+            _ => Err(no_method("Int", name, span)),
+        },
+        Value::Float(x) => match name {
+            "toInt" => {
+                expect_args(name, args, 0, span)?;
+                Ok(float_to_int(*x))
+            }
+            "round" => {
+                expect_args(name, args, 0, span)?;
+                Ok(Value::Float(x.round()))
+            }
+            "abs" => {
+                expect_args(name, args, 0, span)?;
+                Ok(Value::Float(x.abs()))
+            }
+            "min" => {
+                let args = expect_args("Float.min", args, 1, span)?;
+                let Value::Float(other) = &args[0] else {
+                    return Err(type_error("Float.min", "other", "Float", &args[0], span));
+                };
+                Ok(Value::Float(x.min(*other)))
+            }
+            "max" => {
+                let args = expect_args("Float.max", args, 1, span)?;
+                let Value::Float(other) = &args[0] else {
+                    return Err(type_error("Float.max", "other", "Float", &args[0], span));
+                };
+                Ok(Value::Float(x.max(*other)))
+            }
+            "format" => {
+                let args = expect_args("Float.format", args, 1, span)?;
+                let Value::Int(digits) = &args[0] else {
+                    return Err(type_error("Float.format", "digits", "Int", &args[0], span));
+                };
+                if !(0..=17).contains(digits) {
+                    return Err(format_digits_error(*digits, span));
+                }
+                Ok(Value::Str(format!("{:.*}", *digits as usize, x).into()))
+            }
+            _ => Err(no_method("Float", name, span)),
+        },
         other => Err(no_method(&other.type_name(), name, span)),
     }
 }
@@ -728,6 +810,42 @@ fn type_error(
 
 fn no_method(type_name: &str, method: &str, span: Span) -> RuntimeError {
     RuntimeError::new(format!("`{type_name}` has no method `{method}`")).at(span)
+}
+
+/// `Float.toInt`: truncates toward zero and names which of the three expected
+/// failures stopped it. `NaN` is not a number, an infinity has no
+/// truncation, and a magnitude at or past 2^63 does not fit in an `Int`.
+fn float_to_int(x: f64) -> Value {
+    if x.is_nan() {
+        return Value::err(Value::error(
+            "`Float.toInt` cannot convert `NaN`, which is not a number",
+        ));
+    }
+    if x.is_infinite() {
+        return Value::err(Value::error(format!(
+            "`Float.toInt` cannot convert `{x}`, which has no truncation"
+        )));
+    }
+    let truncated = x.trunc();
+    if truncated < i64::MIN as f64 || truncated >= i64::MAX as f64 {
+        return Value::err(Value::error(format!(
+            "`Float.toInt` cannot convert `{x}`, which is outside Int's range"
+        )));
+    }
+    Value::ok(Value::Int(truncated as i64))
+}
+
+/// `Float.format` refused a `digits` outside `0..=17`.
+///
+/// A `Float` carries at most 17 significant decimal digits, so a `digits`
+/// past that asks for padding rather than precision, and a negative `digits`
+/// names nothing.
+fn format_digits_error(digits: i64, span: Span) -> RuntimeError {
+    RuntimeError::new(format!("`Float.format` cannot use `{digits}` digits"))
+        .at(span)
+        .with_rule(
+            "A Float carries at most 17 significant decimal digits, so `digits` must be between 0 and 17.",
+        )
 }
 
 /// Reads `value` as a `String`, or reports the type `method` declares for

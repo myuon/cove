@@ -6776,6 +6776,7 @@ fn builtin_ty(declared: &BuiltinType, bound: &BTreeMap<&str, Ty>, receiver: Opti
         BuiltinType::Unit => Ty::Unit,
         BuiltinType::Bool => Ty::Bool,
         BuiltinType::Int => Ty::Int,
+        BuiltinType::Float => Ty::Float,
         BuiltinType::String => Ty::Str,
         BuiltinType::Error => Ty::Error,
         BuiltinType::Array(item) => Ty::Array(nested(item)),
@@ -8203,7 +8204,7 @@ fn run() -> Counter {
         assert_eq!(error.message, "`Array` has no associated function `of`");
         assert_eq!(
             error.rule.unwrap(),
-            "A builtin type's associated functions are `Vector.of`, `Map.of`, `Set.of`, and `Int.parse`."
+            "A builtin type's associated functions are `Vector.of`, `Map.of`, `Set.of`, `Int.parse`, and `Float.parse`."
         );
     }
 
