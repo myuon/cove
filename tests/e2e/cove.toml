@@ -163,6 +163,10 @@ allow = ["console", "env"]
 entry = "host_files.main"
 allow = ["files", "console"]
 
+[run.host_files_streaming]
+entry = "host_files_streaming.main"
+allow = ["files", "console"]
+
 [run.host_process]
 entry = "host_process.main"
 allow = ["process", "console"]
