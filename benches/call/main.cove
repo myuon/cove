@@ -1,0 +1,23 @@
+/// Answers its argument, so that calling it measures the call.
+fn identity(value: Int) -> Int {
+  value
+}
+
+/// The baseline loop, with one call to a free function per iteration.
+///
+/// The difference from `arith` is what a call costs with no receiver at all:
+/// evaluating an argument, building an environment for the body, finding the
+/// declaration, and tearing the environment down. Read beside `method`, it
+/// separates the cost of calling from the cost of having a receiver.
+export fn main() -> Result<Unit, Error> {
+  var total = 0
+  var i = 0
+  while i < 2000000 {
+    if identity(i) % 7 == 0 {
+      total += 1
+    }
+    i += 1
+  }
+  assertEqual(total, 285715)?
+  Ok(())
+}

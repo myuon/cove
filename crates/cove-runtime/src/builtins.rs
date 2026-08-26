@@ -461,9 +461,7 @@ pub fn call_method(
             "chars" => {
                 expect_args(name, args, 0, span)?;
                 Ok(Value::Array(
-                    text.chars()
-                        .map(|c| Value::Str(c.to_string().into()))
-                        .collect(),
+                    text.chars().map(|c| Value::Str(one_character(c))).collect(),
                 ))
             }
             "split" => {
@@ -846,6 +844,28 @@ fn format_digits_error(digits: i64, span: Span) -> RuntimeError {
         .with_rule(
             "A Float carries at most 17 significant decimal digits, so `digits` must be between 0 and 17.",
         )
+}
+
+/// The one-character string `character` spells.
+///
+/// An ASCII character answers a string this thread already made, because
+/// `chars()` is how a program takes text apart and a scanner asks for every
+/// character of every line it reads. Allocating one string per character made
+/// that the largest single source of allocation in `examples/cq`, and a
+/// character's string is immutable and interchangeable, so there is no way for
+/// a program to tell a shared one from a fresh one (issue #104).
+///
+/// The table is per thread rather than global because `Rc` is not shareable
+/// across threads, which is the same reason `Value` uses `Rc` at all.
+fn one_character(character: char) -> Rc<str> {
+    thread_local! {
+        static ASCII: [Rc<str>; 128] =
+            std::array::from_fn(|byte| Rc::from((byte as u8 as char).to_string().as_str()));
+    }
+    if character.is_ascii() {
+        return ASCII.with(|table| table[character as usize].clone());
+    }
+    character.to_string().into()
 }
 
 /// Reads `value` as a `String`, or reports the type `method` declares for

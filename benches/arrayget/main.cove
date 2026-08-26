@@ -1,0 +1,18 @@
+/// The baseline loop, with one `Array.get` and one `unwrapOr` per iteration.
+///
+/// The difference from `arith` is what it costs to reach one element of an
+/// immutable sequence: an index bounds check, a clone of the element, an
+/// `Option` built around it, and that `Option` opened again and dropped.
+/// `Option` is built here more than anywhere else in an ordinary program,
+/// because this is how every indexed read answers.
+export fn main() -> Result<Unit, Error> {
+  let items = [0, 1, 2, 3, 4, 5, 6, 7]
+  var total = 0
+  var i = 0
+  while i < 2000000 {
+    total += items.get(i % 8).unwrapOr(0)
+    i += 1
+  }
+  assertEqual(total, 7000000)?
+  Ok(())
+}

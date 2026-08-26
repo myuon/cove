@@ -832,6 +832,7 @@ impl Timing {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::rc::Rc;
 
     struct Buffer(Vec<u8>);
 
@@ -1030,7 +1031,7 @@ mod tests {
         let text = record_with(
             ValueCapture::Redacted,
             host_call(
-                vec![Value::Struct(Box::new(crate::value::StructValue {
+                vec![Value::Struct(Rc::new(crate::value::StructValue {
                     type_name: "Credentials".into(),
                     fields: vec![("token".into(), Value::Str("hunter2".into()))],
                     opaque: false,

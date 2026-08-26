@@ -9,3 +9,33 @@ allow = ["console", "clock"]
 [run.startup]
 entry = "startup.main"
 allow = []
+
+# The mechanism benchmarks. Each is the same 2,000,000-iteration loop as
+# `arith` with exactly one mechanism added, so the difference between two of
+# them is what that mechanism costs. Issue #104 added them: `examples/cq`
+# said the interpreted per-character loop was 99% of a real run, and these are
+# where that claim is decomposed into the operations it is made of.
+
+[run.arith]
+entry = "arith.main"
+allow = []
+
+[run.arrayget]
+entry = "arrayget.main"
+allow = []
+
+[run.field]
+entry = "field.main"
+allow = []
+
+[run.method]
+entry = "method.main"
+allow = []
+
+[run.call]
+entry = "call.main"
+allow = []
+
+[run.chars]
+entry = "chars.main"
+allow = []

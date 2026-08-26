@@ -23,6 +23,7 @@
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
 use std::path::Path;
+use std::rc::Rc;
 use std::time::Duration;
 
 use cove_runtime::schema::{Effect, OperationSchema};
@@ -515,7 +516,7 @@ fn decode_value(json: &Json) -> Result<Recorded, String> {
             );
             match collect(&fields) {
                 Ok(values) => recorded(
-                    Value::Struct(Box::new(cove_runtime::value::StructValue {
+                    Value::Struct(Rc::new(cove_runtime::value::StructValue {
                         type_name: name.into(),
                         fields: names
                             .into_iter()

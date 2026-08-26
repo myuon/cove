@@ -340,7 +340,12 @@ impl Place {
             match current {
                 Value::Struct(value) => {
                     let type_name = value.type_name.clone();
-                    current = value
+                    // The one place a struct's field is written, and so the
+                    // one place its shared storage becomes private again.
+                    // `make_mut` copies when another holder exists and does
+                    // nothing when none does, which is what makes sharing a
+                    // copied struct unobservable.
+                    current = Rc::make_mut(value)
                         .get_mut(step)
                         .ok_or_else(|| no_field(&type_name, step, span))?;
                 }
@@ -565,6 +570,15 @@ pub struct Interpreter<'a> {
     /// heap is reached only from the thread that owns it: a collection needs
     /// no safepoint from any other task and takes no lock.
     heap: Heap,
+    /// The scratch key `find_method` compares against, kept so that looking a
+    /// method up does not allocate the pair it looks it up by.
+    ///
+    /// `Resolved::methods` is keyed by two owned strings, and a lookup needs
+    /// two to compare against. Building them was 3.4% of `examples/cq`'s run
+    /// (issue #104), all of it thrown away immediately; this pair is written
+    /// over and keeps its capacity instead. A `Cell` rather than a field,
+    /// because `find_method` takes `&self`.
+    method_key: std::cell::Cell<(String, String)>,
     /// Where the most recent assertion failed, and the message it produced.
     ///
     /// A failed assertion is an ordinary `Err`, which carries a message and
@@ -594,6 +608,7 @@ impl<'a> Interpreter<'a> {
             timings: Vec::new(),
             roots: Rc::new(RefCell::new(Roots::new())),
             heap: Heap::new(),
+            method_key: std::cell::Cell::new((String::new(), String::new())),
             assertion_failure: None,
         }
     }
@@ -927,24 +942,39 @@ impl<'a> Interpreter<'a> {
         type_name: &str,
         name: &str,
     ) -> Option<(Rc<str>, Arc<FnDecl>)> {
-        let key = (type_name.to_string(), name.to_string());
-        if let Some(entry) = self.resolved(type_module).and_then(|m| m.methods.get(&key)) {
-            return Some((type_module.into(), entry.decl.clone()));
-        }
-        for (module, resolved) in &self.program.modules {
-            let conforms = resolved.conformances.values().any(|conformance| {
-                conformance.type_module == type_module
-                    && conformance.type_name == type_name
-                    && conformance.methods.contains(name)
+        // The map is keyed by a pair of owned strings, so a lookup needs a
+        // pair to compare against. Building one allocated twice on every
+        // method call a program made, which was 3.4% of `examples/cq`'s run;
+        // this reuses one pair and keeps its capacity, so the allocation
+        // happens once for the whole interpreter rather than once per call
+        // (issue #104).
+        let mut key = self.method_key.take();
+        key.0.clear();
+        key.0.push_str(type_name);
+        key.1.clear();
+        key.1.push_str(name);
+
+        let found = self
+            .resolved(type_module)
+            .and_then(|m| m.methods.get(&key))
+            .map(|entry| (Rc::from(type_module), entry.decl.clone()))
+            .or_else(|| {
+                self.program.modules.iter().find_map(|(module, resolved)| {
+                    let conforms = resolved.conformances.values().any(|conformance| {
+                        conformance.type_module == type_module
+                            && conformance.type_name == type_name
+                            && conformance.methods.contains(name)
+                    });
+                    if !conforms {
+                        return None;
+                    }
+                    let entry = resolved.methods.get(&key)?;
+                    Some((Rc::from(module.as_str()), entry.decl.clone()))
+                })
             });
-            if !conforms {
-                continue;
-            }
-            if let Some(entry) = resolved.methods.get(&key) {
-                return Some((module.as_str().into(), entry.decl.clone()));
-            }
-        }
-        None
+
+        self.method_key.set(key);
+        found
     }
 
     fn find_struct(&self, module: &str, name: &str) -> Option<(Rc<str>, Arc<StructDecl>)> {
@@ -1212,7 +1242,7 @@ impl<'a> Interpreter<'a> {
             };
             fields.push((field.name.into(), value_of(&arg, field.name, arg.span)?));
         }
-        Ok(Value::Struct(Box::new(StructValue {
+        Ok(Value::Struct(Rc::new(StructValue {
             type_name: format!("{module}.{}", declared.name).into(),
             fields,
             opaque: false,
@@ -2307,7 +2337,7 @@ impl<'a> Interpreter<'a> {
             Value::Map(entries) => Ok(entries
                 .iter()
                 .map(|(key, value)| {
-                    Value::Struct(Box::new(StructValue {
+                    Value::Struct(Rc::new(StructValue {
                         type_name: MAP_ENTRY.name.into(),
                         fields: vec![("key".into(), key.to_value()), ("value".into(), value.clone())],
                         opaque: false,
@@ -2791,9 +2821,16 @@ impl<'a> Interpreter<'a> {
             temporary = Some(concrete);
         }
 
-        let type_name = match (&place, &temporary) {
-            (Some(place), _) => place.with_ref(span, Value::type_name)?,
-            (_, Some(value)) => value.type_name(),
+        // The name of the declared type, when the receiver is one, because a
+        // method a package declares can only be found on a struct or an enum.
+        // A builtin receiver answers `None` and no name is built: `type_name`
+        // returns an owned `String`, and building one on every method call to
+        // discover that `Array` has no `.` in it was measurable (issue #104).
+        let declared = match (&place, &temporary) {
+            (Some(place), _) => {
+                place.with_ref(span, |value| value.declared_type_name().cloned())?
+            }
+            (_, Some(value)) => value.declared_type_name().cloned(),
             _ => unreachable!("a receiver is either a place or a temporary"),
         };
 
@@ -2815,7 +2852,9 @@ impl<'a> Interpreter<'a> {
             return Ok(self.call_host_resource(&handle, name, values, span)?);
         }
 
-        if let Some((type_module, short)) = type_name.rsplit_once('.') {
+        if let Some((type_module, short)) =
+            declared.as_deref().and_then(|name| name.rsplit_once('.'))
+        {
             if let Some((module, decl)) = self.find_method(type_module, short, name) {
                 let receiver_slot = match decl.receiver {
                     Some(Receiver { is_var: true, .. }) => {
@@ -2878,7 +2917,15 @@ impl<'a> Interpreter<'a> {
         // `Shared` is a runtime value rather than a declared type, and `lock`
         // takes the closure itself rather than the closure's value, so it is
         // dispatched here.
-        if type_name == "Shared" {
+        // `Shared`, a task scope, and a task handle are runtime values rather
+        // than declared types, so they are recognized by what they are rather
+        // than by a name built to compare against a literal.
+        let is_shared = match (&place, &temporary) {
+            (Some(place), _) => place.with_ref(span, |value| matches!(value, Value::Shared(_)))?,
+            (_, Some(value)) => matches!(value, Value::Shared(_)),
+            _ => unreachable!("a receiver is either a place or a temporary"),
+        };
+        if is_shared {
             let receiver_value = match (&place, &temporary) {
                 (Some(place), _) => place.read(span)?,
                 (_, Some(value)) => value.clone(),
@@ -2891,7 +2938,14 @@ impl<'a> Interpreter<'a> {
         // declared types, so their operations are dispatched here.
         // `examples/tasks/load.cove` writes the await as a postfix call, and
         // `bookings.await()` means what `await bookings` means.
-        if name == "await" || matches!(type_name.as_str(), "TaskScope" | "Task") {
+        let is_task = match (&place, &temporary) {
+            (Some(place), _) => place.with_ref(span, |value| {
+                matches!(value, Value::Task(_) | Value::TaskScope(_))
+            })?,
+            (_, Some(value)) => matches!(value, Value::Task(_) | Value::TaskScope(_)),
+            _ => unreachable!("a receiver is either a place or a temporary"),
+        };
+        if name == "await" || is_task {
             let receiver_value = match (&place, &temporary) {
                 (Some(place), _) => place.read(span)?,
                 (_, Some(value)) => value.clone(),
@@ -2973,7 +3027,7 @@ impl<'a> Interpreter<'a> {
                 self.coerce(module, value, &field.ty),
             ));
         }
-        Ok(Value::Struct(Box::new(StructValue {
+        Ok(Value::Struct(Rc::new(StructValue {
             type_name: format!("{module}.{}", decl.name.node).into(),
             fields,
             opaque: self.is_opaque(module, &decl.name.node),
@@ -3305,7 +3359,7 @@ fn binary(op: BinaryOp, lhs: Value, rhs: Value, span: Span) -> Result<Value, Run
                 && conformable(lhs.erased())
                 && conformable(rhs.erased());
             let (lhs, rhs) = (lhs.erased(), rhs.erased());
-            if !objects && lhs.type_name() != rhs.type_name() {
+            if !objects && !lhs.same_type_as(rhs) {
                 return Err(RuntimeError::new(format!(
                     "cannot compare `{}` with `{}`",
                     lhs.type_name(),
@@ -3328,7 +3382,7 @@ fn binary(op: BinaryOp, lhs: Value, rhs: Value, span: Span) -> Result<Value, Run
             // struct or an enum — so this changes only which type name the
             // failure below reports.
             let (lhs, rhs) = (lhs.erased(), rhs.erased());
-            if lhs.type_name() != rhs.type_name() {
+            if !lhs.same_type_as(rhs) {
                 return Err(RuntimeError::new(format!(
                     "cannot compare the identity of `{}` with `{}`",
                     lhs.type_name(),
@@ -3473,7 +3527,7 @@ fn init_map_entry(args: Vec<EvaluatedArg>, span: Span) -> Result<Value, RuntimeE
         };
         fields.push(((*field_name).into(), value_of(&arg, field_name, arg.span)?));
     }
-    Ok(Value::Struct(Box::new(StructValue {
+    Ok(Value::Struct(Rc::new(StructValue {
         type_name: MAP_ENTRY.name.into(),
         fields,
         opaque: false,
@@ -4574,7 +4628,7 @@ fn renderAll(values: Array<dyn Display>) -> String {
         // `false`, which is what dropping the guard was for.
         let other = Value::Dyn(Rc::new(DynValue {
             trait_name: "test.Display".into(),
-            value: Value::Struct(Box::new(StructValue {
+            value: Value::Struct(Rc::new(StructValue {
                 type_name: "test.Receipt".into(),
                 fields: vec![("total".into(), Value::Int(2))],
                 opaque: false,

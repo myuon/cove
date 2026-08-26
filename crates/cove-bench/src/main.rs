@@ -27,6 +27,8 @@
 //! {"benchmark":"pure","kind":"trace_overhead","untraced_wall_ns":<u64>,"traced_wall_ns":<u64>,"overhead_ratio":<f64>}
 //! {"benchmark":"hostheavy","kind":"interpreter", ...same shape as "pure" above...}
 //! {"benchmark":"hostheavy","kind":"trace_overhead", ...same shape as "pure" above...}
+//! {"benchmark":"arith","kind":"interpreter", ...} ... and one pair for each
+//! of `arrayget`, `field`, `method`, `call`, and `chars`
 //! {"benchmark":"startup","kind":"process","iterations":<u32>,"wall_ns":{"min":<u64>,"mean":<u64>,"max":<u64>},"ok":<bool>}
 //! ```
 //!
@@ -34,6 +36,22 @@
 //! itself failed, or (for `startup`) the spawned process exited non-zero. A
 //! caller comparing a future backend against a recorded baseline should
 //! refuse numbers from a run that is not `ok`.
+//!
+//! # The mechanism benchmarks
+//!
+//! `pure`, `hostheavy`, and `startup` are ADR 0012's, and measure a program.
+//! `arith`, `arrayget`, `field`, `method`, `call`, and `chars` are issue
+//! #104's, and measure one mechanism each: every one of them is the same
+//! 2,000,000-iteration loop with exactly one thing added, so the difference
+//! between two of them is what that thing costs. `arith` is the loop alone;
+//! `arrayget` adds an indexed read and the `Option` it answers; `field` adds
+//! a struct field; `method` adds a call around that field; `call` adds a call
+//! with no receiver; and `chars` is the per-character scan `examples/cq`
+//! spends nearly all of its time in.
+//!
+//! They exist because a wall-clock number for a whole program says how slow
+//! it is and not what is slow about it. They do not replace the application
+//! measurement in `examples/cq/README.md`; they are what makes it readable.
 //!
 //! This tool asserts no thresholds of its own; see ADR 0012 for why wall-clock
 //! numbers are not gated in CI, and for the thresholds a human applies when
@@ -99,7 +117,16 @@ fn bench() -> ExitCode {
 
     let mut ok = true;
 
-    for name in ["pure", "hostheavy"] {
+    for name in [
+        "pure",
+        "hostheavy",
+        "arith",
+        "arrayget",
+        "field",
+        "method",
+        "call",
+        "chars",
+    ] {
         match bench_interpreter(&package, &program, &sources, name, iterations) {
             Ok(report) => {
                 ok &= report.ok;
