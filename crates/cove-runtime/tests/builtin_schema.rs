@@ -353,9 +353,64 @@ static EXERCISES: &[Exercise] = &[
         body: "  let parsed = Int.parse(\"7\")\n  let fine = parsed.isOk()\n  0",
     },
     Exercise {
+        ty: "Int",
+        name: "toFloat",
+        body: "  let count = 7\n  let ratio = count.toFloat()\n  0",
+    },
+    Exercise {
+        ty: "Int",
+        name: "abs",
+        body: "  let count = -7\n  count.abs()",
+    },
+    Exercise {
+        ty: "Int",
+        name: "min",
+        body: "  let count = 7\n  count.min(3)",
+    },
+    Exercise {
+        ty: "Int",
+        name: "max",
+        body: "  let count = 7\n  count.max(3)",
+    },
+    Exercise {
         ty: "Float",
         name: "snapshot",
         body: "  let ratio = 1.5\n  let copy = ratio.snapshot()\n  0",
+    },
+    Exercise {
+        ty: "Float",
+        name: "parse",
+        body: "  let parsed = Float.parse(\"1.5\")\n  let fine = parsed.isOk()\n  0",
+    },
+    Exercise {
+        ty: "Float",
+        name: "toInt",
+        body: "  let outcome = (1.5).toInt()\n  let fine = outcome.isOk()\n  0",
+    },
+    Exercise {
+        ty: "Float",
+        name: "round",
+        body: "  let ratio = 1.5\n  let rounded = ratio.round()\n  0",
+    },
+    Exercise {
+        ty: "Float",
+        name: "abs",
+        body: "  let ratio = -1.5\n  let magnitude = ratio.abs()\n  0",
+    },
+    Exercise {
+        ty: "Float",
+        name: "min",
+        body: "  let ratio = 1.5\n  let lesser = ratio.min(0.5)\n  0",
+    },
+    Exercise {
+        ty: "Float",
+        name: "max",
+        body: "  let ratio = 1.5\n  let greater = ratio.max(0.5)\n  0",
+    },
+    Exercise {
+        ty: "Float",
+        name: "format",
+        body: "  let ratio = 1.5\n  ratio.format(2).length()",
     },
     Exercise {
         ty: "Bool",
@@ -1005,6 +1060,312 @@ fn string_join_one_element() {
     check_and_answer(
         "String.join one element",
         r#"  if ", ".join(["solo"]) == "solo" { 1 } else { 0 }"#,
+        1,
+    );
+}
+
+// --------------------------------------- new `Int`/`Float` method behaviour
+//
+// The exercises above prove each method and `Float.parse` dispatch; these
+// prove what they answer, including the overflow `Int.abs` shares with `+`
+// and the three expected failures `Float.toInt` tells apart.
+
+/// `Float.parse` accepts an ordinary decimal the way `Int.parse` accepts an
+/// ordinary integer.
+#[test]
+fn float_parse_accepts_a_decimal() {
+    check_and_answer(
+        "Float.parse on \"1.5\"",
+        r#"  match Float.parse("1.5") {
+    Ok(value) => if value == 1.5 { 1 } else { 0 },
+    Err(_) => 0
+  }"#,
+        1,
+    );
+}
+
+/// Text that is not a `Float` at all is an `Err`, worded like `Int.parse`'s.
+#[test]
+fn float_parse_rejects_non_numeric_text() {
+    check_and_answer(
+        "Float.parse on \"abc\"",
+        r#"  match Float.parse("abc") {
+    Ok(_) => 0,
+    Err(failure) => if failure.message == "`abc` is not a Float" { 1 } else { 0 }
+  }"#,
+        1,
+    );
+}
+
+/// `Float.parse` does not accept the `_` digit separators a `Float` literal
+/// may be written with -- pinned here so that changing that later has to
+/// notice this test rather than drift past it silently.
+#[test]
+fn float_parse_rejects_digit_separators() {
+    check_and_answer(
+        "Float.parse on \"1_000.5\"",
+        r#"  match Float.parse("1_000.5") {
+    Ok(_) => 0,
+    Err(failure) => if failure.message == "`1_000.5` is not a Float" { 1 } else { 0 }
+  }"#,
+        1,
+    );
+}
+
+/// `Float.parse` accepts `inf`, the same as Rust's own `f64::from_str`: dividing
+/// it by two still answers itself, which only an infinity does among finite
+/// or zero values.
+#[test]
+fn float_parse_accepts_inf() {
+    check_and_answer(
+        "Float.parse on \"inf\"",
+        r#"  match Float.parse("inf") {
+    Ok(value) => if value == value / 2.0 { 1 } else { 0 },
+    Err(_) => 0
+  }"#,
+        1,
+    );
+}
+
+/// `Int.toFloat` on a value above 2^53 rounds to the nearest representable
+/// `Float` rather than failing: `9007199254740993` is odd and one past 2^53,
+/// so it rounds down to the even `9007199254740992`, which is what round-trips
+/// back out through `Float.toInt`.
+#[test]
+fn int_to_float_rounds_above_two_pow_53() {
+    check_and_answer(
+        "Int.toFloat rounds above 2^53",
+        r#"  let big = 9007199254740993
+  match big.toFloat().toInt() {
+    Ok(value) => if value == 9007199254740992 { 1 } else { 0 },
+    Err(_) => 0
+  }"#,
+        1,
+    );
+}
+
+/// `Float.toInt` truncates a positive value toward zero rather than rounding.
+#[test]
+fn float_to_int_truncates_a_positive_value_toward_zero() {
+    check_and_answer(
+        "Float.toInt truncates a positive value toward zero",
+        r#"  match (3.9).toInt() {
+    Ok(value) => if value == 3 { 1 } else { 0 },
+    Err(_) => 0
+  }"#,
+        1,
+    );
+}
+
+/// `Float.toInt` truncates a negative value toward zero too, not down.
+#[test]
+fn float_to_int_truncates_a_negative_value_toward_zero() {
+    check_and_answer(
+        "Float.toInt truncates a negative value toward zero",
+        r#"  match (-3.9).toInt() {
+    Ok(value) => if value == -3 { 1 } else { 0 },
+    Err(_) => 0
+  }"#,
+        1,
+    );
+}
+
+/// `NaN` is the first of the three expected failures `Float.toInt` tells
+/// apart.
+#[test]
+fn float_to_int_errors_on_nan() {
+    check_and_answer(
+        "Float.toInt on NaN",
+        r#"  match Float.parse("NaN") {
+    Ok(value) => match value.toInt() {
+      Ok(_) => 0,
+      Err(failure) => if failure.message ==
+        "`Float.toInt` cannot convert `NaN`, which is not a number" { 1 } else { 0 }
+    },
+    Err(_) => 0
+  }"#,
+        1,
+    );
+}
+
+/// An infinity is the second: it has no truncation.
+#[test]
+fn float_to_int_errors_on_infinity() {
+    check_and_answer(
+        "Float.toInt on an infinity",
+        r#"  match Float.parse("inf") {
+    Ok(value) => match value.toInt() {
+      Ok(_) => 0,
+      Err(failure) => if failure.message ==
+        "`Float.toInt` cannot convert `inf`, which has no truncation" { 1 } else { 0 }
+    },
+    Err(_) => 0
+  }"#,
+        1,
+    );
+}
+
+/// A magnitude past `Int`'s range is the third. The exact rendering of a
+/// huge `Float` is not what this pins -- only that the message says which
+/// failure this was.
+#[test]
+fn float_to_int_errors_outside_ints_range() {
+    check_and_answer(
+        "Float.toInt outside Int's range",
+        r#"  let huge = 1e30
+  match huge.toInt() {
+    Ok(_) => 0,
+    Err(failure) => if failure.message.contains("is outside Int's range") { 1 } else { 0 }
+  }"#,
+        1,
+    );
+}
+
+/// `Int.abs` on the most negative `Int` has no positive counterpart to
+/// answer, so it overflows the same way `+` does. The literal is built as
+/// `i64::MIN` rather than written directly, because the digits of
+/// `9223372036854775808` alone do not fit a 64-bit integer.
+#[test]
+fn int_abs_on_the_most_negative_int_overflows() {
+    let error = check_and_error(
+        "Int.abs on the most negative Int",
+        "  let min = -9223372036854775807 - 1\n  min.abs()",
+    );
+    assert_eq!(error.message, "`Int` abs overflowed");
+    assert_eq!(
+        error.rule.as_deref(),
+        Some("Integer overflow is a broken invariant, not a wrapped result.")
+    );
+}
+
+/// `format(0)` writes no decimal point at all.
+#[test]
+fn float_format_zero_digits() {
+    check_and_answer(
+        "Float.format(0)",
+        r#"  if (1.5).format(0) == "2" { 1 } else { 0 }"#,
+        1,
+    );
+}
+
+/// `format(2)` pads a value that has fewer decimal digits than it asked for.
+#[test]
+fn float_format_two_digits() {
+    check_and_answer(
+        "Float.format(2)",
+        r#"  if (1.5).format(2) == "1.50" { 1 } else { 0 }"#,
+        1,
+    );
+}
+
+/// `2.345` at 2 digits rounds up to `2.35`: the nearest `Float` to `2.345` is
+/// a hair above it, so this is not even a halfway case.
+#[test]
+fn float_format_rounds_at_the_boundary() {
+    check_and_answer(
+        "Float.format rounds 2.345 at 2 digits",
+        r#"  if (2.345).format(2) == "2.35" { 1 } else { 0 }"#,
+        1,
+    );
+}
+
+/// A negative `digits` names nothing, so it is a runtime error.
+#[test]
+fn float_format_negative_digits_errors() {
+    let error = check_and_error("Float.format(-1)", "  (1.5).format(-1).length()");
+    assert_eq!(error.message, "`Float.format` cannot use `-1` digits");
+    assert_eq!(
+        error.rule.as_deref(),
+        Some(
+            "A Float carries at most 17 significant decimal digits, so `digits` must be between 0 and 17."
+        )
+    );
+}
+
+/// `digits` past 17 asks for padding a `Float` cannot back with precision, so
+/// it errors the same way a negative one does.
+#[test]
+fn float_format_too_many_digits_errors() {
+    let error = check_and_error("Float.format(18)", "  (1.5).format(18).length()");
+    assert_eq!(error.message, "`Float.format` cannot use `18` digits");
+}
+
+/// `min` answers whichever operand is not `NaN` when the receiver is the one
+/// that is.
+#[test]
+fn float_min_with_nan_receiver() {
+    check_and_answer(
+        "Float.min with NaN as the receiver",
+        r#"  match Float.parse("NaN") {
+    Ok(nan) => if nan.min(1.0) == 1.0 { 1 } else { 0 },
+    Err(_) => 0
+  }"#,
+        1,
+    );
+}
+
+/// The same, with `NaN` as the argument instead of the receiver.
+#[test]
+fn float_min_with_nan_argument() {
+    check_and_answer(
+        "Float.min with NaN as the argument",
+        r#"  match Float.parse("NaN") {
+    Ok(nan) => if (1.0).min(nan) == 1.0 { 1 } else { 0 },
+    Err(_) => 0
+  }"#,
+        1,
+    );
+}
+
+/// `min` answers `NaN` only when both operands are.
+#[test]
+fn float_min_of_two_nans_is_nan() {
+    check_and_answer(
+        "Float.min of two NaNs",
+        r#"  match Float.parse("NaN") {
+    Ok(nan) => if nan.min(nan) != nan.min(nan) { 1 } else { 0 },
+    Err(_) => 0
+  }"#,
+        1,
+    );
+}
+
+/// `max` follows the same rule as `min`: whichever operand is not `NaN`, with
+/// `NaN` as the receiver here.
+#[test]
+fn float_max_with_nan_receiver() {
+    check_and_answer(
+        "Float.max with NaN as the receiver",
+        r#"  match Float.parse("NaN") {
+    Ok(nan) => if nan.max(1.0) == 1.0 { 1 } else { 0 },
+    Err(_) => 0
+  }"#,
+        1,
+    );
+}
+
+/// The same, with `NaN` as the argument instead of the receiver.
+#[test]
+fn float_max_with_nan_argument() {
+    check_and_answer(
+        "Float.max with NaN as the argument",
+        r#"  match Float.parse("NaN") {
+    Ok(nan) => if (1.0).max(nan) == 1.0 { 1 } else { 0 },
+    Err(_) => 0
+  }"#,
+        1,
+    );
+}
+
+/// `max` answers `NaN` only when both operands are, the same as `min`.
+#[test]
+fn float_max_of_two_nans_is_nan() {
+    check_and_answer(
+        "Float.max of two NaNs",
+        r#"  match Float.parse("NaN") {
+    Ok(nan) => if nan.max(nan) != nan.max(nan) { 1 } else { 0 },
+    Err(_) => 0
+  }"#,
         1,
     );
 }

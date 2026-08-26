@@ -9,3 +9,6 @@ division 3 remainder 1
 negative division -3 remainder -1
 comparison true true false false
 equality true false
+toFloat 7.0 -3.0
+abs 7 7
+min 3 max 5

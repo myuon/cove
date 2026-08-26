@@ -10,5 +10,11 @@ export fn main() -> Result<Unit, Error> {
   println("remainder {3.5 % 2.0}")?
   println("a whole float prints without a point {4.0} {2.0 * 2.0}")?
   println("comparison {1.5 < 2.5} {1.5 == 1.5}")?
+  println("parse {Float.parse("1.5")} {Float.parse("x")}")?
+  println("toInt {(1.9).toInt()} {(-1.9).toInt()} {(1.0e30).toInt()}")?
+  println("round {(2.5).round()} {(-2.5).round()}")?
+  println("abs {(-1.5).abs()}")?
+  println("min {(1.5).min(2.5)} max {(1.5).max(2.5)}")?
+  println("format {(3.14159).format(2)} {(2.0).format(0)}")?
   Ok(())
 }

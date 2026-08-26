@@ -92,6 +92,8 @@ pub enum BuiltinType {
     Bool,
     /// `Int`, a signed 64-bit integer.
     Int,
+    /// `Float`, a 64-bit binary floating-point number.
+    Float,
     /// `String`.
     String,
     /// `Error`, the builtin error struct.
@@ -140,6 +142,7 @@ impl fmt::Display for BuiltinType {
             BuiltinType::Unit => f.write_str("Unit"),
             BuiltinType::Bool => f.write_str("Bool"),
             BuiltinType::Int => f.write_str("Int"),
+            BuiltinType::Float => f.write_str("Float"),
             BuiltinType::String => f.write_str("String"),
             BuiltinType::Error => f.write_str("Error"),
             BuiltinType::Array(item) => write!(f, "Array<{item}>"),
@@ -1367,7 +1370,58 @@ pub const INT: BuiltinSchema = BuiltinSchema {
     namespace: true,
     cases: &[],
     fields: &[],
-    methods: &[SNAPSHOT],
+    methods: &[
+        // The nearest `Float`. This is exact for magnitudes below 2^53 and
+        // rounds to the nearest representable value above it, which is what
+        // IEEE 754 does and what any lossless-only conversion would have to
+        // refuse instead.
+        MethodSchema {
+            name: "toFloat",
+            generics: &[],
+            params: &[],
+            variadic: false,
+            result: BuiltinType::Float,
+            mutating: false,
+        },
+        // The magnitude. `Int` is two's complement, so the most negative
+        // `Int` has no positive counterpart; that case is an overflow, and
+        // it stops the run with the same kind of error `+` reports, because
+        // the Language Card already calls integer overflow a broken
+        // invariant rather than a wrapped result.
+        MethodSchema {
+            name: "abs",
+            generics: &[],
+            params: &[],
+            variadic: false,
+            result: BuiltinType::Int,
+            mutating: false,
+        },
+        // The lesser of the receiver and `other`.
+        MethodSchema {
+            name: "min",
+            generics: &[],
+            params: &[ParamSchema {
+                name: "other",
+                ty: BuiltinType::Int,
+            }],
+            variadic: false,
+            result: BuiltinType::Int,
+            mutating: false,
+        },
+        // The greater of the receiver and `other`.
+        MethodSchema {
+            name: "max",
+            generics: &[],
+            params: &[ParamSchema {
+                name: "other",
+                ty: BuiltinType::Int,
+            }],
+            variadic: false,
+            result: BuiltinType::Int,
+            mutating: false,
+        },
+        SNAPSHOT,
+    ],
     associated: &[MethodSchema {
         name: "parse",
         generics: &[],
@@ -1384,14 +1438,121 @@ pub const INT: BuiltinSchema = BuiltinSchema {
 // ------------------------------------------------------------------- Float
 
 /// `Float`: a 64-bit binary floating-point number.
+///
+/// `parse` fails on text that is not one, which is an expected failure and so
+/// a `Result`, exactly as `Int.parse` is. `toInt` is a `Result` for a second
+/// reason on top of that one: `NaN`, an infinity, and a magnitude `Int` has no
+/// room for are three ways a conversion can have nothing to answer, and a
+/// program that read the number out of a file is the program that should be
+/// handling them.
+///
+/// `Float` is IEEE 754 and stops at nothing, so nothing here traps: `abs`,
+/// `round`, `min`, and `max` are total. `format` is the one exception, and
+/// what it refuses is its own argument rather than the value.
 pub const FLOAT: BuiltinSchema = BuiltinSchema {
     name: "Float",
     parameters: &[],
     namespace: true,
     cases: &[],
     fields: &[],
-    methods: &[SNAPSHOT],
-    associated: &[],
+    methods: &[
+        // Truncated toward zero. This is a `Result` rather than a trap
+        // because the value usually came from outside the program: `NaN`, an
+        // infinity, and anything whose truncation falls outside `Int`'s
+        // range are all expected failures, and the error names which of them
+        // happened.
+        MethodSchema {
+            name: "toInt",
+            generics: &[],
+            params: &[],
+            variadic: false,
+            result: BuiltinType::Result(&BuiltinType::Int, &BuiltinType::Error),
+            mutating: false,
+        },
+        // The nearest whole `Float`, halfway cases rounded away from zero —
+        // Rust's own `f64::round`.
+        MethodSchema {
+            name: "round",
+            generics: &[],
+            params: &[],
+            variadic: false,
+            result: BuiltinType::Float,
+            mutating: false,
+        },
+        // The magnitude.
+        MethodSchema {
+            name: "abs",
+            generics: &[],
+            params: &[],
+            variadic: false,
+            result: BuiltinType::Float,
+            mutating: false,
+        },
+        // The lesser of the receiver and `other`. Rust's own `f64::min`
+        // answers whichever operand is not `NaN`, and answers `NaN` only
+        // when both are; this does the same rather than deciding anything of
+        // its own.
+        MethodSchema {
+            name: "min",
+            generics: &[],
+            params: &[ParamSchema {
+                name: "other",
+                ty: BuiltinType::Float,
+            }],
+            variadic: false,
+            result: BuiltinType::Float,
+            mutating: false,
+        },
+        // The greater of the receiver and `other`, by the same rule as
+        // `min`: Rust's own `f64::max` answers whichever operand is not
+        // `NaN`, and `NaN` only when both are.
+        MethodSchema {
+            name: "max",
+            generics: &[],
+            params: &[ParamSchema {
+                name: "other",
+                ty: BuiltinType::Float,
+            }],
+            variadic: false,
+            result: BuiltinType::Float,
+            mutating: false,
+        },
+        // The value written with exactly `digits` digits after the decimal
+        // point. `digits` outside `0..=17` is a runtime error: a `Float`
+        // carries at most 17 significant decimal digits, so anything beyond
+        // that is padding rather than precision, and a negative count names
+        // nothing.
+        MethodSchema {
+            name: "format",
+            generics: &[],
+            params: &[ParamSchema {
+                name: "digits",
+                ty: BuiltinType::Int,
+            }],
+            variadic: false,
+            result: BuiltinType::String,
+            mutating: false,
+        },
+        SNAPSHOT,
+    ],
+    // Mirrors `Int.parse` exactly in shape: `Ok` or an `Error` whose message
+    // says the text is not a `Float`. It accepts what Rust's `f64::from_str`
+    // accepts, which includes `inf`, `-inf`, and `NaN` — consistent with the
+    // Language Card's "Float is IEEE 754 and stops at nothing" — and, exactly
+    // like `Int.parse` today, it does not accept the `_` digit separators a
+    // literal may be written with. That is `Int.parse`'s existing behaviour,
+    // not a new choice made here.
+    associated: &[MethodSchema {
+        name: "parse",
+        generics: &[],
+        params: &[ParamSchema {
+            name: "text",
+            ty: BuiltinType::String,
+        }],
+        variadic: false,
+        result: BuiltinType::Result(&BuiltinType::Float, &BuiltinType::Error),
+        mutating: false,
+    }],
 };
 
 // -------------------------------------------------------------------- Bool

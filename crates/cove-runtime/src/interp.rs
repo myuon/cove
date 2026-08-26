@@ -3999,7 +3999,12 @@ fn unsupported(what: &str, span: Span) -> RuntimeError {
     .with_rule("The MVP interpreter runs the subset of Cove that the MVP defines.")
 }
 
-fn overflow(operation: &str, span: Span) -> RuntimeError {
+/// `Int` arithmetic overflowed.
+///
+/// `crate::builtins` reports `Int.abs()` on the most negative `Int` through
+/// this too, rather than writing the same sentence out a second time: an
+/// overflow is one rule, so it is one message wherever it is reached from.
+pub(crate) fn overflow(operation: &str, span: Span) -> RuntimeError {
     RuntimeError::new(format!("`Int` {operation} overflowed"))
         .at(span)
         .with_rule("Integer overflow is a broken invariant, not a wrapped result.")

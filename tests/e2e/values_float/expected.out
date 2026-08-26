@@ -6,3 +6,9 @@ multiplication 3.0 division 1.5
 remainder 1.5
 a whole float prints without a point 4.0 4.0
 comparison true true
+parse Ok(1.5) Err(`x` is not a Float)
+toInt Ok(1) Ok(-1) Err(`Float.toInt` cannot convert `1000000000000000000000000000000`, which is outside Int's range)
+round 3.0 -3.0
+abs 1.5
+min 1.5 max 2.5
+format 3.14 2
