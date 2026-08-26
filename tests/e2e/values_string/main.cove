@@ -14,5 +14,52 @@ export fn main() -> Result<Unit, Error> {
   println("words {sentence.words()}")?
   println("length {sentence.words().length()}")?
   println("isEmpty {sentence.isEmpty()} {"".isEmpty()}")?
+
+  let word = "cove"
+  println("chars {word.chars()}")?
+
+  let csv = "a,,b,"
+  println("split {csv.split(",")}")?
+  println("split none {"abc".split(",")}")?
+  // One part, and that part is empty — which `[]` alone could not say.
+  let ofEmpty = "".split(",")
+  let onlyPart = ofEmpty.get(0).unwrapOr("x")
+  println("split empty {ofEmpty.length()} part of length {onlyPart.length()}")?
+
+  let names = ["Alice", "Bob", "Cara"]
+  let empty: Array<String> = []
+  println("join {", ".join(names)}")?
+  println("join empty [{", ".join(empty)}]")?
+  println("join one {", ".join(["solo"])}")?
+
+  let phrase = "hello world"
+  println("slice {phrase.slice(0, 5)}")?
+  println("slice clamped {phrase.slice(-3, 100)}")?
+  println("slice empty [{phrase.slice(5, 2)}]")?
+
+  let padded = "  spaced out  "
+  println("trim [{padded.trim()}]")?
+
+  println("contains {phrase.contains("wor")} {phrase.contains("xyz")}")?
+  println(
+    "startsWith {phrase.startsWith("hello")} {phrase.startsWith("world")}",
+  )?
+  println("endsWith {phrase.endsWith("world")} {phrase.endsWith("hello")}")?
+
+  println("indexOf {phrase.indexOf("world")} {phrase.indexOf("xyz")} {phrase.indexOf("")}")?
+
+  println("replace {phrase.replace("o", "0")}")?
+
+  let mixedCase = "Hello World"
+  println("toUpper {mixedCase.toUpper()}")?
+  println("toLower {mixedCase.toLower()}")?
+
+  // Every index is a character index, because `length()` counts characters.
+  // A byte offset would put all four of these numbers somewhere else.
+  let multibyte = "aあいbう"
+  println("length {multibyte.length()}")?
+  println("chars {multibyte.chars()}")?
+  println("slice {multibyte.slice(1, 3)}")?
+  println("indexOf {multibyte.indexOf("b")} {multibyte.indexOf("う")}")?
   Ok(())
 }

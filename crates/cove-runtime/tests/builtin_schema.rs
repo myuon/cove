@@ -35,7 +35,7 @@ use std::sync::Arc;
 use cove_diag::SourceMap;
 use cove_runtime::interp::Interpreter;
 use cove_runtime::value::Value;
-use cove_runtime::{Grants, HostRegistry, Runtime};
+use cove_runtime::{Grants, HostRegistry, Runtime, RuntimeError};
 use cove_sema::{Config, Module, Package, Unit};
 
 /// One entry of the shared table, with a program that calls it.
@@ -223,6 +223,66 @@ static EXERCISES: &[Exercise] = &[
         ty: "String",
         name: "words",
         body: "  let text = \"one two\"\n  text.words().length()",
+    },
+    Exercise {
+        ty: "String",
+        name: "chars",
+        body: "  let text = \"abc\"\n  text.chars().length()",
+    },
+    Exercise {
+        ty: "String",
+        name: "split",
+        body: "  let text = \"a,b\"\n  text.split(\",\").length()",
+    },
+    Exercise {
+        ty: "String",
+        name: "join",
+        body: "  let parts = [\"a\", \"b\"]\n  \",\".join(parts).length()",
+    },
+    Exercise {
+        ty: "String",
+        name: "slice",
+        body: "  let text = \"hello\"\n  text.slice(1, 3).length()",
+    },
+    Exercise {
+        ty: "String",
+        name: "trim",
+        body: "  let text = \"  hi  \"\n  text.trim().length()",
+    },
+    Exercise {
+        ty: "String",
+        name: "contains",
+        body: "  let text = \"hello\"\n  let found = text.contains(\"ell\")\n  0",
+    },
+    Exercise {
+        ty: "String",
+        name: "startsWith",
+        body: "  let text = \"hello\"\n  let found = text.startsWith(\"he\")\n  0",
+    },
+    Exercise {
+        ty: "String",
+        name: "endsWith",
+        body: "  let text = \"hello\"\n  let found = text.endsWith(\"lo\")\n  0",
+    },
+    Exercise {
+        ty: "String",
+        name: "indexOf",
+        body: "  let text = \"hello\"\n  text.indexOf(\"l\").unwrapOr(-1)",
+    },
+    Exercise {
+        ty: "String",
+        name: "replace",
+        body: "  let text = \"hello\"\n  text.replace(\"l\", \"L\").length()",
+    },
+    Exercise {
+        ty: "String",
+        name: "toUpper",
+        body: "  let text = \"hello\"\n  text.toUpper().length()",
+    },
+    Exercise {
+        ty: "String",
+        name: "toLower",
+        body: "  let text = \"HELLO\"\n  text.toLower().length()",
     },
     Exercise {
         ty: "String",
@@ -760,4 +820,191 @@ fn check_and_run(what: &str, body: &str) -> Value {
                 error.message
             )
         })
+}
+
+/// Resolves and checks one program the same way [`check_and_run`] does, but
+/// where the point of the program is that the interpreter refuses it.
+fn check_and_error(what: &str, body: &str) -> RuntimeError {
+    let (package, sources) = package(body);
+    let program = cove_sema::resolve::resolve(&package)
+        .unwrap_or_else(|errors| panic!("`{what}` resolves: {errors:?}"));
+    let diagnostics = cove_sema::typeck::check(&package, &program);
+    assert!(
+        diagnostics.is_empty(),
+        "`{what}` is declared by the schema but the checker refused it: {:?}",
+        diagnostics
+            .iter()
+            .map(|diagnostic| diagnostic.message.clone())
+            .collect::<Vec<_>>()
+    );
+
+    let hosts = HostRegistry::new(Grants::new(Vec::<String>::new()));
+    let runtime = Runtime::new(Arc::new(program), sources, Arc::new(hosts));
+    match Interpreter::new(&runtime).run_entry("app", "main", Vec::new()) {
+        Ok(value) => panic!("`{what}` was expected to fail at run time, but answered `{value}`"),
+        Err(error) => error,
+    }
+}
+
+// --------------------------------------------- new `String` method behaviour
+//
+// The exercises above prove each method dispatches; these prove what it
+// answers, including the two runtime errors `split` and `replace` can raise
+// and the points where a byte offset and a character index would disagree.
+
+/// Adjacent separators produce an empty part, and `split` keeps every part in
+/// order.
+#[test]
+fn string_split_adjacent_separators() {
+    check_and_answer(
+        "String.split adjacent separators",
+        r#"  let parts = "a,,b".split(",")
+  if parts == ["a", "", "b"] { 1 } else { 0 }"#,
+        1,
+    );
+}
+
+/// Text with no occurrence of the separator produces one part: the whole
+/// text.
+#[test]
+fn string_split_no_occurrence() {
+    check_and_answer(
+        "String.split no occurrence",
+        r#"  let parts = "abc".split(",")
+  if parts == ["abc"] { 1 } else { 0 }"#,
+        1,
+    );
+}
+
+/// `"".split(",")` is `[""]`, not `[]`: an empty text is one empty part.
+#[test]
+fn string_split_empty_text() {
+    check_and_answer(
+        "String.split empty text",
+        r#"  let parts = "".split(",")
+  if parts == [""] { 1 } else { 0 }"#,
+        1,
+    );
+}
+
+/// An empty separator is a runtime error, with help pointing at `chars()`.
+#[test]
+fn string_split_empty_separator_errors() {
+    let error = check_and_error(
+        "String.split empty separator",
+        "  \"abc\".split(\"\").length()",
+    );
+    assert_eq!(
+        error.message,
+        "`String.split` cannot use an empty `separator`"
+    );
+    assert_eq!(
+        error.help.as_deref(),
+        Some("use `chars()` to take a string apart character by character")
+    );
+}
+
+/// An empty `old` is a runtime error too, and is told what it is missing
+/// rather than offered `chars()`: replacing nothing is not a request for the
+/// characters.
+#[test]
+fn string_replace_empty_old_errors() {
+    let error = check_and_error(
+        "String.replace empty old",
+        "  \"abc\".replace(\"\", \"x\").length()",
+    );
+    assert_eq!(error.message, "`String.replace` cannot use an empty `old`");
+    assert_eq!(
+        error.help.as_deref(),
+        Some("`old` is the text to look for, and an empty `old` names none")
+    );
+}
+
+/// Both bounds outside the string are clamped into `0..length()` rather than
+/// stopping the program.
+#[test]
+fn string_slice_bounds_outside_are_clamped() {
+    check_and_answer(
+        "String.slice bounds outside",
+        r#"  let text = "ab"
+  if text.slice(-5, 100) == "ab" { 1 } else { 0 }"#,
+        1,
+    );
+}
+
+/// A `to` at or below `from` is the empty string, never an error.
+#[test]
+fn string_slice_to_at_or_below_from_is_empty() {
+    check_and_answer(
+        "String.slice to <= from",
+        r#"  let text = "hello"
+  if text.slice(3, 3) == "" && text.slice(3, 1) == "" { 1 } else { 0 }"#,
+        1,
+    );
+}
+
+/// A negative `from` clamps to 0 rather than indexing from the end or
+/// erroring.
+#[test]
+fn string_slice_negative_from_clamps_to_zero() {
+    check_and_answer(
+        "String.slice negative from",
+        r#"  let text = "hello"
+  if text.slice(-3, 2) == "he" { 1 } else { 0 }"#,
+        1,
+    );
+}
+
+/// `chars`, `slice`, and `indexOf` all count characters, not bytes: "héllo"
+/// has an accented `é` that is two bytes wide in UTF-8 but one character, so
+/// a byte-offset implementation would disagree with every assertion here.
+#[test]
+fn string_multibyte_indices_count_characters() {
+    check_and_answer(
+        "String multibyte characters (Latin)",
+        r#"  let text = "héllo"
+  let chars = text.chars()
+  if chars.length() == 5 &&
+    chars.get(1).unwrapOr("?") == "é" &&
+    text.slice(1, 2) == "é" &&
+    text.indexOf("llo") == Some(2) { 1 } else { 0 }"#,
+        1,
+    );
+}
+
+/// The same proof again with three-byte-per-character text, so the
+/// conversion is shown to hold for more than a two-byte case.
+#[test]
+fn string_multibyte_indices_count_characters_wide() {
+    check_and_answer(
+        "String multibyte characters (wide)",
+        r#"  let text = "あいう"
+  if text.chars().length() == 3 &&
+    text.chars().get(0).unwrapOr("?") == "あ" &&
+    text.slice(2, 3) == "う" &&
+    text.indexOf("う") == Some(2) { 1 } else { 0 }"#,
+        1,
+    );
+}
+
+/// `join` on an empty array is the empty string: there is nothing to
+/// separate.
+#[test]
+fn string_join_empty_array() {
+    check_and_answer(
+        "String.join empty array",
+        r#"  let parts: Array<String> = []
+  if ", ".join(parts) == "" { 1 } else { 0 }"#,
+        1,
+    );
+}
+
+/// `join` on one element is that element, with no separator inserted.
+#[test]
+fn string_join_one_element() {
+    check_and_answer(
+        "String.join one element",
+        r#"  if ", ".join(["solo"]) == "solo" { 1 } else { 0 }"#,
+        1,
+    );
 }
