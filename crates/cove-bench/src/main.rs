@@ -93,10 +93,14 @@
 //! # Running it
 //!
 //! ```text
-//! cargo build --workspace
-//! ./target/debug/cove-bench                      # a handful of iterations: what CI runs, for correctness
-//! ./target/debug/cove-bench --iterations 200      # a real local measurement
+//! cargo build --release --workspace
+//! ./target/release/cove-bench --iterations 1      # what CI runs, for correctness
+//! ./target/release/cove-bench --iterations 200    # a real local measurement
 //! ```
+//!
+//! Optimized in both cases. The benchmarks are sized to be measurable in an
+//! optimized build, so an unoptimized one does not run them uniformly slower
+//! in some way that could be divided back out — it runs them for minutes.
 //!
 //! Reading one backend against the other is what the output is arranged for:
 //! the two `wall_ns` means of one benchmark are the comparison, and the
@@ -122,9 +126,14 @@ use cove_sema::resolve::Program;
 
 /// How many times each benchmark runs when `--iterations` is not given.
 ///
-/// Small enough that the whole harness finishes in well under a second, so
-/// CI can run it for correctness on every push without becoming the slow
-/// step in the pipeline; see ADR 0012.
+/// This claimed the whole harness finishes in well under a second, and it
+/// was not true of any run anyone made: CI asked for three iterations of an
+/// unoptimized build and spent 82% of its pipeline waiting. No count fixes
+/// that, because the benchmarks are sized for an optimized build and three
+/// iterations of one without optimization take minutes. So CI builds the
+/// harness optimized and asks for one, and this default is what a local
+/// reader gets who wants a first look rather than a measurement. ADR 0012
+/// says why no number here is gated.
 const DEFAULT_ITERATIONS: u32 = 5;
 
 fn main() -> ExitCode {
