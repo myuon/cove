@@ -56,6 +56,30 @@
 //! this pass deciding something the checker declined to, which is the one
 //! thing ADR 0019 says a lowering does not do.
 //!
+//! # A settled type is also where the value is kept
+//!
+//! The same rule, asked of a binding rather than of an operator, decides
+//! which of the VM's two stacks its slot lives in. A local declared from
+//! something the checker settled as `Int` or `Bool` is an `i64` in the
+//! scalar stack — [`SlotKind::Scalar`] — and everything else is the `Value`
+//! it always was. It is one rule and not two: `Body::scalar_of` is
+//! `Body::is_int` asked about both scalar types, and an abstention answers
+//! both the same way.
+//!
+//! [`Inst::IntBinary`] reads and writes that stack, because two `i64` in and
+//! one out is the whole of what it does, and [`Inst::ScalarConst`],
+//! [`Inst::LoadScalar`], [`Inst::StoreScalar`] and
+//! [`Inst::JumpIfFalseScalar`] are what let a loop over integers stay in it.
+//! [`Inst::ScalarToValue`] and [`Inst::ValueToScalar`] are the boundary, and
+//! the lowering spends one only where an expression really does cross:
+//! `Body::on_scalar_stack` is what keeps a condition the value stack
+//! computed from being moved across just to be tested.
+//!
+//! Two things are deliberately *not* scalar. A parameter's slot is a value
+//! slot, because an argument arrives on the caller's value stack and becomes
+//! the callee's slot without moving, and this does not change the calling
+//! convention. A struct's field is not a slot at all.
+//!
 //! # What the interpreter decides and this reproduces
 //!
 //! `crates/cove-runtime/src/interp.rs` is the oracle, and seven of its rules
@@ -123,7 +147,8 @@ use cove_syntax::ast::{
 };
 
 use crate::{
-    BinaryOp, Const, ConstId, Function, FunctionId, Inst, IntOp, Program, UnaryOp, Unsupported,
+    BinaryOp, Const, ConstId, Function, FunctionId, Inst, IntOp, Program, Scalar, SlotKind,
+    UnaryOp, Unsupported,
 };
 
 /// A lowered program and the function to start it at.
@@ -600,30 +625,31 @@ impl<'a> Lowering<'a> {
             }
             // A receiver is read-only in the body: a `var self` receiver is
             // refused above, so nothing writes through this one.
-            body.declare(Some("self"), false);
+            body.declare(Some("self"), false, SlotKind::Value);
         }
         for param in &decl.params {
             reject_parameter(param.is_var, param.variadic, param.ty.as_ref(), param.span)?;
             // An ordinary parameter receives a shallow copy and is a
             // read-only place inside the body, exactly as the interpreter
             // declares one; a `var` parameter is refused above.
-            body.declare(Some(param.name.node.as_str()), false);
+            body.declare(Some(param.name.node.as_str()), false, SlotKind::Value);
         }
 
         body.block(&decl.body)?;
         body.emit_final_return(decl.body.span);
-        let (code, spans, arg_spans, frame_size) = body.finish();
+        let finished = body.finish();
 
         Ok(Function {
             module: module.into(),
             name,
-            frame_size,
+            frame_size: finished.frame_size,
+            slots: finished.slots,
             arity: decl.params.len() as u32 + u32::from(decl.receiver.is_some()),
             has_receiver: decl.receiver.is_some(),
             captures: Vec::new(),
-            code,
-            spans,
-            arg_spans,
+            code: finished.code,
+            spans: finished.spans,
+            arg_spans: finished.arg_spans,
             span: decl.span,
         })
     }
@@ -646,23 +672,56 @@ struct Binding<'a> {
     name: Option<&'a str>,
     slot: u32,
     writable: bool,
+    /// Which stack the slot lives in, decided when it was declared and never
+    /// revisited: a binding's type does not change, so neither does where it
+    /// is kept.
+    kind: SlotKind,
 }
 
 /// A jump target, resolved once the instruction it points at exists.
 struct Label {
     at: Option<u32>,
-    /// The operand-stack depth control arrives here with, taken from the
+    /// The operand-stack depths control arrives here with, taken from the
     /// first reachable jump that names it.
-    depth: Option<u32>,
+    depth: Option<Depth>,
+}
+
+/// How much stands on each of the two operand stacks.
+///
+/// Two numbers rather than one because there are two stacks. Every join point
+/// has to be arrived at with the same amount on both, and `validate` simulates
+/// both, so tracking one and guessing the other would be tracking neither.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Depth {
+    values: u32,
+    scalars: u32,
+}
+
+impl Depth {
+    /// Both stacks empty, which is where a body and a loop's operands start.
+    const EMPTY: Depth = Depth {
+        values: 0,
+        scalars: 0,
+    };
+
+    /// The depths after one instruction of this shape has run.
+    fn after(self, shape: Shape) -> Depth {
+        Depth {
+            values: self.values.saturating_sub(shape.values.0) + shape.values.1,
+            scalars: self.scalars.saturating_sub(shape.scalars.0) + shape.scalars.1,
+        }
+    }
 }
 
 /// The loop a `break` or a `continue` leaves.
 struct LoopFrame {
     break_to: usize,
     continue_to: usize,
-    /// The operand-stack depth the loop runs at, which is what a `break`
-    /// written inside a half-evaluated expression has to get back down to.
-    depth: u32,
+    /// The operand-stack depths the loop runs at, which is what a `break`
+    /// written inside a half-evaluated expression has to get back down to —
+    /// on both stacks, because a half-evaluated `a + b` can have left
+    /// something on either.
+    depth: Depth,
 }
 
 /// Which kind of `for` header a loop is walking.
@@ -707,21 +766,45 @@ enum Position {
     Effect,
 }
 
+/// What lowering one body produced, on its way into a [`Function`].
+struct Finished {
+    code: Vec<Inst>,
+    spans: Vec<Span>,
+    arg_spans: BTreeMap<u32, Vec<Span>>,
+    frame_size: u32,
+    /// Where each slot lives, one entry per slot, which is the frame
+    /// metadata the VM addresses a slot through and a root set is read from.
+    slots: Vec<SlotKind>,
+}
+
 /// Everything one function's instructions are built from.
 struct Body<'a, 'l> {
     outer: &'l mut Lowering<'a>,
     module: &'a str,
     code: Vec<Inst>,
     spans: Vec<Span>,
-    /// The operand-stack depth, or `None` where control cannot arrive.
+    /// The operand-stack depths, or `None` where control cannot arrive.
     ///
     /// `return`, `break`, and `continue` are expressions, so the
     /// instructions written after one are unreachable and have no depth to
     /// speak of. Tracking that rather than guessing is what keeps a later
     /// join point honest.
-    depth: Option<u32>,
+    depth: Option<Depth>,
     live: Vec<Binding<'a>>,
     frame_size: u32,
+    /// Where each slot number lives, by slot number.
+    ///
+    /// It only grows: a slot released at the end of a block keeps its kind,
+    /// because a later sibling block that reuses the number reuses the
+    /// storage, and one number naming two storages is exactly the mistake
+    /// `Body::declare` skips past.
+    kinds: Vec<SlotKind>,
+    /// The next slot number to hand out, restored when a scope ends.
+    ///
+    /// This was `live.len()` while every slot was alike. It is its own number
+    /// now because `declare` may skip a released slot whose kind does not
+    /// match.
+    next: u32,
     labels: Vec<Label>,
     patches: Vec<(usize, usize)>,
     loops: Vec<LoopFrame>,
@@ -737,9 +820,11 @@ impl<'a, 'l> Body<'a, 'l> {
             module,
             code: Vec::new(),
             spans: Vec::new(),
-            depth: Some(0),
+            depth: Some(Depth::EMPTY),
             live: Vec::new(),
             frame_size: 0,
+            kinds: Vec::new(),
+            next: 0,
             labels: Vec::new(),
             patches: Vec::new(),
             loops: Vec::new(),
@@ -748,17 +833,26 @@ impl<'a, 'l> Body<'a, 'l> {
     }
 
     /// The finished instructions, with every jump pointing at a real one.
-    fn finish(mut self) -> (Vec<Inst>, Vec<Span>, BTreeMap<u32, Vec<Span>>, u32) {
+    fn finish(mut self) -> Finished {
         for (pc, label) in &self.patches {
             let target = self.labels[*label]
                 .at
                 .expect("every label a jump names is bound");
             match &mut self.code[*pc] {
-                Inst::Jump(to) | Inst::JumpIfFalse(to) | Inst::JumpIfTrue(to) => *to = target,
+                Inst::Jump(to)
+                | Inst::JumpIfFalse(to)
+                | Inst::JumpIfTrue(to)
+                | Inst::JumpIfFalseScalar(to) => *to = target,
                 other => unreachable!("a patch points at a jump, not {other:?}"),
             }
         }
-        (self.code, self.spans, self.arg_spans, self.frame_size)
+        Finished {
+            code: self.code,
+            spans: self.spans,
+            arg_spans: self.arg_spans,
+            frame_size: self.frame_size,
+            slots: self.kinds,
+        }
     }
 
     // ------------------------------------------------------------ emitting
@@ -774,8 +868,7 @@ impl<'a, 'l> Body<'a, 'l> {
         let Some(depth) = self.depth else {
             return;
         };
-        let (consumed, produced) = stack_shape(&self.outer.constants, inst);
-        self.depth = Some(depth.saturating_sub(consumed) + produced);
+        self.depth = Some(depth.after(stack_shape(&self.outer.constants, inst)));
         if matches!(inst, Inst::Return | Inst::Jump(_) | Inst::NoMatch) {
             self.depth = None;
         }
@@ -795,7 +888,10 @@ impl<'a, 'l> Body<'a, 'l> {
             if matches!(self.code.last(), Some(Inst::Return)) {
                 return;
             }
-            self.depth = Some(1);
+            self.depth = Some(Depth {
+                values: 1,
+                scalars: 0,
+            });
         }
         self.emit(Inst::Return, span);
     }
@@ -818,11 +914,7 @@ impl<'a, 'l> Body<'a, 'l> {
         let Some(depth) = self.depth else {
             return;
         };
-        let arrival = if matches!(inst(0), Inst::Jump(_)) {
-            depth
-        } else {
-            depth - 1
-        };
+        let arrival = depth.after(stack_shape(&self.outer.constants, inst(0)));
         if self.labels[label].depth.is_none() {
             self.labels[label].depth = Some(arrival);
         }
@@ -850,15 +942,54 @@ impl<'a, 'l> Body<'a, 'l> {
     /// Shadowing declares rather than overwrites, exactly as `Env::declare`
     /// does, so `let x = 1; let x = 2` is two slots. `writable` is what a
     /// write to the binding is checked against, and only a `var` is.
-    fn declare(&mut self, name: Option<&'a str>, writable: bool) -> u32 {
-        let slot = self.live.len() as u32;
+    ///
+    /// # Why a released number is not always reused
+    ///
+    /// A block's slots are released at its end and a later sibling block
+    /// reuses the numbers, which is what makes `frame_size` a high-water
+    /// mark. A number now names storage in one of two stacks, so a number
+    /// reused by a binding of the other kind would name two — and neither
+    /// the VM nor `validate` could say which. So a number whose kind does
+    /// not match is skipped, and the reuse that keeps a frame small still
+    /// happens between the bindings that can share.
+    fn declare(&mut self, name: Option<&'a str>, writable: bool, kind: SlotKind) -> u32 {
+        let mut slot = self.next;
+        while self
+            .kinds
+            .get(slot as usize)
+            .is_some_and(|settled| *settled != kind)
+        {
+            slot += 1;
+        }
+        if slot as usize == self.kinds.len() {
+            self.kinds.push(kind);
+        }
+        self.next = slot + 1;
         self.live.push(Binding {
             name,
             slot,
             writable,
+            kind,
         });
         self.frame_size = self.frame_size.max(slot + 1);
         slot
+    }
+
+    /// Where a scope begins, to be handed back to [`Body::release`] when it
+    /// ends.
+    fn scope(&self) -> usize {
+        self.live.len()
+    }
+
+    /// Releases every binding declared since `mark`, which is what ends a
+    /// scope.
+    ///
+    /// The next slot number goes back with them: a scope's declarations are a
+    /// stack, so one past the highest still-live slot is where the block that
+    /// contained them was.
+    fn release(&mut self, mark: usize) {
+        self.live.truncate(mark);
+        self.next = self.live.last().map_or(0, |binding| binding.slot + 1);
     }
 
     /// The binding `name` reaches: the most recent declaration of it, because
@@ -873,6 +1004,18 @@ impl<'a, 'l> Body<'a, 'l> {
     /// The slot `name` reaches.
     fn lookup(&self, name: &str) -> Option<u32> {
         self.binding(name).map(|binding| binding.slot)
+    }
+
+    /// The slot `name` reaches and what it holds, where it is a scalar one.
+    ///
+    /// `None` for a name that is not a local and for a local kept as a
+    /// `Value`, which are the two cases that lower the way they always did.
+    fn scalar_binding(&self, name: &str) -> Option<(u32, Scalar)> {
+        let binding = self.binding(name)?;
+        match binding.kind {
+            SlotKind::Scalar(what) => Some((binding.slot, what)),
+            SlotKind::Value => None,
+        }
     }
 
     /// Whether source may write the binding `name` reaches.
@@ -902,6 +1045,50 @@ impl<'a, 'l> Body<'a, 'l> {
     /// an expression that was never walked — have to answer it the same way.
     fn is_int(&self, expr: &Expr) -> bool {
         matches!(self.settled(expr), Some(Ty::Int))
+    }
+
+    /// What a scalar stack would hold this expression's value as, or `None`
+    /// where the checker settled no type that stack can hold.
+    ///
+    /// The rule [`Body::is_int`] states, asked of both scalar types at once
+    /// and for the same reason: an abstention and an expression that was
+    /// never walked are not settled types, so neither becomes a scalar.
+    fn scalar_of(&self, expr: &Expr) -> Option<Scalar> {
+        match self.settled(expr) {
+            Some(Ty::Int) => Some(Scalar::Int),
+            Some(Ty::Bool) => Some(Scalar::Bool),
+            _ => None,
+        }
+    }
+
+    /// Where a binding declared from `expr` lives.
+    ///
+    /// The same question again, because a binding's storage and an operand's
+    /// storage are settled by the same fact: a slot the checker proved holds
+    /// an `Int` holds an integer word, and a slot it said nothing about holds
+    /// what every slot used to.
+    fn slot_kind(&self, expr: &Expr) -> SlotKind {
+        match self.scalar_of(expr) {
+            Some(what) => SlotKind::Scalar(what),
+            None => SlotKind::Value,
+        }
+    }
+
+    /// Whether this expression is *computed* on the scalar stack, rather than
+    /// computed on the value stack and moved across.
+    ///
+    /// It decides which stack a condition is tested on: a `Bool` the scalar
+    /// stack already holds is one [`Inst::JumpIfFalseScalar`], and one the
+    /// value stack holds would need a [`Inst::ValueToScalar`] first — an
+    /// instruction spent to save none.
+    fn on_scalar_stack(&self, expr: &'a Expr) -> bool {
+        match &expr.kind {
+            ExprKind::Int(_) | ExprKind::Bool(_) => self.scalar_of(expr).is_some(),
+            ExprKind::Ident(name) => self.scalar_binding(name).is_some(),
+            ExprKind::Binary { op, lhs, rhs } => binary_op(*op)
+                .is_some_and(|op| matches!(self.binary_inst(op, lhs, rhs), Inst::IntBinary(_))),
+            _ => false,
+        }
     }
 
     /// The instruction `op` lowers to over these two operands.
@@ -1011,7 +1198,7 @@ impl<'a, 'l> Body<'a, 'l> {
     /// all. Its statements are unaffected: they were already lowered for
     /// their effect, whichever position the block itself is in.
     fn block_at(&mut self, block: &'a Block, position: Position) -> Result<(), Unsupported> {
-        let mark = self.live.len();
+        let mark = self.scope();
         for statement in &block.statements {
             self.statement(statement)?;
         }
@@ -1020,7 +1207,7 @@ impl<'a, 'l> Body<'a, 'l> {
             (None, Position::Value) => self.constant(Const::Unit, block.span),
             (None, Position::Effect) => {}
         }
-        self.live.truncate(mark);
+        self.release(mark);
         Ok(())
     }
 
@@ -1037,9 +1224,18 @@ impl<'a, 'l> Body<'a, 'l> {
                 }
                 // The value is lowered before the name exists, which is what
                 // makes `let x = x` read the outer `x`.
-                self.expr(value)?;
-                let slot = self.declare(Some(name.node.as_str()), *is_var);
-                self.emit(Inst::StoreLocal(slot), statement.span);
+                //
+                // Where the binding lives is settled by the same fact every
+                // typed instruction is settled by: the type the checker gave
+                // what it is declared from. An abstention keeps the slot a
+                // `Value`, and the whole function then reads as it always did.
+                let kind = self.slot_kind(value);
+                match kind {
+                    SlotKind::Scalar(_) => self.expr_scalar(value)?,
+                    SlotKind::Value => self.expr(value)?,
+                }
+                let slot = self.declare(Some(name.node.as_str()), *is_var, kind);
+                self.emit(store_slot(kind, slot), statement.span);
                 Ok(())
             }
             StmtKind::Expr(expr) => {
@@ -1072,6 +1268,63 @@ impl<'a, 'l> Body<'a, 'l> {
     /// missing. See `Position` for why that is worth a second entry point.
     fn effect(&mut self, expr: &'a Expr) -> Result<(), Unsupported> {
         self.expr_at(expr, Position::Effect)
+    }
+
+    /// Lowers one expression so that what it computed is on the scalar
+    /// stack.
+    ///
+    /// Called only where [`Body::scalar_of`] settled a type, so what arrives
+    /// is what the instruction reading it was promised. An expression the
+    /// scalar stack has no instructions for is lowered exactly as it always
+    /// was and moved across by one [`Inst::ValueToScalar`] — a boundary
+    /// rather than a second lowering of the language.
+    fn expr_scalar(&mut self, expr: &'a Expr) -> Result<(), Unsupported> {
+        let span = expr.span;
+        match &expr.kind {
+            ExprKind::Int(value) if self.scalar_of(expr) == Some(Scalar::Int) => {
+                self.emit(Inst::ScalarConst(*value), span);
+            }
+            ExprKind::Bool(value) if self.scalar_of(expr) == Some(Scalar::Bool) => {
+                self.emit(Inst::ScalarConst(i64::from(*value)), span);
+            }
+            ExprKind::Ident(name) => match self.scalar_binding(name) {
+                Some((slot, _)) => self.emit(Inst::LoadScalar(slot), span),
+                None => return self.moved_to_scalar(expr),
+            },
+            ExprKind::Binary { op, lhs, rhs } => {
+                let inst = binary_op(*op).map(|op| self.binary_inst(op, lhs, rhs));
+                let Some(inst @ Inst::IntBinary(_)) = inst else {
+                    return self.moved_to_scalar(expr);
+                };
+                // `binary_inst` answered `IntBinary` only because the checker
+                // settled both operands as `Int`, so both hold this
+                // function's precondition and neither needs asking again.
+                self.expr_scalar(lhs)?;
+                self.expr_scalar(rhs)?;
+                self.emit(inst, span);
+            }
+            _ => return self.moved_to_scalar(expr),
+        }
+        Ok(())
+    }
+
+    /// Lowers one expression the way it has always been lowered, and moves
+    /// what it produced onto the scalar stack.
+    fn moved_to_scalar(&mut self, expr: &'a Expr) -> Result<(), Unsupported> {
+        self.expr(expr)?;
+        self.emit(Inst::ValueToScalar, expr.span);
+        Ok(())
+    }
+
+    /// Lowers a condition and answers whether it left its `Bool` on the
+    /// scalar stack.
+    fn condition(&mut self, condition: &'a Expr) -> Result<bool, Unsupported> {
+        if self.scalar_of(condition) == Some(Scalar::Bool) && self.on_scalar_stack(condition) {
+            self.expr_scalar(condition)?;
+            return Ok(true);
+        }
+        self.expr(condition)?;
+        Ok(false)
     }
 
     /// Lowers one expression in the position it was written in.
@@ -1218,6 +1471,14 @@ impl<'a, 'l> Body<'a, 'l> {
     /// shadow the host module of that name — and what leaves an `http.fetch`
     /// written above the `let` still reaching the host.
     fn ident(&mut self, name: &str, span: Span) -> Result<(), Unsupported> {
+        if let Some((slot, what)) = self.scalar_binding(name) {
+            // A scalar slot read where a `Value` is wanted is the boundary in
+            // the outward direction, and the instruction carries the tag the
+            // word itself does not.
+            self.emit(Inst::LoadScalar(slot), span);
+            self.emit(Inst::ScalarToValue(what), span);
+            return Ok(());
+        }
         if let Some(slot) = self.lookup(name) {
             self.emit(Inst::LoadLocal(slot), span);
             return Ok(());
@@ -1338,6 +1599,18 @@ impl<'a, 'l> Body<'a, 'l> {
             _ => {
                 let op = binary_op(op).expect("`&&` and `||` are the two handled above");
                 let inst = self.binary_inst(op, lhs, rhs);
+                if let Inst::IntBinary(typed) = inst {
+                    // The typed operator lives on the scalar stack, so its
+                    // operands are lowered onto it and its answer is moved
+                    // back only because a value is what was asked for here.
+                    // Where a scalar is what was asked for, `expr_scalar`
+                    // emits the same three instructions and no fourth.
+                    self.expr_scalar(lhs)?;
+                    self.expr_scalar(rhs)?;
+                    self.emit(inst, span);
+                    self.emit(Inst::ScalarToValue(int_result(typed)), span);
+                    return Ok(());
+                }
                 self.expr(lhs)?;
                 self.expr(rhs)?;
                 self.emit(inst, span);
@@ -1367,17 +1640,21 @@ impl<'a, 'l> Body<'a, 'l> {
         let ExprKind::Ident(name) = &target.kind else {
             return Err(Unsupported::new("assignment to this place", span));
         };
-        let Some(slot) = self.lookup(name) else {
+        let Some(binding) = self.binding(name) else {
             return Err(Unsupported::new(
                 format!("assignment to `{name}`, which is not a local"),
                 span,
             ));
         };
+        let (slot, kind) = (binding.slot, binding.kind);
         if !self.is_writable(name) {
             return Err(read_only_place(name, span));
         }
         match op {
-            None => self.expr(value)?,
+            None => match kind {
+                SlotKind::Scalar(_) => self.expr_scalar(value)?,
+                SlotKind::Value => self.expr(value)?,
+            },
             Some(op) => {
                 let Some(op) = binary_op(op) else {
                     return Err(Unsupported::new("this compound assignment", span));
@@ -1387,12 +1664,38 @@ impl<'a, 'l> Body<'a, 'l> {
                 // arithmetic — the same question `a + b` asks, asked of the
                 // two expressions this form writes as one.
                 let inst = self.binary_inst(op, target, value);
-                self.emit(Inst::LoadLocal(slot), target.span);
-                self.expr(value)?;
-                self.emit(inst, span);
+                match (kind, inst) {
+                    // Read, combine, and write again without ever leaving the
+                    // scalar stack. This is `i += 1` inside a loop, which is
+                    // the case the whole arrangement exists for.
+                    (SlotKind::Scalar(_), Inst::IntBinary(_)) => {
+                        self.emit(Inst::LoadScalar(slot), target.span);
+                        self.expr_scalar(value)?;
+                        self.emit(inst, span);
+                    }
+                    (SlotKind::Scalar(what), _) => {
+                        self.emit(Inst::LoadScalar(slot), target.span);
+                        self.emit(Inst::ScalarToValue(what), target.span);
+                        self.expr(value)?;
+                        self.emit(inst, span);
+                        self.emit(Inst::ValueToScalar, span);
+                    }
+                    (SlotKind::Value, Inst::IntBinary(typed)) => {
+                        self.emit(Inst::LoadLocal(slot), target.span);
+                        self.emit(Inst::ValueToScalar, target.span);
+                        self.expr_scalar(value)?;
+                        self.emit(inst, span);
+                        self.emit(Inst::ScalarToValue(int_result(typed)), span);
+                    }
+                    (SlotKind::Value, _) => {
+                        self.emit(Inst::LoadLocal(slot), target.span);
+                        self.expr(value)?;
+                        self.emit(inst, span);
+                    }
+                }
             }
         }
-        self.emit(Inst::StoreLocal(slot), span);
+        self.emit(store_slot(kind, slot), span);
         if position == Position::Value {
             self.constant(Const::Unit, span);
         }
@@ -1457,8 +1760,19 @@ impl<'a, 'l> Body<'a, 'l> {
                 let inst = self.binary_inst(op, target, value);
                 self.emit(Inst::Dup, place);
                 self.emit(read, place);
-                self.expr(value)?;
-                self.emit(inst, span);
+                if let Inst::IntBinary(typed) = inst {
+                    // A field is a `Value` wherever it is read from, so this
+                    // is the boundary in both directions around one typed
+                    // operator. A struct's fields are not slots and this
+                    // slice does not make them one.
+                    self.emit(Inst::ValueToScalar, place);
+                    self.expr_scalar(value)?;
+                    self.emit(inst, span);
+                    self.emit(Inst::ScalarToValue(int_result(typed)), span);
+                } else {
+                    self.expr(value)?;
+                    self.emit(inst, span);
+                }
             }
         }
         self.emit(Inst::SetField(named), span);
@@ -1488,12 +1802,12 @@ impl<'a, 'l> Body<'a, 'l> {
         position: Position,
         span: Span,
     ) -> Result<(), Unsupported> {
-        self.expr(condition)?;
+        let branch = branch_on(self.condition(condition)?);
         match else_branch {
             Some(else_branch) => {
                 let otherwise = self.label();
                 let end = self.label();
-                self.jump(Inst::JumpIfFalse, otherwise, condition.span);
+                self.jump(branch, otherwise, condition.span);
                 self.block_at(then_branch, position)?;
                 self.jump(Inst::Jump, end, span);
                 self.bind(otherwise);
@@ -1502,7 +1816,7 @@ impl<'a, 'l> Body<'a, 'l> {
             }
             None => {
                 let end = self.label();
-                self.jump(Inst::JumpIfFalse, end, condition.span);
+                self.jump(branch, end, condition.span);
                 self.block_at(then_branch, Position::Effect)?;
                 self.bind(end);
                 if position == Position::Value {
@@ -1522,12 +1836,12 @@ impl<'a, 'l> Body<'a, 'l> {
         position: Position,
         span: Span,
     ) -> Result<(), Unsupported> {
-        let base = self.depth.unwrap_or(0);
+        let base = self.depth.unwrap_or(Depth::EMPTY);
         let top = self.label();
         let end = self.label();
         self.bind(top);
-        self.expr(condition)?;
-        self.jump(Inst::JumpIfFalse, end, condition.span);
+        let branch = branch_on(self.condition(condition)?);
+        self.jump(branch, end, condition.span);
         self.loops.push(LoopFrame {
             break_to: end,
             continue_to: top,
@@ -1568,8 +1882,8 @@ impl<'a, 'l> Body<'a, 'l> {
         position: Position,
         span: Span,
     ) -> Result<(), Unsupported> {
-        let base = self.depth.unwrap_or(0);
-        let mark = self.live.len();
+        let base = self.depth.unwrap_or(Depth::EMPTY);
+        let mark = self.scope();
 
         let (cursor, header) = match &iterable.kind {
             ExprKind::Range {
@@ -1577,8 +1891,8 @@ impl<'a, 'l> Body<'a, 'l> {
                 end,
                 inclusive_end,
             } => {
-                let cursor = self.declare(None, false);
-                let limit = self.declare(None, false);
+                let cursor = self.declare(None, false, SlotKind::Value);
+                let limit = self.declare(None, false, SlotKind::Value);
                 self.expr(start)?;
                 self.emit(Inst::StoreLocal(cursor), start.span);
                 self.expr(end)?;
@@ -1592,9 +1906,9 @@ impl<'a, 'l> Body<'a, 'l> {
                 )
             }
             _ => {
-                let sequence = self.declare(None, false);
-                let length = self.declare(None, false);
-                let cursor = self.declare(None, false);
+                let sequence = self.declare(None, false, SlotKind::Value);
+                let length = self.declare(None, false, SlotKind::Value);
+                let cursor = self.declare(None, false, SlotKind::Value);
                 self.expr(iterable)?;
                 self.emit(Inst::IterItems, iterable.span);
                 self.emit(Inst::StoreLocal(sequence), iterable.span);
@@ -1612,7 +1926,7 @@ impl<'a, 'l> Body<'a, 'l> {
         // block opens a scope inside this one.
         // A `for` binding is read-only, which is what the interpreter
         // declares one as.
-        let element = self.declare(Some(binding), false);
+        let element = self.declare(Some(binding), false, SlotKind::Value);
 
         let top = self.label();
         let next = self.label();
@@ -1676,7 +1990,7 @@ impl<'a, 'l> Body<'a, 'l> {
         self.jump(Inst::Jump, top, span);
 
         self.bind(end);
-        self.live.truncate(mark);
+        self.release(mark);
         if position == Position::Value {
             self.constant(Const::Unit, span);
         }
@@ -1701,12 +2015,15 @@ impl<'a, 'l> Body<'a, 'l> {
             frame.continue_to
         };
         let base = frame.depth;
-        // Whatever the half-evaluated expression around this left on the
-        // stack goes with it, so the loop's exit is reached at the depth the
+        // Whatever the half-evaluated expression around this left on either
+        // stack goes with it, so the loop's exit is reached at the depths the
         // loop runs at.
         if let Some(depth) = self.depth {
-            for _ in base..depth {
+            for _ in base.values..depth.values {
                 self.emit(Inst::Pop, span);
+            }
+            for _ in base.scalars..depth.scalars {
+                self.emit(Inst::ScalarPop, span);
             }
         }
         self.jump(Inst::Jump, target, span);
@@ -2130,15 +2447,15 @@ impl<'a, 'l> Body<'a, 'l> {
         // The depth the subject alone stands at. Every failed test gets back
         // down to it before it jumps, so the next arm begins where this one
         // began and `validate`'s simulation sees one depth per instruction.
-        let subject = self.depth.unwrap_or(0);
+        let subject = self.depth.map_or(0, |depth| depth.values);
         let end = self.label();
         for arm in arms {
-            let mark = self.live.len();
+            let mark = self.scope();
             let next = self.label();
             self.pattern(&arm.pattern, next, subject)?;
             self.emit(Inst::Pop, arm.span);
             self.expr_at(&arm.body, position)?;
-            self.live.truncate(mark);
+            self.release(mark);
             self.jump(Inst::Jump, end, arm.span);
             self.bind(next);
         }
@@ -2239,7 +2556,7 @@ impl<'a, 'l> Body<'a, 'l> {
     ) -> Result<(), Unsupported> {
         if name != builtins::NONE_CASE.name {
             self.emit(Inst::Dup, span);
-            let slot = self.declare(Some(name), false);
+            let slot = self.declare(Some(name), false, SlotKind::Value);
             self.emit(Inst::StoreLocal(slot), span);
             return Ok(());
         }
@@ -2260,7 +2577,7 @@ impl<'a, 'l> Body<'a, 'l> {
         self.fail_arm(next, subject, span);
         self.bind(bind_it);
         self.emit(Inst::Dup, span);
-        let slot = self.declare(Some(name), false);
+        let slot = self.declare(Some(name), false, SlotKind::Value);
         self.emit(Inst::StoreLocal(slot), span);
         self.bind(matched);
         Ok(())
@@ -2274,7 +2591,7 @@ impl<'a, 'l> Body<'a, 'l> {
     /// inside a payload cannot: the payloads it is standing on have to come
     /// off first, and a conditional jump has nowhere to put them.
     fn test(&mut self, next: usize, subject: u32, span: Span) {
-        if self.depth == Some(subject + 1) {
+        if self.depth.map(|depth| depth.values) == Some(subject + 1) {
             self.jump(Inst::JumpIfFalse, next, span);
             return;
         }
@@ -2292,7 +2609,7 @@ impl<'a, 'l> Body<'a, 'l> {
     /// evaluated expression.
     fn fail_arm(&mut self, next: usize, subject: u32, span: Span) {
         if let Some(depth) = self.depth {
-            for _ in subject..depth {
+            for _ in subject..depth.values {
                 self.emit(Inst::Pop, span);
             }
         }
@@ -2571,6 +2888,35 @@ fn binary_op(op: SourceBinary) -> Option<BinaryOp> {
     })
 }
 
+/// The instruction that writes a slot, which is decided by where the slot is.
+fn store_slot(kind: SlotKind, slot: u32) -> Inst {
+    match kind {
+        SlotKind::Value => Inst::StoreLocal(slot),
+        SlotKind::Scalar(_) => Inst::StoreScalar(slot),
+    }
+}
+
+/// What [`Inst::IntBinary`] leaves on the scalar stack.
+///
+/// Arithmetic answers an `Int` and a comparison answers a `Bool`. The scalar
+/// stack carries no tag, so this is where a boundary instruction learns which
+/// of the two it is being handed.
+fn int_result(op: IntOp) -> Scalar {
+    match op {
+        IntOp::Add | IntOp::Sub | IntOp::Mul | IntOp::Div | IntOp::Rem => Scalar::Int,
+        IntOp::Eq | IntOp::Ne | IntOp::Lt | IntOp::Le | IntOp::Gt | IntOp::Ge => Scalar::Bool,
+    }
+}
+
+/// The conditional jump that reads the stack a condition was left on.
+fn branch_on(scalar: bool) -> fn(u32) -> Inst {
+    if scalar {
+        Inst::JumpIfFalseScalar
+    } else {
+        Inst::JumpIfFalse
+    }
+}
+
 /// The operator as [`Inst::IntBinary`] carries it, or `None` for one `Int`
 /// does not answer.
 ///
@@ -2650,11 +2996,16 @@ fn reject_parameter(
 /// having — so this is where the trust is earned. Every jump lands on an
 /// instruction, every slot is inside the frame, every id names something,
 /// every recorded argument span belongs to an instruction that exists, every
-/// function ends in a `Return`, and the operand stack has one depth at
+/// function ends in a `Return`, and both operand stacks have one depth at
 /// every instruction control can reach: a join point arrived at with two
 /// different depths is a bug in the lowering, and finding it here is the
 /// difference between a failed test and a VM reading a value that is not
 /// there.
+///
+/// A slot is addressed as what it is, too. A slot number names storage in
+/// one of the two stacks, and which one is settled at lowering, so a scalar
+/// instruction reaching a value slot — or the other way round — is caught
+/// here rather than read as whichever eight bytes happened to stand there.
 pub fn validate(program: &Program) -> Result<(), String> {
     for (index, function) in program.functions.iter().enumerate() {
         let id = FunctionId(index as u32);
@@ -2681,6 +3032,24 @@ fn validate_function(program: &Program, id: FunctionId) -> Result<(), String> {
             "takes {} arguments but has a frame of {}",
             function.arity, function.frame_size
         ));
+    }
+    if function.slots.len() != function.frame_size as usize {
+        return Err(format!(
+            "describes {} slots of a frame of {}",
+            function.slots.len(),
+            function.frame_size
+        ));
+    }
+    // An argument arrives on the caller's value stack and becomes one of the
+    // callee's first slots without moving, which is the calling convention
+    // and is why a parameter's slot is a value slot. A scalar parameter would
+    // need the convention changed, and this slice does not change it.
+    for slot in 0..function.arity as usize {
+        if function.slots[slot].is_scalar() {
+            return Err(format!(
+                "takes argument {slot} into a scalar slot, which no call fills"
+            ));
+        }
     }
     if !matches!(function.code.last(), Some(Inst::Return)) {
         return Err("does not end in a `return`".to_string());
@@ -2720,6 +3089,24 @@ fn validate_function(program: &Program, id: FunctionId) -> Result<(), String> {
                         function.frame_size
                     )));
                 }
+                if function.slots[slot as usize].is_scalar() {
+                    return Err(at(format!(
+                        "reaches slot {slot} as a value, and it is a scalar slot"
+                    )));
+                }
+            }
+            Inst::LoadScalar(slot) | Inst::StoreScalar(slot) => {
+                if slot >= function.frame_size {
+                    return Err(at(format!(
+                        "reaches slot {slot} of a frame of {}",
+                        function.frame_size
+                    )));
+                }
+                if !function.slots[slot as usize].is_scalar() {
+                    return Err(at(format!(
+                        "reaches slot {slot} as a scalar, and it is a value slot"
+                    )));
+                }
             }
             Inst::LoadCapture(index) => {
                 if index as usize >= function.captures.len() {
@@ -2729,7 +3116,10 @@ fn validate_function(program: &Program, id: FunctionId) -> Result<(), String> {
                     )));
                 }
             }
-            Inst::Jump(to) | Inst::JumpIfFalse(to) | Inst::JumpIfTrue(to) => {
+            Inst::Jump(to)
+            | Inst::JumpIfFalse(to)
+            | Inst::JumpIfTrue(to)
+            | Inst::JumpIfFalseScalar(to) => {
                 if to as usize >= length {
                     return Err(at(format!("jumps to {to}, past the {length} instructions")));
                 }
@@ -2775,11 +3165,11 @@ fn validate_function(program: &Program, id: FunctionId) -> Result<(), String> {
         }
     }
 
-    // The operand stack, simulated over every path control can take. Code no
-    // path reaches is not simulated: it cannot be run, so its depth is not a
-    // fact about anything.
-    let mut depths: Vec<Option<i64>> = vec![None; length];
-    let mut pending = vec![(0usize, 0i64)];
+    // Both operand stacks, simulated over every path control can take. Code
+    // no path reaches is not simulated: it cannot be run, so its depths are
+    // not a fact about anything.
+    let mut depths: Vec<Option<(i64, i64)>> = vec![None; length];
+    let mut pending = vec![(0usize, (0i64, 0i64))];
     while let Some((pc, depth)) = pending.pop() {
         if pc >= length {
             return Err(format!(
@@ -2790,26 +3180,37 @@ fn validate_function(program: &Program, id: FunctionId) -> Result<(), String> {
         if let Some(seen) = depths[pc] {
             if seen != depth {
                 return Err(format!(
-                    "{pc}: reached with {depth} values on the stack and with {seen}"
+                    "{pc}: reached with {} values and {} scalars on the stack and with {} and {}",
+                    depth.0, depth.1, seen.0, seen.1
                 ));
             }
             continue;
         }
         depths[pc] = Some(depth);
         let inst = function.code[pc];
-        let (consumed, produced) = stack_shape(&program.constants, inst);
-        if depth < i64::from(consumed) {
+        let shape = stack_shape(&program.constants, inst);
+        if depth.0 < i64::from(shape.values.0) {
             return Err(format!(
-                "{pc}: takes {consumed} values off a stack of {depth}"
+                "{pc}: takes {} values off a stack of {}",
+                shape.values.0, depth.0
             ));
         }
-        let after = depth - i64::from(consumed) + i64::from(produced);
+        if depth.1 < i64::from(shape.scalars.0) {
+            return Err(format!(
+                "{pc}: takes {} scalars off a stack of {}",
+                shape.scalars.0, depth.1
+            ));
+        }
+        let after = (
+            depth.0 - i64::from(shape.values.0) + i64::from(shape.values.1),
+            depth.1 - i64::from(shape.scalars.0) + i64::from(shape.scalars.1),
+        );
         match inst {
             // Neither continues: a return leaves the frame, and a `match`
             // that covered nothing stops the run.
             Inst::Return | Inst::NoMatch => {}
             Inst::Jump(to) => pending.push((to as usize, after)),
-            Inst::JumpIfFalse(to) | Inst::JumpIfTrue(to) => {
+            Inst::JumpIfFalse(to) | Inst::JumpIfTrue(to) | Inst::JumpIfFalseScalar(to) => {
                 pending.push((to as usize, after));
                 pending.push((pc + 1, after));
             }
@@ -2819,39 +3220,90 @@ fn validate_function(program: &Program, id: FunctionId) -> Result<(), String> {
     Ok(())
 }
 
-/// How many values an instruction takes off the stack and puts back.
+/// How many operands an instruction takes off each stack and puts back.
+///
+/// Two pairs rather than one, because there are two stacks and an
+/// instruction may read one and write the other: that is what a boundary
+/// instruction *is*.
+#[derive(Clone, Copy)]
+struct Shape {
+    /// Taken off, and put back on, the value stack.
+    values: (u32, u32),
+    /// Taken off, and put back on, the scalar stack.
+    scalars: (u32, u32),
+}
+
+impl Shape {
+    /// An instruction that touches only the value stack.
+    const fn on_values(taken: u32, left: u32) -> Shape {
+        Shape {
+            values: (taken, left),
+            scalars: (0, 0),
+        }
+    }
+
+    /// An instruction that touches only the scalar stack.
+    const fn on_scalars(taken: u32, left: u32) -> Shape {
+        Shape {
+            values: (0, 0),
+            scalars: (taken, left),
+        }
+    }
+}
+
+/// How many operands an instruction takes off each stack and puts back.
 ///
 /// One description, read by the lowering as it emits and by [`validate`] as
 /// it simulates, so the two cannot disagree about what an instruction does.
-fn stack_shape(constants: &[Const], inst: Inst) -> (u32, u32) {
+fn stack_shape(constants: &[Const], inst: Inst) -> Shape {
     match inst {
-        Inst::Const(_) | Inst::LoadLocal(_) | Inst::LoadCapture(_) => (0, 1),
-        Inst::StoreLocal(_) | Inst::Pop => (1, 0),
-        Inst::Dup => (1, 2),
-        Inst::Unary(_) | Inst::GetField(_) | Inst::GetFieldAt(_) | Inst::Try => (1, 1),
-        Inst::Binary(_) | Inst::IntBinary(_) | Inst::SetField(_) => (2, 1),
-        Inst::Jump(_) => (0, 0),
-        Inst::JumpIfFalse(_) | Inst::JumpIfTrue(_) | Inst::Return => (1, 0),
+        Inst::Const(_) | Inst::LoadLocal(_) | Inst::LoadCapture(_) => Shape::on_values(0, 1),
+        Inst::StoreLocal(_) | Inst::Pop => Shape::on_values(1, 0),
+        Inst::Dup => Shape::on_values(1, 2),
+        Inst::Unary(_) | Inst::GetField(_) | Inst::GetFieldAt(_) | Inst::Try => {
+            Shape::on_values(1, 1)
+        }
+        Inst::Binary(_) | Inst::SetField(_) => Shape::on_values(2, 1),
+        // The typed operator is the scalar stack's: two `i64` in, one out.
+        Inst::IntBinary(_) => Shape::on_scalars(2, 1),
+        Inst::ScalarConst(_) | Inst::LoadScalar(_) => Shape::on_scalars(0, 1),
+        Inst::StoreScalar(_) | Inst::ScalarPop | Inst::JumpIfFalseScalar(_) => {
+            Shape::on_scalars(1, 0)
+        }
+        // The two boundary instructions, and the only ones that move
+        // anything between the stacks.
+        Inst::ScalarToValue(_) => Shape {
+            values: (0, 1),
+            scalars: (1, 0),
+        },
+        Inst::ValueToScalar => Shape {
+            values: (1, 0),
+            scalars: (0, 1),
+        },
+        Inst::Jump(_) => Shape::on_values(0, 0),
+        Inst::JumpIfFalse(_) | Inst::JumpIfTrue(_) | Inst::Return => Shape::on_values(1, 0),
         Inst::Call { argc, .. } | Inst::CallHost { argc, .. } | Inst::MakeBuiltin { argc, .. } => {
-            (argc, 1)
+            Shape::on_values(argc, 1)
         }
         // The receiver sits below the arguments.
-        Inst::CallBuiltin { argc, .. } => (argc + 1, 1),
-        Inst::MakeArray(len) => (len, 1),
-        Inst::Concat(parts) => (parts, 1),
-        Inst::MakeStruct { fields, .. } => (field_count(constants, fields), 1),
+        Inst::CallBuiltin { argc, .. } => Shape::on_values(argc + 1, 1),
+        Inst::MakeArray(len) => Shape::on_values(len, 1),
+        Inst::Concat(parts) => Shape::on_values(parts, 1),
+        Inst::MakeStruct { fields, .. } => Shape::on_values(field_count(constants, fields), 1),
         // A case's payload is what it is built from, and an associated
         // function has no receiver, so both read exactly their arguments.
-        Inst::MakeEnum { argc, .. } | Inst::CallBuiltinAssoc { argc, .. } => (argc, 1),
+        Inst::MakeEnum { argc, .. } | Inst::CallBuiltinAssoc { argc, .. } => {
+            Shape::on_values(argc, 1)
+        }
         // Both peek: a pattern tests the subject and then binds out of it,
         // and the arm after this one needs the subject still there.
-        Inst::TestCase(_) | Inst::GetPayload(_) => (0, 1),
+        Inst::TestCase(_) | Inst::GetPayload(_) => Shape::on_values(0, 1),
         // The iterable is read and the `Array` of what a `for` walks it as
         // stands where it stood.
-        Inst::IterItems => (1, 1),
+        Inst::IterItems => Shape::on_values(1, 1),
         // The value no arm covered is what the message names, so it is read;
         // nothing is put back, because control does not continue.
-        Inst::NoMatch => (1, 0),
+        Inst::NoMatch => Shape::on_values(1, 0),
     }
 }
 
@@ -3008,21 +3460,22 @@ mod tests {
                 "fn f() -> Int {\n  let a = 1\n  let b = 1.5\n  let c = true\n  let d = 250ms\n  let e = ()\n  let g = \"hi\"\n  a\n}\n",
                 "f"
             ),
-            "fn m.f arity=0 frame=6\n\
-             \x20  0  const Int(1)\n\
-             \x20  1  store 0\n\
+            "fn m.f arity=0 frame=6 scalars=[0:Int, 2:Bool]\n\
+             \x20  0  scalar-const 1\n\
+             \x20  1  store-scalar 0\n\
              \x20  2  const Float(1.5)\n\
              \x20  3  store 1\n\
-             \x20  4  const Bool(true)\n\
-             \x20  5  store 2\n\
+             \x20  4  scalar-const 1\n\
+             \x20  5  store-scalar 2\n\
              \x20  6  const Duration(250000000)\n\
              \x20  7  store 3\n\
              \x20  8  const Unit\n\
              \x20  9  store 4\n\
              \x20 10  const Str(\"hi\")\n\
              \x20 11  store 5\n\
-             \x20 12  load 0\n\
-             \x20 13  return\n"
+             \x20 12  load-scalar 0\n\
+             \x20 13  scalar-to-value Int\n\
+             \x20 14  return\n"
         );
     }
 
@@ -3062,17 +3515,18 @@ mod tests {
                 "fn f() -> Int {\n  var x = 1\n  x = 2\n  x += 3\n  x\n}\n",
                 "f"
             ),
-            "fn m.f arity=0 frame=1\n\
-             \x20  0  const Int(1)\n\
-             \x20  1  store 0\n\
-             \x20  2  const Int(2)\n\
-             \x20  3  store 0\n\
-             \x20  4  load 0\n\
-             \x20  5  const Int(3)\n\
+            "fn m.f arity=0 frame=1 scalars=[0:Int]\n\
+             \x20  0  scalar-const 1\n\
+             \x20  1  store-scalar 0\n\
+             \x20  2  scalar-const 2\n\
+             \x20  3  store-scalar 0\n\
+             \x20  4  load-scalar 0\n\
+             \x20  5  scalar-const 3\n\
              \x20  6  int Add\n\
-             \x20  7  store 0\n\
-             \x20  8  load 0\n\
-             \x20  9  return\n"
+             \x20  7  store-scalar 0\n\
+             \x20  8  load-scalar 0\n\
+             \x20  9  scalar-to-value Int\n\
+             \x20 10  return\n"
         );
     }
 
@@ -3086,11 +3540,11 @@ mod tests {
     fn an_assignment_whose_value_is_read_still_answers_unit() {
         assert_eq!(
             listing("fn f() -> Unit {\n  var x = 1\n  x = 2\n}\n", "f"),
-            "fn m.f arity=0 frame=1\n\
-             \x20  0  const Int(1)\n\
-             \x20  1  store 0\n\
-             \x20  2  const Int(2)\n\
-             \x20  3  store 0\n\
+            "fn m.f arity=0 frame=1 scalars=[0:Int]\n\
+             \x20  0  scalar-const 1\n\
+             \x20  1  store-scalar 0\n\
+             \x20  2  scalar-const 2\n\
+             \x20  3  store-scalar 0\n\
              \x20  4  const Unit\n\
              \x20  5  return\n"
         );
@@ -3105,19 +3559,27 @@ mod tests {
             ),
             "fn m.f arity=2 frame=2\n\
              \x20  0  load 0\n\
-             \x20  1  load 1\n\
-             \x20  2  int Mul\n\
-             \x20  3  load 0\n\
-             \x20  4  int Div\n\
-             \x20  5  load 1\n\
-             \x20  6  int Rem\n\
-             \x20  7  load 0\n\
-             \x20  8  int Sub\n\
-             \x20  9  load 1\n\
-             \x20 10  int Add\n\
+             \x20  1  value-to-scalar\n\
+             \x20  2  load 1\n\
+             \x20  3  value-to-scalar\n\
+             \x20  4  int Mul\n\
+             \x20  5  load 0\n\
+             \x20  6  value-to-scalar\n\
+             \x20  7  int Div\n\
+             \x20  8  load 1\n\
+             \x20  9  value-to-scalar\n\
+             \x20 10  int Rem\n\
              \x20 11  load 0\n\
-             \x20 12  int Ne\n\
-             \x20 13  return\n"
+             \x20 12  value-to-scalar\n\
+             \x20 13  int Sub\n\
+             \x20 14  load 1\n\
+             \x20 15  value-to-scalar\n\
+             \x20 16  int Add\n\
+             \x20 17  load 0\n\
+             \x20 18  value-to-scalar\n\
+             \x20 19  int Ne\n\
+             \x20 20  scalar-to-value Bool\n\
+             \x20 21  return\n"
         );
     }
 
@@ -3141,19 +3603,21 @@ mod tests {
                 "fn f(a: Int, b: Int, c: Float, d: Float, e: Duration, g: Duration) -> Duration {\n  let n = a + b\n  let x = c + d\n  e + g\n}\n",
                 "f"
             ),
-            "fn m.f arity=6 frame=8\n\
+            "fn m.f arity=6 frame=8 scalars=[6:Int]\n\
              \x20  0  load 0\n\
-             \x20  1  load 1\n\
-             \x20  2  int Add\n\
-             \x20  3  store 6\n\
-             \x20  4  load 2\n\
-             \x20  5  load 3\n\
-             \x20  6  binary Add\n\
-             \x20  7  store 7\n\
-             \x20  8  load 4\n\
-             \x20  9  load 5\n\
-             \x20 10  binary Add\n\
-             \x20 11  return\n"
+             \x20  1  value-to-scalar\n\
+             \x20  2  load 1\n\
+             \x20  3  value-to-scalar\n\
+             \x20  4  int Add\n\
+             \x20  5  store-scalar 6\n\
+             \x20  6  load 2\n\
+             \x20  7  load 3\n\
+             \x20  8  binary Add\n\
+             \x20  9  store 7\n\
+             \x20 10  load 4\n\
+             \x20 11  load 5\n\
+             \x20 12  binary Add\n\
+             \x20 13  return\n"
         );
     }
 
@@ -3171,10 +3635,13 @@ mod tests {
             "fn m.f arity=1 frame=1\n\
              \x20  0  load 0\n\
              \x20  1  get-field-at 0\n\
-             \x20  2  load 0\n\
-             \x20  3  get-field-at 1\n\
-             \x20  4  int Add\n\
-             \x20  5  return\n"
+             \x20  2  value-to-scalar\n\
+             \x20  3  load 0\n\
+             \x20  4  get-field-at 1\n\
+             \x20  5  value-to-scalar\n\
+             \x20  6  int Add\n\
+             \x20  7  scalar-to-value Int\n\
+             \x20  8  return\n"
         );
     }
 
@@ -3196,13 +3663,16 @@ mod tests {
             "fn m.f arity=1 frame=1\n\
              \x20  0  load 0\n\
              \x20  1  call m.Box.length argc=1\n\
-             \x20  2  const Int(1)\n\
-             \x20  3  const Int(2)\n\
-             \x20  4  const Int(3)\n\
-             \x20  5  make-array 3\n\
-             \x20  6  call-builtin length argc=0\n\
-             \x20  7  int Add\n\
-             \x20  8  return\n"
+             \x20  2  value-to-scalar\n\
+             \x20  3  const Int(1)\n\
+             \x20  4  const Int(2)\n\
+             \x20  5  const Int(3)\n\
+             \x20  6  make-array 3\n\
+             \x20  7  call-builtin length argc=0\n\
+             \x20  8  value-to-scalar\n\
+             \x20  9  int Add\n\
+             \x20 10  scalar-to-value Int\n\
+             \x20 11  return\n"
         );
     }
 
@@ -3247,9 +3717,9 @@ mod tests {
     fn a_block_with_no_tail_is_unit() {
         assert_eq!(
             listing("fn f() -> Unit {\n  let a = 1\n}\n", "f"),
-            "fn m.f arity=0 frame=1\n\
-             \x20  0  const Int(1)\n\
-             \x20  1  store 0\n\
+            "fn m.f arity=0 frame=1 scalars=[0:Int]\n\
+             \x20  0  scalar-const 1\n\
+             \x20  1  store-scalar 0\n\
              \x20  2  const Unit\n\
              \x20  3  return\n"
         );
@@ -3268,19 +3738,20 @@ mod tests {
                 "fn f(n: Int) -> Unit {\n  {\n    if n < 2 {\n      let a = 1\n    } else {\n      let b = 2\n    }\n  }\n}\n",
                 "f"
             ),
-            "fn m.f arity=1 frame=2\n\
+            "fn m.f arity=1 frame=2 scalars=[1:Int]\n\
              \x20  0  load 0\n\
-             \x20  1  const Int(2)\n\
-             \x20  2  int Lt\n\
-             \x20  3  jump-if-false 8\n\
-             \x20  4  const Int(1)\n\
-             \x20  5  store 1\n\
-             \x20  6  const Unit\n\
-             \x20  7  jump 11\n\
-             \x20  8  const Int(2)\n\
-             \x20  9  store 1\n\
-             \x20 10  const Unit\n\
-             \x20 11  return\n"
+             \x20  1  value-to-scalar\n\
+             \x20  2  scalar-const 2\n\
+             \x20  3  int Lt\n\
+             \x20  4  jump-if-false-scalar 9\n\
+             \x20  5  scalar-const 1\n\
+             \x20  6  store-scalar 1\n\
+             \x20  7  const Unit\n\
+             \x20  8  jump 12\n\
+             \x20  9  scalar-const 2\n\
+             \x20 10  store-scalar 1\n\
+             \x20 11  const Unit\n\
+             \x20 12  return\n"
         );
     }
 
@@ -3293,17 +3764,20 @@ mod tests {
                 "fn f(n: Int) -> Int {\n  let x = if n < 2 {\n    1\n  } else {\n    2\n  }\n  x\n}\n",
                 "f"
             ),
-            "fn m.f arity=1 frame=2\n\
+            "fn m.f arity=1 frame=2 scalars=[1:Int]\n\
              \x20  0  load 0\n\
-             \x20  1  const Int(2)\n\
-             \x20  2  int Lt\n\
-             \x20  3  jump-if-false 6\n\
-             \x20  4  const Int(1)\n\
-             \x20  5  jump 7\n\
-             \x20  6  const Int(2)\n\
-             \x20  7  store 1\n\
-             \x20  8  load 1\n\
-             \x20  9  return\n"
+             \x20  1  value-to-scalar\n\
+             \x20  2  scalar-const 2\n\
+             \x20  3  int Lt\n\
+             \x20  4  jump-if-false-scalar 7\n\
+             \x20  5  const Int(1)\n\
+             \x20  6  jump 8\n\
+             \x20  7  const Int(2)\n\
+             \x20  8  value-to-scalar\n\
+             \x20  9  store-scalar 1\n\
+             \x20 10  load-scalar 1\n\
+             \x20 11  scalar-to-value Int\n\
+             \x20 12  return\n"
         );
     }
 
@@ -3316,15 +3790,18 @@ mod tests {
             ),
             "fn m.f arity=1 frame=1\n\
              \x20  0  load 0\n\
-             \x20  1  const Int(2)\n\
-             \x20  2  int Lt\n\
-             \x20  3  jump-if-false 6\n\
-             \x20  4  load 0\n\
-             \x20  5  jump 9\n\
-             \x20  6  load 0\n\
-             \x20  7  const Int(1)\n\
-             \x20  8  int Sub\n\
-             \x20  9  return\n"
+             \x20  1  value-to-scalar\n\
+             \x20  2  scalar-const 2\n\
+             \x20  3  int Lt\n\
+             \x20  4  jump-if-false-scalar 7\n\
+             \x20  5  load 0\n\
+             \x20  6  jump 12\n\
+             \x20  7  load 0\n\
+             \x20  8  value-to-scalar\n\
+             \x20  9  scalar-const 1\n\
+             \x20 10  int Sub\n\
+             \x20 11  scalar-to-value Int\n\
+             \x20 12  return\n"
         );
     }
 
@@ -3340,17 +3817,19 @@ mod tests {
                 "fn f(n: Int) -> Int {\n  var t = 0\n  if n < 2 {\n    t = 1\n  }\n  t\n}\n",
                 "f"
             ),
-            "fn m.f arity=1 frame=2\n\
-             \x20  0  const Int(0)\n\
-             \x20  1  store 1\n\
+            "fn m.f arity=1 frame=2 scalars=[1:Int]\n\
+             \x20  0  scalar-const 0\n\
+             \x20  1  store-scalar 1\n\
              \x20  2  load 0\n\
-             \x20  3  const Int(2)\n\
-             \x20  4  int Lt\n\
-             \x20  5  jump-if-false 8\n\
-             \x20  6  const Int(1)\n\
-             \x20  7  store 1\n\
-             \x20  8  load 1\n\
-             \x20  9  return\n"
+             \x20  3  value-to-scalar\n\
+             \x20  4  scalar-const 2\n\
+             \x20  5  int Lt\n\
+             \x20  6  jump-if-false-scalar 9\n\
+             \x20  7  scalar-const 1\n\
+             \x20  8  store-scalar 1\n\
+             \x20  9  load-scalar 1\n\
+             \x20 10  scalar-to-value Int\n\
+             \x20 11  return\n"
         );
     }
 
@@ -3362,17 +3841,18 @@ mod tests {
                 "fn f(n: Int) -> Unit {\n  var t = 0\n  if n < 2 {\n    t = 1\n  }\n}\n",
                 "f"
             ),
-            "fn m.f arity=1 frame=2\n\
-             \x20  0  const Int(0)\n\
-             \x20  1  store 1\n\
+            "fn m.f arity=1 frame=2 scalars=[1:Int]\n\
+             \x20  0  scalar-const 0\n\
+             \x20  1  store-scalar 1\n\
              \x20  2  load 0\n\
-             \x20  3  const Int(2)\n\
-             \x20  4  int Lt\n\
-             \x20  5  jump-if-false 8\n\
-             \x20  6  const Int(1)\n\
-             \x20  7  store 1\n\
-             \x20  8  const Unit\n\
-             \x20  9  return\n"
+             \x20  3  value-to-scalar\n\
+             \x20  4  scalar-const 2\n\
+             \x20  5  int Lt\n\
+             \x20  6  jump-if-false-scalar 9\n\
+             \x20  7  scalar-const 1\n\
+             \x20  8  store-scalar 1\n\
+             \x20  9  const Unit\n\
+             \x20 10  return\n"
         );
     }
 
@@ -3389,20 +3869,21 @@ mod tests {
                 "fn f() -> Int {\n  var i = 0\n  while i < 3 {\n    i += 1\n  }\n  i\n}\n",
                 "f"
             ),
-            "fn m.f arity=0 frame=1\n\
-             \x20  0  const Int(0)\n\
-             \x20  1  store 0\n\
-             \x20  2  load 0\n\
-             \x20  3  const Int(3)\n\
+            "fn m.f arity=0 frame=1 scalars=[0:Int]\n\
+             \x20  0  scalar-const 0\n\
+             \x20  1  store-scalar 0\n\
+             \x20  2  load-scalar 0\n\
+             \x20  3  scalar-const 3\n\
              \x20  4  int Lt\n\
-             \x20  5  jump-if-false 11\n\
-             \x20  6  load 0\n\
-             \x20  7  const Int(1)\n\
+             \x20  5  jump-if-false-scalar 11\n\
+             \x20  6  load-scalar 0\n\
+             \x20  7  scalar-const 1\n\
              \x20  8  int Add\n\
-             \x20  9  store 0\n\
+             \x20  9  store-scalar 0\n\
              \x20 10  jump 2\n\
-             \x20 11  load 0\n\
-             \x20 12  return\n"
+             \x20 11  load-scalar 0\n\
+             \x20 12  scalar-to-value Int\n\
+             \x20 13  return\n"
         );
     }
 
@@ -3423,9 +3904,9 @@ mod tests {
                 "fn f() -> Int {\n  var t = 0\n  for i in 0..<3 {\n    t += i\n  }\n  t\n}\n",
                 "f"
             ),
-            "fn m.f arity=0 frame=4\n\
-             \x20  0  const Int(0)\n\
-             \x20  1  store 0\n\
+            "fn m.f arity=0 frame=4 scalars=[0:Int]\n\
+             \x20  0  scalar-const 0\n\
+             \x20  1  store-scalar 0\n\
              \x20  2  const Int(0)\n\
              \x20  3  store 1\n\
              \x20  4  const Int(3)\n\
@@ -3433,20 +3914,22 @@ mod tests {
              \x20  6  load 1\n\
              \x20  7  load 2\n\
              \x20  8  binary Lt\n\
-             \x20  9  jump-if-false 21\n\
+             \x20  9  jump-if-false 22\n\
              \x20 10  load 1\n\
              \x20 11  store 3\n\
-             \x20 12  load 0\n\
+             \x20 12  load-scalar 0\n\
              \x20 13  load 3\n\
-             \x20 14  int Add\n\
-             \x20 15  store 0\n\
-             \x20 16  load 1\n\
-             \x20 17  const Int(1)\n\
-             \x20 18  binary Add\n\
-             \x20 19  store 1\n\
-             \x20 20  jump 6\n\
-             \x20 21  load 0\n\
-             \x20 22  return\n"
+             \x20 14  value-to-scalar\n\
+             \x20 15  int Add\n\
+             \x20 16  store-scalar 0\n\
+             \x20 17  load 1\n\
+             \x20 18  const Int(1)\n\
+             \x20 19  binary Add\n\
+             \x20 20  store 1\n\
+             \x20 21  jump 6\n\
+             \x20 22  load-scalar 0\n\
+             \x20 23  scalar-to-value Int\n\
+             \x20 24  return\n"
         );
     }
 
@@ -3480,9 +3963,9 @@ mod tests {
                 "fn f(items: Array<Int>) -> Int {\n  var t = 0\n  for item in items {\n    t += item\n  }\n  t\n}\n",
                 "f"
             ),
-            "fn m.f arity=1 frame=6\n\
-             \x20  0  const Int(0)\n\
-             \x20  1  store 1\n\
+            "fn m.f arity=1 frame=6 scalars=[1:Int]\n\
+             \x20  0  scalar-const 0\n\
+             \x20  1  store-scalar 1\n\
              \x20  2  load 0\n\
              \x20  3  iter-items\n\
              \x20  4  store 2\n\
@@ -3494,23 +3977,25 @@ mod tests {
              \x20 10  load 4\n\
              \x20 11  load 3\n\
              \x20 12  binary Lt\n\
-             \x20 13  jump-if-false 28\n\
+             \x20 13  jump-if-false 29\n\
              \x20 14  load 2\n\
              \x20 15  load 4\n\
              \x20 16  call-builtin get argc=1\n\
              \x20 17  try\n\
              \x20 18  store 5\n\
-             \x20 19  load 1\n\
+             \x20 19  load-scalar 1\n\
              \x20 20  load 5\n\
-             \x20 21  int Add\n\
-             \x20 22  store 1\n\
-             \x20 23  load 4\n\
-             \x20 24  const Int(1)\n\
-             \x20 25  binary Add\n\
-             \x20 26  store 4\n\
-             \x20 27  jump 10\n\
-             \x20 28  load 1\n\
-             \x20 29  return\n"
+             \x20 21  value-to-scalar\n\
+             \x20 22  int Add\n\
+             \x20 23  store-scalar 1\n\
+             \x20 24  load 4\n\
+             \x20 25  const Int(1)\n\
+             \x20 26  binary Add\n\
+             \x20 27  store 4\n\
+             \x20 28  jump 10\n\
+             \x20 29  load-scalar 1\n\
+             \x20 30  scalar-to-value Int\n\
+             \x20 31  return\n"
         );
     }
 
@@ -3523,30 +4008,31 @@ mod tests {
                 "fn f() -> Int {\n  var i = 0\n  while i < 10 {\n    i += 1\n    if i == 2 {\n      continue\n    }\n    if i == 5 {\n      break\n    }\n  }\n  i\n}\n",
                 "f"
             ),
-            "fn m.f arity=0 frame=1\n\
-             \x20  0  const Int(0)\n\
-             \x20  1  store 0\n\
-             \x20  2  load 0\n\
-             \x20  3  const Int(10)\n\
+            "fn m.f arity=0 frame=1 scalars=[0:Int]\n\
+             \x20  0  scalar-const 0\n\
+             \x20  1  store-scalar 0\n\
+             \x20  2  load-scalar 0\n\
+             \x20  3  scalar-const 10\n\
              \x20  4  int Lt\n\
-             \x20  5  jump-if-false 21\n\
-             \x20  6  load 0\n\
-             \x20  7  const Int(1)\n\
+             \x20  5  jump-if-false-scalar 21\n\
+             \x20  6  load-scalar 0\n\
+             \x20  7  scalar-const 1\n\
              \x20  8  int Add\n\
-             \x20  9  store 0\n\
-             \x20 10  load 0\n\
-             \x20 11  const Int(2)\n\
+             \x20  9  store-scalar 0\n\
+             \x20 10  load-scalar 0\n\
+             \x20 11  scalar-const 2\n\
              \x20 12  int Eq\n\
-             \x20 13  jump-if-false 15\n\
+             \x20 13  jump-if-false-scalar 15\n\
              \x20 14  jump 2\n\
-             \x20 15  load 0\n\
-             \x20 16  const Int(5)\n\
+             \x20 15  load-scalar 0\n\
+             \x20 16  scalar-const 5\n\
              \x20 17  int Eq\n\
-             \x20 18  jump-if-false 20\n\
+             \x20 18  jump-if-false-scalar 20\n\
              \x20 19  jump 21\n\
              \x20 20  jump 2\n\
-             \x20 21  load 0\n\
-             \x20 22  return\n"
+             \x20 21  load-scalar 0\n\
+             \x20 22  scalar-to-value Int\n\
+             \x20 23  return\n"
         );
     }
 
@@ -3559,21 +4045,29 @@ mod tests {
             ),
             "fn m.fib arity=1 frame=1\n\
              \x20  0  load 0\n\
-             \x20  1  const Int(2)\n\
-             \x20  2  int Lt\n\
-             \x20  3  jump-if-false 6\n\
-             \x20  4  load 0\n\
-             \x20  5  jump 15\n\
-             \x20  6  load 0\n\
-             \x20  7  const Int(1)\n\
-             \x20  8  int Sub\n\
-             \x20  9  call m.fib argc=1\n\
-             \x20 10  load 0\n\
-             \x20 11  const Int(2)\n\
-             \x20 12  int Sub\n\
-             \x20 13  call m.fib argc=1\n\
-             \x20 14  int Add\n\
-             \x20 15  return\n"
+             \x20  1  value-to-scalar\n\
+             \x20  2  scalar-const 2\n\
+             \x20  3  int Lt\n\
+             \x20  4  jump-if-false-scalar 7\n\
+             \x20  5  load 0\n\
+             \x20  6  jump 23\n\
+             \x20  7  load 0\n\
+             \x20  8  value-to-scalar\n\
+             \x20  9  scalar-const 1\n\
+             \x20 10  int Sub\n\
+             \x20 11  scalar-to-value Int\n\
+             \x20 12  call m.fib argc=1\n\
+             \x20 13  value-to-scalar\n\
+             \x20 14  load 0\n\
+             \x20 15  value-to-scalar\n\
+             \x20 16  scalar-const 2\n\
+             \x20 17  int Sub\n\
+             \x20 18  scalar-to-value Int\n\
+             \x20 19  call m.fib argc=1\n\
+             \x20 20  value-to-scalar\n\
+             \x20 21  int Add\n\
+             \x20 22  scalar-to-value Int\n\
+             \x20 23  return\n"
         );
     }
 
@@ -3605,10 +4099,13 @@ mod tests {
              \x20  3  store 0\n\
              \x20  4  load 0\n\
              \x20  5  call m.P.sum argc=1\n\
-             \x20  6  load 0\n\
-             \x20  7  get-field-at 0\n\
-             \x20  8  int Add\n\
-             \x20  9  return\n"
+             \x20  6  value-to-scalar\n\
+             \x20  7  load 0\n\
+             \x20  8  get-field-at 0\n\
+             \x20  9  value-to-scalar\n\
+             \x20 10  int Add\n\
+             \x20 11  scalar-to-value Int\n\
+             \x20 12  return\n"
         );
     }
 
@@ -3619,10 +4116,13 @@ mod tests {
             "fn m.P.sum arity=1 frame=1 receiver\n\
              \x20  0  load 0\n\
              \x20  1  get-field-at 0\n\
-             \x20  2  load 0\n\
-             \x20  3  get-field-at 1\n\
-             \x20  4  int Add\n\
-             \x20  5  return\n"
+             \x20  2  value-to-scalar\n\
+             \x20  3  load 0\n\
+             \x20  4  get-field-at 1\n\
+             \x20  5  value-to-scalar\n\
+             \x20  6  int Add\n\
+             \x20  7  scalar-to-value Int\n\
+             \x20  8  return\n"
         );
     }
 
@@ -3753,10 +4253,12 @@ mod tests {
             "fn m.f arity=1 frame=1\n\
              \x20  0  load 0\n\
              \x20  1  try\n\
-             \x20  2  const Int(1)\n\
-             \x20  3  int Add\n\
-             \x20  4  make-builtin Some argc=1\n\
-             \x20  5  return\n"
+             \x20  2  value-to-scalar\n\
+             \x20  3  scalar-const 1\n\
+             \x20  4  int Add\n\
+             \x20  5  scalar-to-value Int\n\
+             \x20  6  make-builtin Some argc=1\n\
+             \x20  7  return\n"
         );
     }
 
@@ -3769,13 +4271,14 @@ mod tests {
             ),
             "fn m.f arity=1 frame=1\n\
              \x20  0  load 0\n\
-             \x20  1  const Int(0)\n\
-             \x20  2  int Lt\n\
-             \x20  3  jump-if-false 6\n\
-             \x20  4  const Int(0)\n\
-             \x20  5  return\n\
-             \x20  6  load 0\n\
-             \x20  7  return\n"
+             \x20  1  value-to-scalar\n\
+             \x20  2  scalar-const 0\n\
+             \x20  3  int Lt\n\
+             \x20  4  jump-if-false-scalar 7\n\
+             \x20  5  const Int(0)\n\
+             \x20  6  return\n\
+             \x20  7  load 0\n\
+             \x20  8  return\n"
         );
     }
 
@@ -3788,15 +4291,16 @@ mod tests {
                 "fn f() -> Int {\n  let x = 1\n  let x = x + 1\n  x\n}\n",
                 "f"
             ),
-            "fn m.f arity=0 frame=2\n\
-             \x20  0  const Int(1)\n\
-             \x20  1  store 0\n\
-             \x20  2  load 0\n\
-             \x20  3  const Int(1)\n\
+            "fn m.f arity=0 frame=2 scalars=[0:Int, 1:Int]\n\
+             \x20  0  scalar-const 1\n\
+             \x20  1  store-scalar 0\n\
+             \x20  2  load-scalar 0\n\
+             \x20  3  scalar-const 1\n\
              \x20  4  int Add\n\
-             \x20  5  store 1\n\
-             \x20  6  load 1\n\
-             \x20  7  return\n"
+             \x20  5  store-scalar 1\n\
+             \x20  6  load-scalar 1\n\
+             \x20  7  scalar-to-value Int\n\
+             \x20  8  return\n"
         );
     }
 
@@ -3810,15 +4314,17 @@ mod tests {
                 "fn f() -> Int {\n  {\n    let a = 1\n    a\n  }\n  {\n    let b = 2\n    b\n  }\n}\n",
                 "f"
             ),
-            "fn m.f arity=0 frame=1\n\
-             \x20  0  const Int(1)\n\
-             \x20  1  store 0\n\
-             \x20  2  load 0\n\
-             \x20  3  pop\n\
-             \x20  4  const Int(2)\n\
-             \x20  5  store 0\n\
-             \x20  6  load 0\n\
-             \x20  7  return\n"
+            "fn m.f arity=0 frame=1 scalars=[0:Int]\n\
+             \x20  0  scalar-const 1\n\
+             \x20  1  store-scalar 0\n\
+             \x20  2  load-scalar 0\n\
+             \x20  3  scalar-to-value Int\n\
+             \x20  4  pop\n\
+             \x20  5  scalar-const 2\n\
+             \x20  6  store-scalar 0\n\
+             \x20  7  load-scalar 0\n\
+             \x20  8  scalar-to-value Int\n\
+             \x20  9  return\n"
         );
     }
 
@@ -3831,17 +4337,18 @@ mod tests {
                 "fn f() -> Int {\n  let a = 1\n  {\n    let b = 2\n    let c = 3\n    b + c\n  }\n}\n",
                 "f"
             ),
-            "fn m.f arity=0 frame=3\n\
-             \x20  0  const Int(1)\n\
-             \x20  1  store 0\n\
-             \x20  2  const Int(2)\n\
-             \x20  3  store 1\n\
-             \x20  4  const Int(3)\n\
-             \x20  5  store 2\n\
-             \x20  6  load 1\n\
-             \x20  7  load 2\n\
+            "fn m.f arity=0 frame=3 scalars=[0:Int, 1:Int, 2:Int]\n\
+             \x20  0  scalar-const 1\n\
+             \x20  1  store-scalar 0\n\
+             \x20  2  scalar-const 2\n\
+             \x20  3  store-scalar 1\n\
+             \x20  4  scalar-const 3\n\
+             \x20  5  store-scalar 2\n\
+             \x20  6  load-scalar 1\n\
+             \x20  7  load-scalar 2\n\
              \x20  8  int Add\n\
-             \x20  9  return\n"
+             \x20  9  scalar-to-value Int\n\
+             \x20 10  return\n"
         );
     }
 
@@ -3854,11 +4361,13 @@ mod tests {
                 "fn f(x: Int) -> Int {\n  {\n    let x = x\n    x\n  }\n}\n",
                 "f"
             ),
-            "fn m.f arity=1 frame=2\n\
+            "fn m.f arity=1 frame=2 scalars=[1:Int]\n\
              \x20  0  load 0\n\
-             \x20  1  store 1\n\
-             \x20  2  load 1\n\
-             \x20  3  return\n"
+             \x20  1  value-to-scalar\n\
+             \x20  2  store-scalar 1\n\
+             \x20  3  load-scalar 1\n\
+             \x20  4  scalar-to-value Int\n\
+             \x20  5  return\n"
         );
     }
 
@@ -4156,39 +4665,53 @@ mod tests {
             .expect("its entry is lowered");
         assert_eq!(
             crate::render(&program, id),
-            "fn arith.main arity=0 frame=2\n\
-             \x20  0  const Int(0)\n\
-             \x20  1  store 0\n\
-             \x20  2  const Int(0)\n\
-             \x20  3  store 1\n\
-             \x20  4  load 1\n\
-             \x20  5  const Int(2000000)\n\
+            "fn arith.main arity=0 frame=2 scalars=[0:Int, 1:Int]\n\
+             \x20  0  scalar-const 0\n\
+             \x20  1  store-scalar 0\n\
+             \x20  2  scalar-const 0\n\
+             \x20  3  store-scalar 1\n\
+             \x20  4  load-scalar 1\n\
+             \x20  5  scalar-const 2000000\n\
              \x20  6  int Lt\n\
-             \x20  7  jump-if-false 23\n\
-             \x20  8  load 1\n\
-             \x20  9  const Int(7)\n\
+             \x20  7  jump-if-false-scalar 23\n\
+             \x20  8  load-scalar 1\n\
+             \x20  9  scalar-const 7\n\
              \x20 10  int Rem\n\
-             \x20 11  const Int(0)\n\
+             \x20 11  scalar-const 0\n\
              \x20 12  int Eq\n\
-             \x20 13  jump-if-false 18\n\
-             \x20 14  load 0\n\
-             \x20 15  const Int(1)\n\
+             \x20 13  jump-if-false-scalar 18\n\
+             \x20 14  load-scalar 0\n\
+             \x20 15  scalar-const 1\n\
              \x20 16  int Add\n\
-             \x20 17  store 0\n\
-             \x20 18  load 1\n\
-             \x20 19  const Int(1)\n\
+             \x20 17  store-scalar 0\n\
+             \x20 18  load-scalar 1\n\
+             \x20 19  scalar-const 1\n\
              \x20 20  int Add\n\
-             \x20 21  store 1\n\
+             \x20 21  store-scalar 1\n\
              \x20 22  jump 4\n\
-             \x20 23  load 0\n\
-             \x20 24  const Int(285715)\n\
-             \x20 25  make-builtin assertEqual argc=2\n\
-             \x20 26  try\n\
-             \x20 27  pop\n\
-             \x20 28  const Unit\n\
-             \x20 29  make-builtin Ok argc=1\n\
-             \x20 30  return\n"
+             \x20 23  load-scalar 0\n\
+             \x20 24  scalar-to-value Int\n\
+             \x20 25  const Int(285715)\n\
+             \x20 26  make-builtin assertEqual argc=2\n\
+             \x20 27  try\n\
+             \x20 28  pop\n\
+             \x20 29  const Unit\n\
+             \x20 30  make-builtin Ok argc=1\n\
+             \x20 31  return\n"
         );
+
+        // The hot loop, from the test at its top to the jump back, holds no
+        // instruction that reads or writes the value stack. The
+        // `assertEqual` below it is the boundary, and it is outside the loop.
+        let function = program.function(id);
+        for inst in &function.code[4..=22] {
+            let shape = stack_shape(&program.constants, *inst);
+            assert_eq!(
+                (shape.values.0, shape.values.1),
+                (0, 0),
+                "`arith`'s loop runs no general `Value` operation, and {inst:?} is one"
+            );
+        }
     }
 
     /// The other two lower through the instruction that writes a field, and
@@ -4235,13 +4758,15 @@ mod tests {
              \x20  3  load 0\n\
              \x20  4  dup\n\
              \x20  5  get-field-at 0\n\
-             \x20  6  const Int(2)\n\
-             \x20  7  int Add\n\
-             \x20  8  set-field x\n\
-             \x20  9  store 0\n\
-             \x20 10  load 0\n\
-             \x20 11  get-field-at 0\n\
-             \x20 12  return\n"
+             \x20  6  value-to-scalar\n\
+             \x20  7  scalar-const 2\n\
+             \x20  8  int Add\n\
+             \x20  9  scalar-to-value Int\n\
+             \x20 10  set-field x\n\
+             \x20 11  store 0\n\
+             \x20 12  load 0\n\
+             \x20 13  get-field-at 0\n\
+             \x20 14  return\n"
         );
     }
 
@@ -4419,6 +4944,59 @@ mod tests {
         );
     }
 
+    /// A scalar instruction may only reach a scalar slot, and a value
+    /// instruction only a value slot.
+    ///
+    /// A slot number names storage in one of two stacks, and nothing about
+    /// the number says which. Read as the wrong one it would answer with
+    /// whichever eight bytes stood there, which is the class of mistake this
+    /// check exists to make impossible rather than merely unlikely.
+    #[test]
+    fn validate_refuses_a_slot_addressed_as_the_wrong_kind() {
+        let source = "fn f() -> Int {\n  let a = 1\n  a\n}\n";
+        let mut program = lower(&checked(source)).expect("it lowers");
+        program.functions[0].code[1] = Inst::StoreLocal(0);
+        assert_eq!(
+            validate(&program).expect_err("a scalar slot written as a value is refused"),
+            "m.f: 1: reaches slot 0 as a value, and it is a scalar slot"
+        );
+
+        let mut program =
+            lower(&checked("fn f(s: String) -> String {\n  s\n}\n")).expect("it lowers");
+        program.functions[0].code[0] = Inst::LoadScalar(0);
+        assert_eq!(
+            validate(&program).expect_err("a value slot read as a scalar is refused"),
+            "m.f: 0: reaches slot 0 as a scalar, and it is a value slot"
+        );
+    }
+
+    /// Two sibling blocks share a slot number only when they agree about
+    /// where it lives.
+    ///
+    /// The first block's `Int` takes slot 0 in the scalar stack. The second
+    /// block's `String` cannot have slot 0 as well, because one number would
+    /// then name two storages, so it takes the next number instead and the
+    /// frame is one bigger than the deepest block. Reuse still happens
+    /// between bindings that can share it, which the third block shows.
+    #[test]
+    fn sibling_blocks_share_a_slot_number_only_when_the_kinds_agree() {
+        assert_eq!(
+            listing(
+                "fn f() -> Unit {\n  {\n    let a = 1\n  }\n  {\n    let b = \"two\"\n  }\n  {\n    let c = 3\n  }\n}\n",
+                "f"
+            ),
+            "fn m.f arity=0 frame=2 scalars=[0:Int]\n\
+             \x20  0  scalar-const 1\n\
+             \x20  1  store-scalar 0\n\
+             \x20  2  const Str(\"two\")\n\
+             \x20  3  store 1\n\
+             \x20  4  scalar-const 3\n\
+             \x20  5  store-scalar 0\n\
+             \x20  6  const Unit\n\
+             \x20  7  return\n"
+        );
+    }
+
     #[test]
     fn validate_refuses_a_join_reached_at_two_depths() {
         let mut program = lower(&checked(
@@ -4470,7 +5048,7 @@ mod tests {
         function.arg_spans.insert(99, vec![span]);
         assert_eq!(
             validate(&program).expect_err("spans for no instruction are refused"),
-            "m.f: carries argument spans for instruction 99 of 9"
+            "m.f: carries argument spans for instruction 99 of 10"
         );
     }
 

@@ -44,6 +44,29 @@
 //! whole point of the exercise — issue #104 measured a minimal call at
 //! 650–790 ns, most of it building an environment and tearing it down.
 //!
+//! # A second stack, for the words that are not values
+//!
+//! Beside it is a `Vec<i64>`, and a slot the checker proved holds an `Int` or
+//! a `Bool` lives there instead — as the integer itself, or as 0 or 1. Every
+//! frame is a window into both, at its `base` and at its `scalar_base`, and
+//! a call and a return move both the same way.
+//!
+//! The point is negative. `benches/arith` adds two integers two million
+//! times, and a `Value` is 40 bytes with a destructor, so the loop was moving
+//! 40 bytes per push and running drop glue per pop to do arithmetic that owns
+//! nothing. A typed instruction over a scalar stack does not touch a `Value`
+//! at all, and [`Inst::ScalarToValue`] and [`Inst::ValueToScalar`] are the
+//! two places where the loop meets something general.
+//!
+//! **A scalar slot holds no reference.** That is what it is for, and it is
+//! also what the root set is: a collection that scans a frame scans the
+//! `Value` slots `cove_ir::Function::slots` names and can skip the rest
+//! without inspecting them, because eight bytes of integer cannot reach the
+//! heap. There is no collection in this VM yet — nothing the lowering covers
+//! allocates growable storage — so this is a statement about where the roots
+//! are rather than code that reads them, said here so that whoever writes
+//! that collection does not have to infer it.
+//!
 //! # What is not here
 //!
 //! Closures, tasks, `var` places, and everything else `cove_ir::lower`
@@ -57,7 +80,7 @@ use std::time::{Duration, Instant};
 
 use cove_diag::{SourceMap, Span};
 use cove_ir::{
-    BinaryOp as IrBinary, Const, ConstId, Function, FunctionId, Inst, IntOp, Program,
+    BinaryOp as IrBinary, Const, ConstId, Function, FunctionId, Inst, IntOp, Program, Scalar,
     UnaryOp as IrUnary,
 };
 use cove_schema::builtins::{free_builtin, FreeBuiltinKind, MAP_ENTRY, NONE_CASE, OPTION, RESULT};
@@ -132,6 +155,20 @@ struct Frame {
     /// slots without moving. A return truncates to `base`, which is that one
     /// fact read from the other side.
     base: usize,
+    /// Where this frame's slots begin in the scalar stack.
+    ///
+    /// A separate number from `base` because the two stacks are separate: an
+    /// argument arrives on the value stack, so nothing is transferred here
+    /// and a call's scalar window simply begins above whatever scalar
+    /// operands the caller had half-computed. A return truncates to it, which
+    /// discards this frame's scalar slots and leaves the caller's operands
+    /// exactly as they were.
+    ///
+    /// Every slot number is a window into both stacks and lives in one of
+    /// them; `cove_ir::Function::slots` says which, and
+    /// `cove_ir::lower::validate` proved that every instruction addresses its
+    /// slot as what it is.
+    scalar_base: usize,
 }
 
 /// What a `MakeStruct` builds, worked out once for the whole run.
@@ -183,6 +220,13 @@ pub struct Vm<'a> {
     /// One contiguous value stack shared by every frame: slots below,
     /// operands above.
     stack: Vec<Value>,
+    /// The same arrangement for the slots and operands the checker proved
+    /// are `Int` or `Bool`, as eight bytes each and with no tag and no
+    /// destructor.
+    ///
+    /// Nothing in here is a GC root: a scalar is a number, and a number
+    /// reaches nothing.
+    scalars: Vec<i64>,
     frames: Vec<Frame>,
     /// One entry per constant, filled for the constants a `MakeStruct` names
     /// its type with and empty everywhere else.
@@ -241,6 +285,7 @@ impl<'a> Vm<'a> {
             program,
             sources: runtime.sources(),
             stack: Vec::new(),
+            scalars: Vec::new(),
             frames: Vec::new(),
             shapes: struct_shapes(runtime, program),
             enums: enum_shapes(runtime, program),
@@ -272,14 +317,21 @@ impl<'a> Vm<'a> {
             .at(entry.span));
         }
         self.stack.clear();
+        self.scalars.clear();
         self.frames.clear();
         self.fuel = 0;
         self.stack.extend(args);
         self.stack.resize(entry.frame_size as usize, Value::Unit);
+        // Both windows are the whole frame, so a slot number indexes either
+        // stack directly and nothing has to be mapped. A slot lives in one of
+        // them; the cell it does not use costs eight bytes or forty and no
+        // instruction reads it.
+        self.scalars.resize(entry.frame_size as usize, 0);
         self.frames.push(Frame {
             function,
             return_pc: 0,
             base: 0,
+            scalar_base: 0,
         });
 
         // The two events an entry is bracketed by are source-level, which is
@@ -506,10 +558,45 @@ impl<'a> Vm<'a> {
                     // one word however large the number is, so this operator's
                     // cost is the constant fuel every instruction is charged
                     // and nothing proportional to what it was handed.
-                    let rhs = promised_int(self.pop());
-                    let lhs = promised_int(self.pop());
+                    let rhs = self.pop_scalar();
+                    let lhs = self.pop_scalar();
                     let answer = int_binary(op, lhs, rhs, running.span_at(pc))?;
-                    self.stack.push(answer);
+                    self.scalars.push(answer);
+                }
+                Inst::ScalarConst(value) => self.scalars.push(value),
+                Inst::LoadScalar(slot) => {
+                    let value = self.scalars[frame.scalar_base + slot as usize];
+                    self.scalars.push(value);
+                }
+                Inst::StoreScalar(slot) => {
+                    let value = self.pop_scalar();
+                    self.scalars[frame.scalar_base + slot as usize] = value;
+                }
+                Inst::ScalarPop => {
+                    self.pop_scalar();
+                }
+                Inst::JumpIfFalseScalar(to) => {
+                    // A scalar `Bool` is 0 or 1 and the lowering emitted this
+                    // only where the checker settled one, so there is nothing
+                    // to examine: the value *is* the answer.
+                    if self.pop_scalar() == 0 {
+                        if to as usize <= pc {
+                            self.back_edge(running.span_at(pc))?;
+                        }
+                        pc = to as usize;
+                        continue;
+                    }
+                }
+                Inst::ScalarToValue(what) => {
+                    let scalar = self.pop_scalar();
+                    self.stack.push(match what {
+                        Scalar::Int => Value::Int(scalar),
+                        Scalar::Bool => Value::Bool(scalar != 0),
+                    });
+                }
+                Inst::ValueToScalar => {
+                    let value = self.pop();
+                    self.scalars.push(promised_scalar(value));
                 }
                 Inst::Jump(to) => {
                     if to as usize <= pc {
@@ -542,10 +629,18 @@ impl<'a> Vm<'a> {
                     let base = self.stack.len() - argc as usize;
                     self.stack
                         .resize(base + callee.frame_size as usize, Value::Unit);
+                    // Every argument arrived on the value stack, so nothing
+                    // is transferred here: the callee's scalar window simply
+                    // opens above whatever scalar operands the caller had
+                    // half-computed, and a return closes it again.
+                    let scalar_base = self.scalars.len();
+                    self.scalars
+                        .resize(scalar_base + callee.frame_size as usize, 0);
                     frame = Frame {
                         function: target,
                         return_pc: pc + 1,
                         base,
+                        scalar_base,
                     };
                     self.frames.push(frame);
                     running = callee;
@@ -807,6 +902,17 @@ impl<'a> Vm<'a> {
             .expect("a validated instruction takes only values that are there")
     }
 
+    /// The top of the scalar stack.
+    ///
+    /// Empty here means the same thing an empty value stack means: a broken
+    /// invariant of this backend, because `cove_ir::lower::validate`
+    /// simulated both depths before the VM was handed the program.
+    fn pop_scalar(&mut self) -> i64 {
+        self.scalars
+            .pop()
+            .expect("a validated instruction takes only scalars that are there")
+    }
+
     /// The top `count` values, in the order they were pushed.
     fn take(&mut self, count: usize) -> Vec<Value> {
         let at = self.stack.len() - count;
@@ -850,6 +956,7 @@ impl<'a> Vm<'a> {
     fn leave(&mut self, value: Value) -> Answer {
         let done = self.frames.pop().expect("a return leaves a frame");
         self.stack.truncate(done.base);
+        self.scalars.truncate(done.scalar_base);
         match self.frames.last().copied() {
             Some(caller) => {
                 self.stack.push(value);
@@ -1109,19 +1216,22 @@ fn binary_op(op: IrBinary) -> BinaryOp {
     }
 }
 
-/// The `Int` an [`Inst::IntBinary`] was promised.
+/// The `Int` or `Bool` an [`Inst::ValueToScalar`] was promised, as the word
+/// the scalar stack keeps it as.
 ///
-/// The lowering emits one only where the checker settled *both* operands as
-/// `Int`, so anything else arriving here is a broken invariant of this
+/// The lowering emits one only where the checker settled the value as one of
+/// those two, so anything else arriving here is a broken invariant of this
 /// backend and not a program that could be told about it — the same standing
-/// as an operand stack that came up empty. Saying so is what keeps the
-/// promise readable: the type is in the instruction, and the value is not
-/// examined because it does not have to be.
-fn promised_int(value: Value) -> i64 {
+/// as an operand stack that came up empty. This is the only instruction that
+/// looks at a `Value`'s tag on the way in, and it looks because it is the
+/// boundary: everything above it in the scalar stack is a word with no tag
+/// at all.
+fn promised_scalar(value: Value) -> i64 {
     match value {
         Value::Int(value) => value,
+        Value::Bool(value) => i64::from(value),
         other => unreachable!(
-            "`int` was emitted for two `Int`, and was handed a `{}`",
+            "`value-to-scalar` was emitted for an `Int` or a `Bool`, and was handed a `{}`",
             other.type_name()
         ),
     }
@@ -1141,44 +1251,41 @@ fn promised_int(value: Value) -> i64 {
 /// answers `None` for `i64::MIN / -1` and for `n / 0` alike and those are
 /// two different failures with two different messages. `crate::interp::binary`
 /// tests in that order for that reason, and so this does.
-fn int_binary(op: IntOp, lhs: i64, rhs: i64, span: Span) -> Result<Value, RuntimeError> {
+fn int_binary(op: IntOp, lhs: i64, rhs: i64, span: Span) -> Result<i64, RuntimeError> {
     Ok(match op {
-        IntOp::Add => Value::Int(
-            lhs.checked_add(rhs)
-                .ok_or_else(|| overflow("addition", span))?,
-        ),
-        IntOp::Sub => Value::Int(
-            lhs.checked_sub(rhs)
-                .ok_or_else(|| overflow("subtraction", span))?,
-        ),
-        IntOp::Mul => Value::Int(
-            lhs.checked_mul(rhs)
-                .ok_or_else(|| overflow("multiplication", span))?,
-        ),
+        IntOp::Add => lhs
+            .checked_add(rhs)
+            .ok_or_else(|| overflow("addition", span))?,
+        IntOp::Sub => lhs
+            .checked_sub(rhs)
+            .ok_or_else(|| overflow("subtraction", span))?,
+        IntOp::Mul => lhs
+            .checked_mul(rhs)
+            .ok_or_else(|| overflow("multiplication", span))?,
         IntOp::Div => {
             if rhs == 0 {
                 return Err(divide_by_zero("division", span));
             }
-            Value::Int(
-                lhs.checked_div(rhs)
-                    .ok_or_else(|| overflow("division", span))?,
-            )
+            lhs.checked_div(rhs)
+                .ok_or_else(|| overflow("division", span))?
         }
         IntOp::Rem => {
             if rhs == 0 {
                 return Err(divide_by_zero("remainder", span));
             }
-            Value::Int(
-                lhs.checked_rem(rhs)
-                    .ok_or_else(|| overflow("remainder", span))?,
-            )
+            lhs.checked_rem(rhs)
+                .ok_or_else(|| overflow("remainder", span))?
         }
-        IntOp::Eq => Value::Bool(lhs == rhs),
-        IntOp::Ne => Value::Bool(lhs != rhs),
-        IntOp::Lt => Value::Bool(lhs < rhs),
-        IntOp::Le => Value::Bool(lhs <= rhs),
-        IntOp::Gt => Value::Bool(lhs > rhs),
-        IntOp::Ge => Value::Bool(lhs >= rhs),
+        // A comparison answers a `Bool`, which is 0 or 1 in this stack.
+        // `Inst::ScalarToValue` is what puts the tag back on where one is
+        // wanted, and `Inst::JumpIfFalseScalar` is what reads it where none
+        // is.
+        IntOp::Eq => i64::from(lhs == rhs),
+        IntOp::Ne => i64::from(lhs != rhs),
+        IntOp::Lt => i64::from(lhs < rhs),
+        IntOp::Le => i64::from(lhs <= rhs),
+        IntOp::Gt => i64::from(lhs > rhs),
+        IntOp::Ge => i64::from(lhs >= rhs),
     })
 }
 
@@ -2082,6 +2189,74 @@ mod tests {
         );
     }
 
+    /// A frame whose slots are in both stacks answers what the interpreter
+    /// answers.
+    ///
+    /// `total` and `i` are `Int` and live in the scalar stack; `label` is a
+    /// `String` and stays where every slot used to be. The two windows open
+    /// at the same slot numbers and a `Value` slot's number is not a scalar
+    /// slot's, which is what `cove_ir::lower::validate` proved and what this
+    /// runs.
+    #[test]
+    fn a_frame_with_slots_in_both_stacks_answers_what_the_interpreter_answers() {
+        assert_eq!(
+            agree_main(
+                "String",
+                "  let label = \"n=\"\n  var total = 0\n  var i = 0\n  while i < 5 {\n    total += i\n    i += 1\n  }\n  \"{label}{total}\""
+            )
+            .value(),
+            "Str(\"n=10\")"
+        );
+    }
+
+    /// A `Bool` the checker settled is a scalar too, and the jump reads it
+    /// where it stands.
+    #[test]
+    fn a_settled_bool_is_a_scalar_slot_and_a_condition_reads_it_there() {
+        for (n, expected) in [(20, "Int(1)"), (2, "Int(2)")] {
+            assert_eq!(
+                agree_main(
+                    "Int",
+                    &format!("  let n = {n}\n  let big = n > 10\n  if big {{\n    1\n  }} else {{\n    2\n  }}")
+                )
+                .value(),
+                expected
+            );
+        }
+    }
+
+    /// A `break` written inside a half-evaluated scalar expression takes what
+    /// it left on the scalar stack with it.
+    ///
+    /// The loop's exit is reached at the depths the loop runs at, on both
+    /// stacks: `total +` has already pushed `total`, so leaving without
+    /// discarding it would reach the instruction after the loop one scalar
+    /// deep and `validate` would have refused the function. This runs it.
+    #[test]
+    fn a_break_inside_a_half_evaluated_scalar_expression_leaves_nothing_behind() {
+        assert_eq!(
+            agree_main(
+                "Int",
+                "  var total = 0\n  var i = 0\n  while i < 10 {\n    i += 1\n    total += if i == 3 {\n      break\n    } else {\n      i\n    }\n  }\n  total"
+            )
+            .value(),
+            "Int(3)"
+        );
+    }
+
+    /// Each call opens its own scalar window, so a recursion's scalar locals
+    /// do not reach each other.
+    #[test]
+    fn recursion_gives_every_frame_its_own_scalar_slots() {
+        assert_eq!(
+            agree(
+                "fn down(n: Int) -> Int {\n  let here = n * 2\n  if n <= 0 {\n    0\n  } else {\n    here + down(n - 1)\n  }\n}\n\nexport fn main() -> Int {\n  down(4)\n}\n"
+            )
+            .value(),
+            "Int(20)"
+        );
+    }
+
     /// A `for` walks every collection the language has, and walks each one
     /// the way the interpreter does.
     ///
@@ -2798,6 +2973,7 @@ mod tests {
                     module: "m".into(),
                     name: "main".into(),
                     frame_size: 0,
+                    slots: Vec::new(),
                     arity: 0,
                     has_receiver: false,
                     captures: Vec::new(),
@@ -2904,6 +3080,7 @@ mod tests {
                     module: "m".into(),
                     name: "main".into(),
                     frame_size: 0,
+                    slots: Vec::new(),
                     arity: 0,
                     has_receiver: false,
                     captures: Vec::new(),

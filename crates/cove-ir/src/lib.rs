@@ -19,6 +19,22 @@
 //! Lowering runs once per program and may allocate freely. Execution is the
 //! thing being made fast, and nothing else is.
 //!
+//! # Two stacks, and a slot is in one of them
+//!
+//! An operand or a slot whose type the checker settled as `Int` or `Bool`
+//! lives in a stack of `i64` — [`SlotKind::Scalar`] — and everything else
+//! lives in the stack of `Value` it always did. The point is negative rather
+//! than positive: a loop that adds two integers should not move a 40-byte
+//! tagged value or run its drop glue to do it, and an instruction that says
+//! which stack it reads is how that is arranged without asking at run time.
+//!
+//! Nothing is guessed. A slot is scalar only where `Facts::ty` answered
+//! `Some(Ty::Int)` or `Some(Ty::Bool)`; `None` and `Some(Ty::Unknown(_))`
+//! are the checker declining, and a function it declined about keeps the
+//! representation it had. [`Inst::ScalarToValue`] and [`Inst::ValueToScalar`]
+//! are the boundary between the two, emitted where a scalar meets something
+//! general — a call's argument, an assertion, a struct field.
+//!
 //! # What is not here
 //!
 //! No serialization, no version number, no compatibility promise. Nothing
@@ -86,6 +102,18 @@ pub struct Function {
     /// A frame is this many slots of a stack that already exists, which is
     /// the whole reason for lowering.
     pub frame_size: u32,
+    /// Where each of those slots lives, by slot number.
+    ///
+    /// One entry per slot, so `slots.len()` is `frame_size`. A
+    /// [`SlotKind::Value`] slot is a `Value` in the value stack, which is
+    /// what every slot was before typed slots existed; a
+    /// [`SlotKind::Scalar`] slot is an `i64` in the scalar stack beside it.
+    ///
+    /// This is the frame metadata a precise root set is read from. A scalar
+    /// slot holds no reference — that is the whole point of it — so a
+    /// collection that scans a frame scans the [`SlotKind::Value`] slots and
+    /// can skip the rest without inspecting them.
+    pub slots: Vec<SlotKind>,
     /// How many arguments a call must supply, `self` included.
     pub arity: u32,
     /// Whether slot 0 is a receiver rather than the first parameter.
@@ -127,6 +155,43 @@ impl Function {
         self.arg_spans
             .get(&(pc as u32))
             .map_or(&[][..], Vec::as_slice)
+    }
+}
+
+/// What a scalar slot or a scalar operand holds.
+///
+/// The scalar stack is a `Vec<i64>` and carries no tag, so what a word means
+/// is in the instruction that reads it rather than beside the word. Two
+/// types fit that description today, and they are the two the checker
+/// settles most often.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Scalar {
+    /// An `Int`, as itself: Cove's `Int` is a full 64 bits and so is this.
+    Int,
+    /// A `Bool`, as 0 or 1.
+    Bool,
+}
+
+/// Where one of a function's frame slots lives.
+///
+/// Decided at lowering from what the checker settled, and only from that: a
+/// slot is scalar where `Facts::ty` answered `Some(Ty::Int)` or
+/// `Some(Ty::Bool)` for what the binding was declared from. An abstention —
+/// `None`, or `Some(Ty::Unknown(_))` — is not a settled type and keeps the
+/// representation every slot had before, which is what makes a function the
+/// checker said nothing useful about run exactly as it ran yesterday.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SlotKind {
+    /// A `Value` in the value stack.
+    Value,
+    /// An `i64` in the scalar stack, meaning what [`Scalar`] says.
+    Scalar(Scalar),
+}
+
+impl SlotKind {
+    /// Whether this slot lives in the scalar stack.
+    pub fn is_scalar(self) -> bool {
+        matches!(self, SlotKind::Scalar(_))
     }
 }
 
@@ -184,14 +249,56 @@ pub enum Inst {
     /// out that it was adding two integers. Where the checker settled that it
     /// *is* two integers, [`Inst::IntBinary`] is emitted instead.
     Binary(BinaryOp),
-    /// Applies a binary operator to two `Int` on top of the stack.
+    /// Applies a binary operator to the two scalars on top of the *scalar*
+    /// stack, left below right, and leaves its answer there.
     ///
     /// Only emitted where the checker recorded both operands as `Int`, so the
     /// operands need no examining — the type is in the instruction. Overflow,
     /// division by zero, and remainder by zero raise what the untyped operator
     /// raises, because a broken invariant is the same broken invariant however
     /// it was reached.
+    ///
+    /// It reads the scalar stack rather than the value stack because that is
+    /// the whole of what this instruction was ever for: two `i64` in, one
+    /// `i64` out, with no 40-byte `Value` moved and no drop glue run to add
+    /// two integers. A comparison leaves a `Bool` as 0 or 1, which
+    /// [`Inst::JumpIfFalseScalar`] reads without building one.
     IntBinary(IntOp),
+    /// Pushes an `Int`, or a `Bool` as 0 or 1, onto the scalar stack.
+    ///
+    /// The number is in the instruction rather than in the constant pool: a
+    /// scalar constant is one word, and an id would be an indirection to
+    /// fetch what it already fits.
+    ScalarConst(i64),
+    /// Pushes the scalar in a frame slot onto the scalar stack.
+    ///
+    /// The slot is a [`SlotKind::Scalar`] one; `validate` is where that is
+    /// checked, so nothing here asks.
+    LoadScalar(u32),
+    /// Pops the scalar stack into a frame slot.
+    StoreScalar(u32),
+    /// Discards the top of the scalar stack.
+    ///
+    /// What a `break` written inside a half-evaluated scalar expression needs,
+    /// exactly as [`Inst::Pop`] is what one written inside a half-evaluated
+    /// value expression needs.
+    ScalarPop,
+    /// Pops a scalar `Bool` and jumps when it is zero.
+    JumpIfFalseScalar(u32),
+    /// Pops the scalar stack and pushes what it holds onto the value stack.
+    ///
+    /// The boundary in the outward direction: a scalar has no tag, so the
+    /// instruction carries the one it is to be given. Emitted where a value
+    /// is wanted from something the scalar stack computed — an argument to a
+    /// call, a returned value, a field written back.
+    ScalarToValue(Scalar),
+    /// Pops the value stack and pushes what it holds onto the scalar stack.
+    ///
+    /// The boundary in the inward direction, and half of "a value into a
+    /// scalar slot": this and [`Inst::StoreScalar`] are what a scalar
+    /// binding declared from something the value path computed lowers to.
+    /// Emitted only where the checker settled the value as `Int` or `Bool`.
+    ValueToScalar,
     /// Pushes a field of the struct on top of the stack, by position.
     ///
     /// Emitted where the checker settled the receiver's type, which is what
@@ -392,6 +499,21 @@ pub fn render(program: &Program, id: FunctionId) -> String {
         "fn {}.{} arity={} frame={}",
         function.module, function.name, function.arity, function.frame_size
     ));
+    // The scalar slots are named where there are any, because which slots
+    // left the value stack is the thing a listing of typed instructions is
+    // read for. A function with none reads exactly as it always did.
+    let scalars: Vec<String> = function
+        .slots
+        .iter()
+        .enumerate()
+        .filter_map(|(slot, kind)| match kind {
+            SlotKind::Value => None,
+            SlotKind::Scalar(what) => Some(format!("{slot}:{what:?}")),
+        })
+        .collect();
+    if !scalars.is_empty() {
+        out.push_str(&format!(" scalars=[{}]", scalars.join(", ")));
+    }
     if function.has_receiver {
         out.push_str(" receiver");
     }
@@ -422,6 +544,13 @@ fn render_inst(program: &Program, inst: Inst) -> String {
         Inst::Unary(op) => format!("unary {op:?}"),
         Inst::Binary(op) => format!("binary {op:?}"),
         Inst::IntBinary(op) => format!("int {op:?}"),
+        Inst::ScalarConst(value) => format!("scalar-const {value}"),
+        Inst::LoadScalar(slot) => format!("load-scalar {slot}"),
+        Inst::StoreScalar(slot) => format!("store-scalar {slot}"),
+        Inst::ScalarPop => "scalar-pop".to_string(),
+        Inst::JumpIfFalseScalar(to) => format!("jump-if-false-scalar {to}"),
+        Inst::ScalarToValue(what) => format!("scalar-to-value {what:?}"),
+        Inst::ValueToScalar => "value-to-scalar".to_string(),
         Inst::GetFieldAt(index) => format!("get-field-at {index}"),
         Inst::Jump(to) => format!("jump {to}"),
         Inst::JumpIfFalse(to) => format!("jump-if-false {to}"),
