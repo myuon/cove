@@ -75,10 +75,27 @@
 //! `Body::on_scalar_stack` is what keeps a condition the value stack
 //! computed from being moved across just to be tested.
 //!
-//! Two things are deliberately *not* scalar. A parameter's slot is a value
-//! slot, because an argument arrives on the caller's value stack and becomes
-//! the callee's slot without moving, and this does not change the calling
-//! convention. A struct's field is not a slot at all.
+//! # A signature is where the value is kept too
+//!
+//! The same rule again, asked of a declaration's boundary rather than of a
+//! binding, decides the calling convention. A parameter the checker settled
+//! as `Int` or `Bool` is a scalar slot, so its argument is pushed onto the
+//! scalar stack and *becomes* that slot without moving, exactly as a value
+//! argument becomes a value slot; and a function whose return type the
+//! checker settled leaves its answer on the scalar stack and ends in
+//! [`Inst::ReturnScalar`]. [`Function::params`] and [`Function::returns`]
+//! are that convention written down, and `validate` is where a call and its
+//! callee are made to agree about it.
+//!
+//! It is read from `Facts::signature` rather than derived from the
+//! annotations here, for the reason everything else is: two readings that
+//! could disagree is what `Facts` exists to prevent. A declaration the
+//! checker recorded nothing for keeps the convention every function had
+//! before — every argument on the value stack, the answer on the value
+//! stack — because an abstention is not a settled type here either.
+//!
+//! What is still deliberately not scalar is a struct's field, which is not a
+//! slot at all.
 //!
 //! # What the interpreter decides and this reproduces
 //!
@@ -140,7 +157,7 @@ use cove_schema::builtins;
 use cove_schema::hosts;
 use cove_sema::resolve::Program as Checked;
 use cove_sema::typeck::Ty;
-use cove_sema::MethodTarget;
+use cove_sema::{MethodTarget, Signature};
 use cove_syntax::ast::{
     Arg, BinaryOp as SourceBinary, Block, EnumDecl, Expr, ExprId, ExprKind, FnDecl, ItemKind,
     MatchArm, Pattern, PatternKind, Stmt, StmtKind, StrPart, StructDecl, Type, TypeKind,
@@ -394,6 +411,18 @@ impl<'a> Lowering<'a> {
         &self.catalog[key.0]
     }
 
+    /// The boundary the checker resolved for `key`, keyed by the
+    /// declaration's own span.
+    ///
+    /// `None` is the checker having recorded nothing about this
+    /// declaration, which a checked program does not produce. The lowering
+    /// does not guess when it happens: see [`Lowering::function`], where the
+    /// fallback is written down.
+    fn signature(&self, key: Key) -> Option<&'a Signature> {
+        let decl = self.declaration(key).decl;
+        self.checked.facts.signature(decl.span.file, decl.span)
+    }
+
     /// Whether a method call written in `from` could reach the method `key`.
     ///
     /// A receiver is a value, and a value's type came from `from` or from
@@ -607,7 +636,8 @@ impl<'a> Lowering<'a> {
 
     /// Lowers one function into its instructions.
     fn function(&mut self, id: FunctionId) -> Result<Function, Unsupported> {
-        let declared = self.declaration(self.reached[id.0 as usize]);
+        let key = self.reached[id.0 as usize];
+        let declared = self.declaration(key);
         let module = declared.module;
         let name: Rc<str> = declared.name.as_str().into();
         let decl = declared.decl;
@@ -619,24 +649,57 @@ impl<'a> Lowering<'a> {
             reject_dyn(ty, "a `dyn` return type")?;
         }
 
+        // The convention this function is called under, read from what the
+        // checker resolved for this declaration rather than derived from its
+        // annotations again — the rule the whole pass follows.
+        //
+        // A declaration the checker recorded nothing for is not a checked
+        // program, and the lowering does not guess about one: every
+        // parameter and the answer keep the representation every slot had
+        // before it, which is the same thing an abstention about a binding
+        // gets.
+        let signature = self.signature(key);
+        let returns = signature.map_or(SlotKind::Value, |signature| slot_kind_of(&signature.ret));
+
+        // In the order a call supplies them, which is what makes an argument
+        // become a slot without moving: the receiver first, then the
+        // parameters as declared.
+        let mut params: Vec<SlotKind> = Vec::new();
         let mut body = Body::new(self, module);
+        body.returns = returns;
         if let Some(receiver) = decl.receiver {
             if receiver.is_var {
                 return Err(Unsupported::new("a `var self` receiver", receiver.span));
             }
+            // Derived rather than assumed. A receiver is a value in every
+            // program that can be written today, because a method is
+            // declared on a struct or an enum, but which stack it lives in
+            // is the signature's answer and not this pass's guess.
+            //
             // A receiver is read-only in the body: a `var self` receiver is
             // refused above, so nothing writes through this one.
-            body.declare(Some("self"), false, SlotKind::Value);
+            let kind = signature
+                .and_then(|signature| signature.receiver.as_ref())
+                .map_or(SlotKind::Value, slot_kind_of);
+            params.push(kind);
+            body.declare(Some("self"), false, kind);
         }
-        for param in &decl.params {
+        for (at, param) in decl.params.iter().enumerate() {
             reject_parameter(param.is_var, param.variadic, param.ty.as_ref(), param.span)?;
             // An ordinary parameter receives a shallow copy and is a
             // read-only place inside the body, exactly as the interpreter
             // declares one; a `var` parameter is refused above.
-            body.declare(Some(param.name.node.as_str()), false, SlotKind::Value);
+            let kind = signature
+                .and_then(|signature| signature.params.get(at))
+                .map_or(SlotKind::Value, slot_kind_of);
+            params.push(kind);
+            body.declare(Some(param.name.node.as_str()), false, kind);
         }
 
-        body.block(&decl.body)?;
+        // The body's value is the function's answer, so it is lowered into
+        // the stack the answer travels on rather than into the value stack
+        // and moved across afterwards.
+        body.block_at(&decl.body, position_of(returns))?;
         body.emit_final_return(decl.body.span);
         let finished = body.finish();
 
@@ -646,6 +709,8 @@ impl<'a> Lowering<'a> {
             value_frame_size: finished.value_frame_size,
             scalar_frame_size: finished.scalar_frame_size,
             arity: decl.params.len() as u32 + u32::from(decl.receiver.is_some()),
+            params,
+            returns,
             has_receiver: decl.receiver.is_some(),
             captures: Vec::new(),
             code: finished.code,
@@ -771,12 +836,27 @@ enum Header {
 /// What it does not do is decide that anything need not run. Which calls are
 /// pure is not a question this pass asks, so an expression whose value is
 /// unwanted is still lowered in full and only its result goes missing.
+///
+/// [`Position::Scalar`] is the value position on the other stack, and it
+/// reaches inside the same three constructs for the same reason. An `if`
+/// whose branches are integers should leave an integer, not build a `Value`
+/// in each branch for a boundary instruction to unwrap again — and the
+/// saving is only there if the position reaches the branch, because the
+/// branch is where the value would have been built.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Position {
-    /// Something reads what this leaves.
+    /// Something reads what this leaves, on the value stack.
     Value,
     /// Nothing does.
     Effect,
+    /// Something reads what this leaves, on the scalar stack.
+    ///
+    /// Entered only where the checker settled the expression's type as `Int`
+    /// or `Bool`, so what arrives is what the instruction reading it was
+    /// promised. `Body::expr_scalar` is the way in and the way every leaf is
+    /// lowered; a construct with an inside hands this down and lets its
+    /// branches, tails, and arms be the leaves.
+    Scalar,
 }
 
 /// What lowering one body produced, on its way into a [`Function`].
@@ -792,6 +872,11 @@ struct Finished {
 struct Body<'a, 'l> {
     outer: &'l mut Lowering<'a>,
     module: &'a str,
+    /// Which stack this function's answer travels on, which decides both
+    /// which return instruction it ends in and where every `return` inside
+    /// it leaves its operand. Read from the declaration's signature once, in
+    /// [`Lowering::function`].
+    returns: SlotKind,
     code: Vec<Inst>,
     spans: Vec<Span>,
     /// The operand-stack depths, or `None` where control cannot arrive.
@@ -825,6 +910,7 @@ impl<'a, 'l> Body<'a, 'l> {
         Body {
             outer,
             module,
+            returns: SlotKind::Value,
             code: Vec::new(),
             spans: Vec::new(),
             depth: Some(Depth::EMPTY),
@@ -877,36 +963,80 @@ impl<'a, 'l> Body<'a, 'l> {
             return;
         };
         self.depth = Some(depth.after(stack_shape(&self.outer.constants, inst)));
-        if matches!(inst, Inst::Return | Inst::Jump(_) | Inst::NoMatch) {
+        if matches!(
+            inst,
+            Inst::Return | Inst::ReturnScalar | Inst::Jump(_) | Inst::NoMatch
+        ) {
             self.depth = None;
         }
         self.code.push(inst);
         self.spans.push(span);
     }
 
-    /// The `Return` a function ends in, emitted even where control cannot
-    /// fall into it.
+    /// The return a function ends in, emitted even where control cannot fall
+    /// into it.
     ///
     /// A body whose last expression is itself a `return` leaves nothing to
     /// fall through, and a function still has to end in the instruction that
     /// ends a function: [`validate`] asks for one, and a VM that ran off the
     /// end would have nowhere to go.
+    ///
+    /// Which one it is, and which stack the body left its answer on, are the
+    /// same question — the function's `returns` — so a body that already
+    /// ends in either of the two is left alone.
     fn emit_final_return(&mut self, span: Span) {
+        let (inst, arrival) = match self.returns {
+            SlotKind::Value => (
+                Inst::Return,
+                Depth {
+                    values: 1,
+                    scalars: 0,
+                },
+            ),
+            SlotKind::Scalar(_) => (
+                Inst::ReturnScalar,
+                Depth {
+                    values: 0,
+                    scalars: 1,
+                },
+            ),
+        };
         if self.depth.is_none() {
-            if matches!(self.code.last(), Some(Inst::Return)) {
+            if matches!(self.code.last(), Some(Inst::Return | Inst::ReturnScalar)) {
                 return;
             }
-            self.depth = Some(Depth {
-                values: 1,
-                scalars: 0,
-            });
+            self.depth = Some(arrival);
         }
-        self.emit(Inst::Return, span);
+        self.emit(inst, span);
     }
 
     fn constant(&mut self, value: Const, span: Span) {
         let id = self.outer.constant(value);
         self.emit(Inst::Const(id), span);
+    }
+
+    /// The `()` a construct that answers one leaves, in the position it was
+    /// written in.
+    ///
+    /// An assignment, a `while`, a `for`, an `if` with no `else`, and a
+    /// block with no tail all answer `()`. Lowered for effect none of them
+    /// builds one, which is what [`Position::Effect`] is for.
+    ///
+    /// None of them can be written in scalar position at all: `()` is not a
+    /// type the scalar stack holds, and the position is chosen from the type
+    /// the checker settled. The boundary is emitted rather than skipped
+    /// anyway, so that the depth stays a fact and a mistake shows up as the
+    /// VM's own report of a `value-to-scalar` handed something that is not a
+    /// scalar, rather than as a stack that is quietly one short.
+    fn unit_at(&mut self, position: Position, span: Span) {
+        match position {
+            Position::Effect => {}
+            Position::Value => self.constant(Const::Unit, span),
+            Position::Scalar => {
+                self.constant(Const::Unit, span);
+                self.emit(Inst::ValueToScalar, span);
+            }
+        }
     }
 
     fn label(&mut self) -> usize {
@@ -1063,12 +1193,13 @@ impl<'a, 'l> Body<'a, 'l> {
     /// The rule [`Body::is_int`] states, asked of both scalar types at once
     /// and for the same reason: an abstention and an expression that was
     /// never walked are not settled types, so neither becomes a scalar.
+    ///
+    /// The rule itself is [`scalar_of_ty`], so that an expression's storage
+    /// and a parameter's storage are decided by one function rather than by
+    /// two that could drift apart. Two such rules disagreeing is exactly
+    /// what reading the checker's answers is supposed to make impossible.
     fn scalar_of(&self, expr: &Expr) -> Option<Scalar> {
-        match self.settled(expr) {
-            Some(Ty::Int) => Some(Scalar::Int),
-            Some(Ty::Bool) => Some(Scalar::Bool),
-            _ => None,
-        }
+        self.settled(expr).and_then(scalar_of_ty)
     }
 
     /// Where a binding declared from `expr` lives.
@@ -1097,8 +1228,36 @@ impl<'a, 'l> Body<'a, 'l> {
             ExprKind::Ident(name) => self.scalar_binding(name).is_some(),
             ExprKind::Binary { op, lhs, rhs } => binary_op(*op)
                 .is_some_and(|op| matches!(self.binary_inst(op, lhs, rhs), Inst::IntBinary(_))),
+            ExprKind::Call { callee, .. } => self.callee_returns(expr.id, callee).is_some(),
             _ => false,
         }
+    }
+
+    /// What a call to a declared function leaves on the scalar stack, asked
+    /// without lowering the call.
+    ///
+    /// Only the two callees a name settles on their own: a bare name that is
+    /// not a local and reaches a declared function, and a method call the
+    /// checker recorded a declaration for. Everything else answers `None`.
+    ///
+    /// That is allowed to be incomplete because nothing depends on it for
+    /// correctness. It decides which stack a condition is *tested* on, and
+    /// both answers are lowered correctly whichever this gives: a call that
+    /// landed on the other stack crosses it with one boundary instruction.
+    /// A wrong answer costs an instruction, so this answers only where a
+    /// cheap question settles it.
+    fn callee_returns(&self, id: ExprId, callee: &'a Expr) -> Option<Scalar> {
+        let key = match &callee.kind {
+            ExprKind::Ident(name) if self.lookup(name).is_none() => {
+                self.outer.function_of(self.module, name)?
+            }
+            ExprKind::Field { .. } => {
+                let target = self.target(id, callee.span)?;
+                self.declared_by(target)?
+            }
+            _ => return None,
+        };
+        scalar_of_ty(&self.outer.signature(key)?.ret)
     }
 
     /// The instruction `op` lowers to over these two operands.
@@ -1192,30 +1351,25 @@ impl<'a, 'l> Body<'a, 'l> {
 
     // ---------------------------------------------------------- statements
 
-    /// Lowers a block, leaving its value on the stack.
+    /// A block, lowered in the position it was written in.
+    ///
+    /// A block's value is its tail's, so the position is handed to the tail:
+    /// lowered for effect a block builds no `Unit` at all, and lowered in
+    /// scalar position its tail leaves its value on the scalar stack. Its
+    /// statements are unaffected — they were already lowered for their
+    /// effect, whichever position the block itself is in.
     ///
     /// The slots the block declared are released at its end, so a later
     /// sibling block reuses the numbers and each frame size stays a
     /// high-water mark rather than a total.
-    fn block(&mut self, block: &'a Block) -> Result<(), Unsupported> {
-        self.block_at(block, Position::Value)
-    }
-
-    /// The same block, lowered for its value or for its effect.
-    ///
-    /// A block's value is its tail's, so a block lowered for effect lowers
-    /// its tail for effect too and a block with no tail builds no `Unit` at
-    /// all. Its statements are unaffected: they were already lowered for
-    /// their effect, whichever position the block itself is in.
     fn block_at(&mut self, block: &'a Block, position: Position) -> Result<(), Unsupported> {
         let mark = self.scope();
         for statement in &block.statements {
             self.statement(statement)?;
         }
-        match (&block.tail, position) {
-            (Some(tail), _) => self.expr_at(tail, position)?,
-            (None, Position::Value) => self.constant(Const::Unit, block.span),
-            (None, Position::Effect) => {}
+        match &block.tail {
+            Some(tail) => self.expr_at(tail, position)?,
+            None => self.unit_at(position, block.span),
         }
         self.release(mark);
         Ok(())
@@ -1288,6 +1442,13 @@ impl<'a, 'l> Body<'a, 'l> {
     /// scalar stack has no instructions for is lowered exactly as it always
     /// was and moved across by one [`Inst::ValueToScalar`] — a boundary
     /// rather than a second lowering of the language.
+    ///
+    /// The three constructs with an inside are not moved across: a block, an
+    /// `if`/`else`, and a `match` hand [`Position::Scalar`] to their tails,
+    /// branches, and arms, so that an integer is left where an integer was
+    /// wanted rather than built as a `Value` in each branch and unwrapped
+    /// again afterwards. That is the same reasoning [`Position::Effect`]
+    /// reaches inside them for.
     fn expr_scalar(&mut self, expr: &'a Expr) -> Result<(), Unsupported> {
         let span = expr.span;
         match &expr.kind {
@@ -1312,6 +1473,33 @@ impl<'a, 'l> Body<'a, 'l> {
                 self.expr_scalar(lhs)?;
                 self.expr_scalar(rhs)?;
                 self.emit(inst, span);
+            }
+            ExprKind::Call {
+                callee,
+                generics: _,
+                args,
+                trailing,
+            } => {
+                // Deliberately not through `moved_to_scalar`: a call to a
+                // function whose answer already arrives on the scalar stack
+                // would be moved off it and straight back on again, which is
+                // the pair of instructions this whole convention exists to
+                // stop emitting. Only a call that landed on the value stack
+                // crosses.
+                if self
+                    .call(expr.id, callee, args, trailing.is_some(), span)?
+                    .is_none()
+                {
+                    self.emit(Inst::ValueToScalar, span);
+                }
+            }
+            ExprKind::Block(_) | ExprKind::Match { .. } => {
+                return self.expr_at(expr, Position::Scalar)
+            }
+            // An `if` with no `else` answers `()`, which the scalar stack
+            // does not hold, so only the two-branch form takes the position.
+            ExprKind::If { else_branch, .. } if else_branch.is_some() => {
+                return self.expr_at(expr, Position::Scalar)
             }
             _ => return self.moved_to_scalar(expr),
         }
@@ -1348,6 +1536,22 @@ impl<'a, 'l> Body<'a, 'l> {
     /// which is the `Pop` below.
     fn expr_at(&mut self, expr: &'a Expr, position: Position) -> Result<(), Unsupported> {
         let span = expr.span;
+        // The scalar position reaches only the three constructs with an
+        // inside; everything else is a leaf, and a leaf's scalar lowering is
+        // [`Body::expr_scalar`]'s rather than a second copy of it here.
+        if position == Position::Scalar
+            && !matches!(
+                expr.kind,
+                ExprKind::Block(_)
+                    | ExprKind::Match { .. }
+                    | ExprKind::If {
+                        else_branch: Some(_),
+                        ..
+                    }
+            )
+        {
+            return self.expr_scalar(expr);
+        }
         match &expr.kind {
             ExprKind::Int(value) => self.constant(Const::Int(*value), span),
             ExprKind::Float(value) => self.constant(Const::Float(*value), span),
@@ -1368,7 +1572,20 @@ impl<'a, 'l> Body<'a, 'l> {
                 generics: _,
                 args,
                 trailing,
-            } => self.call(expr.id, callee, args, trailing.is_some(), span)?,
+            } => {
+                // A call to a function whose return type the checker settled
+                // leaves its answer on the scalar stack, so what a reader of
+                // this position needs is on the other one: one boundary
+                // instruction where a value is wanted, and the scalar
+                // stack's own discard where nothing is.
+                if let Some(what) = self.call(expr.id, callee, args, trailing.is_some(), span)? {
+                    if position == Position::Effect {
+                        self.emit(Inst::ScalarPop, span);
+                        return Ok(());
+                    }
+                    self.emit(Inst::ScalarToValue(what), span);
+                }
+            }
             ExprKind::Unary { op, operand } => {
                 self.expr(operand)?;
                 let op = match op {
@@ -1407,13 +1624,31 @@ impl<'a, 'l> Body<'a, 'l> {
                 iterable,
                 body,
             } => return self.for_loop(binding.node.as_str(), iterable, body, position, span),
-            ExprKind::Return(value) => {
-                match value {
-                    Some(value) => self.expr(value)?,
-                    None => self.constant(Const::Unit, span),
+            ExprKind::Return(value) => match (self.returns, value) {
+                // Every return of a function leaves on the stack that
+                // function's `returns` names, because a caller reads exactly
+                // that one and nothing tells it which of two a given return
+                // used.
+                (SlotKind::Scalar(_), Some(value)) => {
+                    self.expr_scalar(value)?;
+                    self.emit(Inst::ReturnScalar, span);
                 }
-                self.emit(Inst::Return, span);
-            }
+                // `return` with no value answers `()`, and no scalar stack
+                // holds one. The checker compares a `return`'s operand
+                // against the declared type, so a checked program whose
+                // return type is `Int` or `Bool` has no such `return`;
+                // lowering it as the untyped one rather than inventing a
+                // scalar is what makes `validate` refuse the pair and say so
+                // instead of the VM reading a word that was never written.
+                (SlotKind::Scalar(_), None) | (SlotKind::Value, None) => {
+                    self.constant(Const::Unit, span);
+                    self.emit(Inst::Return, span);
+                }
+                (SlotKind::Value, Some(value)) => {
+                    self.expr(value)?;
+                    self.emit(Inst::Return, span);
+                }
+            },
             ExprKind::Break(value) => {
                 // The operand is evaluated for its effects and discarded: a
                 // loop is `()` however it leaves, so there is nowhere for a
@@ -1706,9 +1941,7 @@ impl<'a, 'l> Body<'a, 'l> {
             }
         }
         self.emit(store_slot(kind, slot), span);
-        if position == Position::Value {
-            self.constant(Const::Unit, span);
-        }
+        self.unit_at(position, span);
         Ok(())
     }
 
@@ -1787,9 +2020,7 @@ impl<'a, 'l> Body<'a, 'l> {
         }
         self.emit(Inst::SetField(named), span);
         self.emit(Inst::StoreLocal(slot), span);
-        if position == Position::Value {
-            self.constant(Const::Unit, span);
-        }
+        self.unit_at(position, span);
         Ok(())
     }
 
@@ -1829,9 +2060,7 @@ impl<'a, 'l> Body<'a, 'l> {
                 self.jump(branch, end, condition.span);
                 self.block_at(then_branch, Position::Effect)?;
                 self.bind(end);
-                if position == Position::Value {
-                    self.constant(Const::Unit, span);
-                }
+                self.unit_at(position, span);
             }
         }
         Ok(())
@@ -1862,9 +2091,7 @@ impl<'a, 'l> Body<'a, 'l> {
         lowered?;
         self.jump(Inst::Jump, top, span);
         self.bind(end);
-        if position == Position::Value {
-            self.constant(Const::Unit, span);
-        }
+        self.unit_at(position, span);
         Ok(())
     }
 
@@ -2001,9 +2228,7 @@ impl<'a, 'l> Body<'a, 'l> {
 
         self.bind(end);
         self.release(mark);
-        if position == Position::Value {
-            self.constant(Const::Unit, span);
-        }
+        self.unit_at(position, span);
         Ok(())
     }
 
@@ -2042,6 +2267,15 @@ impl<'a, 'l> Body<'a, 'l> {
 
     // --------------------------------------------------------------- calls
 
+    /// Lowers a call, answering where it left its result.
+    ///
+    /// `Some` means the scalar stack, which is what a call to a function
+    /// whose return type the checker settled as `Int` or `Bool` leaves it
+    /// on; `None` means the value stack, which is what every other call
+    /// leaves it on. The answer is threaded up rather than asked about
+    /// afterwards because only the path that resolved the callee knows it —
+    /// a builtin, a host operation, a constructor, and a declared function
+    /// are four different answers reached through four different lookups.
     fn call(
         &mut self,
         id: ExprId,
@@ -2049,7 +2283,7 @@ impl<'a, 'l> Body<'a, 'l> {
         args: &'a [Arg],
         trailing: bool,
         span: Span,
-    ) -> Result<(), Unsupported> {
+    ) -> Result<Option<Scalar>, Unsupported> {
         if trailing {
             return Err(Unsupported::new("a trailing closure", span));
         }
@@ -2073,7 +2307,12 @@ impl<'a, 'l> Body<'a, 'l> {
     /// The order is the interpreter's: a local first — which is what makes a
     /// binding shadow a declaration — then a declared function, a struct
     /// initializer, an imported host operation, and a free builtin.
-    fn call_named(&mut self, name: &str, args: &'a [Arg], span: Span) -> Result<(), Unsupported> {
+    fn call_named(
+        &mut self,
+        name: &str,
+        args: &'a [Arg],
+        span: Span,
+    ) -> Result<Option<Scalar>, Unsupported> {
         if self.lookup(name).is_some() {
             return Err(Unsupported::new(
                 format!("a call through the local `{name}`"),
@@ -2084,7 +2323,7 @@ impl<'a, 'l> Body<'a, 'l> {
             return self.call_declared(key, None, args, span);
         }
         if let Some((owner, decl)) = self.outer.struct_of(self.module, name) {
-            return self.make_struct(owner, decl, args, span);
+            return on_the_value_stack(self.make_struct(owner, decl, args, span));
         }
         if self.outer.declares_enum(self.module, name) {
             return Err(Unsupported::new(
@@ -2093,13 +2332,13 @@ impl<'a, 'l> Body<'a, 'l> {
             ));
         }
         if let Some(module) = self.outer.host_item(self.module, name) {
-            return self.call_host(module, name, args, span);
+            return on_the_value_stack(self.call_host(module, name, args, span));
         }
         if name == builtins::MAP_ENTRY.name {
-            return self.make_map_entry(args, span);
+            return on_the_value_stack(self.make_map_entry(args, span));
         }
         if let Some(schema) = builtins::free_builtin(name) {
-            return self.make_builtin(schema.name, args, span);
+            return on_the_value_stack(self.make_builtin(schema.name, args, span));
         }
         Err(Unsupported::new(
             format!("a call to `{name}`, which the lowering cannot resolve"),
@@ -2117,11 +2356,11 @@ impl<'a, 'l> Body<'a, 'l> {
         name: &str,
         args: &'a [Arg],
         span: Span,
-    ) -> Result<(), Unsupported> {
+    ) -> Result<Option<Scalar>, Unsupported> {
         if let ExprKind::Ident(head) = &base.kind {
             if self.lookup(head).is_none() {
                 if self.outer.is_host_module(self.module, head) {
-                    return self.call_host(head, name, args, span);
+                    return on_the_value_stack(self.call_host(head, name, args, span));
                 }
                 if let Some((owner, decl)) = self.outer.enum_of(self.module, head) {
                     // A case wins over an associated function of the same
@@ -2134,7 +2373,7 @@ impl<'a, 'l> Body<'a, 'l> {
                             return self.call_declared(key, None, args, span);
                         }
                     }
-                    return self.make_enum(owner, head, name, args, span);
+                    return on_the_value_stack(self.make_enum(owner, head, name, args, span));
                 }
                 if let Some((owner, _)) = self.outer.struct_of(self.module, head) {
                     if let Some(key) = self.outer.method_of(owner, head, name) {
@@ -2146,7 +2385,7 @@ impl<'a, 'l> Body<'a, 'l> {
                         return self.call_declared(key, None, args, span);
                     }
                     if let Some(decl) = self.outer.exported_struct(owner, name) {
-                        return self.make_struct(owner, decl, args, span);
+                        return on_the_value_stack(self.make_struct(owner, decl, args, span));
                     }
                     return Err(Unsupported::new(
                         format!("`{head}.{name}`, which module `{owner}` does not export"),
@@ -2154,7 +2393,7 @@ impl<'a, 'l> Body<'a, 'l> {
                     ));
                 }
                 if builtins::is_builtin_type(head) {
-                    return self.call_builtin_assoc(head, name, args, span);
+                    return on_the_value_stack(self.call_builtin_assoc(head, name, args, span));
                 }
             }
         }
@@ -2162,14 +2401,25 @@ impl<'a, 'l> Body<'a, 'l> {
     }
 
     /// A call to a function this package declares, with the receiver a
-    /// method needs pushed below its arguments.
+    /// method needs pushed first.
+    ///
+    /// Each argument is lowered into the stack its own parameter's slot kind
+    /// names, and nothing is moved afterwards: the arguments already stand in
+    /// declaration order — `arguments_in_order` refuses a call whose
+    /// arguments do not — so within each stack they land in exactly the
+    /// order that stack's slots are numbered in, and *become* those slots.
+    ///
+    /// Answers where the call left its result, which is the callee's
+    /// `returns` read from the same signature the callee's own lowering
+    /// reads. Both sides of a call therefore agree by construction rather
+    /// than by convention, and `validate` says so out loud.
     fn call_declared(
         &mut self,
         key: Key,
         receiver: Option<&'a Expr>,
         args: &'a [Arg],
         span: Span,
-    ) -> Result<(), Unsupported> {
+    ) -> Result<Option<Scalar>, Unsupported> {
         let declared = self.outer.declaration(key);
         let decl = declared.decl;
         let what = declared.name.clone();
@@ -2190,6 +2440,18 @@ impl<'a, 'l> Body<'a, 'l> {
             .collect();
         arguments_in_order(&names, args, &what, span)?;
 
+        // The same signature the callee's own lowering reads, so the two
+        // cannot disagree about where an argument goes; a declaration the
+        // checker recorded nothing about falls back to the convention every
+        // function had before, on both sides at once.
+        let signature = self.outer.signature(key);
+        let mut value_argc = 0;
+        let mut scalar_argc = 0;
+        let mut into = |kind: SlotKind| match kind {
+            SlotKind::Value => value_argc += 1,
+            SlotKind::Scalar(_) => scalar_argc += 1,
+        };
+
         match (decl.receiver, receiver) {
             (Some(declared), Some(expr)) => {
                 if declared.is_var {
@@ -2198,7 +2460,14 @@ impl<'a, 'l> Body<'a, 'l> {
                         span,
                     ));
                 }
-                self.expr(expr)?;
+                let kind = signature
+                    .and_then(|signature| signature.receiver.as_ref())
+                    .map_or(SlotKind::Value, slot_kind_of);
+                into(kind);
+                match kind {
+                    SlotKind::Scalar(_) => self.expr_scalar(expr)?,
+                    SlotKind::Value => self.expr(expr)?,
+                }
             }
             (Some(_), None) => {
                 return Err(Unsupported::new(
@@ -2214,16 +2483,31 @@ impl<'a, 'l> Body<'a, 'l> {
             }
             (None, None) => {}
         }
-        for arg in args {
-            self.expr(&arg.value)?;
+        for (at, arg) in args.iter().enumerate() {
+            let kind = signature
+                .and_then(|signature| signature.params.get(at))
+                .map_or(SlotKind::Value, slot_kind_of);
+            into(kind);
+            match kind {
+                SlotKind::Scalar(_) => self.expr_scalar(&arg.value)?,
+                SlotKind::Value => self.expr(&arg.value)?,
+            }
         }
-        let argc = args.len() as u32 + u32::from(decl.receiver.is_some());
+        let answer = signature.and_then(|signature| scalar_of_ty(&signature.ret));
         // This is the whole of the reachability rule: the call being emitted
         // is what makes the target part of the program, so the target is
         // numbered here and nowhere else.
         let function = self.outer.number(key);
-        self.emit(Inst::Call { function, argc }, span);
-        Ok(())
+        self.emit(
+            Inst::Call {
+                function,
+                value_argc,
+                scalar_argc,
+                returns_scalar: answer.is_some(),
+            },
+            span,
+        );
+        Ok(answer)
     }
 
     /// `console.println(...)` and `clock.now()`.
@@ -2659,7 +2943,7 @@ impl<'a, 'l> Body<'a, 'l> {
         name: &str,
         args: &'a [Arg],
         span: Span,
-    ) -> Result<(), Unsupported> {
+    ) -> Result<Option<Scalar>, Unsupported> {
         // Before anything is asked about the name, because a recorded target
         // makes every one of those questions moot: which types declare this
         // name, whether a builtin shares it, and whether the builtin that
@@ -2750,7 +3034,9 @@ impl<'a, 'l> Body<'a, 'l> {
                 },
                 span,
             );
-            return Ok(());
+            // A builtin method answers on the value stack, whatever its type:
+            // `call_method` is the interpreter's and hands back a `Value`.
+            return Ok(None);
         }
         Err(Unsupported::new(
             format!("a call to `{name}`, which no declared type and no builtin has"),
@@ -2876,6 +3162,56 @@ fn read_only_place(place: &str, span: Span) -> Unsupported {
         format!("assignment to `{place}`, which is a read-only place"),
         span,
     )
+}
+
+/// A call that answers on the value stack, whatever it produced.
+///
+/// Everything a call can lower to other than [`Inst::Call`] hands back a
+/// `Value`: a builtin method, a host operation, a struct initializer, an
+/// enum case, an assertion, and a builtin type's associated function are all
+/// the interpreter's own code, and the interpreter speaks `Value`. Saying so
+/// through one function keeps `Body::call_declared` the only place where a
+/// call's answer can be anything else.
+fn on_the_value_stack(lowered: Result<(), Unsupported>) -> Result<Option<Scalar>, Unsupported> {
+    lowered.map(|()| None)
+}
+
+/// What a scalar stack would hold a value of this type as, or `None` for a
+/// type it cannot hold.
+///
+/// The one rule, and the only one. A binding's slot, an operand's stack, a
+/// parameter's slot, and where a call leaves its answer are four questions
+/// with one answer, so they ask one function: two rules that could disagree
+/// about what the scalar stack holds is exactly the drift reading the
+/// checker's answers is supposed to make impossible.
+///
+/// `Ty::Unknown` is the checker saying it did not prove this and is not a
+/// settled type, so it answers `None` like everything else the stack has no
+/// word for.
+fn scalar_of_ty(ty: &Ty) -> Option<Scalar> {
+    match ty {
+        Ty::Int => Some(Scalar::Int),
+        Ty::Bool => Some(Scalar::Bool),
+        _ => None,
+    }
+}
+
+/// Where a slot of this type lives, which is [`scalar_of_ty`] read as a
+/// place rather than as a representation.
+fn slot_kind_of(ty: &Ty) -> SlotKind {
+    match scalar_of_ty(ty) {
+        Some(what) => SlotKind::Scalar(what),
+        None => SlotKind::Value,
+    }
+}
+
+/// The position an expression is lowered in to leave its value where a slot
+/// of this kind wants it.
+fn position_of(kind: SlotKind) -> Position {
+    match kind {
+        SlotKind::Value => Position::Value,
+        SlotKind::Scalar(_) => Position::Scalar,
+    }
 }
 
 /// The source binary operator as the IR carries it, or `None` for the two
@@ -3006,16 +3342,24 @@ fn reject_parameter(
 /// having — so this is where the trust is earned. Every jump lands on an
 /// instruction, every slot is inside the frame, every id names something,
 /// every recorded argument span belongs to an instruction that exists, every
-/// function ends in a `Return`, and both operand stacks have one depth at
-/// every instruction control can reach: a join point arrived at with two
-/// different depths is a bug in the lowering, and finding it here is the
-/// difference between a failed test and a VM reading a value that is not
-/// there.
+/// function ends in the return its convention names, and both operand stacks
+/// have one depth at every instruction control can reach: a join point
+/// arrived at with two different depths is a bug in the lowering, and finding
+/// it here is the difference between a failed test and a VM reading a value
+/// that is not there.
 ///
 /// A slot is addressed as what it is, too. A slot number names storage in
 /// one of the two stacks, and which one is settled at lowering, so a scalar
 /// instruction reaching a value slot — or the other way round — is caught
 /// here rather than read as whichever eight bytes happened to stand there.
+///
+/// The calling convention is checked from both ends, which is what makes it
+/// an invariant rather than a convention. A function's `params` has one
+/// entry per argument and each stack has room for the parameters that live
+/// in it; a function ends in the return its `returns` names and holds no
+/// instance of the other one; and every `Call` supplies the counts its
+/// callee's `params` describe and expects its answer on the stack its
+/// callee's `returns` leaves it on.
 pub fn validate(program: &Program) -> Result<(), String> {
     for (index, function) in program.functions.iter().enumerate() {
         let id = FunctionId(index as u32);
@@ -3037,14 +3381,46 @@ fn validate_function(program: &Program, id: FunctionId) -> Result<(), String> {
             function.code.len()
         ));
     }
-    if function.arity > function.value_frame_size {
+    if function.params.len() != function.arity as usize {
         return Err(format!(
-            "takes {} arguments but has a frame of {}",
-            function.arity, function.value_frame_size
+            "takes {} arguments but says where {} of them arrive",
+            function.arity,
+            function.params.len()
         ));
     }
-    if !matches!(function.code.last(), Some(Inst::Return)) {
-        return Err("does not end in a `return`".to_string());
+    let value_params = function.params.iter().filter(|k| !k.is_scalar()).count() as u32;
+    let scalar_params = function.params.iter().filter(|k| k.is_scalar()).count() as u32;
+    if value_params > function.value_frame_size {
+        return Err(format!(
+            "takes {value_params} value arguments but has a value frame of {}",
+            function.value_frame_size
+        ));
+    }
+    if scalar_params > function.scalar_frame_size {
+        return Err(format!(
+            "takes {scalar_params} scalar arguments but has a scalar frame of {}",
+            function.scalar_frame_size
+        ));
+    }
+    // One return instruction per function, decided by where the answer
+    // travels: a caller reads exactly the stack `returns` names, and nothing
+    // tells it which of the two a given return happened to use.
+    let (ends_in, other) = match function.returns {
+        SlotKind::Value => (Inst::Return, Inst::ReturnScalar),
+        SlotKind::Scalar(_) => (Inst::ReturnScalar, Inst::Return),
+    };
+    if function.code.last() != Some(&ends_in) {
+        return Err(format!("does not end in a `{}`", render_return(ends_in)));
+    }
+    if function.code.contains(&other) {
+        return Err(format!(
+            "answers on the {} stack and holds a `{}`",
+            match function.returns {
+                SlotKind::Value => "value",
+                SlotKind::Scalar(_) => "scalar",
+            },
+            render_return(other)
+        ));
     }
     for at in function.arg_spans.keys() {
         if *at as usize >= function.code.len() {
@@ -3108,7 +3484,9 @@ fn validate_function(program: &Program, id: FunctionId) -> Result<(), String> {
             }
             Inst::Call {
                 function: target,
-                argc,
+                value_argc,
+                scalar_argc,
+                returns_scalar,
             } => {
                 let Some(target) = program.functions.get(target.0 as usize) else {
                     return Err(at(format!(
@@ -3116,10 +3494,34 @@ fn validate_function(program: &Program, id: FunctionId) -> Result<(), String> {
                         target.0
                     )));
                 };
-                if target.arity != argc {
+                if target.arity != value_argc + scalar_argc {
                     return Err(at(format!(
-                        "calls `{}.{}` with {argc} arguments, which takes {}",
-                        target.module, target.name, target.arity
+                        "calls `{}.{}` with {} arguments, which takes {}",
+                        target.module,
+                        target.name,
+                        value_argc + scalar_argc,
+                        target.arity
+                    )));
+                }
+                let values = target.params.iter().filter(|k| !k.is_scalar()).count() as u32;
+                let scalars = target.params.iter().filter(|k| k.is_scalar()).count() as u32;
+                if values != value_argc || scalars != scalar_argc {
+                    return Err(at(format!(
+                        "calls `{}.{}` with {value_argc} value and {scalar_argc} scalar arguments, which takes {values} and {scalars}",
+                        target.module, target.name
+                    )));
+                }
+                if target.returns.is_scalar() != returns_scalar {
+                    return Err(at(format!(
+                        "calls `{}.{}` for an answer on the {} stack, which answers on the {}",
+                        target.module,
+                        target.name,
+                        if returns_scalar { "scalar" } else { "value" },
+                        if target.returns.is_scalar() {
+                            "scalar"
+                        } else {
+                            "value"
+                        }
                     )));
                 }
             }
@@ -3188,9 +3590,9 @@ fn validate_function(program: &Program, id: FunctionId) -> Result<(), String> {
             depth.1 - i64::from(shape.scalars.0) + i64::from(shape.scalars.1),
         );
         match inst {
-            // Neither continues: a return leaves the frame, and a `match`
-            // that covered nothing stops the run.
-            Inst::Return | Inst::NoMatch => {}
+            // None continues: a return leaves the frame, whichever stack it
+            // reads, and a `match` that covered nothing stops the run.
+            Inst::Return | Inst::ReturnScalar | Inst::NoMatch => {}
             Inst::Jump(to) => pending.push((to as usize, after)),
             Inst::JumpIfFalse(to) | Inst::JumpIfTrue(to) | Inst::JumpIfFalseScalar(to) => {
                 pending.push((to as usize, after));
@@ -3264,9 +3666,19 @@ fn stack_shape(constants: &[Const], inst: Inst) -> Shape {
         },
         Inst::Jump(_) => Shape::on_values(0, 0),
         Inst::JumpIfFalse(_) | Inst::JumpIfTrue(_) | Inst::Return => Shape::on_values(1, 0),
-        Inst::Call { argc, .. } | Inst::CallHost { argc, .. } | Inst::MakeBuiltin { argc, .. } => {
-            Shape::on_values(argc, 1)
-        }
+        Inst::ReturnScalar => Shape::on_scalars(1, 0),
+        // A call reads each stack for the arguments that arrived on it and
+        // leaves its answer on the one its callee's return type named.
+        Inst::Call {
+            value_argc,
+            scalar_argc,
+            returns_scalar,
+            ..
+        } => Shape {
+            values: (value_argc, u32::from(!returns_scalar)),
+            scalars: (scalar_argc, u32::from(returns_scalar)),
+        },
+        Inst::CallHost { argc, .. } | Inst::MakeBuiltin { argc, .. } => Shape::on_values(argc, 1),
         // The receiver sits below the arguments.
         Inst::CallBuiltin { argc, .. } => Shape::on_values(argc + 1, 1),
         Inst::MakeArray(len) => Shape::on_values(len, 1),
@@ -3286,6 +3698,14 @@ fn stack_shape(constants: &[Const], inst: Inst) -> Shape {
         // The value no arm covered is what the message names, so it is read;
         // nothing is put back, because control does not continue.
         Inst::NoMatch => Shape::on_values(1, 0),
+    }
+}
+
+/// A return instruction as a diagnostic names it.
+fn render_return(inst: Inst) -> &'static str {
+    match inst {
+        Inst::ReturnScalar => "return-scalar",
+        _ => "return",
     }
 }
 
@@ -3442,7 +3862,7 @@ mod tests {
                 "fn f() -> Int {\n  let a = 1\n  let b = 1.5\n  let c = true\n  let d = 250ms\n  let e = ()\n  let g = \"hi\"\n  a\n}\n",
                 "f"
             ),
-            "fn m.f arity=0 frame=4/2\n\
+            "fn m.f arity=0 frame=4/2 -> Int\n\
              \x20  0  scalar-const 1\n\
              \x20  1  store-scalar 0\n\
              \x20  2  const Float(1.5)\n\
@@ -3456,8 +3876,7 @@ mod tests {
              \x20 10  const Str(\"hi\")\n\
              \x20 11  store 3\n\
              \x20 12  load-scalar 0\n\
-             \x20 13  scalar-to-value Int\n\
-             \x20 14  return\n"
+             \x20 13  return-scalar\n"
         );
     }
 
@@ -3465,12 +3884,13 @@ mod tests {
     fn an_interpolated_string_renders_its_parts_left_to_right() {
         assert_eq!(
             listing("fn f(n: Int) -> String {\n  \"tick {n}!\"\n}\n", "f"),
-            "fn m.f arity=1 frame=1/0\n\
+            "fn m.f arity=1 frame=0/1 params=[Int] -> value\n\
              \x20  0  const Str(\"tick \")\n\
-             \x20  1  load 0\n\
-             \x20  2  const Str(\"!\")\n\
-             \x20  3  concat 3\n\
-             \x20  4  return\n"
+             \x20  1  load-scalar 0\n\
+             \x20  2  scalar-to-value Int\n\
+             \x20  3  const Str(\"!\")\n\
+             \x20  4  concat 3\n\
+             \x20  5  return\n"
         );
     }
 
@@ -3478,7 +3898,7 @@ mod tests {
     fn a_string_with_nothing_interpolated_is_one_constant() {
         assert_eq!(
             listing("fn f() -> String {\n  \"tick\"\n}\n", "f"),
-            "fn m.f arity=0 frame=0/0\n\
+            "fn m.f arity=0 frame=0/0 -> value\n\
              \x20  0  const Str(\"tick\")\n\
              \x20  1  return\n"
         );
@@ -3497,7 +3917,7 @@ mod tests {
                 "fn f() -> Int {\n  var x = 1\n  x = 2\n  x += 3\n  x\n}\n",
                 "f"
             ),
-            "fn m.f arity=0 frame=0/1\n\
+            "fn m.f arity=0 frame=0/1 -> Int\n\
              \x20  0  scalar-const 1\n\
              \x20  1  store-scalar 0\n\
              \x20  2  scalar-const 2\n\
@@ -3507,8 +3927,7 @@ mod tests {
              \x20  6  int Add\n\
              \x20  7  store-scalar 0\n\
              \x20  8  load-scalar 0\n\
-             \x20  9  scalar-to-value Int\n\
-             \x20 10  return\n"
+             \x20  9  return-scalar\n"
         );
     }
 
@@ -3522,7 +3941,7 @@ mod tests {
     fn an_assignment_whose_value_is_read_still_answers_unit() {
         assert_eq!(
             listing("fn f() -> Unit {\n  var x = 1\n  x = 2\n}\n", "f"),
-            "fn m.f arity=0 frame=0/1\n\
+            "fn m.f arity=0 frame=0/1 -> value\n\
              \x20  0  scalar-const 1\n\
              \x20  1  store-scalar 0\n\
              \x20  2  scalar-const 2\n\
@@ -3539,29 +3958,21 @@ mod tests {
                 "fn f(a: Int, b: Int) -> Bool {\n  a * b / a % b - a + b != a\n}\n",
                 "f"
             ),
-            "fn m.f arity=2 frame=2/0\n\
-             \x20  0  load 0\n\
-             \x20  1  value-to-scalar\n\
-             \x20  2  load 1\n\
-             \x20  3  value-to-scalar\n\
-             \x20  4  int Mul\n\
-             \x20  5  load 0\n\
-             \x20  6  value-to-scalar\n\
-             \x20  7  int Div\n\
-             \x20  8  load 1\n\
-             \x20  9  value-to-scalar\n\
-             \x20 10  int Rem\n\
-             \x20 11  load 0\n\
-             \x20 12  value-to-scalar\n\
-             \x20 13  int Sub\n\
-             \x20 14  load 1\n\
-             \x20 15  value-to-scalar\n\
-             \x20 16  int Add\n\
-             \x20 17  load 0\n\
-             \x20 18  value-to-scalar\n\
-             \x20 19  int Ne\n\
-             \x20 20  scalar-to-value Bool\n\
-             \x20 21  return\n"
+            "fn m.f arity=2 frame=0/2 params=[Int, Int] -> Bool\n\
+             \x20  0  load-scalar 0\n\
+             \x20  1  load-scalar 1\n\
+             \x20  2  int Mul\n\
+             \x20  3  load-scalar 0\n\
+             \x20  4  int Div\n\
+             \x20  5  load-scalar 1\n\
+             \x20  6  int Rem\n\
+             \x20  7  load-scalar 0\n\
+             \x20  8  int Sub\n\
+             \x20  9  load-scalar 1\n\
+             \x20 10  int Add\n\
+             \x20 11  load-scalar 0\n\
+             \x20 12  int Ne\n\
+             \x20 13  return-scalar\n"
         );
     }
 
@@ -3585,21 +3996,19 @@ mod tests {
                 "fn f(a: Int, b: Int, c: Float, d: Float, e: Duration, g: Duration) -> Duration {\n  let n = a + b\n  let x = c + d\n  e + g\n}\n",
                 "f"
             ),
-            "fn m.f arity=6 frame=7/1\n\
-             \x20  0  load 0\n\
-             \x20  1  value-to-scalar\n\
-             \x20  2  load 1\n\
-             \x20  3  value-to-scalar\n\
-             \x20  4  int Add\n\
-             \x20  5  store-scalar 0\n\
-             \x20  6  load 2\n\
-             \x20  7  load 3\n\
-             \x20  8  binary Add\n\
-             \x20  9  store 6\n\
-             \x20 10  load 4\n\
-             \x20 11  load 5\n\
-             \x20 12  binary Add\n\
-             \x20 13  return\n"
+            "fn m.f arity=6 frame=5/3 params=[Int, Int, value, value, value, value] -> value\n\
+             \x20  0  load-scalar 0\n\
+             \x20  1  load-scalar 1\n\
+             \x20  2  int Add\n\
+             \x20  3  store-scalar 2\n\
+             \x20  4  load 0\n\
+             \x20  5  load 1\n\
+             \x20  6  binary Add\n\
+             \x20  7  store 4\n\
+             \x20  8  load 2\n\
+             \x20  9  load 3\n\
+             \x20 10  binary Add\n\
+             \x20 11  return\n"
         );
     }
 
@@ -3614,7 +4023,7 @@ mod tests {
                 "struct P {\n  x: Int\n  y: Int\n}\n\nfn f(p: P) -> Int {\n  p.x + p.y\n}\n",
                 "f"
             ),
-            "fn m.f arity=1 frame=1/0\n\
+            "fn m.f arity=1 frame=1/0 params=[value] -> Int\n\
              \x20  0  load 0\n\
              \x20  1  get-field-at 0\n\
              \x20  2  value-to-scalar\n\
@@ -3622,8 +4031,7 @@ mod tests {
              \x20  4  get-field-at 1\n\
              \x20  5  value-to-scalar\n\
              \x20  6  int Add\n\
-             \x20  7  scalar-to-value Int\n\
-             \x20  8  return\n"
+             \x20  7  return-scalar\n"
         );
     }
 
@@ -3642,19 +4050,17 @@ mod tests {
                 "struct Box {\n  n: Int\n}\n\nimpl Box {\n  fn length(self) -> Int {\n    self.n\n  }\n}\n\nfn f(b: Box) -> Int {\n  b.length() + [1, 2, 3].length()\n}\n",
                 "f"
             ),
-            "fn m.f arity=1 frame=1/0\n\
+            "fn m.f arity=1 frame=1/0 params=[value] -> Int\n\
              \x20  0  load 0\n\
-             \x20  1  call m.Box.length argc=1\n\
-             \x20  2  value-to-scalar\n\
-             \x20  3  const Int(1)\n\
-             \x20  4  const Int(2)\n\
-             \x20  5  const Int(3)\n\
-             \x20  6  make-array 3\n\
-             \x20  7  call-builtin length argc=0\n\
-             \x20  8  value-to-scalar\n\
-             \x20  9  int Add\n\
-             \x20 10  scalar-to-value Int\n\
-             \x20 11  return\n"
+             \x20  1  call m.Box.length argc=1/0 -> scalar\n\
+             \x20  2  const Int(1)\n\
+             \x20  3  const Int(2)\n\
+             \x20  4  const Int(3)\n\
+             \x20  5  make-array 3\n\
+             \x20  6  call-builtin length argc=0\n\
+             \x20  7  value-to-scalar\n\
+             \x20  8  int Add\n\
+             \x20  9  return-scalar\n"
         );
     }
 
@@ -3665,15 +4071,17 @@ mod tests {
                 "fn f(b: Bool) -> Int {\n  if !b {\n    return -1\n  }\n  0\n}\n",
                 "f"
             ),
-            "fn m.f arity=1 frame=1/0\n\
-             \x20  0  load 0\n\
-             \x20  1  unary Not\n\
-             \x20  2  jump-if-false 6\n\
-             \x20  3  const Int(1)\n\
-             \x20  4  unary Neg\n\
-             \x20  5  return\n\
-             \x20  6  const Int(0)\n\
-             \x20  7  return\n"
+            "fn m.f arity=1 frame=0/1 params=[Bool] -> Int\n\
+             \x20  0  load-scalar 0\n\
+             \x20  1  scalar-to-value Bool\n\
+             \x20  2  unary Not\n\
+             \x20  3  jump-if-false 8\n\
+             \x20  4  const Int(1)\n\
+             \x20  5  unary Neg\n\
+             \x20  6  value-to-scalar\n\
+             \x20  7  return-scalar\n\
+             \x20  8  scalar-const 0\n\
+             \x20  9  return-scalar\n"
         );
     }
 
@@ -3681,17 +4089,21 @@ mod tests {
     fn and_and_or_short_circuit_through_jumps() {
         assert_eq!(
             listing("fn f(a: Bool, b: Bool) -> Bool {\n  a && b || a\n}\n", "f"),
-            "fn m.f arity=2 frame=2/0\n\
-             \x20  0  load 0\n\
-             \x20  1  jump-if-false 4\n\
-             \x20  2  load 1\n\
-             \x20  3  jump 5\n\
-             \x20  4  const Bool(false)\n\
-             \x20  5  jump-if-true 8\n\
-             \x20  6  load 0\n\
-             \x20  7  jump 9\n\
-             \x20  8  const Bool(true)\n\
-             \x20  9  return\n"
+            "fn m.f arity=2 frame=0/2 params=[Bool, Bool] -> Bool\n\
+             \x20  0  load-scalar 0\n\
+             \x20  1  scalar-to-value Bool\n\
+             \x20  2  jump-if-false 6\n\
+             \x20  3  load-scalar 1\n\
+             \x20  4  scalar-to-value Bool\n\
+             \x20  5  jump 7\n\
+             \x20  6  const Bool(false)\n\
+             \x20  7  jump-if-true 11\n\
+             \x20  8  load-scalar 0\n\
+             \x20  9  scalar-to-value Bool\n\
+             \x20 10  jump 12\n\
+             \x20 11  const Bool(true)\n\
+             \x20 12  value-to-scalar\n\
+             \x20 13  return-scalar\n"
         );
     }
 
@@ -3699,7 +4111,7 @@ mod tests {
     fn a_block_with_no_tail_is_unit() {
         assert_eq!(
             listing("fn f() -> Unit {\n  let a = 1\n}\n", "f"),
-            "fn m.f arity=0 frame=0/1\n\
+            "fn m.f arity=0 frame=0/1 -> value\n\
              \x20  0  scalar-const 1\n\
              \x20  1  store-scalar 0\n\
              \x20  2  const Unit\n\
@@ -3720,20 +4132,19 @@ mod tests {
                 "fn f(n: Int) -> Unit {\n  {\n    if n < 2 {\n      let a = 1\n    } else {\n      let b = 2\n    }\n  }\n}\n",
                 "f"
             ),
-            "fn m.f arity=1 frame=1/1\n\
-             \x20  0  load 0\n\
-             \x20  1  value-to-scalar\n\
-             \x20  2  scalar-const 2\n\
-             \x20  3  int Lt\n\
-             \x20  4  jump-if-false-scalar 9\n\
-             \x20  5  scalar-const 1\n\
-             \x20  6  store-scalar 0\n\
-             \x20  7  const Unit\n\
-             \x20  8  jump 12\n\
-             \x20  9  scalar-const 2\n\
-             \x20 10  store-scalar 0\n\
-             \x20 11  const Unit\n\
-             \x20 12  return\n"
+            "fn m.f arity=1 frame=0/2 params=[Int] -> value\n\
+             \x20  0  load-scalar 0\n\
+             \x20  1  scalar-const 2\n\
+             \x20  2  int Lt\n\
+             \x20  3  jump-if-false-scalar 8\n\
+             \x20  4  scalar-const 1\n\
+             \x20  5  store-scalar 1\n\
+             \x20  6  const Unit\n\
+             \x20  7  jump 11\n\
+             \x20  8  scalar-const 2\n\
+             \x20  9  store-scalar 1\n\
+             \x20 10  const Unit\n\
+             \x20 11  return\n"
         );
     }
 
@@ -3746,20 +4157,17 @@ mod tests {
                 "fn f(n: Int) -> Int {\n  let x = if n < 2 {\n    1\n  } else {\n    2\n  }\n  x\n}\n",
                 "f"
             ),
-            "fn m.f arity=1 frame=1/1\n\
-             \x20  0  load 0\n\
-             \x20  1  value-to-scalar\n\
-             \x20  2  scalar-const 2\n\
-             \x20  3  int Lt\n\
-             \x20  4  jump-if-false-scalar 7\n\
-             \x20  5  const Int(1)\n\
-             \x20  6  jump 8\n\
-             \x20  7  const Int(2)\n\
-             \x20  8  value-to-scalar\n\
-             \x20  9  store-scalar 0\n\
-             \x20 10  load-scalar 0\n\
-             \x20 11  scalar-to-value Int\n\
-             \x20 12  return\n"
+            "fn m.f arity=1 frame=0/2 params=[Int] -> Int\n\
+             \x20  0  load-scalar 0\n\
+             \x20  1  scalar-const 2\n\
+             \x20  2  int Lt\n\
+             \x20  3  jump-if-false-scalar 6\n\
+             \x20  4  scalar-const 1\n\
+             \x20  5  jump 7\n\
+             \x20  6  scalar-const 2\n\
+             \x20  7  store-scalar 1\n\
+             \x20  8  load-scalar 1\n\
+             \x20  9  return-scalar\n"
         );
     }
 
@@ -3770,20 +4178,17 @@ mod tests {
                 "fn f(n: Int) -> Int {\n  if n < 2 {\n    n\n  } else {\n    n - 1\n  }\n}\n",
                 "f"
             ),
-            "fn m.f arity=1 frame=1/0\n\
-             \x20  0  load 0\n\
-             \x20  1  value-to-scalar\n\
-             \x20  2  scalar-const 2\n\
-             \x20  3  int Lt\n\
-             \x20  4  jump-if-false-scalar 7\n\
-             \x20  5  load 0\n\
-             \x20  6  jump 12\n\
-             \x20  7  load 0\n\
-             \x20  8  value-to-scalar\n\
-             \x20  9  scalar-const 1\n\
-             \x20 10  int Sub\n\
-             \x20 11  scalar-to-value Int\n\
-             \x20 12  return\n"
+            "fn m.f arity=1 frame=0/1 params=[Int] -> Int\n\
+             \x20  0  load-scalar 0\n\
+             \x20  1  scalar-const 2\n\
+             \x20  2  int Lt\n\
+             \x20  3  jump-if-false-scalar 6\n\
+             \x20  4  load-scalar 0\n\
+             \x20  5  jump 9\n\
+             \x20  6  load-scalar 0\n\
+             \x20  7  scalar-const 1\n\
+             \x20  8  int Sub\n\
+             \x20  9  return-scalar\n"
         );
     }
 
@@ -3799,19 +4204,17 @@ mod tests {
                 "fn f(n: Int) -> Int {\n  var t = 0\n  if n < 2 {\n    t = 1\n  }\n  t\n}\n",
                 "f"
             ),
-            "fn m.f arity=1 frame=1/1\n\
+            "fn m.f arity=1 frame=0/2 params=[Int] -> Int\n\
              \x20  0  scalar-const 0\n\
-             \x20  1  store-scalar 0\n\
-             \x20  2  load 0\n\
-             \x20  3  value-to-scalar\n\
-             \x20  4  scalar-const 2\n\
-             \x20  5  int Lt\n\
-             \x20  6  jump-if-false-scalar 9\n\
-             \x20  7  scalar-const 1\n\
-             \x20  8  store-scalar 0\n\
-             \x20  9  load-scalar 0\n\
-             \x20 10  scalar-to-value Int\n\
-             \x20 11  return\n"
+             \x20  1  store-scalar 1\n\
+             \x20  2  load-scalar 0\n\
+             \x20  3  scalar-const 2\n\
+             \x20  4  int Lt\n\
+             \x20  5  jump-if-false-scalar 8\n\
+             \x20  6  scalar-const 1\n\
+             \x20  7  store-scalar 1\n\
+             \x20  8  load-scalar 1\n\
+             \x20  9  return-scalar\n"
         );
     }
 
@@ -3823,18 +4226,17 @@ mod tests {
                 "fn f(n: Int) -> Unit {\n  var t = 0\n  if n < 2 {\n    t = 1\n  }\n}\n",
                 "f"
             ),
-            "fn m.f arity=1 frame=1/1\n\
+            "fn m.f arity=1 frame=0/2 params=[Int] -> value\n\
              \x20  0  scalar-const 0\n\
-             \x20  1  store-scalar 0\n\
-             \x20  2  load 0\n\
-             \x20  3  value-to-scalar\n\
-             \x20  4  scalar-const 2\n\
-             \x20  5  int Lt\n\
-             \x20  6  jump-if-false-scalar 9\n\
-             \x20  7  scalar-const 1\n\
-             \x20  8  store-scalar 0\n\
-             \x20  9  const Unit\n\
-             \x20 10  return\n"
+             \x20  1  store-scalar 1\n\
+             \x20  2  load-scalar 0\n\
+             \x20  3  scalar-const 2\n\
+             \x20  4  int Lt\n\
+             \x20  5  jump-if-false-scalar 8\n\
+             \x20  6  scalar-const 1\n\
+             \x20  7  store-scalar 1\n\
+             \x20  8  const Unit\n\
+             \x20  9  return\n"
         );
     }
 
@@ -3851,7 +4253,7 @@ mod tests {
                 "fn f() -> Int {\n  var i = 0\n  while i < 3 {\n    i += 1\n  }\n  i\n}\n",
                 "f"
             ),
-            "fn m.f arity=0 frame=0/1\n\
+            "fn m.f arity=0 frame=0/1 -> Int\n\
              \x20  0  scalar-const 0\n\
              \x20  1  store-scalar 0\n\
              \x20  2  load-scalar 0\n\
@@ -3864,8 +4266,7 @@ mod tests {
              \x20  9  store-scalar 0\n\
              \x20 10  jump 2\n\
              \x20 11  load-scalar 0\n\
-             \x20 12  scalar-to-value Int\n\
-             \x20 13  return\n"
+             \x20 12  return-scalar\n"
         );
     }
 
@@ -3886,7 +4287,7 @@ mod tests {
                 "fn f() -> Int {\n  var t = 0\n  for i in 0..<3 {\n    t += i\n  }\n  t\n}\n",
                 "f"
             ),
-            "fn m.f arity=0 frame=3/1\n\
+            "fn m.f arity=0 frame=3/1 -> Int\n\
              \x20  0  scalar-const 0\n\
              \x20  1  store-scalar 0\n\
              \x20  2  const Int(0)\n\
@@ -3910,8 +4311,7 @@ mod tests {
              \x20 20  store 0\n\
              \x20 21  jump 6\n\
              \x20 22  load-scalar 0\n\
-             \x20 23  scalar-to-value Int\n\
-             \x20 24  return\n"
+             \x20 23  return-scalar\n"
         );
     }
 
@@ -3945,7 +4345,7 @@ mod tests {
                 "fn f(items: Array<Int>) -> Int {\n  var t = 0\n  for item in items {\n    t += item\n  }\n  t\n}\n",
                 "f"
             ),
-            "fn m.f arity=1 frame=5/1\n\
+            "fn m.f arity=1 frame=5/1 params=[value] -> Int\n\
              \x20  0  scalar-const 0\n\
              \x20  1  store-scalar 0\n\
              \x20  2  load 0\n\
@@ -3976,8 +4376,7 @@ mod tests {
              \x20 27  store 3\n\
              \x20 28  jump 10\n\
              \x20 29  load-scalar 0\n\
-             \x20 30  scalar-to-value Int\n\
-             \x20 31  return\n"
+             \x20 30  return-scalar\n"
         );
     }
 
@@ -3990,7 +4389,7 @@ mod tests {
                 "fn f() -> Int {\n  var i = 0\n  while i < 10 {\n    i += 1\n    if i == 2 {\n      continue\n    }\n    if i == 5 {\n      break\n    }\n  }\n  i\n}\n",
                 "f"
             ),
-            "fn m.f arity=0 frame=0/1\n\
+            "fn m.f arity=0 frame=0/1 -> Int\n\
              \x20  0  scalar-const 0\n\
              \x20  1  store-scalar 0\n\
              \x20  2  load-scalar 0\n\
@@ -4013,8 +4412,7 @@ mod tests {
              \x20 19  jump 21\n\
              \x20 20  jump 2\n\
              \x20 21  load-scalar 0\n\
-             \x20 22  scalar-to-value Int\n\
-             \x20 23  return\n"
+             \x20 22  return-scalar\n"
         );
     }
 
@@ -4025,31 +4423,23 @@ mod tests {
                 "fn fib(n: Int) -> Int {\n  if n < 2 {\n    n\n  } else {\n    fib(n - 1) + fib(n - 2)\n  }\n}\n",
                 "fib"
             ),
-            "fn m.fib arity=1 frame=1/0\n\
-             \x20  0  load 0\n\
-             \x20  1  value-to-scalar\n\
-             \x20  2  scalar-const 2\n\
-             \x20  3  int Lt\n\
-             \x20  4  jump-if-false-scalar 7\n\
-             \x20  5  load 0\n\
-             \x20  6  jump 23\n\
-             \x20  7  load 0\n\
-             \x20  8  value-to-scalar\n\
-             \x20  9  scalar-const 1\n\
-             \x20 10  int Sub\n\
-             \x20 11  scalar-to-value Int\n\
-             \x20 12  call m.fib argc=1\n\
-             \x20 13  value-to-scalar\n\
-             \x20 14  load 0\n\
-             \x20 15  value-to-scalar\n\
-             \x20 16  scalar-const 2\n\
-             \x20 17  int Sub\n\
-             \x20 18  scalar-to-value Int\n\
-             \x20 19  call m.fib argc=1\n\
-             \x20 20  value-to-scalar\n\
-             \x20 21  int Add\n\
-             \x20 22  scalar-to-value Int\n\
-             \x20 23  return\n"
+            "fn m.fib arity=1 frame=0/1 params=[Int] -> Int\n\
+             \x20  0  load-scalar 0\n\
+             \x20  1  scalar-const 2\n\
+             \x20  2  int Lt\n\
+             \x20  3  jump-if-false-scalar 6\n\
+             \x20  4  load-scalar 0\n\
+             \x20  5  jump 15\n\
+             \x20  6  load-scalar 0\n\
+             \x20  7  scalar-const 1\n\
+             \x20  8  int Sub\n\
+             \x20  9  call m.fib argc=0/1 -> scalar\n\
+             \x20 10  load-scalar 0\n\
+             \x20 11  scalar-const 2\n\
+             \x20 12  int Sub\n\
+             \x20 13  call m.fib argc=0/1 -> scalar\n\
+             \x20 14  int Add\n\
+             \x20 15  return-scalar\n"
         );
     }
 
@@ -4060,11 +4450,129 @@ mod tests {
                 "fn g(a: Int, b: Int) -> Int {\n  a\n}\n\nfn f() -> Int {\n  g(1, 2)\n}\n",
                 "f"
             ),
-            "fn m.f arity=0 frame=0/0\n\
-             \x20  0  const Int(1)\n\
-             \x20  1  const Int(2)\n\
-             \x20  2  call m.g argc=2\n\
-             \x20  3  return\n"
+            "fn m.f arity=0 frame=0/0 -> Int\n\
+             \x20  0  scalar-const 1\n\
+             \x20  1  scalar-const 2\n\
+             \x20  2  call m.g argc=0/2 -> scalar\n\
+             \x20  3  return-scalar\n"
+        );
+    }
+
+    /// The convention itself, in the smallest program that states it: a
+    /// parameter the checker settled travels on the scalar stack and becomes
+    /// the callee's scalar slot, and the answer comes back the same way.
+    /// Nothing crosses between the stacks, on either side of the call.
+    #[test]
+    fn a_settled_parameter_and_a_settled_answer_travel_on_the_scalar_stack() {
+        let source =
+            "fn identity(value: Int) -> Int {\n  value\n}\n\nfn f() -> Int {\n  identity(1)\n}\n";
+        assert_eq!(
+            listing(source, "identity"),
+            "fn m.identity arity=1 frame=0/1 params=[Int] -> Int\n\
+             \x20  0  load-scalar 0\n\
+             \x20  1  return-scalar\n"
+        );
+        assert_eq!(
+            listing(source, "f"),
+            "fn m.f arity=0 frame=0/0 -> Int\n\
+             \x20  0  scalar-const 1\n\
+             \x20  1  call m.identity argc=0/1 -> scalar\n\
+             \x20  2  return-scalar\n"
+        );
+    }
+
+    /// Each argument goes to the stack its own parameter names, and within
+    /// each stack they land in the order that stack's slots are numbered in
+    /// — which is why nothing has to be moved once they are pushed.
+    ///
+    /// `g`'s frame is one value slot and one scalar slot, and `tag` is value
+    /// slot 0 while `n` is scalar slot 0: the numbering is dense inside each
+    /// stack and says nothing about the other.
+    #[test]
+    fn an_argument_travels_on_the_stack_its_own_type_names() {
+        let source = "fn g(n: Int, tag: String, k: Int) -> String {\n  tag\n}\n\nfn f() -> String {\n  g(1, \"a\", 2)\n}\n";
+        assert_eq!(
+            listing(source, "g"),
+            "fn m.g arity=3 frame=1/2 params=[Int, value, Int] -> value\n\
+             \x20  0  load 0\n\
+             \x20  1  return\n"
+        );
+        assert_eq!(
+            listing(source, "f"),
+            "fn m.f arity=0 frame=0/0 -> value\n\
+             \x20  0  scalar-const 1\n\
+             \x20  1  const Str(\"a\")\n\
+             \x20  2  scalar-const 2\n\
+             \x20  3  call m.g argc=1/2\n\
+             \x20  4  return\n"
+        );
+    }
+
+    /// A receiver is pushed first because it is the first thing `params`
+    /// names, and it goes to its own stack like any other argument — which
+    /// is the value stack, because a method is declared on a struct or an
+    /// enum.
+    #[test]
+    fn a_receiver_is_the_first_argument_and_travels_on_its_own_stack() {
+        let source = "struct P {\n  x: Int\n}\n\nimpl P {\n  fn plus(self, by: Int) -> Int {\n    self.x + by\n  }\n}\n\nfn f(p: P) -> Int {\n  p.plus(by: 2)\n}\n";
+        assert_eq!(
+            listing(source, "P.plus"),
+            "fn m.P.plus arity=2 frame=1/1 params=[value, Int] receiver -> Int\n\
+             \x20  0  load 0\n\
+             \x20  1  get-field-at 0\n\
+             \x20  2  value-to-scalar\n\
+             \x20  3  load-scalar 0\n\
+             \x20  4  int Add\n\
+             \x20  5  return-scalar\n"
+        );
+        assert_eq!(
+            listing(source, "f"),
+            "fn m.f arity=1 frame=1/0 params=[value] -> Int\n\
+             \x20  0  load 0\n\
+             \x20  1  scalar-const 2\n\
+             \x20  2  call m.P.plus argc=1/1 -> scalar\n\
+             \x20  3  return-scalar\n"
+        );
+    }
+
+    /// A scalar answer crosses only where something on the other stack reads
+    /// it: one boundary instruction where a value is wanted, the scalar
+    /// stack's own discard where nothing is, and neither where a scalar was
+    /// wanted anyway.
+    #[test]
+    fn a_scalar_answer_crosses_only_where_a_value_reads_it() {
+        let source = "fn g() -> Int {\n  1\n}\n\nfn f() -> String {\n  g()\n  let n = g() + 1\n  \"{g()}\"\n}\n";
+        assert_eq!(
+            listing(source, "f"),
+            "fn m.f arity=0 frame=0/1 -> value\n\
+             \x20  0  call m.g argc=0/0 -> scalar\n\
+             \x20  1  scalar-pop\n\
+             \x20  2  call m.g argc=0/0 -> scalar\n\
+             \x20  3  scalar-const 1\n\
+             \x20  4  int Add\n\
+             \x20  5  store-scalar 0\n\
+             \x20  6  call m.g argc=0/0 -> scalar\n\
+             \x20  7  scalar-to-value Int\n\
+             \x20  8  concat 1\n\
+             \x20  9  return\n"
+        );
+    }
+
+    /// A `Bool` a call left on the scalar stack is branched on where it
+    /// stands, rather than moved across to be tested.
+    #[test]
+    fn a_bool_a_call_answered_is_tested_where_it_stands() {
+        let source = "fn big(n: Int) -> Bool {\n  n > 2\n}\n\nfn f(n: Int) -> Int {\n  if big(n) {\n    1\n  } else {\n    0\n  }\n}\n";
+        assert_eq!(
+            listing(source, "f"),
+            "fn m.f arity=1 frame=0/1 params=[Int] -> Int\n\
+             \x20  0  load-scalar 0\n\
+             \x20  1  call m.big argc=0/1 -> scalar\n\
+             \x20  2  jump-if-false-scalar 5\n\
+             \x20  3  scalar-const 1\n\
+             \x20  4  jump 6\n\
+             \x20  5  scalar-const 0\n\
+             \x20  6  return-scalar\n"
         );
     }
 
@@ -4074,20 +4582,18 @@ mod tests {
     fn a_struct_is_built_in_declaration_order_and_read_by_field() {
         assert_eq!(
             listing(STRUCT_AND_METHOD, "f"),
-            "fn m.f arity=0 frame=1/0\n\
+            "fn m.f arity=0 frame=1/0 -> Int\n\
              \x20  0  const Int(1)\n\
              \x20  1  const Int(2)\n\
              \x20  2  make-struct m.P fields=x,y\n\
              \x20  3  store 0\n\
              \x20  4  load 0\n\
-             \x20  5  call m.P.sum argc=1\n\
-             \x20  6  value-to-scalar\n\
-             \x20  7  load 0\n\
-             \x20  8  get-field-at 0\n\
-             \x20  9  value-to-scalar\n\
-             \x20 10  int Add\n\
-             \x20 11  scalar-to-value Int\n\
-             \x20 12  return\n"
+             \x20  5  call m.P.sum argc=1/0 -> scalar\n\
+             \x20  6  load 0\n\
+             \x20  7  get-field-at 0\n\
+             \x20  8  value-to-scalar\n\
+             \x20  9  int Add\n\
+             \x20 10  return-scalar\n"
         );
     }
 
@@ -4095,7 +4601,7 @@ mod tests {
     fn a_method_takes_its_receiver_in_slot_zero() {
         assert_eq!(
             listing(STRUCT_AND_METHOD, "P.sum"),
-            "fn m.P.sum arity=1 frame=1/0 receiver\n\
+            "fn m.P.sum arity=1 frame=1/0 params=[value] receiver -> Int\n\
              \x20  0  load 0\n\
              \x20  1  get-field-at 0\n\
              \x20  2  value-to-scalar\n\
@@ -4103,8 +4609,7 @@ mod tests {
              \x20  4  get-field-at 1\n\
              \x20  5  value-to-scalar\n\
              \x20  6  int Add\n\
-             \x20  7  scalar-to-value Int\n\
-             \x20  8  return\n"
+             \x20  7  return-scalar\n"
         );
     }
 
@@ -4115,7 +4620,7 @@ mod tests {
                 "use console.println\nuse clock\n\nfn f() -> Result<Unit, Error> {\n  let at = clock.now()\n  println(\"at {at}\")?\n  Ok(())\n}\n",
                 "f"
             ),
-            "fn m.f arity=0 frame=1/0\n\
+            "fn m.f arity=0 frame=1/0 -> value\n\
              \x20  0  call-host clock.now argc=0\n\
              \x20  1  store 0\n\
              \x20  2  const Str(\"at \")\n\
@@ -4137,13 +4642,14 @@ mod tests {
                 "fn f(items: Array<Int>) -> Int {\n  items.get(0).unwrapOr(7)\n}\n",
                 "f"
             ),
-            "fn m.f arity=1 frame=1/0\n\
+            "fn m.f arity=1 frame=1/0 params=[value] -> Int\n\
              \x20  0  load 0\n\
              \x20  1  const Int(0)\n\
              \x20  2  call-builtin get argc=1\n\
              \x20  3  const Int(7)\n\
              \x20  4  call-builtin unwrapOr argc=1\n\
-             \x20  5  return\n"
+             \x20  5  value-to-scalar\n\
+             \x20  6  return-scalar\n"
         );
     }
 
@@ -4154,7 +4660,7 @@ mod tests {
                 "fn f() -> Result<Unit, Error> {\n  assertEqual(1, 1)?\n  Ok(())\n}\n",
                 "f"
             ),
-            "fn m.f arity=0 frame=0/0\n\
+            "fn m.f arity=0 frame=0/0 -> value\n\
              \x20  0  const Int(1)\n\
              \x20  1  const Int(1)\n\
              \x20  2  make-builtin assertEqual argc=2\n\
@@ -4206,7 +4712,7 @@ mod tests {
     fn none_is_built_from_nothing() {
         assert_eq!(
             listing("fn f() -> Option<Int> {\n  None\n}\n", "f"),
-            "fn m.f arity=0 frame=0/0\n\
+            "fn m.f arity=0 frame=0/0 -> value\n\
              \x20  0  make-builtin None argc=0\n\
              \x20  1  return\n"
         );
@@ -4216,7 +4722,7 @@ mod tests {
     fn an_array_literal_collects_its_elements_left_to_right() {
         assert_eq!(
             listing("fn f() -> Array<Int> {\n  [1, 2, 3]\n}\n", "f"),
-            "fn m.f arity=0 frame=0/0\n\
+            "fn m.f arity=0 frame=0/0 -> value\n\
              \x20  0  const Int(1)\n\
              \x20  1  const Int(2)\n\
              \x20  2  const Int(3)\n\
@@ -4232,7 +4738,7 @@ mod tests {
                 "fn f(v: Option<Int>) -> Option<Int> {\n  Some(v? + 1)\n}\n",
                 "f"
             ),
-            "fn m.f arity=1 frame=1/0\n\
+            "fn m.f arity=1 frame=1/0 params=[value] -> value\n\
              \x20  0  load 0\n\
              \x20  1  try\n\
              \x20  2  value-to-scalar\n\
@@ -4251,16 +4757,15 @@ mod tests {
                 "fn f(n: Int) -> Int {\n  if n < 0 {\n    return 0\n  }\n  return n\n}\n",
                 "f"
             ),
-            "fn m.f arity=1 frame=1/0\n\
-             \x20  0  load 0\n\
-             \x20  1  value-to-scalar\n\
-             \x20  2  scalar-const 0\n\
-             \x20  3  int Lt\n\
-             \x20  4  jump-if-false-scalar 7\n\
-             \x20  5  const Int(0)\n\
-             \x20  6  return\n\
-             \x20  7  load 0\n\
-             \x20  8  return\n"
+            "fn m.f arity=1 frame=0/1 params=[Int] -> Int\n\
+             \x20  0  load-scalar 0\n\
+             \x20  1  scalar-const 0\n\
+             \x20  2  int Lt\n\
+             \x20  3  jump-if-false-scalar 6\n\
+             \x20  4  scalar-const 0\n\
+             \x20  5  return-scalar\n\
+             \x20  6  load-scalar 0\n\
+             \x20  7  return-scalar\n"
         );
     }
 
@@ -4273,7 +4778,7 @@ mod tests {
                 "fn f() -> Int {\n  let x = 1\n  let x = x + 1\n  x\n}\n",
                 "f"
             ),
-            "fn m.f arity=0 frame=0/2\n\
+            "fn m.f arity=0 frame=0/2 -> Int\n\
              \x20  0  scalar-const 1\n\
              \x20  1  store-scalar 0\n\
              \x20  2  load-scalar 0\n\
@@ -4281,8 +4786,7 @@ mod tests {
              \x20  4  int Add\n\
              \x20  5  store-scalar 1\n\
              \x20  6  load-scalar 1\n\
-             \x20  7  scalar-to-value Int\n\
-             \x20  8  return\n"
+             \x20  7  return-scalar\n"
         );
     }
 
@@ -4296,7 +4800,7 @@ mod tests {
                 "fn f() -> Int {\n  {\n    let a = 1\n    a\n  }\n  {\n    let b = 2\n    b\n  }\n}\n",
                 "f"
             ),
-            "fn m.f arity=0 frame=0/1\n\
+            "fn m.f arity=0 frame=0/1 -> Int\n\
              \x20  0  scalar-const 1\n\
              \x20  1  store-scalar 0\n\
              \x20  2  load-scalar 0\n\
@@ -4305,8 +4809,7 @@ mod tests {
              \x20  5  scalar-const 2\n\
              \x20  6  store-scalar 0\n\
              \x20  7  load-scalar 0\n\
-             \x20  8  scalar-to-value Int\n\
-             \x20  9  return\n"
+             \x20  8  return-scalar\n"
         );
     }
 
@@ -4319,7 +4822,7 @@ mod tests {
                 "fn f() -> Int {\n  let a = 1\n  {\n    let b = 2\n    let c = 3\n    b + c\n  }\n}\n",
                 "f"
             ),
-            "fn m.f arity=0 frame=0/3\n\
+            "fn m.f arity=0 frame=0/3 -> Int\n\
              \x20  0  scalar-const 1\n\
              \x20  1  store-scalar 0\n\
              \x20  2  scalar-const 2\n\
@@ -4329,8 +4832,7 @@ mod tests {
              \x20  6  load-scalar 1\n\
              \x20  7  load-scalar 2\n\
              \x20  8  int Add\n\
-             \x20  9  scalar-to-value Int\n\
-             \x20 10  return\n"
+             \x20  9  return-scalar\n"
         );
     }
 
@@ -4343,13 +4845,11 @@ mod tests {
                 "fn f(x: Int) -> Int {\n  {\n    let x = x\n    x\n  }\n}\n",
                 "f"
             ),
-            "fn m.f arity=1 frame=1/1\n\
-             \x20  0  load 0\n\
-             \x20  1  value-to-scalar\n\
-             \x20  2  store-scalar 0\n\
-             \x20  3  load-scalar 0\n\
-             \x20  4  scalar-to-value Int\n\
-             \x20  5  return\n"
+            "fn m.f arity=1 frame=0/2 params=[Int] -> Int\n\
+             \x20  0  load-scalar 0\n\
+             \x20  1  store-scalar 1\n\
+             \x20  2  load-scalar 1\n\
+             \x20  3  return-scalar\n"
         );
     }
 
@@ -4363,7 +4863,7 @@ mod tests {
     fn an_enum_case_is_built_from_its_payload() {
         assert_eq!(
             listing(&format!("{ENUM}fn f() -> E {{\n  E.B(1)\n}}\n"), "f"),
-            "fn m.f arity=0 frame=0/0\n\
+            "fn m.f arity=0 frame=0/0 -> value\n\
              \x20  0  const Int(1)\n\
              \x20  1  make-enum m.E.B argc=1\n\
              \x20  2  return\n"
@@ -4376,7 +4876,7 @@ mod tests {
     fn a_case_that_carries_nothing_is_built_from_nothing() {
         assert_eq!(
             listing(&format!("{ENUM}fn f() -> E {{\n  E.A\n}}\n"), "f"),
-            "fn m.f arity=0 frame=0/0\n\
+            "fn m.f arity=0 frame=0/0 -> value\n\
              \x20  0  make-enum m.E.A argc=0\n\
              \x20  1  return\n"
         );
@@ -4390,24 +4890,25 @@ mod tests {
                 &format!("{ENUM}fn f(e: E) -> Int {{\n  match e {{\n    E.A => 1\n    E.B(n) => n\n  }}\n}}\n"),
                 "f"
             ),
-            "fn m.f arity=1 frame=2/0\n\
+            "fn m.f arity=1 frame=2/0 params=[value] -> Int\n\
              \x20  0  load 0\n\
              \x20  1  test-case E.A\n\
              \x20  2  jump-if-false 6\n\
              \x20  3  pop\n\
-             \x20  4  const Int(1)\n\
-             \x20  5  jump 16\n\
+             \x20  4  scalar-const 1\n\
+             \x20  5  jump 17\n\
              \x20  6  test-case E.B\n\
-             \x20  7  jump-if-false 15\n\
+             \x20  7  jump-if-false 16\n\
              \x20  8  get-payload 0\n\
              \x20  9  dup\n\
              \x20 10  store 1\n\
              \x20 11  pop\n\
              \x20 12  pop\n\
              \x20 13  load 1\n\
-             \x20 14  jump 16\n\
-             \x20 15  no-match\n\
-             \x20 16  return\n"
+             \x20 14  value-to-scalar\n\
+             \x20 15  jump 17\n\
+             \x20 16  no-match\n\
+             \x20 17  return-scalar\n"
         );
     }
 
@@ -4421,28 +4922,30 @@ mod tests {
                 "enum Pair {\n  L(Int)\n  R(Int)\n}\n\nfn f(p: Pair) -> Int {\n  match p {\n    Pair.L(x) => x\n    Pair.R(y) => y\n  }\n}\n",
                 "f"
             ),
-            "fn m.f arity=1 frame=2/0\n\
+            "fn m.f arity=1 frame=2/0 params=[value] -> Int\n\
              \x20  0  load 0\n\
              \x20  1  test-case Pair.L\n\
-             \x20  2  jump-if-false 10\n\
+             \x20  2  jump-if-false 11\n\
              \x20  3  get-payload 0\n\
              \x20  4  dup\n\
              \x20  5  store 1\n\
              \x20  6  pop\n\
              \x20  7  pop\n\
              \x20  8  load 1\n\
-             \x20  9  jump 20\n\
-             \x20 10  test-case Pair.R\n\
-             \x20 11  jump-if-false 19\n\
-             \x20 12  get-payload 0\n\
-             \x20 13  dup\n\
-             \x20 14  store 1\n\
-             \x20 15  pop\n\
+             \x20  9  value-to-scalar\n\
+             \x20 10  jump 22\n\
+             \x20 11  test-case Pair.R\n\
+             \x20 12  jump-if-false 21\n\
+             \x20 13  get-payload 0\n\
+             \x20 14  dup\n\
+             \x20 15  store 1\n\
              \x20 16  pop\n\
-             \x20 17  load 1\n\
-             \x20 18  jump 20\n\
-             \x20 19  no-match\n\
-             \x20 20  return\n"
+             \x20 17  pop\n\
+             \x20 18  load 1\n\
+             \x20 19  value-to-scalar\n\
+             \x20 20  jump 22\n\
+             \x20 21  no-match\n\
+             \x20 22  return-scalar\n"
         );
     }
 
@@ -4455,15 +4958,15 @@ mod tests {
                 "fn f(r: Result<Option<Int>, Error>) -> Int {\n  match r {\n    Ok(Some(x)) => x\n    _ => 0\n  }\n}\n",
                 "f"
             ),
-            "fn m.f arity=1 frame=2/0\n\
+            "fn m.f arity=1 frame=2/0 params=[value] -> Int\n\
              \x20  0  load 0\n\
              \x20  1  test-case Ok\n\
-             \x20  2  jump-if-false 16\n\
+             \x20  2  jump-if-false 17\n\
              \x20  3  get-payload 0\n\
              \x20  4  test-case Some\n\
              \x20  5  jump-if-true 8\n\
              \x20  6  pop\n\
-             \x20  7  jump 16\n\
+             \x20  7  jump 17\n\
              \x20  8  get-payload 0\n\
              \x20  9  dup\n\
              \x20 10  store 1\n\
@@ -4471,11 +4974,12 @@ mod tests {
              \x20 12  pop\n\
              \x20 13  pop\n\
              \x20 14  load 1\n\
-             \x20 15  jump 19\n\
-             \x20 16  pop\n\
-             \x20 17  const Int(0)\n\
-             \x20 18  jump 19\n\
-             \x20 19  return\n"
+             \x20 15  value-to-scalar\n\
+             \x20 16  jump 20\n\
+             \x20 17  pop\n\
+             \x20 18  scalar-const 0\n\
+             \x20 19  jump 20\n\
+             \x20 20  return-scalar\n"
         );
     }
 
@@ -4485,12 +4989,13 @@ mod tests {
     fn an_associated_function_reads_its_arguments_alone() {
         assert_eq!(
             listing("fn f() -> Int {\n  Vector.of(1, 2).length()\n}\n", "f"),
-            "fn m.f arity=0 frame=0/0\n\
+            "fn m.f arity=0 frame=0/0 -> Int\n\
              \x20  0  const Int(1)\n\
              \x20  1  const Int(2)\n\
              \x20  2  call-assoc Vector.of argc=2\n\
              \x20  3  call-builtin length argc=0\n\
-             \x20  4  return\n"
+             \x20  4  value-to-scalar\n\
+             \x20  5  return-scalar\n"
         );
     }
 
@@ -4503,7 +5008,7 @@ mod tests {
                 "fn f() -> String {\n  MapEntry(key: \"a\", value: 1).key\n}\n",
                 "f"
             ),
-            "fn m.f arity=0 frame=0/0\n\
+            "fn m.f arity=0 frame=0/0 -> value\n\
              \x20  0  const Str(\"a\")\n\
              \x20  1  const Int(1)\n\
              \x20  2  make-builtin MapEntry argc=2\n\
@@ -4647,7 +5152,7 @@ mod tests {
             .expect("its entry is lowered");
         assert_eq!(
             crate::render(&program, id),
-            "fn arith.main arity=0 frame=0/2\n\
+            "fn arith.main arity=0 frame=0/2 -> value\n\
              \x20  0  scalar-const 0\n\
              \x20  1  store-scalar 0\n\
              \x20  2  scalar-const 0\n\
@@ -4733,7 +5238,7 @@ mod tests {
         let id = program.function_named("m", "f").expect("`f` is lowered");
         assert_eq!(
             crate::render(&program, id),
-            "fn m.f arity=0 frame=1/0\n\
+            "fn m.f arity=0 frame=1/0 -> Int\n\
              \x20  0  const Int(1)\n\
              \x20  1  make-struct m.P fields=x\n\
              \x20  2  store 0\n\
@@ -4748,7 +5253,8 @@ mod tests {
              \x20 11  store 0\n\
              \x20 12  load 0\n\
              \x20 13  get-field-at 0\n\
-             \x20 14  return\n"
+             \x20 14  value-to-scalar\n\
+             \x20 15  return-scalar\n"
         );
     }
 
@@ -4764,7 +5270,7 @@ mod tests {
             .expect("its entry is lowered");
         assert_eq!(
             crate::render(&program, id),
-            "fn startup.main arity=0 frame=0/0\n\
+            "fn startup.main arity=0 frame=0/0 -> value\n\
              \x20  0  const Unit\n\
              \x20  1  return\n"
         );
@@ -4972,7 +5478,7 @@ mod tests {
                 "fn f() -> Unit {\n  {\n    let a = 1\n  }\n  {\n    let b = \"two\"\n  }\n  {\n    let c = 3\n  }\n}\n",
                 "f"
             ),
-            "fn m.f arity=0 frame=1/1\n\
+            "fn m.f arity=0 frame=1/1 -> value\n\
              \x20  0  scalar-const 1\n\
              \x20  1  store-scalar 0\n\
              \x20  2  const Str(\"two\")\n\
@@ -5015,12 +5521,25 @@ mod tests {
 
     #[test]
     fn validate_refuses_a_function_that_does_not_end_in_a_return() {
-        let mut program = lower(&checked("fn f() -> Int {\n  1\n}\n")).expect("it lowers");
+        let mut program = lower(&checked("fn f() -> String {\n  \"hi\"\n}\n")).expect("it lowers");
         program.functions[0].code.pop();
         program.functions[0].spans.pop();
         assert_eq!(
             validate(&program).expect_err("a missing return is refused"),
             "m.f: does not end in a `return`"
+        );
+    }
+
+    /// The instruction a function must end in is the one its convention
+    /// names, so a scalar-answering function is missing a different one.
+    #[test]
+    fn validate_refuses_a_scalar_function_that_does_not_end_in_a_return_scalar() {
+        let mut program = lower(&checked("fn f() -> Int {\n  1\n}\n")).expect("it lowers");
+        program.functions[0].code.pop();
+        program.functions[0].spans.pop();
+        assert_eq!(
+            validate(&program).expect_err("a missing return is refused"),
+            "m.f: does not end in a `return-scalar`"
         );
     }
 
@@ -5048,12 +5567,73 @@ mod tests {
         let id = program.function_named("m", "f").expect("`f` is lowered");
         let function = &mut program.functions[id.0 as usize];
         for inst in &mut function.code {
-            if let Inst::Call { argc, .. } = inst {
-                *argc = 2;
+            if let Inst::Call { scalar_argc, .. } = inst {
+                *scalar_argc = 2;
             }
         }
         assert!(validate(&program)
             .expect_err("a mismatched call is refused")
             .contains("with 2 arguments, which takes 1"),);
+    }
+
+    /// The counts are per stack and not only in total, because a call that
+    /// supplied the right number of arguments on the wrong stacks would read
+    /// words nobody wrote.
+    #[test]
+    fn validate_refuses_a_call_that_puts_its_arguments_on_the_wrong_stack() {
+        let mut program = lower(&checked(
+            "fn g(a: Int) -> Int {\n  a\n}\n\nfn f() -> Int {\n  g(1)\n}\n",
+        ))
+        .expect("it lowers");
+        let id = program.function_named("m", "f").expect("`f` is lowered");
+        let function = &mut program.functions[id.0 as usize];
+        for inst in &mut function.code {
+            if let Inst::Call {
+                value_argc,
+                scalar_argc,
+                ..
+            } = inst
+            {
+                *value_argc = 1;
+                *scalar_argc = 0;
+            }
+        }
+        assert!(validate(&program)
+            .expect_err("a call on the wrong stacks is refused")
+            .contains("with 1 value and 0 scalar arguments, which takes 0 and 1"),);
+    }
+
+    /// And the answer's stack likewise: a caller that read the wrong one
+    /// would read whatever the callee happened to leave behind.
+    #[test]
+    fn validate_refuses_a_call_that_expects_its_answer_on_the_wrong_stack() {
+        let mut program = lower(&checked(
+            "fn g(a: Int) -> Int {\n  a\n}\n\nfn f() -> Int {\n  g(1)\n}\n",
+        ))
+        .expect("it lowers");
+        let id = program.function_named("m", "f").expect("`f` is lowered");
+        let function = &mut program.functions[id.0 as usize];
+        for inst in &mut function.code {
+            if let Inst::Call { returns_scalar, .. } = inst {
+                *returns_scalar = false;
+            }
+        }
+        assert!(validate(&program)
+            .expect_err("a call reading the wrong stack is refused")
+            .contains("for an answer on the value stack, which answers on the scalar"),);
+    }
+
+    /// A function returns on one stack, so a body holding both instructions
+    /// would leave its caller reading whichever one happened to run.
+    #[test]
+    fn validate_refuses_a_function_that_mixes_the_two_returns() {
+        let mut program = lower(&checked("fn f(a: Int) -> Int {\n  a\n}\n")).expect("it lowers");
+        let id = program.function_named("m", "f").expect("`f` is lowered");
+        let function = &mut program.functions[id.0 as usize];
+        function.code.insert(0, Inst::Return);
+        function.spans.insert(0, function.span);
+        assert!(validate(&program)
+            .expect_err("a mixed return is refused")
+            .contains("answers on the scalar stack and holds a `return`"),);
     }
 }

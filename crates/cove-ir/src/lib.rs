@@ -33,7 +33,14 @@
 //! are the checker declining, and a function it declined about keeps the
 //! representation it had. [`Inst::ScalarToValue`] and [`Inst::ValueToScalar`]
 //! are the boundary between the two, emitted where a scalar meets something
-//! general — a call's argument, an assertion, a struct field.
+//! general — an assertion, a struct field, a string being interpolated, a
+//! builtin method's answer.
+//!
+//! A call is not one of those. [`Function::params`] and [`Function::returns`]
+//! carry the same rule across a call boundary, so an argument whose type the
+//! checker settled is pushed onto the scalar stack and becomes the callee's
+//! scalar slot without moving, and an answer comes back the way it was
+//! computed.
 //!
 //! # What is not here
 //!
@@ -97,8 +104,8 @@ pub struct Function {
     pub module: Rc<str>,
     pub name: Rc<str>,
     /// How many slots of the *value* stack one call needs: `self` if it has
-    /// a receiver, then its parameters, then every `Value` local and
-    /// temporary the body declares.
+    /// a receiver, then each parameter `params` names a value slot for, then
+    /// every `Value` local and temporary the body declares.
     ///
     /// [`Inst::LoadLocal`] and [`Inst::StoreLocal`] address `0..value_frame_size`
     /// of the value stack; nothing else does. That makes this the frame
@@ -110,16 +117,45 @@ pub struct Function {
     /// `scalar_frame_size` instead.
     pub value_frame_size: u32,
     /// How many slots of the *scalar* stack one call needs: every `Int` or
-    /// `Bool` local and temporary the body declares.
+    /// `Bool` parameter, local, and temporary the body declares.
     ///
     /// [`Inst::LoadScalar`] and [`Inst::StoreScalar`] address
     /// `0..scalar_frame_size` of the scalar stack; nothing else does. A
-    /// parameter is never counted here — an argument arrives on the caller's
-    /// value stack and becomes the callee's slot without moving, so a
-    /// parameter's slot is always a value slot.
+    /// scalar parameter is counted here and a value parameter is counted in
+    /// `value_frame_size`, because an argument arrives on the stack its own
+    /// type names and becomes the callee's slot there without moving; see
+    /// `params`.
     pub scalar_frame_size: u32,
     /// How many arguments a call must supply, `self` included.
     pub arity: u32,
+    /// Which stack each of those arguments arrives on, in the order a call
+    /// supplies them — the receiver first when `has_receiver`, then the
+    /// declared parameters in declaration order.
+    ///
+    /// This is the calling convention, and it is the callee's to state
+    /// because the callee is what a slot number means. An argument is
+    /// pushed onto the stack its own settled type names and *becomes* the
+    /// callee's slot in that stack without moving, so the value parameters
+    /// occupy the first value slots in the order they appear here and the
+    /// scalar parameters the first scalar slots, each dense within its own
+    /// stack. `params.len()` is `arity`, which `validate` checks rather than
+    /// assumes.
+    ///
+    /// Written out rather than derived, because a caller has to place its
+    /// arguments before the callee exists: a recursive call is lowered
+    /// before its own `Function` does. [`Inst::Call`] therefore carries the
+    /// counts, and `validate` is where the two are made to agree.
+    pub params: Vec<SlotKind>,
+    /// Which stack a call to this function leaves its answer on, and
+    /// therefore which stack its return instruction reads.
+    ///
+    /// [`SlotKind::Scalar`] means the checker settled the declared return
+    /// type as `Int` or `Bool`, every return of the body is an
+    /// [`Inst::ReturnScalar`], and a caller finds the answer on the scalar
+    /// stack. [`SlotKind::Value`] is [`Inst::Return`] and the value stack,
+    /// which is what a function the checker settled nothing useful about
+    /// keeps.
+    pub returns: SlotKind,
     /// Whether slot 0 is a receiver rather than the first parameter.
     pub has_receiver: bool,
     /// What the closure that created this body handed it, in the order the
@@ -317,8 +353,25 @@ pub enum Inst {
     JumpIfTrue(u32),
     /// Duplicates the top of the stack.
     Dup,
-    /// Calls a lowered function with `argc` arguments, pushed left to right.
-    Call { function: FunctionId, argc: u32 },
+    /// Calls a lowered function whose arguments are already on the two
+    /// stacks: `value_argc` of them on the value stack and `scalar_argc` on
+    /// the scalar stack, each in the callee's parameter order within its own
+    /// stack. `returns_scalar` says which stack the answer comes back on.
+    ///
+    /// The three numbers are in the instruction rather than looked up in the
+    /// callee, and both reasons are structural. `crate::lower::stack_shape`
+    /// is a pure function of one instruction and has no function table to
+    /// ask; and a recursive call is emitted before its own callee's
+    /// [`Function`] exists, so there would be nothing to ask at the moment
+    /// the instruction is written. `validate` reconciles them with the
+    /// callee's own `params` and `returns`, which is what makes the
+    /// convention an invariant rather than a convention.
+    Call {
+        function: FunctionId,
+        value_argc: u32,
+        scalar_argc: u32,
+        returns_scalar: bool,
+    },
     /// Calls a Host operation. `module` and `op` are `Const::Name`.
     CallHost {
         module: ConstId,
@@ -410,8 +463,20 @@ pub enum Inst {
     /// `expr?`: pops a `Result` or `Option`, pushes its payload, or returns
     /// the failure from this call.
     Try,
-    /// Returns the top of the stack.
+    /// Returns the top of the value stack.
+    ///
+    /// What a function whose `returns` is [`SlotKind::Value`] ends in, and
+    /// what every one of its returns is.
     Return,
+    /// Returns the top of the *scalar* stack.
+    ///
+    /// What a function whose declared return type the checker settled as
+    /// `Int` or `Bool` ends in, and what every one of its returns is: the
+    /// answer never becomes a `Value` on the way out, because the caller
+    /// wanted a scalar and the callee computed one. A function that mixes
+    /// this with [`Inst::Return`] is a `validate` failure, since `returns`
+    /// names one stack and a caller reads exactly that one.
+    ReturnScalar,
 }
 
 /// The unary operators the IR carries, which are the language's.
@@ -507,17 +572,32 @@ pub fn render(program: &Program, id: FunctionId) -> String {
         function.value_frame_size,
         function.scalar_frame_size
     ));
+    if !function.params.is_empty() {
+        let params: Vec<&str> = function.params.iter().copied().map(render_kind).collect();
+        out.push_str(&format!(" params=[{}]", params.join(", ")));
+    }
     if function.has_receiver {
         out.push_str(" receiver");
     }
     if !function.captures.is_empty() {
         out.push_str(&format!(" captures=[{}]", function.captures.join(", ")));
     }
+    out.push_str(&format!(" -> {}", render_kind(function.returns)));
     out.push('\n');
     for (pc, inst) in function.code.iter().enumerate() {
         out.push_str(&format!("{pc:4}  {}\n", render_inst(program, *inst)));
     }
     out
+}
+
+/// Which stack a slot lives in, as a listing names it: the scalar's by what
+/// it holds, and the value stack's by being the one that holds anything.
+fn render_kind(kind: SlotKind) -> &'static str {
+    match kind {
+        SlotKind::Value => "value",
+        SlotKind::Scalar(Scalar::Int) => "Int",
+        SlotKind::Scalar(Scalar::Bool) => "Bool",
+    }
 }
 
 /// Renders one instruction, resolving the constants it names so that a
@@ -548,9 +628,18 @@ fn render_inst(program: &Program, inst: Inst) -> String {
         Inst::Jump(to) => format!("jump {to}"),
         Inst::JumpIfFalse(to) => format!("jump-if-false {to}"),
         Inst::JumpIfTrue(to) => format!("jump-if-true {to}"),
-        Inst::Call { function, argc } => {
+        Inst::Call {
+            function,
+            value_argc,
+            scalar_argc,
+            returns_scalar,
+        } => {
             let target = program.function(function);
-            format!("call {}.{} argc={argc}", target.module, target.name)
+            let answer = if returns_scalar { " -> scalar" } else { "" };
+            format!(
+                "call {}.{} argc={value_argc}/{scalar_argc}{answer}",
+                target.module, target.name
+            )
         }
         Inst::CallHost { module, op, argc } => {
             format!("call-host {}.{} argc={argc}", name(module), name(op))
@@ -576,5 +665,6 @@ fn render_inst(program: &Program, inst: Inst) -> String {
         Inst::NoMatch => "no-match".to_string(),
         Inst::Try => "try".to_string(),
         Inst::Return => "return".to_string(),
+        Inst::ReturnScalar => "return-scalar".to_string(),
     }
 }

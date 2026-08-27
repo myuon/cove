@@ -21,7 +21,7 @@ pub mod typeck;
 pub use capability::{open_reasons, Capability, OpenCall};
 pub use compile::Compiler;
 pub use config::{Config, RunConfig};
-pub use facts::{Facts, MethodTarget};
+pub use facts::{Facts, MethodTarget, Signature};
 pub use package::{Module, Package, Unit};
 
 // Re-exported so an embedder configuring the checker names one crate: the

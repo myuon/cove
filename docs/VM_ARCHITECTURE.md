@@ -70,39 +70,71 @@ change is named.
 
 ### The stack
 
-One contiguous `Vec<Value>` for the whole run, shared by every frame. A frame
-is three numbers:
+Two contiguous vectors for the whole run, shared by every frame: a `Vec<Value>`
+and, beside it, a `Vec<i64>` for the slots and operands the checker proved are
+`Int` or `Bool`. A frame is a window into both:
 
 ```rust
 struct Frame {
     function: FunctionId,
-    return_pc: usize,   // the instruction after the caller's `Call`
-    base: usize,        // where this frame's slots begin
+    return_pc: usize,    // the instruction after the caller's `Call`
+    base: usize,         // where this frame's value slots begin
+    scalar_base: usize,  // where its scalar slots begin
 }
 ```
 
-A frame's slots are `stack[base .. base + frame_size]` and its operands sit
-above them. Nothing is allocated per call: the frame is three words pushed onto
-a `Vec<Frame>`, and the slots are stack that already exists.
+A frame's slots are `stack[base .. base + value_frame_size]` and
+`scalars[scalar_base .. scalar_base + scalar_frame_size]`, and its operands sit
+above them on each. The two are numbered separately, so which stack a slot
+lives in is decided by which instruction addresses it rather than by anything
+read at run time. Nothing is allocated per call: the frame is four words pushed
+onto a `Vec<Frame>`, and the slots are stack that already exists.
 
 ### Argument placement
 
-Arguments are pushed onto the *caller's* operand stack, left to right, and
+Arguments are pushed onto the *caller's* operand stacks, left to right, and
 become the callee's first slots without moving. So `base` is the caller's
-operand top, read from the other side.
+value-operand top, read from the other side, and `scalar_base` is its
+scalar-operand top read the same way.
 
-Slot order is fixed at lowering: `self` when the function has a receiver, then
-each declared parameter in declaration order, then locals and temporaries in
-the order the body declares them. `frame_size` is the high-water mark of that,
-not the total, because a block's slots are released at its end and a later
-sibling block reuses the numbers.
+Which of the two stacks an argument travels on is the callee's declared type,
+resolved by the checker and published as `Function::params`: a parameter the
+checker settled as `Int` or `Bool` is a scalar slot, so its argument is pushed
+onto the scalar stack and becomes that slot, and everything else is a value
+slot as before. `Call` carries the two counts rather than looking them up,
+because the lowering has to place a recursive call's arguments before the
+callee it is inside exists, and because the depth simulation is a function of
+one instruction with no function table beside it. `validate` reconciles the
+counts with the callee's own `params`, which is what makes this an invariant
+rather than an agreement.
+
+Slot order is fixed at lowering and is dense within each stack: `self` when the
+function has a receiver, then each declared parameter in declaration order,
+then locals and temporaries in the order the body declares them, each drawing
+a number from the stack it lives in. `value_frame_size` and
+`scalar_frame_size` are the high-water marks of that, not the totals, because a
+block's slots are released at its end and a later sibling block reuses the
+numbers.
 
 ### Return
 
-`Return` pops the value, truncates the stack to `base`, pops the frame, and
-pushes the value onto what is now the caller's operand stack. Truncating to
-`base` is what discards the callee's slots and its arguments together, since
-they are the same storage.
+`Function::returns` says which stack a call leaves its answer on, and it is
+the same question asked of the declared return type: a function the checker
+settled as answering `Int` or `Bool` answers on the scalar stack, and every
+one of its returns is a `ReturnScalar`. Mixing the two in one function is a
+`validate` failure, because a caller reads exactly the stack the convention
+named and nothing tells it which of two a given return happened to use.
+
+Either return pops its answer, truncates *both* stacks to the frame's bases,
+pops the frame, and pushes the answer onto whichever stack it came off — which
+is now the caller's. Truncating to the bases is what discards the callee's
+slots and its arguments together, since they are the same storage.
+
+A whole run still answers a `Value`, because that is the language the
+embedding API speaks. So the entry's arguments cross into their stacks on the
+way in and a scalar answer becomes the `Value` it stands for on the way out,
+at the return that has no caller. That is the only place either conversion
+happens.
 
 ### Recursion and depth
 
@@ -293,15 +325,22 @@ What dominates now is dispatch, which was always the other half of the
 prototype's profile and is now 85% of a run 2.5× shorter. That is the next
 thing to be measured against, not this one.
 
-Two bounded follow-ups the profile names, neither taken here:
+Both follow-ups the profile named have since been taken, and they were one
+change. A parameter's slot and a return value's stack are now the declared
+type's to decide, which is the calling convention described above; and an
+`Int`-typed `if`/`else`, `match`, or block is lowered in scalar position
+rather than built as a `Value` in each branch for a boundary instruction to
+unwrap again — the second is what the first needs to be worth anything, since
+a function whose body is a tail `if` would otherwise have paid back at its
+return what its parameters saved. `benches/pure`'s `fib` and `benches/call`'s
+`identity` hold no boundary instruction at all now, where `fib` had eight of
+twenty-four.
 
-- A parameter's slot is a value slot, because an argument arrives on the
-  caller's value stack and becomes the callee's first slot without moving.
-  So `benches/pure` and `benches/call` pay a boundary instruction per
-  parameter read. Making a parameter's slot typed means writing the calling
-  convention the target asks for, and it is what would carry the `arith`
-  result into everything with a signature.
-- An `Int`-typed expression used as an operand but lowered on the value path
-  — an `if`/`else`, a `match` — round-trips through
-  `scalar-to-value; value-to-scalar`. Lowering those in scalar position
-  removes the pair.
+What the convention does not reach is what still lowers on the value path
+either way. `&&` and `||` short-circuit through the value stack's jumps, so a
+`Bool` parameter crosses to be tested and the answer crosses back; `!` and
+unary `-` have no scalar form; and a builtin method or a host operation
+answers a `Value` whatever its type, because both are the interpreter's own
+code and the interpreter speaks `Value`. Each is a boundary instruction where
+a value really does meet something general, which is what the boundary is for
+— and none of them is what a profile now names.

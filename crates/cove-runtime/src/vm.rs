@@ -51,6 +51,16 @@
 //! frame is a window into both, at its `base` and at its `scalar_base`, and
 //! a call and a return move both the same way.
 //!
+//! That includes the arguments and the answer. A parameter the checker
+//! settled is a scalar slot, so its argument was pushed onto the scalar
+//! stack and becomes that slot without moving, exactly as a value argument
+//! becomes a value slot; `cove_ir::Function::params` is which of the two
+//! each argument arrived on and `cove_ir::Inst::Call` carries the counts.
+//! `cove_ir::Function::returns` is the same question about the answer, and
+//! [`Inst::ReturnScalar`] is what a function that answers a scalar ends in.
+//! Neither is examined at run time: the counts are in the instruction and
+//! the two stacks are resized from them.
+//!
 //! The point is negative. `benches/arith` adds two integers two million
 //! times, and a `Value` is 40 bytes with a destructor, so the loop was moving
 //! 40 bytes per push and running drop glue per pop to do arithmetic that owns
@@ -82,7 +92,7 @@ use std::time::{Duration, Instant};
 use cove_diag::{SourceMap, Span};
 use cove_ir::{
     BinaryOp as IrBinary, Const, ConstId, Function, FunctionId, Inst, IntOp, Program, Scalar,
-    UnaryOp as IrUnary,
+    SlotKind, UnaryOp as IrUnary,
 };
 use cove_schema::builtins::{free_builtin, FreeBuiltinKind, MAP_ENTRY, NONE_CASE, OPTION, RESULT};
 use cove_syntax::ast::{BinaryOp, EnumDecl, UnaryOp};
@@ -152,20 +162,22 @@ struct Frame {
     /// are `stack[base .. base + value_frame_size]`, and its operands sit
     /// above them.
     ///
-    /// This is also the caller's operand top, because the arguments were
-    /// pushed onto the caller's stack and then became this frame's first
-    /// slots without moving. A return truncates to `base`, which is that one
-    /// fact read from the other side.
+    /// This is also the caller's value-operand top, because the arguments
+    /// that travel on the value stack were pushed onto the caller's stack
+    /// and then became this frame's first value slots without moving. A
+    /// return truncates to `base`, which is that one fact read from the
+    /// other side.
     base: usize,
     /// Where this frame's scalar slots begin in the scalar stack. Its slots
     /// are `scalars[scalar_base .. scalar_base + scalar_frame_size]`.
     ///
-    /// A separate number from `base` because the two stacks are separate: an
-    /// argument arrives on the value stack, so nothing is transferred here
-    /// and a call's scalar window simply begins above whatever scalar
-    /// operands the caller had half-computed. A return truncates to it, which
-    /// discards this frame's scalar slots and leaves the caller's operands
-    /// exactly as they were.
+    /// A separate number from `base` because the two stacks are separate,
+    /// and read the same way from the other side: it is the caller's scalar
+    /// operand top before it pushed the scalar arguments, so those arguments
+    /// become this frame's first scalar slots without moving, exactly as the
+    /// value arguments become its first value slots. A return truncates to
+    /// it, which discards this frame's scalar slots and its scalar arguments
+    /// together and leaves the caller's own operands exactly as they were.
     ///
     /// The two stacks are numbered separately: `cove_ir::Inst::LoadLocal` and
     /// `cove_ir::Inst::StoreLocal` address `base`'s stack, and
@@ -305,9 +317,16 @@ impl<'a> Vm<'a> {
 
     /// Runs `function` with `args`, answering what the entry answered.
     ///
-    /// The arguments arrive on the operand stack, pushed left to right, and
-    /// become the first slots of the frame — which is what a `Call` does,
-    /// done by hand here because there is no caller to have done it.
+    /// The arguments are placed on the two operand stacks the way a `Call`
+    /// would have placed them — each onto the stack its own parameter's slot
+    /// kind names, in the order `params` gives — and become the first slots
+    /// of the frame. It is done by hand here because there is no caller to
+    /// have done it.
+    ///
+    /// The host speaks `Value`, because that is the language the embedding
+    /// API is written in, so this is where an argument whose slot is a
+    /// scalar one crosses. The entry's own answer crosses back at the other
+    /// end of the same boundary: the return that has no caller.
     pub fn run(&mut self, function: FunctionId, args: Vec<Value>) -> Result<Value, RuntimeError> {
         let entry = self.program.function(function);
         if args.len() as u32 != entry.arity {
@@ -324,7 +343,12 @@ impl<'a> Vm<'a> {
         self.scalars.clear();
         self.frames.clear();
         self.fuel = 0;
-        self.stack.extend(args);
+        for (kind, value) in entry.params.iter().zip(args) {
+            match kind {
+                SlotKind::Value => self.stack.push(value),
+                SlotKind::Scalar(_) => self.scalars.push(promised_scalar(value)),
+            }
+        }
         self.stack
             .resize(entry.value_frame_size as usize, Value::Unit);
         self.scalars.resize(entry.scalar_frame_size as usize, 0);
@@ -622,19 +646,24 @@ impl<'a> Vm<'a> {
                 }
                 Inst::Call {
                     function: target,
-                    argc,
+                    value_argc,
+                    scalar_argc,
+                    ..
                 } => {
                     let span = running.span_at(pc);
                     let callee = program.function(target);
                     self.enter(callee, span)?;
-                    let base = self.stack.len() - argc as usize;
+                    // Each stack's window opens where its own arguments
+                    // begin, so those arguments *are* the callee's first
+                    // slots in that stack and nothing is transferred: a
+                    // scalar argument was pushed onto the scalar stack by
+                    // the caller and is already the scalar slot it becomes.
+                    // Resizing is what gives the rest of each window room,
+                    // and a return truncates both back.
+                    let base = self.stack.len() - value_argc as usize;
                     self.stack
                         .resize(base + callee.value_frame_size as usize, Value::Unit);
-                    // Every argument arrived on the value stack, so nothing
-                    // is transferred here: the callee's scalar window simply
-                    // opens above whatever scalar operands the caller had
-                    // half-computed, and a return closes it again.
-                    let scalar_base = self.scalars.len();
+                    let scalar_base = self.scalars.len() - scalar_argc as usize;
                     self.scalars
                         .resize(scalar_base + callee.scalar_frame_size as usize, 0);
                     frame = Frame {
@@ -857,7 +886,7 @@ impl<'a> Vm<'a> {
                         Ok(payload) => self.stack.push(payload),
                         Err(failure) => {
                             self.safepoint(span)?;
-                            match self.leave(failure) {
+                            match self.leave(Answered::Value(failure)) {
                                 Answer::Done(value) => return Ok(value),
                                 Answer::Caller(caller, resumed) => {
                                     frame = caller;
@@ -873,7 +902,25 @@ impl<'a> Vm<'a> {
                 Inst::Return => {
                     self.safepoint(running.span_at(pc))?;
                     let value = self.pop();
-                    match self.leave(value) {
+                    match self.leave(Answered::Value(value)) {
+                        Answer::Done(value) => return Ok(value),
+                        Answer::Caller(caller, resumed) => {
+                            frame = caller;
+                            running = program.function(frame.function);
+                            code = &running.code;
+                            pc = resumed;
+                            continue;
+                        }
+                    }
+                }
+                Inst::ReturnScalar => {
+                    // The same frame teardown, and the same safepoint,
+                    // because a return is a return however its answer
+                    // travels: only which stack the answer is taken off and
+                    // put back on differs.
+                    self.safepoint(running.span_at(pc))?;
+                    let scalar = self.pop_scalar();
+                    match self.leave(Answered::Scalar(scalar)) {
                         Answer::Done(value) => return Ok(value),
                         Answer::Caller(caller, resumed) => {
                             frame = caller;
@@ -949,21 +996,37 @@ impl<'a> Vm<'a> {
         self.safepoint(span)
     }
 
-    /// Pops the running frame and hands `value` back to whoever called it.
+    /// Pops the running frame and hands `answer` back to whoever called it.
     ///
-    /// The stack is truncated to the frame's base, which is where the
-    /// caller's operands ended before it pushed the arguments, so the value
-    /// lands exactly where the caller expects it.
-    fn leave(&mut self, value: Value) -> Answer {
+    /// Both windows are truncated to the frame's bases, which are where the
+    /// caller's operands ended on each stack before it pushed the arguments,
+    /// so the frame's slots and its arguments are discarded together — they
+    /// are the same storage. The answer is then pushed onto whichever stack
+    /// it came off, which is the one the caller's `Call` said to expect it
+    /// on.
+    ///
+    /// The run itself ends in a `Value`, because that is what an embedder
+    /// asked for and the scalar stack is an internal representation. So a
+    /// scalar answer that has no caller becomes the `Value` it stands for
+    /// here, at the outermost boundary there is.
+    fn leave(&mut self, answer: Answered) -> Answer {
         let done = self.frames.pop().expect("a return leaves a frame");
         self.stack.truncate(done.base);
         self.scalars.truncate(done.scalar_base);
-        match self.frames.last().copied() {
-            Some(caller) => {
+        match (self.frames.last().copied(), answer) {
+            (Some(caller), Answered::Value(value)) => {
                 self.stack.push(value);
                 Answer::Caller(caller, done.return_pc)
             }
-            None => Answer::Done(value),
+            (Some(caller), Answered::Scalar(scalar)) => {
+                self.scalars.push(scalar);
+                Answer::Caller(caller, done.return_pc)
+            }
+            (None, Answered::Value(value)) => Answer::Done(value),
+            (None, Answered::Scalar(scalar)) => {
+                let returns = self.program.function(done.function).returns;
+                Answer::Done(as_value(returns, scalar))
+            }
         }
     }
 
@@ -1120,6 +1183,19 @@ enum Answer {
     Caller(Frame, usize),
 }
 
+/// The answer a return is carrying, and which stack it came off.
+///
+/// The two are not interchangeable and nothing at run time could tell them
+/// apart once the word is on the scalar stack, so the distinction is made
+/// where it is still known: at the instruction that read it. A caller resumes
+/// expecting the answer on the stack its `Call` named, and that name came
+/// from the callee's own `returns`, so the two agree by construction —
+/// `cove_ir::lower::validate` is where they were made to.
+enum Answered {
+    Value(Value),
+    Scalar(i64),
+}
+
 /// `expr?`: the payload, or the failure to return from this call.
 ///
 /// The rule is the interpreter's, for both of the types it is defined over: a
@@ -1234,6 +1310,26 @@ fn promised_scalar(value: Value) -> i64 {
         other => unreachable!(
             "`value-to-scalar` was emitted for an `Int` or a `Bool`, and was handed a `{}`",
             other.type_name()
+        ),
+    }
+}
+
+/// The `Value` a scalar answer stands for, at the one boundary a whole run
+/// has: the return that has no caller.
+///
+/// Which of the two it is comes from `cove_ir::Function::returns` rather than
+/// from beside the word, because the scalar stack carries no tag — that is
+/// what it is for. `returns` named a scalar for every function whose returns
+/// were lowered as [`Inst::ReturnScalar`], and `cove_ir::lower::validate`
+/// refused a function where the two disagreed, so anything else arriving here
+/// is a broken invariant of this backend and not a program that could be told
+/// about it.
+fn as_value(returns: SlotKind, scalar: i64) -> Value {
+    match returns {
+        SlotKind::Scalar(Scalar::Int) => Value::Int(scalar),
+        SlotKind::Scalar(Scalar::Bool) => Value::Bool(scalar != 0),
+        SlotKind::Value => unreachable!(
+            "`return-scalar` was reached in a function that answers on the value stack"
         ),
     }
 }
@@ -2976,6 +3072,8 @@ mod tests {
                     value_frame_size: 0,
                     scalar_frame_size: 0,
                     arity: 0,
+                    params: Vec::new(),
+                    returns: cove_ir::SlotKind::Value,
                     has_receiver: false,
                     captures: Vec::new(),
                     spans: vec![span; code.len()],
@@ -3083,6 +3181,8 @@ mod tests {
                     value_frame_size: 0,
                     scalar_frame_size: 0,
                     arity: 0,
+                    params: Vec::new(),
+                    returns: cove_ir::SlotKind::Value,
                     has_receiver: false,
                     captures: Vec::new(),
                     spans: vec![span; code.len()],
