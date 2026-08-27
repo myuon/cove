@@ -380,6 +380,17 @@ pub enum Inst {
     /// makes the position knowable. [`Inst::GetField`] is what a receiver
     /// whose type the checker abstained about still gets.
     GetFieldAt(u32),
+    /// Pops a struct off the value stack and pushes the field at this
+    /// position onto the scalar stack.
+    ///
+    /// Emitted where the checker settled both the receiver's type — which is
+    /// what makes the position knowable, exactly as for [`Inst::GetFieldAt`]
+    /// — and the field's own type, as `Int` or `Bool`. It is a fusion of two
+    /// instructions rather than a new capability: without it, the same read
+    /// is [`Inst::GetFieldAt`] followed by [`Inst::ValueToScalar`], which
+    /// builds a `Value` for the sole purpose of the next instruction
+    /// discarding it.
+    GetFieldAtScalar(u32),
     /// Jumps to an instruction index.
     Jump(u32),
     /// Pops a `Bool` and jumps when it is false.
@@ -661,6 +672,7 @@ fn render_inst(program: &Program, inst: Inst) -> String {
         Inst::ScalarToValue(what) => format!("scalar-to-value {what:?}"),
         Inst::ValueToScalar => "value-to-scalar".to_string(),
         Inst::GetFieldAt(index) => format!("get-field-at {index}"),
+        Inst::GetFieldAtScalar(index) => format!("get-field-at-scalar {index}"),
         Inst::Jump(to) => format!("jump {to}"),
         Inst::JumpIfFalse(to) => format!("jump-if-false {to}"),
         Inst::JumpIfTrue(to) => format!("jump-if-true {to}"),

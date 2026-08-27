@@ -1244,6 +1244,7 @@ impl<'a, 'l> Body<'a, 'l> {
             ExprKind::Binary { op, lhs, rhs } => binary_op(*op)
                 .is_some_and(|op| matches!(self.binary_inst(op, lhs, rhs), Inst::IntBinary(_))),
             ExprKind::Call { callee, .. } => self.callee_returns(expr.id, callee).is_some(),
+            ExprKind::Field { base, name } => self.scalar_field(expr, base, &name.node).is_some(),
             _ => false,
         }
     }
@@ -1338,6 +1339,20 @@ impl<'a, 'l> Body<'a, 'l> {
             .iter()
             .position(|field| field.name.node == name)?;
         Some(index as u32)
+    }
+
+    /// Where `receiver.name` stands, asked only where the read is one
+    /// [`Inst::GetFieldAtScalar`] can answer: the receiver's type settled a
+    /// position, the same as for [`Inst::GetFieldAt`], *and* the field itself
+    /// is a type the scalar stack holds.
+    ///
+    /// One predicate for the two places that need it — lowering the read
+    /// itself and deciding which stack it leaves its answer on
+    /// ([`Body::on_scalar_stack`]) — so that they cannot settle it
+    /// differently.
+    fn scalar_field(&self, field: &Expr, receiver: &'a Expr, name: &str) -> Option<u32> {
+        self.scalar_of(field)?;
+        self.field_position(receiver, name)
     }
 
     /// The declaration the checker recorded this call as reaching.
@@ -1527,6 +1542,17 @@ impl<'a, 'l> Body<'a, 'l> {
             ExprKind::If { else_branch, .. } if else_branch.is_some() => {
                 return self.expr_at(expr, Position::Scalar)
             }
+            // `Inst::GetFieldAtScalar` where the receiver's position and the
+            // field's own type are both settled — see `Body::scalar_field`.
+            // Anything else falls to `moved_to_scalar`, exactly where
+            // `Inst::GetFieldAt` is not emitted either.
+            ExprKind::Field { base, name } => match self.scalar_field(expr, base, &name.node) {
+                Some(index) => {
+                    self.expr(base)?;
+                    self.emit(Inst::GetFieldAtScalar(index), span);
+                }
+                None => return self.moved_to_scalar(expr),
+            },
             _ => return self.moved_to_scalar(expr),
         }
         Ok(())
@@ -3876,6 +3902,13 @@ fn stack_shape(constants: &[Const], inst: Inst) -> Shape {
         Inst::Unary(_) | Inst::GetField(_) | Inst::GetFieldAt(_) | Inst::Try => {
             Shape::on_values(1, 1)
         }
+        // The fusion of `Inst::GetFieldAt` with `Inst::ValueToScalar`: the
+        // struct it reads is the same one value in, and the field it reads
+        // out lands on the other stack.
+        Inst::GetFieldAtScalar(_) => Shape {
+            values: (1, 0),
+            scalars: (0, 1),
+        },
         Inst::Binary(_) | Inst::SetField(_) => Shape::on_values(2, 1),
         // The typed operator is the scalar stack's: two `i64` in, one out.
         Inst::IntBinary(_) => Shape::on_scalars(2, 1),
@@ -4255,11 +4288,55 @@ mod tests {
             ),
             "fn m.f arity=1 frame=1/0 params=[value] -> Int\n\
              \x20  0  load 0\n\
-             \x20  1  get-field-at 0\n\
-             \x20  2  value-to-scalar\n\
-             \x20  3  load 0\n\
-             \x20  4  get-field-at 1\n\
-             \x20  5  value-to-scalar\n\
+             \x20  1  get-field-at-scalar 0\n\
+             \x20  2  load 0\n\
+             \x20  3  get-field-at-scalar 1\n\
+             \x20  4  int Add\n\
+             \x20  5  return-scalar\n"
+        );
+    }
+
+    /// A `Bool` field is branched on directly where its receiver's position
+    /// and its own type are both settled: `Inst::GetFieldAtScalar` puts it on
+    /// the scalar stack and `Inst::JumpIfFalseScalar` reads it there, with no
+    /// `Value` built for a condition that is never wanted as one.
+    #[test]
+    fn a_bool_field_as_a_condition_never_builds_a_value() {
+        assert_eq!(
+            listing(
+                "struct P {\n  ready: Bool\n}\n\nfn f(p: P) -> Int {\n  if p.ready {\n    1\n  } else {\n    0\n  }\n}\n",
+                "f"
+            ),
+            "fn m.f arity=1 frame=1/0 params=[value] -> Int\n\
+             \x20  0  load 0\n\
+             \x20  1  get-field-at-scalar 0\n\
+             \x20  2  jump-if-false-scalar 5\n\
+             \x20  3  scalar-const 1\n\
+             \x20  4  jump 6\n\
+             \x20  5  scalar-const 0\n\
+             \x20  6  return-scalar\n"
+        );
+    }
+
+    /// `MapEntry` is a builtin, not a struct this package declares, so its
+    /// fields have a settled type but no knowable position — the same reason
+    /// [`Inst::GetFieldAt`] declines it. The fusion answers only where both
+    /// halves are settled, so an `Int` field still lowers to
+    /// [`Inst::GetField`] rather than guessing a position for it.
+    #[test]
+    fn a_field_of_an_unsettled_position_still_lowers_by_name() {
+        assert_eq!(
+            listing(
+                "fn f() -> Int {\n  MapEntry(key: \"a\", value: 1).value + 1\n}\n",
+                "f"
+            ),
+            "fn m.f arity=0 frame=0/0 -> Int\n\
+             \x20  0  const Str(\"a\")\n\
+             \x20  1  const Int(1)\n\
+             \x20  2  make-builtin MapEntry argc=2\n\
+             \x20  3  get-field value\n\
+             \x20  4  value-to-scalar\n\
+             \x20  5  scalar-const 1\n\
              \x20  6  int Add\n\
              \x20  7  return-scalar\n"
         );
@@ -4334,24 +4411,25 @@ mod tests {
     }
 
     /// The scalar form of `&&`/`||` is declined where neither operand is
-    /// already on the scalar stack: a struct field read always answers a
-    /// `Value`, so both operands here cost a `ValueToScalar` to reach the
-    /// scalar stack, which is exactly what the value form's own single
-    /// `ValueToScalar` on the answer is cheaper than.
+    /// already on the scalar stack: `MapEntry`'s fields are settled types but
+    /// not positions — [`Inst::GetFieldAt`] is for a struct this package
+    /// declares, and a builtin one still reads by name — so both operands
+    /// here cost a `ValueToScalar` to reach the scalar stack, which is
+    /// exactly what the value form's own single `ValueToScalar` on the
+    /// answer is cheaper than.
     #[test]
     fn and_over_two_values_still_lowers_through_jumps() {
         assert_eq!(
             listing(
-                "struct S { a: Bool, b: Bool }\n\
-                 fn f(s: S) -> Bool {\n  s.a && s.b\n}\n",
+                "fn f(s: MapEntry<String, Bool>, t: MapEntry<String, Bool>) -> Bool {\n  s.value && t.value\n}\n",
                 "f"
             ),
-            "fn m.f arity=1 frame=1/0 params=[value] -> Bool\n\
+            "fn m.f arity=2 frame=2/0 params=[value, value] -> Bool\n\
              \x20  0  load 0\n\
-             \x20  1  get-field-at 0\n\
+             \x20  1  get-field value\n\
              \x20  2  jump-if-false 6\n\
-             \x20  3  load 0\n\
-             \x20  4  get-field-at 1\n\
+             \x20  3  load 1\n\
+             \x20  4  get-field value\n\
              \x20  5  jump 7\n\
              \x20  6  const Bool(false)\n\
              \x20  7  value-to-scalar\n\
@@ -4794,11 +4872,10 @@ mod tests {
             listing(source, "P.plus"),
             "fn m.P.plus arity=2 frame=1/1 params=[value, Int] receiver -> Int\n\
              \x20  0  load 0\n\
-             \x20  1  get-field-at 0\n\
-             \x20  2  value-to-scalar\n\
-             \x20  3  load-scalar 0\n\
-             \x20  4  int Add\n\
-             \x20  5  return-scalar\n"
+             \x20  1  get-field-at-scalar 0\n\
+             \x20  2  load-scalar 0\n\
+             \x20  3  int Add\n\
+             \x20  4  return-scalar\n"
         );
         assert_eq!(
             listing(source, "f"),
@@ -4865,10 +4942,9 @@ mod tests {
              \x20  4  load 0\n\
              \x20  5  call m.P.sum argc=1/0 -> scalar\n\
              \x20  6  load 0\n\
-             \x20  7  get-field-at 0\n\
-             \x20  8  value-to-scalar\n\
-             \x20  9  int Add\n\
-             \x20 10  return-scalar\n"
+             \x20  7  get-field-at-scalar 0\n\
+             \x20  8  int Add\n\
+             \x20  9  return-scalar\n"
         );
     }
 
@@ -4878,13 +4954,11 @@ mod tests {
             listing(STRUCT_AND_METHOD, "P.sum"),
             "fn m.P.sum arity=1 frame=1/0 params=[value] receiver -> Int\n\
              \x20  0  load 0\n\
-             \x20  1  get-field-at 0\n\
-             \x20  2  value-to-scalar\n\
-             \x20  3  load 0\n\
-             \x20  4  get-field-at 1\n\
-             \x20  5  value-to-scalar\n\
-             \x20  6  int Add\n\
-             \x20  7  return-scalar\n"
+             \x20  1  get-field-at-scalar 0\n\
+             \x20  2  load 0\n\
+             \x20  3  get-field-at-scalar 1\n\
+             \x20  4  int Add\n\
+             \x20  5  return-scalar\n"
         );
     }
 
@@ -5527,9 +5601,8 @@ mod tests {
              \x20 10  set-field x\n\
              \x20 11  store 0\n\
              \x20 12  load 0\n\
-             \x20 13  get-field-at 0\n\
-             \x20 14  value-to-scalar\n\
-             \x20 15  return-scalar\n"
+             \x20 13  get-field-at-scalar 0\n\
+             \x20 14  return-scalar\n"
         );
     }
 

@@ -66,7 +66,11 @@
 //! 40 bytes per push and running drop glue per pop to do arithmetic that owns
 //! nothing. A typed instruction over a scalar stack does not touch a `Value`
 //! at all, and [`Inst::ScalarToValue`] and [`Inst::ValueToScalar`] are the
-//! two places where the loop meets something general.
+//! two places where the loop meets something general. A struct field of a
+//! settled scalar type is read by [`Inst::GetFieldAtScalar`] instead, and
+//! does not go through either: the field is converted straight off the
+//! struct, without a `Value` built only to be handed to `ValueToScalar` and
+//! thrown away.
 //!
 //! **A scalar slot holds no reference.** That is what it is for, and it is
 //! also what the root set is: the two stacks are numbered separately, so a
@@ -380,7 +384,7 @@ impl<'a> Vm<'a> {
         for (kind, value) in entry.params.iter().zip(args) {
             match kind {
                 SlotKind::Value => self.stack.push(value),
-                SlotKind::Scalar(_) => self.scalars.push(promised_scalar(value)),
+                SlotKind::Scalar(_) => self.scalars.push(promised_scalar(&value)),
             }
         }
         self.stack
@@ -670,7 +674,7 @@ impl<'a> Vm<'a> {
                 }
                 Inst::ValueToScalar => {
                     let value = self.pop();
-                    self.scalars.push(promised_scalar(value));
+                    self.scalars.push(promised_scalar(&value));
                 }
                 Inst::Jump(to) => {
                     let to = to as usize;
@@ -833,6 +837,28 @@ impl<'a> Vm<'a> {
                         .1
                         .clone();
                     self.stack.push(found);
+                }
+                Inst::GetFieldAtScalar(index) => {
+                    // The fusion of `Inst::GetFieldAt` with
+                    // `Inst::ValueToScalar`: the same receiver, read by
+                    // reference so that an `Int` or `Bool` field is converted
+                    // rather than cloned onto the value stack just to be
+                    // read back off it.
+                    let base_value = self.pop();
+                    let Value::Struct(held) = &base_value else {
+                        unreachable!(
+                            "`get-field-at-scalar` was emitted for a struct, and was handed a `{}`",
+                            base_value.type_name()
+                        );
+                    };
+                    let found = &held
+                        .fields
+                        .get(index as usize)
+                        .expect(
+                            "`get-field-at-scalar` names a field of the struct it was emitted for",
+                        )
+                        .1;
+                    self.scalars.push(promised_scalar(found));
                 }
                 Inst::SetField(field) => {
                     let span = running.span_at(pc);
@@ -1409,22 +1435,24 @@ fn binary_op(op: IrBinary) -> BinaryOp {
     }
 }
 
-/// The `Int` or `Bool` an [`Inst::ValueToScalar`] was promised, as the word
-/// the scalar stack keeps it as.
+/// The `Int` or `Bool` an [`Inst::ValueToScalar`] or [`Inst::GetFieldAtScalar`]
+/// was promised, as the word the scalar stack keeps it as.
 ///
-/// The lowering emits one only where the checker settled the value as one of
-/// those two, so anything else arriving here is a broken invariant of this
+/// The lowering emits either only where the checker settled the value as one
+/// of those two, so anything else arriving here is a broken invariant of this
 /// backend and not a program that could be told about it — the same standing
-/// as an operand stack that came up empty. This is the only instruction that
-/// looks at a `Value`'s tag on the way in, and it looks because it is the
-/// boundary: everything above it in the scalar stack is a word with no tag
-/// at all.
-fn promised_scalar(value: Value) -> i64 {
+/// as an operand stack that came up empty. These are the only instructions
+/// that look at a `Value`'s tag on the way onto the scalar stack, and they
+/// look because they are the boundary: everything above it there is a word
+/// with no tag at all. Taking `value` by reference is what lets
+/// `Inst::GetFieldAtScalar` read a field out of a struct it does not own
+/// without cloning it first.
+fn promised_scalar(value: &Value) -> i64 {
     match value {
-        Value::Int(value) => value,
-        Value::Bool(value) => i64::from(value),
+        Value::Int(value) => *value,
+        Value::Bool(value) => i64::from(*value),
         other => unreachable!(
-            "`value-to-scalar` was emitted for an `Int` or a `Bool`, and was handed a `{}`",
+            "a scalar was promised for an `Int` or a `Bool`, and was handed a `{}`",
             other.type_name()
         ),
     }
@@ -2319,9 +2347,15 @@ mod tests {
              }\n";
         assert_eq!(agree(source).value().to_string(), "Int(10)");
         let listing = main_of(source);
+        // Both fields are `Int`, so a read of either is fused straight to
+        // the scalar stack rather than stopping at `get-field-at`.
         assert!(
-            listing.lines().any(|line| line.contains("get-field-at 0"))
-                && listing.lines().any(|line| line.contains("get-field-at 1")),
+            listing
+                .lines()
+                .any(|line| line.contains("get-field-at-scalar 0"))
+                && listing
+                    .lines()
+                    .any(|line| line.contains("get-field-at-scalar 1")),
             "both fields are read by position:\n{listing}"
         );
         assert!(
