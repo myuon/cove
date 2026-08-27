@@ -155,17 +155,46 @@ today — would need the stack truncated to the failing frame's base.
 
 ### Fuel, cancellation, and safepoints
 
-Fuel is charged per instruction, and proportionally where an operation's cost
-is not constant. A safepoint spends the accumulated fuel against the run's
-shared budget and checks the deadline.
+Fuel is charged, and instructions counted, once per basic block, on arriving at
+the block's head: at the entry, at a taken jump, at the fall-through of one not
+taken, at a callee's first instruction, at the caller's resumption after a
+return, and at the fall-through of a `?`. Those are every arrival there is, and
+`cove_ir::Function::block_fuel` records how far the straight line from each head
+runs, so the total charged for a path is identical to what per-instruction
+charging gave — which `--stats` confirms unchanged for every benchmark. An
+operation whose cost is not constant is still charged proportionally where it
+happens.
 
-Safepoints are at: entering the entry, every call, every return, every back
-edge, and every 1024 instructions of straight-line code.
+The counts are extents, not a partition, and they overlap. That is the part a
+reader gets wrong, so it is worth saying why. Cutting the code at every head and
+letting the pieces tile it loses instructions: an `if` with no `else` inside a
+loop *falls* into the join its own conditional jump also targets, and a fall
+announces nothing, so charging a head only where something jumps to it never
+charges that join. The first attempt did exactly that, and `arith` came back
+4.6% short of the instructions it had really run. An extent runs from its head
+to the first instruction at or after it that control can leave from, so the
+extent above a join reaches past it and pays for the walk. `validate` refuses a
+table that is not that, from both sides.
 
-A back edge reads this thread's stop flags every time — cancelling a task stops
-its loop at the next turn, exactly as on the interpreter — but spends fuel only
-once 64 has gathered, because spending takes a lock the tasks share and a tight
-loop takes a back edge every turn.
+Safepoints are at: entering the entry, every call, every return, every back edge
+at which enough fuel has gathered, and `SAFEPOINT_INTERVAL`, which is read where
+the charge is made rather than per instruction — so what it bounds is the fuel
+standing when a straight line is entered, and the work between two safepoints is
+that plus one straight line, which is bounded by the length of the function's
+code.
+
+A back edge asks one question on one schedule. A loop notices any stop — a
+bounded call's flag, the run's cancellation, its deadline, its fuel — at the
+first back edge at which `BACK_EDGE_FUEL` (64) of fuel has gathered since the
+last safepoint, so it stops within 63 fuel plus one turn rather than within one
+turn; a loop whose turn charges C fuel stops within ceil(64 / C) turns. Two
+facts narrow what that gives up, and both belong here. The run's own
+cancellation was never on the eager schedule to begin with, because it is read
+inside `Budget::safepoint`, which the gathered schedule already gated; and
+`self.stops` is pushed only by `Reentry::call_until`, which this backend answers
+without running any Cove code, so no VM run today can have a flag in that list
+while a loop turns. It is a bound given up for speed all the same, and it will
+start to matter when closures lower.
 
 ### Host calls and reentry
 
@@ -264,18 +293,19 @@ target.
 | `field`  |  867.0 ms |  649.6 ms |  604.7 ms | 1.07× | 1.45× |
 | `method` | 2882.4 ms | 1047.7 ms | 1007.9 ms | 1.04× | 2.93× |
 
-The whole suite afterwards, measured again on the same machine:
+The whole suite as it stands now, `cove-bench --iterations 15`, mean wall time
+on the same machine:
 
-| bench       | AST      | typed VM | |
-| ----------- | -------: | -------: | -------: |
-| `call`      | 1592.8 ms |  326.7 ms | **4.88×** |
-| `pure`      |   16.3 ms |    3.5 ms | 4.62× |
-| `arith`     |  474.0 ms |  106.7 ms | 4.44× |
-| `method`    | 2913.2 ms | 1002.2 ms | 2.91× |
-| `chars`     | 1909.6 ms |  872.2 ms | 2.19× |
-| `arrayget`  | 1480.6 ms |  729.5 ms | 2.03× |
-| `field`     |  883.2 ms |  606.0 ms | 1.46× |
-| `hostheavy` |    4.9 ms |    3.8 ms | 1.29× |
+| bench       | AST       | VM       | ratio |
+| ----------- | --------: | -------: | ----: |
+| `pure`      |   15.9 ms |   2.6 ms | **6.25×** |
+| `call`      | 1601.7 ms | 260.1 ms | 6.16× |
+| `arith`     |  455.1 ms |  82.8 ms | 5.49× |
+| `method`    | 2852.7 ms | 947.7 ms | 3.01× |
+| `chars`     | 1898.7 ms | 832.3 ms | 2.28× |
+| `arrayget`  | 1467.8 ms | 677.5 ms | 2.17× |
+| `field`     |  878.4 ms | 542.5 ms | 1.62× |
+| `hostheavy` |    4.8 ms |   3.8 ms | 1.26× |
 
 `hostheavy` is the floor and should be: it is host dispatch, which both
 backends reach through the same registry, so there is nothing there for an
@@ -337,10 +367,149 @@ return what its parameters saved. `benches/pure`'s `fib` and `benches/call`'s
 twenty-four.
 
 What the convention does not reach is what still lowers on the value path
-either way. `&&` and `||` short-circuit through the value stack's jumps, so a
-`Bool` parameter crosses to be tested and the answer crosses back; `!` and
-unary `-` have no scalar form; and a builtin method or a host operation
-answers a `Value` whatever its type, because both are the interpreter's own
-code and the interpreter speaks `Value`. Each is a boundary instruction where
-a value really does meet something general, which is what the boundary is for
-— and none of them is what a profile now names.
+either way. `!` and unary `-` have no scalar form, and a builtin method or a
+host operation answers a `Value` whatever its type, because both are the
+interpreter's own code and the interpreter speaks `Value`. Each is a boundary
+instruction where a value really does meet something general, which is what the
+boundary is for. `&&` and `||` are lowered on the scalar stack, but only where
+it pays: with two operands, the scalar form costs one boundary per operand that
+is not already scalar and the value form costs one per operand that is, plus one
+for the answer if a scalar is what was wanted. So the threshold differs by
+position — wanted as a scalar, one already-scalar operand is enough; wanted as a
+value, both must be.
+
+The one shape a profile does still name is the struct field read. A field
+answers a `Value`, so `benches/field` pays a `value-to-scalar` per field it
+reads into arithmetic — five per loop turn — and `benches/method`'s `position`
+method pays one before its own `return-scalar`. That is the largest remaining
+boundary traffic in the suite, and nothing above addresses it.
+
+## What each change bought
+
+The suite table above is the end of a progression, and the steps of it are
+separable. Every number below is VM-only, on the same machine and the same 15
+iterations. "typed slots" is commit `5c04da2`, "convention" is `ba86c24`, and
+"block charging" is `f44131b`.
+
+| bench       | typed slots | convention | block charging |
+| ----------- | ----------: | ---------: | -------------: |
+| `pure`      |     3.5 ms |     2.6 ms |     2.6 ms |
+| `call`      |   326.7 ms |   280.6 ms |   260.1 ms |
+| `arith`     |   106.7 ms |    98.7 ms |    82.8 ms |
+| `method`    |  1002.2 ms |  1005.0 ms |   947.7 ms |
+| `chars`     |   872.2 ms |   847.8 ms |   832.3 ms |
+| `arrayget`  |   729.5 ms |   707.9 ms |   677.5 ms |
+| `field`     |   606.0 ms |   602.3 ms |   542.5 ms |
+| `hostheavy` |     3.8 ms |     3.8 ms |     3.8 ms |
+
+One cell of that has to be read with its caveat rather than at face value.
+`arith` ran the *same* 31,142,877 instructions before and after the calling
+convention, so its 106.7 ms to 98.7 ms is not attributable to that change, and
+code layout is the likeliest explanation for it. The two changes `arith`
+genuinely responds to are the typed slots, measured above, and the block
+charging in the last column.
+
+The calling convention, unlike the typed slots, really is partly a reduction in
+the number of instructions run — and only where it acts. From `cove run
+--stats`:
+
+| bench      | before     | after      |
+| ---------- | ---------: | ---------: |
+| `arith`    | 31,142,877 | 31,142,877 |
+| `call`     | 41,142,877 | 37,142,877 |
+| `pure`     |    328,367 |    229,862 |
+| `method`   | 65,714,314 | 65,714,314 |
+| `field`    | 53,714,311 | 53,714,311 |
+| `chars`    | 41,856,022 | 41,856,022 |
+| `arrayget` | 42,000,027 | 42,000,027 |
+
+`pure` runs 30% fewer instructions and `call` 9.7% fewer; nothing else moves,
+because nothing else calls a function whose parameters or answer are `Int`.
+Block charging then left every one of these counts unchanged, which is the
+control that says it moved a charge rather than the work.
+
+The shape of the whole thing is three different kinds of saving. The typed-slot
+change made the same instructions cheaper, the calling convention removed
+instructions, and block charging removed bookkeeping that was never about the
+instruction it stood in front of. Each benchmark responded to the ones it was
+shaped to respond to, and to no others.
+
+## What the dispatch loop is made of
+
+Each row below was removed *alone* from commit `ba86c24`, with the rest left as
+it was, and the run measured. Several of them are unsound and none of them was
+a proposal: the point is attribution, not a shipping change.
+
+| removed                                       | `arith` | `field` |
+| --------------------------------------------- | ------: | ------: |
+| the instruction counter                       |   +1.9% |   −0.2% |
+| per-instruction fuel and its interval compare |   +7.1% |   +3.5% |
+| the back edge's cancellation poll             |   −5.8% |   +1.0% |
+| the whole back-edge check                     |  +10.8% |   +5.1% |
+| the instruction fetch's bounds check          |   −6.3% |   +0.4% |
+| the frame slots' bounds checks                |   +1.0% |   −0.1% |
+| the scalar operand stack's checks             |   +4.2% |   −0.2% |
+| the span computed for every `Int` operator    |   +4.4% |   +0.8% |
+| all of them together                          |  +35.8% |   +9.1% |
+
+Three things are needed to read that honestly.
+
+**Two ablations made `arith` slower, reproducibly.** Removing the fetch's bounds
+check cost 6.3%, and 4.6% when the measurement was repeated on a clean rebuild.
+The cause is code layout: perturbing a forty-arm `match` moves branch-target
+alignment and the dispatch body's cache footprint, and `arith`'s loop is small
+enough to feel it. The consequence is that any single `arith` delta below
+roughly ±6% is not separable from layout, so `field` — whose baselines
+bracketed at 0.5% to 2.1%, and whose deltas move monotonically — is the
+benchmark to trust for a small effect. Two baselines bracketed the whole study
+at 0.01% on `arith` and the untouched interpreter moved at most 1.3%, so the
+machine was quiet; layout is the explanation, not noise.
+
+**`arith` is superadditive and `field` is not.** The individual `arith` savings
+sum to 23.1% — counting the whole back-edge check rather than the poll inside
+it — against the 35.8% measured with all of them removed together, over
+half again as much; the same sum on `field` is additive to within 2%. Whatever
+the mechanism — a loop body that crosses some threshold once enough
+per-instruction work is gone — `arith`'s floor is not reachable by any subset
+of these summed.
+
+**`field` responds to almost nothing but fuel and the back edge.** 8.6 of its
+9.1 points are those two. It spends its time in the value stack and the heap,
+not in dispatch bookkeeping.
+
+The sizes measured alongside belong with the table, since several rows are
+about what a hot path carries: `size_of::<Span>()` is 12,
+`size_of::<Result<i64, RuntimeError>>()` is 120, and
+`size_of::<Result<(), RuntimeError>>()` is 120 against 8 for
+`Result<(), Box<RuntimeError>>`.
+
+## What was built from it, and what was not
+
+**Built.** Block charging, worth 11.4% on `arith` and 6.9% on `field`. Then one
+schedule for the back edge, another 4.3% and 1.1%. Together they are the two
+largest individual rows of the table above, and both were *placement* rather
+than substance: the same total is charged, at fewer points.
+
+**Measured and not built: reading the failing operator's span only on failure.**
+It bought 0.2% on `arith` and −1.9% on `field`, both inside the noise, against
+the 4.4% the same thing was worth when it was ablated. That is the most
+interesting negative result here. The span was expensive only while it stood
+next to the per-instruction bookkeeping, and once that bookkeeping was gone it
+was not standing in front of anything. A cost measured by ablation is a cost *in
+that arrangement*, and rearranging the surroundings can retire it without anyone
+touching it.
+
+**Measured and not worth building: an unchecked instruction fetch, and
+unchecked frame-slot indexing.** The first is reproducibly slower, and the
+second is worth 1.0% on `arith` and nothing on `field`. `validate` proves both
+of those bounds already, so the proof is available and buying it a second time
+is not worth the `unsafe`.
+
+**Named and not taken.** `Result<(), RuntimeError>` is 120 bytes, and it is what
+`Vm::charge`, `Vm::back_edge`, and `Vm::safepoint` all return, on every taken
+jump, every fall-through, every call, and every return, on a path where the
+answer is always `Ok`. Boxing the error's payload would make it 8. It is a large
+mechanical change across the workspace, and it is the one remaining `Result`
+with a hot reader. Also not taken: a typed field read, which is what `field` and
+`method` would want, since a struct field answers a `Value` and every one of
+them crosses a boundary to be used as an `Int`.
