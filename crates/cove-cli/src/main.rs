@@ -82,7 +82,9 @@ is refused before anything happens rather than finished on the interpreter,
 and the refusal names the construct and points at it. What is lowered is what
 the entry can reach, so a construct elsewhere in the package refuses only the
 entries that reach it. `--stats` reports how long lowering took apart from
-how long the run took.
+how long the run took, and how many instructions the run executed — the
+figure a change to the lowering is judged by, because wall time moves for
+many reasons and that moves for one.
 
 `cove test` runs every `test fn` in the package, reports each one, and exits
 non-zero when any failed. `--filter` runs only the tests whose qualified name
@@ -138,7 +140,7 @@ literal `--` is a program argument, even if it looks like a flag):
   --trace-values <mode> `full` (the default) records each host call's arguments and result, which is what `cove replay` needs; `redacted` records only their types
   --max-tasks <n>       stop the run when it would hold more than <n> tasks at once
   --backend <ast|vm>    which backend runs the entry: `ast`, the tree-walking interpreter and the default, or `vm`, the dedicated VM of ADR 0019
-  --stats               print the backend's lowering and execution times, then fuel spent, host calls, irreversible writes, elapsed time, host-call wait, and the heap, to stderr
+  --stats               print the backend's lowering and execution times and the instructions it executed, then fuel spent, host calls, irreversible writes, elapsed time, host-call wait, and the heap, to stderr
   --files-root <path>   the one directory the `files` host may reach; defaults to `files/` in the package
   --allow-exec <path>   an absolute path `process.run` may start; repeat to allow more, and omit to allow none
 ";
@@ -1236,22 +1238,22 @@ pub(crate) fn execute_entry(
     // between a `--backend ast` run and a `--backend vm` run is which one is
     // built and nothing else about how it is called.
     let started = Instant::now();
-    let (outcome, heap) = match &lowered {
+    let (outcome, heap, instructions) = match &lowered {
         Some(lowered) => {
             let mut vm = Vm::new(&runtime, runtime.hosts(), &lowered.ir);
             let outcome = vm.run_entry(module, entry, program_args);
-            (outcome, vm.heap_stats())
+            (outcome, vm.heap_stats(), Some(vm.instructions()))
         }
         None => {
             let mut interpreter = Interpreter::new(&runtime);
             let outcome = interpreter.run_entry(module, entry, program_args);
-            (outcome, interpreter.heap_stats())
+            (outcome, interpreter.heap_stats(), None)
         }
     };
     let execution = started.elapsed();
 
     if flags.stats {
-        print_backend_stats(flags.backend, lowered.as_ref(), execution);
+        print_backend_stats(flags.backend, lowered.as_ref(), execution, instructions);
         print_stats(runtime.hosts(), &wait_total, &heap);
     }
 
@@ -1273,19 +1275,36 @@ struct Lowered {
     validate: Duration,
 }
 
-/// Prints which backend ran the entry and what each phase cost, for
-/// `--stats`.
+/// Prints which backend ran the entry, what each phase cost, and how many
+/// instructions the run executed, for `--stats`.
 ///
 /// The interpreter reports no lowering time because it does none: it walks
 /// the checked program directly, and a zero there would read as a measurement
-/// rather than as the absence of a phase.
-fn print_backend_stats(backend: Backend, lowered: Option<&Lowered>, execution: Duration) {
+/// rather than as the absence of a phase. It reports no instruction count for
+/// the same reason — it has no instructions, and `instructions=0` would read
+/// as a run that did nothing.
+///
+/// The count is here, beside the timings, because it is what a change to the
+/// lowering is judged by: wall time moves for many reasons, and how many
+/// instructions a program needed moves for exactly one.
+fn print_backend_stats(
+    backend: Backend,
+    lowered: Option<&Lowered>,
+    execution: Duration,
+    instructions: Option<u64>,
+) {
+    let counted = match instructions {
+        Some(instructions) => instructions.to_string(),
+        None => "none".to_string(),
+    };
     match lowered {
         Some(lowered) => eprintln!(
-            "backend: {backend} lower={:?} validate={:?} execute={:?}",
+            "backend: {backend} lower={:?} validate={:?} execute={:?} instructions={counted}",
             lowered.lower, lowered.validate, execution
         ),
-        None => eprintln!("backend: {backend} lower=none execute={execution:?}"),
+        None => {
+            eprintln!("backend: {backend} lower=none execute={execution:?} instructions={counted}")
+        }
     }
 }
 

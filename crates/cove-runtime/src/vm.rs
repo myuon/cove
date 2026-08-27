@@ -83,6 +83,24 @@ const INSTRUCTION_FUEL: u64 = 1;
 /// statement about the run rather than about its loops.
 const SAFEPOINT_INTERVAL: u64 = 1024;
 
+/// How much fuel may accumulate across back edges before the shared budget is
+/// spent against.
+///
+/// A back edge is where a loop can be stopped, so one is checked at every one
+/// of them — but *checking* is two things, and only one of them is cheap.
+/// Reading this thread's own stop flags costs a load. Spending fuel against
+/// the run's budget takes a lock the tasks share, and `benches/arith` takes
+/// two million back edges, which was 13% of its run.
+///
+/// So a back edge always reads the flags and spends the fuel only once this
+/// much has gathered. What that costs is granularity: a run stopped by fuel or
+/// by a deadline notices within this many instructions rather than within one
+/// iteration. What it buys is that a tight loop does not lock a mutex per
+/// turn. The number is small enough that the difference is not one a program
+/// can be written to observe, and [`SAFEPOINT_INTERVAL`] still bounds a
+/// straight line that has no back edge at all.
+const BACK_EDGE_FUEL: u64 = 64;
+
 /// One call in progress.
 ///
 /// The three numbers are what a return needs and nothing more, which is why a
@@ -170,6 +188,16 @@ pub struct Vm<'a> {
     heap: Heap,
     /// Fuel charged since the last safepoint, spent at the next one.
     fuel: u64,
+    /// How many instructions this VM has executed.
+    ///
+    /// Fuel cannot answer that question. An operation whose cost is not
+    /// constant is charged proportionally — a copy by its size, a call by its
+    /// arguments — so `fuel` counts work and not instructions, and the two
+    /// diverge by exactly the amount that makes fuel a budget. This is the
+    /// other number: how much of the program had to run. Wall time moves for
+    /// many reasons and this moves for one, which is what makes it the figure
+    /// a change to the lowering is judged by.
+    instructions: u64,
     /// Flags raised by a host call that bounds the work it was given, one for
     /// each such call this thread is inside, checked at every safepoint
     /// exactly as [`crate::interp::Interpreter`] checks them.
@@ -205,6 +233,7 @@ impl<'a> Vm<'a> {
             enums: enum_shapes(runtime, program),
             heap: Heap::new(),
             fuel: 0,
+            instructions: 0,
             stops: Vec::new(),
             timings: Vec::new(),
             wait: Duration::ZERO,
@@ -367,6 +396,15 @@ impl<'a> Vm<'a> {
         self.wait
     }
 
+    /// How many instructions every run on this VM has executed between them.
+    ///
+    /// Cumulative rather than per-run, because a [`Vm`] runs one entry and a
+    /// run is what a caller asks about; a caller that ran two would be asking
+    /// about the pair.
+    pub fn instructions(&self) -> u64 {
+        self.instructions
+    }
+
     // -------------------------------------------------------- the dispatch
 
     /// The loop, from the frame [`Vm::run`] pushed to the value it answers.
@@ -394,6 +432,7 @@ impl<'a> Vm<'a> {
 
         loop {
             let inst = code[pc];
+            self.instructions += 1;
             self.fuel += INSTRUCTION_FUEL;
             if self.fuel >= SAFEPOINT_INTERVAL {
                 self.safepoint(running.span_at(pc))?;
@@ -451,7 +490,7 @@ impl<'a> Vm<'a> {
                 }
                 Inst::Jump(to) => {
                     if to as usize <= pc {
-                        self.safepoint(running.span_at(pc))?;
+                        self.back_edge(running.span_at(pc))?;
                     }
                     pc = to as usize;
                     continue;
@@ -464,7 +503,7 @@ impl<'a> Vm<'a> {
                     };
                     if test == taken_on {
                         if to as usize <= pc {
-                            self.safepoint(running.span_at(pc))?;
+                            self.back_edge(running.span_at(pc))?;
                         }
                         pc = to as usize;
                         continue;
@@ -797,6 +836,23 @@ impl<'a> Vm<'a> {
     /// cancelled before it began stops before its first instruction; and
     /// [`SAFEPOINT_INTERVAL`] instructions of anything else, so a long
     /// straight line is bounded too.
+    /// A safepoint at a loop's back edge.
+    ///
+    /// The stop flags this thread owns are read every time, so cancelling a
+    /// task or a bounded call stops its loop at the next turn exactly as it
+    /// does on the interpreter. The run's shared budget is spent against only
+    /// once [`BACK_EDGE_FUEL`] has gathered, because that one takes a lock and
+    /// a loop takes a back edge every turn.
+    fn back_edge(&mut self, span: Span) -> Result<(), RuntimeError> {
+        if self.stops.iter().any(Cancellation::is_cancelled) {
+            return Err(work_stopped(span));
+        }
+        if self.fuel >= BACK_EDGE_FUEL {
+            self.safepoint(span)?;
+        }
+        Ok(())
+    }
+
     fn safepoint(&mut self, span: Span) -> Result<(), RuntimeError> {
         // A bounded call's flag stops only the body it bounds. The host that
         // raised it turns the stop into the answer it promised, so this need
@@ -1757,6 +1813,62 @@ mod tests {
             )
             .value(),
             "Int(6)"
+        );
+    }
+
+    // --------------------------------- lowered for value, lowered for effect
+
+    /// An `if`/`else` used as an expression answers the branch that ran.
+    ///
+    /// `cove_ir::lower` lowers an expression whose value nobody reads for its
+    /// effect, and reaches inside a block, an `if`/`else`, and a `match` to do
+    /// it. What those constructs *mean* is not allowed to change, so the
+    /// oracle is asked: the same `if` is read into a `let`, nested as a
+    /// block's tail, and written as the right-hand side of an assignment, and
+    /// both backends have to agree about every one of them.
+    #[test]
+    fn an_if_else_used_as_an_expression_answers_what_the_interpreter_answers() {
+        let source = "export fn main() -> Result<Unit, Error> {\n  let a = if 1 < 2 {\n    10\n  } else {\n    20\n  }\n  let b = {\n    if a == 10 {\n      a + 1\n    } else {\n      a - 1\n    }\n  }\n  var c = 0\n  if b == 11 {\n    c = if a == 10 {\n      5\n    } else {\n      6\n    }\n  }\n  let d = if a == 10 {\n    let ignored = 1\n  } else {\n    let ignored = 2\n  }\n  assertEqual(a, 10)?\n  assertEqual(b, 11)?\n  assertEqual(c, 5)?\n  assertEqual(d, ())?\n  Ok(())\n}\n";
+        assert_eq!(
+            agree(source).value(),
+            "Enum(EnumValue { type_name: \"Result\", case: \"Ok\", payload: [Unit] })"
+        );
+    }
+
+    /// A `match` used as an expression answers the arm that ran, and one
+    /// written as a statement still runs it.
+    #[test]
+    fn a_match_used_as_an_expression_answers_what_the_interpreter_answers() {
+        let source = "enum Shape {\n  Dot\n  Line(Int)\n}\n\nexport fn main() -> Result<Unit, Error> {\n  let n = match Shape.Line(3) {\n    Shape.Dot => 0\n    Shape.Line(k) => k * 2\n  }\n  let m = {\n    match Shape.Dot {\n      Shape.Dot => n + 1\n      Shape.Line(k) => k\n    }\n  }\n  var seen = 0\n  match Shape.Line(5) {\n    Shape.Dot => seen = 1\n    Shape.Line(k) => seen = k\n  }\n  assertEqual(n, 6)?\n  assertEqual(m, 7)?\n  assertEqual(seen, 5)?\n  Ok(())\n}\n";
+        assert_eq!(
+            agree(source).value(),
+            "Enum(EnumValue { type_name: \"Result\", case: \"Ok\", payload: [Unit] })"
+        );
+    }
+
+    /// A block used as an expression answers its tail, and a block with no
+    /// tail answers `()`.
+    #[test]
+    fn a_block_used_as_an_expression_answers_what_the_interpreter_answers() {
+        let source = "export fn main() -> Result<Unit, Error> {\n  let a = {\n    let x = 1\n    let y = 2\n    x + y\n  }\n  let b = {\n    let z = a\n  }\n  var t = 0\n  {\n    t = a * 2\n  }\n  assertEqual(a, 3)?\n  assertEqual(b, ())?\n  assertEqual(t, 6)?\n  Ok(())\n}\n";
+        assert_eq!(
+            agree(source).value(),
+            "Enum(EnumValue { type_name: \"Result\", case: \"Ok\", payload: [Unit] })"
+        );
+    }
+
+    /// A statement lowered for its effect still does everything it did.
+    ///
+    /// Lowering for effect removes a value and never an operation, so the
+    /// loops still count, the assignments still write, and the `if` with no
+    /// `else` still takes the branch it was going to take. The oracle is what
+    /// says so.
+    #[test]
+    fn a_statement_lowered_for_its_effect_still_runs_everything_in_it() {
+        let source = "export fn main() -> Result<Unit, Error> {\n  var total = 0\n  var i = 0\n  while i < 10 {\n    if i % 3 == 0 {\n      total += i\n    }\n    i += 1\n  }\n  for j in 0..<4 {\n    total += j\n  }\n  assertEqual(total, 24)?\n  Ok(())\n}\n";
+        assert_eq!(
+            agree(source).value(),
+            "Enum(EnumValue { type_name: \"Result\", case: \"Ok\", payload: [Unit] })"
         );
     }
 

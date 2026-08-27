@@ -20,6 +20,21 @@
 //! so a whole-package listing and an entry's program are two seeds of one
 //! lowering rather than two lowerings that could drift.
 //!
+//! # An expression is lowered for its value or for its effect
+//!
+//! [`Position`] is the distinction. A statement's value is read by nothing,
+//! and `()` is a value here — an assignment, a loop, and an `if` with no
+//! `else` all answer one — so lowering every expression the same way builds
+//! a `Unit` for a `Pop` to take away again. That was six of the twenty-five
+//! instructions `benches/arith` ran per iteration. Lowering for effect emits
+//! neither, and reaches inside a block, an `if`/`else`, and a `match` so that
+//! the saving is taken where the value would have been built.
+//!
+//! It changes nothing about what a program means: the value of a block, of an
+//! `if` used as an expression, and of a `match` used as an expression are
+//! what they were, and only a value nobody reads stops being built.
+//! [`validate`]'s depth simulation is what catches a mistake in it.
+//!
 //! # What the interpreter decides and this reproduces
 //!
 //! `crates/cove-runtime/src/interp.rs` is the oracle, and seven of its rules
@@ -630,6 +645,37 @@ enum Header {
     Sequence { sequence: u32, length: u32 },
 }
 
+/// Whether an expression's value is wanted.
+///
+/// An expression lowered for its **value** leaves exactly one thing on the
+/// operand stack. One lowered for its **effect** leaves nothing. Both do
+/// everything the expression does — a call is still made, a store still
+/// happens — and they differ only in whether a value nobody reads is built.
+///
+/// The distinction is worth having because `()` is a value here. An
+/// assignment, a `while`, a `for`, and an `if` with no `else` all answer
+/// `()`, and a statement discards whatever it is handed; lowered for value
+/// each of them therefore pushes a `Unit` for a `Pop` to take away again.
+/// That is six of the twenty-five instructions `benches/arith` runs per
+/// iteration, and every one of them moves a `Value` and runs its drop glue.
+///
+/// [`Position::Effect`] reaches inside the constructs that have an inside: a
+/// block lowers its tail for effect, an `if`/`else` lowers both branches for
+/// effect, and a `match` lowers every arm. The saving is taken where the
+/// value would have been built rather than where it would have been thrown
+/// away, so it reaches a `Unit` built three blocks down.
+///
+/// What it does not do is decide that anything need not run. Which calls are
+/// pure is not a question this pass asks, so an expression whose value is
+/// unwanted is still lowered in full and only its result goes missing.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Position {
+    /// Something reads what this leaves.
+    Value,
+    /// Nothing does.
+    Effect,
+}
+
 /// Everything one function's instructions are built from.
 struct Body<'a, 'l> {
     outer: &'l mut Lowering<'a>,
@@ -811,13 +857,24 @@ impl<'a, 'l> Body<'a, 'l> {
     /// sibling block reuses the numbers and `frame_size` stays a high-water
     /// mark rather than a total.
     fn block(&mut self, block: &'a Block) -> Result<(), Unsupported> {
+        self.block_at(block, Position::Value)
+    }
+
+    /// The same block, lowered for its value or for its effect.
+    ///
+    /// A block's value is its tail's, so a block lowered for effect lowers
+    /// its tail for effect too and a block with no tail builds no `Unit` at
+    /// all. Its statements are unaffected: they were already lowered for
+    /// their effect, whichever position the block itself is in.
+    fn block_at(&mut self, block: &'a Block, position: Position) -> Result<(), Unsupported> {
         let mark = self.live.len();
         for statement in &block.statements {
             self.statement(statement)?;
         }
-        match &block.tail {
-            Some(tail) => self.expr(tail)?,
-            None => self.constant(Const::Unit, block.span),
+        match (&block.tail, position) {
+            (Some(tail), _) => self.expr_at(tail, position)?,
+            (None, Position::Value) => self.constant(Const::Unit, block.span),
+            (None, Position::Effect) => {}
         }
         self.live.truncate(mark);
         Ok(())
@@ -842,8 +899,9 @@ impl<'a, 'l> Body<'a, 'l> {
                 Ok(())
             }
             StmtKind::Expr(expr) => {
-                self.expr(expr)?;
-                self.emit(Inst::Pop, expr.span);
+                // A statement is the one place a value is definitely
+                // unwanted, so it is where lowering for effect starts.
+                self.effect(expr)?;
                 Ok(())
             }
             StmtKind::Item(item) => Err(Unsupported::new(
@@ -860,6 +918,28 @@ impl<'a, 'l> Body<'a, 'l> {
 
     /// Lowers one expression, which leaves exactly one value on the stack.
     fn expr(&mut self, expr: &'a Expr) -> Result<(), Unsupported> {
+        self.expr_at(expr, Position::Value)
+    }
+
+    /// Lowers one expression whose value nobody reads, which leaves nothing
+    /// on the stack.
+    ///
+    /// Everything the expression does still happens; only its value goes
+    /// missing. See [`Position`] for why that is worth a second entry point.
+    fn effect(&mut self, expr: &'a Expr) -> Result<(), Unsupported> {
+        self.expr_at(expr, Position::Effect)
+    }
+
+    /// Lowers one expression in the position it was written in.
+    ///
+    /// Six constructs take the position themselves, because each of them
+    /// either builds its `Unit` here — an assignment, a `while`, a `for`, an
+    /// `if` with no `else` — or has an inside the position should reach: an
+    /// `if`/`else`, a `Block`, and a `Match` hand it to each branch, tail,
+    /// and arm. Everything else answers a value it computed, and the only
+    /// honest way to want nothing from it is to take that value off again,
+    /// which is the `Pop` below.
+    fn expr_at(&mut self, expr: &'a Expr, position: Position) -> Result<(), Unsupported> {
         let span = expr.span;
         match &expr.kind {
             ExprKind::Int(value) => self.constant(Const::Int(*value), span),
@@ -891,23 +971,35 @@ impl<'a, 'l> Body<'a, 'l> {
                 self.emit(Inst::Unary(op), span);
             }
             ExprKind::Binary { op, lhs, rhs } => self.binary(*op, lhs, rhs, span)?,
-            ExprKind::Assign { op, target, value } => self.assign(*op, target, value, span)?,
+            ExprKind::Assign { op, target, value } => {
+                return self.assign(*op, target, value, position, span)
+            }
             ExprKind::Try(inner) => {
                 self.expr(inner)?;
                 self.emit(Inst::Try, span);
             }
-            ExprKind::Block(block) => self.block(block)?,
+            ExprKind::Block(block) => return self.block_at(block, position),
             ExprKind::If {
                 condition,
                 then_branch,
                 else_branch,
-            } => self.conditional(condition, then_branch, else_branch.as_deref(), span)?,
-            ExprKind::While { condition, body } => self.while_loop(condition, body, span)?,
+            } => {
+                return self.conditional(
+                    condition,
+                    then_branch,
+                    else_branch.as_deref(),
+                    position,
+                    span,
+                )
+            }
+            ExprKind::While { condition, body } => {
+                return self.while_loop(condition, body, position, span)
+            }
             ExprKind::For {
                 binding,
                 iterable,
                 body,
-            } => self.for_loop(binding.node.as_str(), iterable, body, span)?,
+            } => return self.for_loop(binding.node.as_str(), iterable, body, position, span),
             ExprKind::Return(value) => {
                 match value {
                     Some(value) => self.expr(value)?,
@@ -920,8 +1012,7 @@ impl<'a, 'l> Body<'a, 'l> {
                 // loop is `()` however it leaves, so there is nowhere for a
                 // value to go.
                 if let Some(value) = value {
-                    self.expr(value)?;
-                    self.emit(Inst::Pop, span);
+                    self.effect(value)?;
                 }
                 self.leave_loop(true, span)?;
             }
@@ -933,9 +1024,18 @@ impl<'a, 'l> Body<'a, 'l> {
                 ))
             }
             ExprKind::Lambda { .. } => return Err(Unsupported::new("a closure", span)),
-            ExprKind::Match { scrutinee, arms } => self.match_expr(scrutinee, arms, span)?,
+            ExprKind::Match { scrutinee, arms } => {
+                return self.match_expr(scrutinee, arms, position, span)
+            }
             ExprKind::Scope { .. } => return Err(Unsupported::new("a task scope", span)),
             ExprKind::Await(_) => return Err(Unsupported::new("an `await`", span)),
+        }
+        if position == Position::Effect {
+            // A value was computed and nothing reads it. Where control cannot
+            // reach here — after a `return`, a `break`, or a `continue` —
+            // `emit` writes nothing, so a diverging expression costs no `Pop`
+            // either.
+            self.emit(Inst::Pop, span);
         }
         Ok(())
     }
@@ -1105,15 +1205,19 @@ impl<'a, 'l> Body<'a, 'l> {
     ///
     /// A compound assignment reads the place, then evaluates the right-hand
     /// side, then combines them — the order the interpreter reads them in.
+    ///
+    /// The store is the whole of what an assignment does, so lowered for
+    /// effect it ends there and the `()` it would have answered is not built.
     fn assign(
         &mut self,
         op: Option<SourceBinary>,
         target: &'a Expr,
         value: &'a Expr,
+        position: Position,
         span: Span,
     ) -> Result<(), Unsupported> {
-        if let ExprKind::Field { base, name } = &target.kind {
-            return self.assign_field(op, base, name.node.as_str(), value, target.span, span);
+        if matches!(target.kind, ExprKind::Field { .. }) {
+            return self.assign_field(op, target, value, position, span);
         }
         let ExprKind::Ident(name) = &target.kind else {
             return Err(Unsupported::new("assignment to this place", span));
@@ -1139,7 +1243,9 @@ impl<'a, 'l> Body<'a, 'l> {
             }
         }
         self.emit(Inst::StoreLocal(slot), span);
-        self.constant(Const::Unit, span);
+        if position == Position::Value {
+            self.constant(Const::Unit, span);
+        }
         Ok(())
     }
 
@@ -1152,15 +1258,23 @@ impl<'a, 'l> Body<'a, 'l> {
     /// rather than a mutation through a place. A deeper path than one field is
     /// refused rather than rebuilt: it would need the intermediate struct put
     /// back too, and nothing in the subset produces one.
+    ///
+    /// `target` is the whole `place.field`, because that is what the
+    /// instructions reading the struct point at: a diagnostic about the read
+    /// is about the place, not about the name below it.
     fn assign_field(
         &mut self,
         op: Option<SourceBinary>,
-        base: &'a Expr,
-        field: &str,
+        target: &'a Expr,
         value: &'a Expr,
-        base_span: Span,
+        position: Position,
         span: Span,
     ) -> Result<(), Unsupported> {
+        let ExprKind::Field { base, name: field } = &target.kind else {
+            unreachable!("`assign` dispatches here only for a field")
+        };
+        let field = field.node.as_str();
+        let place = target.span;
         let ExprKind::Ident(name) = &base.kind else {
             return Err(Unsupported::new(
                 "assignment to a field of anything but a local",
@@ -1179,22 +1293,24 @@ impl<'a, 'l> Body<'a, 'l> {
             return Err(read_only_place(&format!("{name}.{field}"), span));
         }
         let field = self.outer.name(field);
-        self.emit(Inst::LoadLocal(slot), base_span);
+        self.emit(Inst::LoadLocal(slot), place);
         match op {
             None => self.expr(value)?,
             Some(op) => {
                 let Some(op) = binary_op(op) else {
                     return Err(Unsupported::new("this compound assignment", span));
                 };
-                self.emit(Inst::Dup, base_span);
-                self.emit(Inst::GetField(field), base_span);
+                self.emit(Inst::Dup, place);
+                self.emit(Inst::GetField(field), place);
                 self.expr(value)?;
                 self.emit(Inst::Binary(op), span);
             }
         }
         self.emit(Inst::SetField(field), span);
         self.emit(Inst::StoreLocal(slot), span);
-        self.constant(Const::Unit, span);
+        if position == Position::Value {
+            self.constant(Const::Unit, span);
+        }
         Ok(())
     }
 
@@ -1203,12 +1319,18 @@ impl<'a, 'l> Body<'a, 'l> {
     /// An `if` with no `else` is `()` however it goes, including when the
     /// branch that ran produced something: there is no second branch to give
     /// the missing case a value, so the branch that ran does not get to
-    /// supply one either.
+    /// supply one either. Its branch is therefore lowered for effect in both
+    /// positions, and only the `()` at the join depends on which one this is.
+    ///
+    /// An `if` with an `else` is worth something, so the position reaches
+    /// inside it: both branches are lowered in the position the `if` is in,
+    /// and lowering for effect saves whatever each branch would have built.
     fn conditional(
         &mut self,
         condition: &'a Expr,
         then_branch: &'a Block,
         else_branch: Option<&'a Expr>,
+        position: Position,
         span: Span,
     ) -> Result<(), Unsupported> {
         self.expr(condition)?;
@@ -1217,29 +1339,32 @@ impl<'a, 'l> Body<'a, 'l> {
                 let otherwise = self.label();
                 let end = self.label();
                 self.jump(Inst::JumpIfFalse, otherwise, condition.span);
-                self.block(then_branch)?;
+                self.block_at(then_branch, position)?;
                 self.jump(Inst::Jump, end, span);
                 self.bind(otherwise);
-                self.expr(else_branch)?;
+                self.expr_at(else_branch, position)?;
                 self.bind(end);
             }
             None => {
                 let end = self.label();
                 self.jump(Inst::JumpIfFalse, end, condition.span);
-                self.block(then_branch)?;
-                self.emit(Inst::Pop, span);
+                self.block_at(then_branch, Position::Effect)?;
                 self.bind(end);
-                self.constant(Const::Unit, span);
+                if position == Position::Value {
+                    self.constant(Const::Unit, span);
+                }
             }
         }
         Ok(())
     }
 
-    /// `while`, which is `()` however it leaves.
+    /// `while`, which is `()` however it leaves — so its body's value is
+    /// never wanted, and lowered for effect the loop builds nothing at all.
     fn while_loop(
         &mut self,
         condition: &'a Expr,
         body: &'a Block,
+        position: Position,
         span: Span,
     ) -> Result<(), Unsupported> {
         let base = self.depth.unwrap_or(0);
@@ -1253,13 +1378,14 @@ impl<'a, 'l> Body<'a, 'l> {
             continue_to: top,
             depth: base,
         });
-        let lowered = self.block(body);
+        let lowered = self.block_at(body, Position::Effect);
         self.loops.pop();
         lowered?;
-        self.emit(Inst::Pop, body.span);
         self.jump(Inst::Jump, top, span);
         self.bind(end);
-        self.constant(Const::Unit, span);
+        if position == Position::Value {
+            self.constant(Const::Unit, span);
+        }
         Ok(())
     }
 
@@ -1284,6 +1410,7 @@ impl<'a, 'l> Body<'a, 'l> {
         binding: &'a str,
         iterable: &'a Expr,
         body: &'a Block,
+        position: Position,
         span: Span,
     ) -> Result<(), Unsupported> {
         let base = self.depth.unwrap_or(0);
@@ -1380,10 +1507,9 @@ impl<'a, 'l> Body<'a, 'l> {
             continue_to: next,
             depth: base,
         });
-        let lowered = self.block(body);
+        let lowered = self.block_at(body, Position::Effect);
         self.loops.pop();
         lowered?;
-        self.emit(Inst::Pop, body.span);
 
         // `continue` lands here, so that skipping the rest of a body still
         // advances the cursor.
@@ -1396,7 +1522,9 @@ impl<'a, 'l> Body<'a, 'l> {
 
         self.bind(end);
         self.live.truncate(mark);
-        self.constant(Const::Unit, span);
+        if position == Position::Value {
+            self.constant(Const::Unit, span);
+        }
         Ok(())
     }
 
@@ -1829,10 +1957,16 @@ impl<'a, 'l> Body<'a, 'l> {
     /// matches is the only one that runs, which is what `ExprKind::Match`
     /// does; an arm's binders live in a scope of its own, released when the
     /// arm ends, exactly as a block's slots are.
+    ///
+    /// A `match`'s value is the value of the arm that ran, so the position it
+    /// is lowered in is every arm's position: a `match` written as a
+    /// statement builds nothing in any of them, and one written as an
+    /// expression is unchanged.
     fn match_expr(
         &mut self,
         scrutinee: &'a Expr,
         arms: &'a [MatchArm],
+        position: Position,
         span: Span,
     ) -> Result<(), Unsupported> {
         self.expr(scrutinee)?;
@@ -1846,7 +1980,7 @@ impl<'a, 'l> Body<'a, 'l> {
             let next = self.label();
             self.pattern(&arm.pattern, next, subject)?;
             self.emit(Inst::Pop, arm.span);
-            self.expr(&arm.body)?;
+            self.expr_at(&arm.body, position)?;
             self.live.truncate(mark);
             self.jump(Inst::Jump, end, arm.span);
             self.bind(next);
@@ -2688,8 +2822,14 @@ mod tests {
         );
     }
 
+    /// An assignment written as a statement stores, and stops there.
+    ///
+    /// The store is the whole of what an assignment does, so the `()` it
+    /// would answer is not built and there is nothing for a `Pop` to take
+    /// away. `x += 3` still reads the slot, adds, and writes it back, because
+    /// lowering for effect removes a value and never an operation.
     #[test]
-    fn an_assignment_writes_a_slot_and_produces_unit() {
+    fn an_assignment_written_as_a_statement_builds_no_value() {
         assert_eq!(
             listing(
                 "fn f() -> Int {\n  var x = 1\n  x = 2\n  x += 3\n  x\n}\n",
@@ -2700,16 +2840,32 @@ mod tests {
              \x20  1  store 0\n\
              \x20  2  const Int(2)\n\
              \x20  3  store 0\n\
+             \x20  4  load 0\n\
+             \x20  5  const Int(3)\n\
+             \x20  6  binary Add\n\
+             \x20  7  store 0\n\
+             \x20  8  load 0\n\
+             \x20  9  return\n"
+        );
+    }
+
+    /// An assignment whose value is read still answers `()`.
+    ///
+    /// A block's tail is its value, so this one is lowered for value and the
+    /// `()` an assignment means is built exactly as it was. Both halves of
+    /// the rule are golden, because the saving is only correct if this is
+    /// unchanged.
+    #[test]
+    fn an_assignment_whose_value_is_read_still_answers_unit() {
+        assert_eq!(
+            listing("fn f() -> Unit {\n  var x = 1\n  x = 2\n}\n", "f"),
+            "fn m.f arity=0 frame=1\n\
+             \x20  0  const Int(1)\n\
+             \x20  1  store 0\n\
+             \x20  2  const Int(2)\n\
+             \x20  3  store 0\n\
              \x20  4  const Unit\n\
-             \x20  5  pop\n\
-             \x20  6  load 0\n\
-             \x20  7  const Int(3)\n\
-             \x20  8  binary Add\n\
-             \x20  9  store 0\n\
-             \x20 10  const Unit\n\
-             \x20 11  pop\n\
-             \x20 12  load 0\n\
-             \x20 13  return\n"
+             \x20  5  return\n"
         );
     }
 
@@ -2752,10 +2908,8 @@ mod tests {
              \x20  3  const Int(1)\n\
              \x20  4  unary Neg\n\
              \x20  5  return\n\
-             \x20  6  const Unit\n\
-             \x20  7  pop\n\
-             \x20  8  const Int(0)\n\
-             \x20  9  return\n"
+             \x20  6  const Int(0)\n\
+             \x20  7  return\n"
         );
     }
 
@@ -2789,6 +2943,58 @@ mod tests {
         );
     }
 
+    /// A block whose tail is an `if`/`else` keeps what both branches build.
+    ///
+    /// This is the other half of the rule. The block is the function's body
+    /// and its value is what the function returns, so the `if` is lowered for
+    /// value, and so is each of its branches — both of which are blocks with
+    /// no tail, which is what a `const Unit` in a listing means.
+    #[test]
+    fn a_block_whose_tail_is_an_if_else_still_builds_both_values() {
+        assert_eq!(
+            listing(
+                "fn f(n: Int) -> Unit {\n  {\n    if n < 2 {\n      let a = 1\n    } else {\n      let b = 2\n    }\n  }\n}\n",
+                "f"
+            ),
+            "fn m.f arity=1 frame=2\n\
+             \x20  0  load 0\n\
+             \x20  1  const Int(2)\n\
+             \x20  2  binary Lt\n\
+             \x20  3  jump-if-false 8\n\
+             \x20  4  const Int(1)\n\
+             \x20  5  store 1\n\
+             \x20  6  const Unit\n\
+             \x20  7  jump 11\n\
+             \x20  8  const Int(2)\n\
+             \x20  9  store 1\n\
+             \x20 10  const Unit\n\
+             \x20 11  return\n"
+        );
+    }
+
+    /// `let x = if c { 1 } else { 2 }` reads the `if`, so both branches
+    /// answer and the store takes whichever one ran.
+    #[test]
+    fn a_let_of_an_if_else_stores_the_branch_that_ran() {
+        assert_eq!(
+            listing(
+                "fn f(n: Int) -> Int {\n  let x = if n < 2 {\n    1\n  } else {\n    2\n  }\n  x\n}\n",
+                "f"
+            ),
+            "fn m.f arity=1 frame=2\n\
+             \x20  0  load 0\n\
+             \x20  1  const Int(2)\n\
+             \x20  2  binary Lt\n\
+             \x20  3  jump-if-false 6\n\
+             \x20  4  const Int(1)\n\
+             \x20  5  jump 7\n\
+             \x20  6  const Int(2)\n\
+             \x20  7  store 1\n\
+             \x20  8  load 1\n\
+             \x20  9  return\n"
+        );
+    }
+
     #[test]
     fn an_if_with_an_else_joins_both_branches() {
         assert_eq!(
@@ -2810,8 +3016,13 @@ mod tests {
         );
     }
 
+    /// An `if` with no `else` written as a statement builds nothing.
+    ///
+    /// It is `()` however it goes — there is no second branch to give the
+    /// missing case a value — so as a statement there is no value to build in
+    /// either direction, and its branch is lowered for effect too.
     #[test]
-    fn an_if_with_no_else_is_unit_however_it_goes() {
+    fn an_if_with_no_else_written_as_a_statement_builds_no_value() {
         assert_eq!(
             listing(
                 "fn f(n: Int) -> Int {\n  var t = 0\n  if n < 2 {\n    t = 1\n  }\n  t\n}\n",
@@ -2823,18 +3034,42 @@ mod tests {
              \x20  2  load 0\n\
              \x20  3  const Int(2)\n\
              \x20  4  binary Lt\n\
-             \x20  5  jump-if-false 10\n\
+             \x20  5  jump-if-false 8\n\
              \x20  6  const Int(1)\n\
              \x20  7  store 1\n\
-             \x20  8  const Unit\n\
-             \x20  9  pop\n\
-             \x20 10  const Unit\n\
-             \x20 11  pop\n\
-             \x20 12  load 1\n\
-             \x20 13  return\n"
+             \x20  8  load 1\n\
+             \x20  9  return\n"
         );
     }
 
+    /// The same `if` whose value is read is still `()` however it goes.
+    #[test]
+    fn an_if_with_no_else_whose_value_is_read_is_still_unit() {
+        assert_eq!(
+            listing(
+                "fn f(n: Int) -> Unit {\n  var t = 0\n  if n < 2 {\n    t = 1\n  }\n}\n",
+                "f"
+            ),
+            "fn m.f arity=1 frame=2\n\
+             \x20  0  const Int(0)\n\
+             \x20  1  store 1\n\
+             \x20  2  load 0\n\
+             \x20  3  const Int(2)\n\
+             \x20  4  binary Lt\n\
+             \x20  5  jump-if-false 8\n\
+             \x20  6  const Int(1)\n\
+             \x20  7  store 1\n\
+             \x20  8  const Unit\n\
+             \x20  9  return\n"
+        );
+    }
+
+    /// A `while` written as a statement builds nothing, in the body or at the
+    /// end.
+    ///
+    /// A loop is `()` however it leaves, so its body's value is never wanted
+    /// and neither is its own here: four instructions of test, four of body,
+    /// and the jump back, with no `Unit` anywhere in it.
     #[test]
     fn a_while_loop_tests_at_the_top_and_jumps_back() {
         assert_eq!(
@@ -2848,18 +3083,14 @@ mod tests {
              \x20  2  load 0\n\
              \x20  3  const Int(3)\n\
              \x20  4  binary Lt\n\
-             \x20  5  jump-if-false 13\n\
+             \x20  5  jump-if-false 11\n\
              \x20  6  load 0\n\
              \x20  7  const Int(1)\n\
              \x20  8  binary Add\n\
              \x20  9  store 0\n\
-             \x20 10  const Unit\n\
-             \x20 11  pop\n\
-             \x20 12  jump 2\n\
-             \x20 13  const Unit\n\
-             \x20 14  pop\n\
-             \x20 15  load 0\n\
-             \x20 16  return\n"
+             \x20 10  jump 2\n\
+             \x20 11  load 0\n\
+             \x20 12  return\n"
         );
     }
 
@@ -2890,24 +3121,20 @@ mod tests {
              \x20  6  load 1\n\
              \x20  7  load 2\n\
              \x20  8  binary Lt\n\
-             \x20  9  jump-if-false 23\n\
+             \x20  9  jump-if-false 21\n\
              \x20 10  load 1\n\
              \x20 11  store 3\n\
              \x20 12  load 0\n\
              \x20 13  load 3\n\
              \x20 14  binary Add\n\
              \x20 15  store 0\n\
-             \x20 16  const Unit\n\
-             \x20 17  pop\n\
-             \x20 18  load 1\n\
-             \x20 19  const Int(1)\n\
-             \x20 20  binary Add\n\
-             \x20 21  store 1\n\
-             \x20 22  jump 6\n\
-             \x20 23  const Unit\n\
-             \x20 24  pop\n\
-             \x20 25  load 0\n\
-             \x20 26  return\n"
+             \x20 16  load 1\n\
+             \x20 17  const Int(1)\n\
+             \x20 18  binary Add\n\
+             \x20 19  store 1\n\
+             \x20 20  jump 6\n\
+             \x20 21  load 0\n\
+             \x20 22  return\n"
         );
     }
 
@@ -2955,7 +3182,7 @@ mod tests {
              \x20 10  load 4\n\
              \x20 11  load 3\n\
              \x20 12  binary Lt\n\
-             \x20 13  jump-if-false 30\n\
+             \x20 13  jump-if-false 28\n\
              \x20 14  load 2\n\
              \x20 15  load 4\n\
              \x20 16  call-builtin get argc=1\n\
@@ -2965,17 +3192,13 @@ mod tests {
              \x20 20  load 5\n\
              \x20 21  binary Add\n\
              \x20 22  store 1\n\
-             \x20 23  const Unit\n\
-             \x20 24  pop\n\
-             \x20 25  load 4\n\
-             \x20 26  const Int(1)\n\
-             \x20 27  binary Add\n\
-             \x20 28  store 4\n\
-             \x20 29  jump 10\n\
-             \x20 30  const Unit\n\
-             \x20 31  pop\n\
-             \x20 32  load 1\n\
-             \x20 33  return\n"
+             \x20 23  load 4\n\
+             \x20 24  const Int(1)\n\
+             \x20 25  binary Add\n\
+             \x20 26  store 4\n\
+             \x20 27  jump 10\n\
+             \x20 28  load 1\n\
+             \x20 29  return\n"
         );
     }
 
@@ -2994,32 +3217,24 @@ mod tests {
              \x20  2  load 0\n\
              \x20  3  const Int(10)\n\
              \x20  4  binary Lt\n\
-             \x20  5  jump-if-false 27\n\
+             \x20  5  jump-if-false 21\n\
              \x20  6  load 0\n\
              \x20  7  const Int(1)\n\
              \x20  8  binary Add\n\
              \x20  9  store 0\n\
-             \x20 10  const Unit\n\
-             \x20 11  pop\n\
-             \x20 12  load 0\n\
-             \x20 13  const Int(2)\n\
-             \x20 14  binary Eq\n\
-             \x20 15  jump-if-false 17\n\
-             \x20 16  jump 2\n\
-             \x20 17  const Unit\n\
-             \x20 18  pop\n\
-             \x20 19  load 0\n\
-             \x20 20  const Int(5)\n\
-             \x20 21  binary Eq\n\
-             \x20 22  jump-if-false 24\n\
-             \x20 23  jump 27\n\
-             \x20 24  const Unit\n\
-             \x20 25  pop\n\
-             \x20 26  jump 2\n\
-             \x20 27  const Unit\n\
-             \x20 28  pop\n\
-             \x20 29  load 0\n\
-             \x20 30  return\n"
+             \x20 10  load 0\n\
+             \x20 11  const Int(2)\n\
+             \x20 12  binary Eq\n\
+             \x20 13  jump-if-false 15\n\
+             \x20 14  jump 2\n\
+             \x20 15  load 0\n\
+             \x20 16  const Int(5)\n\
+             \x20 17  binary Eq\n\
+             \x20 18  jump-if-false 20\n\
+             \x20 19  jump 21\n\
+             \x20 20  jump 2\n\
+             \x20 21  load 0\n\
+             \x20 22  return\n"
         );
     }
 
@@ -3247,10 +3462,8 @@ mod tests {
              \x20  3  jump-if-false 6\n\
              \x20  4  const Int(0)\n\
              \x20  5  return\n\
-             \x20  6  const Unit\n\
-             \x20  7  pop\n\
-             \x20  8  load 0\n\
-             \x20  9  return\n"
+             \x20  6  load 0\n\
+             \x20  7  return\n"
         );
     }
 
@@ -3618,6 +3831,58 @@ mod tests {
         }
     }
 
+    /// `benches/arith`'s loop, which is what lowering for effect was measured
+    /// on.
+    ///
+    /// Every statement in it is one of the three that build nothing now: two
+    /// compound assignments and an `if` with no `else`. Nineteen instructions
+    /// run on an iteration that takes the branch and fifteen on one that does
+    /// not, where before it was twenty-five and nineteen — six of them a
+    /// `const Unit` and the `pop` that took it away again.
+    #[test]
+    fn the_arith_bench_loop_builds_no_value_it_does_not_use() {
+        let program = lower(&bench("arith")).expect("`benches/arith` lowers");
+        validate(&program).expect("it holds the invariants");
+        let id = program
+            .function_named("arith", "main")
+            .expect("its entry is lowered");
+        assert_eq!(
+            crate::render(&program, id),
+            "fn arith.main arity=0 frame=2\n\
+             \x20  0  const Int(0)\n\
+             \x20  1  store 0\n\
+             \x20  2  const Int(0)\n\
+             \x20  3  store 1\n\
+             \x20  4  load 1\n\
+             \x20  5  const Int(2000000)\n\
+             \x20  6  binary Lt\n\
+             \x20  7  jump-if-false 23\n\
+             \x20  8  load 1\n\
+             \x20  9  const Int(7)\n\
+             \x20 10  binary Rem\n\
+             \x20 11  const Int(0)\n\
+             \x20 12  binary Eq\n\
+             \x20 13  jump-if-false 18\n\
+             \x20 14  load 0\n\
+             \x20 15  const Int(1)\n\
+             \x20 16  binary Add\n\
+             \x20 17  store 0\n\
+             \x20 18  load 1\n\
+             \x20 19  const Int(1)\n\
+             \x20 20  binary Add\n\
+             \x20 21  store 1\n\
+             \x20 22  jump 4\n\
+             \x20 23  load 0\n\
+             \x20 24  const Int(285715)\n\
+             \x20 25  make-builtin assertEqual argc=2\n\
+             \x20 26  try\n\
+             \x20 27  pop\n\
+             \x20 28  const Unit\n\
+             \x20 29  make-builtin Ok argc=1\n\
+             \x20 30  return\n"
+        );
+    }
+
     /// The other two lower through the instruction that writes a field, and
     /// it is one construct they share: `cursor.at += cursor.step`.
     ///
@@ -3666,11 +3931,9 @@ mod tests {
              \x20  7  binary Add\n\
              \x20  8  set-field x\n\
              \x20  9  store 0\n\
-             \x20 10  const Unit\n\
-             \x20 11  pop\n\
-             \x20 12  load 0\n\
-             \x20 13  get-field x\n\
-             \x20 14  return\n"
+             \x20 10  load 0\n\
+             \x20 11  get-field x\n\
+             \x20 12  return\n"
         );
     }
 
