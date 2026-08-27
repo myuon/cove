@@ -167,18 +167,19 @@ const SAFEPOINT_INTERVAL: u64 = 1024;
 /// spent against.
 ///
 /// A back edge is where a loop can be stopped, so one is checked at every one
-/// of them — but *checking* is two things, and only one of them is cheap.
-/// Reading this thread's own stop flags costs a load. Spending fuel against
-/// the run's budget takes a lock the tasks share, and `benches/arith` takes
-/// two million back edges, which was 13% of its run.
+/// of them — but *checking* takes a lock the tasks share, and `benches/arith`
+/// takes two million back edges, which was 13% of its run.
 ///
-/// So a back edge always reads the flags and spends the fuel only once this
-/// much has gathered. What that costs is granularity: a run stopped by fuel or
-/// by a deadline notices within this many instructions rather than within one
-/// iteration. What it buys is that a tight loop does not lock a mutex per
-/// turn. The number is small enough that the difference is not one a program
-/// can be written to observe, and [`SAFEPOINT_INTERVAL`] still bounds a
-/// straight line that has no back edge at all.
+/// So a back edge checks only once this much fuel has gathered, and every
+/// question a back edge asks waits for it: the run's cancellation, its
+/// deadline, its fuel, and the stop flags of every bounded call this thread is
+/// inside. What that costs is granularity: a loop notices a stop within this
+/// much fuel plus the one turn that crosses it, rather than within one
+/// iteration. What it buys is that a tight loop does not lock a mutex per turn
+/// and does not walk a list per turn either. The number is small enough that
+/// the difference is not one a program can be written to observe, and
+/// [`SAFEPOINT_INTERVAL`] still bounds a straight line that has no back edge
+/// at all.
 const BACK_EDGE_FUEL: u64 = 64;
 
 /// One call in progress.
@@ -1111,32 +1112,6 @@ impl<'a> Vm<'a> {
 
     // ------------------------------------------------------------- budget
 
-    /// Spends the fuel charged since the last safepoint, and checks the
-    /// deadline, the run's cancellation, and every bounded call this thread
-    /// is inside.
-    ///
-    /// This is `Interpreter::charge_safepoint` with the same budget and the
-    /// same order of questions; only what is charged differs, because what
-    /// this backend does between two safepoints is instructions rather than
-    /// AST nodes. A stop surfaces as the ordinary [`RuntimeError`]
-    /// [`crate::budget::Budget`] already produces, pointing at the
-    /// instruction that reached the limit.
-    ///
-    /// # Where the safepoints are
-    ///
-    /// Every backward jump and every call, which are the interpreter's loop
-    /// back edges and calls; every return, which is where the fuel of a body
-    /// that made neither is finally spent; entering the entry, so a run
-    /// cancelled before it began stops before its first instruction; and any
-    /// block entered with [`SAFEPOINT_INTERVAL`] fuel already standing, so a
-    /// long straight line is bounded too.
-    /// A safepoint at a loop's back edge.
-    ///
-    /// The stop flags this thread owns are read every time, so cancelling a
-    /// task or a bounded call stops its loop at the next turn exactly as it
-    /// does on the interpreter. The run's shared budget is spent against only
-    /// once [`BACK_EDGE_FUEL`] has gathered, because that one takes a lock and
-    /// a loop takes a back edge every turn.
     /// Charges a whole basic block, on entering it.
     ///
     /// `block` is `cove_ir::Function::block_fuel` at the head this arrived
@@ -1167,10 +1142,42 @@ impl<'a> Vm<'a> {
         Ok(())
     }
 
+    /// Spends the fuel charged since the last safepoint, and checks the
+    /// deadline, the run's cancellation, and every bounded call this thread
+    /// is inside.
+    ///
+    /// This is `Interpreter::charge_safepoint` with the same budget and the
+    /// same order of questions; only what is charged differs, because what
+    /// this backend does between two safepoints is instructions rather than
+    /// AST nodes. A stop surfaces as the ordinary [`RuntimeError`]
+    /// [`crate::budget::Budget`] already produces, pointing at the
+    /// instruction that reached the limit.
+    ///
+    /// # Where the safepoints are
+    ///
+    /// Every backward jump and every call, which are the interpreter's loop
+    /// back edges and calls; every return, which is where the fuel of a body
+    /// that made neither is finally spent; entering the entry, so a run
+    /// cancelled before it began stops before its first instruction; and any
+    /// block entered with [`SAFEPOINT_INTERVAL`] fuel already standing, so a
+    /// long straight line is bounded too.
+    /// A safepoint at a loop's back edge, taken once [`BACK_EDGE_FUEL`] has
+    /// gathered.
+    ///
+    /// Everything a back edge asks is asked on that one schedule. It used to
+    /// ask two questions on two: the stop flags this thread owns were read on
+    /// *every* back edge, and only the run's shared budget waited for the fuel
+    /// to gather. But a loop that takes two million back edges pays for the
+    /// reading as well as for the lock, and the run's own cancellation was
+    /// already on the gathered schedule — [`crate::budget::Budget::safepoint`]
+    /// is where it is asked — so the eager read bought a tighter bound for one
+    /// of the two stops and not for the other.
+    ///
+    /// So both wait together, and [`Vm::safepoint`] asks both. What that costs
+    /// is granularity, and it is the granularity [`BACK_EDGE_FUEL`] already
+    /// named: a loop notices a stop within that much fuel plus the one turn
+    /// that crosses it, rather than at its next turn.
     fn back_edge(&mut self, span: Span) -> Result<(), RuntimeError> {
-        if self.stops.iter().any(Cancellation::is_cancelled) {
-            return Err(work_stopped(span));
-        }
         if self.fuel >= BACK_EDGE_FUEL {
             self.safepoint(span)?;
         }
