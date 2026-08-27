@@ -17,6 +17,8 @@ design is recorded in [ADR 0001](docs/adr/0001-mvp-language-design.md).
 - [Language Card](docs/LANGUAGE_CARD.md) — a one-page map of the language
 - [Language Reference](docs/LANGUAGE_REFERENCE.md) — one rule per expression
   and pattern form, held to the implementation by a conformance suite
+- [VM architecture](docs/VM_ARCHITECTURE.md) — what the VM is today, what it
+  is being changed into, and the calling convention it holds to
 - [Architecture decisions](docs/adr/) — each one carries its status, the pull
   request that implemented it, how much of it is built, and what has since
   amended or superseded it
