@@ -290,7 +290,7 @@ use cove_syntax::ast::{
     TypeKind, UnaryOp,
 };
 
-use crate::facts::{Facts, MethodTarget};
+use crate::facts::{Facts, MethodTarget, Signature};
 use crate::package::Package;
 use crate::resolve::{Conformance, Program, ResolvedModule, TraitEntry};
 
@@ -2079,6 +2079,7 @@ impl<'a> Checker<'a> {
     /// A function with no `->` returns `Unit`, so its body's value must be
     /// `Unit` too.
     fn check_body(&mut self, decl: &FnDecl, sig: &FnSig) {
+        self.record_signature(decl, sig);
         self.type_params = sig.generics.clone();
         self.bounds = sig.bounds.clone();
         self.ret = sig.ret.clone();
@@ -6001,6 +6002,36 @@ impl<'a> Checker<'a> {
     /// `Account` of the module `module_opaque.account`, and splitting at the
     /// first dot would file it under `module_opaque` as a type called
     /// `account.Account`, which nothing declares.
+    /// Records the boundary of the declaration whose body is about to be
+    /// checked.
+    ///
+    /// The types are `sig`'s own — the ones this checker resolved for *this*
+    /// declaration and is about to check the body against — rather than a
+    /// second reading of `decl`'s annotations. That is the whole point:
+    /// [`crate::facts`] exists so that a consumer and the checker cannot
+    /// disagree, and a re-derivation here would be exactly the disagreement
+    /// it prevents.
+    ///
+    /// A variadic parameter is recorded as what it was written as rather
+    /// than as the `Array<T>` the body sees, because a call supplies the
+    /// element and the array is what the callee makes of them. Nothing that
+    /// reads this lowers a variadic call today, so the distinction costs
+    /// nothing to state correctly and would cost something to state wrongly.
+    ///
+    /// Recording is not deciding: this is called before the walk and read by
+    /// nothing during it, so no diagnostic depends on it.
+    fn record_signature(&mut self, decl: &FnDecl, sig: &FnSig) {
+        self.facts.record_signature(
+            decl.span.file,
+            decl.span,
+            Signature {
+                receiver: sig.receiver.clone(),
+                params: sig.params.iter().map(|param| param.ty.clone()).collect(),
+                ret: sig.ret.clone(),
+            },
+        );
+    }
+
     fn record_target(&mut self, id: ExprId, file: FileId, key: &str, method: &str) {
         let (module, type_name) = match key.rsplit_once('.') {
             Some((module, name)) => (module.to_string(), name.to_string()),

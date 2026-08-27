@@ -48,8 +48,25 @@
 //! distinction rather than losing it: a callee with a recorded type is a
 //! call through a value, and a callee without one is a call to a
 //! declaration — which [`Facts::target`] then names.
+//!
+//! # A declaration's boundary is a fact too, and it is a small one
+//!
+//! An expression is not the only thing the checker settles. It also resolves
+//! every declaration's signature — what each parameter is, what the receiver
+//! is, what comes back — and a consumer that has to know where a parameter
+//! lives, or which stack an answer comes back on, is asking about the
+//! signature rather than about any expression inside the body. Re-deriving
+//! it from the source would be the same mistake in a new place: a `->
+//! module.Thing` written in one module and read in another is a name whose
+//! meaning only the checker holds.
+//!
+//! [`Facts::signature`] is that table, and it is keyed differently from the
+//! expression tables on purpose — see [`Facts::signature`] for why a hash is
+//! the right shape here and the wrong one there.
 
-use cove_diag::FileId;
+use std::collections::HashMap;
+
+use cove_diag::{FileId, Span};
 use cove_syntax::ast::ExprId;
 
 use crate::typeck::Ty;
@@ -78,18 +95,57 @@ pub struct MethodTarget {
     pub method: String,
 }
 
+/// A declaration's boundary, as the checker resolved it for that body.
+///
+/// Every type here is the one the checker held while it walked *this*
+/// declaration's body, not a re-derivation from the source: an annotation is
+/// resolved once, against the module it was written in, and this is that
+/// answer rather than a second reading of it.
+///
+/// The three parts are kept apart the way a declaration keeps them. `params`
+/// is in declaration order and holds one entry per written parameter;
+/// `receiver` is the type of `self` and is `Some` only for a method, so a
+/// consumer that has to place arguments knows the receiver comes first
+/// without inferring it from a count. `ret` is `Ty::Unit` for a declaration
+/// with no `->`, because a function with no declared return type returns
+/// `()` and that is a settled type rather than an absence.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Signature {
+    /// The type of `self`, for a method, and nothing for a free function.
+    pub receiver: Option<Ty>,
+    /// The declared parameters, in declaration order, receiver excluded.
+    pub params: Vec<Ty>,
+    /// What a call to this declaration answers.
+    pub ret: Ty,
+}
+
 /// What the checker worked out about each expression.
 ///
-/// One of these covers a whole package: every file the checker walked, and
-/// within each file every expression it settled something about. It is
-/// published on [`Program`](crate::resolve::Program), which is what a
-/// consumer of a checked package already holds.
+/// One of these covers a whole package: every file the checker walked,
+/// within each file every expression it settled something about, and the
+/// boundary of every declaration it resolved. It is published on
+/// [`Program`](crate::resolve::Program), which is what a consumer of a
+/// checked package already holds.
 #[derive(Debug, Default)]
 pub struct Facts {
     /// Indexed by [`FileId`]. A file the checker never walked is an empty
     /// entry rather than a missing one, because the index has to stay the
     /// id.
     files: Vec<FileFacts>,
+    /// One entry per declared function or method, keyed by the file it was
+    /// written in and the start offset of its `fn` declaration.
+    ///
+    /// A hash where the expression tables are a `Vec`, and the difference is
+    /// a difference in size rather than a change of mind. A declaration's
+    /// span has no dense numbering to index by — it is a byte offset into a
+    /// file, and the offsets of a file's declarations are sparse across its
+    /// whole length — so a dense table would be one slot per byte. What
+    /// makes a hash affordable anyway is that there is one entry per
+    /// declaration rather than one per expression, and it is read twice per
+    /// function at lowering time, once for the function's own boundary and
+    /// once at each call site that names it. Nothing on a hot path reads it
+    /// at all.
+    signatures: HashMap<(FileId, u32), Signature>,
 }
 
 /// Everything recorded about one file, indexed by [`ExprId`].
@@ -132,6 +188,24 @@ impl Facts {
             .as_ref()
     }
 
+    /// The boundary of the declaration written at `decl`, if the checker
+    /// resolved one.
+    ///
+    /// `decl` is the `FnDecl`'s own span, which is what a consumer holding a
+    /// declaration already has and what makes the key need no side channel:
+    /// the checker records against the same span, so a declaration found in
+    /// the tree and the fact recorded about it meet without either naming
+    /// the other.
+    ///
+    /// `None` means the checker never resolved this declaration — a body it
+    /// stopped before reaching, or a tree that was never part of a checked
+    /// package. As everywhere else here, it does not mean the checker was
+    /// unsure: a parameter it could say nothing about is recorded as
+    /// [`Ty::Unknown`], which is an answer.
+    pub fn signature(&self, file: FileId, decl: Span) -> Option<&Signature> {
+        self.signatures.get(&(file, decl.start))
+    }
+
     /// Records the type the checker settled for one expression.
     ///
     /// A later record for the same id replaces an earlier one. That is what
@@ -153,6 +227,16 @@ impl Facts {
         *slot(&mut self.file_mut(file).targets, index) = Some(target);
     }
 
+    /// Records the boundary the checker resolved for one declaration.
+    ///
+    /// A later record for the same declaration replaces an earlier one, for
+    /// the reason [`Facts::record_ty`] gives: a probe walks a tree before
+    /// the real walk of it does, and what is left behind has to be the real
+    /// walk's answer.
+    pub(crate) fn record_signature(&mut self, file: FileId, decl: Span, signature: Signature) {
+        self.signatures.insert((file, decl.start), signature);
+    }
+
     /// Takes over everything `other` recorded.
     ///
     /// A module is checked by a checker of its own, and a file belongs to
@@ -165,6 +249,7 @@ impl Facts {
             merge_table(&mut into.types, from.types);
             merge_table(&mut into.targets, from.targets);
         }
+        self.signatures.extend(other.signatures);
     }
 
     /// The entry for `file`, growing the table until the id is an index into
@@ -286,6 +371,49 @@ mod tests {
         fn target(&self, module: &str, source: &str) -> Option<&MethodTarget> {
             let id = self.id(module, source);
             self.facts.target(self.file(module), id)
+        }
+
+        /// The signature recorded for the declaration of `module` named
+        /// `name`, which is `Type.method` for a method.
+        ///
+        /// The declaration is found in the tree rather than in a table of
+        /// the checker's, so a test reads the fact through the same span a
+        /// consumer holding a `FnDecl` would read it through.
+        #[track_caller]
+        fn signature(&self, module: &str, name: &str) -> &Signature {
+            let mut found: Option<Span> = None;
+            for item in &self.unit(module).items {
+                match &item.kind {
+                    ItemKind::Fn(decl) if decl.name.node == name => found = Some(decl.span),
+                    ItemKind::Impl(block) => {
+                        for item in &block.items {
+                            if let ItemKind::Fn(decl) = &item.kind {
+                                if format!("{}.{}", block.type_name.node, decl.name.node) == name {
+                                    found = Some(decl.span);
+                                }
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            let span = found.unwrap_or_else(|| panic!("`{module}` declares no `{name}`"));
+            self.facts
+                .signature(self.file(module), span)
+                .unwrap_or_else(|| panic!("nothing was recorded for `{name}`"))
+        }
+
+        /// A signature as `receiver | params -> ret`, written out so a test
+        /// reads as the declaration does.
+        #[track_caller]
+        fn written(&self, module: &str, name: &str) -> String {
+            let signature = self.signature(module, name);
+            let params: Vec<String> = signature.params.iter().map(Ty::to_string).collect();
+            let receiver = match &signature.receiver {
+                Some(ty) => format!("{ty} | "),
+                None => String::new(),
+            };
+            format!("{receiver}({}) -> {}", params.join(", "), signature.ret)
         }
     }
 
@@ -659,6 +787,50 @@ export fn broken() -> Int {
                 method: "bumped".to_string(),
             })
         );
+    }
+
+    /// A free function's boundary is recorded as the checker resolved it,
+    /// which is what a consumer placing arguments reads instead of reading
+    /// the annotations again.
+    #[test]
+    fn a_declarations_signature_is_recorded() {
+        assert_eq!(
+            reporting().written("main", "report"),
+            "(Array<Int>, Int) -> String"
+        );
+    }
+
+    /// A method's receiver is recorded apart from its parameters, because a
+    /// call supplies it first and a consumer must not have to infer that
+    /// from a count.
+    #[test]
+    fn a_methods_signature_records_its_receiver_apart_from_its_parameters() {
+        let checked = reporting();
+        assert_eq!(
+            checked.written("geometry", "Point.scaled"),
+            "Point | (Float) -> Point"
+        );
+        assert_eq!(
+            checked.written("geometry", "Point.length"),
+            "Point | () -> Int"
+        );
+        assert_eq!(
+            checked.written("geometry", "Point.origin"),
+            "() -> Point",
+            "an associated function has no receiver"
+        );
+    }
+
+    /// A declaration with no `->` returns `()`, and `()` is a type. Recording
+    /// it as one is what keeps "the checker said nothing" and "the checker
+    /// said `Unit`" apart here as everywhere else.
+    #[test]
+    fn a_declaration_with_no_return_type_records_unit() {
+        let checked = compile(&[(
+            "main",
+            "/// Doc.\nexport fn note(what: String) {\n  let _ignored = what\n}\n",
+        )]);
+        assert_eq!(checked.written("main", "note"), "(String) -> ()");
     }
 
     // ------------------------------------------------- an independent walk
