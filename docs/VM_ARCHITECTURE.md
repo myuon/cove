@@ -227,10 +227,10 @@ two changes to try — nothing about the dynamic representation moves, so
 everything the VM already ran keeps running unchanged — and on `arith` it
 removed the whole of the cost it was aimed at.
 
-**Still not chosen, and still not to be chosen without measurement:** whether
-the dynamic representation is a tag beside a payload, an aligned tagged
-pointer, or NaN boxing. NaN boxing in particular has to be weighed against
-Cove's `Int` being a full 64 bits, which it does not fit alongside a tag.
+What the dynamic representation itself is — a tag beside a payload, an
+aligned tagged pointer, NaN boxing — was the question left open here. It has
+since been audited and measured, and it is large enough to have its own
+section: "The value representation, audited", below.
 
 ### Frame metadata
 
@@ -248,10 +248,61 @@ facts rather than invented, which is also what a future JIT would need.
 
 ### A VM-owned heap
 
-Today a heap value is a Rust object graph reached through `Rc`. The target is a
-layout the VM owns, reached through a stable handle. That is the largest of
-these changes and the one most entangled with the embedding API, so the
-embedding API should stop exposing the representation before it moves.
+Today a heap value is a Rust object graph reached through `Rc`, and the target
+has been a layout the VM owns, reached through a stable handle — goals 4 and 5
+of #116. Before building it, the two benchmarks that allocate were profiled on
+the VM as it stands, release build with symbols, self time. (The `chars`
+profile at the top of this document is the prototype's; these are the current
+one's.)
+
+```text
+benches/chars                    benches/arrayget
+34.9%  <malloc>                  41.1%  <malloc>
+27.6%  Vm::execute               22.1%  Vm::execute
+ 9.6%  builtins::call_method      8.7%  builtins::call_method
+ 4.8%  drop_in_place<Value>       3.5%  Vec construction
+ 3.2%  Vec construction           3.0%  drop_in_place<Value>
+ 1.6%  Value::clone               2.6%  Value::some
+ 1.6%  Value::some                2.2%  Value::clone
+```
+
+Allocation is the largest single cost in both, which is the complete reverse of
+`arith`, where dispatch is 85% and malloc is zero. But a profile says *where*,
+and where is not a heap layout. Two specific sites account for it.
+
+**A `Some(x)` costs two allocations.** `Value::some` builds
+`Value::Enum(Box::new(EnumValue { type_name, case, payload: vec![value] }))` —
+a `Box` for the `EnumValue` and a `Vec` for a payload of one — plus two lookups
+through a thread-local cache for the two names. `benches/arrayget`'s own doc
+comment already says why that matters: "`Option` is built here more than
+anywhere else in an ordinary program, because this is how every indexed read
+answers." Its loop calls `get` and `unwrapOr` two million times.
+
+**A builtin call builds an argument vector.** `Vm::take` is
+`self.stack.drain(at..).collect()`, one `Vec<Value>` allocated and dropped per
+builtin call. ADR 0019 named that cost in the tree walk and it is still here in
+the VM. `arrayget` pays two of them a turn.
+
+Four allocations per iteration of a loop that reads an array element, which is
+eight million of them for the run.
+
+A VM-owned heap would give the VM a layout it controls, and it is still the
+right long-term shape for #116's goals 4 and 5. But it is not what these
+numbers ask for next, and building it first would be answering a question the
+profile did not ask. What the profile asks for is that a two-word `Some` stop
+costing two allocations and two name lookups, and that a builtin call stop
+allocating a vector in order to hand a function three values. Both are bounded
+changes inside the representation that already exists.
+
+It is worth naming what a VM-owned heap would *not* fix, so this is not
+over-read in the other direction. It would not remove the `Option` allocation
+on its own, because that allocation is caused by the shape of `EnumValue`
+rather than by who owns the memory underneath it: a `Some` built out of a `Box`
+and a one-element `Vec` costs two allocations whoever is holding the arena.
+
+So the heap design stays open, and it should be decided after those two rather
+than before them. What is still allocating once they are gone is the evidence a
+heap layout would actually be answering.
 
 ## The slice, and the gate
 
@@ -298,14 +349,21 @@ on the same machine:
 
 | bench       | AST       | VM       | ratio |
 | ----------- | --------: | -------: | ----: |
-| `pure`      |   15.9 ms |   2.6 ms | **6.25×** |
-| `call`      | 1601.7 ms | 260.1 ms | 6.16× |
-| `arith`     |  455.1 ms |  82.8 ms | 5.49× |
-| `method`    | 2852.7 ms | 947.7 ms | 3.01× |
-| `chars`     | 1898.7 ms | 832.3 ms | 2.28× |
-| `arrayget`  | 1467.8 ms | 677.5 ms | 2.17× |
-| `field`     |  878.4 ms | 542.5 ms | 1.62× |
-| `hostheavy` |    4.8 ms |   3.8 ms | 1.26× |
+| `pure`      |   15.7 ms |   2.6 ms | **5.93×** |
+| `call`      | 1534.1 ms | 260.3 ms | 5.89× |
+| `arith`     |  424.7 ms |  82.4 ms | 5.15× |
+| `method`    | 2860.0 ms | 861.7 ms | 3.32× |
+| `chars`     | 1841.8 ms | 810.0 ms | 2.27× |
+| `arrayget`  | 1411.8 ms | 658.2 ms | 2.14× |
+| `field`     |  857.6 ms | 436.8 ms | 1.96× |
+| `hostheavy` |    5.0 ms |   3.7 ms | 1.36× |
+
+Three of those ratios fell while both columns got faster, which is worth
+saying because a ratio alone would read as a regression. `Value` at 24 bytes
+is shared by the two backends, so the AST column moved with the VM column and
+`arith`'s ratio went from 5.49 to 5.15 on a VM run that got *faster*. The
+ratio is what the two backends cost each other; the milliseconds are what
+Cove costs.
 
 `hostheavy` is the floor and should be: it is host dispatch, which both
 backends reach through the same registry, so there is nothing there for an
@@ -483,6 +541,93 @@ about what a hot path carries: `size_of::<Span>()` is 12,
 `size_of::<Result<(), RuntimeError>>()` is 120 against 8 for
 `Result<(), Box<RuntimeError>>`.
 
+## The value representation, audited
+
+Issue #116 asked that no representation be chosen without a measurement and an
+audit. This is the audit, and the measurement it turned out to need.
+
+`cove_runtime::Value` is a twenty-two-variant enum and `needs_drop::<Value>()`
+is true. It was 40 bytes — the number the top of this document reads the
+prototype's cost through. The audit's first question was what made it 40, and
+the answer needed no cleverness to read: an enum is as wide as its widest
+variant, and exactly one variant was wide.
+
+```text
+40  Value
+32  (Rc<str>, Rc<str>)            Value::HostFn { module, op }
+24  (i64, i64, bool)              Value::Range
+16  Rc<str>, Rc<[Value]>          Str, Array — fat pointers
+ 8  Rc<String>, Rc<Vec<Value>>    the thin equivalents
+```
+
+Every `Value` either backend moved was sized by the variant that names
+`console.println`. Commit `c8450e7` put that variant behind one pointer, and
+`size_of::<Value>()` is 24.
+
+A prediction failed on the way there, and it belongs on the record with
+everything else. The expected ladder was 40 → 32 → 24: `Range`'s
+`(i64, i64, bool)` would set the width at 32 once `HostFn` had gone, and a
+second commit boxing `Range` would take it the rest of the way. There is no 32
+step. `bool` has a niche, rustc puts the discriminant inside it, and the whole
+of `Range` fits in 24 including its tag — the same 24 a fat pointer needs. The
+second commit was written and measured anyway, it bought nothing, and it was
+dropped.
+
+Going 24 → 16 means making `Str` and `Array` hold thin pointers, which is 284
+call sites and either an extra dereference on every read (`Rc<String>`) or
+hand-written unsafe to avoid one. Rather than pay that to find out what it was
+worth, the width itself was measured: a padding variant that is never
+constructed was added to `Value` to widen it, and the suite run at each width.
+
+| bench | 24 | 32 | 40 | per +8 bytes |
+| --- | ---: | ---: | ---: | ---: |
+| VM `field` | 436.8 ms | 440.0 ms | 453.7 ms | +1.9% |
+| VM `method` | 861.7 ms | 881.9 ms | 893.3 ms | +1.8% |
+| VM `chars` | 810.0 ms | 805.4 ms | 822.5 ms | +0.8% |
+| VM `arrayget` | 658.2 ms | 650.7 ms | 667.2 ms | +0.7% |
+| VM `arith` | 82.4 ms | 82.4 ms | 82.0 ms | −0.3% |
+| AST `arith` | 424.7 ms | 447.8 ms | 459.7 ms | +4.1% |
+| AST `call` | 1534.1 ms | 1544.2 ms | 1592.7 ms | +1.9% |
+| AST `field` | 857.6 ms | 857.7 ms | 886.7 ms | +1.7% |
+
+The 40 column is a control, and it is what makes the rest readable: padding to
+40 reproduces the real 40-byte `Value` measured before `c8450e7` — VM `arith`
+82.0 against 82.6, AST `arith` 459.7 against 462.4, AST `call` 1592.7 against
+1605.9. A padding variant that nothing constructs measures width and nothing
+else, and it lands where the real thing landed. The 32 column is noisier than
+the endpoints and several of its entries are negative, so the honest reading of
+the table is the 24-to-40 span rather than either single step.
+
+So eight bytes of `Value` width is worth roughly 0.7% to 1.9% on the VM, and it
+is worth least on `chars` and `arrayget` — which are exactly the two benchmarks
+that would pay the extra indirection a thin pointer costs. **24 → 16 is not
+taken.** The gain is about a percent, and it is smallest on the two programs
+where the cost of getting it would be largest.
+
+That settles what the last eight bytes are worth. It does not settle the
+question #116 actually asked, which is whether a `Value` could be one word
+rather than two — and that one is settled by semantics rather than by
+measurement. `docs/LANGUAGE_REFERENCE.md` says `Int` is a 64-bit signed
+integer, and `docs/LANGUAGE_CARD.md` says integer overflow is a broken
+invariant rather than a wrapped result. An 8-byte value has no room for a full
+64-bit integer *and* a tag. NaN boxing gives about 51 bits of payload and an
+aligned tagged pointer gives 61 or 62; both would have to box integers outside
+their range, which would make arithmetic near `i64::MAX` allocate. That is a
+change to what `Int` costs, in a language whose Card promises what `Int` *is*.
+So neither is rejected here for being slow or unportable. They are rejected
+because Cove's `Int` does not fit in them, and the floor for this language is 16
+bytes: a tag beside a word.
+
+A tag beside a payload at 16 bytes is the third of the three and it remains
+available. It is not taken either, for the reason two paragraphs above: the
+measured gain from the last eight bytes is about one percent, and it lands
+where the cost of getting it would land.
+
+The conclusion is the one the audit was for. The value representation is not
+where the remaining cost is. It was worth exactly one boxed variant, that
+variant was a mistake rather than a design, and everything past it is either a
+percent or impossible.
+
 ## What was built from it, and what was not
 
 **Built.** Block charging, worth 11.4% on `arith` and 6.9% on `field`. Then one
@@ -510,6 +655,39 @@ is not worth the `unsafe`.
 jump, every fall-through, every call, and every return, on a path where the
 answer is always `Ok`. Boxing the error's payload would make it 8. It is a large
 mechanical change across the workspace, and it is the one remaining `Result`
-with a hot reader. Also not taken: a typed field read, which is what `field` and
-`method` would want, since a struct field answers a `Value` and every one of
-them crosses a boundary to be used as an `Int`.
+with a hot reader.
+
+A typed field read stood in this paragraph too, as the other thing named and
+not taken: a struct field answers a `Value`, so every field used as an `Int`
+crossed a boundary to become one, five times a turn in `benches/field`. It has
+since been taken — one instruction that reads the field out of the struct by
+reference and converts it, where the two it replaces built a `Value` for the
+next instruction to discard. `field` lost 11.7% of its instructions and 18% of
+its time, and `method` 9.6% and 3%. It is written here rather than left in the
+list because the list is what was named from a profile, and this is what came
+of one of them.
+
+## What is settled and what is open
+
+**Settled by measurement.** Typed scalar slots, the calling convention,
+per-block charging, the fused typed field read, and `Value` at 24 bytes. Every
+one of those was taken because a number said to, and two of them — the fused
+field read and the 24-byte `Value` — were named as open in an earlier section
+of this document before they were.
+
+**Settled by semantics.** The 16-byte floor. It follows from `Int` being a full
+64 bits with overflow a broken invariant, and no measurement can move it,
+because it was never a question about speed.
+
+**Open, and what would settle each.** The inline representation of `Option`,
+`Result`, and small enum payloads — settled by building one and measuring
+`arrayget` and `chars`. The argument vector allocated per builtin call — the
+same two benchmarks, the same way. The heap layout the VM owns — settled by
+what is still allocating once those two are gone, which is exactly the evidence
+it does not have yet. A moving collector and precise roots — not yet asked for
+by anything measured here, and the frame metadata it would need already exists,
+for the reason given under "Frame metadata" above.
+
+Everything on that open list is downstream of the same two allocation sites.
+That makes them the next measurement whether or not a VM-owned heap is ever
+built.
