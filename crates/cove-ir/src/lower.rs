@@ -92,8 +92,9 @@
 //!   overwrites. Two `let x`s are two slots, and a reference reaches the
 //!   later one because a lookup scans from the top.
 //! - **A block's slots are released when the block ends**, so a later sibling
-//!   block reuses the same numbers and `frame_size` is a high-water mark
-//!   rather than a count of declarations.
+//!   block reuses the same numbers and each of `value_frame_size` and
+//!   `scalar_frame_size` is a high-water mark rather than a count of
+//!   declarations.
 //! - **A `for` binding lives in the scope its body sees**, and the iterable
 //!   is evaluated in the enclosing one.
 //! - **Evaluation is left to right everywhere**: arguments, operands, array
@@ -642,8 +643,8 @@ impl<'a> Lowering<'a> {
         Ok(Function {
             module: module.into(),
             name,
-            frame_size: finished.frame_size,
-            slots: finished.slots,
+            value_frame_size: finished.value_frame_size,
+            scalar_frame_size: finished.scalar_frame_size,
             arity: decl.params.len() as u32 + u32::from(decl.receiver.is_some()),
             has_receiver: decl.receiver.is_some(),
             captures: Vec::new(),
@@ -676,6 +677,18 @@ struct Binding<'a> {
     /// revisited: a binding's type does not change, so neither does where it
     /// is kept.
     kind: SlotKind,
+}
+
+/// Where a scope begins: [`Body::scope`] takes one and [`Body::release`]
+/// restores it, which is what ends the scope.
+///
+/// The value and scalar slot counters are numbered separately, so ending a
+/// scope has to roll back both of them, not just how many bindings are live.
+#[derive(Clone, Copy)]
+struct Mark {
+    live: usize,
+    next_value: u32,
+    next_scalar: u32,
 }
 
 /// A jump target, resolved once the instruction it points at exists.
@@ -771,10 +784,8 @@ struct Finished {
     code: Vec<Inst>,
     spans: Vec<Span>,
     arg_spans: BTreeMap<u32, Vec<Span>>,
-    frame_size: u32,
-    /// Where each slot lives, one entry per slot, which is the frame
-    /// metadata the VM addresses a slot through and a root set is read from.
-    slots: Vec<SlotKind>,
+    value_frame_size: u32,
+    scalar_frame_size: u32,
 }
 
 /// Everything one function's instructions are built from.
@@ -791,20 +802,16 @@ struct Body<'a, 'l> {
     /// join point honest.
     depth: Option<Depth>,
     live: Vec<Binding<'a>>,
-    frame_size: u32,
-    /// Where each slot number lives, by slot number.
-    ///
-    /// It only grows: a slot released at the end of a block keeps its kind,
-    /// because a later sibling block that reuses the number reuses the
-    /// storage, and one number naming two storages is exactly the mistake
-    /// `Body::declare` skips past.
-    kinds: Vec<SlotKind>,
-    /// The next slot number to hand out, restored when a scope ends.
-    ///
-    /// This was `live.len()` while every slot was alike. It is its own number
-    /// now because `declare` may skip a released slot whose kind does not
-    /// match.
-    next: u32,
+    /// The high-water mark of value slots handed out: `self` if there is a
+    /// receiver, then parameters, then every `Value` local and temporary.
+    value_frame_size: u32,
+    /// The high-water mark of scalar slots handed out: every `Int` or `Bool`
+    /// local and temporary.
+    scalar_frame_size: u32,
+    /// The next value slot number to hand out, restored when a scope ends.
+    next_value: u32,
+    /// The next scalar slot number to hand out, restored when a scope ends.
+    next_scalar: u32,
     labels: Vec<Label>,
     patches: Vec<(usize, usize)>,
     loops: Vec<LoopFrame>,
@@ -822,9 +829,10 @@ impl<'a, 'l> Body<'a, 'l> {
             spans: Vec::new(),
             depth: Some(Depth::EMPTY),
             live: Vec::new(),
-            frame_size: 0,
-            kinds: Vec::new(),
-            next: 0,
+            value_frame_size: 0,
+            scalar_frame_size: 0,
+            next_value: 0,
+            next_scalar: 0,
             labels: Vec::new(),
             patches: Vec::new(),
             loops: Vec::new(),
@@ -850,8 +858,8 @@ impl<'a, 'l> Body<'a, 'l> {
             code: self.code,
             spans: self.spans,
             arg_spans: self.arg_spans,
-            frame_size: self.frame_size,
-            slots: self.kinds,
+            value_frame_size: self.value_frame_size,
+            scalar_frame_size: self.scalar_frame_size,
         }
     }
 
@@ -943,53 +951,55 @@ impl<'a, 'l> Body<'a, 'l> {
     /// does, so `let x = 1; let x = 2` is two slots. `writable` is what a
     /// write to the binding is checked against, and only a `var` is.
     ///
-    /// # Why a released number is not always reused
-    ///
-    /// A block's slots are released at its end and a later sibling block
-    /// reuses the numbers, which is what makes `frame_size` a high-water
-    /// mark. A number now names storage in one of two stacks, so a number
-    /// reused by a binding of the other kind would name two — and neither
-    /// the VM nor `validate` could say which. So a number whose kind does
-    /// not match is skipped, and the reuse that keeps a frame small still
-    /// happens between the bindings that can share.
+    /// The value stack and the scalar stack are numbered separately, so
+    /// `kind` picks which counter this draws from. A number is dense within
+    /// its own stack — nothing to skip, because the other stack's numbers
+    /// are not in this space at all.
     fn declare(&mut self, name: Option<&'a str>, writable: bool, kind: SlotKind) -> u32 {
-        let mut slot = self.next;
-        while self
-            .kinds
-            .get(slot as usize)
-            .is_some_and(|settled| *settled != kind)
-        {
-            slot += 1;
-        }
-        if slot as usize == self.kinds.len() {
-            self.kinds.push(kind);
-        }
-        self.next = slot + 1;
+        let slot = match kind {
+            SlotKind::Value => {
+                let slot = self.next_value;
+                self.next_value += 1;
+                self.value_frame_size = self.value_frame_size.max(self.next_value);
+                slot
+            }
+            SlotKind::Scalar(_) => {
+                let slot = self.next_scalar;
+                self.next_scalar += 1;
+                self.scalar_frame_size = self.scalar_frame_size.max(self.next_scalar);
+                slot
+            }
+        };
         self.live.push(Binding {
             name,
             slot,
             writable,
             kind,
         });
-        self.frame_size = self.frame_size.max(slot + 1);
         slot
     }
 
     /// Where a scope begins, to be handed back to [`Body::release`] when it
     /// ends.
-    fn scope(&self) -> usize {
-        self.live.len()
+    fn scope(&self) -> Mark {
+        Mark {
+            live: self.live.len(),
+            next_value: self.next_value,
+            next_scalar: self.next_scalar,
+        }
     }
 
     /// Releases every binding declared since `mark`, which is what ends a
     /// scope.
     ///
-    /// The next slot number goes back with them: a scope's declarations are a
-    /// stack, so one past the highest still-live slot is where the block that
-    /// contained them was.
-    fn release(&mut self, mark: usize) {
-        self.live.truncate(mark);
-        self.next = self.live.last().map_or(0, |binding| binding.slot + 1);
+    /// Both slot counters go back with them, restored from the mark rather
+    /// than recomputed from what remains live: a scope's declarations are on
+    /// two independent stacks now, and the mark is what was true of both
+    /// before either grew.
+    fn release(&mut self, mark: Mark) {
+        self.live.truncate(mark.live);
+        self.next_value = mark.next_value;
+        self.next_scalar = mark.next_scalar;
     }
 
     /// The binding `name` reaches: the most recent declaration of it, because
@@ -1185,8 +1195,8 @@ impl<'a, 'l> Body<'a, 'l> {
     /// Lowers a block, leaving its value on the stack.
     ///
     /// The slots the block declared are released at its end, so a later
-    /// sibling block reuses the numbers and `frame_size` stays a high-water
-    /// mark rather than a total.
+    /// sibling block reuses the numbers and each frame size stays a
+    /// high-water mark rather than a total.
     fn block(&mut self, block: &'a Block) -> Result<(), Unsupported> {
         self.block_at(block, Position::Value)
     }
@@ -3027,29 +3037,11 @@ fn validate_function(program: &Program, id: FunctionId) -> Result<(), String> {
             function.code.len()
         ));
     }
-    if function.arity > function.frame_size {
+    if function.arity > function.value_frame_size {
         return Err(format!(
             "takes {} arguments but has a frame of {}",
-            function.arity, function.frame_size
+            function.arity, function.value_frame_size
         ));
-    }
-    if function.slots.len() != function.frame_size as usize {
-        return Err(format!(
-            "describes {} slots of a frame of {}",
-            function.slots.len(),
-            function.frame_size
-        ));
-    }
-    // An argument arrives on the caller's value stack and becomes one of the
-    // callee's first slots without moving, which is the calling convention
-    // and is why a parameter's slot is a value slot. A scalar parameter would
-    // need the convention changed, and this slice does not change it.
-    for slot in 0..function.arity as usize {
-        if function.slots[slot].is_scalar() {
-            return Err(format!(
-                "takes argument {slot} into a scalar slot, which no call fills"
-            ));
-        }
     }
     if !matches!(function.code.last(), Some(Inst::Return)) {
         return Err("does not end in a `return`".to_string());
@@ -3083,28 +3075,18 @@ fn validate_function(program: &Program, id: FunctionId) -> Result<(), String> {
                 }
             }
             Inst::LoadLocal(slot) | Inst::StoreLocal(slot) => {
-                if slot >= function.frame_size {
+                if slot >= function.value_frame_size {
                     return Err(at(format!(
                         "reaches slot {slot} of a frame of {}",
-                        function.frame_size
-                    )));
-                }
-                if function.slots[slot as usize].is_scalar() {
-                    return Err(at(format!(
-                        "reaches slot {slot} as a value, and it is a scalar slot"
+                        function.value_frame_size
                     )));
                 }
             }
             Inst::LoadScalar(slot) | Inst::StoreScalar(slot) => {
-                if slot >= function.frame_size {
+                if slot >= function.scalar_frame_size {
                     return Err(at(format!(
                         "reaches slot {slot} of a frame of {}",
-                        function.frame_size
-                    )));
-                }
-                if !function.slots[slot as usize].is_scalar() {
-                    return Err(at(format!(
-                        "reaches slot {slot} as a scalar, and it is a value slot"
+                        function.scalar_frame_size
                     )));
                 }
             }
@@ -3460,19 +3442,19 @@ mod tests {
                 "fn f() -> Int {\n  let a = 1\n  let b = 1.5\n  let c = true\n  let d = 250ms\n  let e = ()\n  let g = \"hi\"\n  a\n}\n",
                 "f"
             ),
-            "fn m.f arity=0 frame=6 scalars=[0:Int, 2:Bool]\n\
+            "fn m.f arity=0 frame=4/2\n\
              \x20  0  scalar-const 1\n\
              \x20  1  store-scalar 0\n\
              \x20  2  const Float(1.5)\n\
-             \x20  3  store 1\n\
+             \x20  3  store 0\n\
              \x20  4  scalar-const 1\n\
-             \x20  5  store-scalar 2\n\
+             \x20  5  store-scalar 1\n\
              \x20  6  const Duration(250000000)\n\
-             \x20  7  store 3\n\
+             \x20  7  store 1\n\
              \x20  8  const Unit\n\
-             \x20  9  store 4\n\
+             \x20  9  store 2\n\
              \x20 10  const Str(\"hi\")\n\
-             \x20 11  store 5\n\
+             \x20 11  store 3\n\
              \x20 12  load-scalar 0\n\
              \x20 13  scalar-to-value Int\n\
              \x20 14  return\n"
@@ -3483,7 +3465,7 @@ mod tests {
     fn an_interpolated_string_renders_its_parts_left_to_right() {
         assert_eq!(
             listing("fn f(n: Int) -> String {\n  \"tick {n}!\"\n}\n", "f"),
-            "fn m.f arity=1 frame=1\n\
+            "fn m.f arity=1 frame=1/0\n\
              \x20  0  const Str(\"tick \")\n\
              \x20  1  load 0\n\
              \x20  2  const Str(\"!\")\n\
@@ -3496,7 +3478,7 @@ mod tests {
     fn a_string_with_nothing_interpolated_is_one_constant() {
         assert_eq!(
             listing("fn f() -> String {\n  \"tick\"\n}\n", "f"),
-            "fn m.f arity=0 frame=0\n\
+            "fn m.f arity=0 frame=0/0\n\
              \x20  0  const Str(\"tick\")\n\
              \x20  1  return\n"
         );
@@ -3515,7 +3497,7 @@ mod tests {
                 "fn f() -> Int {\n  var x = 1\n  x = 2\n  x += 3\n  x\n}\n",
                 "f"
             ),
-            "fn m.f arity=0 frame=1 scalars=[0:Int]\n\
+            "fn m.f arity=0 frame=0/1\n\
              \x20  0  scalar-const 1\n\
              \x20  1  store-scalar 0\n\
              \x20  2  scalar-const 2\n\
@@ -3540,7 +3522,7 @@ mod tests {
     fn an_assignment_whose_value_is_read_still_answers_unit() {
         assert_eq!(
             listing("fn f() -> Unit {\n  var x = 1\n  x = 2\n}\n", "f"),
-            "fn m.f arity=0 frame=1 scalars=[0:Int]\n\
+            "fn m.f arity=0 frame=0/1\n\
              \x20  0  scalar-const 1\n\
              \x20  1  store-scalar 0\n\
              \x20  2  scalar-const 2\n\
@@ -3557,7 +3539,7 @@ mod tests {
                 "fn f(a: Int, b: Int) -> Bool {\n  a * b / a % b - a + b != a\n}\n",
                 "f"
             ),
-            "fn m.f arity=2 frame=2\n\
+            "fn m.f arity=2 frame=2/0\n\
              \x20  0  load 0\n\
              \x20  1  value-to-scalar\n\
              \x20  2  load 1\n\
@@ -3603,17 +3585,17 @@ mod tests {
                 "fn f(a: Int, b: Int, c: Float, d: Float, e: Duration, g: Duration) -> Duration {\n  let n = a + b\n  let x = c + d\n  e + g\n}\n",
                 "f"
             ),
-            "fn m.f arity=6 frame=8 scalars=[6:Int]\n\
+            "fn m.f arity=6 frame=7/1\n\
              \x20  0  load 0\n\
              \x20  1  value-to-scalar\n\
              \x20  2  load 1\n\
              \x20  3  value-to-scalar\n\
              \x20  4  int Add\n\
-             \x20  5  store-scalar 6\n\
+             \x20  5  store-scalar 0\n\
              \x20  6  load 2\n\
              \x20  7  load 3\n\
              \x20  8  binary Add\n\
-             \x20  9  store 7\n\
+             \x20  9  store 6\n\
              \x20 10  load 4\n\
              \x20 11  load 5\n\
              \x20 12  binary Add\n\
@@ -3632,7 +3614,7 @@ mod tests {
                 "struct P {\n  x: Int\n  y: Int\n}\n\nfn f(p: P) -> Int {\n  p.x + p.y\n}\n",
                 "f"
             ),
-            "fn m.f arity=1 frame=1\n\
+            "fn m.f arity=1 frame=1/0\n\
              \x20  0  load 0\n\
              \x20  1  get-field-at 0\n\
              \x20  2  value-to-scalar\n\
@@ -3660,7 +3642,7 @@ mod tests {
                 "struct Box {\n  n: Int\n}\n\nimpl Box {\n  fn length(self) -> Int {\n    self.n\n  }\n}\n\nfn f(b: Box) -> Int {\n  b.length() + [1, 2, 3].length()\n}\n",
                 "f"
             ),
-            "fn m.f arity=1 frame=1\n\
+            "fn m.f arity=1 frame=1/0\n\
              \x20  0  load 0\n\
              \x20  1  call m.Box.length argc=1\n\
              \x20  2  value-to-scalar\n\
@@ -3683,7 +3665,7 @@ mod tests {
                 "fn f(b: Bool) -> Int {\n  if !b {\n    return -1\n  }\n  0\n}\n",
                 "f"
             ),
-            "fn m.f arity=1 frame=1\n\
+            "fn m.f arity=1 frame=1/0\n\
              \x20  0  load 0\n\
              \x20  1  unary Not\n\
              \x20  2  jump-if-false 6\n\
@@ -3699,7 +3681,7 @@ mod tests {
     fn and_and_or_short_circuit_through_jumps() {
         assert_eq!(
             listing("fn f(a: Bool, b: Bool) -> Bool {\n  a && b || a\n}\n", "f"),
-            "fn m.f arity=2 frame=2\n\
+            "fn m.f arity=2 frame=2/0\n\
              \x20  0  load 0\n\
              \x20  1  jump-if-false 4\n\
              \x20  2  load 1\n\
@@ -3717,7 +3699,7 @@ mod tests {
     fn a_block_with_no_tail_is_unit() {
         assert_eq!(
             listing("fn f() -> Unit {\n  let a = 1\n}\n", "f"),
-            "fn m.f arity=0 frame=1 scalars=[0:Int]\n\
+            "fn m.f arity=0 frame=0/1\n\
              \x20  0  scalar-const 1\n\
              \x20  1  store-scalar 0\n\
              \x20  2  const Unit\n\
@@ -3738,18 +3720,18 @@ mod tests {
                 "fn f(n: Int) -> Unit {\n  {\n    if n < 2 {\n      let a = 1\n    } else {\n      let b = 2\n    }\n  }\n}\n",
                 "f"
             ),
-            "fn m.f arity=1 frame=2 scalars=[1:Int]\n\
+            "fn m.f arity=1 frame=1/1\n\
              \x20  0  load 0\n\
              \x20  1  value-to-scalar\n\
              \x20  2  scalar-const 2\n\
              \x20  3  int Lt\n\
              \x20  4  jump-if-false-scalar 9\n\
              \x20  5  scalar-const 1\n\
-             \x20  6  store-scalar 1\n\
+             \x20  6  store-scalar 0\n\
              \x20  7  const Unit\n\
              \x20  8  jump 12\n\
              \x20  9  scalar-const 2\n\
-             \x20 10  store-scalar 1\n\
+             \x20 10  store-scalar 0\n\
              \x20 11  const Unit\n\
              \x20 12  return\n"
         );
@@ -3764,7 +3746,7 @@ mod tests {
                 "fn f(n: Int) -> Int {\n  let x = if n < 2 {\n    1\n  } else {\n    2\n  }\n  x\n}\n",
                 "f"
             ),
-            "fn m.f arity=1 frame=2 scalars=[1:Int]\n\
+            "fn m.f arity=1 frame=1/1\n\
              \x20  0  load 0\n\
              \x20  1  value-to-scalar\n\
              \x20  2  scalar-const 2\n\
@@ -3774,8 +3756,8 @@ mod tests {
              \x20  6  jump 8\n\
              \x20  7  const Int(2)\n\
              \x20  8  value-to-scalar\n\
-             \x20  9  store-scalar 1\n\
-             \x20 10  load-scalar 1\n\
+             \x20  9  store-scalar 0\n\
+             \x20 10  load-scalar 0\n\
              \x20 11  scalar-to-value Int\n\
              \x20 12  return\n"
         );
@@ -3788,7 +3770,7 @@ mod tests {
                 "fn f(n: Int) -> Int {\n  if n < 2 {\n    n\n  } else {\n    n - 1\n  }\n}\n",
                 "f"
             ),
-            "fn m.f arity=1 frame=1\n\
+            "fn m.f arity=1 frame=1/0\n\
              \x20  0  load 0\n\
              \x20  1  value-to-scalar\n\
              \x20  2  scalar-const 2\n\
@@ -3817,17 +3799,17 @@ mod tests {
                 "fn f(n: Int) -> Int {\n  var t = 0\n  if n < 2 {\n    t = 1\n  }\n  t\n}\n",
                 "f"
             ),
-            "fn m.f arity=1 frame=2 scalars=[1:Int]\n\
+            "fn m.f arity=1 frame=1/1\n\
              \x20  0  scalar-const 0\n\
-             \x20  1  store-scalar 1\n\
+             \x20  1  store-scalar 0\n\
              \x20  2  load 0\n\
              \x20  3  value-to-scalar\n\
              \x20  4  scalar-const 2\n\
              \x20  5  int Lt\n\
              \x20  6  jump-if-false-scalar 9\n\
              \x20  7  scalar-const 1\n\
-             \x20  8  store-scalar 1\n\
-             \x20  9  load-scalar 1\n\
+             \x20  8  store-scalar 0\n\
+             \x20  9  load-scalar 0\n\
              \x20 10  scalar-to-value Int\n\
              \x20 11  return\n"
         );
@@ -3841,16 +3823,16 @@ mod tests {
                 "fn f(n: Int) -> Unit {\n  var t = 0\n  if n < 2 {\n    t = 1\n  }\n}\n",
                 "f"
             ),
-            "fn m.f arity=1 frame=2 scalars=[1:Int]\n\
+            "fn m.f arity=1 frame=1/1\n\
              \x20  0  scalar-const 0\n\
-             \x20  1  store-scalar 1\n\
+             \x20  1  store-scalar 0\n\
              \x20  2  load 0\n\
              \x20  3  value-to-scalar\n\
              \x20  4  scalar-const 2\n\
              \x20  5  int Lt\n\
              \x20  6  jump-if-false-scalar 9\n\
              \x20  7  scalar-const 1\n\
-             \x20  8  store-scalar 1\n\
+             \x20  8  store-scalar 0\n\
              \x20  9  const Unit\n\
              \x20 10  return\n"
         );
@@ -3869,7 +3851,7 @@ mod tests {
                 "fn f() -> Int {\n  var i = 0\n  while i < 3 {\n    i += 1\n  }\n  i\n}\n",
                 "f"
             ),
-            "fn m.f arity=0 frame=1 scalars=[0:Int]\n\
+            "fn m.f arity=0 frame=0/1\n\
              \x20  0  scalar-const 0\n\
              \x20  1  store-scalar 0\n\
              \x20  2  load-scalar 0\n\
@@ -3904,28 +3886,28 @@ mod tests {
                 "fn f() -> Int {\n  var t = 0\n  for i in 0..<3 {\n    t += i\n  }\n  t\n}\n",
                 "f"
             ),
-            "fn m.f arity=0 frame=4 scalars=[0:Int]\n\
+            "fn m.f arity=0 frame=3/1\n\
              \x20  0  scalar-const 0\n\
              \x20  1  store-scalar 0\n\
              \x20  2  const Int(0)\n\
-             \x20  3  store 1\n\
+             \x20  3  store 0\n\
              \x20  4  const Int(3)\n\
-             \x20  5  store 2\n\
-             \x20  6  load 1\n\
-             \x20  7  load 2\n\
+             \x20  5  store 1\n\
+             \x20  6  load 0\n\
+             \x20  7  load 1\n\
              \x20  8  binary Lt\n\
              \x20  9  jump-if-false 22\n\
-             \x20 10  load 1\n\
-             \x20 11  store 3\n\
+             \x20 10  load 0\n\
+             \x20 11  store 2\n\
              \x20 12  load-scalar 0\n\
-             \x20 13  load 3\n\
+             \x20 13  load 2\n\
              \x20 14  value-to-scalar\n\
              \x20 15  int Add\n\
              \x20 16  store-scalar 0\n\
-             \x20 17  load 1\n\
+             \x20 17  load 0\n\
              \x20 18  const Int(1)\n\
              \x20 19  binary Add\n\
-             \x20 20  store 1\n\
+             \x20 20  store 0\n\
              \x20 21  jump 6\n\
              \x20 22  load-scalar 0\n\
              \x20 23  scalar-to-value Int\n\
@@ -3963,37 +3945,37 @@ mod tests {
                 "fn f(items: Array<Int>) -> Int {\n  var t = 0\n  for item in items {\n    t += item\n  }\n  t\n}\n",
                 "f"
             ),
-            "fn m.f arity=1 frame=6 scalars=[1:Int]\n\
+            "fn m.f arity=1 frame=5/1\n\
              \x20  0  scalar-const 0\n\
-             \x20  1  store-scalar 1\n\
+             \x20  1  store-scalar 0\n\
              \x20  2  load 0\n\
              \x20  3  iter-items\n\
-             \x20  4  store 2\n\
-             \x20  5  load 2\n\
+             \x20  4  store 1\n\
+             \x20  5  load 1\n\
              \x20  6  call-builtin length argc=0\n\
-             \x20  7  store 3\n\
+             \x20  7  store 2\n\
              \x20  8  const Int(0)\n\
-             \x20  9  store 4\n\
-             \x20 10  load 4\n\
-             \x20 11  load 3\n\
+             \x20  9  store 3\n\
+             \x20 10  load 3\n\
+             \x20 11  load 2\n\
              \x20 12  binary Lt\n\
              \x20 13  jump-if-false 29\n\
-             \x20 14  load 2\n\
-             \x20 15  load 4\n\
+             \x20 14  load 1\n\
+             \x20 15  load 3\n\
              \x20 16  call-builtin get argc=1\n\
              \x20 17  try\n\
-             \x20 18  store 5\n\
-             \x20 19  load-scalar 1\n\
-             \x20 20  load 5\n\
+             \x20 18  store 4\n\
+             \x20 19  load-scalar 0\n\
+             \x20 20  load 4\n\
              \x20 21  value-to-scalar\n\
              \x20 22  int Add\n\
-             \x20 23  store-scalar 1\n\
-             \x20 24  load 4\n\
+             \x20 23  store-scalar 0\n\
+             \x20 24  load 3\n\
              \x20 25  const Int(1)\n\
              \x20 26  binary Add\n\
-             \x20 27  store 4\n\
+             \x20 27  store 3\n\
              \x20 28  jump 10\n\
-             \x20 29  load-scalar 1\n\
+             \x20 29  load-scalar 0\n\
              \x20 30  scalar-to-value Int\n\
              \x20 31  return\n"
         );
@@ -4008,7 +3990,7 @@ mod tests {
                 "fn f() -> Int {\n  var i = 0\n  while i < 10 {\n    i += 1\n    if i == 2 {\n      continue\n    }\n    if i == 5 {\n      break\n    }\n  }\n  i\n}\n",
                 "f"
             ),
-            "fn m.f arity=0 frame=1 scalars=[0:Int]\n\
+            "fn m.f arity=0 frame=0/1\n\
              \x20  0  scalar-const 0\n\
              \x20  1  store-scalar 0\n\
              \x20  2  load-scalar 0\n\
@@ -4043,7 +4025,7 @@ mod tests {
                 "fn fib(n: Int) -> Int {\n  if n < 2 {\n    n\n  } else {\n    fib(n - 1) + fib(n - 2)\n  }\n}\n",
                 "fib"
             ),
-            "fn m.fib arity=1 frame=1\n\
+            "fn m.fib arity=1 frame=1/0\n\
              \x20  0  load 0\n\
              \x20  1  value-to-scalar\n\
              \x20  2  scalar-const 2\n\
@@ -4078,7 +4060,7 @@ mod tests {
                 "fn g(a: Int, b: Int) -> Int {\n  a\n}\n\nfn f() -> Int {\n  g(1, 2)\n}\n",
                 "f"
             ),
-            "fn m.f arity=0 frame=0\n\
+            "fn m.f arity=0 frame=0/0\n\
              \x20  0  const Int(1)\n\
              \x20  1  const Int(2)\n\
              \x20  2  call m.g argc=2\n\
@@ -4092,7 +4074,7 @@ mod tests {
     fn a_struct_is_built_in_declaration_order_and_read_by_field() {
         assert_eq!(
             listing(STRUCT_AND_METHOD, "f"),
-            "fn m.f arity=0 frame=1\n\
+            "fn m.f arity=0 frame=1/0\n\
              \x20  0  const Int(1)\n\
              \x20  1  const Int(2)\n\
              \x20  2  make-struct m.P fields=x,y\n\
@@ -4113,7 +4095,7 @@ mod tests {
     fn a_method_takes_its_receiver_in_slot_zero() {
         assert_eq!(
             listing(STRUCT_AND_METHOD, "P.sum"),
-            "fn m.P.sum arity=1 frame=1 receiver\n\
+            "fn m.P.sum arity=1 frame=1/0 receiver\n\
              \x20  0  load 0\n\
              \x20  1  get-field-at 0\n\
              \x20  2  value-to-scalar\n\
@@ -4133,7 +4115,7 @@ mod tests {
                 "use console.println\nuse clock\n\nfn f() -> Result<Unit, Error> {\n  let at = clock.now()\n  println(\"at {at}\")?\n  Ok(())\n}\n",
                 "f"
             ),
-            "fn m.f arity=0 frame=1\n\
+            "fn m.f arity=0 frame=1/0\n\
              \x20  0  call-host clock.now argc=0\n\
              \x20  1  store 0\n\
              \x20  2  const Str(\"at \")\n\
@@ -4155,7 +4137,7 @@ mod tests {
                 "fn f(items: Array<Int>) -> Int {\n  items.get(0).unwrapOr(7)\n}\n",
                 "f"
             ),
-            "fn m.f arity=1 frame=1\n\
+            "fn m.f arity=1 frame=1/0\n\
              \x20  0  load 0\n\
              \x20  1  const Int(0)\n\
              \x20  2  call-builtin get argc=1\n\
@@ -4172,7 +4154,7 @@ mod tests {
                 "fn f() -> Result<Unit, Error> {\n  assertEqual(1, 1)?\n  Ok(())\n}\n",
                 "f"
             ),
-            "fn m.f arity=0 frame=0\n\
+            "fn m.f arity=0 frame=0/0\n\
              \x20  0  const Int(1)\n\
              \x20  1  const Int(1)\n\
              \x20  2  make-builtin assertEqual argc=2\n\
@@ -4224,7 +4206,7 @@ mod tests {
     fn none_is_built_from_nothing() {
         assert_eq!(
             listing("fn f() -> Option<Int> {\n  None\n}\n", "f"),
-            "fn m.f arity=0 frame=0\n\
+            "fn m.f arity=0 frame=0/0\n\
              \x20  0  make-builtin None argc=0\n\
              \x20  1  return\n"
         );
@@ -4234,7 +4216,7 @@ mod tests {
     fn an_array_literal_collects_its_elements_left_to_right() {
         assert_eq!(
             listing("fn f() -> Array<Int> {\n  [1, 2, 3]\n}\n", "f"),
-            "fn m.f arity=0 frame=0\n\
+            "fn m.f arity=0 frame=0/0\n\
              \x20  0  const Int(1)\n\
              \x20  1  const Int(2)\n\
              \x20  2  const Int(3)\n\
@@ -4250,7 +4232,7 @@ mod tests {
                 "fn f(v: Option<Int>) -> Option<Int> {\n  Some(v? + 1)\n}\n",
                 "f"
             ),
-            "fn m.f arity=1 frame=1\n\
+            "fn m.f arity=1 frame=1/0\n\
              \x20  0  load 0\n\
              \x20  1  try\n\
              \x20  2  value-to-scalar\n\
@@ -4269,7 +4251,7 @@ mod tests {
                 "fn f(n: Int) -> Int {\n  if n < 0 {\n    return 0\n  }\n  return n\n}\n",
                 "f"
             ),
-            "fn m.f arity=1 frame=1\n\
+            "fn m.f arity=1 frame=1/0\n\
              \x20  0  load 0\n\
              \x20  1  value-to-scalar\n\
              \x20  2  scalar-const 0\n\
@@ -4291,7 +4273,7 @@ mod tests {
                 "fn f() -> Int {\n  let x = 1\n  let x = x + 1\n  x\n}\n",
                 "f"
             ),
-            "fn m.f arity=0 frame=2 scalars=[0:Int, 1:Int]\n\
+            "fn m.f arity=0 frame=0/2\n\
              \x20  0  scalar-const 1\n\
              \x20  1  store-scalar 0\n\
              \x20  2  load-scalar 0\n\
@@ -4314,7 +4296,7 @@ mod tests {
                 "fn f() -> Int {\n  {\n    let a = 1\n    a\n  }\n  {\n    let b = 2\n    b\n  }\n}\n",
                 "f"
             ),
-            "fn m.f arity=0 frame=1 scalars=[0:Int]\n\
+            "fn m.f arity=0 frame=0/1\n\
              \x20  0  scalar-const 1\n\
              \x20  1  store-scalar 0\n\
              \x20  2  load-scalar 0\n\
@@ -4328,7 +4310,7 @@ mod tests {
         );
     }
 
-    /// `frame_size` is the high-water mark: three bindings are live at once
+    /// A frame size is the high-water mark: three bindings are live at once
     /// inside the nested block, and one of them is the outer body's.
     #[test]
     fn the_frame_is_as_big_as_the_most_that_was_ever_live() {
@@ -4337,7 +4319,7 @@ mod tests {
                 "fn f() -> Int {\n  let a = 1\n  {\n    let b = 2\n    let c = 3\n    b + c\n  }\n}\n",
                 "f"
             ),
-            "fn m.f arity=0 frame=3 scalars=[0:Int, 1:Int, 2:Int]\n\
+            "fn m.f arity=0 frame=0/3\n\
              \x20  0  scalar-const 1\n\
              \x20  1  store-scalar 0\n\
              \x20  2  scalar-const 2\n\
@@ -4361,11 +4343,11 @@ mod tests {
                 "fn f(x: Int) -> Int {\n  {\n    let x = x\n    x\n  }\n}\n",
                 "f"
             ),
-            "fn m.f arity=1 frame=2 scalars=[1:Int]\n\
+            "fn m.f arity=1 frame=1/1\n\
              \x20  0  load 0\n\
              \x20  1  value-to-scalar\n\
-             \x20  2  store-scalar 1\n\
-             \x20  3  load-scalar 1\n\
+             \x20  2  store-scalar 0\n\
+             \x20  3  load-scalar 0\n\
              \x20  4  scalar-to-value Int\n\
              \x20  5  return\n"
         );
@@ -4381,7 +4363,7 @@ mod tests {
     fn an_enum_case_is_built_from_its_payload() {
         assert_eq!(
             listing(&format!("{ENUM}fn f() -> E {{\n  E.B(1)\n}}\n"), "f"),
-            "fn m.f arity=0 frame=0\n\
+            "fn m.f arity=0 frame=0/0\n\
              \x20  0  const Int(1)\n\
              \x20  1  make-enum m.E.B argc=1\n\
              \x20  2  return\n"
@@ -4394,7 +4376,7 @@ mod tests {
     fn a_case_that_carries_nothing_is_built_from_nothing() {
         assert_eq!(
             listing(&format!("{ENUM}fn f() -> E {{\n  E.A\n}}\n"), "f"),
-            "fn m.f arity=0 frame=0\n\
+            "fn m.f arity=0 frame=0/0\n\
              \x20  0  make-enum m.E.A argc=0\n\
              \x20  1  return\n"
         );
@@ -4408,7 +4390,7 @@ mod tests {
                 &format!("{ENUM}fn f(e: E) -> Int {{\n  match e {{\n    E.A => 1\n    E.B(n) => n\n  }}\n}}\n"),
                 "f"
             ),
-            "fn m.f arity=1 frame=2\n\
+            "fn m.f arity=1 frame=2/0\n\
              \x20  0  load 0\n\
              \x20  1  test-case E.A\n\
              \x20  2  jump-if-false 6\n\
@@ -4439,7 +4421,7 @@ mod tests {
                 "enum Pair {\n  L(Int)\n  R(Int)\n}\n\nfn f(p: Pair) -> Int {\n  match p {\n    Pair.L(x) => x\n    Pair.R(y) => y\n  }\n}\n",
                 "f"
             ),
-            "fn m.f arity=1 frame=2\n\
+            "fn m.f arity=1 frame=2/0\n\
              \x20  0  load 0\n\
              \x20  1  test-case Pair.L\n\
              \x20  2  jump-if-false 10\n\
@@ -4473,7 +4455,7 @@ mod tests {
                 "fn f(r: Result<Option<Int>, Error>) -> Int {\n  match r {\n    Ok(Some(x)) => x\n    _ => 0\n  }\n}\n",
                 "f"
             ),
-            "fn m.f arity=1 frame=2\n\
+            "fn m.f arity=1 frame=2/0\n\
              \x20  0  load 0\n\
              \x20  1  test-case Ok\n\
              \x20  2  jump-if-false 16\n\
@@ -4503,7 +4485,7 @@ mod tests {
     fn an_associated_function_reads_its_arguments_alone() {
         assert_eq!(
             listing("fn f() -> Int {\n  Vector.of(1, 2).length()\n}\n", "f"),
-            "fn m.f arity=0 frame=0\n\
+            "fn m.f arity=0 frame=0/0\n\
              \x20  0  const Int(1)\n\
              \x20  1  const Int(2)\n\
              \x20  2  call-assoc Vector.of argc=2\n\
@@ -4521,7 +4503,7 @@ mod tests {
                 "fn f() -> String {\n  MapEntry(key: \"a\", value: 1).key\n}\n",
                 "f"
             ),
-            "fn m.f arity=0 frame=0\n\
+            "fn m.f arity=0 frame=0/0\n\
              \x20  0  const Str(\"a\")\n\
              \x20  1  const Int(1)\n\
              \x20  2  make-builtin MapEntry argc=2\n\
@@ -4665,7 +4647,7 @@ mod tests {
             .expect("its entry is lowered");
         assert_eq!(
             crate::render(&program, id),
-            "fn arith.main arity=0 frame=2 scalars=[0:Int, 1:Int]\n\
+            "fn arith.main arity=0 frame=0/2\n\
              \x20  0  scalar-const 0\n\
              \x20  1  store-scalar 0\n\
              \x20  2  scalar-const 0\n\
@@ -4751,7 +4733,7 @@ mod tests {
         let id = program.function_named("m", "f").expect("`f` is lowered");
         assert_eq!(
             crate::render(&program, id),
-            "fn m.f arity=0 frame=1\n\
+            "fn m.f arity=0 frame=1/0\n\
              \x20  0  const Int(1)\n\
              \x20  1  make-struct m.P fields=x\n\
              \x20  2  store 0\n\
@@ -4782,7 +4764,7 @@ mod tests {
             .expect("its entry is lowered");
         assert_eq!(
             crate::render(&program, id),
-            "fn startup.main arity=0 frame=0\n\
+            "fn startup.main arity=0 frame=0/0\n\
              \x20  0  const Unit\n\
              \x20  1  return\n"
         );
@@ -4944,52 +4926,57 @@ mod tests {
         );
     }
 
-    /// A scalar instruction may only reach a scalar slot, and a value
-    /// instruction only a value slot.
+    /// A slot number is bounded by its own stack's frame size, not by
+    /// whatever the other stack's frame happens to be.
     ///
-    /// A slot number names storage in one of two stacks, and nothing about
-    /// the number says which. Read as the wrong one it would answer with
-    /// whichever eight bytes stood there, which is the class of mistake this
-    /// check exists to make impossible rather than merely unlikely.
+    /// The first program has no value locals at all — `value_frame_size` is
+    /// 0 — so addressing value slot 0 is refused exactly as it would be in a
+    /// frame with a hundred scalar slots and no value ones. The second is the
+    /// mirror image: no scalar locals, so scalar slot 0 is refused however
+    /// large the value frame is. Two independent numberings mean the mistake
+    /// once caught by comparing a slot's declared kind is caught the same way
+    /// an out-of-range slot always was.
     #[test]
-    fn validate_refuses_a_slot_addressed_as_the_wrong_kind() {
+    fn validate_refuses_a_slot_past_its_own_stacks_frame() {
         let source = "fn f() -> Int {\n  let a = 1\n  a\n}\n";
         let mut program = lower(&checked(source)).expect("it lowers");
         program.functions[0].code[1] = Inst::StoreLocal(0);
         assert_eq!(
-            validate(&program).expect_err("a scalar slot written as a value is refused"),
-            "m.f: 1: reaches slot 0 as a value, and it is a scalar slot"
+            validate(&program).expect_err("a value slot past an empty value frame is refused"),
+            "m.f: 1: reaches slot 0 of a frame of 0"
         );
 
         let mut program =
             lower(&checked("fn f(s: String) -> String {\n  s\n}\n")).expect("it lowers");
         program.functions[0].code[0] = Inst::LoadScalar(0);
         assert_eq!(
-            validate(&program).expect_err("a value slot read as a scalar is refused"),
-            "m.f: 0: reaches slot 0 as a scalar, and it is a value slot"
+            validate(&program).expect_err("a scalar slot past an empty scalar frame is refused"),
+            "m.f: 0: reaches slot 0 of a frame of 0"
         );
     }
 
-    /// Two sibling blocks share a slot number only when they agree about
-    /// where it lives.
+    /// Two sibling blocks share a slot number even when they disagree about
+    /// where it lives, because the value stack and the scalar stack are
+    /// numbered separately now.
     ///
-    /// The first block's `Int` takes slot 0 in the scalar stack. The second
-    /// block's `String` cannot have slot 0 as well, because one number would
-    /// then name two storages, so it takes the next number instead and the
-    /// frame is one bigger than the deepest block. Reuse still happens
-    /// between bindings that can share it, which the third block shows.
+    /// The first block's `Int` takes scalar slot 0. The second block's
+    /// `String` is free to take value slot 0 as well — a value number and a
+    /// scalar number are not the same number space, so there is nothing to
+    /// skip past — and the third block's `Int` reuses scalar slot 0 again.
+    /// The frame is as big as either stack's deepest block, not as big as
+    /// their sum.
     #[test]
-    fn sibling_blocks_share_a_slot_number_only_when_the_kinds_agree() {
+    fn sibling_blocks_share_a_slot_number_regardless_of_kind() {
         assert_eq!(
             listing(
                 "fn f() -> Unit {\n  {\n    let a = 1\n  }\n  {\n    let b = \"two\"\n  }\n  {\n    let c = 3\n  }\n}\n",
                 "f"
             ),
-            "fn m.f arity=0 frame=2 scalars=[0:Int]\n\
+            "fn m.f arity=0 frame=1/1\n\
              \x20  0  scalar-const 1\n\
              \x20  1  store-scalar 0\n\
              \x20  2  const Str(\"two\")\n\
-             \x20  3  store 1\n\
+             \x20  3  store 0\n\
              \x20  4  scalar-const 3\n\
              \x20  5  store-scalar 0\n\
              \x20  6  const Unit\n\

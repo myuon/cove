@@ -59,13 +59,14 @@
 //! two places where the loop meets something general.
 //!
 //! **A scalar slot holds no reference.** That is what it is for, and it is
-//! also what the root set is: a collection that scans a frame scans the
-//! `Value` slots `cove_ir::Function::slots` names and can skip the rest
-//! without inspecting them, because eight bytes of integer cannot reach the
-//! heap. There is no collection in this VM yet — nothing the lowering covers
-//! allocates growable storage — so this is a statement about where the roots
-//! are rather than code that reads them, said here so that whoever writes
-//! that collection does not have to infer it.
+//! also what the root set is: the two stacks are numbered separately, so a
+//! scalar slot is not a number in the value stack's space at all, and a
+//! frame's whole value window, `stack[base .. base + value_frame_size]`, is
+//! its root set with nothing inside it to skip. There is no collection in
+//! this VM yet — nothing the lowering covers allocates growable storage — so
+//! this is a statement about where the roots are rather than code that reads
+//! them, said here so that whoever writes that collection does not have to
+//! infer it.
 //!
 //! # What is not here
 //!
@@ -147,15 +148,17 @@ struct Frame {
     function: FunctionId,
     /// Where the caller resumes: the instruction after its `Call`.
     return_pc: usize,
-    /// Where this frame's slots begin in the value stack. Its slots are
-    /// `stack[base .. base + frame_size]`, and its operands sit above them.
+    /// Where this frame's value slots begin in the value stack. Its slots
+    /// are `stack[base .. base + value_frame_size]`, and its operands sit
+    /// above them.
     ///
     /// This is also the caller's operand top, because the arguments were
     /// pushed onto the caller's stack and then became this frame's first
     /// slots without moving. A return truncates to `base`, which is that one
     /// fact read from the other side.
     base: usize,
-    /// Where this frame's slots begin in the scalar stack.
+    /// Where this frame's scalar slots begin in the scalar stack. Its slots
+    /// are `scalars[scalar_base .. scalar_base + scalar_frame_size]`.
     ///
     /// A separate number from `base` because the two stacks are separate: an
     /// argument arrives on the value stack, so nothing is transferred here
@@ -164,10 +167,11 @@ struct Frame {
     /// discards this frame's scalar slots and leaves the caller's operands
     /// exactly as they were.
     ///
-    /// Every slot number is a window into both stacks and lives in one of
-    /// them; `cove_ir::Function::slots` says which, and
-    /// `cove_ir::lower::validate` proved that every instruction addresses its
-    /// slot as what it is.
+    /// The two stacks are numbered separately: `cove_ir::Inst::LoadLocal` and
+    /// `cove_ir::Inst::StoreLocal` address `base`'s stack, and
+    /// `cove_ir::Inst::LoadScalar` and `cove_ir::Inst::StoreScalar` address
+    /// this one, so which stack a slot lives in is decided by which
+    /// instruction addresses it rather than by anything read at run time.
     scalar_base: usize,
 }
 
@@ -321,12 +325,9 @@ impl<'a> Vm<'a> {
         self.frames.clear();
         self.fuel = 0;
         self.stack.extend(args);
-        self.stack.resize(entry.frame_size as usize, Value::Unit);
-        // Both windows are the whole frame, so a slot number indexes either
-        // stack directly and nothing has to be mapped. A slot lives in one of
-        // them; the cell it does not use costs eight bytes or forty and no
-        // instruction reads it.
-        self.scalars.resize(entry.frame_size as usize, 0);
+        self.stack
+            .resize(entry.value_frame_size as usize, Value::Unit);
+        self.scalars.resize(entry.scalar_frame_size as usize, 0);
         self.frames.push(Frame {
             function,
             return_pc: 0,
@@ -628,14 +629,14 @@ impl<'a> Vm<'a> {
                     self.enter(callee, span)?;
                     let base = self.stack.len() - argc as usize;
                     self.stack
-                        .resize(base + callee.frame_size as usize, Value::Unit);
+                        .resize(base + callee.value_frame_size as usize, Value::Unit);
                     // Every argument arrived on the value stack, so nothing
                     // is transferred here: the callee's scalar window simply
                     // opens above whatever scalar operands the caller had
                     // half-computed, and a return closes it again.
                     let scalar_base = self.scalars.len();
                     self.scalars
-                        .resize(scalar_base + callee.frame_size as usize, 0);
+                        .resize(scalar_base + callee.scalar_frame_size as usize, 0);
                     frame = Frame {
                         function: target,
                         return_pc: pc + 1,
@@ -2193,10 +2194,10 @@ mod tests {
     /// answers.
     ///
     /// `total` and `i` are `Int` and live in the scalar stack; `label` is a
-    /// `String` and stays where every slot used to be. The two windows open
-    /// at the same slot numbers and a `Value` slot's number is not a scalar
-    /// slot's, which is what `cove_ir::lower::validate` proved and what this
-    /// runs.
+    /// `String` and stays where every slot used to be. The two windows are
+    /// numbered independently, so `label`'s value slot and `total`'s scalar
+    /// slot can share a number without naming the same storage, which is
+    /// what `cove_ir::lower::validate` proved and what this runs.
     #[test]
     fn a_frame_with_slots_in_both_stacks_answers_what_the_interpreter_answers() {
         assert_eq!(
@@ -2972,8 +2973,8 @@ mod tests {
                 functions: vec![cove_ir::Function {
                     module: "m".into(),
                     name: "main".into(),
-                    frame_size: 0,
-                    slots: Vec::new(),
+                    value_frame_size: 0,
+                    scalar_frame_size: 0,
                     arity: 0,
                     has_receiver: false,
                     captures: Vec::new(),
@@ -3079,8 +3080,8 @@ mod tests {
                 functions: vec![cove_ir::Function {
                     module: "m".into(),
                     name: "main".into(),
-                    frame_size: 0,
-                    slots: Vec::new(),
+                    value_frame_size: 0,
+                    scalar_frame_size: 0,
                     arity: 0,
                     has_receiver: false,
                     captures: Vec::new(),

@@ -96,24 +96,28 @@ pub struct Function {
     /// diagnostics and traces, and read by nothing on a hot path.
     pub module: Rc<str>,
     pub name: Rc<str>,
-    /// How many slots one call needs: `self` if it has a receiver, then its
-    /// parameters, then every local and temporary the body declares.
+    /// How many slots of the *value* stack one call needs: `self` if it has
+    /// a receiver, then its parameters, then every `Value` local and
+    /// temporary the body declares.
     ///
-    /// A frame is this many slots of a stack that already exists, which is
-    /// the whole reason for lowering.
-    pub frame_size: u32,
-    /// Where each of those slots lives, by slot number.
+    /// [`Inst::LoadLocal`] and [`Inst::StoreLocal`] address `0..value_frame_size`
+    /// of the value stack; nothing else does. That makes this the frame
+    /// metadata a precise root set is read from: a frame's whole value
+    /// window, `stack[base .. base + value_frame_size]`, is its root set,
+    /// with nothing to skip inside it, because a scalar slot is not numbered
+    /// in this space at all — it lives in the other stack, addressed by
+    /// [`Inst::LoadScalar`] and [`Inst::StoreScalar`] through
+    /// `scalar_frame_size` instead.
+    pub value_frame_size: u32,
+    /// How many slots of the *scalar* stack one call needs: every `Int` or
+    /// `Bool` local and temporary the body declares.
     ///
-    /// One entry per slot, so `slots.len()` is `frame_size`. A
-    /// [`SlotKind::Value`] slot is a `Value` in the value stack, which is
-    /// what every slot was before typed slots existed; a
-    /// [`SlotKind::Scalar`] slot is an `i64` in the scalar stack beside it.
-    ///
-    /// This is the frame metadata a precise root set is read from. A scalar
-    /// slot holds no reference — that is the whole point of it — so a
-    /// collection that scans a frame scans the [`SlotKind::Value`] slots and
-    /// can skip the rest without inspecting them.
-    pub slots: Vec<SlotKind>,
+    /// [`Inst::LoadScalar`] and [`Inst::StoreScalar`] address
+    /// `0..scalar_frame_size` of the scalar stack; nothing else does. A
+    /// parameter is never counted here — an argument arrives on the caller's
+    /// value stack and becomes the callee's slot without moving, so a
+    /// parameter's slot is always a value slot.
+    pub scalar_frame_size: u32,
     /// How many arguments a call must supply, `self` included.
     pub arity: u32,
     /// Whether slot 0 is a receiver rather than the first parameter.
@@ -496,24 +500,13 @@ pub fn render(program: &Program, id: FunctionId) -> String {
     let function = program.function(id);
     let mut out = String::new();
     out.push_str(&format!(
-        "fn {}.{} arity={} frame={}",
-        function.module, function.name, function.arity, function.frame_size
+        "fn {}.{} arity={} frame={}/{}",
+        function.module,
+        function.name,
+        function.arity,
+        function.value_frame_size,
+        function.scalar_frame_size
     ));
-    // The scalar slots are named where there are any, because which slots
-    // left the value stack is the thing a listing of typed instructions is
-    // read for. A function with none reads exactly as it always did.
-    let scalars: Vec<String> = function
-        .slots
-        .iter()
-        .enumerate()
-        .filter_map(|(slot, kind)| match kind {
-            SlotKind::Value => None,
-            SlotKind::Scalar(what) => Some(format!("{slot}:{what:?}")),
-        })
-        .collect();
-    if !scalars.is_empty() {
-        out.push_str(&format!(" scalars=[{}]", scalars.join(", ")));
-    }
     if function.has_receiver {
         out.push_str(" receiver");
     }

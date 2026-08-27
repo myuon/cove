@@ -177,12 +177,13 @@ The frame layout is where precise GC roots come from. A function's metadata
 should carry, per slot, whether it holds a reference — so a collection scans
 the slots that can hold one rather than inspecting every scalar as a `Value`.
 
-That metadata exists now: `cove_ir::Function::slots` says, per slot number,
-which of the two stacks the slot lives in, and a scalar slot holds no
-reference by construction. A collection scanning a frame scans the `Value`
-slots and can skip the rest without inspecting them. It is derived from the
-checker's facts rather than invented, which is also what a future JIT would
-need.
+That metadata exists now, and it turned out to need no per-slot list at all:
+`cove_ir::Function::value_frame_size` and `scalar_frame_size` number the two
+stacks separately, so a scalar slot is never a number in the value stack's
+space to begin with. A frame's whole value window is its root set, with
+nothing inside it to skip, because a scalar slot holds no reference by
+construction and was never counted there. It is derived from the checker's
+facts rather than invented, which is also what a future JIT would need.
 
 ### A VM-owned heap
 
