@@ -936,7 +936,8 @@ impl<'a, 'l> Body<'a, 'l> {
                 Inst::Jump(to)
                 | Inst::JumpIfFalse(to)
                 | Inst::JumpIfTrue(to)
-                | Inst::JumpIfFalseScalar(to) => *to = target,
+                | Inst::JumpIfFalseScalar(to)
+                | Inst::JumpIfTrueScalar(to) => *to = target,
                 other => unreachable!("a patch points at a jump, not {other:?}"),
             }
         }
@@ -1226,6 +1227,19 @@ impl<'a, 'l> Body<'a, 'l> {
         match &expr.kind {
             ExprKind::Int(_) | ExprKind::Bool(_) => self.scalar_of(expr).is_some(),
             ExprKind::Ident(name) => self.scalar_binding(name).is_some(),
+            // The same threshold `expr_scalar` lowers `&&`/`||` at: one
+            // operand already on the scalar stack makes the scalar form
+            // cheaper (see `and_or_scalar`'s callers). `condition` asks this
+            // and then calls `expr_scalar`, so the two answering differently
+            // would mean testing a condition on the stack it was not put on.
+            ExprKind::Binary {
+                op: SourceBinary::And | SourceBinary::Or,
+                lhs,
+                rhs,
+            } => {
+                self.scalar_of(expr) == Some(Scalar::Bool)
+                    && (self.on_scalar_stack(lhs) || self.on_scalar_stack(rhs))
+            }
             ExprKind::Binary { op, lhs, rhs } => binary_op(*op)
                 .is_some_and(|op| matches!(self.binary_inst(op, lhs, rhs), Inst::IntBinary(_))),
             ExprKind::Call { callee, .. } => self.callee_returns(expr.id, callee).is_some(),
@@ -1463,6 +1477,17 @@ impl<'a, 'l> Body<'a, 'l> {
                 None => return self.moved_to_scalar(expr),
             },
             ExprKind::Binary { op, lhs, rhs } => {
+                // `&&`/`||` wanted as a scalar: the scalar form costs
+                // `2 - k` boundaries where `k` operands are already on the
+                // scalar stack, the value form costs `k + 1` (one per
+                // already-scalar operand, plus one to move the answer
+                // across), so the scalar form wins as soon as `k >= 1`.
+                if matches!(op, SourceBinary::And | SourceBinary::Or)
+                    && self.scalar_of(expr) == Some(Scalar::Bool)
+                    && (self.on_scalar_stack(lhs) || self.on_scalar_stack(rhs))
+                {
+                    return self.and_or_scalar(*op, lhs, rhs, span);
+                }
                 let inst = binary_op(*op).map(|op| self.binary_inst(op, lhs, rhs));
                 let Some(inst @ Inst::IntBinary(_)) = inst else {
                     return self.moved_to_scalar(expr);
@@ -1594,7 +1619,7 @@ impl<'a, 'l> Body<'a, 'l> {
                 };
                 self.emit(Inst::Unary(op), span);
             }
-            ExprKind::Binary { op, lhs, rhs } => self.binary(*op, lhs, rhs, span)?,
+            ExprKind::Binary { op, lhs, rhs } => self.binary(expr, *op, lhs, rhs, span)?,
             ExprKind::Assign { op, target, value } => {
                 return self.assign(*op, target, value, position, span)
             }
@@ -1817,6 +1842,7 @@ impl<'a, 'l> Body<'a, 'l> {
     /// be a different language.
     fn binary(
         &mut self,
+        expr: &'a Expr,
         op: SourceBinary,
         lhs: &'a Expr,
         rhs: &'a Expr,
@@ -1824,6 +1850,20 @@ impl<'a, 'l> Body<'a, 'l> {
     ) -> Result<(), Unsupported> {
         match op {
             SourceBinary::And | SourceBinary::Or => {
+                // `&&`/`||` wanted as a value: the scalar form costs
+                // `(2 - k) + 1` boundaries where `k` operands are already on
+                // the scalar stack (both operands moved across, plus the
+                // answer moved back), the value form costs `k`, so the
+                // scalar form only wins where `k == 2` — both operands
+                // already scalar, nothing but the answer crosses.
+                if self.scalar_of(expr) == Some(Scalar::Bool)
+                    && self.on_scalar_stack(lhs)
+                    && self.on_scalar_stack(rhs)
+                {
+                    self.and_or_scalar(op, lhs, rhs, span)?;
+                    self.emit(Inst::ScalarToValue(Scalar::Bool), span);
+                    return Ok(());
+                }
                 let short = self.label();
                 let end = self.label();
                 self.expr(lhs)?;
@@ -1862,6 +1902,40 @@ impl<'a, 'l> Body<'a, 'l> {
                 Ok(())
             }
         }
+    }
+
+    /// `&&`/`||` lowered entirely on the scalar stack.
+    ///
+    /// The same shape as `binary` above with every instruction replaced by
+    /// its scalar counterpart: the jump pops the scalar stack instead of the
+    /// value stack, and the side that short-circuited is answered as a
+    /// scalar rather than a `Const`. The short-circuiting side is still the
+    /// answer for the same reason it always was — `&&` that stopped is
+    /// `false` and `||` that stopped is `true` — this only changes which
+    /// stack that answer is written to.
+    fn and_or_scalar(
+        &mut self,
+        op: SourceBinary,
+        lhs: &'a Expr,
+        rhs: &'a Expr,
+        span: Span,
+    ) -> Result<(), Unsupported> {
+        let short = self.label();
+        let end = self.label();
+        self.expr_scalar(lhs)?;
+        if op == SourceBinary::And {
+            self.jump(Inst::JumpIfFalseScalar, short, span);
+        } else {
+            self.jump(Inst::JumpIfTrueScalar, short, span);
+        }
+        self.expr_scalar(rhs)?;
+        self.jump(Inst::Jump, end, span);
+        self.bind(short);
+        // The side that short-circuited is the answer: `&&` that stopped is
+        // `false` and `||` that stopped is `true`.
+        self.emit(Inst::ScalarConst(i64::from(op == SourceBinary::Or)), span);
+        self.bind(end);
+        Ok(())
     }
 
     /// `place = value` and `place += value`, which produce `()`.
@@ -3477,7 +3551,8 @@ fn validate_function(program: &Program, id: FunctionId) -> Result<(), String> {
             Inst::Jump(to)
             | Inst::JumpIfFalse(to)
             | Inst::JumpIfTrue(to)
-            | Inst::JumpIfFalseScalar(to) => {
+            | Inst::JumpIfFalseScalar(to)
+            | Inst::JumpIfTrueScalar(to) => {
                 if to as usize >= length {
                     return Err(at(format!("jumps to {to}, past the {length} instructions")));
                 }
@@ -3594,7 +3669,10 @@ fn validate_function(program: &Program, id: FunctionId) -> Result<(), String> {
             // reads, and a `match` that covered nothing stops the run.
             Inst::Return | Inst::ReturnScalar | Inst::NoMatch => {}
             Inst::Jump(to) => pending.push((to as usize, after)),
-            Inst::JumpIfFalse(to) | Inst::JumpIfTrue(to) | Inst::JumpIfFalseScalar(to) => {
+            Inst::JumpIfFalse(to)
+            | Inst::JumpIfTrue(to)
+            | Inst::JumpIfFalseScalar(to)
+            | Inst::JumpIfTrueScalar(to) => {
                 pending.push((to as usize, after));
                 pending.push((pc + 1, after));
             }
@@ -3651,9 +3729,10 @@ fn stack_shape(constants: &[Const], inst: Inst) -> Shape {
         // The typed operator is the scalar stack's: two `i64` in, one out.
         Inst::IntBinary(_) => Shape::on_scalars(2, 1),
         Inst::ScalarConst(_) | Inst::LoadScalar(_) => Shape::on_scalars(0, 1),
-        Inst::StoreScalar(_) | Inst::ScalarPop | Inst::JumpIfFalseScalar(_) => {
-            Shape::on_scalars(1, 0)
-        }
+        Inst::StoreScalar(_)
+        | Inst::ScalarPop
+        | Inst::JumpIfFalseScalar(_)
+        | Inst::JumpIfTrueScalar(_) => Shape::on_scalars(1, 0),
         // The two boundary instructions, and the only ones that move
         // anything between the stacks.
         Inst::ScalarToValue(_) => Shape {
@@ -4091,19 +4170,64 @@ mod tests {
             listing("fn f(a: Bool, b: Bool) -> Bool {\n  a && b || a\n}\n", "f"),
             "fn m.f arity=2 frame=0/2 params=[Bool, Bool] -> Bool\n\
              \x20  0  load-scalar 0\n\
-             \x20  1  scalar-to-value Bool\n\
+             \x20  1  jump-if-false-scalar 4\n\
+             \x20  2  load-scalar 1\n\
+             \x20  3  jump 5\n\
+             \x20  4  scalar-const 0\n\
+             \x20  5  jump-if-true-scalar 8\n\
+             \x20  6  load-scalar 0\n\
+             \x20  7  jump 9\n\
+             \x20  8  scalar-const 1\n\
+             \x20  9  return-scalar\n"
+        );
+    }
+
+    /// The scalar form of `&&`/`||` is declined where neither operand is
+    /// already on the scalar stack: a struct field read always answers a
+    /// `Value`, so both operands here cost a `ValueToScalar` to reach the
+    /// scalar stack, which is exactly what the value form's own single
+    /// `ValueToScalar` on the answer is cheaper than.
+    #[test]
+    fn and_over_two_values_still_lowers_through_jumps() {
+        assert_eq!(
+            listing(
+                "struct S { a: Bool, b: Bool }\n\
+                 fn f(s: S) -> Bool {\n  s.a && s.b\n}\n",
+                "f"
+            ),
+            "fn m.f arity=1 frame=1/0 params=[value] -> Bool\n\
+             \x20  0  load 0\n\
+             \x20  1  get-field-at 0\n\
              \x20  2  jump-if-false 6\n\
-             \x20  3  load-scalar 1\n\
-             \x20  4  scalar-to-value Bool\n\
+             \x20  3  load 0\n\
+             \x20  4  get-field-at 1\n\
              \x20  5  jump 7\n\
              \x20  6  const Bool(false)\n\
-             \x20  7  jump-if-true 11\n\
-             \x20  8  load-scalar 0\n\
-             \x20  9  scalar-to-value Bool\n\
-             \x20 10  jump 12\n\
-             \x20 11  const Bool(true)\n\
-             \x20 12  value-to-scalar\n\
-             \x20 13  return-scalar\n"
+             \x20  7  value-to-scalar\n\
+             \x20  8  return-scalar\n"
+        );
+    }
+
+    /// A `&&` over scalar `Bool` parameters used as an `if` condition is
+    /// branched on directly, with no `Value` built for it at all.
+    #[test]
+    fn and_of_scalar_bools_as_a_condition_never_builds_a_value() {
+        assert_eq!(
+            listing(
+                "fn f(a: Bool, b: Bool) -> Int {\n  if a && b {\n    1\n  } else {\n    0\n  }\n}\n",
+                "f"
+            ),
+            "fn m.f arity=2 frame=0/2 params=[Bool, Bool] -> Int\n\
+             \x20  0  load-scalar 0\n\
+             \x20  1  jump-if-false-scalar 4\n\
+             \x20  2  load-scalar 1\n\
+             \x20  3  jump 5\n\
+             \x20  4  scalar-const 0\n\
+             \x20  5  jump-if-false-scalar 8\n\
+             \x20  6  scalar-const 1\n\
+             \x20  7  jump 9\n\
+             \x20  8  scalar-const 0\n\
+             \x20  9  return-scalar\n"
         );
     }
 

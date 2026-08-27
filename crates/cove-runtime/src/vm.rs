@@ -612,6 +612,18 @@ impl<'a> Vm<'a> {
                         continue;
                     }
                 }
+                Inst::JumpIfTrueScalar(to) => {
+                    // A scalar `Bool` is 0 or 1 and the lowering emitted this
+                    // only where the checker settled one, so there is nothing
+                    // to examine: the value *is* the answer.
+                    if self.pop_scalar() != 0 {
+                        if to as usize <= pc {
+                            self.back_edge(running.span_at(pc))?;
+                        }
+                        pc = to as usize;
+                        continue;
+                    }
+                }
                 Inst::ScalarToValue(what) => {
                     let scalar = self.pop_scalar();
                     self.stack.push(match what {

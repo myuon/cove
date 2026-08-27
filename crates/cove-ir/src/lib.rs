@@ -325,6 +325,13 @@ pub enum Inst {
     ScalarPop,
     /// Pops a scalar `Bool` and jumps when it is zero.
     JumpIfFalseScalar(u32),
+    /// Pops a scalar `Bool` and jumps when it is non-zero.
+    ///
+    /// A scalar `Bool` is 0 or 1, so there is nothing to examine beyond that
+    /// bit; the lowering emitted it only where the checker settled one. The
+    /// companion of [`Inst::JumpIfFalseScalar`], for the operand of a `||`
+    /// that short-circuits on truth rather than falsity.
+    JumpIfTrueScalar(u32),
     /// Pops the scalar stack and pushes what it holds onto the value stack.
     ///
     /// The boundary in the outward direction: a scalar has no tag, so the
@@ -622,6 +629,7 @@ fn render_inst(program: &Program, inst: Inst) -> String {
         Inst::StoreScalar(slot) => format!("store-scalar {slot}"),
         Inst::ScalarPop => "scalar-pop".to_string(),
         Inst::JumpIfFalseScalar(to) => format!("jump-if-false-scalar {to}"),
+        Inst::JumpIfTrueScalar(to) => format!("jump-if-true-scalar {to}"),
         Inst::ScalarToValue(what) => format!("scalar-to-value {what:?}"),
         Inst::ValueToScalar => "value-to-scalar".to_string(),
         Inst::GetFieldAt(index) => format!("get-field-at {index}"),
