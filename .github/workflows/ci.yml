@@ -17,6 +17,11 @@ env:
   CARGO_TERM_COLOR: always
   # A failed build should say what failed, not where in the compiler it failed.
   RUST_BACKTRACE: 1
+  # Nothing here builds twice in the same job, so incremental compilation
+  # buys no rebuild and costs the cache the artifacts it writes to make one
+  # possible. Those are most of what a `target` directory weighs, and the
+  # cache below is now written on every run.
+  CARGO_INCREMENTAL: 0
 
 jobs:
   build:
@@ -41,6 +46,15 @@ jobs:
       # crate under each package it builds from, in a target directory of its
       # own, and without the cache that is a cold release build of the runtime
       # on every run.
+      #
+      # The key ends in the run id, which is never the same twice, because
+      # `actions/cache` writes nothing when the key it was given hits
+      # exactly. Keyed on the lockfile alone it therefore saved once — on
+      # whichever run first built with that `Cargo.lock` — and every run
+      # after it restored that same frozen directory and threw its own work
+      # away. A key that always misses always saves, and `restore-keys`
+      # takes the most recent one that matches the prefix, which is what
+      # the lockfile-keyed entry was meant to be doing all along.
       - name: Cache cargo registry and target
         uses: actions/cache@v4
         with:
@@ -51,8 +65,9 @@ jobs:
             target
             examples/target
             tests/e2e/target
-          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}-${{ github.run_id }}
           restore-keys: |
+            ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}-
             ${{ runner.os }}-cargo-
 
       # Formatting first: it is the cheapest check and the easiest to fix.
@@ -104,8 +119,25 @@ jobs:
       # every metric it names comes back well-formed, and the process exits
       # 0. Reading the numbers for a real measurement is a local exercise,
       # documented in ADR 0012.
+      #
+      # Optimized, and once, because none of that needs a slow run to
+      # establish. The benchmarks are sized to be measurable in an
+      # optimized build — `benches/arith` turns a loop two million times —
+      # and this step ran them unoptimized, three times each, with the
+      # traced and untraced runs `trace_overhead` needs on top: nine
+      # executions of every benchmark, each written to take a while. It
+      # cost 422 seconds of a 514-second run, which is 82% of a pipeline
+      # spent on the one step that asserts nothing. An optimized build runs
+      # `arith` 7.6x faster and one iteration is three times fewer, and
+      # neither changes any of the three things above.
+      # The CLI as well, and in the same profile: the `startup` benchmark
+      # measures a real process, so it spawns the `cove` binary beside
+      # itself rather than calling into the runtime in-process, and an
+      # optimized harness looks for an optimized one. The debug build above
+      # stays, because the dogfooding steps run against the binary this
+      # commit builds and that is what they have always meant.
       - name: Build cove-bench
-        run: cargo build -p cove-bench
+        run: cargo build --release -p cove-cli -p cove-bench
 
       - name: cove-bench (correctness only; no threshold gate)
-        run: ./target/debug/cove-bench --iterations 3
+        run: ./target/release/cove-bench --iterations 1
