@@ -34,7 +34,7 @@ use crate::budget::Cancellation;
 use crate::error::RuntimeError;
 use crate::host::ResourceHandle;
 use crate::shared::SharedCell;
-use crate::value::{Closure, DynValue, EnumValue, MapKey, StructValue, Value};
+use crate::value::{Closure, DynValue, EnumValue, HostFnValue, MapKey, StructValue, Value};
 
 /// What a task thread hands back to the task that spawned it: the value the
 /// body produced, in the form that may cross the boundary, or why it stopped.
@@ -501,9 +501,9 @@ impl Transfer {
             // reads; addressing the module is not itself a transfer of state,
             // and the grant check still happens at the call.
             Value::HostModule(module) => Ok(Transfer::HostModule(module.to_string())),
-            Value::HostFn { module, op } => Ok(Transfer::HostFn {
-                module: module.to_string(),
-                op: op.to_string(),
+            Value::HostFn(host) => Ok(Transfer::HostFn {
+                module: host.module.to_string(),
+                op: host.op.to_string(),
             }),
             Value::Type(name) => Ok(Transfer::Type(name.to_string())),
             // "Host resources declare task-safety in their Host API schema."
@@ -588,10 +588,10 @@ impl Transfer {
                 }))
             }
             Transfer::HostModule(module) => Value::HostModule(module.into()),
-            Transfer::HostFn { module, op } => Value::HostFn {
+            Transfer::HostFn { module, op } => Value::HostFn(Rc::new(HostFnValue {
                 module: module.into(),
                 op: op.into(),
-            },
+            })),
             Transfer::Type(name) => Value::Type(name.into()),
             Transfer::Range {
                 start,

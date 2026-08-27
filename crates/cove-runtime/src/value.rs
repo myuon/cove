@@ -96,10 +96,24 @@ pub enum Value {
     /// [`crate::host::ResourceHandle`].
     Resource(Arc<ResourceHandle>),
     /// A bound host operation such as `console.println`.
-    HostFn {
-        module: Rc<str>,
-        op: Rc<str>,
-    },
+    ///
+    /// The two names live behind one pointer, exactly as [`Value::Struct`]
+    /// and [`Value::Dyn`] hold their contents, and for the same kind of
+    /// reason: a variant is as wide as its widest member, and this one held
+    /// two fat pointers where every other variant holds at most one. Thirty-
+    /// two bytes for the pair set the width of every `Value` in the program,
+    /// including the `Int`s the two backends spend most of their time moving.
+    ///
+    /// The trade is an allocation for a value that is built when a host
+    /// operation is *used* as a value — `console.println` bound to a name or
+    /// passed as an argument — rather than called in place, which is rare,
+    /// against sixteen bytes off every value everywhere.
+    ///
+    /// An embedder constructing one writes `Value::HostFn(Rc::new(
+    /// HostFnValue { module, op }))` where it wrote `Value::HostFn { module,
+    /// op }`, and one matching on the variant binds an `&Rc<HostFnValue>`
+    /// whose fields have the names and the types they had.
+    HostFn(Rc<HostFnValue>),
     /// A type used as a value, such as `Vector` in `Vector.of(1, 2)`.
     Type(Rc<str>),
     /// An integer range. `..` includes `end` and `..<` excludes it.
@@ -245,6 +259,20 @@ pub struct DynValue {
     /// The concrete value. Its own type is what dynamic dispatch resolves a
     /// method against, which is exactly what makes this dispatch dynamic.
     pub value: Value,
+}
+
+/// The two names a [`Value::HostFn`] is: the host module the operation
+/// belongs to, and the operation itself.
+///
+/// Neither is the operation's implementation. A bound host operation is a
+/// name the same way [`Value::HostModule`] is, and what it names is looked up
+/// through the registry at the call.
+#[derive(Clone, Debug)]
+pub struct HostFnValue {
+    /// The host module, such as `console`.
+    pub module: Rc<str>,
+    /// The operation's own name, such as `println`.
+    pub op: Rc<str>,
 }
 
 /// A closure captures its environment by value at creation time.
@@ -656,8 +684,8 @@ impl Value {
                 left.module == right.module && left.type_name == right.type_name
             }
             (Value::HostModule(left), Value::HostModule(right)) => left == right,
-            (Value::HostFn { module: lm, op: lo }, Value::HostFn { module: rm, op: ro }) => {
-                lm == rm && lo == ro
+            (Value::HostFn(left), Value::HostFn(right)) => {
+                left.module == right.module && left.op == right.op
             }
             (Value::Type(left), Value::Type(right)) => left == right,
             // Everything else is one type per variant, so the discriminants
@@ -699,7 +727,9 @@ impl Value {
             Value::Dyn(d) => format!("dyn {}", d.trait_name),
             Value::HostModule(m) => format!("host module `{m}`"),
             Value::Resource(handle) => handle.qualified_type(),
-            Value::HostFn { module, op } => format!("host operation `{module}.{op}`"),
+            Value::HostFn(host) => {
+                format!("host operation `{}.{}`", host.module, host.op)
+            }
             Value::Type(t) => format!("type `{t}`"),
             Value::Range { .. } => "Range".into(),
             Value::TaskScope(_) => "TaskScope".into(),
@@ -894,7 +924,7 @@ impl fmt::Display for Value {
             // connections are told apart by the number the host issued and
             // by nothing else.
             Value::Resource(handle) => write!(f, "<{}>", handle),
-            Value::HostFn { module, op } => write!(f, "<host fn {module}.{op}>"),
+            Value::HostFn(host) => write!(f, "<host fn {}.{}>", host.module, host.op),
             Value::Type(t) => write!(f, "<type {t}>"),
             Value::Range {
                 start,

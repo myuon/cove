@@ -39,7 +39,7 @@ use crate::runtime::{Runtime, ENTRY_TASK};
 use crate::schema::TypeSchema;
 use crate::task::{Task, TaskOutcome, TaskScope, TaskState, Transfer};
 use crate::trace::{RunOutcome, Timing, TraceEvent};
-use crate::value::{Closure, DynValue, EnumValue, RangeBounds, StructValue, Value};
+use crate::value::{Closure, DynValue, EnumValue, HostFnValue, RangeBounds, StructValue, Value};
 
 /// How deep Cove calls may nest before the runtime reports a limit instead of
 /// exhausting the host stack.
@@ -1583,9 +1583,9 @@ impl<'a> Interpreter<'a> {
                     span,
                 )
             }
-            Value::HostFn { module, op } => {
-                let values = plain_values(args, &format!("{module}.{op}"))?;
-                self.call_host(&module, &op, values, span)
+            Value::HostFn(host) => {
+                let values = plain_values(args, &format!("{}.{}", host.module, host.op))?;
+                self.call_host(&host.module, &host.op, values, span)
             }
             other => {
                 Err(RuntimeError::new(format!("`{}` is not callable", other.type_name())).at(span))
@@ -2384,10 +2384,10 @@ impl<'a> Interpreter<'a> {
             return Ok(Value::HostModule(name.into()));
         }
         if let Some(host) = self.host_item(&module, name) {
-            return Ok(Value::HostFn {
+            return Ok(Value::HostFn(Rc::new(HostFnValue {
                 module: host,
                 op: name.into(),
-            });
+            })));
         }
         Err(
             RuntimeError::new(format!("cannot find `{name}` in this scope"))
@@ -2410,10 +2410,10 @@ impl<'a> Interpreter<'a> {
                     if self.hosts.host_type(head, name).is_some() {
                         return Ok(Value::Type(format!("{head}.{name}").into()));
                     }
-                    return Ok(Value::HostFn {
+                    return Ok(Value::HostFn(Rc::new(HostFnValue {
                         module: head.as_str().into(),
                         op: name.into(),
-                    });
+                    })));
                 }
                 // `booking.create` and `booking.Status`: a module imported
                 // whole answers with the exported declaration it names.
@@ -2446,10 +2446,10 @@ impl<'a> Interpreter<'a> {
             },
             Value::HostModule(module) => match self.hosts.host_type(module, name) {
                 Some(_) => Ok(Value::Type(format!("{module}.{name}").into())),
-                None => Ok(Value::HostFn {
+                None => Ok(Value::HostFn(Rc::new(HostFnValue {
                     module: module.clone(),
                     op: name.into(),
-                }),
+                }))),
             },
             other => Err(RuntimeError::new(format!(
                 "`{}` has no field `{name}`",
