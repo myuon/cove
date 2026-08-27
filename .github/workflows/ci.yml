@@ -130,8 +130,14 @@ jobs:
       # spent on the one step that asserts nothing. An optimized build runs
       # `arith` 7.6x faster and one iteration is three times fewer, and
       # neither changes any of the three things above.
+      # The CLI as well, and in the same profile: the `startup` benchmark
+      # measures a real process, so it spawns the `cove` binary beside
+      # itself rather than calling into the runtime in-process, and an
+      # optimized harness looks for an optimized one. The debug build above
+      # stays, because the dogfooding steps run against the binary this
+      # commit builds and that is what they have always meant.
       - name: Build cove-bench
-        run: cargo build --release -p cove-bench
+        run: cargo build --release -p cove-cli -p cove-bench
 
       - name: cove-bench (correctness only; no threshold gate)
         run: ./target/release/cove-bench --iterations 1
