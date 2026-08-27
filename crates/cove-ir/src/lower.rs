@@ -713,6 +713,7 @@ impl<'a> Lowering<'a> {
             returns,
             has_receiver: decl.receiver.is_some(),
             captures: Vec::new(),
+            block_fuel: block_fuel(&finished.code),
             code: finished.code,
             spans: finished.spans,
             arg_spans: finished.arg_spans,
@@ -3408,6 +3409,107 @@ fn reject_parameter(
     Ok(())
 }
 
+// -------------------------------------------------------------- the blocks
+
+/// Whether an instruction is the last one of a straight line: after it,
+/// control is somewhere the next index does not name.
+///
+/// The five jumps go elsewhere or fall through, [`Inst::Call`] runs a whole
+/// callee in between, [`Inst::Try`] may leave the frame instead of continuing,
+/// and [`Inst::Return`], [`Inst::ReturnScalar`] and [`Inst::NoMatch`] do not
+/// continue at all.
+fn ends_a_block(inst: Inst) -> bool {
+    matches!(
+        inst,
+        Inst::Jump(_)
+            | Inst::JumpIfFalse(_)
+            | Inst::JumpIfTrue(_)
+            | Inst::JumpIfFalseScalar(_)
+            | Inst::JumpIfTrueScalar(_)
+            | Inst::Call { .. }
+            | Inst::Try
+            | Inst::Return
+            | Inst::ReturnScalar
+            | Inst::NoMatch
+    )
+}
+
+/// How many instructions run from each index control can *arrive* at before
+/// it can go somewhere else, and 0 at every index it cannot arrive at.
+///
+/// This is [`Function::block_fuel`], and it is a pass over finished code
+/// rather than something the lowering threads through itself: a block's
+/// boundaries are readable from the instructions alone, so deriving them here
+/// keeps every emitter of a jump from having to know that the VM charges by
+/// the block.
+///
+/// # Arrival, not partition
+///
+/// The obvious reading — cut the code at every head and let the pieces tile
+/// it — is wrong, and wrong in a way that silently loses instructions. An
+/// `if` with no `else` inside a loop lowers to a body that *falls* into the
+/// join its own conditional jump also targets. The join is a head, because a
+/// jump lands on it; but control also reaches it by walking off the end of
+/// the block above, and nothing about that walk announces itself. A VM that
+/// charged a head only where it jumped to one would never charge that join,
+/// and the instructions after it would run for free.
+///
+/// So a count here is an *extent* and the counts overlap: `block_fuel[h]` is
+/// how far the straight line beginning at `h` runs — to the first instruction
+/// at or after `h` that ends a block, inclusive. Falling from one head
+/// into another is then already paid for, because the extent of the first
+/// reaches past the second and out to the same terminator. Jumping to the
+/// second pays for the second alone. Both are exact, which is the whole
+/// requirement: the instructions charged for a path are the instructions that
+/// ran on it.
+///
+/// A head is the entry, every jump target, and the index after every
+/// instruction that ends a block — including after a return, which control
+/// never reaches, so that every index has an answer rather than a hole.
+///
+/// A jump target outside the code, or a straight line that runs off the end,
+/// is answered rather than reported. Both are [`validate`]'s to refuse, and
+/// this has to answer something for the malformed function it is asked about
+/// first.
+pub fn block_fuel(code: &[Inst]) -> Vec<u32> {
+    if code.is_empty() {
+        return Vec::new();
+    }
+    let mut head = vec![false; code.len()];
+    head[0] = true;
+    for (pc, inst) in code.iter().enumerate() {
+        match *inst {
+            Inst::Jump(to)
+            | Inst::JumpIfFalse(to)
+            | Inst::JumpIfTrue(to)
+            | Inst::JumpIfFalseScalar(to)
+            | Inst::JumpIfTrueScalar(to) => {
+                if let Some(target) = head.get_mut(to as usize) {
+                    *target = true;
+                }
+            }
+            _ => {}
+        }
+        if ends_a_block(*inst) {
+            if let Some(next) = head.get_mut(pc + 1) {
+                *next = true;
+            }
+        }
+    }
+    let mut fuel = vec![0u32; code.len()];
+    for (at, slot) in fuel.iter_mut().enumerate() {
+        if !head[at] {
+            continue;
+        }
+        let mut end = at;
+        while end + 1 < code.len() && !ends_a_block(code[end]) {
+            end += 1;
+        }
+        *slot = (end - at + 1) as u32;
+    }
+    fuel
+}
+
 // ---------------------------------------------------------- the invariants
 
 /// Checks the invariants a lowered function must hold before the VM runs it.
@@ -3678,6 +3780,55 @@ fn validate_function(program: &Program, id: FunctionId) -> Result<(), String> {
             }
             _ => pending.push((pc + 1, after)),
         }
+    }
+
+    // The block table, which the VM charges fuel from without looking at it
+    // twice. A count is an extent: how far the straight line from that head
+    // runs. So each one has to end on an instruction that ends a block and
+    // run through no earlier one, and the heads have to be exactly the
+    // indices the code names — a head the code does not name is one the VM
+    // never arrives at, and a head the table is missing is an arrival that
+    // charges nothing.
+    if function.block_fuel.len() != length {
+        return Err(format!(
+            "carries {} block lengths for {length} instructions",
+            function.block_fuel.len()
+        ));
+    }
+    for (pc, count) in function.block_fuel.iter().enumerate() {
+        let count = *count as usize;
+        if count == 0 {
+            continue;
+        }
+        if pc + count > length {
+            return Err(format!(
+                "{pc}: begins a block of {count}, which runs past the {length} instructions"
+            ));
+        }
+        if let Some(inside) = (pc..pc + count - 1).find(|at| ends_a_block(function.code[*at])) {
+            return Err(format!(
+                "{pc}: begins a block of {count}, which runs through the one that ends at {inside}"
+            ));
+        }
+        if !ends_a_block(function.code[pc + count - 1]) {
+            return Err(format!(
+                "{pc}: begins a block of {count}, which ends where control does not"
+            ));
+        }
+    }
+    let expected = block_fuel(&function.code);
+    if let Some((pc, (held, want))) = function
+        .block_fuel
+        .iter()
+        .zip(&expected)
+        .enumerate()
+        .find(|(_, (held, want))| held != want)
+    {
+        return Err(match (held, want) {
+            (0, _) => format!("{pc}: begins a block of {want}, and the table begins none there"),
+            (_, 0) => format!("{pc}: begins no block, and the table begins one of {held} there"),
+            _ => format!("{pc}: begins a block of {want}, and the table says {held}"),
+        });
     }
     Ok(())
 }
@@ -5533,6 +5684,177 @@ mod tests {
     }
 
     // ----------------------------------------------------------- validate
+
+    // ------------------------------------------------------------- blocks
+
+    /// A listing of the blocks, read the way `render` reads instructions: the
+    /// head, how far it reaches, and the instruction it begins at.
+    fn blocks(program: &Program, function: &str) -> String {
+        let id = program
+            .function_named("m", function)
+            .expect("the function is lowered");
+        let function = program.function(id);
+        let mut out = String::new();
+        for (pc, count) in function.block_fuel.iter().enumerate() {
+            if *count != 0 {
+                out.push_str(&format!(
+                    "{pc}+{count} {}\n",
+                    crate::render(program, id)
+                        .lines()
+                        .nth(pc + 1)
+                        .and_then(|line| line.trim().split_once("  "))
+                        .expect("the listing has a line per instruction")
+                        .1
+                ));
+            }
+        }
+        out
+    }
+
+    /// Every head reaches the jump that ends its straight line, and the run-up
+    /// to a loop reaches past the head the back edge lands on — which is what
+    /// makes the extents overlap and what makes falling into a head already
+    /// paid for.
+    #[test]
+    fn a_head_reaches_the_jump_that_ends_its_line() {
+        let program = lower(&checked(
+            "fn f() -> Int {\n  var i = 0\n  while i < 10 {\n    i = i + 1\n  }\n  i\n}\n",
+        ))
+        .expect("it lowers");
+        assert_eq!(
+            blocks(&program, "f"),
+            "0+6 scalar-const 0\n\
+             2+4 load-scalar 0\n\
+             6+5 load-scalar 0\n\
+             11+2 load-scalar 0\n"
+        );
+    }
+
+    /// The case a partition would lose: an `if` with no `else` falls into the
+    /// join its own jump also targets, and nothing about that fall announces
+    /// itself. The head above the join has to reach past it, or the
+    /// instructions after the join run for free.
+    #[test]
+    fn a_head_reaches_past_a_join_it_falls_into() {
+        let program = lower(&checked(
+            "fn f(b: Bool) -> Int {\n  var i = 0\n  if b {\n    i = 1\n  }\n  i\n}\n",
+        ))
+        .expect("it lowers");
+        let function = program.function(program.function_named("m", "f").expect("`f` is lowered"));
+        let join = match function.code.iter().find_map(|inst| match inst {
+            Inst::JumpIfFalse(to) | Inst::JumpIfFalseScalar(to) => Some(*to as usize),
+            _ => None,
+        }) {
+            Some(join) => join,
+            None => panic!("an `if` lowers to a conditional jump"),
+        };
+        assert_ne!(function.block_fuel[join], 0, "the join is a head");
+        let above = (0..join)
+            .rev()
+            .find(|pc| function.block_fuel[*pc] != 0)
+            .expect("some head stands above the join");
+        assert!(
+            above + function.block_fuel[above] as usize > join,
+            "the head at {above} reaches {} and the join is at {join}",
+            above + function.block_fuel[above] as usize
+        );
+    }
+
+    /// A call ends a block, because the callee runs before the caller's next
+    /// instruction does and the caller's fuel has not been charged yet.
+    #[test]
+    fn a_call_ends_the_block_it_stands_in() {
+        let program = lower(&checked(
+            "fn g(a: Int) -> Int {\n  a\n}\n\nfn f() -> Int {\n  g(1) + g(2)\n}\n",
+        ))
+        .expect("it lowers");
+        assert_eq!(
+            blocks(&program, "f"),
+            "0+2 scalar-const 1\n\
+             2+2 scalar-const 2\n\
+             4+2 int Add\n"
+        );
+    }
+
+    /// Whichever head control last arrived at, its extent reaches every
+    /// instruction between that head and the next one it can leave from. That
+    /// is the property the VM's instruction count rests on: an instruction
+    /// outside every extent above it would run without being charged.
+    #[test]
+    fn every_instruction_is_inside_the_extent_of_the_head_above_it() {
+        let program = lower(&checked(
+            "fn g(a: Int) -> Int {\n  a\n}\n\n\
+             fn f(b: Bool) -> Int {\n  \
+               var total = 0\n  \
+               for x in [1, 2, 3] {\n    \
+                 if b && x > 1 {\n      total = total + g(x)\n    } else {\n      total = total - 1\n    }\n  \
+               }\n  \
+               total\n\
+             }\n",
+        ))
+        .expect("it lowers");
+        validate(&program).expect("it holds the invariants");
+        for function in &program.functions {
+            let mut reaches = 0usize;
+            for pc in 0..function.code.len() {
+                if function.block_fuel[pc] != 0 {
+                    reaches = reaches.max(pc + function.block_fuel[pc] as usize);
+                }
+                assert!(
+                    reaches > pc,
+                    "{}: {pc} is inside no head's extent",
+                    function.name
+                );
+            }
+        }
+    }
+
+    /// A head the code does not name is a head the VM never arrives at, so
+    /// the instructions its extent covers would be charged twice — once by
+    /// it, and once by whichever head control really came from.
+    #[test]
+    fn validate_refuses_a_block_head_the_code_does_not_name() {
+        let mut program = lower(&checked(
+            "fn f() -> Int {\n  var i = 0\n  while i < 10 {\n    i = i + 1\n  }\n  i\n}\n",
+        ))
+        .expect("it lowers");
+        program.functions[0].block_fuel[3] = 3;
+        assert_eq!(
+            validate(&program).expect_err("a head nothing reaches is refused"),
+            "m.f: 3: begins no block, and the table begins one of 3 there"
+        );
+    }
+
+    /// And a head the code does name, missing from the table, is an arrival
+    /// that charges nothing at all.
+    #[test]
+    fn validate_refuses_a_block_head_the_table_is_missing() {
+        let mut program = lower(&checked(
+            "fn f() -> Int {\n  var i = 0\n  while i < 10 {\n    i = i + 1\n  }\n  i\n}\n",
+        ))
+        .expect("it lowers");
+        program.functions[0].block_fuel[2] = 0;
+        assert_eq!(
+            validate(&program).expect_err("a head the table is missing is refused"),
+            "m.f: 2: begins a block of 4, and the table begins none there"
+        );
+    }
+
+    /// An extent that stops short of the instruction control leaves from is
+    /// refused whatever it stops on, because the rest of that straight line
+    /// would run uncharged.
+    #[test]
+    fn validate_refuses_a_block_that_ends_where_control_does_not() {
+        let mut program = lower(&checked(
+            "fn f() -> Int {\n  var i = 0\n  while i < 10 {\n    i = i + 1\n  }\n  i\n}\n",
+        ))
+        .expect("it lowers");
+        program.functions[0].block_fuel[2] = 3;
+        assert_eq!(
+            validate(&program).expect_err("a block that stops short is refused"),
+            "m.f: 2: begins a block of 3, which ends where control does not"
+        );
+    }
 
     #[test]
     fn validate_refuses_a_jump_past_the_end() {

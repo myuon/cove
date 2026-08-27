@@ -162,6 +162,34 @@ pub struct Function {
     /// instructions expect. Empty for a declared function.
     pub captures: Vec<Rc<str>>,
     pub code: Vec<Inst>,
+    /// How many instructions run from each index control can arrive at before
+    /// it can go somewhere else, and 0 at every index it cannot arrive at.
+    ///
+    /// Where a straight line begins and ends is a fact about the code,
+    /// settled when the code was finished, so counting instructions again one
+    /// at a time while running them is the re-derivation this whole IR exists
+    /// to stop doing. The VM charges fuel and counts instructions a block at
+    /// a time, where control *arrives* at a head, which is the same total
+    /// over the same path reached with one addition instead of one per
+    /// instruction.
+    ///
+    /// A head is the entry, every jump target, and the index after every
+    /// instruction control can leave the straight line at: a jump, a
+    /// [`Inst::Call`], a [`Inst::Try`], a return, and a [`Inst::NoMatch`].
+    ///
+    /// **The counts overlap, and they have to.** They are extents rather than
+    /// a partition: `block_fuel[h]` reaches from `h` to the first instruction
+    /// at or after it that control can leave from. An `if` with no `else`
+    /// falls into the join its own jump also targets, so a head is reached
+    /// both by jumping to it and by walking into it, and only the walk has
+    /// nothing to announce it. An extent that reaches past the join covers
+    /// the walk; a partition would not, and the instructions after such a
+    /// join would run uncharged. `lower::block_fuel` says the rest, and
+    /// `lower::validate` refuses a table that does not hold it.
+    ///
+    /// Parallel to `code` for the reason `spans` is: it is read at a block
+    /// head and nowhere else, so it has no business inside an [`Inst`].
+    pub block_fuel: Vec<u32>,
     /// One span per instruction, so a runtime error points at source.
     ///
     /// Parallel to `code` rather than inside `Inst`, so that an instruction

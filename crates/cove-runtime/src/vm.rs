@@ -78,6 +78,25 @@
 //! them, said here so that whoever writes that collection does not have to
 //! infer it.
 //!
+//! # Fuel is charged by the block, not by the instruction
+//!
+//! A straight line's length is known when it is lowered, and the dispatch
+//! loop ran two additions and a compare per instruction to arrive at the same
+//! number one addition could. So `cove_ir::Function::block_fuel` says how far
+//! the line beginning at each index runs, and `Vm::charge` adds the whole of
+//! it where control *arrives* at a head — at the entry, at a taken jump, at
+//! the fall-through of one not taken, at a callee's first instruction, at the
+//! caller's resumption after a return, and at the fall-through of a `?`.
+//!
+//! Those are all the arrivals there are, which is what makes the total for a
+//! path the total it was before. The counts overlap on purpose: a head that
+//! is also fallen into is covered by the extent above it, so the fall costs
+//! nothing to notice. `cove_ir::lower::block_fuel` is where that is argued.
+//!
+//! What changes is how much may happen between two *checks* of the budget:
+//! one straight line more than before, bounded by the length of the
+//! function's code. `SAFEPOINT_INTERVAL` states that bound.
+//!
 //! # What is not here
 //!
 //! Closures, tasks, `var` places, and everything else `cove_ir::lower`
@@ -119,15 +138,29 @@ use crate::value::{StructValue, Value};
 /// exceeds its budget stops, deterministically, at a point the program can be
 /// told about — and an instruction is the unit of work this backend can
 /// promise that about.
+///
+/// It is charged a basic block at a time rather than an instruction at a
+/// time, by [`Vm::charge`], which is the same total over the same path: how
+/// far a straight line runs was settled when it was lowered, and a straight
+/// line runs to its end or the run ends. What that changes is not what a path
+/// costs but how much may happen between two *checks* of the budget, and
+/// [`SAFEPOINT_INTERVAL`] is where that bound is stated.
 const INSTRUCTION_FUEL: u64 = 1;
 
 /// How much fuel may accumulate between safepoints before one is forced.
 ///
-/// Fuel is charged per instruction and spent against the shared
+/// Fuel is charged a basic block at a time and spent against the shared
 /// [`crate::budget::Budget`] at a safepoint, so a long stretch of
 /// straight-line instructions would otherwise hold its charge until the next
 /// call or back edge. A cap keeps "a run that exceeds its budget stops" a
 /// statement about the run rather than about its loops.
+///
+/// The cap is read where the charge is made rather than where the
+/// instructions were counted, so what it bounds is the fuel standing at the
+/// *start* of a block. A block runs to its end once entered, so the work
+/// between two safepoints is this much plus one block — bounded by the
+/// length of the function's code, which is finite and known before the run —
+/// plus whatever the proportional charges of that block added.
 const SAFEPOINT_INTERVAL: u64 = 1024;
 
 /// How much fuel may accumulate across back edges before the shared budget is
@@ -512,6 +545,7 @@ impl<'a> Vm<'a> {
             .expect("`run` pushes the frame this executes");
         let mut running = program.function(frame.function);
         let mut code: &[Inst] = &running.code;
+        let mut blocks: &[u32] = &running.block_fuel;
         let mut pc = 0usize;
 
         // Entering a call is a safepoint and the entry is a call, so a run
@@ -519,14 +553,10 @@ impl<'a> Vm<'a> {
         // instruction — which is what `Interpreter::invoke` does for the
         // entry as well.
         self.safepoint(running.span)?;
+        self.charge(blocks[0], || running.span_at(0))?;
 
         loop {
             let inst = code[pc];
-            self.instructions += 1;
-            self.fuel += INSTRUCTION_FUEL;
-            if self.fuel >= SAFEPOINT_INTERVAL {
-                self.safepoint(running.span_at(pc))?;
-            }
             match inst {
                 Inst::Const(id) => self.stack.push(constant(program.constant(id))),
                 Inst::LoadLocal(slot) => {
@@ -604,25 +634,31 @@ impl<'a> Vm<'a> {
                     // A scalar `Bool` is 0 or 1 and the lowering emitted this
                     // only where the checker settled one, so there is nothing
                     // to examine: the value *is* the answer.
+                    let to = to as usize;
                     if self.pop_scalar() == 0 {
-                        if to as usize <= pc {
+                        if to <= pc {
                             self.back_edge(running.span_at(pc))?;
                         }
-                        pc = to as usize;
+                        self.charge(blocks[to], || running.span_at(to))?;
+                        pc = to;
                         continue;
                     }
+                    self.charge(blocks[pc + 1], || running.span_at(pc + 1))?;
                 }
                 Inst::JumpIfTrueScalar(to) => {
                     // A scalar `Bool` is 0 or 1 and the lowering emitted this
                     // only where the checker settled one, so there is nothing
                     // to examine: the value *is* the answer.
+                    let to = to as usize;
                     if self.pop_scalar() != 0 {
-                        if to as usize <= pc {
+                        if to <= pc {
                             self.back_edge(running.span_at(pc))?;
                         }
-                        pc = to as usize;
+                        self.charge(blocks[to], || running.span_at(to))?;
+                        pc = to;
                         continue;
                     }
+                    self.charge(blocks[pc + 1], || running.span_at(pc + 1))?;
                 }
                 Inst::ScalarToValue(what) => {
                     let scalar = self.pop_scalar();
@@ -636,25 +672,30 @@ impl<'a> Vm<'a> {
                     self.scalars.push(promised_scalar(value));
                 }
                 Inst::Jump(to) => {
-                    if to as usize <= pc {
+                    let to = to as usize;
+                    if to <= pc {
                         self.back_edge(running.span_at(pc))?;
                     }
-                    pc = to as usize;
+                    self.charge(blocks[to], || running.span_at(to))?;
+                    pc = to;
                     continue;
                 }
                 Inst::JumpIfFalse(to) | Inst::JumpIfTrue(to) => {
                     let taken_on = matches!(inst, Inst::JumpIfTrue(_));
+                    let to = to as usize;
                     let test = self.pop();
                     let Value::Bool(test) = test else {
                         return Err(not_a_condition(&test, running.span_at(pc)));
                     };
                     if test == taken_on {
-                        if to as usize <= pc {
+                        if to <= pc {
                             self.back_edge(running.span_at(pc))?;
                         }
-                        pc = to as usize;
+                        self.charge(blocks[to], || running.span_at(to))?;
+                        pc = to;
                         continue;
                     }
+                    self.charge(blocks[pc + 1], || running.span_at(pc + 1))?;
                 }
                 Inst::Call {
                     function: target,
@@ -665,6 +706,10 @@ impl<'a> Vm<'a> {
                     let span = running.span_at(pc);
                     let callee = program.function(target);
                     self.enter(callee, span)?;
+                    // The callee's first block, charged where the callee is
+                    // entered: the caller's own line ended at this `Call`, so
+                    // nothing of the callee has been paid for yet.
+                    self.charge(callee.block_fuel[0], || callee.span_at(0))?;
                     // Each stack's window opens where its own arguments
                     // begin, so those arguments *are* the callee's first
                     // slots in that stack and nothing is transferred: a
@@ -687,6 +732,7 @@ impl<'a> Vm<'a> {
                     self.frames.push(frame);
                     running = callee;
                     code = &callee.code;
+                    blocks = &callee.block_fuel;
                     pc = 0;
                     continue;
                 }
@@ -895,7 +941,13 @@ impl<'a> Vm<'a> {
                     let span = running.span_at(pc);
                     let value = self.pop();
                     match opened(value, span)? {
-                        Ok(payload) => self.stack.push(payload),
+                        Ok(payload) => {
+                            self.stack.push(payload);
+                            // A `?` ends its line because it may leave the
+                            // frame instead of falling through, so falling
+                            // through arrives at the next head.
+                            self.charge(blocks[pc + 1], || running.span_at(pc + 1))?;
+                        }
                         Err(failure) => {
                             self.safepoint(span)?;
                             match self.leave(Answered::Value(failure)) {
@@ -904,7 +956,12 @@ impl<'a> Vm<'a> {
                                     frame = caller;
                                     running = program.function(frame.function);
                                     code = &running.code;
+                                    blocks = &running.block_fuel;
                                     pc = resumed;
+                                    // The caller resumes at the instruction
+                                    // after its `Call`, which is a block head
+                                    // for exactly that reason.
+                                    self.charge(blocks[resumed], || running.span_at(resumed))?;
                                     continue;
                                 }
                             }
@@ -920,7 +977,12 @@ impl<'a> Vm<'a> {
                             frame = caller;
                             running = program.function(frame.function);
                             code = &running.code;
+                            blocks = &running.block_fuel;
                             pc = resumed;
+                            // The caller resumes at the instruction after its
+                            // `Call`, which is a block head for exactly that
+                            // reason.
+                            self.charge(blocks[resumed], || running.span_at(resumed))?;
                             continue;
                         }
                     }
@@ -938,7 +1000,12 @@ impl<'a> Vm<'a> {
                             frame = caller;
                             running = program.function(frame.function);
                             code = &running.code;
+                            blocks = &running.block_fuel;
                             pc = resumed;
+                            // The caller resumes at the instruction after its
+                            // `Call`, which is a block head for exactly that
+                            // reason.
+                            self.charge(blocks[resumed], || running.span_at(resumed))?;
                             continue;
                         }
                     }
@@ -1060,9 +1127,9 @@ impl<'a> Vm<'a> {
     /// Every backward jump and every call, which are the interpreter's loop
     /// back edges and calls; every return, which is where the fuel of a body
     /// that made neither is finally spent; entering the entry, so a run
-    /// cancelled before it began stops before its first instruction; and
-    /// [`SAFEPOINT_INTERVAL`] instructions of anything else, so a long
-    /// straight line is bounded too.
+    /// cancelled before it began stops before its first instruction; and any
+    /// block entered with [`SAFEPOINT_INTERVAL`] fuel already standing, so a
+    /// long straight line is bounded too.
     /// A safepoint at a loop's back edge.
     ///
     /// The stop flags this thread owns are read every time, so cancelling a
@@ -1070,6 +1137,36 @@ impl<'a> Vm<'a> {
     /// does on the interpreter. The run's shared budget is spent against only
     /// once [`BACK_EDGE_FUEL`] has gathered, because that one takes a lock and
     /// a loop takes a back edge every turn.
+    /// Charges a whole basic block, on entering it.
+    ///
+    /// `block` is `cove_ir::Function::block_fuel` at the head this arrived
+    /// at, which is how many instructions run from there before control can
+    /// go somewhere else. Charging there rather than at each instruction is
+    /// the same total over the same path — that line runs to its end, or the
+    /// run ends — and it is what lets the dispatch loop carry no
+    /// per-instruction bookkeeping at all.
+    ///
+    /// The forced safepoint moves with the charge for the same reason. What
+    /// [`SAFEPOINT_INTERVAL`] now bounds is the fuel standing when a block is
+    /// entered, so the work between two safepoints is that plus one straight
+    /// line, and a straight line is bounded by the length of the function's
+    /// code.
+    ///
+    /// The span is a closure because every call site has one to hand and none
+    /// of them needs it: it is read only when the budget says stop, and
+    /// `cove_ir::Function::span_at` is a bounds check and a twelve-byte copy
+    /// that a taken jump should not pay per turn.
+    #[inline]
+    fn charge(&mut self, block: u32, span: impl FnOnce() -> Span) -> Result<(), RuntimeError> {
+        let count = u64::from(block);
+        self.instructions += count;
+        self.fuel += count * INSTRUCTION_FUEL;
+        if self.fuel >= SAFEPOINT_INTERVAL {
+            self.safepoint(span())?;
+        }
+        Ok(())
+    }
+
     fn back_edge(&mut self, span: Span) -> Result<(), RuntimeError> {
         if self.stops.iter().any(Cancellation::is_cancelled) {
             return Err(work_stopped(span));
@@ -3089,6 +3186,7 @@ mod tests {
                     has_receiver: false,
                     captures: Vec::new(),
                     spans: vec![span; code.len()],
+                    block_fuel: cove_ir::lower::block_fuel(&code),
                     code,
                     arg_spans: BTreeMap::new(),
                     span,
@@ -3198,6 +3296,7 @@ mod tests {
                     has_receiver: false,
                     captures: Vec::new(),
                     spans: vec![span; code.len()],
+                    block_fuel: cove_ir::lower::block_fuel(&code),
                     code,
                     arg_spans: BTreeMap::new(),
                     span,
