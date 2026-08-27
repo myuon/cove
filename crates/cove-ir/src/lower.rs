@@ -35,6 +35,27 @@
 //! what they were, and only a value nobody reads stops being built.
 //! [`validate`]'s depth simulation is what catches a mistake in it.
 //!
+//! # A settled type is an instruction, and an abstention is not
+//!
+//! `cove-sema` publishes what it worked out about every expression, and this
+//! pass reads it rather than guessing from the shape of the source. Three
+//! things follow from it, and nothing else does:
+//!
+//! - An operator over two operands the checker settled as `Int` lowers to
+//!   [`Inst::IntBinary`], which needs no look at what it was handed.
+//! - A field of a receiver whose type the checker settled lowers to
+//!   [`Inst::GetFieldAt`], which is an index rather than a name to scan for.
+//! - A method call the checker recorded a declaration for calls it, so a
+//!   name a builtin type and a declared type both answer to is no longer a
+//!   refusal.
+//!
+//! The rule the first two share is that a type must be *settled*.
+//! `Ty::Unknown` is the checker saying it did not prove this and no fact at
+//! all is the expression never having been walked; neither is `Int`, and
+//! both lower to the untyped instruction. Specialising on either would be
+//! this pass deciding something the checker declined to, which is the one
+//! thing ADR 0019 says a lowering does not do.
+//!
 //! # What the interpreter decides and this reproduces
 //!
 //! `crates/cove-runtime/src/interp.rs` is the oracle, and seven of its rules
@@ -74,11 +95,17 @@
 //! # What is refused because the program is wrong
 //!
 //! Two of the refusals are not about this pass being unfinished. A write to
-//! a `let` binding, and a method call whose name a builtin type and a
-//! declared type both answer to, are reported because the alternative is a
-//! backend that accepts what the oracle refuses or that guesses which of two
-//! targets was meant. ADR 0012 ranks the oracle above a backend, so refusing
-//! to lower is the answer and approximating is not.
+//! a `let` binding, and a method call by a name whose answer nothing has
+//! settled, are reported because the alternative is a backend that accepts
+//! what the oracle refuses or that guesses which of two targets was meant.
+//! ADR 0012 ranks the oracle above a backend, so refusing to lower is the
+//! answer and approximating is not.
+//!
+//! The second of those two is now narrow. A call the checker recorded a
+//! declaration for is that declaration's, so a name two types share stops
+//! being ambiguous the moment the receiver's type is known; what is left is
+//! a call the checker recorded nothing for, where a name is still all there
+//! is.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::rc::Rc;
@@ -87,13 +114,17 @@ use cove_diag::{FileId, Span};
 use cove_schema::builtins;
 use cove_schema::hosts;
 use cove_sema::resolve::Program as Checked;
+use cove_sema::typeck::Ty;
+use cove_sema::MethodTarget;
 use cove_syntax::ast::{
-    Arg, BinaryOp as SourceBinary, Block, EnumDecl, Expr, ExprKind, FnDecl, ItemKind, MatchArm,
-    Pattern, PatternKind, Stmt, StmtKind, StrPart, StructDecl, Type, TypeKind,
+    Arg, BinaryOp as SourceBinary, Block, EnumDecl, Expr, ExprId, ExprKind, FnDecl, ItemKind,
+    MatchArm, Pattern, PatternKind, Stmt, StmtKind, StrPart, StructDecl, Type, TypeKind,
     UnaryOp as SourceUnary,
 };
 
-use crate::{BinaryOp, Const, ConstId, Function, FunctionId, Inst, Program, UnaryOp, Unsupported};
+use crate::{
+    BinaryOp, Const, ConstId, Function, FunctionId, Inst, IntOp, Program, UnaryOp, Unsupported,
+};
 
 /// A lowered program and the function to start it at.
 ///
@@ -849,6 +880,119 @@ impl<'a, 'l> Body<'a, 'l> {
         self.binding(name).is_some_and(|binding| binding.writable)
     }
 
+    // ----------------------------------------------- what the checker knows
+
+    /// The type the checker settled for `expr`, or `None` where it settled
+    /// none.
+    ///
+    /// `None` means the expression was never walked — a tree built by hand,
+    /// or a callee that names a declaration rather than producing a value.
+    /// It does not mean the checker was unsure: an expression it walked and
+    /// could say nothing about answers [`Ty::Unknown`], which is an answer
+    /// and is not a type. Every caller here specialises on a settled type,
+    /// so both of those fall through to the untyped instruction.
+    fn settled(&self, expr: &Expr) -> Option<&'a Ty> {
+        self.outer.checked.facts.ty(expr.span.file, expr.id)
+    }
+
+    /// Whether the checker settled that this expression is an `Int`.
+    ///
+    /// Written as one question because it is asked of both operands of every
+    /// operator, and because the two ways of not knowing — an abstention and
+    /// an expression that was never walked — have to answer it the same way.
+    fn is_int(&self, expr: &Expr) -> bool {
+        matches!(self.settled(expr), Some(Ty::Int))
+    }
+
+    /// The instruction `op` lowers to over these two operands.
+    ///
+    /// [`Inst::IntBinary`] where the checker settled *both* operands as `Int`
+    /// and the operator is one `Int` answers, so that the VM neither examines
+    /// the operands nor builds the interpreter's `Result<Value, RuntimeError>`
+    /// to discover what it already knew. [`Inst::Binary`] everywhere else,
+    /// which is every operand pair the checker did not settle and `is`, which
+    /// asks about storage rather than about integers.
+    fn binary_inst(&self, op: BinaryOp, lhs: &'a Expr, rhs: &'a Expr) -> Inst {
+        match int_op(op) {
+            Some(op) if self.is_int(lhs) && self.is_int(rhs) => Inst::IntBinary(op),
+            _ => Inst::Binary(op),
+        }
+    }
+
+    /// The instruction a read of `receiver.name` lowers to.
+    ///
+    /// [`Inst::GetFieldAt`] where the checker settled the receiver's type and
+    /// the declaration of that type gives `name` a position, because a
+    /// position is an index and a name is a scan. [`Inst::GetField`] wherever
+    /// the type was not settled, was settled as something other than a struct
+    /// this package declares, or names a field the declaration does not have
+    /// — the last of which is not this pass's failure to report, since a
+    /// program the checker accepted has no such read.
+    fn field_inst(&mut self, receiver: &'a Expr, name: &str) -> Inst {
+        match self.field_position(receiver, name) {
+            Some(index) => Inst::GetFieldAt(index),
+            None => Inst::GetField(self.outer.name(name)),
+        }
+    }
+
+    /// Where `name` stands among the fields of the struct `receiver` is.
+    ///
+    /// The order is the declaration's, which is the order a struct's fields
+    /// are pushed in and therefore the order they are held in: `make_struct`
+    /// pushes them that way and [`crate::Inst::SetField`] replaces one where
+    /// it stands, so nothing a lowered program builds holds them otherwise.
+    ///
+    /// The checker names a type of the module it was checking — bare for a
+    /// type that module declares and `module.Name` for one it met through an
+    /// import — so a bare name is read against the module this body belongs
+    /// to, exactly as source written there would read it.
+    fn field_position(&self, receiver: &'a Expr, name: &str) -> Option<u32> {
+        let Some(Ty::Struct(named, _)) = self.settled(receiver) else {
+            return None;
+        };
+        let decl = match named.split_once('.') {
+            Some((module, type_name)) => self
+                .outer
+                .checked
+                .modules
+                .get(module)?
+                .structs
+                .get(type_name)?
+                .decl
+                .as_ref(),
+            None => self.outer.struct_of(self.module, named)?.1,
+        };
+        let index = decl
+            .fields
+            .iter()
+            .position(|field| field.name.node == name)?;
+        Some(index as u32)
+    }
+
+    /// The declaration the checker recorded this call as reaching.
+    ///
+    /// A method call is written against a value and which declaration it
+    /// reaches is decided by that value's type, which is the one thing this
+    /// pass cannot work out for itself. Where the checker recorded an answer
+    /// there is nothing left to guess at; where it recorded none — a builtin
+    /// method, a host operation, a receiver it abstained about —
+    /// [`Body::method_call`] asks by name and refuses what a name cannot
+    /// settle.
+    fn target(&self, id: ExprId, span: Span) -> Option<&'a MethodTarget> {
+        self.outer.checked.facts.target(span.file, id)
+    }
+
+    /// The declaration `target` names, or `None` where this package has none
+    /// of that name.
+    ///
+    /// `None` is not a failure to report. It leaves the call to the
+    /// name-based path below, which is where a call the checker said nothing
+    /// about goes anyway.
+    fn declared_by(&self, target: &MethodTarget) -> Option<Key> {
+        self.outer
+            .method_of(&target.module, &target.type_name, &target.method)
+    }
+
     // ---------------------------------------------------------- statements
 
     /// Lowers a block, leaving its value on the stack.
@@ -961,7 +1105,7 @@ impl<'a, 'l> Body<'a, 'l> {
                 generics: _,
                 args,
                 trailing,
-            } => self.call(callee, args, trailing.is_some(), span)?,
+            } => self.call(expr.id, callee, args, trailing.is_some(), span)?,
             ExprKind::Unary { op, operand } => {
                 self.expr(operand)?;
                 let op = match op {
@@ -1156,9 +1300,9 @@ impl<'a, 'l> Body<'a, 'l> {
                 }
             }
         }
+        let inst = self.field_inst(base, name);
         self.expr(base)?;
-        let field = self.outer.name(name);
-        self.emit(Inst::GetField(field), span);
+        self.emit(inst, span);
         Ok(())
     }
 
@@ -1193,9 +1337,10 @@ impl<'a, 'l> Body<'a, 'l> {
             }
             _ => {
                 let op = binary_op(op).expect("`&&` and `||` are the two handled above");
+                let inst = self.binary_inst(op, lhs, rhs);
                 self.expr(lhs)?;
                 self.expr(rhs)?;
-                self.emit(Inst::Binary(op), span);
+                self.emit(inst, span);
                 Ok(())
             }
         }
@@ -1237,9 +1382,14 @@ impl<'a, 'l> Body<'a, 'l> {
                 let Some(op) = binary_op(op) else {
                     return Err(Unsupported::new("this compound assignment", span));
                 };
+                // The place read is the left operand, so the type the checker
+                // settled for it is what says whether this is integer
+                // arithmetic — the same question `a + b` asks, asked of the
+                // two expressions this form writes as one.
+                let inst = self.binary_inst(op, target, value);
                 self.emit(Inst::LoadLocal(slot), target.span);
                 self.expr(value)?;
-                self.emit(Inst::Binary(op), span);
+                self.emit(inst, span);
             }
         }
         self.emit(Inst::StoreLocal(slot), span);
@@ -1292,7 +1442,10 @@ impl<'a, 'l> Body<'a, 'l> {
             // is what `Place::field` carries down from its base.
             return Err(read_only_place(&format!("{name}.{field}"), span));
         }
-        let field = self.outer.name(field);
+        // The write goes by name whatever the checker settled: `SetField`
+        // puts a value back where a name stands, and only the read has a
+        // position to take instead.
+        let named = self.outer.name(field);
         self.emit(Inst::LoadLocal(slot), place);
         match op {
             None => self.expr(value)?,
@@ -1300,13 +1453,15 @@ impl<'a, 'l> Body<'a, 'l> {
                 let Some(op) = binary_op(op) else {
                     return Err(Unsupported::new("this compound assignment", span));
                 };
+                let read = self.field_inst(base, field);
+                let inst = self.binary_inst(op, target, value);
                 self.emit(Inst::Dup, place);
-                self.emit(Inst::GetField(field), place);
+                self.emit(read, place);
                 self.expr(value)?;
-                self.emit(Inst::Binary(op), span);
+                self.emit(inst, span);
             }
         }
-        self.emit(Inst::SetField(field), span);
+        self.emit(Inst::SetField(named), span);
         self.emit(Inst::StoreLocal(slot), span);
         if position == Position::Value {
             self.constant(Const::Unit, span);
@@ -1562,6 +1717,7 @@ impl<'a, 'l> Body<'a, 'l> {
 
     fn call(
         &mut self,
+        id: ExprId,
         callee: &'a Expr,
         args: &'a [Arg],
         trailing: bool,
@@ -1580,7 +1736,7 @@ impl<'a, 'l> Body<'a, 'l> {
         }
         match &callee.kind {
             ExprKind::Ident(name) => self.call_named(name, args, span),
-            ExprKind::Field { base, name } => self.call_qualified(base, &name.node, args, span),
+            ExprKind::Field { base, name } => self.call_qualified(id, base, &name.node, args, span),
             _ => Err(Unsupported::new("a call through a value", callee.span)),
         }
     }
@@ -1629,6 +1785,7 @@ impl<'a, 'l> Body<'a, 'l> {
     /// none of those.
     fn call_qualified(
         &mut self,
+        id: ExprId,
         base: &'a Expr,
         name: &str,
         args: &'a [Arg],
@@ -1674,7 +1831,7 @@ impl<'a, 'l> Body<'a, 'l> {
                 }
             }
         }
-        self.method_call(base, name, args, span)
+        self.method_call(id, base, name, args, span)
     }
 
     /// A call to a function this package declares, with the receiver a
@@ -2146,21 +2303,45 @@ impl<'a, 'l> Body<'a, 'l> {
     ///
     /// The interpreter tries a declared method of the receiver's *runtime*
     /// type first and falls back to the builtin table, so which of the two
-    /// applies is a fact about the receiver. Nothing here knows a receiver's
-    /// type, so a declared method is found by name — and a name that could
-    /// reach two answers is reported rather than guessed at, whether the two
-    /// are two declarations or one declaration and a builtin.
+    /// applies is a fact about the receiver — and the receiver's type is
+    /// what the checker settled. Two answers follow from it, and the second
+    /// is as much of the point as the first:
     ///
-    /// Guessing would be the one mistake a second backend must not make:
+    /// - Where the checker recorded the declaration this call reaches, that
+    ///   is the declaration, and nothing about the name is asked.
+    /// - Where it settled the receiver's type and recorded no declaration,
+    ///   this call reaches none: it is a builtin method, and a declared type
+    ///   answering to the same name somewhere in the package is not what it
+    ///   could have meant.
+    ///
+    /// Together those are why `impl Box { fn length(self) }` and
+    /// `[1, 2, 3].length()` can now be written in one program. Both used to
+    /// refuse — the first because a builtin shares the name, the second
+    /// because a declared type does — and a name was all there was to tell
+    /// them apart, which is not enough.
+    ///
+    /// A receiver the checker abstained about, or one it never walked, is
+    /// still resolved by name and still refuses what a name cannot settle.
+    /// Guessing there is the one mistake a second backend must not make:
     /// `[1, 2, 3].length()` is the builtin's `3` on the oracle, and a `Call`
     /// to a declared `Box.length` is a different program.
     fn method_call(
         &mut self,
+        id: ExprId,
         receiver: &'a Expr,
         name: &str,
         args: &'a [Arg],
         span: Span,
     ) -> Result<(), Unsupported> {
+        // Before anything is asked about the name, because a recorded target
+        // makes every one of those questions moot: which types declare this
+        // name, whether a builtin shares it, and whether the builtin that
+        // shares it writes through its receiver are all questions about
+        // *which* declaration is meant, and the checker has answered that.
+        let recorded = self.target(id, span);
+        if let Some(key) = recorded.and_then(|target| self.declared_by(target)) {
+            return self.call_declared(key, Some(receiver), args, span);
+        }
         if name == "await" {
             return Err(Unsupported::new("an `await`", span));
         }
@@ -2179,20 +2360,38 @@ impl<'a, 'l> Body<'a, 'l> {
         let builtin_method = builtins::builtins()
             .iter()
             .any(|schema| schema.method(name).is_some());
-        // Only the methods this module could be handed a receiver for: a
-        // method of a type no `use` brings here belongs to another program
-        // of the same package, and cannot be what this call means.
-        let candidates: Vec<Key> = self
-            .outer
-            .by_name
-            .get(name)
-            .map(|all| {
-                all.iter()
-                    .copied()
-                    .filter(|key| self.outer.could_dispatch(self.module, *key))
-                    .collect()
-            })
-            .unwrap_or_default();
+        // Only the methods this module could be handed a receiver for, and
+        // only where a name is still all there is to go on. A receiver whose
+        // type the checker settled and recorded no target for has already
+        // been decided about — the target above would have named a
+        // declaration if the call reached one — so there is no candidate
+        // here and a name two types share stops being ambiguous.
+        //
+        // Three cases are not that. `Unknown` is the checker saying it did
+        // not prove this and `Never` is a receiver that produces no value,
+        // so neither settles which method a call reaches; a receiver the
+        // checker never walked settles nothing either. And a target it
+        // *did* record that this pass could not find a declaration for is
+        // an answer nobody here can act on, which leaves the name.
+        let by_name_is_all_there_is = recorded.is_some()
+            || matches!(
+                self.settled(receiver),
+                None | Some(Ty::Unknown(_)) | Some(Ty::Never)
+            );
+        let candidates: Vec<Key> = if by_name_is_all_there_is {
+            self.outer
+                .by_name
+                .get(name)
+                .map(|all| {
+                    all.iter()
+                        .copied()
+                        .filter(|key| self.outer.could_dispatch(self.module, *key))
+                        .collect()
+                })
+                .unwrap_or_default()
+        } else {
+            Vec::new()
+        };
         if !candidates.is_empty() {
             if candidates.len() > 1 {
                 return Err(Unsupported::new(
@@ -2369,6 +2568,28 @@ fn binary_op(op: SourceBinary) -> Option<BinaryOp> {
         SourceBinary::Ge => BinaryOp::Ge,
         SourceBinary::Is => BinaryOp::Is,
         SourceBinary::And | SourceBinary::Or => return None,
+    })
+}
+
+/// The operator as [`Inst::IntBinary`] carries it, or `None` for one `Int`
+/// does not answer.
+///
+/// `is` is that one. It compares storage rather than value, and an `Int` has
+/// none to compare, so there is nothing for a typed instruction to do faster.
+fn int_op(op: BinaryOp) -> Option<IntOp> {
+    Some(match op {
+        BinaryOp::Add => IntOp::Add,
+        BinaryOp::Sub => IntOp::Sub,
+        BinaryOp::Mul => IntOp::Mul,
+        BinaryOp::Div => IntOp::Div,
+        BinaryOp::Rem => IntOp::Rem,
+        BinaryOp::Eq => IntOp::Eq,
+        BinaryOp::Ne => IntOp::Ne,
+        BinaryOp::Lt => IntOp::Lt,
+        BinaryOp::Le => IntOp::Le,
+        BinaryOp::Gt => IntOp::Gt,
+        BinaryOp::Ge => IntOp::Ge,
+        BinaryOp::Is => return None,
     })
 }
 
@@ -2607,8 +2828,8 @@ fn stack_shape(constants: &[Const], inst: Inst) -> (u32, u32) {
         Inst::Const(_) | Inst::LoadLocal(_) | Inst::LoadCapture(_) => (0, 1),
         Inst::StoreLocal(_) | Inst::Pop => (1, 0),
         Inst::Dup => (1, 2),
-        Inst::Unary(_) | Inst::GetField(_) | Inst::Try => (1, 1),
-        Inst::Binary(_) | Inst::SetField(_) => (2, 1),
+        Inst::Unary(_) | Inst::GetField(_) | Inst::GetFieldAt(_) | Inst::Try => (1, 1),
+        Inst::Binary(_) | Inst::IntBinary(_) | Inst::SetField(_) => (2, 1),
         Inst::Jump(_) => (0, 0),
         Inst::JumpIfFalse(_) | Inst::JumpIfTrue(_) | Inst::Return => (1, 0),
         Inst::Call { argc, .. } | Inst::CallHost { argc, .. } | Inst::MakeBuiltin { argc, .. } => {
@@ -2658,7 +2879,13 @@ mod tests {
     use cove_sema::package::{Module, Package, Unit};
 
     /// Checks one module of source the way `cove run` checks a package:
-    /// parse, then resolve, which is what runs the type checker.
+    /// parse, resolve, and type-check.
+    ///
+    /// Both halves, because the second is what settles a type and the
+    /// lowering reads those: a program that was only resolved carries no
+    /// facts, so every listing taken from one would show the untyped
+    /// instruction and would say nothing about the rule that picks between
+    /// them.
     ///
     /// The module is called `m`, so a listing reads `fn m.something` and a
     /// test asserts on the whole of it.
@@ -2685,7 +2912,7 @@ mod tests {
                 },
             )]),
         };
-        match cove_sema::resolve::resolve(&package) {
+        match cove_sema::Compiler::new().compile(&package) {
             Ok(program) => program,
             Err(items) => panic!("the source checks:\n{}", rendered(&sources, &items)),
         }
@@ -2737,7 +2964,7 @@ mod tests {
                 rendered(&sources, &items)
             ),
         };
-        match cove_sema::resolve::resolve(&package) {
+        match cove_sema::Compiler::new().compile(&package) {
             Ok(program) => program,
             Err(items) => panic!(
                 "the examples package checks:\n{}",
@@ -2763,7 +2990,7 @@ mod tests {
             .remove(name)
             .unwrap_or_else(|| panic!("`benches/{name}` is a module of the package"));
         package.modules = BTreeMap::from([(name.to_string(), module)]);
-        match cove_sema::resolve::resolve(&package) {
+        match cove_sema::Compiler::new().compile(&package) {
             Ok(program) => program,
             Err(items) => panic!(
                 "the benches package checks:\n{}",
@@ -2842,7 +3069,7 @@ mod tests {
              \x20  3  store 0\n\
              \x20  4  load 0\n\
              \x20  5  const Int(3)\n\
-             \x20  6  binary Add\n\
+             \x20  6  int Add\n\
              \x20  7  store 0\n\
              \x20  8  load 0\n\
              \x20  9  return\n"
@@ -2879,18 +3106,103 @@ mod tests {
             "fn m.f arity=2 frame=2\n\
              \x20  0  load 0\n\
              \x20  1  load 1\n\
-             \x20  2  binary Mul\n\
+             \x20  2  int Mul\n\
              \x20  3  load 0\n\
-             \x20  4  binary Div\n\
+             \x20  4  int Div\n\
              \x20  5  load 1\n\
-             \x20  6  binary Rem\n\
+             \x20  6  int Rem\n\
              \x20  7  load 0\n\
-             \x20  8  binary Sub\n\
+             \x20  8  int Sub\n\
              \x20  9  load 1\n\
-             \x20 10  binary Add\n\
+             \x20 10  int Add\n\
              \x20 11  load 0\n\
-             \x20 12  binary Ne\n\
+             \x20 12  int Ne\n\
              \x20 13  return\n"
+        );
+    }
+
+    /// The operator carries a type only where the checker settled one.
+    ///
+    /// Three additions in one listing: two `Int`, two `Float`, and two
+    /// `Duration`. Only the first is integer arithmetic, so only the first
+    /// is `int Add`; the other two keep the operator that looks at what it
+    /// was handed, because `Float` and `Duration` are not `Int` and the rule
+    /// is not "a number". Reading all three from one function is what makes
+    /// the rule visible rather than three tests that each happen to agree.
+    ///
+    /// An operand the checker *abstained* about is not written here because
+    /// it cannot be: `Ty::Unknown` accompanies a diagnostic, and a program
+    /// with one does not reach the lowering. The rule that it is not `Int`
+    /// is stated where it is read, in `Body::is_int`.
+    #[test]
+    fn an_addition_is_typed_only_where_the_checker_settled_int() {
+        assert_eq!(
+            listing(
+                "fn f(a: Int, b: Int, c: Float, d: Float, e: Duration, g: Duration) -> Duration {\n  let n = a + b\n  let x = c + d\n  e + g\n}\n",
+                "f"
+            ),
+            "fn m.f arity=6 frame=8\n\
+             \x20  0  load 0\n\
+             \x20  1  load 1\n\
+             \x20  2  int Add\n\
+             \x20  3  store 6\n\
+             \x20  4  load 2\n\
+             \x20  5  load 3\n\
+             \x20  6  binary Add\n\
+             \x20  7  store 7\n\
+             \x20  8  load 4\n\
+             \x20  9  load 5\n\
+             \x20 10  binary Add\n\
+             \x20 11  return\n"
+        );
+    }
+
+    /// A field of a receiver the checker settled is read by position.
+    ///
+    /// Both fields, so that the position is read as a position rather than
+    /// as a zero that happens to be right.
+    #[test]
+    fn a_field_of_a_settled_struct_is_read_by_position() {
+        assert_eq!(
+            listing(
+                "struct P {\n  x: Int\n  y: Int\n}\n\nfn f(p: P) -> Int {\n  p.x + p.y\n}\n",
+                "f"
+            ),
+            "fn m.f arity=1 frame=1\n\
+             \x20  0  load 0\n\
+             \x20  1  get-field-at 0\n\
+             \x20  2  load 0\n\
+             \x20  3  get-field-at 1\n\
+             \x20  4  int Add\n\
+             \x20  5  return\n"
+        );
+    }
+
+    /// A name a builtin type and a declared type both answer to reaches the
+    /// one the receiver's type names, and both are written here.
+    ///
+    /// This used to refuse the whole program: a name reached two answers and
+    /// the lowering had no way to choose, so declaring `Box.length` anywhere
+    /// in a package stopped `[1, 2, 3].length()` lowering everywhere in it.
+    /// The checker settles the receiver's type, which is the only thing that
+    /// ever decided it.
+    #[test]
+    fn a_name_a_builtin_and_a_declared_type_share_reaches_what_the_receiver_names() {
+        assert_eq!(
+            listing(
+                "struct Box {\n  n: Int\n}\n\nimpl Box {\n  fn length(self) -> Int {\n    self.n\n  }\n}\n\nfn f(b: Box) -> Int {\n  b.length() + [1, 2, 3].length()\n}\n",
+                "f"
+            ),
+            "fn m.f arity=1 frame=1\n\
+             \x20  0  load 0\n\
+             \x20  1  call m.Box.length argc=1\n\
+             \x20  2  const Int(1)\n\
+             \x20  3  const Int(2)\n\
+             \x20  4  const Int(3)\n\
+             \x20  5  make-array 3\n\
+             \x20  6  call-builtin length argc=0\n\
+             \x20  7  int Add\n\
+             \x20  8  return\n"
         );
     }
 
@@ -2959,7 +3271,7 @@ mod tests {
             "fn m.f arity=1 frame=2\n\
              \x20  0  load 0\n\
              \x20  1  const Int(2)\n\
-             \x20  2  binary Lt\n\
+             \x20  2  int Lt\n\
              \x20  3  jump-if-false 8\n\
              \x20  4  const Int(1)\n\
              \x20  5  store 1\n\
@@ -2984,7 +3296,7 @@ mod tests {
             "fn m.f arity=1 frame=2\n\
              \x20  0  load 0\n\
              \x20  1  const Int(2)\n\
-             \x20  2  binary Lt\n\
+             \x20  2  int Lt\n\
              \x20  3  jump-if-false 6\n\
              \x20  4  const Int(1)\n\
              \x20  5  jump 7\n\
@@ -3005,13 +3317,13 @@ mod tests {
             "fn m.f arity=1 frame=1\n\
              \x20  0  load 0\n\
              \x20  1  const Int(2)\n\
-             \x20  2  binary Lt\n\
+             \x20  2  int Lt\n\
              \x20  3  jump-if-false 6\n\
              \x20  4  load 0\n\
              \x20  5  jump 9\n\
              \x20  6  load 0\n\
              \x20  7  const Int(1)\n\
-             \x20  8  binary Sub\n\
+             \x20  8  int Sub\n\
              \x20  9  return\n"
         );
     }
@@ -3033,7 +3345,7 @@ mod tests {
              \x20  1  store 1\n\
              \x20  2  load 0\n\
              \x20  3  const Int(2)\n\
-             \x20  4  binary Lt\n\
+             \x20  4  int Lt\n\
              \x20  5  jump-if-false 8\n\
              \x20  6  const Int(1)\n\
              \x20  7  store 1\n\
@@ -3055,7 +3367,7 @@ mod tests {
              \x20  1  store 1\n\
              \x20  2  load 0\n\
              \x20  3  const Int(2)\n\
-             \x20  4  binary Lt\n\
+             \x20  4  int Lt\n\
              \x20  5  jump-if-false 8\n\
              \x20  6  const Int(1)\n\
              \x20  7  store 1\n\
@@ -3082,11 +3394,11 @@ mod tests {
              \x20  1  store 0\n\
              \x20  2  load 0\n\
              \x20  3  const Int(3)\n\
-             \x20  4  binary Lt\n\
+             \x20  4  int Lt\n\
              \x20  5  jump-if-false 11\n\
              \x20  6  load 0\n\
              \x20  7  const Int(1)\n\
-             \x20  8  binary Add\n\
+             \x20  8  int Add\n\
              \x20  9  store 0\n\
              \x20 10  jump 2\n\
              \x20 11  load 0\n\
@@ -3126,7 +3438,7 @@ mod tests {
              \x20 11  store 3\n\
              \x20 12  load 0\n\
              \x20 13  load 3\n\
-             \x20 14  binary Add\n\
+             \x20 14  int Add\n\
              \x20 15  store 0\n\
              \x20 16  load 1\n\
              \x20 17  const Int(1)\n\
@@ -3190,7 +3502,7 @@ mod tests {
              \x20 18  store 5\n\
              \x20 19  load 1\n\
              \x20 20  load 5\n\
-             \x20 21  binary Add\n\
+             \x20 21  int Add\n\
              \x20 22  store 1\n\
              \x20 23  load 4\n\
              \x20 24  const Int(1)\n\
@@ -3216,20 +3528,20 @@ mod tests {
              \x20  1  store 0\n\
              \x20  2  load 0\n\
              \x20  3  const Int(10)\n\
-             \x20  4  binary Lt\n\
+             \x20  4  int Lt\n\
              \x20  5  jump-if-false 21\n\
              \x20  6  load 0\n\
              \x20  7  const Int(1)\n\
-             \x20  8  binary Add\n\
+             \x20  8  int Add\n\
              \x20  9  store 0\n\
              \x20 10  load 0\n\
              \x20 11  const Int(2)\n\
-             \x20 12  binary Eq\n\
+             \x20 12  int Eq\n\
              \x20 13  jump-if-false 15\n\
              \x20 14  jump 2\n\
              \x20 15  load 0\n\
              \x20 16  const Int(5)\n\
-             \x20 17  binary Eq\n\
+             \x20 17  int Eq\n\
              \x20 18  jump-if-false 20\n\
              \x20 19  jump 21\n\
              \x20 20  jump 2\n\
@@ -3248,19 +3560,19 @@ mod tests {
             "fn m.fib arity=1 frame=1\n\
              \x20  0  load 0\n\
              \x20  1  const Int(2)\n\
-             \x20  2  binary Lt\n\
+             \x20  2  int Lt\n\
              \x20  3  jump-if-false 6\n\
              \x20  4  load 0\n\
              \x20  5  jump 15\n\
              \x20  6  load 0\n\
              \x20  7  const Int(1)\n\
-             \x20  8  binary Sub\n\
+             \x20  8  int Sub\n\
              \x20  9  call m.fib argc=1\n\
              \x20 10  load 0\n\
              \x20 11  const Int(2)\n\
-             \x20 12  binary Sub\n\
+             \x20 12  int Sub\n\
              \x20 13  call m.fib argc=1\n\
-             \x20 14  binary Add\n\
+             \x20 14  int Add\n\
              \x20 15  return\n"
         );
     }
@@ -3294,8 +3606,8 @@ mod tests {
              \x20  4  load 0\n\
              \x20  5  call m.P.sum argc=1\n\
              \x20  6  load 0\n\
-             \x20  7  get-field x\n\
-             \x20  8  binary Add\n\
+             \x20  7  get-field-at 0\n\
+             \x20  8  int Add\n\
              \x20  9  return\n"
         );
     }
@@ -3306,10 +3618,10 @@ mod tests {
             listing(STRUCT_AND_METHOD, "P.sum"),
             "fn m.P.sum arity=1 frame=1 receiver\n\
              \x20  0  load 0\n\
-             \x20  1  get-field x\n\
+             \x20  1  get-field-at 0\n\
              \x20  2  load 0\n\
-             \x20  3  get-field y\n\
-             \x20  4  binary Add\n\
+             \x20  3  get-field-at 1\n\
+             \x20  4  int Add\n\
              \x20  5  return\n"
         );
     }
@@ -3442,7 +3754,7 @@ mod tests {
              \x20  0  load 0\n\
              \x20  1  try\n\
              \x20  2  const Int(1)\n\
-             \x20  3  binary Add\n\
+             \x20  3  int Add\n\
              \x20  4  make-builtin Some argc=1\n\
              \x20  5  return\n"
         );
@@ -3458,7 +3770,7 @@ mod tests {
             "fn m.f arity=1 frame=1\n\
              \x20  0  load 0\n\
              \x20  1  const Int(0)\n\
-             \x20  2  binary Lt\n\
+             \x20  2  int Lt\n\
              \x20  3  jump-if-false 6\n\
              \x20  4  const Int(0)\n\
              \x20  5  return\n\
@@ -3481,7 +3793,7 @@ mod tests {
              \x20  1  store 0\n\
              \x20  2  load 0\n\
              \x20  3  const Int(1)\n\
-             \x20  4  binary Add\n\
+             \x20  4  int Add\n\
              \x20  5  store 1\n\
              \x20  6  load 1\n\
              \x20  7  return\n"
@@ -3528,7 +3840,7 @@ mod tests {
              \x20  5  store 2\n\
              \x20  6  load 1\n\
              \x20  7  load 2\n\
-             \x20  8  binary Add\n\
+             \x20  8  int Add\n\
              \x20  9  return\n"
         );
     }
@@ -3790,10 +4102,6 @@ mod tests {
                 "assignment to `p.x`, which is a read-only place",
                 "struct P {\n  x: Int\n}\n\nfn f() -> Int {\n  let p = P(x: 1)\n  p.x = 2\n  p.x\n}\n",
             ),
-            (
-                "a call to `length`, which a builtin type and a declared type both have",
-                "struct Box {\n  n: Int\n}\n\nimpl Box {\n  fn length(self) -> Int {\n    self.n\n  }\n}\n\nfn f() -> Int {\n  [1, 2, 3].length()\n}\n",
-            ),
         ];
         for (what, source) in cases {
             assert_eq!(refused(source), what, "for:\n{source}");
@@ -3855,21 +4163,21 @@ mod tests {
              \x20  3  store 1\n\
              \x20  4  load 1\n\
              \x20  5  const Int(2000000)\n\
-             \x20  6  binary Lt\n\
+             \x20  6  int Lt\n\
              \x20  7  jump-if-false 23\n\
              \x20  8  load 1\n\
              \x20  9  const Int(7)\n\
-             \x20 10  binary Rem\n\
+             \x20 10  int Rem\n\
              \x20 11  const Int(0)\n\
-             \x20 12  binary Eq\n\
+             \x20 12  int Eq\n\
              \x20 13  jump-if-false 18\n\
              \x20 14  load 0\n\
              \x20 15  const Int(1)\n\
-             \x20 16  binary Add\n\
+             \x20 16  int Add\n\
              \x20 17  store 0\n\
              \x20 18  load 1\n\
              \x20 19  const Int(1)\n\
-             \x20 20  binary Add\n\
+             \x20 20  int Add\n\
              \x20 21  store 1\n\
              \x20 22  jump 4\n\
              \x20 23  load 0\n\
@@ -3926,13 +4234,13 @@ mod tests {
              \x20  2  store 0\n\
              \x20  3  load 0\n\
              \x20  4  dup\n\
-             \x20  5  get-field x\n\
+             \x20  5  get-field-at 0\n\
              \x20  6  const Int(2)\n\
-             \x20  7  binary Add\n\
+             \x20  7  int Add\n\
              \x20  8  set-field x\n\
              \x20  9  store 0\n\
              \x20 10  load 0\n\
-             \x20 11  get-field x\n\
+             \x20 11  get-field-at 0\n\
              \x20 12  return\n"
         );
     }

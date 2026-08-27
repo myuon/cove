@@ -177,7 +177,27 @@ pub enum Inst {
     /// Applies a unary operator to the top of the stack.
     Unary(UnaryOp),
     /// Applies a binary operator to the top two values, left below right.
+    ///
+    /// This is the operator that does not know what it is applied to. It goes
+    /// through the interpreter's own `binary`, which takes two 40-byte
+    /// `Value`s, answers a 120-byte `Result`, and matches three times to find
+    /// out that it was adding two integers. Where the checker settled that it
+    /// *is* two integers, [`Inst::IntBinary`] is emitted instead.
     Binary(BinaryOp),
+    /// Applies a binary operator to two `Int` on top of the stack.
+    ///
+    /// Only emitted where the checker recorded both operands as `Int`, so the
+    /// operands need no examining — the type is in the instruction. Overflow,
+    /// division by zero, and remainder by zero raise what the untyped operator
+    /// raises, because a broken invariant is the same broken invariant however
+    /// it was reached.
+    IntBinary(IntOp),
+    /// Pushes a field of the struct on top of the stack, by position.
+    ///
+    /// Emitted where the checker settled the receiver's type, which is what
+    /// makes the position knowable. [`Inst::GetField`] is what a receiver
+    /// whose type the checker abstained about still gets.
+    GetFieldAt(u32),
     /// Jumps to an instruction index.
     Jump(u32),
     /// Pops a `Bool` and jumps when it is false.
@@ -290,6 +310,26 @@ pub enum UnaryOp {
     Neg,
 }
 
+/// What [`Inst::IntBinary`] does to two integers.
+///
+/// A separate enum from [`BinaryOp`] because it is a smaller question: these
+/// are the operators `Int` answers, and nothing here has a case for a type
+/// that cannot arrive.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum IntOp {
+    Add,
+    Sub,
+    Mul,
+    Div,
+    Rem,
+    Eq,
+    Ne,
+    Lt,
+    Le,
+    Gt,
+    Ge,
+}
+
 /// The binary operators the IR carries.
 ///
 /// `&&` and `||` are absent on purpose: they short-circuit, so they lower to
@@ -381,6 +421,8 @@ fn render_inst(program: &Program, inst: Inst) -> String {
         Inst::Dup => "dup".to_string(),
         Inst::Unary(op) => format!("unary {op:?}"),
         Inst::Binary(op) => format!("binary {op:?}"),
+        Inst::IntBinary(op) => format!("int {op:?}"),
+        Inst::GetFieldAt(index) => format!("get-field-at {index}"),
         Inst::Jump(to) => format!("jump {to}"),
         Inst::JumpIfFalse(to) => format!("jump-if-false {to}"),
         Inst::JumpIfTrue(to) => format!("jump-if-true {to}"),

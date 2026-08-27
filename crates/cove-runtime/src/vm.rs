@@ -24,6 +24,18 @@
 //! `while`, or a `&&`, and the checker refuses such a program before any of
 //! them is lowered.
 //!
+//! # A typed instruction does the same thing faster, or it is not typed
+//!
+//! [`Inst::IntBinary`] and [`Inst::GetFieldAt`] are emitted only where the
+//! checker settled the type they assume, so what arrives is what was
+//! promised and neither instruction examines it. What that is allowed to
+//! change is how the answer is reached and nothing about the answer:
+//! overflow, division by zero, and remainder by zero raise the interpreter's
+//! own errors through the interpreter's own helpers, so a program that fails
+//! fails identically whichever instruction ran. An operand that is somehow
+//! not what the lowering promised is a broken invariant of this backend, and
+//! is said so the way an empty operand stack is.
+//!
 //! # One stack, and a frame is a region of it
 //!
 //! Every frame's slots and every frame's operands live in one contiguous
@@ -45,7 +57,8 @@ use std::time::{Duration, Instant};
 
 use cove_diag::{SourceMap, Span};
 use cove_ir::{
-    BinaryOp as IrBinary, Const, ConstId, Function, FunctionId, Inst, Program, UnaryOp as IrUnary,
+    BinaryOp as IrBinary, Const, ConstId, Function, FunctionId, Inst, IntOp, Program,
+    UnaryOp as IrUnary,
 };
 use cove_schema::builtins::{free_builtin, FreeBuiltinKind, MAP_ENTRY, NONE_CASE, OPTION, RESULT};
 use cove_syntax::ast::{BinaryOp, EnumDecl, UnaryOp};
@@ -56,8 +69,8 @@ use crate::error::RuntimeError;
 use crate::heap::{Heap, HeapStats};
 use crate::host::{HostRegistry, Reentry};
 use crate::interp::{
-    binary, no_field, not_a_struct, returned_error_message, source_text, unary, work_stopped,
-    MAX_CALL_DEPTH,
+    binary, divide_by_zero, no_field, not_a_struct, overflow, returned_error_message, source_text,
+    unary, work_stopped, MAX_CALL_DEPTH,
 };
 use crate::runtime::{Runtime, ENTRY_TASK};
 use crate::trace::{RunOutcome, Timing, TraceEvent};
@@ -488,6 +501,16 @@ impl<'a> Vm<'a> {
                     let answer = binary(binary_op(op), lhs, rhs, running.span_at(pc))?;
                     self.stack.push(answer);
                 }
+                Inst::IntBinary(op) => {
+                    // No `size_of_value` beside the instruction: an `Int` is
+                    // one word however large the number is, so this operator's
+                    // cost is the constant fuel every instruction is charged
+                    // and nothing proportional to what it was handed.
+                    let rhs = promised_int(self.pop());
+                    let lhs = promised_int(self.pop());
+                    let answer = int_binary(op, lhs, rhs, running.span_at(pc))?;
+                    self.stack.push(answer);
+                }
                 Inst::Jump(to) => {
                     if to as usize <= pc {
                         self.back_edge(running.span_at(pc))?;
@@ -604,6 +627,27 @@ impl<'a> Vm<'a> {
                         return Err(no_field(&held.type_name, field, span));
                     };
                     let found = found.clone();
+                    self.stack.push(found);
+                }
+                Inst::GetFieldAt(index) => {
+                    // Neither the type nor the position is asked about: the
+                    // lowering emitted this only where the checker settled the
+                    // receiver's type, and a struct's fields stand in
+                    // declaration order wherever one is built, so both are
+                    // invariants of this backend rather than facts to confirm.
+                    let base_value = self.pop();
+                    let Value::Struct(held) = &base_value else {
+                        unreachable!(
+                            "`get-field-at` was emitted for a struct, and was handed a `{}`",
+                            base_value.type_name()
+                        );
+                    };
+                    let found = held
+                        .fields
+                        .get(index as usize)
+                        .expect("`get-field-at` names a field of the struct it was emitted for")
+                        .1
+                        .clone();
                     self.stack.push(found);
                 }
                 Inst::SetField(field) => {
@@ -1065,6 +1109,79 @@ fn binary_op(op: IrBinary) -> BinaryOp {
     }
 }
 
+/// The `Int` an [`Inst::IntBinary`] was promised.
+///
+/// The lowering emits one only where the checker settled *both* operands as
+/// `Int`, so anything else arriving here is a broken invariant of this
+/// backend and not a program that could be told about it — the same standing
+/// as an operand stack that came up empty. Saying so is what keeps the
+/// promise readable: the type is in the instruction, and the value is not
+/// examined because it does not have to be.
+fn promised_int(value: Value) -> i64 {
+    match value {
+        Value::Int(value) => value,
+        other => unreachable!(
+            "`int` was emitted for two `Int`, and was handed a `{}`",
+            other.type_name()
+        ),
+    }
+}
+
+/// What [`Inst::IntBinary`] answers, and what it raises when `Int` has no
+/// answer.
+///
+/// The failures are the interpreter's own, raised through the interpreter's
+/// own helpers rather than restated here: an arithmetic operator that
+/// overflowed, and division or remainder by zero, are rules of the language
+/// and not rules of a backend, so each is one message however the operator
+/// was reached. Specialising is allowed to change which instruction runs and
+/// nothing about what it means.
+///
+/// `Div` and `Rem` test for zero before they ask, because `checked_div`
+/// answers `None` for `i64::MIN / -1` and for `n / 0` alike and those are
+/// two different failures with two different messages. `crate::interp::binary`
+/// tests in that order for that reason, and so this does.
+fn int_binary(op: IntOp, lhs: i64, rhs: i64, span: Span) -> Result<Value, RuntimeError> {
+    Ok(match op {
+        IntOp::Add => Value::Int(
+            lhs.checked_add(rhs)
+                .ok_or_else(|| overflow("addition", span))?,
+        ),
+        IntOp::Sub => Value::Int(
+            lhs.checked_sub(rhs)
+                .ok_or_else(|| overflow("subtraction", span))?,
+        ),
+        IntOp::Mul => Value::Int(
+            lhs.checked_mul(rhs)
+                .ok_or_else(|| overflow("multiplication", span))?,
+        ),
+        IntOp::Div => {
+            if rhs == 0 {
+                return Err(divide_by_zero("division", span));
+            }
+            Value::Int(
+                lhs.checked_div(rhs)
+                    .ok_or_else(|| overflow("division", span))?,
+            )
+        }
+        IntOp::Rem => {
+            if rhs == 0 {
+                return Err(divide_by_zero("remainder", span));
+            }
+            Value::Int(
+                lhs.checked_rem(rhs)
+                    .ok_or_else(|| overflow("remainder", span))?,
+            )
+        }
+        IntOp::Eq => Value::Bool(lhs == rhs),
+        IntOp::Ne => Value::Bool(lhs != rhs),
+        IntOp::Lt => Value::Bool(lhs < rhs),
+        IntOp::Le => Value::Bool(lhs <= rhs),
+        IntOp::Gt => Value::Bool(lhs > rhs),
+        IntOp::Ge => Value::Bool(lhs >= rhs),
+    })
+}
+
 /// How big a value is, in the units the work over it is proportional to.
 ///
 /// ADR 0019 asks that an operation whose cost is not constant — copying a
@@ -1492,8 +1609,8 @@ mod tests {
         .expect("a thread to run Cove on")
     }
 
-    /// Parses and checks `source` as the single unit of module `m`.
-    fn checked_module(source: &str) -> (Arc<SourceMap>, Arc<Checked>) {
+    /// Parses `source` as the single unit of module `m`.
+    fn packaged(source: &str) -> (SourceMap, Package) {
         let mut sources = SourceMap::new();
         let path = PathBuf::from("m/main.cove");
         let file = sources.add(path.clone(), source);
@@ -1513,9 +1630,37 @@ mod tests {
                 },
             )]),
         };
-        match cove_sema::resolve::resolve(&package) {
+        (sources, package)
+    }
+
+    /// Parses and checks `source` the way `cove run` checks a package.
+    ///
+    /// Both halves of the check, because the lowering reads what the second
+    /// one settled: a program that was only resolved carries no types, so
+    /// every test here would run the untyped instructions and would prove
+    /// nothing about the typed ones.
+    fn checked_module(source: &str) -> (Arc<SourceMap>, Arc<Checked>) {
+        let (sources, package) = packaged(source);
+        match cove_sema::Compiler::new().compile(&package) {
             Ok(program) => (Arc::new(sources), Arc::new(program)),
             Err(items) => panic!("the source checks:\n{}", rendered(&sources, &items)),
+        }
+    }
+
+    /// The same, resolved but not type-checked.
+    ///
+    /// Two failures below belong to the runtime and are unreachable through
+    /// a checked program: a builtin method called with the wrong number of
+    /// arguments is a diagnostic now, so a program holding one never reaches
+    /// either backend. What both backends do with it is still worth pinning
+    /// — an embedder may resolve without checking, and the two must not
+    /// answer differently — so those tests are written against a program
+    /// that skipped the half that would have refused it.
+    fn resolved_module(source: &str) -> (Arc<SourceMap>, Arc<Checked>) {
+        let (sources, package) = packaged(source);
+        match cove_sema::resolve::resolve(&package) {
+            Ok(program) => (Arc::new(sources), Arc::new(program)),
+            Err(items) => panic!("the source resolves:\n{}", rendered(&sources, &items)),
         }
     }
 
@@ -1535,7 +1680,17 @@ mod tests {
     /// backend, so a test that asserted only what the VM did would be a test
     /// of what somebody expected rather than of what Cove means.
     fn agree(source: &str) -> Outcome {
-        let (sources, checked) = checked_module(source);
+        agree_over(checked_module(source), source)
+    }
+
+    /// `agree`, over a program that was resolved and not checked.
+    fn agree_unchecked(source: &str) -> Outcome {
+        agree_over(resolved_module(source), source)
+    }
+
+    /// The comparison both of those make, over a program either one produced.
+    fn agree_over(checked: (Arc<SourceMap>, Arc<Checked>), source: &str) -> Outcome {
+        let (sources, checked) = checked;
         let (interpreted, lowered) = on_both(&checked, &sources, "m", None);
         assert_eq!(
             format!("{:?}", interpreted.answer),
@@ -1561,9 +1716,35 @@ mod tests {
         agree_main(ty, &format!("  {expr}")).value().to_string()
     }
 
-    /// The message both backends refused one expression with.
-    fn refused(ty: &str, expr: &str) -> String {
-        agree_main(ty, &format!("  {expr}")).error().message.clone()
+    /// The instructions `m.main` was lowered to, rendered.
+    ///
+    /// Which instruction ran is not something an outcome can show — that is
+    /// the whole point of specialising — so a test that asserts the answer
+    /// asserts the listing beside it. Otherwise a specialisation that
+    /// stopped happening would go on passing every differential test there
+    /// is.
+    fn main_of(source: &str) -> String {
+        let (_, checked) = checked_module(source);
+        let program = cove_ir::lower::lower(&checked).expect("the program lowers");
+        let id = program
+            .function_named("m", "main")
+            .expect("`m.main` was lowered");
+        cove_ir::render(&program, id)
+    }
+
+    /// The message both backends refused one expression with, for an
+    /// expression only the runtime refuses.
+    ///
+    /// Every other refusal in this file belongs to the checker now, so the
+    /// program has to skip the half that would have caught it; see
+    /// [`resolved_module`].
+    fn refused_unchecked(ty: &str, expr: &str) -> String {
+        agree_unchecked(&format!(
+            "use console.println\n\nexport fn main() -> {ty} {{\n  {expr}\n}}\n"
+        ))
+        .error()
+        .message
+        .clone()
     }
 
     // -------------------------------------------------------- operators
@@ -1658,6 +1839,212 @@ mod tests {
                 .error()
                 .message,
             "`Int` division overflowed"
+        );
+    }
+
+    // ---------------------------------------- the instructions with a type
+
+    /// Every operator the checker settles as `Int`, answered by the typed
+    /// instruction and by the interpreter, message for message.
+    ///
+    /// The point of specialising is that nothing about the program changed,
+    /// so the assertion is the same one every other test here makes: the
+    /// oracle's answer. What is different is only which instruction produced
+    /// it, and `an_int_operator_lowers_to_the_typed_instruction` is what
+    /// pins that, because a specialisation that silently stopped happening
+    /// would pass this test forever.
+    #[test]
+    fn every_int_operator_answers_what_the_interpreter_answers() {
+        let cases: &[(&str, &str, &str)] = &[
+            ("Int", "a + b", "Int(12)"),
+            ("Int", "a - b", "Int(2)"),
+            ("Int", "a * b", "Int(35)"),
+            ("Int", "a / b", "Int(1)"),
+            ("Int", "a % b", "Int(2)"),
+            ("Bool", "a == b", "Bool(false)"),
+            ("Bool", "a != b", "Bool(true)"),
+            ("Bool", "a < b", "Bool(false)"),
+            ("Bool", "a <= b", "Bool(false)"),
+            ("Bool", "a > b", "Bool(true)"),
+            ("Bool", "a >= b", "Bool(true)"),
+        ];
+        for (ty, expr, expected) in cases {
+            let body = format!("  let a = 7\n  let b = 5\n  {expr}");
+            assert_eq!(
+                &agree_main(ty, &body).value().to_string(),
+                expected,
+                "for `{expr}`"
+            );
+            assert!(
+                main_of(&format!("export fn main() -> {ty} {{\n{body}\n}}\n"))
+                    .lines()
+                    .any(|line| line.contains("  int ")),
+                "`{expr}` lowers to the typed operator"
+            );
+        }
+    }
+
+    /// The failures `Int` has, raised by the typed instruction in the words
+    /// the interpreter raises them in.
+    ///
+    /// Overflow at each of the three limits, and division and remainder by
+    /// zero. `arithmetic_fails_the_way_the_interpreter_fails` asserts the
+    /// same messages; this asserts them of the instruction that carries the
+    /// type, which is a different instruction reaching the same helpers, and
+    /// checks that it is the one that ran.
+    #[test]
+    fn the_typed_operator_fails_the_way_the_interpreter_fails() {
+        let cases: &[(&str, &str)] = &[
+            (
+                "  let big = 9223372036854775807\n  let one = 1\n  big + one",
+                "`Int` addition overflowed",
+            ),
+            (
+                "  let least = -9223372036854775807 - 1\n  let one = 1\n  least - one",
+                "`Int` subtraction overflowed",
+            ),
+            (
+                "  let big = 9223372036854775807\n  let two = 2\n  big * two",
+                "`Int` multiplication overflowed",
+            ),
+            (
+                "  let least = -9223372036854775807 - 1\n  let minus = -1\n  least / minus",
+                "`Int` division overflowed",
+            ),
+            (
+                "  let one = 1\n  let zero = 0\n  one / zero",
+                "`Int` division by zero",
+            ),
+            (
+                "  let one = 1\n  let zero = 0\n  one % zero",
+                "`Int` remainder by zero",
+            ),
+        ];
+        for (body, message) in cases {
+            assert_eq!(
+                &agree_main("Int", body).error().message,
+                message,
+                "for:\n{body}"
+            );
+            let listing = main_of(&format!("export fn main() -> Int {{\n{body}\n}}\n"));
+            assert!(
+                listing.lines().any(|line| line.contains("  int ")),
+                "the failure came from the typed operator:\n{listing}"
+            );
+        }
+    }
+
+    /// A `Float` operator is not an `Int` operator, so it keeps the untyped
+    /// instruction and keeps agreeing.
+    ///
+    /// This is the other half of the rule, and the half a mistake would show
+    /// in: specialising on a type the checker did not settle is how a backend
+    /// starts answering a different program.
+    #[test]
+    fn float_arithmetic_keeps_the_untyped_operator_and_still_agrees() {
+        let cases: &[(&str, &str, &str)] = &[
+            ("Float", "a + b", "Float(7.75)"),
+            ("Float", "a - b", "Float(7.25)"),
+            ("Float", "a * b", "Float(1.875)"),
+            ("Float", "a / b", "Float(30.0)"),
+            ("Bool", "a > b", "Bool(true)"),
+        ];
+        for (ty, expr, expected) in cases {
+            let body = format!("  let a = 7.5\n  let b = 0.25\n  {expr}");
+            assert_eq!(
+                &agree_main(ty, &body).value().to_string(),
+                expected,
+                "for `{expr}`"
+            );
+            let listing = main_of(&format!("export fn main() -> {ty} {{\n{body}\n}}\n"));
+            assert!(
+                listing.lines().any(|line| line.contains("  binary ")),
+                "`{expr}` keeps the untyped operator:\n{listing}"
+            );
+            assert!(
+                !listing.lines().any(|line| line.contains("  int ")),
+                "`{expr}` is not integer arithmetic:\n{listing}"
+            );
+        }
+    }
+
+    /// A `Duration` is neither operand of an `Int` operator, and mixing one
+    /// with an `Int` is the arithmetic the checker allows across two types.
+    #[test]
+    fn duration_arithmetic_keeps_the_untyped_operator_and_still_agrees() {
+        let body = "  let a = 1ms\n  let b = 500us\n  a - b";
+        assert_eq!(
+            agree_main("Duration", body).value().to_string(),
+            "Duration(500000)"
+        );
+        let listing = main_of(&format!("export fn main() -> Duration {{\n{body}\n}}\n"));
+        assert!(
+            !listing.lines().any(|line| line.contains("  int ")),
+            "a `Duration` is not an `Int`:\n{listing}"
+        );
+    }
+
+    /// A field read by position answers what the same read by name answers.
+    ///
+    /// Both programs are written, because the property is that the two are
+    /// one program: the position is where the name stands, and a struct's
+    /// fields stand in declaration order wherever one is built.
+    #[test]
+    fn a_field_read_by_position_answers_what_a_read_by_name_answers() {
+        let source = "struct Point {\n  x: Int\n  y: Int\n}\n\n\
+             export fn main() -> Int {\n\
+             \x20 var p = Point(x: 3, y: 4)\n\
+             \x20 p.y = p.y + p.x\n\
+             \x20 p.x + p.y\n\
+             }\n";
+        assert_eq!(agree(source).value().to_string(), "Int(10)");
+        let listing = main_of(source);
+        assert!(
+            listing.lines().any(|line| line.contains("get-field-at 0"))
+                && listing.lines().any(|line| line.contains("get-field-at 1")),
+            "both fields are read by position:\n{listing}"
+        );
+        assert!(
+            !listing.lines().any(|line| line.contains("  get-field ")),
+            "nothing is left reading by name:\n{listing}"
+        );
+    }
+
+    /// A method a builtin type also names now lowers, because the checker
+    /// recorded which of the two the call reaches.
+    ///
+    /// `Array` has a `length` and so does this `Box`, and both are called in
+    /// one program. Until the lowering could read the checker's answer this
+    /// refused to lower at all, so the assertion that matters is that there
+    /// is an answer to compare.
+    #[test]
+    fn a_declared_method_a_builtin_also_names_lowers_and_agrees() {
+        let source = "struct Box {\n  items: Array<Int>\n}\n\n\
+             impl Box {\n\
+             \x20 /// Doc.\n\
+             \x20 fn length(self) -> Int {\n\
+             \x20   99\n\
+             \x20 }\n\
+             }\n\n\
+             export fn main() -> Int {\n\
+             \x20 let b = Box(items: [1, 2, 3])\n\
+             \x20 b.length() + [1, 2, 3].length()\n\
+             }\n";
+        // 99 from the declaration and 3 from the builtin: a call reaching the
+        // wrong one of the two would answer 6 or 198 rather than fail.
+        assert_eq!(agree(source).value().to_string(), "Int(102)");
+        let listing = main_of(source);
+        assert!(
+            listing
+                .lines()
+                .any(|line| line.contains("call m.Box.length")),
+            "the declared method is called:\n{listing}"
+        );
+        assert!(
+            listing
+                .lines()
+                .any(|line| line.contains("call-builtin length")),
+            "the builtin is called:\n{listing}"
         );
     }
 
@@ -1990,7 +2377,7 @@ mod tests {
             "`Int` abs overflowed"
         );
         assert_eq!(
-            refused("Int", "[1, 2, 3].get(1, 2).unwrapOr(0)"),
+            refused_unchecked("Int", "[1, 2, 3].get(1, 2).unwrapOr(0)"),
             "`Array.get` takes 1 argument(s), but 2 were given"
         );
     }
@@ -2336,7 +2723,7 @@ mod tests {
     #[test]
     fn an_unknown_associated_function_fails_the_way_the_interpreter_fails() {
         assert_eq!(
-            refused(
+            refused_unchecked(
                 "Int",
                 "Vector.of(1).length() + Int.parse(\"1\", \"2\").unwrapOr(0)"
             ),
@@ -2639,24 +3026,30 @@ mod tests {
     }
 
     /// A method name a builtin type and a declared type both answer to is
-    /// refused rather than resolved to one of them.
+    /// resolved by the receiver's type, which is the only thing that decides
+    /// it.
     ///
     /// The interpreter tries a declared method of the receiver's *runtime*
     /// type first and falls back to the builtin table, so which applies is a
-    /// fact about the receiver. The lowering has no type table, so a name
-    /// both could answer to has two possible targets and no way to choose:
-    /// `[1, 2, 3].length()` is the builtin's `3` here, and a `Call` to the
-    /// declared `Box.length` would be a different program. Refusing to lower
-    /// is the answer; guessing is not.
+    /// fact about the receiver — and this used to be refused, because the
+    /// lowering had no type table and `[1, 2, 3].length()` answering the
+    /// builtin's `3` and a `Call` to the declared `Box.length` are two
+    /// different programs. The checker settles which, so this asserts what
+    /// the refusal used to protect: the array reaches the builtin with a
+    /// `Box.length` declared in the same program.
+    ///
+    /// `a_declared_method_a_builtin_also_names_lowers_and_agrees` is the
+    /// same fact read from the other side, with both calls written together.
     #[test]
-    fn a_method_name_a_builtin_and_a_declared_type_share_is_refused() {
-        let (sources, checked) = checked_module(
-            "struct Box {\n  n: Int\n}\n\nimpl Box {\n  fn length(self) -> Int {\n    self.n\n  }\n}\n\nexport fn main() -> Int {\n  [1, 2, 3].length()\n}\n",
-        );
-        assert_eq!(only_interpreted(&checked, &sources).value(), "Int(3)");
-        assert_eq!(
-            not_lowered(&checked),
-            "a call to `length`, which a builtin type and a declared type both have"
+    fn a_method_name_a_builtin_and_a_declared_type_share_reaches_the_builtin() {
+        let source = "struct Box {\n  n: Int\n}\n\nimpl Box {\n  fn length(self) -> Int {\n    self.n\n  }\n}\n\nexport fn main() -> Int {\n  [1, 2, 3].length()\n}\n";
+        assert_eq!(agree(source).value(), "Int(3)");
+        let listing = main_of(source);
+        assert!(
+            listing
+                .lines()
+                .any(|line| line.contains("call-builtin length")),
+            "the array's `length` is the builtin's:\n{listing}"
         );
     }
 

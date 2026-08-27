@@ -5995,8 +5995,14 @@ impl<'a> Checker<'a> {
     /// what turns "the name this checker files it under" into "the
     /// declaration", which is what a consumer needs and what is the same
     /// answer read from anywhere in the package.
+    ///
+    /// The split is at the **last** dot, because a module's name may hold one
+    /// and a type's name may not: `module_opaque.account.Account` is the type
+    /// `Account` of the module `module_opaque.account`, and splitting at the
+    /// first dot would file it under `module_opaque` as a type called
+    /// `account.Account`, which nothing declares.
     fn record_target(&mut self, id: ExprId, file: FileId, key: &str, method: &str) {
-        let (module, type_name) = match key.split_once('.') {
+        let (module, type_name) = match key.rsplit_once('.') {
             Some((module, name)) => (module.to_string(), name.to_string()),
             None => (self.module.name.clone(), key.to_string()),
         };

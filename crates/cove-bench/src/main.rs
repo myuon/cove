@@ -389,13 +389,19 @@ fn load_benches() -> Result<(SourceMap, Package, Program), String> {
             render_all(&sources, &items)
         )
     })?;
-    let program = cove_sema::resolve::resolve(&package).map_err(|items| {
-        format!(
-            "`{}` does not resolve:\n{}",
-            root.display(),
-            render_all(&sources, &items)
-        )
-    })?;
+    // Both halves of the check, because the lowering reads what the second
+    // one settled and a program that was only resolved carries none of it.
+    // A benchmark measured against that program would be measuring a
+    // lowering `cove run --backend vm` never produces.
+    let program = cove_sema::Compiler::new()
+        .compile(&package)
+        .map_err(|items| {
+            format!(
+                "`{}` does not check:\n{}",
+                root.display(),
+                render_all(&sources, &items)
+            )
+        })?;
     Ok((sources, package, program))
 }
 

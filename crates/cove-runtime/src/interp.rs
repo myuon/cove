@@ -4140,7 +4140,12 @@ pub(crate) fn overflow(operation: &str, span: Span) -> RuntimeError {
         .with_rule("Integer overflow is a broken invariant, not a wrapped result.")
 }
 
-fn divide_by_zero(operation: &str, span: Span) -> RuntimeError {
+/// `Int` division or remainder was asked for zero.
+///
+/// Reachable from outside for the reason [`overflow`] is: `crate::vm`'s typed
+/// integer operator raises what this operator raises, because dividing by
+/// zero is one rule of the language and not one rule per backend.
+pub(crate) fn divide_by_zero(operation: &str, span: Span) -> RuntimeError {
     RuntimeError::new(format!("`Int` {operation} by zero"))
         .at(span)
         .with_rule("Division and remainder by zero are broken invariants.")
