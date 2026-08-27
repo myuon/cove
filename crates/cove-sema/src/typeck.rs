@@ -274,9 +274,9 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
-use std::rc::Rc;
+use std::sync::Arc;
 
-use cove_diag::{Diagnostic, Span};
+use cove_diag::{Diagnostic, FileId, Span};
 use cove_schema::builtins::{
     BuiltinSchema, BuiltinType, FreeBuiltinKind, FreeBuiltinSchema, MethodSchema, ParamSchema,
     MAP_ENTRY, NONE_CASE, SCOPE,
@@ -285,11 +285,12 @@ use cove_schema::{
     HostSchemas, HostType, ModuleSchema, OperationSchema, ResourceSchema, TypeSchema,
 };
 use cove_syntax::ast::{
-    Arg, BinaryOp, Block, EnumDecl, Expr, ExprKind, FnDecl, GenericParam, Ident, ItemKind,
+    Arg, BinaryOp, Block, EnumDecl, Expr, ExprId, ExprKind, FnDecl, GenericParam, Ident, ItemKind,
     MatchArm, Param, Pattern, PatternKind, Stmt, StmtKind, StrPart, StructDecl, TraitMethod, Type,
     TypeKind, UnaryOp,
 };
 
+use crate::facts::{Facts, MethodTarget};
 use crate::package::Package;
 use crate::resolve::{Conformance, Program, ResolvedModule, TraitEntry};
 
@@ -431,6 +432,23 @@ pub fn check(package: &Package, program: &Program) -> Vec<Diagnostic> {
 /// argument types, and results; the fields of the types it declares; the
 /// cases of its enums; and the operations its resources answer.
 pub fn check_with(package: &Package, program: &Program, schemas: &HostSchemas) -> Vec<Diagnostic> {
+    check_facts(package, program, schemas).0
+}
+
+/// Type-checks a resolved program against `schemas`, keeping what the check
+/// worked out about each expression.
+///
+/// This is [`check_with`] with its second answer. The check is the same one
+/// — the facts are written as the walk settles them and read by nothing
+/// during it — so a caller that wants only the diagnostics loses nothing by
+/// taking this instead, and one that wants the types does not have to derive
+/// them a second time. [`Facts`] says why deriving them a second time is the
+/// thing worth avoiding.
+pub fn check_facts(
+    package: &Package,
+    program: &Program,
+    schemas: &HostSchemas,
+) -> (Vec<Diagnostic>, Facts) {
     let mut diagnostics = Vec::new();
     let mut envs: BTreeMap<&str, ImportEnv> = BTreeMap::new();
     let mut checked: BTreeMap<&str, Checker> = BTreeMap::new();
@@ -446,7 +464,14 @@ pub fn check_with(package: &Package, program: &Program, schemas: &HostSchemas) -
     }
     check_entries(package, &checked, &mut diagnostics);
     check_tests(program, &checked, &mut diagnostics);
-    diagnostics
+    // Each module is checked by a checker of its own, so the facts arrive in
+    // as many tables as there are modules. A file belongs to one module, so
+    // gathering them into one table keyed by file loses nothing.
+    let mut facts = Facts::default();
+    for (_, checker) in checked {
+        facts.merge(checker.facts);
+    }
+    (diagnostics, facts)
 }
 
 /// Checks every `test fn` against the one shape the test runner calls.
@@ -573,7 +598,7 @@ fn conformance_key(module: &ResolvedModule, conformance: &Conformance) -> (Strin
 
 /// The canonical key of a declaration `module` makes, leaving a name that
 /// already carries a module alone.
-fn qualified_name(name: &Rc<str>, module: &str) -> Rc<str> {
+fn qualified_name(name: &Arc<str>, module: &str) -> Arc<str> {
     if name.contains('.') {
         name.clone()
     } else {
@@ -632,7 +657,7 @@ impl FieldUse {
 struct ImportEnv {
     structs: BTreeMap<String, StructSig>,
     enums: BTreeMap<String, EnumSig>,
-    aliases: BTreeMap<String, (Vec<Rc<str>>, Ty)>,
+    aliases: BTreeMap<String, (Vec<Arc<str>>, Ty)>,
     functions: BTreeMap<String, FnSig>,
     methods: BTreeMap<(String, String), FnSig>,
     traits: BTreeMap<String, BTreeMap<String, FnSig>>,
@@ -677,7 +702,7 @@ fn not_task_safe(ty: &Ty) -> Option<&Ty> {
 /// name a module writes for its own declaration is bare, which is what makes
 /// the two cases distinguishable.
 fn qualify(ty: &Ty, module: &str) -> Ty {
-    let qualified = |name: &Rc<str>| qualified_name(name, module);
+    let qualified = |name: &Arc<str>| qualified_name(name, module);
     match ty {
         Ty::Array(inner) => Ty::Array(Box::new(qualify(inner, module))),
         Ty::Vector(inner) => Ty::Vector(Box::new(qualify(inner, module))),
@@ -763,6 +788,13 @@ impl Unknown {
 }
 
 /// A Cove type.
+///
+/// A name inside one is shared by [`Arc`] rather than [`std::rc::Rc`]
+/// because a type outlives the check that settled it: it is recorded in
+/// [`Facts`] and published on [`Program`], which the runtime holds behind an
+/// `Arc` and moves onto the stack it runs a program on. Sharing atomically
+/// is what lets a type be a fact about a checked package rather than a value
+/// that dies with the checker.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Ty {
     /// The checker could not determine this type; see the module docs.
@@ -799,19 +831,19 @@ pub enum Ty {
     /// The value `scope name { ... }` binds.
     Scope,
     /// A struct this module declares, with its type arguments.
-    Struct(Rc<str>, Vec<Ty>),
+    Struct(Arc<str>, Vec<Ty>),
     /// An enum this module declares, with its type arguments.
-    Enum(Rc<str>, Vec<Ty>),
-    Fn(Rc<FnTy>),
+    Enum(Arc<str>, Vec<Ty>),
+    Fn(Arc<FnTy>),
     /// A type parameter, rigid inside the body that declares it.
-    Param(Rc<str>),
+    Param(Arc<str>),
     /// `dyn Display`: a value of some type that conforms to the named trait,
     /// carrying its implementation with it.
     ///
     /// This is a type of its own, not a type parameter: it cannot be written
     /// where a bounded type parameter is expected, and only the trait's
     /// `self`-taking methods can be called on it.
-    Dyn(Rc<str>),
+    Dyn(Arc<str>),
     /// A type a host module declares, named the way Cove source writes it:
     /// `http.Request`, `database.Connection`.
     ///
@@ -821,7 +853,7 @@ pub enum Ty {
     /// `ResourceSchema` — does not change how it is written or compared, so
     /// it does not change this either; what the schema says about it decides
     /// what may be read from it and what may be called on it.
-    Host(Rc<str>),
+    Host(Arc<str>),
 }
 
 /// A function type: `fn(Int) -> Int`, `async fn() -> Result<Unit, Error>`.
@@ -834,7 +866,7 @@ pub struct FnTy {
 
 impl Ty {
     fn func(is_async: bool, params: Vec<Ty>, ret: Ty) -> Ty {
-        Ty::Fn(Rc::new(FnTy {
+        Ty::Fn(Arc::new(FnTy {
             is_async,
             params,
             ret,
@@ -1045,7 +1077,7 @@ impl Ty {
     }
 
     /// Replaces every type parameter bound in `subst`, leaving the rest.
-    fn substitute(&self, subst: &BTreeMap<Rc<str>, Ty>) -> Ty {
+    fn substitute(&self, subst: &BTreeMap<Arc<str>, Ty>) -> Ty {
         if subst.is_empty() {
             return self.clone();
         }
@@ -1152,7 +1184,7 @@ struct ParamSig {
 /// written, so an unsatisfied bound can point at it.
 #[derive(Clone, Debug)]
 struct TraitBound {
-    name: Rc<str>,
+    name: Arc<str>,
     span: Span,
 }
 
@@ -1160,11 +1192,11 @@ struct TraitBound {
 #[derive(Clone, Debug)]
 struct FnSig {
     /// Type parameters this signature binds, rigid inside its own body.
-    generics: Vec<Rc<str>>,
+    generics: Vec<Arc<str>>,
     /// The traits each type parameter is bounded by. A parameter with no
     /// bound is absent, which is also what makes a method call on it an
     /// error: it has no operations.
-    bounds: BTreeMap<Rc<str>, Vec<TraitBound>>,
+    bounds: BTreeMap<Arc<str>, Vec<TraitBound>>,
     params: Vec<ParamSig>,
     ret: Ty,
     ret_span: Span,
@@ -1222,7 +1254,7 @@ impl FnSig {
 /// A struct's fields, in declaration order.
 #[derive(Clone, Debug)]
 struct StructSig {
-    generics: Vec<Rc<str>>,
+    generics: Vec<Arc<str>>,
     fields: Vec<ParamSig>,
     /// `export opaque struct`: the fields below belong to the declaring
     /// module alone.
@@ -1236,7 +1268,7 @@ struct StructSig {
 /// An enum's cases, in declaration order.
 #[derive(Clone, Debug)]
 struct EnumSig {
-    generics: Vec<Rc<str>>,
+    generics: Vec<Arc<str>>,
     cases: Vec<CaseSig>,
 }
 
@@ -1322,7 +1354,7 @@ struct Checker<'a> {
     enums: BTreeMap<String, EnumSig>,
     /// Expanded type aliases, resolved once so the names inside an alias are
     /// reported once however many times it is used.
-    aliases: BTreeMap<String, (Vec<Rc<str>>, Ty)>,
+    aliases: BTreeMap<String, (Vec<Arc<str>>, Ty)>,
     /// Aliases currently being expanded, to catch `type A = A`.
     expanding: Vec<String>,
     /// Every trait the module declares, with the signature of each of its
@@ -1332,9 +1364,9 @@ struct Checker<'a> {
     /// explicit, so this set is complete.
     conformances: BTreeSet<(String, String)>,
     /// Type parameters in scope, innermost last.
-    type_params: Vec<Rc<str>>,
+    type_params: Vec<Arc<str>>,
     /// The bounds of the type parameters currently in scope.
-    bounds: BTreeMap<Rc<str>, Vec<TraitBound>>,
+    bounds: BTreeMap<Arc<str>, Vec<TraitBound>>,
     scopes: Vec<BTreeMap<String, Binding>>,
     /// The declared return type of the function whose body is being checked,
     /// and where it was written.
@@ -1362,6 +1394,11 @@ struct Checker<'a> {
     /// Whether the walk currently running is a `Checker::probe`, whose
     /// diagnostics are discarded.
     probing: bool,
+    /// What this checker settled about each expression it walked.
+    ///
+    /// It is written to and never read by the walk, which is what makes it
+    /// unable to change a diagnostic. [`Facts`] says who reads it and why.
+    facts: Facts,
 }
 
 impl<'a> Checker<'a> {
@@ -1397,6 +1434,7 @@ impl<'a> Checker<'a> {
             assigned_place: None,
             ret_stated: false,
             probing: false,
+            facts: Facts::default(),
         }
     }
 
@@ -1817,7 +1855,7 @@ impl<'a> Checker<'a> {
         let trait_names: Vec<String> = self.module.traits.keys().cloned().collect();
         for trait_name in trait_names {
             let decl = self.module.traits[&trait_name].decl.clone();
-            let self_param: Rc<str> = "Self".into();
+            let self_param: Arc<str> = "Self".into();
             for method in &decl.methods {
                 let sig = self.traits[&trait_name][&method.name.node].clone();
                 self.type_params = vec![self_param.clone()];
@@ -2226,16 +2264,16 @@ impl<'a> Checker<'a> {
     /// Brings `params` into scope as type parameters, on top of whatever is
     /// already in scope, and returns just the ones it added. Every caller
     /// restores the previous list when the declaration ends.
-    fn enter_generics(&mut self, params: &[GenericParam]) -> Vec<Rc<str>> {
-        let generics: Vec<Rc<str>> = params.iter().map(|p| p.name.node.as_str().into()).collect();
+    fn enter_generics(&mut self, params: &[GenericParam]) -> Vec<Arc<str>> {
+        let generics: Vec<Arc<str>> = params.iter().map(|p| p.name.node.as_str().into()).collect();
         self.type_params.extend(generics.iter().cloned());
         generics
     }
 
     /// The traits each of `params` is bounded by, with every bound checked to
     /// name a trait this module declares.
-    fn bounds_of(&mut self, params: &[GenericParam]) -> BTreeMap<Rc<str>, Vec<TraitBound>> {
-        let mut bounds: BTreeMap<Rc<str>, Vec<TraitBound>> = BTreeMap::new();
+    fn bounds_of(&mut self, params: &[GenericParam]) -> BTreeMap<Arc<str>, Vec<TraitBound>> {
+        let mut bounds: BTreeMap<Arc<str>, Vec<TraitBound>> = BTreeMap::new();
         for param in params {
             let mut named: Vec<TraitBound> = Vec::new();
             for bound in &param.bounds {
@@ -2585,7 +2623,7 @@ impl<'a> Checker<'a> {
     }
 
     /// Expands a type alias, once per module.
-    fn alias(&mut self, name: &str) -> (Vec<Rc<str>>, Ty) {
+    fn alias(&mut self, name: &str) -> (Vec<Arc<str>>, Ty) {
         if let Some(cached) = self.aliases.get(name) {
             return cached.clone();
         }
@@ -2748,6 +2786,14 @@ impl<'a> Checker<'a> {
     /// one arriving here means a construction site was wrong about itself,
     /// and the assertion names it in the test suite rather than letting the
     /// unknown validate whatever comes next.
+    /// Recording happens here, at the one point every expression passes
+    /// through, so no form can be added later that forgets to. It happens
+    /// after the type is settled and nothing in the walk reads it back, so
+    /// what is recorded cannot change what is reported.
+    ///
+    /// An expression walked twice records twice, and the later record wins.
+    /// A [`Checker::probe`] is always the earlier of the two, so the answer
+    /// left behind is the one the real walk reached.
     fn expr(&mut self, expr: &Expr, expected: Option<&Expected>) -> Ty {
         let ty = self.expr_type(expr, expected);
         debug_assert!(
@@ -2755,6 +2801,7 @@ impl<'a> Checker<'a> {
             "a placeholder unknown escaped into the type of an expression at {:?}: `{ty}`",
             expr.span
         );
+        self.facts.record_ty(expr.span.file, expr.id, &ty);
         ty
     }
 
@@ -2784,7 +2831,15 @@ impl<'a> Checker<'a> {
                 generics,
                 args,
                 trailing,
-            } => self.call(callee, generics, args, trailing.as_deref(), span, expected),
+            } => self.call(
+                expr.id,
+                callee,
+                generics,
+                args,
+                trailing.as_deref(),
+                span,
+                expected,
+            ),
             ExprKind::Unary { op, operand } => self.unary(*op, operand, span),
             ExprKind::Binary { op, lhs, rhs } => self.binary(*op, lhs, rhs, span),
             ExprKind::Assign { op, target, value } => self.assign(*op, target, value, span),
@@ -3410,8 +3465,8 @@ impl<'a> Checker<'a> {
         }
         // A generic enum's arguments are decided by the payload it is given,
         // exactly as a generic function's are decided by its arguments.
-        let generic_set: BTreeSet<Rc<str>> = sig.generics.iter().cloned().collect();
-        let mut subst: BTreeMap<Rc<str>, Ty> = BTreeMap::new();
+        let generic_set: BTreeSet<Arc<str>> = sig.generics.iter().cloned().collect();
+        let mut subst: BTreeMap<Arc<str>, Ty> = BTreeMap::new();
         for (arg, payload) in args.iter().zip(&found.payload) {
             let hint = self.open(payload, &sig.generics, &subst);
             let expected = Expected::new(
@@ -4242,8 +4297,14 @@ impl<'a> Checker<'a> {
     /// A call, resolved the way the interpreter resolves one: a local
     /// binding, then a declaration of this module, then a host item, then a
     /// builtin.
+    ///
+    /// `id` names the call expression itself rather than any of its parts,
+    /// because that is what a resolved target is recorded against: a
+    /// consumer holding the call is asking which declaration it reaches.
+    #[allow(clippy::too_many_arguments)]
     fn call(
         &mut self,
+        id: ExprId,
         callee: &Expr,
         generics: &[Type],
         args: &[Arg],
@@ -4259,14 +4320,14 @@ impl<'a> Checker<'a> {
                 if let ExprKind::Ident(head) = &base.kind {
                     if self.lookup(head).is_none() {
                         if let Some(ty) =
-                            self.call_qualified(head, name, args, trailing, span, expected)
+                            self.call_qualified(id, head, name, args, trailing, span, expected)
                         {
                             return ty;
                         }
                     }
                 }
                 let receiver = self.expr(base, None);
-                self.method_call(&receiver, name, args, trailing, span)
+                self.method_call(id, &receiver, name, args, trailing, span)
             }
             _ => {
                 let callee_ty = self.expr(callee, None);
@@ -4463,8 +4524,10 @@ impl<'a> Checker<'a> {
     /// `head.name(...)` where `head` is not a local binding: a host
     /// operation, an enum case, an associated function, or a method reached
     /// through its type's name.
+    #[allow(clippy::too_many_arguments)]
     fn call_qualified(
         &mut self,
+        id: ExprId,
         head: &str,
         name: &Ident,
         args: &[Arg],
@@ -4518,6 +4581,7 @@ impl<'a> Checker<'a> {
             let is_case = sig.cases.iter().any(|c| c.name == name.node);
             if !is_case {
                 if let Some(sig) = self.methods.get(&(key.clone(), name.node.clone())).cloned() {
+                    self.record_target(id, span.file, &key, &name.node);
                     self.check_receiver(&sig, &key, &name.node, span, false);
                     return Some(self.call_signature(
                         &sig,
@@ -4533,6 +4597,7 @@ impl<'a> Checker<'a> {
         }
         if self.structs.contains_key(&key) {
             if let Some(sig) = self.methods.get(&(key.clone(), name.node.clone())).cloned() {
+                self.record_target(id, span.file, &key, &name.node);
                 self.check_receiver(&sig, &key, &name.node, span, false);
                 return Some(self.call_signature(
                     &sig,
@@ -4859,7 +4924,7 @@ impl<'a> Checker<'a> {
         if !schema.is_enum() {
             return None;
         }
-        let qualified: Rc<str> = format!("{module}.{declared}").into();
+        let qualified: Arc<str> = format!("{module}.{declared}").into();
         if !schema.cases.contains(&case.node.as_str()) {
             let known: Vec<String> = schema.cases.iter().map(|c| (*c).to_string()).collect();
             self.diagnostics.push(
@@ -5080,7 +5145,7 @@ impl<'a> Checker<'a> {
             generics: MAP_ENTRY
                 .parameters
                 .iter()
-                .map(|name| Rc::from(*name))
+                .map(|name| Arc::from(*name))
                 .collect(),
             params: MAP_ENTRY
                 .fields
@@ -5129,7 +5194,7 @@ impl<'a> Checker<'a> {
             self.check_args_freely(args, trailing);
             return Ty::Struct(name.into(), vec![Ty::recovery(); sig.generics.len()]);
         }
-        let generics: Vec<Rc<str>> = sig.generics.clone();
+        let generics: Vec<Arc<str>> = sig.generics.clone();
         let stated = Checker::expected_arguments(name, expected);
         let subst = self.match_arguments(
             &sig.fields,
@@ -5185,7 +5250,7 @@ impl<'a> Checker<'a> {
         trailing: Option<&Expr>,
         span: Span,
     ) -> Ty {
-        let mut subst: BTreeMap<Rc<str>, Ty> = BTreeMap::new();
+        let mut subst: BTreeMap<Arc<str>, Ty> = BTreeMap::new();
         for (param, ty) in sig.generics.iter().zip(explicit) {
             subst.insert(param.clone(), ty);
         }
@@ -5279,14 +5344,14 @@ impl<'a> Checker<'a> {
     fn match_arguments(
         &mut self,
         params: &[ParamSig],
-        generics: &[Rc<str>],
-        mut subst: BTreeMap<Rc<str>, Ty>,
+        generics: &[Arc<str>],
+        mut subst: BTreeMap<Arc<str>, Ty>,
         args: &[Arg],
         trailing: Option<&Expr>,
         span: Span,
         what: &str,
         role: &str,
-    ) -> BTreeMap<Rc<str>, Ty> {
+    ) -> BTreeMap<Arc<str>, Ty> {
         let variadic_last = params.last().is_some_and(|p| p.variadic);
         let mut slots: Vec<Option<&Arg>> = vec![None; params.len()];
         let mut rest: Vec<&Arg> = Vec::new();
@@ -5296,7 +5361,7 @@ impl<'a> Checker<'a> {
         // already been reported, so the parameter it failed to fill is not
         // reported as missing too.
         let mut mislabeled = false;
-        let generic_set: BTreeSet<Rc<str>> = generics.iter().cloned().collect();
+        let generic_set: BTreeSet<Arc<str>> = generics.iter().cloned().collect();
 
         for arg in args {
             match &arg.label {
@@ -5488,8 +5553,8 @@ impl<'a> Checker<'a> {
         expected: &Ty,
         span: Span,
         param: &ParamSig,
-        generics: &BTreeSet<Rc<str>>,
-        subst: &mut BTreeMap<Rc<str>, Ty>,
+        generics: &BTreeSet<Arc<str>>,
+        subst: &mut BTreeMap<Arc<str>, Ty>,
         role: &str,
     ) {
         let unified = unify(expected, found, generics, subst, &self.view());
@@ -5509,11 +5574,11 @@ impl<'a> Checker<'a> {
     /// "unconstrained" means — nothing read so far states this type — and
     /// saying so is what keeps a form given to such a place from being asked
     /// to explain a silence that is not its own.
-    fn open(&self, ty: &Ty, generics: &[Rc<str>], subst: &BTreeMap<Rc<str>, Ty>) -> Ty {
+    fn open(&self, ty: &Ty, generics: &[Arc<str>], subst: &BTreeMap<Arc<str>, Ty>) -> Ty {
         if generics.is_empty() {
             return ty.clone();
         }
-        let map: BTreeMap<Rc<str>, Ty> = generics
+        let map: BTreeMap<Arc<str>, Ty> = generics
             .iter()
             .map(|g| {
                 (
@@ -5534,9 +5599,9 @@ impl<'a> Checker<'a> {
         arg: &Arg,
         element: &Ty,
         param: &ParamSig,
-        generics: &[Rc<str>],
-        generic_set: &BTreeSet<Rc<str>>,
-        subst: &mut BTreeMap<Rc<str>, Ty>,
+        generics: &[Arc<str>],
+        generic_set: &BTreeSet<Arc<str>>,
+        subst: &mut BTreeMap<Arc<str>, Ty>,
         role: &str,
     ) {
         if arg.spread {
@@ -5706,7 +5771,13 @@ impl<'a> Checker<'a> {
     /// A bound is checked here, at the call, because that is where a type
     /// parameter is instantiated; inside the body the parameter is rigid and
     /// its bound is a fact rather than an obligation.
-    fn check_bounds(&mut self, sig: &FnSig, subst: &BTreeMap<Rc<str>, Ty>, what: &str, span: Span) {
+    fn check_bounds(
+        &mut self,
+        sig: &FnSig,
+        subst: &BTreeMap<Arc<str>, Ty>,
+        what: &str,
+        span: Span,
+    ) {
         for (param, bounds) in &sig.bounds {
             let Some(ty) = subst.get(param) else {
                 continue;
@@ -5759,7 +5830,7 @@ impl<'a> Checker<'a> {
 
     /// The trait among `T`'s bounds that declares `method`, with its
     /// signature.
-    fn bound_method(&self, param: &str, method: &str) -> Option<(Rc<str>, FnSig)> {
+    fn bound_method(&self, param: &str, method: &str) -> Option<(Arc<str>, FnSig)> {
         for bound in self.bounds.get(param)? {
             if let Some(sig) = self.traits.get(&*bound.name).and_then(|m| m.get(method)) {
                 return Some((bound.name.clone(), sig.clone()));
@@ -5775,7 +5846,7 @@ impl<'a> Checker<'a> {
     /// written.
     fn param_method_call(
         &mut self,
-        param: &Rc<str>,
+        param: &Arc<str>,
         name: &Ident,
         args: &[Arg],
         trailing: Option<&Expr>,
@@ -5830,7 +5901,7 @@ impl<'a> Checker<'a> {
     /// find an implementation for it.
     fn dyn_method_call(
         &mut self,
-        trait_name: &Rc<str>,
+        trait_name: &Arc<str>,
         name: &Ident,
         args: &[Arg],
         trailing: Option<&Expr>,
@@ -5916,8 +5987,33 @@ impl<'a> Checker<'a> {
 
     // ------------------------------------------------------------ methods
 
+    /// Records that the call `id` reaches the method `method` declared on
+    /// the type `key` names.
+    ///
+    /// `key` is a canonical name — bare for a type this module declares, and
+    /// `module.Name` for one it meets through an import — so splitting it is
+    /// what turns "the name this checker files it under" into "the
+    /// declaration", which is what a consumer needs and what is the same
+    /// answer read from anywhere in the package.
+    fn record_target(&mut self, id: ExprId, file: FileId, key: &str, method: &str) {
+        let (module, type_name) = match key.split_once('.') {
+            Some((module, name)) => (module.to_string(), name.to_string()),
+            None => (self.module.name.clone(), key.to_string()),
+        };
+        self.facts.record_target(
+            file,
+            id,
+            MethodTarget {
+                module,
+                type_name,
+                method: method.to_string(),
+            },
+        );
+    }
+
     fn method_call(
         &mut self,
+        id: ExprId,
         receiver: &Ty,
         name: &Ident,
         args: &[Arg],
@@ -5932,6 +6028,7 @@ impl<'a> Checker<'a> {
             Ty::Struct(type_name, type_args) | Ty::Enum(type_name, type_args) => {
                 let key = (type_name.to_string(), name.node.clone());
                 if let Some(sig) = self.methods.get(&key).cloned() {
+                    self.record_target(id, span.file, type_name, &name.node);
                     self.check_receiver(&sig, type_name, &name.node, span, true);
                     let generics = self.declared_generics(type_name);
                     let subst = substitution(&generics, type_args);
@@ -6159,7 +6256,7 @@ impl<'a> Checker<'a> {
     }
 
     /// The type parameters a struct or enum declares.
-    fn declared_generics(&self, name: &str) -> Vec<Rc<str>> {
+    fn declared_generics(&self, name: &str) -> Vec<Arc<str>> {
         if let Some(sig) = self.structs.get(name) {
             return sig.generics.clone();
         }
@@ -6278,8 +6375,8 @@ fn check_entries(
 fn unify(
     param: &Ty,
     arg: &Ty,
-    generics: &BTreeSet<Rc<str>>,
-    subst: &mut BTreeMap<Rc<str>, Ty>,
+    generics: &BTreeSet<Arc<str>>,
+    subst: &mut BTreeMap<Arc<str>, Ty>,
     view: &ConformanceView<'_>,
 ) -> bool {
     if coerces(arg, param, view) {
@@ -6342,7 +6439,7 @@ fn unify(
 /// they are bounded by.
 struct ConformanceView<'c> {
     declared: &'c BTreeSet<(String, String)>,
-    bounds: &'c BTreeMap<Rc<str>, Vec<TraitBound>>,
+    bounds: &'c BTreeMap<Arc<str>, Vec<TraitBound>>,
 }
 
 /// Whether `ty` conforms to the trait named `trait_name`.
@@ -6475,7 +6572,7 @@ fn trait_signature(sig: &FnSig, name: &str) -> String {
 /// A short argument list means the arity was already reported, so the
 /// padding is a recovery unknown: the diagnostic exists and this stands
 /// where the argument the program did not write would have.
-fn substitution(generics: &[Rc<str>], args: &[Ty]) -> BTreeMap<Rc<str>, Ty> {
+fn substitution(generics: &[Arc<str>], args: &[Ty]) -> BTreeMap<Arc<str>, Ty> {
     generics
         .iter()
         .cloned()
@@ -6489,7 +6586,7 @@ fn substitution(generics: &[Rc<str>], args: &[Ty]) -> BTreeMap<Rc<str>, Ty> {
 
 /// Substitutes the arguments a type alias was written with into the type it
 /// expands to.
-fn expand_alias(generics: Vec<Rc<str>>, ty: Ty, arguments: Vec<Ty>) -> Ty {
+fn expand_alias(generics: Vec<Arc<str>>, ty: Ty, arguments: Vec<Ty>) -> Ty {
     let subst = generics
         .into_iter()
         .zip(
@@ -6517,7 +6614,7 @@ fn fit(mut args: Vec<Ty>, arity: usize) -> Vec<Ty> {
 struct BuiltinSig {
     /// Type parameters this signature binds, unified at the call site just
     /// like a declared function's.
-    generics: Vec<Rc<str>>,
+    generics: Vec<Arc<str>>,
     params: Vec<(&'static str, Ty)>,
     /// Whether the last parameter takes the rest of the arguments, as
     /// `Vector.of(items: T...)` does.
@@ -6969,7 +7066,7 @@ fn builtin_sig(
         generics: method
             .generics
             .iter()
-            .map(|generic| Rc::from(*generic))
+            .map(|generic| Arc::from(*generic))
             .collect(),
         params: method
             .params

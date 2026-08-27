@@ -22,7 +22,7 @@
 //!
 //! # An expression is lowered for its value or for its effect
 //!
-//! [`Position`] is the distinction. A statement's value is read by nothing,
+//! `Position` below is the distinction. A statement's value is read by nothing,
 //! and `()` is a value here — an assignment, a loop, and an `if` with no
 //! `else` all answer one — so lowering every expression the same way builds
 //! a `Unit` for a `Pop` to take away again. That was six of the twenty-five
@@ -925,7 +925,7 @@ impl<'a, 'l> Body<'a, 'l> {
     /// on the stack.
     ///
     /// Everything the expression does still happens; only its value goes
-    /// missing. See [`Position`] for why that is worth a second entry point.
+    /// missing. See `Position` for why that is worth a second entry point.
     fn effect(&mut self, expr: &'a Expr) -> Result<(), Unsupported> {
         self.expr_at(expr, Position::Effect)
     }

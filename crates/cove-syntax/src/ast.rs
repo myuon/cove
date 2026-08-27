@@ -344,8 +344,41 @@ pub enum StmtKind {
     Item(Box<Item>),
 }
 
+/// Identifies one expression within the file it was parsed from.
+///
+/// The id is assigned by [`number_unit`](crate::number::number_unit) once the
+/// file has been parsed, not by the parser itself: an expression the parser
+/// builds carries [`ExprId::UNSET`] until that pass has run over the whole
+/// unit. [`parse_file`](crate::parse_file) runs it, so a tree a caller
+/// receives never holds an unset id.
+///
+/// An id is unique within one [`SourceUnit`] and means nothing outside it.
+/// Every file numbers from zero, so an id is only ever readable alongside the
+/// file it came from, and comparing ids across files compares nothing.
+///
+/// It exists so that a pass can record what it worked out about an expression
+/// in a side table indexed by the id — a `Vec` as long as the file has
+/// expressions — instead of a map keyed by a hash of the expression. A hash
+/// cannot tell two identical subexpressions apart, and an address does not
+/// survive the tree being moved or cloned; a dense index does both, and is a
+/// load rather than a lookup.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct ExprId(pub u32);
+
+impl ExprId {
+    /// The id an expression has before `number_unit` has run.
+    ///
+    /// Every expression the parser builds starts here and none keeps it, so
+    /// this value marks a tree that was built by hand or never numbered
+    /// rather than one position within a file.
+    pub const UNSET: ExprId = ExprId(u32::MAX);
+}
+
 #[derive(Clone, Debug)]
 pub struct Expr {
+    /// Unique within the file this expression was parsed from. See
+    /// [`ExprId`].
+    pub id: ExprId,
     pub kind: ExprKind,
     pub span: Span,
 }
