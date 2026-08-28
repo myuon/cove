@@ -163,6 +163,7 @@ use std::rc::Rc;
 use cove_diag::{FileId, Span};
 use cove_schema::builtins;
 use cove_schema::hosts;
+use cove_schema::TypeSchema;
 use cove_sema::resolve::Program as Checked;
 use cove_sema::typeck::Ty;
 use cove_sema::{MethodTarget, Signature};
@@ -3263,11 +3264,8 @@ impl<'a, 'l> Body<'a, 'l> {
         args: &'a [Arg],
         span: Span,
     ) -> Result<(), Unsupported> {
-        if hosts::module(module).is_some_and(|schema| schema.declared_type(op).is_some()) {
-            return Err(Unsupported::new(
-                format!("`{module}.{op}`, which initializes a type a host declares"),
-                span,
-            ));
+        if let Some(declared) = hosts::module(module).and_then(|schema| schema.declared_type(op)) {
+            return self.make_host_type(module, declared, args, span);
         }
         no_var_argument(args, op)?;
         for arg in args {
@@ -3283,6 +3281,59 @@ impl<'a, 'l> Body<'a, 'l> {
             },
             span,
         );
+        Ok(())
+    }
+
+    /// `http.Route(method: ..., path: ..., handler: ...)`: one value of a
+    /// type a host module declares.
+    ///
+    /// This crosses no boundary. `Interpreter::init_host_type` is
+    /// `init_struct` with the field names read from a `TypeSchema` instead of
+    /// from a declaration — the same `assign_labels`, the same one value per
+    /// field, and an ordinary `Value::Struct` whose `type_name` is
+    /// `{module}.{Name}` and whose `opaque` is false — so it lowers to the
+    /// instruction that builds an ordinary struct, with the qualified name
+    /// the schema spells and the fields in the order the schema declares
+    /// them. `is_opaque` answers false for it in the VM for the reason it
+    /// answers false in the interpreter: no module of this package declares
+    /// `Route`.
+    ///
+    /// An enum a host declares is not written this way — `http.Method.Get`
+    /// is a case, and `init_host_type` reports the call as an error — so a
+    /// call that names one is refused rather than built.
+    ///
+    /// Which types a module declares is read from the schema this crate can
+    /// see, where the interpreter reads it from the `HostRegistry` the run
+    /// was given. The two answer differently only for a registry that left a
+    /// module out, which no runner builds: `cove run`, `cove test`, and
+    /// `embed` each register every host and let the grants decide what a
+    /// *call* may do. `Vm`'s own test harness registers every host for that
+    /// reason and no other.
+    fn make_host_type(
+        &mut self,
+        module: &str,
+        declared: &'static TypeSchema,
+        args: &'a [Arg],
+        span: Span,
+    ) -> Result<(), Unsupported> {
+        if declared.is_enum() {
+            return Err(Unsupported::new(
+                format!(
+                    "`{module}.{}`, which is a host enum and not a function",
+                    declared.name
+                ),
+                span,
+            ));
+        }
+        let names: Vec<&str> = declared.fields.iter().map(|field| field.name).collect();
+        every_argument_supplied(&names, args, declared.name, span)?;
+        no_var_argument(args, declared.name)?;
+        for arg in args {
+            self.expr(&arg.value)?;
+        }
+        let ty = self.outer.name(&format!("{module}.{}", declared.name));
+        let fields = self.outer.name(&names.join(","));
+        self.emit(Inst::MakeStruct { ty, fields }, span);
         Ok(())
     }
 
@@ -6487,6 +6538,31 @@ mod tests {
              \x20  2  load 0\n\
              \x20  3  get-field-at-scalar 1\n\
              \x20  4  int Add\n\
+             \x20  5  return-scalar\n"
+        );
+    }
+
+    /// A type a host module declares is built here rather than asked for
+    /// across the boundary.
+    ///
+    /// `Interpreter::init_host_type` is `init_struct` with the field names
+    /// read from a `TypeSchema`: the same `assign_labels`, one value per
+    /// field, and an ordinary `Value::Struct` named `{module}.{Name}`. So it
+    /// lowers to `make-struct`, the same instruction a declared struct's
+    /// initializer lowers to, and no `call-host` is emitted for it.
+    #[test]
+    fn a_type_a_host_declares_is_built_like_any_other_struct() {
+        assert_eq!(
+            listing(
+                "use http\n\nfn f() -> Int {\n  http.Response(status: 200, body: \"ok\").status\n}\n",
+                "f"
+            ),
+            "fn m.f arity=0 frame=0/0 -> Int\n\
+             \x20  0  const Int(200)\n\
+             \x20  1  const Str(\"ok\")\n\
+             \x20  2  make-struct http.Response fields=status,body\n\
+             \x20  3  get-field status\n\
+             \x20  4  value-to-scalar\n\
              \x20  5  return-scalar\n"
         );
     }

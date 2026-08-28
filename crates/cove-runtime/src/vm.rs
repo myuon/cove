@@ -2192,6 +2192,7 @@ mod tests {
     use crate::clock::{Clock, VirtualTime};
     use crate::files::Files;
     use crate::host::{Console, Env as EnvHost, Grants};
+    use crate::http::Http;
     use crate::interp::Interpreter;
 
     /// Every capability a differential run is granted.
@@ -2200,7 +2201,7 @@ mod tests {
     /// are about: a program that calls no host is unaffected by holding the
     /// capability to, and a program that calls one is compared against an
     /// interpreted run holding exactly the same grants.
-    const GRANTS: &[&str] = &["console", "clock", "env", "files"];
+    const GRANTS: &[&str] = &["console", "clock", "env", "files", "http"];
 
     /// A `console` sink a test can read back.
     #[derive(Clone, Default)]
@@ -2281,6 +2282,15 @@ mod tests {
         hosts.register(Box::new(EnvHost::new(BTreeMap::new())));
         hosts.register(Box::new(Clock::virtual_clock(VirtualTime::new())));
         hosts.register(Box::new(Files::in_memory(BTreeMap::new())));
+        // Registered although nothing here reaches the network, because a
+        // type a host module *declares* is asked of the registry rather than
+        // of the static schema: `HostRegistry::host_type` answers `None` for
+        // a module nobody registered, and the interpreter then reads
+        // `http.Response(...)` as an operation and reports an unknown host
+        // module. Every real runner registers every host, so a registry that
+        // left one out would make this harness the only place the two
+        // backends could differ about one.
+        hosts.register(Box::new(Http::recorded(BTreeMap::new(), Vec::new())));
         if let Some(budget) = budget {
             hosts.set_budget(budget);
         }
@@ -4213,6 +4223,30 @@ mod tests {
             )
             .value(),
             "Int(3)"
+        );
+    }
+
+    /// A value of a type a host module declares is an ordinary struct on
+    /// both backends.
+    ///
+    /// `Interpreter::init_host_type` builds a `Value::Struct` named
+    /// `{module}.{Name}` with `opaque` false and nothing else, so the VM's
+    /// `make-struct` is the whole of it: the shape table reads the qualified
+    /// name off the instruction, and `is_opaque` answers false because no
+    /// module of this package declares `Response`.
+    #[test]
+    fn a_type_a_host_declares_is_an_ordinary_struct_on_both_backends() {
+        let source = "use http\n\nexport fn main() -> String {\n  let r = http.Response(status: 200, body: \"ok\")\n  \"{r} {r.status}\"\n}\n";
+        assert_eq!(
+            agree(source).value(),
+            "Str(\"Response(status: 200, body: ok) 200\")"
+        );
+        assert!(
+            main_of(source)
+                .lines()
+                .any(|line| line.contains("make-struct http.Response fields=status,body")),
+            "the host type is built rather than asked for:\n{}",
+            main_of(source)
         );
     }
 

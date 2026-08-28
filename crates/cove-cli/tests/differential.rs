@@ -165,6 +165,14 @@ use cove_sema::resolve::Program as Checked;
 /// number and leaves the calling convention where it was.
 /// `tests/e2e:fn_defaults` and `tests/e2e:fn_recursion` are the cases that
 /// gained a lowering.
+///
+/// It stayed at 70 when `http.Route` began to lower, and that is worth
+/// recording rather than leaving as a number that did not move.
+/// `examples:server` is the only case in the corpus that initializes a type
+/// a host declares, and the line that does it also writes `http.Method.Get`
+/// — a case of an enum a host declares, which is a construct of its own —
+/// so the case now refuses for that instead. The function it passes as
+/// `handler:` is a third.
 const LOWERED_FLOOR: usize = 70;
 
 // ------------------------------------------------------------------ the test
