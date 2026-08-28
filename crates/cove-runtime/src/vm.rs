@@ -2786,6 +2786,57 @@ mod tests {
         );
     }
 
+    /// A variadic parameter, answered against the interpreter for every
+    /// count of arguments a call can pass it.
+    ///
+    /// The oracle is `Interpreter::bind_params`, whose variadic arm builds
+    /// `Value::Array` out of whatever `assign_labels` left in the
+    /// parameter's slot and in `rest`, and declares it immutable. So a
+    /// variadic parameter given nothing is an empty `Array` rather than a
+    /// missing argument, and one given a label is the one element that label
+    /// named.
+    #[test]
+    fn a_variadic_parameter_is_the_array_the_interpreter_binds() {
+        let join = "fn join(sep: String, items: String...) -> String {\n  var text = \"\"\n  for item in items {\n    text = \"{text}{sep}{item}\"\n  }\n  \"{items.length()}{text}\"\n}\n\n";
+        let cases: &[(&str, &str)] = &[
+            ("join(\"-\", \"a\", \"b\", \"c\")", "Str(\"3-a-b-c\")"),
+            ("join(\"-\", \"a\")", "Str(\"1-a\")"),
+            ("join(\"-\")", "Str(\"0\")"),
+            ("join(\"-\", items: \"a\")", "Str(\"1-a\")"),
+            ("join(sep: \"-\", items: \"a\")", "Str(\"1-a\")"),
+        ];
+        for (call, expected) in cases {
+            assert_eq!(
+                agree(&format!(
+                    "{join}export fn main() -> String {{\n  {call}\n}}\n"
+                ))
+                .value(),
+                *expected,
+                "for `{call}`"
+            );
+        }
+    }
+
+    /// A variadic parameter whose elements are `Int`, which is the case a
+    /// signature read carelessly would get wrong.
+    ///
+    /// `record_signature` stores a variadic parameter as the element type it
+    /// was written as, so `items: Int...` answers `Int` there while the body
+    /// sees `Array<Int>`. The listing is asserted beside the answer because
+    /// nothing about the answer would show which stack the slot was numbered
+    /// in — the callee would load a word where an array was pushed, and the
+    /// whole frame would be wrong from there.
+    #[test]
+    fn a_variadic_parameter_of_ints_arrives_as_an_array() {
+        let source = "fn total(items: Int...) -> Int {\n  var sum = 0\n  for item in items {\n    sum += item\n  }\n  sum\n}\n\nexport fn main() -> Int {\n  total(1, 2, 3) + total()\n}\n";
+        assert_eq!(agree(source).value(), "Int(6)");
+        let listed = main_of(source);
+        assert!(listed.contains("make-array 3"), "{listed}");
+        assert!(listed.contains("make-array 0"), "{listed}");
+        // One argument for one parameter, on the value stack, both times.
+        assert_eq!(listed.matches("argc=1/0").count(), 2, "{listed}");
+    }
+
     // -------------------------------------------------------- structs
 
     const CURSOR: &str = "struct Cursor {\n  at: Int\n  step: Int\n}\n\n";

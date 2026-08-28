@@ -118,6 +118,15 @@ use cove_sema::resolve::Program as Checked;
 /// instruction that made one and refused every range a `for` header did not
 /// consume. `tests/e2e:values_range` is the case that gained a lowering, and
 /// it is the only one the corpus held.
+///
+/// It stayed at 56 when a variadic parameter began to lower, and that is
+/// worth recording rather than leaving as a number that did not move.
+/// `tests/e2e:fn_variadic` is the only case in the corpus that declares one,
+/// and it also spreads — `joinAll("-", ...ready)` — so it now refuses for
+/// the `...` standing behind the variadic parameter rather than for the
+/// parameter itself. A spread is its own construct: it reads an `Array` or a
+/// `Vector` and refuses anything else, which is a runtime question and not
+/// one `make-array` answers.
 const LOWERED_FLOOR: usize = 56;
 
 // ------------------------------------------------------------------ the test

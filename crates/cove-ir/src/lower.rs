@@ -160,7 +160,7 @@ use cove_sema::typeck::Ty;
 use cove_sema::{MethodTarget, Signature};
 use cove_syntax::ast::{
     Arg, BinaryOp as SourceBinary, Block, EnumDecl, Expr, ExprId, ExprKind, FnDecl, ItemKind,
-    MatchArm, Pattern, PatternKind, Stmt, StmtKind, StrPart, StructDecl, Type, TypeKind,
+    MatchArm, Param, Pattern, PatternKind, Stmt, StmtKind, StrPart, StructDecl, Type, TypeKind,
     UnaryOp as SourceUnary,
 };
 
@@ -685,13 +685,27 @@ impl<'a> Lowering<'a> {
             body.declare(Some("self"), false, kind);
         }
         for (at, param) in decl.params.iter().enumerate() {
-            reject_parameter(param.is_var, param.variadic, param.ty.as_ref(), param.span)?;
+            reject_parameter(param, at + 1 == decl.params.len())?;
             // An ordinary parameter receives a shallow copy and is a
             // read-only place inside the body, exactly as the interpreter
             // declares one; a `var` parameter is refused above.
-            let kind = signature
-                .and_then(|signature| signature.params.get(at))
-                .map_or(SlotKind::Value, slot_kind_of);
+            //
+            // A variadic parameter is one ordinary value slot holding the
+            // `Array<T>` the call site collected, which is what
+            // `bind_params` declares one as — `env.declare(name,
+            // Place::binding(Value::Array(items.into()), false))`, immutable
+            // and holding an array. It is not asked of the signature,
+            // because `record_signature` deliberately stores what the
+            // parameter was *written* as rather than the array the body
+            // sees: `items: Int...` would answer `Int` there, and a scalar
+            // slot is exactly what this must not be.
+            let kind = if param.variadic {
+                SlotKind::Value
+            } else {
+                signature
+                    .and_then(|signature| signature.params.get(at))
+                    .map_or(SlotKind::Value, slot_kind_of)
+            };
             params.push(kind);
             body.declare(Some(param.name.node.as_str()), false, kind);
         }
@@ -2595,15 +2609,18 @@ impl<'a, 'l> Body<'a, 'l> {
                 span,
             ));
         }
-        for param in &decl.params {
-            reject_parameter(param.is_var, param.variadic, param.ty.as_ref(), param.span)?;
+        for (at, param) in decl.params.iter().enumerate() {
+            reject_parameter(param, at + 1 == decl.params.len())?;
         }
         let names: Vec<&str> = decl
             .params
             .iter()
             .map(|param| param.name.node.as_str())
             .collect();
-        arguments_in_order(&names, args, &what, span)?;
+        // `reject_parameter` has already refused a variadic parameter that
+        // is not the last one, so the last one is the only one there can be.
+        let variadic = decl.params.last().is_some_and(|param| param.variadic);
+        arguments_in_order(&names, args, &what, variadic, span)?;
 
         // The same signature the callee's own lowering reads, so the two
         // cannot disagree about where an argument goes; a declaration the
@@ -2648,7 +2665,11 @@ impl<'a, 'l> Body<'a, 'l> {
             }
             (None, None) => {}
         }
-        for (at, arg) in args.iter().enumerate() {
+        // Every parameter but a variadic one takes exactly one argument,
+        // and `arguments_in_order` has already refused a call where those do
+        // not stand in order.
+        let fixed = names.len() - usize::from(variadic);
+        for (at, arg) in args.iter().take(fixed).enumerate() {
             let kind = signature
                 .and_then(|signature| signature.params.get(at))
                 .map_or(SlotKind::Value, slot_kind_of);
@@ -2657,6 +2678,26 @@ impl<'a, 'l> Body<'a, 'l> {
                 SlotKind::Scalar(_) => self.expr_scalar(&arg.value)?,
                 SlotKind::Value => self.expr(&arg.value)?,
             }
+        }
+        if variadic {
+            // The arguments left over are the elements of the one `Array`
+            // the callee receives, so they are pushed left to right and
+            // collected here rather than passed as arguments of their own.
+            // That is the whole of the change at a call site: the callee
+            // still gets one argument per parameter and the calling
+            // convention does not move.
+            //
+            // They go onto the value stack whatever the checker settled
+            // about each of them, because an `Array` holds `Value`s and
+            // `Inst::MakeArray` reads that stack. Zero of them is an empty
+            // `Array`, which is what `bind_params` builds when
+            // `assign_labels` left it nothing.
+            let elements = &args[fixed..];
+            for arg in elements {
+                self.expr(&arg.value)?;
+            }
+            self.emit(Inst::MakeArray(elements.len() as u32), span);
+            into(SlotKind::Value);
         }
         let answer = signature.and_then(|signature| scalar_of_ty(&signature.ret));
         // This is the whole of the reachability rule: the call being emitted
@@ -2765,7 +2806,7 @@ impl<'a, 'l> Body<'a, 'l> {
             .iter()
             .map(|field| field.name.node.as_str())
             .collect();
-        arguments_in_order(&names, args, &decl.name.node, span)?;
+        arguments_in_order(&names, args, &decl.name.node, false, span)?;
         for arg in args {
             self.expr(&arg.value)?;
         }
@@ -2861,7 +2902,7 @@ impl<'a, 'l> Body<'a, 'l> {
             .iter()
             .map(|field| field.name)
             .collect();
-        arguments_in_order(&names, args, builtins::MAP_ENTRY.name, span)?;
+        arguments_in_order(&names, args, builtins::MAP_ENTRY.name, false, span)?;
         for arg in args {
             self.expr(&arg.value)?;
         }
@@ -3271,10 +3312,31 @@ fn qualified_case(type_name: &str, case: &str) -> String {
 /// default would need the callee to evaluate an expression the IR does not
 /// carry, and a reordering would put the pushes in an order the receiver
 /// does not expect.
+///
+/// `variadic` says the last parameter takes every argument left over, which
+/// changes two of the three questions and neither of the others. There is no
+/// longer a most: `assign_labels` puts a positional argument past the last
+/// parameter into `rest` rather than reporting one too many. And there is no
+/// longer one argument each: the fewest a call can pass is the parameters
+/// *before* the variadic one, since a variadic parameter given nothing is an
+/// empty `Array` rather than a missing argument.
+///
+/// A label is unchanged, and that is what makes the surprising case safe
+/// without a rule of its own. `assign_labels` will accept
+/// `f(1, 2, items: 3)` and bind `items` to `[3, 2]` — the labelled argument
+/// first and the ones that fell into `rest` after it, which is also what the
+/// checker's `match_arguments` does — and a lowering that pushed those left
+/// to right would have them the other way round. The existing demand that a
+/// label name the parameter standing at its own position refuses that call
+/// before the question arises. What survives it is a label on the variadic
+/// parameter written in the variadic parameter's own place, and since a
+/// positional argument after a label is refused too, that is one argument,
+/// which is one element.
 fn arguments_in_order(
     names: &[&str],
     args: &[Arg],
     what: &str,
+    variadic: bool,
     span: Span,
 ) -> Result<(), Unsupported> {
     let mut labelled = false;
@@ -3306,7 +3368,7 @@ fn arguments_in_order(
                         arg.span,
                     ));
                 }
-                if position >= names.len() {
+                if !variadic && position >= names.len() {
                     return Err(Unsupported::new(
                         format!("a call to `{what}` with more arguments than it has parameters"),
                         arg.span,
@@ -3315,7 +3377,8 @@ fn arguments_in_order(
             }
         }
     }
-    if args.len() != names.len() {
+    let fewest = names.len() - usize::from(variadic);
+    if args.len() < fewest || (!variadic && args.len() > fewest) {
         return Err(Unsupported::new(
             format!("a call to `{what}` that does not supply one argument for every parameter"),
             span,
@@ -3557,19 +3620,46 @@ fn mentions_dyn(ty: &Type) -> bool {
 }
 
 /// Refuses a parameter the IR has no shape for.
-fn reject_parameter(
-    is_var: bool,
-    variadic: bool,
-    ty: Option<&Type>,
-    span: Span,
-) -> Result<(), Unsupported> {
-    if is_var {
-        return Err(Unsupported::new("a `var` parameter", span));
+///
+/// A variadic parameter has one, and it is an ordinary value slot holding
+/// the `Array<T>` the call site collected — see [`Body::call_declared`]. The
+/// two shapes it can be written in that nothing has decided a meaning for
+/// are refused here instead.
+///
+/// **Not the last parameter.** `Interpreter::assign_labels` gathers the
+/// left-over arguments into `rest` only when the *last* parameter is
+/// variadic, while `bind_params` wraps *any* variadic parameter's one slot
+/// in an `Array`. So a variadic parameter written anywhere else is an array
+/// of at most one element, which is a shape nobody meant and which the
+/// parser and the checker both let through. Refusing says so rather than
+/// picking one of the two readings.
+///
+/// **Written with a default.** `bind_params` tests `param.variadic` before
+/// it looks at `param.default` and then `continue`s, and the checker's
+/// `match_arguments` does the same, so a default on a variadic parameter is
+/// dead code that neither of them can ever reach. `parse_param` accepts
+/// `items: T... = x` all the same. Lowering it would mean lowering a
+/// construct whose meaning is an accident of the order two `if`s are
+/// written in.
+fn reject_parameter(param: &Param, is_last: bool) -> Result<(), Unsupported> {
+    if param.is_var {
+        return Err(Unsupported::new("a `var` parameter", param.span));
     }
-    if variadic {
-        return Err(Unsupported::new("a variadic parameter", span));
+    if param.variadic {
+        if !is_last {
+            return Err(Unsupported::new(
+                "a variadic parameter that is not the last one",
+                param.span,
+            ));
+        }
+        if param.default.is_some() {
+            return Err(Unsupported::new(
+                "a variadic parameter written with a default",
+                param.span,
+            ));
+        }
     }
-    if let Some(ty) = ty {
+    if let Some(ty) = &param.ty {
         reject_dyn(ty, "a `dyn` parameter")?;
     }
     Ok(())
@@ -4769,6 +4859,162 @@ mod tests {
         );
     }
 
+    /// The source every variadic test below is a call written into.
+    const VARIADIC: &str = "fn join(sep: String, items: String...) -> Int {\n  items.length()\n}\n";
+
+    /// One `join(...)` call, lowered as the body of `f`.
+    fn variadic_call(call: &str) -> String {
+        listing(
+            &format!("{VARIADIC}\nfn f() -> Int {{\n  {call}\n}}\n"),
+            "f",
+        )
+    }
+
+    /// A variadic parameter is one value slot, and the arguments that fill
+    /// it are collected into it at the call site.
+    ///
+    /// This is the whole of the change: the callee still receives exactly
+    /// one argument per parameter — `argc=2/0` for two parameters — so the
+    /// calling convention does not move at all. `make-array` is where three
+    /// arguments become the two the callee is called with.
+    #[test]
+    fn a_variadic_call_collects_its_arguments_into_one() {
+        assert_eq!(
+            variadic_call("join(\"-\", \"a\", \"b\")"),
+            "fn m.f arity=0 frame=0/0 -> Int\n\
+             \x20  0  const Str(\"-\")\n\
+             \x20  1  const Str(\"a\")\n\
+             \x20  2  const Str(\"b\")\n\
+             \x20  3  make-array 2\n\
+             \x20  4  call m.join argc=2/0 -> scalar\n\
+             \x20  5  return-scalar\n"
+        );
+    }
+
+    /// A variadic parameter given nothing is an empty `Array`, not a missing
+    /// argument.
+    ///
+    /// `Interpreter::assign_labels` leaves its slot empty and `rest` empty,
+    /// and `bind_params` builds `Value::Array` out of the two, so the callee
+    /// is still called with one argument for every parameter.
+    #[test]
+    fn a_variadic_parameter_given_nothing_is_an_empty_array() {
+        assert_eq!(
+            variadic_call("join(\"-\")"),
+            "fn m.f arity=0 frame=0/0 -> Int\n\
+             \x20  0  const Str(\"-\")\n\
+             \x20  1  make-array 0\n\
+             \x20  2  call m.join argc=2/0 -> scalar\n\
+             \x20  3  return-scalar\n"
+        );
+        assert_eq!(
+            listing(
+                "fn count(items: Int...) -> Int {\n  items.length()\n}\n\nfn f() -> Int {\n  count()\n}\n",
+                "f"
+            ),
+            "fn m.f arity=0 frame=0/0 -> Int\n\
+             \x20  0  make-array 0\n\
+             \x20  1  call m.count argc=1/0 -> scalar\n\
+             \x20  2  return-scalar\n"
+        );
+    }
+
+    /// A variadic parameter is a value slot even where its element type is
+    /// one the scalar stack holds.
+    ///
+    /// `items: Int...` is an `Array<Int>` inside the body, and `params=[value]`
+    /// is what says the lowering read that rather than the `Int` the checker
+    /// recorded: `record_signature` stores a variadic parameter as what it
+    /// was *written* as, which is the element type, so asking the signature
+    /// here would have numbered the slot in the scalar stack and the callee
+    /// would have loaded a word where an array was pushed.
+    #[test]
+    fn a_variadic_parameter_of_ints_is_still_a_value_slot() {
+        assert_eq!(
+            listing(
+                "fn count(items: Int...) -> Int {\n  items.length()\n}\n\nfn f() -> Int {\n  count(1, 2)\n}\n",
+                "count"
+            ),
+            "fn m.count arity=1 frame=1/0 params=[value] -> Int\n\
+             \x20  0  load 0\n\
+             \x20  1  call-builtin length argc=0\n\
+             \x20  2  value-to-scalar\n\
+             \x20  3  return-scalar\n"
+        );
+    }
+
+    /// A label on the variadic parameter, written in its own place, is one
+    /// element.
+    ///
+    /// `assign_labels` puts a labelled argument in that parameter's slot and
+    /// `bind_params` makes it the array's first element; no positional
+    /// argument may follow a label, so there is nothing else for the array
+    /// to hold. The call `join(1, 2, items: 3)` — where the interpreter
+    /// would answer `[3, 2]`, the labelled argument before the ones that
+    /// fell past it — is refused by the rule that a label names the
+    /// parameter standing at its own position, which is why this one needs
+    /// no rule of its own.
+    #[test]
+    fn a_labelled_variadic_argument_is_one_element() {
+        assert_eq!(
+            variadic_call("join(\"-\", items: \"a\")"),
+            "fn m.f arity=0 frame=0/0 -> Int\n\
+             \x20  0  const Str(\"-\")\n\
+             \x20  1  const Str(\"a\")\n\
+             \x20  2  make-array 1\n\
+             \x20  3  call m.join argc=2/0 -> scalar\n\
+             \x20  4  return-scalar\n"
+        );
+        assert_eq!(
+            refused(&format!(
+                "{VARIADIC}\nfn f() -> Int {{\n  join(\"-\", \"a\", items: \"b\")\n}}\n"
+            )),
+            "a call to `join` whose arguments do not stand in declaration order"
+        );
+    }
+
+    /// The two shapes a variadic parameter can be written in that nothing
+    /// has decided a meaning for.
+    ///
+    /// Both parse and both check. A variadic parameter that is not the last
+    /// one is an array of at most one element, because `assign_labels`
+    /// gathers `rest` only for the last parameter while `bind_params` wraps
+    /// any variadic one; and a default written on a variadic parameter is
+    /// unreachable, because `bind_params` tests `variadic` first and
+    /// `continue`s.
+    #[test]
+    fn the_variadic_shapes_nothing_decided_a_meaning_for_are_refused() {
+        assert_eq!(
+            refused(
+                "fn f(items: Int..., last: Int) -> Int {\n  last\n}\n\nfn g() -> Int {\n  f(1, last: 2)\n}\n"
+            ),
+            "a variadic parameter that is not the last one"
+        );
+        assert_eq!(
+            refused(
+                "fn f(items: Int... = 1) -> Int {\n  items.length()\n}\n\nfn g() -> Int {\n  f()\n}\n"
+            ),
+            "a variadic parameter written with a default"
+        );
+    }
+
+    /// A parameter left to its default still refuses, variadic call or not.
+    ///
+    /// A variadic parameter takes nothing from that rule except itself: it
+    /// is why there is no longer a *most*, and it lowers the fewest by
+    /// exactly one. A default is a separate piece of work — the callee
+    /// evaluates it, and it may read the parameters before it — so a call
+    /// that leaves one unfilled is still reported rather than guessed at.
+    #[test]
+    fn a_default_before_a_variadic_parameter_still_refuses() {
+        assert_eq!(
+            refused(
+                "fn join(sep: String = \"-\", items: String...) -> Int {\n  items.length()\n}\n\nfn f() -> Int {\n  join()\n}\n"
+            ),
+            "a call to `join` that does not supply one argument for every parameter"
+        );
+    }
+
     /// A range used as a value builds one, from two bounds on the scalar
     /// stack.
     ///
@@ -5629,10 +5875,6 @@ mod tests {
             (
                 "`g`, a function used as a value",
                 "fn g() -> Int {\n  1\n}\n\nfn f() -> Int {\n  let h = g\n  1\n}\n",
-            ),
-            (
-                "a variadic parameter",
-                "fn g(items: Int...) -> Int {\n  1\n}\n\nfn f() -> Int {\n  g(1, 2)\n}\n",
             ),
             (
                 "a call to `g` whose arguments do not stand in declaration order",
