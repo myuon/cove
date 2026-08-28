@@ -220,7 +220,17 @@ use cove_sema::resolve::Program as Checked;
 /// every path that reads a call's arguments would have to remember to use.
 /// `tests/e2e:type_result` and `examples:config` are the cases that gained a
 /// lowering.
-const LOWERED_FLOOR: usize = 76;
+///
+/// 76 to 77: a declared function used as a value is a closure over nothing.
+/// `Interpreter::eval_ident` builds one with `captures: Vec::new()`, because
+/// a declaration reads no environment — the whole of what makes a function a
+/// value is that it can be called through one. The specialisation a closure
+/// is made of is not the one a direct call reaches: `cove_ir::Inst::CallValue`
+/// puts every argument on the value stack and reads the answer off it, and a
+/// convention is what a slot number means, so the body is lowered a second
+/// time under that convention. `examples:cq` — `step: foldRevenue` — is the
+/// case that gained a lowering, and it is the only one the corpus held.
+const LOWERED_FLOOR: usize = 77;
 
 // ------------------------------------------------------------------ the test
 

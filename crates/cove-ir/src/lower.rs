@@ -357,6 +357,23 @@ enum Instance {
         /// collects whatever is left over into the one `Array` it receives
         /// and an empty `Array` is an argument like any other.
         supplied: Vec<bool>,
+        /// Whether this is the specialisation a closure is made of.
+        ///
+        /// A declared function used as a value is called through
+        /// [`Inst::CallValue`], which knows nothing about its target, so
+        /// every argument arrives on the value stack and the answer comes
+        /// back on it. That is a different convention from the one the
+        /// declaration's own signature names, and a convention is what a
+        /// slot number means — so it is a different function, numbered
+        /// beside the one a direct call reaches rather than replacing it.
+        ///
+        /// A body under this convention is lowered the way a body whose
+        /// bindings the checker abstained about is: an `Int` parameter is a
+        /// value slot, and `Body::expr_scalar` moves it across where
+        /// arithmetic wants it. The same thing `Body::rooted` already does
+        /// to a binding a place is rooted at, for the same reason — both
+        /// representations hold the same value.
+        as_value: bool,
     },
     /// An index into [`Lowering::lambdas`].
     Lambda(usize),
@@ -370,6 +387,7 @@ impl Instance {
         Instance::Declared {
             key,
             supplied: vec![true; params],
+            as_value: false,
         }
     }
 }
@@ -777,7 +795,11 @@ impl<'a> Lowering<'a> {
     /// Lowers one function into its instructions.
     fn function(&mut self, id: FunctionId) -> Result<Function, Unsupported> {
         match self.reached[id.0 as usize].clone() {
-            Instance::Declared { key, supplied } => self.declared_function(key, &supplied),
+            Instance::Declared {
+                key,
+                supplied,
+                as_value,
+            } => self.declared_function(key, &supplied, as_value),
             Instance::Lambda(index) => self.lambda_function(index),
         }
     }
@@ -889,7 +911,12 @@ impl<'a> Lowering<'a> {
     }
 
     /// Lowers one declared function into its instructions.
-    fn declared_function(&mut self, key: Key, supplied: &[bool]) -> Result<Function, Unsupported> {
+    fn declared_function(
+        &mut self,
+        key: Key,
+        supplied: &[bool],
+        as_value: bool,
+    ) -> Result<Function, Unsupported> {
         let declared = self.declaration(key);
         let module = declared.module;
         let name: Rc<str> = declared.name.as_str().into();
@@ -912,7 +939,51 @@ impl<'a> Lowering<'a> {
         // before it, which is the same thing an abstention about a binding
         // gets.
         let signature = self.signature(key);
-        let returns = signature.map_or(SlotKind::Value, |signature| slot_kind_of(&signature.ret));
+        let returns = match as_value {
+            // A closure answers on the value stack whatever the declaration
+            // says, because `Inst::CallValue` reads exactly that one and has
+            // no callee to have asked.
+            true => SlotKind::Value,
+            false => signature.map_or(SlotKind::Value, |signature| slot_kind_of(&signature.ret)),
+        };
+        if as_value {
+            // The three shapes a closure has no way to express, and each is
+            // refused rather than approximated. A `var` parameter names the
+            // caller's storage, and every argument of a call through a value
+            // travels on the value stack; a variadic parameter collects
+            // leftovers, and the call supplies a count with nothing to say
+            // which of them were leftovers; and a default is used by a call
+            // that omits an argument, which is what numbers a specialisation
+            // — but a call through a value supplies `arity` arguments and
+            // there is no supplied-set for one to be keyed by.
+            if let Some(param) = decl.params.iter().find(|param| param.is_var) {
+                return Err(Unsupported::new(
+                    format!(
+                        "`{}` used as a value, whose parameter `{}` is `var`",
+                        declared.name, param.name.node
+                    ),
+                    param.span,
+                ));
+            }
+            if let Some(param) = decl.params.iter().find(|param| param.variadic) {
+                return Err(Unsupported::new(
+                    format!(
+                        "`{}` used as a value, whose parameter `{}` is variadic",
+                        declared.name, param.name.node
+                    ),
+                    param.span,
+                ));
+            }
+            if let Some(param) = decl.params.iter().find(|param| param.default.is_some()) {
+                return Err(Unsupported::new(
+                    format!(
+                        "`{}` used as a value, whose parameter `{}` has a default",
+                        declared.name, param.name.node
+                    ),
+                    param.span,
+                ));
+            }
+        }
 
         // In the order a call supplies them, which is what makes an argument
         // become a slot without moving: the receiver first, then the
@@ -967,7 +1038,7 @@ impl<'a> Lowering<'a> {
                 // parameter out rather than lowering a place that names
                 // nothing.
                 SlotKind::Place
-            } else if param.variadic {
+            } else if param.variadic || as_value {
                 SlotKind::Value
             } else {
                 signature
@@ -1041,10 +1112,14 @@ impl<'a> Lowering<'a> {
             params,
             returns,
             has_receiver: decl.receiver.is_some(),
+            // A declared function used as a value is a closure over nothing:
+            // `Interpreter::eval_ident` builds one with `captures:
+            // Vec::new()`, because a declaration reads no environment.
             captures: Vec::new(),
-            // A declared function is not a closure until something makes one
-            // of it, and nothing does yet.
-            written_params: Vec::new(),
+            written_params: match as_value {
+                true => decl.params.clone(),
+                false => Vec::new(),
+            },
             block_fuel: block_fuel(&finished.code),
             code: finished.code,
             spans: finished.spans,
@@ -2428,11 +2503,32 @@ impl<'a, 'l> Body<'a, 'l> {
             );
             return Ok(());
         }
-        if self.outer.function_of(self.module, name).is_some() {
-            return Err(Unsupported::new(
-                format!("`{name}`, a function used as a value"),
+        if let Some(key) = self.outer.function_of(self.module, name) {
+            // A closure over nothing. `Interpreter::eval_ident` builds one
+            // with `captures: Vec::new()`, because a declaration reads no
+            // environment — the whole of what makes a function a value is
+            // that it can be called through one.
+            //
+            // The specialisation it names is not the one a direct call
+            // reaches. A call through a value puts every argument on the
+            // value stack and reads the answer off it, and a convention is
+            // what a slot number means, so the body is lowered a second time
+            // under that convention rather than called under a convention
+            // nothing at the call site could have known.
+            let params = self.outer.declaration(key).decl.params.len();
+            let function = self.outer.number(Instance::Declared {
+                key,
+                supplied: vec![true; params],
+                as_value: true,
+            });
+            self.emit(
+                Inst::MakeClosure {
+                    function,
+                    captures: 0,
+                },
                 span,
-            ));
+            );
+            return Ok(());
         }
         if self.outer.struct_of(self.module, name).is_some()
             || self.outer.declares_enum(self.module, name)
@@ -3612,7 +3708,11 @@ impl<'a, 'l> Body<'a, 'l> {
         // This is the whole of the reachability rule: the call being emitted
         // is what makes the target part of the program, so the target is
         // numbered here and nowhere else.
-        let function = self.outer.number(Instance::Declared { key, supplied });
+        let function = self.outer.number(Instance::Declared {
+            key,
+            supplied,
+            as_value: false,
+        });
         self.emit(
             Inst::Call {
                 function,
@@ -6243,6 +6343,50 @@ mod tests {
         );
     }
 
+    /// A declared function used as a value is a closure over nothing, and it
+    /// is not the function a direct call reaches.
+    ///
+    /// `twice` is called both ways here. The direct call takes its argument
+    /// on the scalar stack and answers there, because the checker settled
+    /// `Int` at both ends; the specialisation a closure is made of takes it
+    /// on the value stack and answers there, because `call-value` reads
+    /// exactly those and has no callee to have asked. The body is the same
+    /// body, lowered twice, with the boundary instructions in the second one
+    /// where the first needed none — which is what a binding the checker
+    /// abstained about already gets.
+    #[test]
+    fn a_function_used_as_a_value_is_a_closure_over_nothing() {
+        let source = "fn twice(n: Int) -> Int {\n  n * 2\n}\n\n\
+                      fn f() -> Int {\n  let g = twice\n  twice(1) + g(2)\n}\n";
+        assert_eq!(
+            specialisation(source, "twice", 1),
+            "fn m.twice arity=1 frame=0/1 params=[Int] -> Int\n\
+             \x20  0  load-scalar 0\n\
+             \x20  1  scalar-const 2\n\
+             \x20  2  int Mul\n\
+             \x20  3  return-scalar\n"
+        );
+        let program = lower(&checked(source)).expect("the program lowers");
+        validate(&program).expect("the lowering holds the VM's invariants");
+        let boxed = program
+            .functions
+            .iter()
+            .position(|function| {
+                &*function.name == "twice" && matches!(function.returns, SlotKind::Value)
+            })
+            .expect("`twice` is lowered a second time, as a value");
+        assert_eq!(
+            crate::render(&program, FunctionId(boxed as u32)),
+            "fn m.twice arity=1 frame=1/0 params=[value] -> value\n\
+             \x20  0  load 0\n\
+             \x20  1  value-to-scalar\n\
+             \x20  2  scalar-const 2\n\
+             \x20  3  int Mul\n\
+             \x20  4  scalar-to-value Int\n\
+             \x20  5  return\n"
+        );
+    }
+
     /// `f(x) { ... }` is sugar: the trailing closure is the last positional
     /// argument and is lowered exactly where a written one would be.
     ///
@@ -8196,8 +8340,8 @@ mod tests {
                 "fn f() -> Int {\n  fn g() -> Int {\n    1\n  }\n  g()\n}\n",
             ),
             (
-                "`g`, a function used as a value",
-                "fn g() -> Int {\n  1\n}\n\nfn f() -> Int {\n  let h = g\n  1\n}\n",
+                "`g` used as a value, whose parameter `n` has a default",
+                "fn g(n: Int = 1) -> Int {\n  n\n}\n\nfn f() -> Int {\n  let h = g\n  1\n}\n",
             ),
             (
                 "a call to `g` whose arguments do not stand in declaration order",
