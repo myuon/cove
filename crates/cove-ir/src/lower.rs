@@ -1165,6 +1165,30 @@ impl<'a, 'l> Body<'a, 'l> {
         self.binding(name).is_some_and(|binding| binding.writable)
     }
 
+    /// Whether `expr` is a place, and whether source may write it — `Place`'s
+    /// own rule in `crates/cove-runtime/src/interp.rs`, read here at lowering
+    /// time instead of at run time.
+    ///
+    /// Mirrors `Interpreter::resolve_place_opt`: walk down through
+    /// `ExprKind::Field { base, .. }` to the expression's root, which is a
+    /// place only where it is an `ExprKind::Ident` naming a local. A field
+    /// does not ask a question of its own — it inherits the root's
+    /// mutability, exactly as `Place::field` copies `mutable` down from the
+    /// base unchanged — so the walk asks [`Body::is_writable`] of the root
+    /// and nowhere else.
+    ///
+    /// `None` is not a place at all: a call's result, a literal, an index
+    /// expression, or a name that resolves to something other than a local.
+    /// `Some` is a place, `true` where source may write it and `false` where
+    /// it is read-only.
+    fn place_mutability(&self, expr: &'a Expr) -> Option<bool> {
+        match &expr.kind {
+            ExprKind::Ident(name) => self.binding(name).is_some().then(|| self.is_writable(name)),
+            ExprKind::Field { base, .. } => self.place_mutability(base),
+            _ => None,
+        }
+    }
+
     // ----------------------------------------------- what the checker knows
 
     /// The type the checker settled for `expr`, or `None` where it settled
@@ -3061,10 +3085,26 @@ impl<'a, 'l> Body<'a, 'l> {
             return Err(Unsupported::new("`snapshot`", span));
         }
         if builtins::is_mutating_method(name) {
-            return Err(Unsupported::new(
-                format!("`{name}`, which writes through its receiver"),
-                span,
-            ));
+            if name == "freeze" {
+                return Err(freeze_needs_the_handle(span));
+            }
+            match self.place_mutability(receiver) {
+                // A mutable place: fall through to the ordinary
+                // builtin-method lowering below, exactly as a non-mutating
+                // method does. `push` mutates through the handle a `Vector`
+                // is, so there is nothing here to write back to the
+                // receiver's slot — see `builtins::call_method`'s `push` arm
+                // and `Value::Vector`'s storage.
+                Some(true) => {}
+                Some(false) => {
+                    return Err(mutating_method_needs_a_mutable_place(
+                        name,
+                        &place_text(receiver),
+                        span,
+                    ));
+                }
+                None => return Err(mutating_method_needs_a_place(name, span)),
+            }
         }
         // Which types declare a method of this name is a question for the
         // shared table rather than for a list written here, so a builtin
@@ -3261,6 +3301,66 @@ fn arguments_in_order(
 fn read_only_place(place: &str, span: Span) -> Unsupported {
     Unsupported::new(
         format!("assignment to `{place}`, which is a read-only place"),
+        span,
+    )
+}
+
+/// A mutating builtin method — today only `push` — called on a receiver
+/// [`Body::place_mutability`] says is a place, but a read-only one.
+///
+/// This is [`read_only_place`]'s case again, asked of a receiver rather than
+/// of an assignment's target, and it refuses at lowering time what the
+/// interpreter's `var_self_needs_mutable` refuses at run time: ``push` takes
+/// a `var self` receiver, but `fixed` is a read-only place``. The same
+/// argument applies unchanged: a backend that performed the call would be
+/// more permissive than the oracle, and mutability belongs in the checker
+/// rather than in either backend — see [`read_only_place`] for why.
+fn mutating_method_needs_a_mutable_place(name: &str, place: &str, span: Span) -> Unsupported {
+    Unsupported::new(
+        format!("`{name}` on `{place}`, which is a read-only place"),
+        span,
+    )
+}
+
+/// A mutating builtin method called on a receiver that is not a place at
+/// all — a call's result, a literal, or anything else
+/// [`Body::place_mutability`] answers `None` for.
+///
+/// Mirrors the interpreter's `var_self_needs_place`: ``push` takes a `var
+/// self` receiver, but `this expression` is not a place``. See
+/// [`read_only_place`] for why refusing here, rather than performing the
+/// call, is the direction a second backend is allowed to be wrong in.
+fn mutating_method_needs_a_place(name: &str, span: Span) -> Unsupported {
+    Unsupported::new(format!("`{name}`, whose receiver is not a place"), span)
+}
+
+/// The dotted name a place is written with in source, for a diagnostic — the
+/// same rendering `Interpreter::describe_place` in
+/// `crates/cove-runtime/src/interp.rs` produces, since a receiver refused
+/// here is a receiver that expression would have described there.
+fn place_text(expr: &Expr) -> String {
+    match &expr.kind {
+        ExprKind::Ident(name) => name.clone(),
+        ExprKind::Field { base, name } => format!("{}.{}", place_text(base), name.node),
+        _ => "this expression".to_string(),
+    }
+}
+
+/// `freeze`, which the lowering still refuses even where the receiver is a
+/// mutable place.
+///
+/// `push` needs no place because `Value::Vector` is a handle and mutating
+/// through one is mutating through all of them, so the receiver can be read
+/// like any other value's. `freeze` cannot follow it: `Interpreter::freeze`
+/// consumes uniquely-owned storage, so `builtins::freeze`'s uniqueness check
+/// has to see the caller's own handle exactly once — which is why the
+/// interpreter runs it inside `place.with_mut` rather than reading the place
+/// first. Reading the receiver the way the ordinary builtin-method lowering
+/// does would hand `builtins::freeze` a second handle to the same storage,
+/// the clone `Place::read` produces, and the count would be wrong.
+fn freeze_needs_the_handle(span: Span) -> Unsupported {
+    Unsupported::new(
+        "`freeze`, which needs the storage handle where it lives, not a read of it that would count as a second handle",
         span,
     )
 }
@@ -5603,6 +5703,94 @@ mod tests {
              \x20 12  load 0\n\
              \x20 13  get-field-at-scalar 0\n\
              \x20 14  return-scalar\n"
+        );
+    }
+
+    /// `push` needs no place: `Value::Vector` is a handle, so the receiver of
+    /// a `var` binding is read like any other value's and handed to
+    /// `Inst::CallBuiltin` exactly as a non-mutating method would be.
+    #[test]
+    fn push_on_a_var_binding_lowers_like_any_other_builtin_method() {
+        assert_eq!(
+            listing(
+                "fn f() -> Int {\n  var v = Vector.of()\n  v.push(1)\n  v.length()\n}\n",
+                "f"
+            ),
+            "fn m.f arity=0 frame=1/0 -> Int\n\
+             \x20  0  call-assoc Vector.of argc=0\n\
+             \x20  1  store 0\n\
+             \x20  2  load 0\n\
+             \x20  3  const Int(1)\n\
+             \x20  4  call-builtin push argc=1\n\
+             \x20  5  pop\n\
+             \x20  6  load 0\n\
+             \x20  7  call-builtin length argc=0\n\
+             \x20  8  value-to-scalar\n\
+             \x20  9  return-scalar\n"
+        );
+    }
+
+    /// A field path is still a place: `Place::field` in
+    /// `crates/cove-runtime/src/interp.rs` carries the root's mutability down
+    /// unchanged, and `Body::place_mutability` mirrors it, so `s.items.push`
+    /// reaches the same fall-through `v.push` above does.
+    #[test]
+    fn push_through_a_var_struct_field_lowers() {
+        assert_eq!(
+            listing(
+                "struct S {\n  items: Vector<Int>\n}\n\nfn f() -> Int {\n  var s = S(items: Vector.of())\n  s.items.push(1)\n  s.items.length()\n}\n",
+                "f"
+            ),
+            "fn m.f arity=0 frame=1/0 -> Int\n\
+             \x20  0  call-assoc Vector.of argc=0\n\
+             \x20  1  make-struct m.S fields=items\n\
+             \x20  2  store 0\n\
+             \x20  3  load 0\n\
+             \x20  4  get-field-at 0\n\
+             \x20  5  const Int(1)\n\
+             \x20  6  call-builtin push argc=1\n\
+             \x20  7  pop\n\
+             \x20  8  load 0\n\
+             \x20  9  get-field-at 0\n\
+             \x20 10  call-builtin length argc=0\n\
+             \x20 11  value-to-scalar\n\
+             \x20 12  return-scalar\n"
+        );
+    }
+
+    /// `let` makes a read-only place, and `Body::place_mutability` answers
+    /// that about the receiver exactly as it would about an assignment's
+    /// target — so `push` refuses it rather than performing a write the
+    /// interpreter would refuse too.
+    #[test]
+    fn push_on_a_let_binding_is_refused() {
+        assert_eq!(
+            refused("fn f() -> Int {\n  let v = Vector.of()\n  v.push(1)\n  v.length()\n}\n"),
+            "`push` on `v`, which is a read-only place"
+        );
+    }
+
+    /// A call's result is not a place at all — there is no binding for
+    /// `Body::place_mutability` to ask about — so `push` refuses it the way
+    /// the interpreter's `var_self_needs_place` does.
+    #[test]
+    fn push_on_a_temporary_is_refused() {
+        assert_eq!(
+            refused("fn f() -> Int {\n  Vector.of().push(1)\n  0\n}\n"),
+            "`push`, whose receiver is not a place"
+        );
+    }
+
+    /// `freeze` still refuses unconditionally, but for the reason that is
+    /// actually true of it: the interpreter needs the storage handle where it
+    /// lives so its uniqueness check counts the caller's own handle once, and
+    /// reading the receiver first — which is what a mutable place would
+    /// otherwise let `push` do — would be a second handle.
+    #[test]
+    fn freeze_is_refused_for_its_own_reason() {
+        assert_eq!(
+            refused("fn f() -> Int {\n  var v = Vector.of()\n  v.freeze()\n  0\n}\n"),
+            "`freeze`, which needs the storage handle where it lives, not a read of it that would count as a second handle"
         );
     }
 

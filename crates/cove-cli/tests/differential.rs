@@ -111,7 +111,15 @@ use cove_sema::resolve::Program as Checked;
 /// lower it, because a case that stopped lowering would be coverage lost
 /// silently, and the whole point of counting is that it cannot be. Raise this
 /// number in the same change that raises the coverage.
-const LOWERED_FLOOR: usize = 53;
+///
+/// 53 to 55: `push` on a receiver `cove_ir::lower::Body::place_mutability`
+/// says is a mutable place no longer refuses — the interpreter only ever
+/// used the place to ask whether the receiver was one, and that question is
+/// static. `tests/e2e:coll_vector` and `tests/e2e:flow_loops` are the two
+/// cases that gained a lowering; three more that also called `push` still
+/// refuse, now for the construct standing behind it once `push` stopped
+/// being the first thing in their way (`freeze`, a closure, and `snapshot`).
+const LOWERED_FLOOR: usize = 55;
 
 // ------------------------------------------------------------------ the test
 
