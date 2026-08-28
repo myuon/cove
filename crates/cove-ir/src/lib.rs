@@ -745,6 +745,14 @@ pub enum Inst {
     /// spans of an assertion's arguments are recorded in
     /// [`Function::arg_spans`] beside it.
     MakeBuiltin { name: ConstId, argc: u32 },
+    /// Builds a case of an enum a *host* declares, such as `http.Method.Get`.
+    ///
+    /// Separate from [`Inst::MakeEnum`] because a host's enum has a
+    /// `cove_schema::TypeSchema` rather than an `EnumDecl`, and the VM shapes
+    /// a `MakeEnum` from a declaration this package holds. There is nothing
+    /// to push either: a host's case carries no payload, so the qualified
+    /// `module.Name` and the case's own name are the whole of it.
+    MakeHostEnum { ty: ConstId, case: ConstId },
     /// Builds a case of a declared enum. `ty` is a `Const::Name` holding the
     /// qualified type name and `case` the case's own name.
     MakeEnum {
@@ -1166,6 +1174,9 @@ fn render_inst(program: &Program, inst: Inst) -> String {
         Inst::GetField(n) => format!("get-field {}", name(n)),
         Inst::SetField(n) => format!("set-field {}", name(n)),
         Inst::MakeBuiltin { name: n, argc } => format!("make-builtin {} argc={argc}", name(n)),
+        Inst::MakeHostEnum { ty, case } => {
+            format!("make-host-enum {}.{}", name(ty), name(case))
+        }
         Inst::MakeEnum { ty, case, argc } => {
             format!("make-enum {}.{} argc={argc}", name(ty), name(case))
         }

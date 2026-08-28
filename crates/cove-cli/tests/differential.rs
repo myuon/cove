@@ -266,7 +266,17 @@ use cove_sema::resolve::Program as Checked;
 /// a trait is. `tests/e2e:module_conformance`, `tests/e2e:type_trait` and
 /// `examples:traits` are the cases that gained a lowering, and they are the
 /// three the previous change left behind.
-const LOWERED_FLOOR: usize = 81;
+///
+/// 81 to 82: `http.Method.Get`, a case of an enum a *host* declares. It has
+/// a `cove_schema::TypeSchema` rather than an `EnumDecl`, so
+/// `cove_ir::Inst::MakeEnum` — which the VM shapes from a declaration this
+/// package holds — could not serve it, and it carries no payload, so a
+/// second instruction naming the type and the case is the whole of it.
+/// Both backends reach `interp::host_enum_case`, so a case the schema does
+/// not name fails in the same words on either. `examples:server` is the
+/// case that gained a lowering, and it needed the two changes before this
+/// one as well: a type a host declares, and a function used as a value.
+const LOWERED_FLOOR: usize = 82;
 
 // ------------------------------------------------------------------ the test
 

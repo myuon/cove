@@ -1178,6 +1178,27 @@ impl<'a> Vm<'a> {
                     let value = self.make_builtin(which, values, running.arg_spans_at(pc), span)?;
                     self.stack.push(value);
                 }
+                Inst::MakeHostEnum { ty, case } => {
+                    // The registry rather than the static schema, because
+                    // that is what `Interpreter::eval_field` asks: an
+                    // embedder's own host declares its types there, and a
+                    // module the lowering saw a schema for may be one the
+                    // run was never given.
+                    let span = running.span_at(pc);
+                    let qualified = name(program, ty);
+                    let case = name(program, case);
+                    let (module, short) = qualified
+                        .rsplit_once('.')
+                        .expect("`make-host-enum` names a type as `module.Name`");
+                    let Some(declared) = self.hosts.host_type(module, short) else {
+                        return Err(RuntimeError::new(format!(
+                            "no host module `{module}` declares `{short}`"
+                        ))
+                        .at(span));
+                    };
+                    let value = crate::interp::host_enum_case(module, &declared, case, span)?;
+                    self.stack.push(value);
+                }
                 Inst::MakeEnum { ty, case, argc } => {
                     let span = running.span_at(pc);
                     let case = name(program, case);

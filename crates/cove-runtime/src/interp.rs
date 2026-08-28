@@ -1286,6 +1286,25 @@ impl<'a> Interpreter<'a> {
         case: &str,
         span: Span,
     ) -> Result<Value, RuntimeError> {
+        host_enum_case(module, declared, case, span)
+    }
+}
+
+/// `http.Method.Get`: a case of an enum a host declares.
+///
+/// A host's enum has a [`TypeSchema`] rather than an `EnumDecl`, so
+/// [`enum_case`] cannot serve it: there is no declaration to read a case's
+/// payload arity from, and a host's cases carry none. Both backends reach
+/// this one function for the same reason they reach [`enum_case`] — a case
+/// the schema does not name has to fail in the same words whichever backend
+/// asked.
+pub(crate) fn host_enum_case(
+    module: &str,
+    declared: &TypeSchema,
+    case: &str,
+    span: Span,
+) -> Result<Value, RuntimeError> {
+    {
         if !declared.cases.contains(&case) {
             return Err(RuntimeError::new(format!(
                 "host type `{module}.{}` has no case `{case}`",
@@ -1300,7 +1319,9 @@ impl<'a> Interpreter<'a> {
             payload: Vec::new(),
         })))
     }
+}
 
+impl<'a> Interpreter<'a> {
     // ---------------------------------------------------------------- calls
 
     fn invoke(

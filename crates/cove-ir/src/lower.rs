@@ -2997,6 +2997,37 @@ impl<'a, 'l> Body<'a, 'l> {
     /// and the other two are named rather than read as a field of a value
     /// they are not.
     fn field(&mut self, base: &'a Expr, name: &str, span: Span) -> Result<(), Unsupported> {
+        // `http.Method.Get`: a case of an enum a host declares, reached
+        // through the module that declares it. The head is a `Field` rather
+        // than an `Ident` here, because two names stand between the module
+        // and the case, and neither of them is a value: the interpreter
+        // answers `http.Method` as a `Value::Type` and then reads the case
+        // off it, so nothing this builds was ever a field of anything.
+        if let ExprKind::Field {
+            base: inner,
+            name: type_name,
+        } = &base.kind
+        {
+            if let ExprKind::Ident(head) = &inner.kind {
+                if self.lookup(head).is_none() && self.outer.is_host_module(self.module, head) {
+                    if let Some(declared) = cove_schema::hosts::module(head)
+                        .and_then(|schema| schema.declared_type(&type_name.node))
+                    {
+                        // A schema's `cases` is empty for a struct, so this
+                        // asks whether the type is an enum at all. Whether it
+                        // declares *this* case is settled where the
+                        // interpreter settles it, at run time, for the reason
+                        // `Body::make_enum` gives.
+                        if !declared.cases.is_empty() {
+                            let ty = self.outer.name(&format!("{head}.{}", type_name.node));
+                            let case = self.outer.name(name);
+                            self.emit(Inst::MakeHostEnum { ty, case }, span);
+                            return Ok(());
+                        }
+                    }
+                }
+            }
+        }
         if let ExprKind::Ident(head) = &base.kind {
             if self.lookup(head).is_none() {
                 if let Some((owner, _)) = self.outer.enum_of(self.module, head) {
@@ -6608,7 +6639,9 @@ impl Shape {
 /// it simulates, so the two cannot disagree about what an instruction does.
 fn stack_shape(constants: &[Const], inst: Inst) -> Shape {
     match inst {
-        Inst::Const(_) | Inst::LoadLocal(_) | Inst::LoadCapture(_) => Shape::on_values(0, 1),
+        Inst::Const(_) | Inst::LoadLocal(_) | Inst::LoadCapture(_) | Inst::MakeHostEnum { .. } => {
+            Shape::on_values(0, 1)
+        }
         Inst::StoreLocal(_) | Inst::Pop => Shape::on_values(1, 0),
         Inst::SpreadArgument => Shape::on_values(2, 1),
         Inst::Dup => Shape::on_values(1, 2),
@@ -8740,6 +8773,22 @@ mod tests {
              \x20  0  const Int(1)\n\
              \x20  1  make-enum m.E.B argc=1\n\
              \x20  2  return\n"
+        );
+    }
+
+    /// A host's enum is reached through the module that declares it, and it
+    /// is not the same instruction: a host's case has a schema rather than a
+    /// declaration behind it, and it never carries a payload.
+    #[test]
+    fn a_case_of_an_enum_a_host_declares_names_the_module_that_declares_it() {
+        assert_eq!(
+            listing(
+                "use http.listen\n\nfn f() -> http.Method {\n  http.Method.Get\n}\n",
+                "f"
+            ),
+            "fn m.f arity=0 frame=0/0 -> value\n\
+             \x20  0  make-host-enum http.Method.Get\n\
+             \x20  1  return\n"
         );
     }
 
