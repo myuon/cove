@@ -1218,6 +1218,33 @@ impl<'a, 'l> Body<'a, 'l> {
         self.outer.checked.facts.ty(expr.span.file, expr.id)
     }
 
+    /// Whether `receiver` is a handle to a host resource that answers an
+    /// operation called `name`.
+    ///
+    /// [`Ty::Host`] is written the same way whichever kind of type a host
+    /// module declares — `http.Response`, which the host hands over, reads
+    /// like `http.Server`, which it keeps — so the name alone does not say
+    /// whether a value of it is a `Value::Resource`. The schema does:
+    /// `declared_type` answers for the data a host gives away, and `resource`
+    /// for the handle it keeps, and only the second is called through
+    /// `HostRegistry::call_resource`. So both halves are asked, of the module
+    /// the qualified name begins with.
+    ///
+    /// A receiver the checker did not settle answers `false` and keeps the
+    /// refusal it had: which method such a call reaches is a question about a
+    /// value at run time, and this backend decides it here or not at all.
+    fn resource_op(&self, receiver: &Expr, name: &str) -> bool {
+        let Some(Ty::Host(qualified)) = self.settled(receiver) else {
+            return false;
+        };
+        let Some((module, type_name)) = qualified.rsplit_once('.') else {
+            return false;
+        };
+        hosts::module(module)
+            .and_then(|schema| schema.resource(type_name))
+            .is_some_and(|resource| resource.operation(name).is_some())
+    }
+
     /// Whether the checker settled that this expression is an `Int`.
     ///
     /// Written as one question because it is asked of both operands of every
@@ -3159,6 +3186,35 @@ impl<'a, 'l> Body<'a, 'l> {
         if let Some(key) = recorded.and_then(|target| self.declared_by(target)) {
             return self.call_declared(key, Some(receiver), args, span);
         }
+        // A resource handle's methods belong to the host that issued it, so
+        // they are dispatched through the boundary rather than looked up in
+        // the package — the rule `Interpreter::call_builtin_method` states
+        // and dispatches by, asked here of what the checker settled instead
+        // of what a value turned out to be. It is asked before any of the
+        // questions below for the reason the interpreter asks it before its
+        // own: none of them is about a handle, and a name a host answers is
+        // not a name this package or the builtins have to share.
+        if self.resource_op(receiver, name) {
+            // The receiver first and then the arguments, left to right:
+            // `Interpreter::eval_method_call` evaluates the receiver before
+            // `eval_args`, and the order two effects happen in is observable.
+            self.expr(receiver)?;
+            for arg in args {
+                self.expr(&arg.value)?;
+            }
+            let op = self.outer.name(name);
+            self.emit(
+                Inst::CallResource {
+                    op,
+                    argc: args.len() as u32,
+                },
+                span,
+            );
+            // On the value stack, whatever the schema says the operation
+            // answers, exactly as `Inst::CallHost` leaves a host call's
+            // answer.
+            return Ok(None);
+        }
         if name == "await" {
             return Err(Unsupported::new("an `await`", span));
         }
@@ -3962,6 +4018,7 @@ fn validate_function(program: &Program, id: FunctionId) -> Result<(), String> {
                 constant(module, "the host module")?;
                 constant(op, "the host operation")?;
             }
+            Inst::CallResource { op, .. } => constant(op, "the resource operation")?,
             Inst::CallBuiltin { name, .. } => constant(name, "the builtin method")?,
             Inst::MakeBuiltin { name, .. } => constant(name, "the builtin")?,
             Inst::MakeEnum { ty, case, .. } => {
@@ -4172,8 +4229,11 @@ fn stack_shape(constants: &[Const], inst: Inst) -> Shape {
             scalars: (scalar_argc, u32::from(returns_scalar)),
         },
         Inst::CallHost { argc, .. } | Inst::MakeBuiltin { argc, .. } => Shape::on_values(argc, 1),
-        // The receiver sits below the arguments.
-        Inst::CallBuiltin { argc, .. } => Shape::on_values(argc + 1, 1),
+        // The receiver sits below the arguments, and for a resource call the
+        // receiver is the handle the call is routed by.
+        Inst::CallBuiltin { argc, .. } | Inst::CallResource { argc, .. } => {
+            Shape::on_values(argc + 1, 1)
+        }
         Inst::MakeArray(len) => Shape::on_values(len, 1),
         // Two settled `Int` bounds off the scalar stack, and the one `Range`
         // they make onto the value stack.
@@ -5438,6 +5498,43 @@ mod tests {
              \x20  8  const Unit\n\
              \x20  9  make-builtin Ok argc=1\n\
              \x20 10  return\n"
+        );
+    }
+
+    #[test]
+    fn a_resource_operation_is_called_through_the_handle_it_stands_on() {
+        assert_eq!(
+            listing(
+                "use http\n\nfn f() -> Result<Unit, Error> {\n  let server = http.listen(0)?\n  server.close()\n}\n",
+                "f"
+            ),
+            "fn m.f arity=0 frame=1/0 -> value\n\
+             \x20  0  const Int(0)\n\
+             \x20  1  call-host http.listen argc=1\n\
+             \x20  2  try\n\
+             \x20  3  store 0\n\
+             \x20  4  load 0\n\
+             \x20  5  call-resource close argc=0\n\
+             \x20  6  return\n"
+        );
+    }
+
+    #[test]
+    fn a_resource_operation_takes_its_handle_below_its_arguments() {
+        assert_eq!(
+            listing(
+                "use files\n\nfn f(line: String) -> Result<Unit, Error> {\n  let writer = files.create(\"notes.txt\")?\n  writer.writeLine(line)\n}\n",
+                "f"
+            ),
+            "fn m.f arity=1 frame=2/0 params=[value] -> value\n\
+             \x20  0  const Str(\"notes.txt\")\n\
+             \x20  1  call-host files.create argc=1\n\
+             \x20  2  try\n\
+             \x20  3  store 1\n\
+             \x20  4  load 1\n\
+             \x20  5  load 0\n\
+             \x20  6  call-resource writeLine argc=1\n\
+             \x20  7  return\n"
         );
     }
 

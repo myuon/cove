@@ -124,7 +124,7 @@ use crate::budget::{Cancellation, Stopped};
 use crate::builtins::{self, Callable};
 use crate::error::RuntimeError;
 use crate::heap::{Heap, HeapStats};
-use crate::host::{HostRegistry, Reentry};
+use crate::host::{HostRegistry, Reentry, ResourceHandle};
 use crate::interp::{
     binary, divide_by_zero, no_field, not_a_struct, overflow, returned_error_message, source_text,
     unary, work_stopped, MAX_CALL_DEPTH,
@@ -749,6 +749,30 @@ impl<'a> Vm<'a> {
                     let value = self.call_host(module, op, values, span)?;
                     self.stack.push(value);
                 }
+                Inst::CallResource { op, argc } => {
+                    let span = running.span_at(pc);
+                    let op = name(program, op);
+                    let values = self.take(argc as usize);
+                    let receiver = self.pop();
+                    // The receiver is not asked what it is: the lowering
+                    // emitted this only where the checker settled the
+                    // receiver as a host resource, so a handle standing here
+                    // is an invariant of this backend rather than a fact to
+                    // confirm.
+                    let Value::Resource(handle) = &receiver else {
+                        unreachable!(
+                            "`call-resource` was emitted for a resource handle, and was handed a `{}`",
+                            receiver.type_name()
+                        );
+                    };
+                    let value = self.call_resource(handle, op, values, span)?;
+                    // No `size_of_value`, unlike the builtin call below and
+                    // like `Inst::CallHost` above: what a host call costs is
+                    // charged inside `HostRegistry`, from the operation's own
+                    // declaration, so pricing the answer again here would hold
+                    // a VM run to more than an interpreted one is held to.
+                    self.stack.push(value);
+                }
                 Inst::CallBuiltin { name: method, argc } => {
                     let span = running.span_at(pc);
                     let method = name(program, method);
@@ -1271,6 +1295,30 @@ impl<'a> Vm<'a> {
         let hosts = self.hosts;
         let started = Instant::now();
         let result = hosts.call_with(module, op, values, &mut Callback { vm: self, span });
+        self.charge_wait(started.elapsed());
+        result.map_err(|error| error.at(span))
+    }
+
+    /// Dispatches an operation on a resource handle, through the same
+    /// boundary and with the same accounting as any other host call.
+    ///
+    /// [`Vm::call_host`] with the handle in place of the module name, for the
+    /// reason `Inst::CallResource` exists: the handle is the address, and
+    /// [`HostRegistry::call_resource`] reads the module, the resource kind,
+    /// and whether that resource is still open out of it. The grant check,
+    /// the schema checks, the budget charge, and the trace are that
+    /// function's, exactly as for a call addressed to a module, so a stale
+    /// handle fails here the way it fails on the interpreter.
+    fn call_resource(
+        &mut self,
+        handle: &ResourceHandle,
+        op: &str,
+        values: Vec<Value>,
+        span: Span,
+    ) -> Result<Value, RuntimeError> {
+        let hosts = self.hosts;
+        let started = Instant::now();
+        let result = hosts.call_resource(handle, op, values, &mut Callback { vm: self, span });
         self.charge_wait(started.elapsed());
         result.map_err(|error| error.at(span))
     }
@@ -1816,6 +1864,7 @@ mod tests {
 
     use crate::budget::{Budget, Limits};
     use crate::clock::{Clock, VirtualTime};
+    use crate::files::Files;
     use crate::host::{Console, Env as EnvHost, Grants};
     use crate::interp::Interpreter;
 
@@ -1825,7 +1874,7 @@ mod tests {
     /// are about: a program that calls no host is unaffected by holding the
     /// capability to, and a program that calls one is compared against an
     /// interpreted run holding exactly the same grants.
-    const GRANTS: &[&str] = &["console", "clock", "env"];
+    const GRANTS: &[&str] = &["console", "clock", "env", "files"];
 
     /// A `console` sink a test can read back.
     #[derive(Clone, Default)]
@@ -1892,13 +1941,20 @@ mod tests {
     }
 
     /// The hosts a differential run calls through: a `console` the test reads
-    /// back, a clock whose virtual time never advances on its own, and an
-    /// `env` with nothing in it.
+    /// back, a clock whose virtual time never advances on its own, an `env`
+    /// with nothing in it, and a `files` that is a map in this process.
+    ///
+    /// `files` is the one of them that issues resource handles — a `Reader`
+    /// and a `Writer` — so it is what a test of `cove_ir::Inst::CallResource`
+    /// calls through. Each run builds its own, because a run that writes a
+    /// file must not be read back by the other backend's run of the same
+    /// program.
     fn hosts(buffer: &Buffer, budget: Option<Budget>) -> Arc<HostRegistry> {
         let mut hosts = HostRegistry::new(Grants::new(GRANTS.to_vec()));
         hosts.register(Box::new(Console::new(buffer.clone())));
         hosts.register(Box::new(EnvHost::new(BTreeMap::new())));
         hosts.register(Box::new(Clock::virtual_clock(VirtualTime::new())));
+        hosts.register(Box::new(Files::in_memory(BTreeMap::new())));
         if let Some(budget) = budget {
             hosts.set_budget(budget);
         }
@@ -3061,6 +3117,60 @@ mod tests {
         assert_eq!(
             lowered.expect_err("the capability was not granted").message,
             "`console.println` requires the `console` capability, which this run was not granted"
+        );
+    }
+
+    /// An operation on a resource handle is dispatched by the handle, not by
+    /// a module name the instruction carries.
+    ///
+    /// The `Writer` and the `Reader` are two handles of two kinds issued by
+    /// one host, and the run writes through one and reads back through the
+    /// other, so an answer that came from anywhere but the handle each call
+    /// stood on would be a different file or no file at all.
+    #[test]
+    fn a_resource_operation_is_dispatched_by_the_handle_it_stands_on() {
+        let outcome = agree(
+            "use console.println\nuse files\n\nexport fn main() -> Result<Unit, Error> {\n  let writer = files.create(\"notes.txt\")?\n  writer.writeLine(\"first\")?\n  writer.write(\"second\")?\n  writer.close()?\n  let reader = files.open(\"notes.txt\")?\n  println(\"one {reader.readLine()?.unwrapOr(\"\")}\")?\n  println(\"two {reader.readLine()?.unwrapOr(\"\")}\")?\n  reader.close()?\n  Ok(())\n}\n",
+        );
+        assert_eq!(outcome.output, "one first\ntwo second\n");
+    }
+
+    /// The instruction that dispatched them, so a call that stopped being a
+    /// resource call would fail here rather than go on passing.
+    #[test]
+    fn a_resource_call_is_lowered_to_the_instruction_that_routes_by_a_handle() {
+        assert_eq!(
+            main_of(
+                "use files\n\nexport fn main() -> Result<Unit, Error> {\n  let writer = files.create(\"notes.txt\")?\n  writer.writeLine(\"first\")?\n  writer.close()\n}\n"
+            ),
+            "fn m.main arity=0 frame=1/0 -> value\n\
+             \x20  0  const Str(\"notes.txt\")\n\
+             \x20  1  call-host files.create argc=1\n\
+             \x20  2  try\n\
+             \x20  3  store 0\n\
+             \x20  4  load 0\n\
+             \x20  5  const Str(\"first\")\n\
+             \x20  6  call-resource writeLine argc=1\n\
+             \x20  7  try\n\
+             \x20  8  pop\n\
+             \x20  9  load 0\n\
+             \x20 10  call-resource close argc=0\n\
+             \x20 11  return\n"
+        );
+    }
+
+    /// A handle that outlived what it named fails inside the host, where the
+    /// only record of what is still open lives — and fails the same way on
+    /// both backends, which is what `tests/e2e:fail_http_stale_handle` is in
+    /// the corpus for.
+    #[test]
+    fn a_stale_handle_fails_the_same_way_on_both_backends() {
+        let outcome = agree(
+            "use files\n\nexport fn main() -> Result<Unit, Error> {\n  let writer = files.create(\"notes.txt\")?\n  writer.close()?\n  writer.close()?\n  Ok(())\n}\n",
+        );
+        assert_eq!(
+            outcome.error().message,
+            "`files.Writer#1` is closed, so `close` has nothing to act on"
         );
     }
 

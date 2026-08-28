@@ -127,7 +127,22 @@ use cove_sema::resolve::Program as Checked;
 /// parameter itself. A spread is its own construct: it reads an `Array` or a
 /// `Vector` and refuses anything else, which is a runtime question and not
 /// one `make-array` answers.
-const LOWERED_FLOOR: usize = 56;
+///
+/// 56 to 59: a method on a host resource handle is dispatched through the
+/// boundary that issued the handle — `cove_ir::Inst::CallResource` stands the
+/// handle below the arguments and lets `HostRegistry::call_resource` read the
+/// module and the resource kind off it — where the lowering previously looked
+/// the name up among the declared types and the builtins, found neither, and
+/// refused. `tests/e2e:fail_http_stale_handle`, `tests/e2e:host_http_resource`
+/// and `tests/e2e:host_files_streaming` are the cases that gained a lowering.
+///
+/// Six cases refused for a resource method and only three of them lower, which
+/// is worth recording rather than leaving as a gap between two numbers. The
+/// other three hold a second construct this backend does not cover and now
+/// refuse for that instead: `examples:cq` and `examples:cqSample` for
+/// `freeze`, and `examples:server` for `http.Route`, which initializes a type
+/// a host declares.
+const LOWERED_FLOOR: usize = 59;
 
 // ------------------------------------------------------------------ the test
 

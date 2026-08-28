@@ -424,6 +424,30 @@ pub enum Inst {
         op: ConstId,
         argc: u32,
     },
+    /// Calls an operation on a resource handle standing below `argc`
+    /// arguments. `op` is a `Const::Name`.
+    ///
+    /// Separate from [`Inst::CallHost`] because of what routes the call.
+    /// There, the instruction names the module the operation is addressed
+    /// to, and the arguments are the whole of the stack it reads. Here the
+    /// receiver is on the stack and it *is* the address: a `Value::Resource`
+    /// is a handle the host issued, and the handle says which module issued
+    /// it and which of that module's resources it names, so
+    /// `HostRegistry::call_resource` reads both off it — including whether
+    /// the resource it named is still there, which nothing the compiler
+    /// knows could answer.
+    ///
+    /// That is also why the qualified type name is not carried beside `op`.
+    /// The lowering reads it, out of what the checker settled for the
+    /// receiver, to decide that this instruction is the right one: a
+    /// `Ty::Host` whose module declares that name as a resource — a
+    /// `cove_schema::ResourceSchema`, which the host keeps, rather than a
+    /// `TypeSchema`, which it hands over — declaring an operation of this
+    /// name. Having decided, there is nothing left for the instruction to
+    /// say about the receiver that the handle does not say for itself, and a
+    /// second answer to "which resource is this" would only be a second
+    /// thing that could be wrong.
+    CallResource { op: ConstId, argc: u32 },
     /// Calls a builtin method on a receiver below `argc` arguments. `name` is
     /// a `Const::Name`.
     CallBuiltin { name: ConstId, argc: u32 },
@@ -708,6 +732,9 @@ fn render_inst(program: &Program, inst: Inst) -> String {
         }
         Inst::CallHost { module, op, argc } => {
             format!("call-host {}.{} argc={argc}", name(module), name(op))
+        }
+        Inst::CallResource { op, argc } => {
+            format!("call-resource {} argc={argc}", name(op))
         }
         Inst::CallBuiltin { name: n, argc } => format!("call-builtin {} argc={argc}", name(n)),
         Inst::MakeArray(len) => format!("make-array {len}"),
