@@ -168,9 +168,9 @@ use cove_sema::resolve::Program as Checked;
 use cove_sema::typeck::Ty;
 use cove_sema::{MethodTarget, Signature};
 use cove_syntax::ast::{
-    Arg, BinaryOp as SourceBinary, Block, EnumDecl, Expr, ExprId, ExprKind, FnDecl, ItemKind,
-    MatchArm, Param, Pattern, PatternKind, Stmt, StmtKind, StrPart, StructDecl, Type, TypeKind,
-    UnaryOp as SourceUnary,
+    Arg, BinaryOp as SourceBinary, Block, EnumDecl, Expr, ExprId, ExprKind, FnDecl, GenericParam,
+    ItemKind, MatchArm, Param, Pattern, PatternKind, Stmt, StmtKind, StrPart, StructDecl, Type,
+    TypeKind, UnaryOp as SourceUnary,
 };
 
 use crate::{
@@ -300,6 +300,16 @@ struct Declared<'a> {
     /// method belongs to and the module its receiver's type belongs to are
     /// two different questions.
     type_name: Option<&'a str>,
+    /// The trait whose default body this method runs, for a method a
+    /// conformance did not write.
+    ///
+    /// `check_conformance` materialises a trait's defaulted method as the
+    /// type's own, with the trait's body — so the declaration is an ordinary
+    /// one, and the only thing that distinguishes it is that its `self` is
+    /// the rigid `Self` the checker bounded by the trait rather than the
+    /// concrete type. That bound is not written anywhere in the declaration,
+    /// so it is carried here; [`Body::bound_of`] is what reads it.
+    from_trait_default: Option<&'a str>,
     decl: &'a FnDecl,
 }
 
@@ -531,6 +541,7 @@ impl<'a> Lowering<'a> {
                     module,
                     name: name.clone(),
                     type_name: None,
+                    from_trait_default: None,
                     decl: &entry.decl,
                 });
                 lowering
@@ -542,6 +553,7 @@ impl<'a> Lowering<'a> {
                     module,
                     name: format!("{type_name}.{method}"),
                     type_name: Some(type_name.as_str()),
+                    from_trait_default: entry.from_trait_default.as_deref(),
                     decl: &entry.decl,
                 });
                 lowering
@@ -1081,6 +1093,7 @@ impl<'a> Lowering<'a> {
         let declared = self.declaration(key);
         let module = declared.module;
         let name: Rc<str> = declared.name.as_str().into();
+        let from_trait_default = declared.from_trait_default;
         let decl = declared.decl;
 
         if decl.is_async {
@@ -1165,6 +1178,8 @@ impl<'a> Lowering<'a> {
         let mut body = Body::new(self, module);
         body.returns = returns;
         body.dyn_return = dyn_return;
+        body.generics = &decl.generics;
+        body.self_bound = from_trait_default;
         body.rooted = var_argument_roots(&decl.body);
         if let Some(receiver) = decl.receiver {
             // `var self` is a place slot and nothing else is. Which stack an
@@ -1496,6 +1511,23 @@ struct Body<'a, 'l> {
     /// re-derived at each `return`, because a body has one return type and a
     /// `return` written inside a `match` arm has no declaration in reach.
     dyn_return: Option<Inst>,
+    /// The type parameters this declaration writes, with the traits each is
+    /// bounded by.
+    ///
+    /// A method call on a value whose type is one of them resolves through
+    /// its bounds — that is what a bound is written for — so this is what
+    /// [`Body::bound_of`] searches. Empty for a lambda, whose body has no
+    /// declaration of its own to have written any.
+    generics: &'a [GenericParam],
+    /// The trait `Self` is bounded by, inside a trait's default body.
+    ///
+    /// `check_trait_defaults` checks a default body once with `self` typed as
+    /// a rigid `Self` bounded by that trait, so a call on `self` there is a
+    /// call through a bound like any other — but the parameter is not
+    /// written in the declaration, because the declaration is one
+    /// `check_conformance` synthesized. This is the bound it would have
+    /// written.
+    self_bound: Option<&'a str>,
     code: Vec<Inst>,
     spans: Vec<Span>,
     /// The operand-stack depths, or `None` where control cannot arrive.
@@ -1550,6 +1582,8 @@ impl<'a, 'l> Body<'a, 'l> {
             module,
             returns: SlotKind::Value,
             dyn_return: None,
+            generics: &[],
+            self_bound: None,
             code: Vec::new(),
             spans: Vec::new(),
             depth: Some(Depth::EMPTY),
@@ -4573,12 +4607,65 @@ impl<'a, 'l> Body<'a, 'l> {
     /// Guessing there is the one mistake a second backend must not make:
     /// `[1, 2, 3].length()` is the builtin's `3` on the oracle, and a `Call`
     /// to a declared `Box.length` is a different program.
-    /// `value.label()` where `value` is a `dyn Trait`: the one call in the
-    /// language whose target is not knowable before the run.
+    /// The trait a call to `method` on a value of the type parameter
+    /// `param` goes through, qualified, and nothing when no bound declares
+    /// one.
     ///
-    /// The receiver's static type names the trait and nothing else, so what
-    /// finds the implementation is the concrete value the trait object
-    /// carries — a run-time fact, and therefore a run-time lookup.
+    /// `Interpreter::eval_method_call` draws no distinction between a
+    /// receiver whose static type is a trait object, a bounded type
+    /// parameter, or the rigid `Self` of a trait's default body: it reads
+    /// the concrete value's own type name and looks the method up from
+    /// there. So this pass draws none either, and all it needs from the
+    /// static type is which trait the call goes through.
+    ///
+    /// The first bound that declares the name is the one, which is the
+    /// choice `cove_sema`'s `bound_method` makes over the same list in the
+    /// same order.
+    ///
+    /// A parameter neither the declaration nor a trait default put in scope
+    /// answers `None` — a type parameter of an `impl` block or of the struct
+    /// it extends, and every parameter in scope around a lambda, which has
+    /// no declaration of its own to have written one. The caller then falls
+    /// through to the refusal it had, which is the honest answer: a receiver
+    /// this pass cannot name a trait for is one it cannot collect the
+    /// candidates of.
+    fn bound_of(&self, param: &str, method: &str) -> Option<Rc<str>> {
+        let written: Vec<&str> = match param {
+            "Self" => self.self_bound.into_iter().collect(),
+            _ => self
+                .generics
+                .iter()
+                .find(|generic| generic.name.node == param)
+                .map(|generic| generic.bounds.iter().map(|b| b.node.as_str()).collect())
+                .unwrap_or_default(),
+        };
+        for bound in written {
+            let qualified = self.outer.trait_named(self.module, bound);
+            let declares = qualified.rsplit_once('.').is_some_and(|(module, short)| {
+                self.outer
+                    .checked
+                    .modules
+                    .get(module)
+                    .and_then(|resolved| resolved.traits.get(short))
+                    .is_some_and(|entry| entry.method(method).is_some())
+            });
+            if declares {
+                return Some(qualified);
+            }
+        }
+        None
+    }
+
+    /// `value.label()` where the receiver's static type says which trait the
+    /// method comes from and nothing about which implementation: the one
+    /// call in the language whose target is not knowable before the run.
+    ///
+    /// Three static types say that and are therefore one call here, as they
+    /// are one call in `Interpreter::eval_method_call`: a `dyn Trait`, a
+    /// type parameter bounded by the trait, and the rigid `Self` of that
+    /// trait's own default body. What finds the implementation in each is
+    /// the concrete value the receiver turns out to be — a run-time fact,
+    /// and therefore a run-time lookup.
     /// [`Inst::CallDyn`] is that lookup. It is an instruction of its own
     /// rather than an [`Inst::Call`] with a target guessed at, which is what
     /// [issue #116](https://github.com/myuon/cove/issues/116) asks for: an
@@ -4694,6 +4781,18 @@ impl<'a, 'l> Body<'a, 'l> {
             // tables, and leaves a name that already carries a module alone.
             let qualified = self.outer.trait_named(self.module, trait_name);
             return self.call_dyn(&qualified, receiver, name, args, span);
+        }
+        // A bounded type parameter is the same call. The checker resolves
+        // the *signature* through the bound and the run resolves the
+        // *implementation* through the value, exactly as it does for a
+        // trait object, and `Interpreter::eval_method_call` runs one code
+        // path for both. `Self` inside a trait's default body is the same
+        // again, which is why a dispatch through a `dyn` to a method the
+        // conformance did not write reaches this.
+        if let Some(Ty::Param(param)) = self.settled(receiver) {
+            if let Some(qualified) = self.bound_of(param, name) {
+                return self.call_dyn(&qualified, receiver, name, args, span);
+            }
         }
         // A resource handle's methods belong to the host that issued it, so
         // they are dispatched through the boundary rather than looked up in
@@ -8892,6 +8991,55 @@ mod tests {
              \x20  5  load 0\n\
              \x20  6  make-dyn m.Show\n\
              \x20  7  return\n"
+        );
+    }
+
+    /// A call on a value whose type is a bounded type parameter is the same
+    /// dispatch a trait object gets, and reaches the same candidates: the
+    /// checker resolved the *signature* through the bound, and the run
+    /// resolves the *implementation* through the value.
+    #[test]
+    fn a_call_through_a_trait_bound_dispatches_from_the_value() {
+        assert_eq!(
+            listing(
+                "trait Show {\n  fn show(self) -> String\n}\n\n\
+                 struct A {\n  n: Int\n}\n\n\
+                 struct B {\n  n: Int\n}\n\n\
+                 impl Show for A {\n  fn show(self) -> String {\n    \"a\"\n  }\n}\n\n\
+                 impl Show for B {\n  fn show(self) -> String {\n    \"b\"\n  }\n}\n\n\
+                 fn f<T: Show>(v: T) -> String {\n  v.show()\n}\n",
+                "f"
+            ),
+            "fn m.f arity=1 frame=1/0 params=[value] -> value\n\
+             \x20  0  load 0\n\
+             \x20  1  call-dyn m.Show.show argc=1 [m.A, m.B]\n\
+             \x20  2  return\n"
+        );
+    }
+
+    /// A trait's default body is checked once with `self` typed as the rigid
+    /// `Self` bounded by that trait, so a call it makes on `self` is a call
+    /// through a bound — and the body is lowered once per conformance that
+    /// did not override it, under the name of the type it was materialised
+    /// for.
+    #[test]
+    fn a_trait_default_body_dispatches_on_self() {
+        assert_eq!(
+            listing(
+                "trait Show {\n  fn show(self) -> String\n\n\
+                 \x20 fn loud(self) -> String {\n    \"!{self.show()}!\"\n  }\n}\n\n\
+                 struct A {\n  n: Int\n}\n\n\
+                 impl Show for A {\n  fn show(self) -> String {\n    \"a\"\n  }\n}\n\n\
+                 fn f(v: dyn Show) -> String {\n  v.loud()\n}\n",
+                "A.loud"
+            ),
+            "fn m.A.loud arity=1 frame=1/0 params=[value] receiver -> value\n\
+             \x20  0  const Str(\"!\")\n\
+             \x20  1  load 0\n\
+             \x20  2  call-dyn m.Show.show argc=1 [m.A]\n\
+             \x20  3  const Str(\"!\")\n\
+             \x20  4  concat 3\n\
+             \x20  5  return\n"
         );
     }
 

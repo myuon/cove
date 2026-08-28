@@ -129,7 +129,18 @@ nothing a body declares takes one at all.
 
 Two calls do not name a function. `call-value` reaches whatever callable
 stands on the stack, and `call-dyn` reaches whichever implementation of a
-trait method the receiver's concrete type carries. Both take the same
+trait method the receiver's concrete type carries.
+
+`call-dyn` covers three static types, because the oracle covers them with one
+code path: a `dyn Trait`, a type parameter bounded by the trait, and the rigid
+`Self` of that trait's own default body. `Interpreter::eval_method_call` reads
+the concrete value's type name and looks the method up from there, whichever
+of the three the receiver was written as, so the lowering takes from the
+static type only the trait the call goes through. That is not a convenience:
+without it a dispatch through a `dyn` could not reach a method a conformance
+left to the trait's default, since such a body is checked once with `self`
+typed as `Self: Trait` and every call it makes on `self` goes through the
+bound. Both take the same
 convention, and for the same reason rather than by coincidence: nothing at
 either call site knows which body it will enter, so neither can have placed
 its arguments by that body's `Function::params`. Every argument travels on

@@ -254,7 +254,19 @@ use cove_sema::resolve::Program as Checked;
 /// `summarize`, which no declared type and no builtin has": the name is
 /// all that is left once the receiver's type turns out to be one this pass
 /// cannot resolve a method against.
-const LOWERED_FLOOR: usize = 78;
+///
+/// 78 to 81: a call on a value whose type is a bounded type parameter, or
+/// the rigid `Self` of a trait's default body, is the same dispatch a `dyn`
+/// gets. `Interpreter::eval_method_call` draws no distinction between the
+/// three — it reads the concrete value's own type name and looks the method
+/// up from there — so `cove_ir::Inst::CallDyn` serves all three, and the
+/// only thing the lowering takes from the static type is which trait the
+/// call goes through. Without it a `dyn` dispatch could not reach a
+/// method a conformance left to the trait's default, which is half of what
+/// a trait is. `tests/e2e:module_conformance`, `tests/e2e:type_trait` and
+/// `examples:traits` are the cases that gained a lowering, and they are the
+/// three the previous change left behind.
+const LOWERED_FLOOR: usize = 81;
 
 // ------------------------------------------------------------------ the test
 
