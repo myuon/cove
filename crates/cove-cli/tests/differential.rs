@@ -112,14 +112,13 @@ use cove_sema::resolve::Program as Checked;
 /// silently, and the whole point of counting is that it cannot be. Raise this
 /// number in the same change that raises the coverage.
 ///
-/// 53 to 55: `push` on a receiver `cove_ir::lower::Body::place_mutability`
-/// says is a mutable place no longer refuses — the interpreter only ever
-/// used the place to ask whether the receiver was one, and that question is
-/// static. `tests/e2e:coll_vector` and `tests/e2e:flow_loops` are the two
-/// cases that gained a lowering; three more that also called `push` still
-/// refuse, now for the construct standing behind it once `push` stopped
-/// being the first thing in their way (`freeze`, a closure, and `snapshot`).
-const LOWERED_FLOOR: usize = 55;
+/// 55 to 56: a range used as a value builds one now — `cove_ir::Inst::MakeRange`
+/// takes two `Int` bounds off the scalar stack and leaves the `Value::Range`
+/// they make on the value stack — where the lowering previously had no
+/// instruction that made one and refused every range a `for` header did not
+/// consume. `tests/e2e:values_range` is the case that gained a lowering, and
+/// it is the only one the corpus held.
+const LOWERED_FLOOR: usize = 56;
 
 // ------------------------------------------------------------------ the test
 

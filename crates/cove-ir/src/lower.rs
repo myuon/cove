@@ -129,10 +129,10 @@
 //! # What is not lowered
 //!
 //! Closures and trailing closures, `scope`/`spawn`/`await`, `var`
-//! parameters, traits and `dyn`, `Shared`, `snapshot`, a range used as a
-//! value, assignment to a field of anything but a local, and any call whose
-//! target cannot be named at lowering time. Each is reported in the words a
-//! Cove programmer writes it in.
+//! parameters, traits and `dyn`, `Shared`, `snapshot`, assignment to a field
+//! of anything but a local, and any call whose target cannot be named at
+//! lowering time. Each is reported in the words a Cove programmer writes it
+//! in.
 //!
 //! # What is refused because the program is wrong
 //!
@@ -1735,12 +1735,11 @@ impl<'a, 'l> Body<'a, 'l> {
                 self.leave_loop(true, span)?;
             }
             ExprKind::Continue => self.leave_loop(false, span)?,
-            ExprKind::Range { .. } => {
-                return Err(Unsupported::new(
-                    "a range used as a value rather than as a `for` header",
-                    span,
-                ))
-            }
+            ExprKind::Range {
+                start,
+                end,
+                inclusive_end,
+            } => self.range(start, end, *inclusive_end, span)?,
             ExprKind::Lambda { .. } => return Err(Unsupported::new("a closure", span)),
             ExprKind::Match { scrutinee, arms } => {
                 return self.match_expr(scrutinee, arms, position, span)
@@ -1783,6 +1782,42 @@ impl<'a, 'l> Body<'a, 'l> {
             }
         }
         self.emit(Inst::Concat(parts.len() as u32), span);
+        Ok(())
+    }
+
+    /// `a..b` and `a..<b`, built as the value it is.
+    ///
+    /// A range is an ordinary Cove value — `Interpreter::eval`'s
+    /// `ExprKind::Range` arm evaluates one like any other expression, and
+    /// says so — so it can be bound, passed, compared, rendered, and used as
+    /// a `Map` key. [`Body::for_loop`] is the one place that never builds
+    /// one: a `for` over a range walks between two bounds it keeps in hidden
+    /// slots, so there is no `Range` in a loop at all, and that stays true.
+    ///
+    /// The bounds go onto the scalar stack, which is where the checker's own
+    /// answer puts them: it checks each against `Ty::Int`, so
+    /// [`Body::scalar_of`] settles both, and a settled `Int` operand belongs
+    /// on that stack the way every other one does. Where it settled
+    /// something else — which a checked program has no way to write, since
+    /// the expectation is what makes a non-`Int` bound a diagnostic — this
+    /// refuses rather than moving a `Value` across a boundary that promised
+    /// an `Int` and was handed something else.
+    fn range(
+        &mut self,
+        start: &'a Expr,
+        end: &'a Expr,
+        inclusive_end: bool,
+        span: Span,
+    ) -> Result<(), Unsupported> {
+        if self.scalar_of(start) != Some(Scalar::Int) || self.scalar_of(end) != Some(Scalar::Int) {
+            return Err(Unsupported::new(
+                "a range whose bounds the checker did not settle as `Int`",
+                span,
+            ));
+        }
+        self.expr_scalar(start)?;
+        self.expr_scalar(end)?;
+        self.emit(Inst::MakeRange { inclusive_end }, span);
         Ok(())
     }
 
@@ -2226,10 +2261,15 @@ impl<'a, 'l> Body<'a, 'l> {
     /// binding is declared in the scope the body sees — the two halves of
     /// what the interpreter does around `iterable_items`.
     ///
-    /// A range header never builds a range value: the IR has no instruction
-    /// that makes one, and `for` is the only place the language reads one,
-    /// so the bounds go into two hidden slots and the loop counts between
-    /// them. Anything else is asked once, by `iter-items`, for the items a
+    /// A range header never builds a range value. [`Inst::MakeRange`] makes
+    /// one, and a range written anywhere else is lowered through it, but a
+    /// `for` has nothing to do with the value: it wants the integers between
+    /// two bounds, so the bounds go into two hidden slots and the loop counts
+    /// between them. Building a `Range` here and taking it apart again would
+    /// be a value made for one instruction to discard, which is what
+    /// `a_for_over_a_range_counts_between_two_hidden_slots` pins.
+    ///
+    /// Anything else is asked once, by `iter-items`, for the items a
     /// `for` walks it as — the elements of a sequence, the `MapEntry` of each
     /// pair of a `Map`, a `Set`'s elements in ascending order — and what
     /// comes back is always an `Array`, so the loop walks it by index with
@@ -4045,6 +4085,12 @@ fn stack_shape(constants: &[Const], inst: Inst) -> Shape {
         // The receiver sits below the arguments.
         Inst::CallBuiltin { argc, .. } => Shape::on_values(argc + 1, 1),
         Inst::MakeArray(len) => Shape::on_values(len, 1),
+        // Two settled `Int` bounds off the scalar stack, and the one `Range`
+        // they make onto the value stack.
+        Inst::MakeRange { .. } => Shape {
+            values: (0, 1),
+            scalars: (2, 0),
+        },
         Inst::Concat(parts) => Shape::on_values(parts, 1),
         Inst::MakeStruct { fields, .. } => Shape::on_values(field_count(constants, fields), 1),
         // A case's payload is what it is built from, and an associated
@@ -4723,11 +4769,75 @@ mod tests {
         );
     }
 
+    /// A range used as a value builds one, from two bounds on the scalar
+    /// stack.
+    ///
+    /// The bounds are the checker's own answer about them — `a range runs
+    /// between two `Int`s` is what it checks each against — so they are
+    /// pushed the way every other settled operand is, and `make-range` is
+    /// where the two words become the one `Value` a `Range` is.
+    #[test]
+    fn a_range_used_as_a_value_is_built_from_two_scalar_bounds() {
+        assert_eq!(
+            listing("fn f() -> Range {\n  0..<3\n}\n", "f"),
+            "fn m.f arity=0 frame=0/0 -> value\n\
+             \x20  0  scalar-const 0\n\
+             \x20  1  scalar-const 3\n\
+             \x20  2  make-range ..<\n\
+             \x20  3  return\n"
+        );
+    }
+
+    /// `..` and `..<` are one instruction apart, and the difference is the
+    /// flag rather than the bounds.
+    ///
+    /// It is not normalised away, because it is observable: `Value::eq_value`
+    /// compares it, `Display` writes the operator back out, and `0..<3` and
+    /// `0..2` are two values that yield the same integers.
+    #[test]
+    fn an_inclusive_range_value_differs_only_in_the_flag() {
+        let inclusive = listing("fn f() -> Range {\n  0..3\n}\n", "f");
+        let exclusive = listing("fn f() -> Range {\n  0..<3\n}\n", "f");
+        assert!(inclusive.contains("   2  make-range ..\n"), "{inclusive}");
+        assert_eq!(
+            inclusive.replace("make-range ..", "make-range ..<"),
+            exclusive
+        );
+    }
+
+    /// A `Range` bound to a name, and asked one of its builtin methods.
+    ///
+    /// The bounds need not be constants: a parameter the checker settled as
+    /// `Int` is already on the scalar stack, so it is loaded from there and
+    /// nothing crosses a boundary on the way in. `length()` is
+    /// `cove_schema::builtins::RANGE`'s own method and reaches
+    /// `builtins::call_method`, which is the interpreter's, so the two
+    /// backends compute it with one piece of code.
+    #[test]
+    fn a_range_can_be_bound_and_asked_its_methods() {
+        assert_eq!(
+            listing(
+                "fn f(n: Int) -> Int {\n  let r = 1..n\n  r.length()\n}\n",
+                "f"
+            ),
+            "fn m.f arity=1 frame=1/1 params=[Int] -> Int\n\
+             \x20  0  scalar-const 1\n\
+             \x20  1  load-scalar 0\n\
+             \x20  2  make-range ..\n\
+             \x20  3  store 0\n\
+             \x20  4  load 0\n\
+             \x20  5  call-builtin length argc=0\n\
+             \x20  6  value-to-scalar\n\
+             \x20  7  return-scalar\n"
+        );
+    }
+
     /// A range header never asks `iter-items` for anything.
     ///
-    /// It builds no value at all: the bounds go into two hidden slots and the
-    /// loop counts between them, which is faster than materialising every
-    /// element and answers exactly what walking the range's items would.
+    /// It builds no value at all — not even the `Range` `make-range` exists
+    /// to build: the bounds go into two hidden slots and the loop counts
+    /// between them, which is faster than materialising every element and
+    /// answers exactly what walking the range's items would.
     #[test]
     fn a_for_over_a_range_counts_between_two_hidden_slots() {
         let listed = listing(
@@ -4735,6 +4845,7 @@ mod tests {
             "f",
         );
         assert!(!listed.contains("iter-items"), "{listed}");
+        assert!(!listed.contains("make-range"), "{listed}");
         assert_eq!(
             listing(
                 "fn f() -> Int {\n  var t = 0\n  for i in 0..<3 {\n    t += i\n  }\n  t\n}\n",
@@ -5502,10 +5613,6 @@ mod tests {
             (
                 "`snapshot`",
                 "fn f(a: Array<Int>) -> Array<Int> {\n  a.snapshot()\n}\n",
-            ),
-            (
-                "a range used as a value rather than as a `for` header",
-                "fn f() -> Int {\n  let r = 0..<3\n  r.length()\n}\n",
             ),
             (
                 "assignment to a field of anything but a local",

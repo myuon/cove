@@ -429,6 +429,23 @@ pub enum Inst {
     CallBuiltin { name: ConstId, argc: u32 },
     /// Builds an `Array` from the top `len` values.
     MakeArray(u32),
+    /// Builds a `Range` from the top two *scalars*: the start below the end.
+    ///
+    /// The bounds travel on the scalar stack because the checker settles
+    /// both of them as `Int` — `a range runs between two `Int`s` is the
+    /// expectation `cove_sema` checks each against — so they are exactly
+    /// what that stack is for, and the lowering emits this only where it
+    /// settled them. Every other typed operand is placed the same way, and
+    /// the alternative would be two `Value`s built for this instruction to
+    /// unwrap again.
+    ///
+    /// `inclusive_end` is in the instruction rather than beside the bounds
+    /// because it is a property of the syntax — `..` against `..<` — and not
+    /// a value anything computes. It is observable and is reproduced rather
+    /// than normalised away: `Value::eq_value` compares it, `Display` writes
+    /// the operator back out, `MapKey::Range` orders by it, and it crosses a
+    /// task boundary in `Transfer::Range`.
+    MakeRange { inclusive_end: bool },
     /// Renders the top `parts` values as one string, left to right.
     ///
     /// This is what `"a{b}c"` lowers to: interpolation is not concatenation
@@ -694,6 +711,11 @@ fn render_inst(program: &Program, inst: Inst) -> String {
         }
         Inst::CallBuiltin { name: n, argc } => format!("call-builtin {} argc={argc}", name(n)),
         Inst::MakeArray(len) => format!("make-array {len}"),
+        // The operator the range was written with, because that is what the
+        // flag means and a listing should read as the source does.
+        Inst::MakeRange { inclusive_end } => {
+            format!("make-range {}", if inclusive_end { ".." } else { "..<" })
+        }
         Inst::Concat(parts) => format!("concat {parts}"),
         Inst::MakeStruct { ty, fields } => {
             format!("make-struct {} fields={}", name(ty), name(fields))

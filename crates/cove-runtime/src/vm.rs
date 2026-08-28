@@ -767,6 +767,21 @@ impl<'a> Vm<'a> {
                     self.fuel += u64::from(len);
                     self.stack.push(Value::Array(items));
                 }
+                Inst::MakeRange { inclusive_end } => {
+                    // The end is above the start, because that is the order
+                    // the lowering pushed them in and the order the source
+                    // writes them in. `inclusive_end` is carried through
+                    // rather than folded into the bounds: `0..<3` and `0..2`
+                    // yield the same integers and are different values, and
+                    // `Value::eq_value` and `Display` both read this flag.
+                    let end = self.pop_scalar();
+                    let start = self.pop_scalar();
+                    self.stack.push(Value::Range {
+                        start,
+                        end,
+                        inclusive_end,
+                    });
+                }
                 Inst::Concat(parts) => {
                     let at = self.stack.len() - parts as usize;
                     let mut text = String::new();
@@ -2571,6 +2586,66 @@ mod tests {
             .value(),
             "Str(\"a=1;b=2;\")"
         );
+    }
+
+    /// A `Range` used as a value, everywhere a value can be used.
+    ///
+    /// The oracle is `Interpreter::eval`'s `ExprKind::Range` arm, which
+    /// evaluates a range like any other expression, and `agree_main` is what
+    /// asserts against it. `inclusive_end` is what these are really about:
+    /// it survives into `Display`, into `Value::eq_value`, and into
+    /// `MapKey::Range`, so `0..<3` and `0..2` yield the same integers and
+    /// are three different times not the same value.
+    #[test]
+    fn a_range_is_a_value_the_way_the_interpreter_makes_one() {
+        // Rendered with the operator it was written with.
+        assert_eq!(expression("String", "\"{0..<3}\""), "Str(\"0..<3\")");
+        assert_eq!(expression("String", "\"{0..3}\""), "Str(\"0..3\")");
+        assert_eq!(expression("String", "\"{-2..<-1}\""), "Str(\"-2..<-1\")");
+        // Its own methods, which are `cove_schema::builtins::RANGE`'s and
+        // reach the same `builtins::call_method` the interpreter reaches.
+        assert_eq!(expression("Int", "(0..<3).length()"), "Int(3)");
+        assert_eq!(expression("Int", "(0..3).length()"), "Int(4)");
+        assert_eq!(expression("Bool", "(3..<3).isEmpty()"), "Bool(true)");
+        assert_eq!(expression("Bool", "(0..<3).contains(3)"), "Bool(false)");
+        assert_eq!(expression("Bool", "(0..3).contains(3)"), "Bool(true)");
+        // Compared by the bounds it was written with, end included.
+        assert_eq!(expression("Bool", "0..<3 == 0..<3"), "Bool(true)");
+        assert_eq!(expression("Bool", "0..<3 == 0..3"), "Bool(false)");
+        assert_eq!(expression("Bool", "0..<3 == 0..<2"), "Bool(false)");
+        // Bound, passed, and iterated as the value it is rather than as a
+        // header the loop took apart.
+        assert_eq!(
+            agree_main(
+                "Int",
+                "  let span = 0..<4\n  var total = 0\n  for i in span {\n    total += i\n  }\n  total"
+            )
+            .value(),
+            "Int(6)"
+        );
+        // And used as a `Map` key, which is where `MapKey::Range` orders by
+        // the same flag.
+        assert_eq!(
+            expression(
+                "Int",
+                "Map.of(MapEntry(key: 0..<3, value: 1), MapEntry(key: 0..3, value: 2)).length()"
+            ),
+            "Int(2)"
+        );
+    }
+
+    /// The instruction a range value lowers to, which no outcome can show.
+    ///
+    /// The bounds travel on the scalar stack because the checker settled
+    /// both as `Int`, so the listing holds no `const` and no boundary
+    /// instruction on the way in — see `cove_ir::Inst::MakeRange`.
+    #[test]
+    fn a_range_value_takes_its_bounds_off_the_scalar_stack() {
+        let listed = main_of("export fn main() -> Range {\n  let n = 3\n  0..<n\n}\n");
+        assert!(listed.contains("make-range ..<"), "{listed}");
+        assert!(!listed.contains("value-to-scalar"), "{listed}");
+        assert!(listed.contains("scalar-const 0"), "{listed}");
+        assert!(listed.contains("load-scalar 0"), "{listed}");
     }
 
     /// An empty collection is walked zero times, whatever it is empty of.
