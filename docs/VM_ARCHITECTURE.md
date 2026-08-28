@@ -490,6 +490,50 @@ task's flag beside the bounded calls this thread is inside.
 `tests/e2e:fail_max_tasks` is in the corpus because a run's concurrency limit
 has to stop it identically on both backends, and it does.
 
+### `Shared`, and the one closure that is not called through a value
+
+`Shared` is the other half of ADR 0008, and the reason the type exists: it is
+the one value that crosses a task boundary by sharing rather than by copying.
+`Shared(value)` is an ordinary `make-builtin` — `builtins::call_constructor`
+already refuses a payload that may not cross — and `lock` is one instruction
+over `SharedCell::lock`, which holds the cell for the whole of the closure,
+converts its contents into the locking task's own `Value` on the way in, and
+converts back whatever the closure left in it. All of that is the oracle's,
+unchanged.
+
+What is not is the call itself. A closure written `fn(var value)` does not
+receive a copy of the cell's contents; it *names* them, so that
+`value.record(false)` decides what the cell holds afterwards. Every argument of
+a `call-value` travels on the value stack and a place cannot, which is why a
+`var` parameter on a lambda was refused, and the note refusing it named
+`shared.lock(fn(var value) { ... })` as the one place such a lambda is written.
+
+So `lock` makes the call itself. It stands the contents in a value slot of the
+*locking* frame, hands the closure a place rooted there, and reads that slot
+back when the closure returns — which is `Interpreter::call_shared_method`'s
+`Place::binding(value, true)` and its `place.read` afterwards, said as a stack
+discipline. The slot survives the call because `Vm::leave` truncates to the
+callee's base, which is above it. A closure written without `var` takes its
+argument on the value stack like any other and the cell keeps what it had,
+which is what the oracle does with one; which of the two a closure is comes off
+its own `params` rather than being assumed.
+
+That is the first parameter of a lowered function that is a place without the
+declaration having said so, and it moves one number. The captures of a closure
+stand in the value slots straight after its parameters, and a place parameter
+takes no value slot — so `cove_ir::Function::capture_base` says where they
+begin, and `load-capture` reads that rather than `arity`. The two are the same
+number for every closure but this one.
+
+What keeps such a closure away from a `call-value` is not a run-time check. The
+lowering builds one only as the direct argument of the `lock` that consumes it,
+where the very next instruction takes it off the stack, so it never becomes a
+value the program can name. `validate` allows exactly that shape — a first
+parameter that is a place, everything after it on the value stack — and refuses
+the rest. The cost is that a `lock` whose closure is *not* written at the call
+is refused, which is narrower than the oracle, and no program in the corpus
+writes one.
+
 ### Trace
 
 `EntryEnter` and `EntryExit` are recorded with the CPU/wait split. Instructions

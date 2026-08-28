@@ -86,6 +86,16 @@
 //! function *used* as a value is numbered as a second specialisation under
 //! that convention rather than called under its own.
 //!
+//! One closure is called by something other than a `call-value`, and it is
+//! the only one whose convention differs. [`Inst::Lock`] hands its closure a
+//! *place* naming the cell's contents, because a closure written
+//! `fn(var value)` changes what the cell will hold rather than a copy of it;
+//! that parameter therefore takes no value slot, and
+//! [`Function::capture_base`] is where the captures begin as a result. It is
+//! sound because the lowering builds such a closure only as the argument of
+//! the `lock` that consumes it, so it never becomes a value a `call-value`
+//! could reach.
+//!
 //! # One program, and every thread of a run reads it
 //!
 //! ADR 0008 runs a spawned task on a thread of its own, and a task's body is
@@ -265,12 +275,24 @@ pub struct Function {
     /// shows.
     ///
     /// The values themselves live in the first value slots after the
-    /// parameters — `arity .. arity + captures.len()` — put there by the
+    /// parameters that arrived on the value stack —
+    /// `capture_base .. capture_base + captures.len()` — put there by the
     /// call that entered this body, out of the closure it was called
     /// through. That is why every function a closure can be made of takes
-    /// all of its arguments on the value stack: the captures follow them
-    /// there, and a scalar parameter would leave a hole between the two.
+    /// its arguments on the value stack: the captures follow them there, and
+    /// a scalar parameter would leave a hole between the two.
     pub captures: Vec<Arc<str>>,
+    /// Where this function's captures begin among its value slots, which is
+    /// how many of its parameters arrived on the value stack.
+    ///
+    /// The same number as `arity` for every closure but one, and written out
+    /// rather than derived because [`Inst::LoadCapture`] reads it on a path
+    /// that should not count anything. The exception is the closure
+    /// `Shared::lock` is given a `var` parameter: that parameter names the
+    /// cell's contents rather than receiving a copy of them, so it arrives on
+    /// the place stack and takes no value slot, and the captures begin one
+    /// slot earlier than `arity` would say. See [`Inst::Lock`].
+    pub capture_base: u32,
     /// The parameters as source wrote them, for a function a closure value
     /// can be made of, and empty for every other.
     ///
@@ -492,15 +514,16 @@ pub enum Inst {
     /// Pushes one of this call's captures.
     ///
     /// A capture is a value slot like any other — the call that entered this
-    /// body copied it out of the closure into `arity + index`, which is
-    /// where the captures stand because every argument of a closure travels
-    /// on the value stack and so the parameters fill exactly `0..arity`
-    /// there. This could therefore have been a [`Inst::LoadLocal`] of that
-    /// number, and it is not, for two reasons that are the same reason: the
-    /// layout is a fact about the closure rather than about the body, and it
-    /// is [`Function::captures`] that states it. A listing reads
-    /// `capture 0` rather than `load 3`, and `crate::lower::validate` can
-    /// check an index against the capture list instead of against the frame.
+    /// body copied it out of the closure into
+    /// [`Function::capture_base`]` + index`, which is where the captures
+    /// stand because a closure's arguments travel on the value stack and so
+    /// its value parameters fill exactly the slots below them. This could
+    /// therefore have been a [`Inst::LoadLocal`] of that number, and it is
+    /// not, for two reasons that are the same reason: the layout is a fact
+    /// about the closure rather than about the body, and it is
+    /// [`Function::captures`] that states it. A listing reads `capture 0`
+    /// rather than `load 3`, and `crate::lower::validate` can check an index
+    /// against the capture list instead of against the frame.
     LoadCapture(u32),
     /// Builds a closure over the top `captures` values, in the order
     /// [`Function::captures`] names them, and pushes it.
@@ -1036,6 +1059,32 @@ pub enum Inst {
     /// finished is known only once something waits for it, which is what
     /// `await` and leaving the scope do.
     Cancel,
+    /// `shared.lock(fn(var value) { ... })`: runs the closure on top of the
+    /// stack with the contents of the `Shared` below it, holding the cell for
+    /// the whole of the call, and pushes what the closure answered.
+    ///
+    /// `lock` is a `Shared`'s only operation, because every access to what a
+    /// cell holds is scoped: a read-modify-write cannot be written as two
+    /// operations that race. `cove_runtime::shared::SharedCell::lock` is the
+    /// whole of what that means, and both backends run this through it.
+    ///
+    /// # Why this is not a call through a value
+    ///
+    /// A closure written `fn(var value)` does not receive a copy of the
+    /// cell's contents; it names them, so that `value.record(false)` changes
+    /// what the cell will hold. Every argument of an [`Inst::CallValue`]
+    /// travels on the value stack, and a place cannot, so this instruction
+    /// makes the call itself: it stands the contents in a value slot of the
+    /// *locking* frame, hands the closure a place rooted there, and reads
+    /// that slot back when the closure returns — which is
+    /// `Interpreter::call_shared_method`'s `Place::binding` and its
+    /// `place.read` afterwards, said as a stack discipline.
+    ///
+    /// A closure written without `var` receives a copy and the cell keeps
+    /// what it had, which is the same thing the oracle does with one. That
+    /// one takes its argument on the value stack like any other closure, so
+    /// which of the two this is is read off the callee's own `params`.
+    Lock,
     /// Returns the top of the value stack.
     ///
     /// What a function whose `returns` is [`SlotKind::Value`] ends in, and
@@ -1297,6 +1346,7 @@ fn render_inst(program: &Program, inst: Inst) -> String {
                 cases.join(", ")
             )
         }
+        Inst::Lock => "lock".to_string(),
         Inst::EnterScope(scope) => format!("enter-scope {}", name(scope)),
         Inst::LeaveScope => "leave-scope".to_string(),
         Inst::CancelScope => "cancel-scope".to_string(),

@@ -307,7 +307,23 @@ use cove_sema::resolve::Program as Checked;
 /// returns on the scalar stack and every one of its returns is a
 /// `return-scalar`, so there is no stack for that failure to travel on. The
 /// lowering refuses such a scope rather than approximating it.
-const LOWERED_FLOOR: usize = 86;
+/// 86 to 88: `Shared`, which is ADR 0008's other half — the one value that
+/// crosses a task boundary by sharing rather than by copying.
+/// `Shared(value)` is an ordinary constructor and `lock` is one instruction
+/// over `cove_runtime::shared::SharedCell::lock`, so what a cell refuses to
+/// wrap, what holding it means, and what a cycle through it costs are all the
+/// oracle's. `tests/e2e:fail_shared_cycle` and `tests/e2e:tasks_shared` are
+/// the cases that gained a lowering, and they are the two the corpus held.
+///
+/// The one thing that is not the oracle's is the call. A closure written
+/// `fn(var value)` names the cell's contents rather than receiving a copy of
+/// them, and every argument of a `call-value` travels on the value stack, so
+/// `cove_ir::Inst::Lock` makes the call itself: the contents stand in a value
+/// slot of the locking frame and the closure is handed a place rooted there.
+/// A `lock` whose closure is a *value* rather than written at the call is
+/// therefore refused, which is narrower than the oracle and is what keeps
+/// such a closure from ever reaching a `call-value`.
+const LOWERED_FLOOR: usize = 88;
 
 // ------------------------------------------------------------------ the test
 

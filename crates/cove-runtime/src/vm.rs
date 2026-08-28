@@ -166,7 +166,7 @@
 //!
 //! # What is not here
 //!
-//! An `async fn`, `Shared`, and everything else `cove_ir::lower` reports as
+//! An `async fn`, and everything else `cove_ir::lower` reports as
 //! [`cove_ir::Unsupported`]. ADR 0019's no-silent-fallback rule is
 //! what makes that the right shape: a program the lowering refuses never
 //! reaches this, so there is no construct this can be wrong about.
@@ -875,12 +875,12 @@ impl<'a> Vm<'a> {
                 Inst::LoadCapture(index) => {
                     // A capture is a value slot: the call that entered this
                     // body copied it out of the closure into
-                    // `arity + index`, which is where the captures stand
-                    // because every argument of a closure travels on the
-                    // value stack and so the parameters fill exactly
-                    // `0..arity`. `cove_ir::lower::validate` checked both
-                    // halves of that, so neither is asked about here.
-                    let slot = frame.base + (running.arity + index) as usize;
+                    // `capture_base + index`, which is where the captures
+                    // stand because a closure's arguments travel on the value
+                    // stack and so its value parameters fill exactly the
+                    // slots below them. `cove_ir::lower::validate` checked
+                    // both halves of that, so neither is asked about here.
+                    let slot = frame.base + (running.capture_base + index) as usize;
                     let value = self.stack[slot].clone();
                     self.stack.push(value);
                 }
@@ -1415,7 +1415,8 @@ impl<'a> Vm<'a> {
                 | Inst::CancelScope
                 | Inst::Spawn
                 | Inst::Await
-                | Inst::Cancel => self.task_inst(inst, running.span_at(pc))?,
+                | Inst::Cancel
+                | Inst::Lock => self.task_inst(inst, running.span_at(pc))?,
                 Inst::NoMatch => {
                     let span = running.span_at(pc);
                     let value = self.pop();
@@ -1720,7 +1721,7 @@ impl<'a> Vm<'a> {
             }
             Inst::CallValue { argc } => {
                 let callee = self.pop();
-                match self.enter_value_call(&callee, argc, pc as u32 + 1, span)? {
+                match self.enter_value_call(&callee, argc, 0, pc as u32 + 1, span)? {
                     // A callee that is not a lowered body answers without a
                     // frame: a bound host operation is a name the registry
                     // resolves, exactly as it is on the oracle.
@@ -1801,6 +1802,7 @@ impl<'a> Vm<'a> {
         &mut self,
         callee: &Value,
         argc: u16,
+        place_argc: u16,
         return_pc: u32,
         span: Span,
     ) -> Result<Entered, RuntimeError> {
@@ -1833,8 +1835,8 @@ impl<'a> Vm<'a> {
             .with_rule("A run has one backend, and a closure belongs to the run that made it."));
         };
         let callee = self.program.function(target);
-        if callee.arity != u32::from(argc) {
-            return Err(wrong_arity(callee, argc, span));
+        if callee.arity != u32::from(argc + place_argc) {
+            return Err(wrong_arity(callee, argc + place_argc, span));
         }
         self.enter(callee, span)?;
         let base = self.stack.len() - argc as usize;
@@ -1846,10 +1848,10 @@ impl<'a> Vm<'a> {
         let scalar_base = self.scalars.len();
         self.scalars
             .resize(scalar_base + callee.scalar_frame_size as usize, 0);
-        let place_base = self.places.len();
-        // A closure has no place slots — a `var` parameter is refused on one
-        // — so this is guarded the way the `Call` arm's is, and for the same
-        // reason.
+        let place_base = self.places.len() - place_argc as usize;
+        // Almost no closure has a place slot: `Inst::Lock`'s is the one whose
+        // parameter can name storage rather than hold a value. So this is
+        // guarded the way the `Call` arm's is, and for the same reason.
         if callee.place_frame_size > 0 {
             self.places.resize(
                 place_base + callee.place_frame_size as usize,
@@ -1990,9 +1992,103 @@ impl<'a> Vm<'a> {
                 handle.cancel();
                 self.stack.push(Value::Unit);
             }
+            Inst::Lock => {
+                let body = self.pop();
+                let receiver = self.pop();
+                let Value::Shared(cell) = receiver else {
+                    unreachable!("a validated `lock` stands on a `Shared`");
+                };
+                // `SharedCell::lock` holds the cell for the whole of the
+                // call, converts its contents into this task's own `Value` on
+                // the way in, and converts back whatever the closure left in
+                // it — all of which is the oracle's, unchanged. What is here
+                // is where that value stands while the closure runs.
+                let answered = cell.lock(span, |value| self.locked(&body, value, span))?;
+                self.stack.push(answered);
+            }
             other => unreachable!("`task_inst` was handed {other:?}"),
         }
         Ok(())
+    }
+
+    /// Runs a `lock`'s closure over `value`, and answers what it left behind
+    /// beside what it returned.
+    ///
+    /// The contents stand in one slot of *this* frame's operands, at `at`,
+    /// and the closure is entered above them — so `Vm::leave` truncates to a
+    /// base above that slot and the value is still there to be read back.
+    /// That slot is what a `var` parameter's place names, which is
+    /// `Interpreter::call_shared_method`'s `Place::binding(value, true)`, and
+    /// reading it afterwards is that method's `place.read`.
+    ///
+    /// The three stacks and the frame stack are restored to what they were
+    /// whichever way the closure went, for the reason `Vm::call_from_host`
+    /// restores them on a failure: the instruction that made this call has
+    /// not finished, and its operands are below.
+    fn locked(
+        &mut self,
+        body: &Value,
+        value: Value,
+        span: Span,
+    ) -> Result<(Value, Value), RuntimeError> {
+        let at = self.stack.len();
+        let scalars = self.scalars.len();
+        let places = self.places.len();
+        let floor = self.frames.len();
+        self.stack.push(value);
+        let answered = self.run_locked(body, at, floor, span);
+        let updated = self.stack[at].clone();
+        self.stack.truncate(at);
+        self.scalars.truncate(scalars);
+        self.places.truncate(places);
+        self.frames.truncate(floor);
+        Ok((answered?, updated))
+    }
+
+    /// Enters the `lock` closure and runs it to its return.
+    ///
+    /// Which convention it takes is the callee's own `params`, because it is
+    /// the callee's to state: a closure written `fn(var value)` takes a place
+    /// naming the slot at `at`, and one written `fn(value)` takes a copy of
+    /// what stands there — which is exactly the difference
+    /// `Interpreter::call_shared_method` reads off `param.is_var`.
+    fn run_locked(
+        &mut self,
+        body: &Value,
+        at: usize,
+        floor: usize,
+        span: Span,
+    ) -> Result<Value, RuntimeError> {
+        let takes_place = match body {
+            Value::Closure(closure) => match closure.body {
+                ClosureBody::Lowered(target) => {
+                    matches!(
+                        self.program.function(target).params.first(),
+                        Some(SlotKind::Place)
+                    )
+                }
+                ClosureBody::Tree(_) => false,
+            },
+            _ => false,
+        };
+        let (argc, place_argc) = match takes_place {
+            true => {
+                self.places.push(Place::rooted_at(at));
+                (0, 1)
+            }
+            false => {
+                let copy = self.stack[at].clone();
+                self.stack.push(copy);
+                (1, 0)
+            }
+        };
+        // The resumption point is never read, for the reason
+        // `Vm::run_callback`'s is not: this frame answers at the floor rather
+        // than resuming an instruction.
+        match self.enter_value_call(body, argc, place_argc, 0, span)? {
+            Entered::Answer(value) => Ok(value),
+            Entered::Frame(_) => self.execute(floor),
+        }
     }
 
     /// The conversion `cove_ir::Inst::MakeDyn` names: the trait object a
@@ -2208,7 +2304,7 @@ impl<'a> Vm<'a> {
         // The resumption point is never read: `leave` answers at the floor
         // rather than resuming an instruction, because the instruction this
         // frame would return into is one no loop fetched.
-        match self.enter_value_call(callee, argc, 0, span)? {
+        match self.enter_value_call(callee, argc, 0, 0, span)? {
             Entered::Answer(value) => Ok(value),
             Entered::Frame(_) => self.execute(floor),
         }
@@ -4655,6 +4751,100 @@ mod tests {
         assert_eq!(lowered.error().span, interpreted.error().span);
     }
 
+    // ---------------------------------------------------------- `Shared`
+
+    /// A `var` closure names the cell's contents, so what it leaves behind is
+    /// what the cell holds afterwards. That is the whole reason `Inst::Lock`
+    /// makes its own call rather than going through `Inst::CallValue`.
+    #[test]
+    fn a_var_lock_closure_changes_what_the_cell_holds() {
+        let outcome = agree(
+            "use console.println\n\nstruct C {\n  n: Int\n}\n\n             export fn main() -> Result<Unit, Error> {\n  let c = Shared(C(n: 1))\n               let by = 4\n  c.lock(fn(var v) {\n    v.n += by\n  })\n               c.lock(fn(v) {\n    println(\"n={v.n}\")\n  })?\n  Ok(())\n}\n",
+        );
+        assert_eq!(outcome.output, "n=5\n");
+    }
+
+    /// A closure written without `var` receives a copy, so the cell keeps
+    /// what it had — which is what the oracle does with one, and is why the
+    /// convention is read off the callee's own `params` rather than assumed.
+    #[test]
+    fn a_lock_closure_without_var_leaves_the_cell_alone() {
+        let outcome = agree(
+            "use console.println\n\nstruct C {\n  n: Int\n}\n\n             export fn main() -> Result<Unit, Error> {\n  let c = Shared(C(n: 1))\n               c.lock(fn(v) {\n    println(\"saw {v.n}\")\n  })?\n               c.lock(fn(v) {\n    println(\"still {v.n}\")\n  })?\n  Ok(())\n}\n",
+        );
+        assert_eq!(outcome.output, "saw 1\nstill 1\n");
+    }
+
+    /// The closure answers the `lock`, and it may capture — which is what
+    /// `Function::capture_base` is for: a place parameter takes no value
+    /// slot, so the captures begin one slot earlier than `arity` would say.
+    #[test]
+    fn a_lock_answers_what_its_closure_answered_and_may_capture() {
+        assert_eq!(
+            value_of(
+                "Result<Int, Error>",
+                "struct C {\n  n: Int\n}\n",
+                "  let c = Shared(C(n: 0))\n  let by = 5\n  Ok(c.lock(fn(var v) {\n    v.n += by\n    v.n * 2\n  }))"
+            ),
+            "Enum(EnumValue { type_name: \"Result\", case: \"Ok\", payload: [Int(10)] })"
+        );
+    }
+
+    /// "There is no `get` and no `set`: every access is scoped." A `lock`
+    /// taken by a task that already holds the cell would wait for itself, and
+    /// `SharedCell::lock` says so instead — the same words on either backend,
+    /// because it is the same code.
+    #[test]
+    fn a_reentrant_lock_is_refused_the_same_way() {
+        let (sources, checked) = checked_module(
+            "use console.println\n\nexport fn main() -> Result<Unit, Error> {\n               let c = Shared(1)\n  c.lock(fn(v) {\n    c.lock(fn(w) {\n      println(\"never\")\n    })\n  })?\n  Ok(())\n}\n",
+        );
+        let (interpreted, lowered) = on_both(&checked, &sources, "m", None);
+        assert_eq!(
+            interpreted.error().message,
+            "this task already holds this `Shared`, so `lock` would wait for itself"
+        );
+        assert_eq!(lowered.error().message, interpreted.error().message);
+        assert_eq!(lowered.error().span, interpreted.error().span);
+    }
+
+    /// The point of the type: two tasks reach one cell, and `lock` holds it
+    /// for the whole of the closure, so no count is lost to a
+    /// read-modify-write that raced.
+    #[test]
+    fn two_tasks_recording_through_one_shared_lose_no_count() {
+        let outcome = agree(
+            "use console.println\n\nstruct C {\n  n: Int\n}\n\n             export fn main() -> Result<Unit, Error> {\n  let c = Shared(C(n: 0))\n               scope work {\n    let a = work.spawn { for i in 0..<50 { c.lock(fn(var v) { v.n += 1 }) } }\n                 let b = work.spawn { for i in 0..<50 { c.lock(fn(var v) { v.n += 1 }) } }\n                 await a\n    await b\n  }\n               c.lock(fn(v) {\n    println(\"n={v.n}\")\n  })?\n  Ok(())\n}\n",
+        );
+        assert_eq!(outcome.output, "n=100\n");
+    }
+
+    /// The listing, because the convention is the point: the cell and the
+    /// closure stand on the stack and `lock` does the rest, and the closure
+    /// the lowering made for it takes a place where every other closure takes
+    /// a value.
+    #[test]
+    fn a_lock_lowers_to_the_cell_the_closure_and_one_instruction() {
+        assert_eq!(
+            main_of(
+                "export fn main() -> Result<Unit, Error> {\n  let c = Shared(1)\n  c.lock(fn(var v) {\n    v = 2\n  })\n  Ok(())\n}\n"
+            ),
+            concat!(
+                "fn m.main arity=0 frame=1/0 -> value\n",
+                "   0  const Int(1)\n",
+                "   1  make-builtin Shared argc=1\n",
+                "   2  store 0\n",
+                "   3  load 0\n",
+                "   4  make-closure m.<closure 0> captures=0\n",
+                "   5  lock\n",
+                "   6  pop\n",
+                "   7  const Unit\n",
+                "   8  make-builtin Ok argc=1\n",
+                "   9  return\n",
+            )
+        );
+    }
+
     // -------------------------------------------------------- the host
 
     /// The same calls, in the same order, with the same values.
@@ -5045,6 +5235,7 @@ mod tests {
                     returns: cove_ir::SlotKind::Value,
                     has_receiver: false,
                     captures: Vec::new(),
+                    capture_base: 0,
                     written_params: Vec::new(),
                     spans: vec![span; code.len()],
                     block_fuel: cove_ir::lower::block_fuel(&code),
@@ -5158,6 +5349,7 @@ mod tests {
                     returns: cove_ir::SlotKind::Value,
                     has_receiver: false,
                     captures: Vec::new(),
+                    capture_base: 0,
                     written_params: Vec::new(),
                     spans: vec![span; code.len()],
                     block_fuel: cove_ir::lower::block_fuel(&code),

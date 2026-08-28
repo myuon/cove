@@ -451,6 +451,15 @@ struct LambdaSite<'a> {
     /// before [`Inst::MakeClosure`] and in the order its
     /// [`Inst::LoadCapture`] indices address.
     captures: Vec<&'a str>,
+    /// Whether this lambda's first parameter, if it is written `var`, names
+    /// storage the caller holds rather than receiving a copy of it.
+    ///
+    /// True for the one closure that is written that way and called that
+    /// way: the one `Shared::lock` is given. A `var` parameter is otherwise
+    /// refused on a lambda, because every argument of an
+    /// [`Inst::CallValue`] travels on the value stack and a place cannot —
+    /// and [`Inst::Lock`] is the instruction that does not go through one.
+    aliases_first_param: bool,
 }
 
 /// The whole-program state one lowering carries: what the package declares,
@@ -978,10 +987,17 @@ impl<'a> Lowering<'a> {
     /// signature. Every parameter is a value slot and the answer comes back
     /// on the value stack, because [`Inst::CallValue`] is emitted where
     /// nothing knows which function it will reach — see that instruction.
-    /// The captures then take the value slots straight after the
+    /// The captures then take the value slots straight after the value
     /// parameters, which is exactly where the call puts them, and that
     /// arrangement is only possible *because* the parameters are all in one
     /// stack: a scalar parameter would leave a hole between the two.
+    ///
+    /// One lambda is not called through a value, and it is the exception the
+    /// whole of [`Function::capture_base`] exists for. The closure a `lock`
+    /// is given may write its first parameter `var`, which means it names the
+    /// cell's contents rather than receiving a copy of them — so that
+    /// parameter is a place, [`Inst::Lock`] hands one over, and the captures
+    /// begin one value slot earlier than `arity` would say.
     ///
     /// The captures are declared before the parameters although they are
     /// numbered after them, and both halves of that matter.
@@ -998,6 +1014,7 @@ impl<'a> Lowering<'a> {
         let decl_body = site.body;
         let captures: Vec<Arc<str>> = site.captures.iter().map(|name| Arc::from(*name)).collect();
         let capture_names: Vec<&'a str> = site.captures.clone();
+        let aliases = site.aliases_first_param;
 
         let mut body = Body::new(self, module);
         body.returns = SlotKind::Value;
@@ -1011,12 +1028,19 @@ impl<'a> Lowering<'a> {
                 // A `var` parameter names the caller's storage, and a call
                 // through a value has no way to hand one over: every
                 // argument of `Inst::CallValue` travels on the value stack.
-                // `shared.lock(fn(var value) { ... })` is where one is
-                // written, and `Shared` is refused already.
-                return Err(Unsupported::new(
-                    format!("a closure's `var` parameter `{}`", param.name.node),
-                    param.span,
-                ));
+                // `shared.lock(fn(var value) { ... })` is the one place one
+                // is written, and `Inst::Lock` is the one call that does not
+                // go through `Inst::CallValue` — so that lambda, and only
+                // that lambda, takes its first parameter as a place.
+                if !(aliases && at == 0) {
+                    return Err(Unsupported::new(
+                        format!("a closure's `var` parameter `{}`", param.name.node),
+                        param.span,
+                    ));
+                }
+                params.push(SlotKind::Place);
+                slots.push(body.allocate(SlotKind::Place));
+                continue;
             }
             if param.default.is_some() {
                 // `bind_params` would evaluate it in the callee, exactly as
@@ -1042,10 +1066,14 @@ impl<'a> Lowering<'a> {
             body.declare_capture_at(name, index as u32, capture_slots[index]);
         }
         for (at, param) in decl_params.iter().enumerate() {
+            // A `var` parameter is writable, which is what a `PlaceWrite`
+            // through it is checked against, and every other parameter is
+            // read-only: that is the `Place::binding` the interpreter builds
+            // for each, read at lowering time.
             body.declare_at(
                 Some(param.name.node.as_str()),
-                false,
-                SlotKind::Value,
+                params[at].is_place(),
+                params[at],
                 slots[at],
             );
             // A lambda's parameters are bound by the same `bind_params`, so
@@ -1053,12 +1081,13 @@ impl<'a> Lowering<'a> {
             // declaration's does. A lambda has no written return type, so
             // there is no second conversion here: `Interpreter::invoke`
             // reads one off `Closure::decl`, and a lambda's is `None`.
-            body.coerce_param(module, param, SlotKind::Value, slots[at], true);
+            body.coerce_param(module, param, params[at], slots[at], true);
         }
 
         body.block_at(decl_body, Position::Value)?;
         body.emit_final_return(decl_body.span);
         let finished = body.finish();
+        let capture_base = value_params(&params);
 
         Ok(Function {
             module: module.into(),
@@ -1074,6 +1103,7 @@ impl<'a> Lowering<'a> {
             returns: SlotKind::Value,
             has_receiver: false,
             captures,
+            capture_base,
             written_params: decl_params.to_vec(),
             block_fuel: block_fuel(&finished.code),
             code: finished.code,
@@ -1301,6 +1331,7 @@ impl<'a> Lowering<'a> {
         body.block_at(&decl.body, position_of(returns))?;
         body.emit_final_return(decl.body.span);
         let finished = body.finish();
+        let capture_base = value_params(&params);
 
         Ok(Function {
             module: module.into(),
@@ -1316,6 +1347,7 @@ impl<'a> Lowering<'a> {
             // `Interpreter::eval_ident` builds one with `captures:
             // Vec::new()`, because a declaration reads no environment.
             captures: Vec::new(),
+            capture_base,
             written_params: match as_value {
                 true => decl.params.clone(),
                 false => Vec::new(),
@@ -2727,7 +2759,7 @@ impl<'a, 'l> Body<'a, 'l> {
                 is_async,
                 params,
                 body,
-            } => self.lambda(expr, *is_async, params, body, span)?,
+            } => self.lambda(expr, *is_async, params, body, span, false)?,
             ExprKind::Match { scrutinee, arms } => {
                 return self.match_expr(scrutinee, arms, position, span)
             }
@@ -2932,6 +2964,7 @@ impl<'a, 'l> Body<'a, 'l> {
         params: &'a [Param],
         body: &'a Block,
         span: Span,
+        aliases_first_param: bool,
     ) -> Result<(), Unsupported> {
         if is_async {
             return Err(Unsupported::new("an `async` closure", span));
@@ -2990,6 +3023,7 @@ impl<'a, 'l> Body<'a, 'l> {
                 body,
                 span,
                 captures: names,
+                aliases_first_param,
             },
             (span.file, expr.id),
         );
@@ -4270,9 +4304,15 @@ impl<'a, 'l> Body<'a, 'l> {
     /// is recorded beside it in [`crate::Function::arg_spans`]. The
     /// interpreter reads exactly these spans, out of the same `SourceMap`.
     fn make_builtin(&mut self, name: &str, args: Args<'a>, span: Span) -> Result<(), Unsupported> {
+        // `Shared` is here rather than beside the three `Result`/`Option`
+        // constructors because it is the one that can refuse its payload:
+        // what a cell wraps must be task-safe, since a `Shared` is reachable
+        // from every task it was given to. `builtins::call_constructor` makes
+        // that check, so both backends refuse the same payloads in the same
+        // words.
         if !matches!(
             name,
-            "Ok" | "Err" | "Some" | "Error" | "assert" | "assertEqual"
+            "Ok" | "Err" | "Some" | "Error" | "Shared" | "assert" | "assertEqual"
         ) {
             return Err(Unsupported::new(format!("`{name}`"), span));
         }
@@ -4879,6 +4919,52 @@ impl<'a, 'l> Body<'a, 'l> {
         Ok(None)
     }
 
+    /// `shared.lock(fn(var value) { ... })`: the cell, then the closure to
+    /// run under its lock.
+    ///
+    /// The closure has to be written at the call, which is narrower than the
+    /// oracle: `Interpreter::call_shared_method` takes whatever closure value
+    /// it is handed. A `var` parameter names the cell's contents rather than
+    /// receiving a copy of them, so it arrives on the place stack — and a
+    /// lambda that is lowered as an ordinary value cannot have one, because
+    /// every argument of an `Inst::CallValue` travels on the value stack.
+    /// Lowering the lambda *here*, as the closure of this `lock`, is what
+    /// makes the exception a property of one written site rather than of
+    /// every closure a program could hand over.
+    fn lock(
+        &mut self,
+        receiver: &'a Expr,
+        args: Args<'a>,
+        span: Span,
+    ) -> Result<Option<Scalar>, Unsupported> {
+        task_arguments(args, "lock", 1)?;
+        let written = args.at(0).value;
+        let ExprKind::Lambda {
+            is_async,
+            params,
+            body,
+        } = &written.kind
+        else {
+            return Err(Unsupported::new(
+                "a `lock` whose closure is not written at the call",
+                written.span,
+            ));
+        };
+        if params.len() != 1 {
+            return Err(Unsupported::new(
+                format!(
+                    "a `lock` whose closure takes {} parameter(s) rather than one",
+                    params.len()
+                ),
+                written.span,
+            ));
+        }
+        self.expr(receiver)?;
+        self.lambda(written, *is_async, params, body, written.span, true)?;
+        self.emit(Inst::Lock, span);
+        Ok(None)
+    }
+
     /// `task.await()` and `task.cancel()`, which take nothing.
     fn task_op(
         &mut self,
@@ -4986,6 +5072,7 @@ impl<'a, 'l> Body<'a, 'l> {
             Some(Ty::Task(_)) if name == "cancel" => {
                 return self.task_op(receiver, Inst::Cancel, "cancel", args, span)
             }
+            Some(Ty::Shared(_)) if name == "lock" => return self.lock(receiver, args, span),
             _ => {}
         }
         if name == "await" {
@@ -5789,6 +5876,18 @@ fn var_marking_disagrees(what: &str, param: &str, declared_var: bool, span: Span
 /// refuses too; and none of them collects a variadic parameter's elements,
 /// so a `...` written at one is a marking the interpreter *ignores* — which
 /// is refused here instead. See [`no_spread_here`].
+/// How many of a function's parameters arrive on the value stack, which is
+/// where its captures begin.
+///
+/// The same as `params.len()` for every closure but the one `Shared::lock` is
+/// given a `var` parameter; see [`Function::capture_base`].
+fn value_params(params: &[SlotKind]) -> u32 {
+    params
+        .iter()
+        .filter(|kind| matches!(kind, SlotKind::Value))
+        .count() as u32
+}
+
 /// The arguments of a task operation, which takes a fixed number of plain
 /// ones and nothing else.
 ///
@@ -6349,13 +6448,23 @@ fn validate_function(program: &Program, id: FunctionId) -> Result<(), String> {
             render_return(other)
         ));
     }
-    // The captures stand in the value slots straight after the parameters,
-    // put there by the call out of the closure it went through, so the frame
-    // has to have room for both. `Inst::LoadCapture` addresses them by index
-    // into `captures` rather than by slot, so this is the one place the two
-    // are reconciled.
+    // The captures stand in the value slots straight after the parameters
+    // that arrived on the value stack, put there by the call out of the
+    // closure it went through, so `capture_base` has to be that number and
+    // the frame has to have room for both. `Inst::LoadCapture` addresses them
+    // by index into `captures` rather than by slot, so this is the one place
+    // the two are reconciled.
+    if function.capture_base != value_params {
+        return Err(format!(
+            "begins its captures at value slot {} and takes {value_params} value argument(s)",
+            function.capture_base
+        ));
+    }
     if !function.captures.is_empty() {
-        if value_params != function.arity {
+        // Every argument but a `lock` closure's first one arrives on the
+        // value stack, which is what makes a capture's slot a static number:
+        // see `Function::capture_base`.
+        if scalar_params > 0 || place_params > 1 {
             return Err(format!(
                 "holds {} capture(s) and takes {} of its {} arguments off another stack",
                 function.captures.len(),
@@ -6363,12 +6472,12 @@ fn validate_function(program: &Program, id: FunctionId) -> Result<(), String> {
                 function.arity
             ));
         }
-        let window = function.arity as usize + function.captures.len();
+        let window = function.capture_base as usize + function.captures.len();
         if window > function.value_frame_size as usize {
             return Err(format!(
-                "holds {} capture(s) after {} argument(s) in a value frame of {}",
+                "holds {} capture(s) after {} value argument(s) in a value frame of {}",
                 function.captures.len(),
-                function.arity,
+                function.capture_base,
                 function.value_frame_size
             ));
         }
@@ -6467,12 +6576,24 @@ fn validate_function(program: &Program, id: FunctionId) -> Result<(), String> {
                 // where the closure is *made*, because that is the last
                 // point at which the target is known: the call itself
                 // reaches whatever value stands there. So a closure can only
-                // ever be made of a function that takes every argument on
-                // the value stack and answers on it.
+                // ever be made of a function that takes its arguments on the
+                // value stack and answers on it.
+                //
+                // With one exception, and it is the one call that does not go
+                // through `Inst::CallValue`. The closure `Inst::Lock` is
+                // given may take its *first* parameter as a place, because
+                // that instruction hands one over itself; every parameter
+                // after it is an argument like any other. What keeps such a
+                // closure away from a `CallValue` is that `crate::lower`
+                // builds one only as the direct argument of a `lock`, where
+                // the very next instruction consumes it, so it never becomes
+                // a value the program can name.
                 if target
                     .params
                     .iter()
+                    .skip(1)
                     .any(|kind| !matches!(kind, SlotKind::Value))
+                    || target.params.first().is_some_and(|kind| kind.is_scalar())
                 {
                     return Err(at(format!(
                         "makes a closure of `{}.{}`, which takes an argument off another stack",
@@ -6922,6 +7043,11 @@ fn stack_shape(constants: &[Const], inst: Inst) -> Shape {
         Inst::CancelScope => Shape::on_values(0, 0),
         // The scope and the closure to run in it, and the handle back.
         Inst::Spawn => Shape::on_values(2, 1),
+        // The cell and the closure to run under its lock, and what the
+        // closure answered back. The contents the closure is given do not
+        // stand on the stack when the instruction begins: `Inst::Lock` puts
+        // them there itself, and takes them back before it ends.
+        Inst::Lock => Shape::on_values(2, 1),
         // The handle in and the value it settled to out; and the handle in
         // and the `()` a `cancel` answers out.
         Inst::Await | Inst::Cancel => Shape::on_values(1, 1),
@@ -9307,8 +9433,13 @@ mod tests {
                 "trait Show {\n  fn show(self) -> String\n}\n\nstruct A {\n  n: Int\n}\n\nimpl Show for A {\n  fn show(self) -> String {\n    \"a\"\n  }\n}\n\nfn f(v: Map<String, dyn Show>) -> Int {\n  v.length()\n}\n",
             ),
             (
-                "`Shared`",
-                "fn f() -> Int {\n  let s = Shared(1)\n  1\n}\n",
+                // `Shared(value)` and `lock` both lower; what does not is a
+                // `lock` whose closure is a value rather than written at the
+                // call. A `var` parameter names the cell's contents, which
+                // only `Inst::Lock` can hand over, so the closure has to be
+                // the one this instruction is lowering.
+                "a `lock` whose closure is not written at the call",
+                "fn g(var n: Int) {\n  n = 2\n}\n\nfn f() -> Int {\n  let s = Shared(1)\n  let h = fn(v: Int) {\n    v\n  }\n  s.lock(h)\n}\n",
             ),
             (
                 "`snapshot` on a `Vector<B>`, which a conformance answers",
