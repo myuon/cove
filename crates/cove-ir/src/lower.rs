@@ -117,10 +117,18 @@
 //! - **Evaluation is left to right everywhere**: arguments, operands, array
 //!   elements, and struct fields.
 //! - **A struct's fields are pushed in declaration order.** `assign_labels`
-//!   in the interpreter refuses a label written out of declaration order, so
-//!   a call it accepts already stands in that order; `arguments_in_order`
-//!   below is that rule, and a call it cannot put in order is reported rather
-//!   than rearranged.
+//!   in the interpreter refuses a label whose parameter stands before one
+//!   already filled, so a call it accepts fills the parameters in increasing
+//!   order; `arguments_in_order` below is that rule, and a call it cannot put
+//!   in order is reported rather than rearranged.
+//! - **A default argument is evaluated by the callee**, in an environment
+//!   holding the parameters declared before it. `bind_params` walks the
+//!   parameters in order and reaches `None => match &param.default` inside
+//!   the frame it is filling, so a default may read an earlier parameter and
+//!   cannot read a later one. A call that leaves a parameter out therefore
+//!   reaches a *specialisation*: an ordinary function whose arity is what
+//!   that call site supplies and whose prologue computes the rest. See
+//!   [`Instance`].
 //! - **A `match` arm is a scope, and the first that matches is the only one
 //!   that runs.** `match_pattern` tests and binds as it walks, and the arm
 //!   that does not match releases what it bound — so an arm's slots behave
@@ -209,7 +217,10 @@ pub fn lower_entry(checked: &Checked, module: &str, name: &str) -> Result<Lowere
             Span::new(FileId(0), 0, 0),
         ));
     };
-    let entry = lowering.number(key);
+    let entry = lowering.number(Instance::whole(
+        key,
+        lowering.declaration(key).decl.params.len(),
+    ));
     Ok(Lowered {
         program: lowering.reachable()?,
         entry,
@@ -232,7 +243,11 @@ pub fn lower_entry(checked: &Checked, module: &str, name: &str) -> Result<Lowere
 pub fn lower(program: &Checked) -> Result<Program, Unsupported> {
     let mut lowering = Lowering::index(program);
     for index in 0..lowering.catalog.len() {
-        lowering.number(Key(index));
+        let key = Key(index);
+        lowering.number(Instance::whole(
+            key,
+            lowering.declaration(key).decl.params.len(),
+        ));
     }
     lowering.reachable()
 }
@@ -296,6 +311,48 @@ struct Declared<'a> {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 struct Key(usize);
 
+/// One declaration together with the parameters a call site supplied for it.
+///
+/// A default argument is evaluated by the *callee* — `bind_params` reaches
+/// `None => match &param.default` inside the frame it is filling — so a call
+/// that leaves one out is not a call with fewer arguments to the same
+/// function. It is a call to a function whose prologue computes the rest.
+///
+/// The supplied arguments are not a prefix either: `measure(3, prefix: "d")`
+/// skips the middle parameter, so a count would not say which of them
+/// arrived. That is why this is the thing that gets numbered rather than
+/// [`Key`]: each distinct supplied-set becomes an ordinary [`Function`] whose
+/// arity is what that call site passes, and the calling convention is
+/// untouched, because a specialisation numbers the supplied parameters' slots
+/// first and its defaulted ones after them.
+///
+/// Two call sites that supply the same parameters share one specialisation,
+/// which is what keeps the worklist finite: a package declares finitely many
+/// parameters, so it has finitely many supplied-sets.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct Instance {
+    key: Key,
+    /// One entry per declared parameter, in declaration order: whether the
+    /// call site handed this parameter an argument.
+    ///
+    /// A variadic parameter is always supplied, because a call site collects
+    /// whatever is left over into the one `Array` it receives and an empty
+    /// `Array` is an argument like any other.
+    supplied: Vec<bool>,
+}
+
+impl Instance {
+    /// The instance every parameter is handed an argument, which is what a
+    /// whole-package lowering seeds and what a call that omits nothing
+    /// reaches.
+    fn whole(key: Key, params: usize) -> Instance {
+        Instance {
+            key,
+            supplied: vec![true; params],
+        }
+    }
+}
+
 /// The whole-program state one lowering carries: what the package declares,
 /// which of it has been reached, and the constants the reached share.
 struct Lowering<'a> {
@@ -303,14 +360,15 @@ struct Lowering<'a> {
     /// Every function the package declares, in the checker's order, whether
     /// or not this lowering will emit any of them.
     catalog: Vec<Declared<'a>>,
-    /// The id each catalog entry was given, once something reached it.
-    numbered: Vec<Option<FunctionId>>,
-    /// The declaration each id names, in the order the ids were handed out.
+    /// The id each specialisation was given, once something reached it.
+    numbered: BTreeMap<Instance, FunctionId>,
+    /// The specialisation each id names, in the order the ids were handed
+    /// out.
     ///
-    /// This is the worklist as much as the table: a declaration is appended
-    /// when it is first reached, and the lowering walks the vector from the
-    /// front until it stops growing.
-    reached: Vec<Key>,
+    /// This is the worklist as much as the table: a specialisation is
+    /// appended when it is first reached, and the lowering walks the vector
+    /// from the front until it stops growing.
+    reached: Vec<Instance>,
     /// Free functions, by the module that declares them and their name.
     functions: BTreeMap<(String, String), Key>,
     /// Methods, by the module that declares the `impl` block, the type, and
@@ -344,7 +402,7 @@ impl<'a> Lowering<'a> {
         let mut lowering = Lowering {
             checked,
             catalog: Vec::new(),
-            numbered: Vec::new(),
+            numbered: BTreeMap::new(),
             reached: Vec::new(),
             functions: BTreeMap::new(),
             methods: BTreeMap::new(),
@@ -386,23 +444,25 @@ impl<'a> Lowering<'a> {
 
     fn catalogue(&mut self, declared: Declared<'a>) -> Key {
         self.catalog.push(declared);
-        self.numbered.push(None);
         Key(self.catalog.len() - 1)
     }
 
-    /// The id `key` has, handing one out and queuing the declaration when
-    /// this is the first thing to reach it.
+    /// The id `instance` has, handing one out and queuing the
+    /// specialisation when this is the first thing to reach it.
     ///
     /// Numbering once is what ends the walk: a function that calls itself,
     /// and a cycle of functions that call each other, are each already
-    /// numbered by the time the call that closes the loop is emitted.
-    fn number(&mut self, key: Key) -> FunctionId {
-        if let Some(id) = self.numbered[key.0] {
-            return id;
+    /// numbered by the time the call that closes the loop is emitted. A
+    /// recursive call that supplies a different set of parameters numbers a
+    /// second specialisation, and that walk ends for the same reason — there
+    /// are only so many sets.
+    fn number(&mut self, instance: Instance) -> FunctionId {
+        if let Some(id) = self.numbered.get(&instance) {
+            return *id;
         }
         let id = FunctionId(self.reached.len() as u32);
-        self.numbered[key.0] = Some(id);
-        self.reached.push(key);
+        self.numbered.insert(instance.clone(), id);
+        self.reached.push(instance);
         id
     }
 
@@ -636,7 +696,8 @@ impl<'a> Lowering<'a> {
 
     /// Lowers one function into its instructions.
     fn function(&mut self, id: FunctionId) -> Result<Function, Unsupported> {
-        let key = self.reached[id.0 as usize];
+        let instance = self.reached[id.0 as usize].clone();
+        let key = instance.key;
         let declared = self.declaration(key);
         let module = declared.module;
         let name: Rc<str> = declared.name.as_str().into();
@@ -688,6 +749,7 @@ impl<'a> Lowering<'a> {
             params.push(kind);
             body.declare(Some("self"), receiver.is_var, kind);
         }
+        let mut kinds: Vec<SlotKind> = Vec::with_capacity(decl.params.len());
         for (at, param) in decl.params.iter().enumerate() {
             reject_parameter(param, at + 1 == decl.params.len())?;
             // An ordinary parameter receives a shallow copy and is a
@@ -703,10 +765,15 @@ impl<'a> Lowering<'a> {
             // parameter was *written* as rather than the array the body
             // sees: `items: Int...` would answer `Int` there, and a scalar
             // slot is exactly what this must not be.
-            let kind = if param.is_var {
+            kinds.push(if param.is_var && instance.supplied[at] {
                 // A `var` parameter does not have a type's slot at all: it
                 // names the caller's storage, and what type that storage
-                // holds says nothing about where the *name* lives.
+                // holds says nothing about where the *name* lives. Left to
+                // its default it is not one: `bind_params` reaches
+                // `Place::binding` there like any other default, and
+                // `Body::call_declared` refuses a call that leaves a `var`
+                // parameter out rather than lowering a place that names
+                // nothing.
                 SlotKind::Place
             } else if param.variadic {
                 SlotKind::Value
@@ -714,9 +781,55 @@ impl<'a> Lowering<'a> {
                 signature
                     .and_then(|signature| signature.params.get(at))
                     .map_or(SlotKind::Value, slot_kind_of)
-            };
-            params.push(kind);
-            body.declare(Some(param.name.node.as_str()), param.is_var, kind);
+            });
+        }
+
+        // The supplied parameters take the first slot numbers of whichever
+        // stack each lives in, because that is what the calling convention
+        // means: an argument is pushed onto its own stack and *becomes* the
+        // callee's slot there without moving. A parameter left to its
+        // default is not pushed by anyone, so it is numbered after all of
+        // them and the convention does not notice it exists.
+        let mut slots: Vec<u32> = vec![0; decl.params.len()];
+        for (at, kind) in kinds.iter().enumerate() {
+            if instance.supplied[at] {
+                params.push(*kind);
+                slots[at] = body.allocate(*kind);
+            }
+        }
+        for (at, kind) in kinds.iter().enumerate() {
+            if !instance.supplied[at] {
+                slots[at] = body.allocate(*kind);
+            }
+        }
+
+        // Now the names, in declaration order, with each default evaluated
+        // when its own parameter's turn comes. That order is the whole of
+        // what makes this the interpreter's semantics rather than an
+        // approximation of it: `bind_params` walks the parameters in order
+        // and declares each into an environment holding the ones before it,
+        // so a default may read an earlier parameter and cannot read a later
+        // one. Naming a parameter only when its turn comes is how a default
+        // that reads a later one refuses here instead of quietly reading a
+        // slot nothing has written.
+        for (at, param) in decl.params.iter().enumerate() {
+            if !instance.supplied[at] {
+                let default = param.default.as_ref().unwrap_or_else(|| {
+                    unreachable!("a parameter left unsupplied was reached through its default")
+                });
+                match kinds[at] {
+                    SlotKind::Scalar(_) => body.expr_scalar(default)?,
+                    SlotKind::Value => body.expr(default)?,
+                    SlotKind::Place => unreachable!("a default does not produce a place"),
+                }
+                body.emit(store_slot(kinds[at], slots[at]), default.span);
+            }
+            body.declare_at(
+                Some(param.name.node.as_str()),
+                param.is_var && instance.supplied[at],
+                kinds[at],
+                slots[at],
+            );
         }
 
         // The body's value is the function's answer, so it is lowered into
@@ -732,7 +845,7 @@ impl<'a> Lowering<'a> {
             value_frame_size: finished.value_frame_size,
             scalar_frame_size: finished.scalar_frame_size,
             place_frame_size: finished.place_frame_size,
-            arity: decl.params.len() as u32 + u32::from(decl.receiver.is_some()),
+            arity: params.len() as u32,
             params,
             returns,
             has_receiver: decl.receiver.is_some(),
@@ -1147,7 +1260,22 @@ impl<'a, 'l> Body<'a, 'l> {
     /// its own stack — nothing to skip, because the other stack's numbers
     /// are not in this space at all.
     fn declare(&mut self, name: Option<&'a str>, writable: bool, kind: SlotKind) -> u32 {
-        let slot = match kind {
+        let slot = self.allocate(kind);
+        self.declare_at(name, writable, kind, slot);
+        slot
+    }
+
+    /// Reserves a slot without letting any name reach it yet.
+    ///
+    /// Split from [`Body::declare`] because a specialisation numbers its
+    /// slots in one order and declares its names in another: the supplied
+    /// parameters take the first slot numbers, because that is what the
+    /// calling convention means, while a default is evaluated in the scope
+    /// its own parameter's turn comes in, so a parameter's name must not be
+    /// reachable before then. Reserving and naming are therefore two events
+    /// here and one event everywhere else.
+    fn allocate(&mut self, kind: SlotKind) -> u32 {
+        match kind {
             SlotKind::Value => {
                 let slot = self.next_value;
                 self.next_value += 1;
@@ -1166,14 +1294,17 @@ impl<'a, 'l> Body<'a, 'l> {
                 self.place_frame_size = self.place_frame_size.max(self.next_place);
                 slot
             }
-        };
+        }
+    }
+
+    /// Lets `name` reach a slot [`Body::allocate`] already reserved.
+    fn declare_at(&mut self, name: Option<&'a str>, writable: bool, kind: SlotKind, slot: u32) {
         self.live.push(Binding {
             name,
             slot,
             writable,
             kind,
         });
-        slot
     }
 
     /// Where a scope begins, to be handed back to [`Body::release`] when it
@@ -2901,7 +3032,46 @@ impl<'a, 'l> Body<'a, 'l> {
         // `reject_parameter` has already refused a variadic parameter that
         // is not the last one, so the last one is the only one there can be.
         let variadic = decl.params.last().is_some_and(|param| param.variadic);
-        arguments_in_order(&names, args, &what, variadic, span)?;
+        let assigned = arguments_in_order(&names, args, &what, variadic, span)?;
+
+        // Which parameters this call site hands an argument, which is what
+        // decides *which* function it calls: a parameter left out is one the
+        // callee computes, so a callee that computes one is a different
+        // function from a callee that is given it. A variadic parameter is
+        // always supplied, because the leftovers are collected here into the
+        // one `Array` it receives and an empty one is an argument like any
+        // other.
+        let mut supplied: Vec<bool> = assigned.slots.iter().map(Option::is_some).collect();
+        if variadic {
+            supplied[names.len() - 1] = true;
+        }
+        for (at, param) in decl.params.iter().enumerate() {
+            if supplied[at] {
+                continue;
+            }
+            if param.default.is_none() {
+                return Err(Unsupported::new(
+                    format!(
+                        "a call to `{what}` that does not supply one argument for every parameter"
+                    ),
+                    span,
+                ));
+            }
+            if param.is_var {
+                // `bind_params` would bind the default's *value* here rather
+                // than an alias, so the parameter the body writes through
+                // would name storage no caller owns. Nothing writes one, and
+                // refusing says so rather than lowering a place that names
+                // nothing.
+                return Err(Unsupported::new(
+                    format!(
+                        "a call to `{what}` that leaves the `var` parameter `{}` to a default",
+                        param.name.node
+                    ),
+                    span,
+                ));
+            }
+        }
 
         // The same signature the callee's own lowering reads, so the two
         // cannot disagree about where an argument goes; a declaration the
@@ -2978,11 +3148,18 @@ impl<'a, 'l> Body<'a, 'l> {
             }
             (None, None) => {}
         }
-        // Every parameter but a variadic one takes exactly one argument,
-        // and `arguments_in_order` has already refused a call where those do
-        // not stand in order.
+        // Every parameter but a variadic one takes at most one argument, and
+        // `arguments_in_order` has already refused a call whose arguments do
+        // not fill the parameters in increasing order — so pushing them in
+        // the order the parameters are declared is pushing them in the order
+        // they are written, and the one a parameter was left to its default
+        // is simply not there.
         let fixed = names.len() - usize::from(variadic);
-        for (at, arg) in args.iter().take(fixed).enumerate() {
+        for at in 0..fixed {
+            let Some(position) = assigned.slots[at] else {
+                continue;
+            };
+            let arg = &args[position];
             // The marking is at both ends and has to agree at both, which is
             // what `bind_params` checks at run time and what this checks
             // before the run.
@@ -3038,9 +3215,23 @@ impl<'a, 'l> Body<'a, 'l> {
             // `Inst::MakeArray` reads that stack. Zero of them is an empty
             // `Array`, which is what `bind_params` builds when
             // `assign_labels` left it nothing.
-            let elements = &args[fixed..];
-            no_var_argument(elements, &what)?;
-            for arg in elements {
+            //
+            // A label written in the variadic parameter's own place is one
+            // element rather than a pile of leftovers, which is what
+            // `bind_params` makes of `slots[index]`; a call that writes both
+            // was refused above.
+            let elements: Vec<&Arg> = assigned.slots[names.len() - 1]
+                .into_iter()
+                .chain(assigned.rest.iter().copied())
+                .map(|position| &args[position])
+                .collect();
+            if let Some(arg) = elements.iter().find(|arg| arg.is_var) {
+                return Err(Unsupported::new(
+                    format!("a `var` argument to `{what}`, which takes values"),
+                    arg.span,
+                ));
+            }
+            for arg in &elements {
                 self.expr(&arg.value)?;
             }
             self.emit(Inst::MakeArray(elements.len() as u32), span);
@@ -3050,7 +3241,7 @@ impl<'a, 'l> Body<'a, 'l> {
         // This is the whole of the reachability rule: the call being emitted
         // is what makes the target part of the program, so the target is
         // numbered here and nowhere else.
-        let function = self.outer.number(key);
+        let function = self.outer.number(Instance { key, supplied });
         self.emit(
             Inst::Call {
                 function,
@@ -3156,7 +3347,7 @@ impl<'a, 'l> Body<'a, 'l> {
             .iter()
             .map(|field| field.name.node.as_str())
             .collect();
-        arguments_in_order(&names, args, &decl.name.node, false, span)?;
+        every_argument_supplied(&names, args, &decl.name.node, span)?;
         no_var_argument(args, &decl.name.node)?;
         for arg in args {
             self.expr(&arg.value)?;
@@ -3255,7 +3446,7 @@ impl<'a, 'l> Body<'a, 'l> {
             .iter()
             .map(|field| field.name)
             .collect();
-        arguments_in_order(&names, args, builtins::MAP_ENTRY.name, false, span)?;
+        every_argument_supplied(&names, args, builtins::MAP_ENTRY.name, span)?;
         no_var_argument(args, builtins::MAP_ENTRY.name)?;
         for arg in args {
             self.expr(&arg.value)?;
@@ -3711,45 +3902,48 @@ fn qualified_case(type_name: &str, case: &str) -> String {
     format!("{type_name}.{case}")
 }
 
-/// Whether the arguments already stand in declaration order, one for every
-/// parameter.
+/// Which parameter each argument fills, refusing every shape whose answer
+/// the lowering would have to rearrange.
 ///
-/// `assign_labels` in the interpreter matches positional arguments to names
-/// in order, refuses a label written out of declaration order, and refuses a
-/// positional argument after a labelled one. What survives all three is a
-/// call whose arguments are its parameters in order — which is what makes
-/// pushing them left to right the same as pushing them in declaration order.
-/// Anything else is reported rather than rearranged: a parameter left to its
-/// default would need the callee to evaluate an expression the IR does not
-/// carry, and a reordering would put the pushes in an order the receiver
-/// does not expect.
+/// This is `assign_labels` in the interpreter, asked before the run instead
+/// of during it. That function matches a positional argument to the next
+/// parameter not yet filled, matches a label to the parameter of that name,
+/// refuses a label whose parameter stands before one already filled, and
+/// refuses a positional argument after a labelled one. What survives is a
+/// call whose arguments fill parameters in strictly increasing order — which
+/// is what makes pushing them left to right the same as pushing them in
+/// declaration order.
+///
+/// A parameter no argument fills is left to its default, and a default is
+/// evaluated by the callee, so it is not this function's business beyond
+/// saying which ones they are. `Body::call_declared` reads that from
+/// [`Arguments::slots`] and specialises the callee; a parameter with no
+/// default to fall back on is what is reported here, in the words
+/// `bind_params` reports it in.
 ///
 /// `variadic` says the last parameter takes every argument left over, which
 /// changes two of the three questions and neither of the others. There is no
 /// longer a most: `assign_labels` puts a positional argument past the last
-/// parameter into `rest` rather than reporting one too many. And there is no
-/// longer one argument each: the fewest a call can pass is the parameters
-/// *before* the variadic one, since a variadic parameter given nothing is an
-/// empty `Array` rather than a missing argument.
+/// parameter into `rest` rather than reporting one too many. And a variadic
+/// parameter is never missing, since one given nothing is an empty `Array`.
 ///
-/// A label is unchanged, and that is what makes the surprising case safe
-/// without a rule of its own. `assign_labels` will accept
-/// `f(1, 2, items: 3)` and bind `items` to `[3, 2]` — the labelled argument
-/// first and the ones that fell into `rest` after it, which is also what the
-/// checker's `match_arguments` does — and a lowering that pushed those left
-/// to right would have them the other way round. The existing demand that a
-/// label name the parameter standing at its own position refuses that call
-/// before the question arises. What survives it is a label on the variadic
-/// parameter written in the variadic parameter's own place, and since a
-/// positional argument after a label is refused too, that is one argument,
-/// which is one element.
+/// The surprising case is the one refused by name. `assign_labels` will
+/// accept `f(1, 2, items: 3)` and bind `items` to `[3, 2]` — the labelled
+/// argument first and the ones that fell into `rest` after it, which is also
+/// what the checker's `match_arguments` does — and a lowering that pushed
+/// those left to right would have them the other way round. Rather than
+/// rearrange them, a variadic parameter that is written with a label *and*
+/// collects leftovers is reported.
 fn arguments_in_order(
     names: &[&str],
     args: &[Arg],
     what: &str,
     variadic: bool,
     span: Span,
-) -> Result<(), Unsupported> {
+) -> Result<Arguments, Unsupported> {
+    let mut slots: Vec<Option<usize>> = vec![None; names.len()];
+    let mut rest: Vec<usize> = Vec::new();
+    let mut next = 0usize;
     let mut labelled = false;
     for (position, arg) in args.iter().enumerate() {
         match &arg.label {
@@ -3761,7 +3955,7 @@ fn arguments_in_order(
                         arg.span,
                     ));
                 };
-                if index != position {
+                if index < next {
                     return Err(Unsupported::new(
                         format!(
                             "a call to `{what}` whose arguments do not stand in declaration order"
@@ -3769,6 +3963,8 @@ fn arguments_in_order(
                         arg.span,
                     ));
                 }
+                slots[index] = Some(position);
+                next = index + 1;
             }
             None => {
                 if labelled {
@@ -3779,7 +3975,12 @@ fn arguments_in_order(
                         arg.span,
                     ));
                 }
-                if !variadic && position >= names.len() {
+                if variadic && next + 1 >= names.len() {
+                    rest.push(position);
+                } else if next < names.len() {
+                    slots[next] = Some(position);
+                    next += 1;
+                } else {
                     return Err(Unsupported::new(
                         format!("a call to `{what}` with more arguments than it has parameters"),
                         arg.span,
@@ -3788,8 +3989,41 @@ fn arguments_in_order(
             }
         }
     }
-    let fewest = names.len() - usize::from(variadic);
-    if args.len() < fewest || (!variadic && args.len() > fewest) {
+    if variadic && !rest.is_empty() && slots[names.len() - 1].is_some() {
+        return Err(Unsupported::new(
+            format!("a call to `{what}` that labels its variadic parameter and passes more"),
+            span,
+        ));
+    }
+    Ok(Arguments { slots, rest })
+}
+
+/// Which argument fills each parameter, and which arguments a variadic
+/// parameter collects.
+struct Arguments {
+    /// For each parameter, the position of the argument that fills it, or
+    /// `None` where the call left it to its default.
+    slots: Vec<Option<usize>>,
+    /// The positions of the arguments that fell past the last parameter, in
+    /// the order they are written, which a variadic parameter collects.
+    rest: Vec<usize>,
+}
+
+/// The rule [`arguments_in_order`] states, for a call that admits no default
+/// and no variadic parameter.
+///
+/// A struct's synthesized initializer, `MapEntry`, and a type a host module
+/// declares are all of that shape: every field is written or the call is
+/// wrong, and the interpreter says so with its own words rather than with a
+/// default it does not have.
+fn every_argument_supplied(
+    names: &[&str],
+    args: &[Arg],
+    what: &str,
+    span: Span,
+) -> Result<(), Unsupported> {
+    let assigned = arguments_in_order(names, args, what, false, span)?;
+    if assigned.slots.iter().any(Option::is_none) {
         return Err(Unsupported::new(
             format!("a call to `{what}` that does not supply one argument for every parameter"),
             span,
@@ -4984,6 +5218,26 @@ mod tests {
         crate::render(&program, id)
     }
 
+    /// The listing of the specialisation of `name` that takes `arity`
+    /// arguments.
+    ///
+    /// A call that leaves a parameter to its default reaches a function of
+    /// its own, so a name is no longer one function and [`listing`] — which
+    /// asks for the first one of that name — would always answer the whole
+    /// one. The arity is what tells the specialisations apart, because each
+    /// takes exactly what its call site supplies.
+    fn specialisation(source: &str, name: &str, arity: u32) -> String {
+        let program = lower(&checked(source)).expect("the program lowers");
+        validate(&program).expect("the lowering holds the VM's invariants");
+        let id = program
+            .functions
+            .iter()
+            .position(|function| &*function.name == name && function.arity == arity)
+            .map(|index| FunctionId(index as u32))
+            .unwrap_or_else(|| panic!("`{name}` was lowered taking {arity} argument(s)"));
+        crate::render(&program, id)
+    }
+
     /// What stopped the lowering, in the words it reported.
     fn refused(source: &str) -> String {
         match lower(&checked(source)) {
@@ -5639,11 +5893,10 @@ mod tests {
     /// `assign_labels` puts a labelled argument in that parameter's slot and
     /// `bind_params` makes it the array's first element; no positional
     /// argument may follow a label, so there is nothing else for the array
-    /// to hold. The call `join(1, 2, items: 3)` — where the interpreter
-    /// would answer `[3, 2]`, the labelled argument before the ones that
-    /// fell past it — is refused by the rule that a label names the
-    /// parameter standing at its own position, which is why this one needs
-    /// no rule of its own.
+    /// to hold. The call `join("-", "a", items: "b")` is the one where that
+    /// stops being true: the interpreter answers `["b", "a"]`, the labelled
+    /// argument before the one that fell past it, and pushing them as
+    /// written would have them the other way round. It is refused by name.
     #[test]
     fn a_labelled_variadic_argument_is_one_element() {
         assert_eq!(
@@ -5659,7 +5912,7 @@ mod tests {
             refused(&format!(
                 "{VARIADIC}\nfn f() -> Int {{\n  join(\"-\", \"a\", items: \"b\")\n}}\n"
             )),
-            "a call to `join` whose arguments do not stand in declaration order"
+            "a call to `join` that labels its variadic parameter and passes more"
         );
     }
 
@@ -5688,20 +5941,149 @@ mod tests {
         );
     }
 
-    /// A parameter left to its default still refuses, variadic call or not.
+    /// A call that leaves a parameter to its default reaches a function
+    /// whose prologue computes it.
     ///
-    /// A variadic parameter takes nothing from that rule except itself: it
-    /// is why there is no longer a *most*, and it lowers the fewest by
-    /// exactly one. A default is a separate piece of work — the callee
-    /// evaluates it, and it may read the parameters before it — so a call
-    /// that leaves one unfilled is still reported rather than guessed at.
+    /// The default is evaluated by the callee — `bind_params` reaches
+    /// `None => match &param.default` inside the frame it is filling — so
+    /// the caller pushes only what it wrote and the callee's first
+    /// instructions are the ones the interpreter runs at the same moment.
+    /// The supplied parameter is slot 0 and the defaulted one slot 1,
+    /// because a specialisation numbers the supplied parameters first and
+    /// that is the whole of what keeps the calling convention where it was.
     #[test]
-    fn a_default_before_a_variadic_parameter_still_refuses() {
+    fn a_parameter_left_to_its_default_is_computed_by_the_callee() {
+        let source =
+            "fn g(a: Int, b: Int = 2) -> Int {\n  a + b\n}\n\nfn f() -> Int {\n  g(1)\n}\n";
         assert_eq!(
-            refused(
-                "fn join(sep: String = \"-\", items: String...) -> Int {\n  items.length()\n}\n\nfn f() -> Int {\n  join()\n}\n"
+            listing(source, "f"),
+            "fn m.f arity=0 frame=0/0 -> Int\n\
+             \x20  0  scalar-const 1\n\
+             \x20  1  call m.g argc=0/1 -> scalar\n\
+             \x20  2  return-scalar\n"
+        );
+        assert_eq!(
+            specialisation(source, "g", 1),
+            "fn m.g arity=1 frame=0/2 params=[Int] -> Int\n\
+             \x20  0  scalar-const 2\n\
+             \x20  1  store-scalar 1\n\
+             \x20  2  load-scalar 0\n\
+             \x20  3  load-scalar 1\n\
+             \x20  4  int Add\n\
+             \x20  5  return-scalar\n"
+        );
+    }
+
+    /// Two call sites that supply different parameters are two functions,
+    /// and two that supply the same ones are one.
+    #[test]
+    fn a_supplied_set_is_what_a_call_numbers() {
+        let source = "fn g(a: Int, b: Int = 2) -> Int {\n  a + b\n}\n\nfn f() -> Int {\n  g(1) + g(1, 3) + g(4)\n}\n";
+        let program = lower(&checked(source)).expect("the program lowers");
+        validate(&program).expect("the lowering holds the VM's invariants");
+        assert_eq!(
+            program
+                .functions
+                .iter()
+                .filter(|function| &*function.name == "g")
+                .map(|function| function.arity)
+                .collect::<Vec<_>>(),
+            [2, 1]
+        );
+    }
+
+    /// A label may skip a parameter, because the one it skips has a default.
+    ///
+    /// `assign_labels` matches a label to the parameter of that name and
+    /// only refuses one whose parameter stands before a parameter already
+    /// filled, so `measure(3, prefix: "d")` fills the first and the third.
+    /// The arguments still reach the callee in declaration order, which is
+    /// what lets them be pushed as written.
+    #[test]
+    fn a_label_may_skip_a_parameter_that_has_a_default() {
+        let source = "fn measure(value: Int, unit: String = \"m\", prefix: String = \"length\") -> String {\n  \"{prefix}: {value}{unit}\"\n}\n\nfn f() -> String {\n  measure(3, prefix: \"d\")\n}\n";
+        assert_eq!(
+            listing(source, "f"),
+            "fn m.f arity=0 frame=0/0 -> value\n\
+             \x20  0  scalar-const 3\n\
+             \x20  1  const Str(\"d\")\n\
+             \x20  2  call m.measure argc=1/1\n\
+             \x20  3  return\n"
+        );
+        assert_eq!(
+            specialisation(source, "measure", 2),
+            "fn m.measure arity=2 frame=2/1 params=[Int, value] -> value\n\
+             \x20  0  const Str(\"m\")\n\
+             \x20  1  store 1\n\
+             \x20  2  load 0\n\
+             \x20  3  const Str(\": \")\n\
+             \x20  4  load-scalar 0\n\
+             \x20  5  scalar-to-value Int\n\
+             \x20  6  load 1\n\
+             \x20  7  concat 4\n\
+             \x20  8  return\n"
+        );
+    }
+
+    /// A default may read a parameter declared before it, and refuses on one
+    /// declared after it.
+    ///
+    /// `bind_params` declares each parameter as its own turn comes, so the
+    /// environment a default is evaluated in holds the parameters before it
+    /// and not the ones after. `fn f(a: Int = b, b: Int = 1)` is therefore
+    /// ``cannot find `b` in this scope`` on the interpreter, whatever the
+    /// call site supplies. A specialisation names its parameters in the same
+    /// order for the same reason, so the name is not one this body can
+    /// resolve and the lowering says so rather than reading a slot nothing
+    /// has written.
+    #[test]
+    fn a_default_reads_the_parameters_before_it_and_no_others() {
+        assert_eq!(
+            specialisation(
+                "fn g(a: Int, b: Int = a * 2) -> Int {\n  b\n}\n\nfn f() -> Int {\n  g(3)\n}\n",
+                "g",
+                1
             ),
-            "a call to `join` that does not supply one argument for every parameter"
+            "fn m.g arity=1 frame=0/2 params=[Int] -> Int\n\
+             \x20  0  load-scalar 0\n\
+             \x20  1  scalar-const 2\n\
+             \x20  2  int Mul\n\
+             \x20  3  store-scalar 1\n\
+             \x20  4  load-scalar 1\n\
+             \x20  5  return-scalar\n"
+        );
+        assert_eq!(
+            refused("fn g(a: Int = b, b: Int = 1) -> Int {\n  a\n}\n\nfn f() -> Int {\n  g()\n}\n"),
+            "`b`, a name the lowering cannot resolve"
+        );
+    }
+
+    /// A default before a variadic parameter is evaluated by the callee like
+    /// any other.
+    ///
+    /// The two rules meet without either giving way: the call supplies the
+    /// variadic parameter, because an empty `Array` is an argument, and it
+    /// does not supply `sep`, so the specialisation it reaches takes one
+    /// argument and computes the other.
+    #[test]
+    fn a_default_before_a_variadic_parameter_is_computed_by_the_callee() {
+        let source = "fn join(sep: String = \"-\", items: String...) -> Int {\n  items.length()\n}\n\nfn f() -> Int {\n  join()\n}\n";
+        assert_eq!(
+            listing(source, "f"),
+            "fn m.f arity=0 frame=0/0 -> Int\n\
+             \x20  0  make-array 0\n\
+             \x20  1  call m.join argc=1/0 -> scalar\n\
+             \x20  2  return-scalar\n"
+        );
+        assert_eq!(
+            specialisation(source, "join", 1),
+            "fn m.join arity=1 frame=2/0 params=[value] -> Int\n\
+             \x20  0  const Str(\"-\")\n\
+             \x20  1  store 1\n\
+             \x20  2  load 0\n\
+             \x20  3  call-builtin length argc=0\n\
+             \x20  4  value-to-scalar\n\
+             \x20  5  return-scalar\n"
         );
     }
 
@@ -6610,10 +6992,6 @@ mod tests {
             (
                 "a call to `g` whose arguments do not stand in declaration order",
                 "fn g(a: Int, b: Int) -> Int {\n  a\n}\n\nfn f() -> Int {\n  g(b: 2, a: 1)\n}\n",
-            ),
-            (
-                "a call to `g` that does not supply one argument for every parameter",
-                "fn g(a: Int, b: Int = 2) -> Int {\n  a\n}\n\nfn f() -> Int {\n  g(1)\n}\n",
             ),
             (
                 "assignment to `x`, which is a read-only place",

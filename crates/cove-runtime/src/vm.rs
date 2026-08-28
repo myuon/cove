@@ -4216,6 +4216,43 @@ mod tests {
         );
     }
 
+    /// A default argument is computed inside the callee's frame, and the
+    /// answer is the interpreter's.
+    ///
+    /// The specialisation is what makes the calling convention survive a
+    /// call that skips a parameter: `measure(3, prefix: "d")` pushes two
+    /// arguments, the callee takes two, and the third parameter is a slot
+    /// the callee's own prologue writes. The listing is asserted beside the
+    /// answer because an outcome cannot show which frame the default was
+    /// evaluated in.
+    #[test]
+    fn a_parameter_left_to_its_default_is_computed_inside_the_callee() {
+        let source = "fn measure(value: Int, unit: String = \"m\", prefix: String = \"length\") -> String {\n  \"{prefix}: {value}{unit}\"\n}\n\nexport fn main() -> String {\n  measure(3, prefix: \"d\")\n}\n";
+        assert_eq!(agree(source).value(), "Str(\"d: 3m\")");
+        assert_eq!(
+            main_of(source),
+            "fn m.main arity=0 frame=0/0 -> value\n\
+             \x20  0  scalar-const 3\n\
+             \x20  1  const Str(\"d\")\n\
+             \x20  2  call m.measure argc=1/1\n\
+             \x20  3  return\n"
+        );
+    }
+
+    /// A default that reads an earlier parameter reads the argument this
+    /// call passed, and a recursive call that supplies it reaches a second
+    /// specialisation.
+    #[test]
+    fn a_default_reads_the_parameters_the_call_supplied() {
+        assert_eq!(
+            agree(
+                "fn sumTo(n: Int, accumulated: Int = 0) -> Int {\n  if n == 0 {\n    accumulated\n  } else {\n    sumTo(n - 1, accumulated + n)\n  }\n}\n\nexport fn main() -> Int {\n  sumTo(10)\n}\n"
+            )
+            .value(),
+            "Int(55)"
+        );
+    }
+
     // -------------------------------------------------------- benchmarks
     //
     // The `benches/` entries used to be checked here, one agreement test

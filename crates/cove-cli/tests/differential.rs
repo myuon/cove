@@ -154,7 +154,18 @@ use cove_sema::resolve::Program as Checked;
 /// `examples:cq` refused for `freeze` too and did not gain one. It refuses
 /// for `step: foldRevenue`, a function used as a value, which is one
 /// construct further down the same program.
-const LOWERED_FLOOR: usize = 68;
+///
+/// 68 to 70: a call that leaves a parameter to its default reaches a
+/// specialisation of the callee. A default is evaluated by the callee — the
+/// interpreter's `bind_params` reaches `None => match &param.default` inside
+/// the frame it is filling — so a call that omits one is not the same call
+/// with fewer arguments; it is a call to a function whose prologue computes
+/// the rest. `cove_ir::lower` numbers one function per supplied-set, which
+/// keeps the arity a call passes and the arity the callee takes the same
+/// number and leaves the calling convention where it was.
+/// `tests/e2e:fn_defaults` and `tests/e2e:fn_recursion` are the cases that
+/// gained a lowering.
+const LOWERED_FLOOR: usize = 70;
 
 // ------------------------------------------------------------------ the test
 
