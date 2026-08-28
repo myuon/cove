@@ -952,6 +952,30 @@ impl<'a> Vm<'a> {
                     self.fuel += u64::from(len);
                     self.stack.push(Value::Array(items));
                 }
+                Inst::SpreadArgument => {
+                    let span = running.span_at(pc);
+                    let spread = self.pop();
+                    let mut items: Vec<Value> = match self.pop() {
+                        Value::Array(built) => built.to_vec(),
+                        other => unreachable!(
+                            "`spread-argument` appends to the array below it, and was handed a `{}`",
+                            other.type_name()
+                        ),
+                    };
+                    // The two `bind_params` reads and nothing else. A
+                    // `Vector`'s elements are taken as it holds them now,
+                    // which is the borrow the interpreter takes at the same
+                    // moment.
+                    match &spread {
+                        Value::Array(values) => items.extend(values.iter().cloned()),
+                        Value::Vector(storage) => {
+                            items.extend(storage.elements.borrow().iter().cloned());
+                        }
+                        _ => return Err(builtins::spread_needs_a_sequence(span)),
+                    }
+                    self.fuel += items.len() as u64;
+                    self.stack.push(Value::Array(items.into()));
+                }
                 Inst::MakeRange { inclusive_end } => {
                     // The end is above the start, because that is the order
                     // the lowering pushed them in and the order the source
@@ -4248,6 +4272,24 @@ mod tests {
             )
             .value(),
             "Int(3)"
+        );
+    }
+
+    /// A `...` argument spreads an `Array` or a `Vector`, and both backends
+    /// see the same elements in the same order.
+    ///
+    /// The four shapes `tests/e2e:fn_variadic` writes: no spread at all, one
+    /// on its own, one mixed with an ordinary argument, and one over a
+    /// `Vector` — whose elements are read as the vector holds them now,
+    /// which is the borrow `bind_params` takes at the same moment.
+    #[test]
+    fn a_spread_argument_passes_a_sequence_where_the_elements_would_go() {
+        assert_eq!(
+            agree(
+                "fn join(sep: String, items: String...) -> String {\n  var text = \"\"\n  for item in items {\n    text = \"{text}{sep}{item}\"\n  }\n  text\n}\n\nexport fn main() -> String {\n  let ready = [\"x\", \"y\"]\n  \"{join(\"-\", \"a\")}|{join(\"-\", ...ready)}|{join(\"-\", \"w\", ...ready)}|{join(\"-\", ...Vector.of(\"v\"))}\"\n}\n"
+            )
+            .value(),
+            "Str(\"-a|-x-y|-w-x-y|-v\")"
         );
     }
 

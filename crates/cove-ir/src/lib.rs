@@ -547,6 +547,22 @@ pub enum Inst {
     /// operation over a known number of parts here, which is what an
     /// instruction is for.
     Concat(u32),
+    /// Appends what a `...` argument spreads to the `Array` below it.
+    ///
+    /// Pops a value and the `Array` under it, and pushes that array extended
+    /// with the value's elements: an `Array`'s own, a `Vector`'s as it holds
+    /// them now, and nothing else — `bind_params` reads exactly those two
+    /// and reports anything else, and so does this.
+    ///
+    /// A variadic parameter receives one `Array`, and `Inst::MakeArray`
+    /// builds it out of the leftover arguments. A spread is the same array
+    /// built out of a value instead of out of a list of expressions, so a
+    /// call that mixes the two builds it in runs: `MakeArray` for each run
+    /// of ordinary arguments, the value itself for each spread, and this
+    /// instruction to join what came before to what comes next. That is why
+    /// it takes an array and a value rather than two arrays — the ordinary
+    /// run is wrapped on its way in, and the spread is not wrapped at all.
+    SpreadArgument,
     /// Builds a declared struct. `ty` is a `Const::Name` holding the qualified
     /// type name, and `fields` names each field in the order the values were
     /// pushed.
@@ -946,6 +962,7 @@ fn render_inst(program: &Program, inst: Inst) -> String {
         Inst::PlaceWrite => "place-write".to_string(),
         Inst::Freeze => "freeze".to_string(),
         Inst::Snapshot => "snapshot".to_string(),
+        Inst::SpreadArgument => "spread-argument".to_string(),
         Inst::TestCase(case) => format!("test-case {}", name(case)),
         Inst::GetPayload(index) => format!("get-payload {index}"),
         Inst::IterItems => "iter-items".to_string(),

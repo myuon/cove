@@ -1479,10 +1479,7 @@ impl<'a> Interpreter<'a> {
                             items.extend(storage.elements.borrow().iter().cloned());
                         }
                         ArgSlot::Value(_) if arg.spread => {
-                            return Err(RuntimeError::new(
-                                "`...` spreads an `Array` or a `Vector`",
-                            )
-                            .at(arg.span));
+                            return Err(builtins::spread_needs_a_sequence(arg.span));
                         }
                         _ => items.push(value_of(arg, &param.name.node, arg.span)?),
                     }

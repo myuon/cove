@@ -127,8 +127,8 @@
 //!   the frame it is filling, so a default may read an earlier parameter and
 //!   cannot read a later one. A call that leaves a parameter out therefore
 //!   reaches a *specialisation*: an ordinary function whose arity is what
-//!   that call site supplies and whose prologue computes the rest. See
-//!   [`Instance`].
+//!   that call site supplies and whose prologue computes the rest, which is
+//!   what `Instance` below is the key of.
 //! - **A `match` arm is a scope, and the first that matches is the only one
 //!   that runs.** `match_pattern` tests and binds as it walks, and the arm
 //!   that does not match releases what it bound — so an arm's slots behave
@@ -2882,11 +2882,6 @@ impl<'a, 'l> Body<'a, 'l> {
         if trailing {
             return Err(Unsupported::new("a trailing closure", span));
         }
-        for arg in args {
-            if arg.spread {
-                return Err(Unsupported::new("a `...` spread argument", arg.span));
-            }
-        }
         match &callee.kind {
             ExprKind::Ident(name) => self.call_named(name, args, span),
             ExprKind::Field { base, name } => self.call_qualified(id, base, &name.node, args, span),
@@ -3161,6 +3156,13 @@ impl<'a, 'l> Body<'a, 'l> {
                 continue;
             };
             let arg = &args[position];
+            // A `...` here fills one parameter's slot, and `bind_params`
+            // reads that slot through `value_of` without looking at
+            // `spread` — the whole array becomes the argument. Refused
+            // rather than reproduced: see `no_spread_here`.
+            if arg.spread {
+                return Err(no_spread_here(&what, arg.span));
+            }
             // The marking is at both ends and has to agree at both, which is
             // what `bind_params` checks at run time and what this checks
             // before the run.
@@ -3220,7 +3222,15 @@ impl<'a, 'l> Body<'a, 'l> {
             // A label written in the variadic parameter's own place is one
             // element rather than a pile of leftovers, which is what
             // `bind_params` makes of `slots[index]`; a call that writes both
-            // was refused above.
+            // was refused above. `bind_params` reads that one through
+            // `value_of` and never looks at its `spread`, so a `...` written
+            // there is a marking nothing acts on and is refused rather than
+            // spread.
+            if let Some(position) = assigned.slots[names.len() - 1] {
+                if args[position].spread {
+                    return Err(no_spread_here(&what, args[position].span));
+                }
+            }
             let elements: Vec<&Arg> = assigned.slots[names.len() - 1]
                 .into_iter()
                 .chain(assigned.rest.iter().copied())
@@ -3232,10 +3242,7 @@ impl<'a, 'l> Body<'a, 'l> {
                     arg.span,
                 ));
             }
-            for arg in &elements {
-                self.expr(&arg.value)?;
-            }
-            self.emit(Inst::MakeArray(elements.len() as u32), span);
+            self.variadic_array(&elements, span)?;
             into(SlotKind::Value);
         }
         let answer = signature.and_then(|signature| scalar_of_ty(&signature.ret));
@@ -3256,6 +3263,63 @@ impl<'a, 'l> Body<'a, 'l> {
         Ok(answer)
     }
 
+    /// The one `Array` a variadic parameter receives, built out of the
+    /// arguments that were left over.
+    ///
+    /// Without a `...` this is `Inst::MakeArray` over the elements as
+    /// written, which is what it has always been. A `...` passes an existing
+    /// sequence where those elements would go, so the array is built in runs
+    /// instead: `MakeArray` for each run of ordinary arguments, the spread's
+    /// own value for each `...`, and `Inst::SpreadArgument` to join each
+    /// piece to what came before. The empty array it starts from is what
+    /// `bind_params` starts from too, and a call with no leftovers at all
+    /// still lowers to the single `MakeArray` it did before.
+    ///
+    /// The pieces are appended as each is produced rather than after all of
+    /// them are, which is one instruction's worth of difference from
+    /// `eval_args`: the interpreter evaluates every argument and then reads
+    /// them in `bind_params`, so a spread of something that is neither an
+    /// `Array` nor a `Vector` is reported after the arguments to its right
+    /// have run. The checker reports that spread before either backend sees
+    /// it — ``` `...` spreads an `Array` or a `Vector`, but found `Int` ```
+    /// is a check-time diagnostic — so the order is unobservable in a
+    /// checked program, and stating it is cheaper than an instruction that
+    /// would have to carry which of its operands were spreads.
+    fn variadic_array(&mut self, elements: &[&'a Arg], span: Span) -> Result<(), Unsupported> {
+        if !elements.iter().any(|arg| arg.spread) {
+            for arg in elements {
+                self.expr(&arg.value)?;
+            }
+            self.emit(Inst::MakeArray(elements.len() as u32), span);
+            return Ok(());
+        }
+        self.emit(Inst::MakeArray(0), span);
+        let mut at = 0;
+        while at < elements.len() {
+            if elements[at].spread {
+                self.expr(&elements[at].value)?;
+                // The argument's own span, because this is the instruction
+                // that reports a spread of something that is neither
+                // sequence and `bind_params` reports it at `arg.span`.
+                self.emit(Inst::SpreadArgument, elements[at].span);
+                at += 1;
+                continue;
+            }
+            let from = at;
+            while at < elements.len() && !elements[at].spread {
+                at += 1;
+            }
+            for arg in &elements[from..at] {
+                self.expr(&arg.value)?;
+            }
+            self.emit(Inst::MakeArray((at - from) as u32), span);
+            // Appending an `Array` this instruction just built, which cannot
+            // be the failure the span above is for.
+            self.emit(Inst::SpreadArgument, span);
+        }
+        Ok(())
+    }
+
     /// `console.println(...)` and `clock.now()`.
     fn call_host(
         &mut self,
@@ -3267,7 +3331,7 @@ impl<'a, 'l> Body<'a, 'l> {
         if let Some(declared) = hosts::module(module).and_then(|schema| schema.declared_type(op)) {
             return self.make_host_type(module, declared, args, span);
         }
-        no_var_argument(args, op)?;
+        plain_arguments(args, op)?;
         for arg in args {
             self.expr(&arg.value)?;
         }
@@ -3327,7 +3391,7 @@ impl<'a, 'l> Body<'a, 'l> {
         }
         let names: Vec<&str> = declared.fields.iter().map(|field| field.name).collect();
         every_argument_supplied(&names, args, declared.name, span)?;
-        no_var_argument(args, declared.name)?;
+        plain_arguments(args, declared.name)?;
         for arg in args {
             self.expr(&arg.value)?;
         }
@@ -3357,7 +3421,7 @@ impl<'a, 'l> Body<'a, 'l> {
             return Err(Unsupported::new(format!("`{name}`"), span));
         }
         let quotes_its_arguments = matches!(name, "assert" | "assertEqual");
-        no_var_argument(args, name)?;
+        plain_arguments(args, name)?;
         for arg in args {
             self.expr(&arg.value)?;
         }
@@ -3399,7 +3463,7 @@ impl<'a, 'l> Body<'a, 'l> {
             .map(|field| field.name.node.as_str())
             .collect();
         every_argument_supplied(&names, args, &decl.name.node, span)?;
-        no_var_argument(args, &decl.name.node)?;
+        plain_arguments(args, &decl.name.node)?;
         for arg in args {
             self.expr(&arg.value)?;
         }
@@ -3429,7 +3493,7 @@ impl<'a, 'l> Body<'a, 'l> {
         args: &'a [Arg],
         span: Span,
     ) -> Result<(), Unsupported> {
-        no_var_argument(args, case)?;
+        plain_arguments(args, case)?;
         for arg in args {
             self.expr(&arg.value)?;
         }
@@ -3465,7 +3529,7 @@ impl<'a, 'l> Body<'a, 'l> {
         args: &'a [Arg],
         span: Span,
     ) -> Result<(), Unsupported> {
-        no_var_argument(args, name)?;
+        plain_arguments(args, name)?;
         for arg in args {
             self.expr(&arg.value)?;
         }
@@ -3498,7 +3562,7 @@ impl<'a, 'l> Body<'a, 'l> {
             .map(|field| field.name)
             .collect();
         every_argument_supplied(&names, args, builtins::MAP_ENTRY.name, span)?;
-        no_var_argument(args, builtins::MAP_ENTRY.name)?;
+        plain_arguments(args, builtins::MAP_ENTRY.name)?;
         for arg in args {
             self.expr(&arg.value)?;
         }
@@ -3764,7 +3828,7 @@ impl<'a, 'l> Body<'a, 'l> {
         // own: none of them is about a handle, and a name a host answers is
         // not a name this package or the builtins have to share.
         if self.resource_op(receiver, name) {
-            no_var_argument(args, name)?;
+            plain_arguments(args, name)?;
             // The receiver first and then the arguments, left to right:
             // `Interpreter::eval_method_call` evaluates the receiver before
             // `eval_args`, and the order two effects happen in is observable.
@@ -3924,7 +3988,7 @@ impl<'a, 'l> Body<'a, 'l> {
             return self.call_declared(key, Some(receiver), args, span);
         }
         if builtin_method {
-            no_var_argument(args, name)?;
+            plain_arguments(args, name)?;
             self.expr(receiver)?;
             for arg in args {
                 self.expr(&arg.value)?;
@@ -4323,21 +4387,42 @@ fn var_marking_disagrees(what: &str, param: &str, declared_var: bool, span: Span
     )
 }
 
-/// A `var` argument written at a call this backend does not route through a
-/// declared function's parameters.
+/// Neither marking a call site can write, at a call this backend does not
+/// route through a declared function's parameters.
 ///
 /// A struct initializer, a host operation, an enum case, a builtin, and a
-/// builtin's associated function all take values; none of them declares a
+/// builtin's associated function all take values. None of them declares a
 /// `var` parameter, so `var` written at one is a program the interpreter
-/// refuses too.
-fn no_var_argument(args: &[Arg], what: &str) -> Result<(), Unsupported> {
-    match args.iter().find(|arg| arg.is_var) {
-        Some(arg) => Err(Unsupported::new(
+/// refuses too; and none of them collects a variadic parameter's elements,
+/// so a `...` written at one is a marking the interpreter *ignores* — which
+/// is refused here instead. See [`no_spread_here`].
+fn plain_arguments(args: &[Arg], what: &str) -> Result<(), Unsupported> {
+    if let Some(arg) = args.iter().find(|arg| arg.is_var) {
+        return Err(Unsupported::new(
             format!("a `var` argument to `{what}`, which takes values"),
             arg.span,
-        )),
-        None => Ok(()),
+        ));
     }
+    if let Some(arg) = args.iter().find(|arg| arg.spread) {
+        return Err(no_spread_here(what, arg.span));
+    }
+    Ok(())
+}
+
+/// A `...` written where nothing collects the elements it would spread.
+///
+/// Only a variadic parameter of a declared function does. Everywhere else
+/// the interpreter reads the argument's *value* and never its `spread` flag:
+/// `println(...["a"])` hands `console.println` one `Array` and fails against
+/// the schema, and `k(...[1, 2, 3])` binds the whole array to `k`'s one
+/// parameter. Refusing rather than reproducing that is the direction a
+/// second backend is allowed to be wrong in, and it keeps the flag from
+/// being carried through paths that would have to ignore it.
+fn no_spread_here(what: &str, span: Span) -> Unsupported {
+    Unsupported::new(
+        format!("a `...` spread argument to `{what}`, which collects nothing"),
+        span,
+    )
 }
 
 /// A write to a place the program is not allowed to write.
@@ -5139,6 +5224,7 @@ fn stack_shape(constants: &[Const], inst: Inst) -> Shape {
     match inst {
         Inst::Const(_) | Inst::LoadLocal(_) | Inst::LoadCapture(_) => Shape::on_values(0, 1),
         Inst::StoreLocal(_) | Inst::Pop => Shape::on_values(1, 0),
+        Inst::SpreadArgument => Shape::on_values(2, 1),
         Inst::Dup => Shape::on_values(1, 2),
         Inst::Unary(_) | Inst::GetField(_) | Inst::GetFieldAt(_) | Inst::Try | Inst::Snapshot => {
             Shape::on_values(1, 1)
@@ -6026,6 +6112,86 @@ mod tests {
                 "{VARIADIC}\nfn f() -> Int {{\n  join(\"-\", \"a\", items: \"b\")\n}}\n"
             )),
             "a call to `join` that labels its variadic parameter and passes more"
+        );
+    }
+
+    /// A `...` passes an existing sequence where a variadic parameter's
+    /// elements would go.
+    ///
+    /// `bind_params` reads an `Array`'s elements or a `Vector`'s and extends
+    /// the array it is building with them, so the callee still receives one
+    /// `Array` and the calling convention does not move. The call with no
+    /// spread in it still lowers to the single `make-array` it always did.
+    #[test]
+    fn a_spread_argument_extends_the_array_a_variadic_parameter_receives() {
+        assert_eq!(
+            variadic_call("join(\"-\", ...[\"a\", \"b\"])"),
+            "fn m.f arity=0 frame=0/0 -> Int\n\
+             \x20  0  const Str(\"-\")\n\
+             \x20  1  make-array 0\n\
+             \x20  2  const Str(\"a\")\n\
+             \x20  3  const Str(\"b\")\n\
+             \x20  4  make-array 2\n\
+             \x20  5  spread-argument\n\
+             \x20  6  call m.join argc=2/0 -> scalar\n\
+             \x20  7  return-scalar\n"
+        );
+    }
+
+    /// A spread mixed with ordinary arguments builds the array in runs.
+    ///
+    /// Each run of ordinary arguments is one `make-array`, each spread is
+    /// its own value, and `spread-argument` joins each piece to what came
+    /// before — which is the order `bind_params` walks `rest` in.
+    #[test]
+    fn a_spread_mixed_with_ordinary_arguments_builds_the_array_in_runs() {
+        assert_eq!(
+            variadic_call("join(\"-\", \"w\", ...[\"a\"], \"z\")"),
+            "fn m.f arity=0 frame=0/0 -> Int\n\
+             \x20  0  const Str(\"-\")\n\
+             \x20  1  make-array 0\n\
+             \x20  2  const Str(\"w\")\n\
+             \x20  3  make-array 1\n\
+             \x20  4  spread-argument\n\
+             \x20  5  const Str(\"a\")\n\
+             \x20  6  make-array 1\n\
+             \x20  7  spread-argument\n\
+             \x20  8  const Str(\"z\")\n\
+             \x20  9  make-array 1\n\
+             \x20 10  spread-argument\n\
+             \x20 11  call m.join argc=2/0 -> scalar\n\
+             \x20 12  return-scalar\n"
+        );
+    }
+
+    /// Everywhere a variadic parameter is not, a `...` is a marking the
+    /// interpreter ignores, and this refuses rather than reproducing it.
+    ///
+    /// `println(...["a"])` hands `console.println` one `Array` and fails
+    /// against the schema; `k(...[1, 2, 3])` binds the whole array to `k`'s
+    /// one parameter; and `join("-", items: ...["a"])` makes the array one
+    /// element long, because `bind_params` reads a labelled variadic slot
+    /// through `value_of` and never looks at `spread`. None of the three is
+    /// a spread doing anything, so none of them lowers.
+    #[test]
+    fn a_spread_that_collects_nothing_is_refused() {
+        assert_eq!(
+            refused(
+                "use console.println\n\nfn f() -> Result<Unit, Error> {\n  println(...[\"a\"])\n}\n"
+            ),
+            "a `...` spread argument to `println`, which collects nothing"
+        );
+        assert_eq!(
+            refused(
+                "fn k(a: Array<Int>) -> Int {\n  a.length()\n}\n\nfn f() -> Int {\n  k(...[1, 2, 3])\n}\n"
+            ),
+            "a `...` spread argument to `k`, which collects nothing"
+        );
+        assert_eq!(
+            refused(&format!(
+                "{VARIADIC}\nfn f() -> Int {{\n  join(\"-\", items: ...[\"a\"])\n}}\n"
+            )),
+            "a `...` spread argument to `join`, which collects nothing"
         );
     }
 

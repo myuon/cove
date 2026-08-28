@@ -125,6 +125,17 @@ pub fn snapshot(
     }
 }
 
+/// What a `...` argument that is neither an `Array` nor a `Vector` is
+/// refused with.
+///
+/// A spread passes an existing sequence where a variadic parameter's
+/// elements would go, so the two sequences are what it reads; `bind_params`
+/// reports anything else, and the VM reports it from the instruction that
+/// does the appending. One wording, because it is one failure.
+pub fn spread_needs_a_sequence(span: Span) -> RuntimeError {
+    RuntimeError::new("`...` spreads an `Array` or a `Vector`").at(span)
+}
+
 /// What a value that implements no `Snapshot` conformance is refused with.
 ///
 /// Both backends reach it: the interpreter for a struct or an enum whose

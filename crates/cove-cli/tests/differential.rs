@@ -184,7 +184,18 @@ use cove_sema::resolve::Program as Checked;
 /// still refused, because an instruction cannot run a whole Cove function in
 /// the middle of itself. `tests/e2e:type_snapshot` is the case that gained a
 /// lowering, and it is the only one the corpus held.
-const LOWERED_FLOOR: usize = 71;
+///
+/// 71 to 72: a `...` argument spreads a sequence into a variadic parameter.
+/// A variadic parameter receives one `Array` and `cove_ir::Inst::MakeArray`
+/// already built it out of the leftover arguments; a spread is the same array
+/// built out of a value, so `cove_ir::Inst::SpreadArgument` appends what one
+/// holds — an `Array`'s elements or a `Vector`'s, and nothing else, which is
+/// the pair `bind_params` reads. A call that mixes the two builds the array
+/// in runs. Everywhere a variadic parameter is *not*, the interpreter reads a
+/// spread argument's value and ignores its marking, so those are refused
+/// rather than reproduced. `tests/e2e:fn_variadic` is the case that gained a
+/// lowering, and it is the only one the corpus held.
+const LOWERED_FLOOR: usize = 72;
 
 // ------------------------------------------------------------------ the test
 
