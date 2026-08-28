@@ -312,7 +312,15 @@ struct Declared<'a> {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 struct Key(usize);
 
-/// One declaration together with the parameters a call site supplied for it.
+/// What one lowered function is lowered from.
+///
+/// Two things can be, and they are numbered in one space because a
+/// [`FunctionId`] names one of them and a caller does not care which:
+/// a declaration together with the parameters a call site supplied for it,
+/// and a lambda together with the captures the body that wrote it handed
+/// over.
+///
+/// # Why a declaration is not enough by itself
 ///
 /// A default argument is evaluated by the *callee* — `bind_params` reaches
 /// `None => match &param.default` inside the frame it is filling — so a call
@@ -330,16 +338,28 @@ struct Key(usize);
 /// Two call sites that supply the same parameters share one specialisation,
 /// which is what keeps the worklist finite: a package declares finitely many
 /// parameters, so it has finitely many supplied-sets.
+///
+/// # Why a lambda is numbered by where it was written
+///
+/// A lambda has no declaration to catalogue, so [`Lowering::lambdas`] is its
+/// catalogue and this holds an index into it. One entry per *written*
+/// lambda, keyed by the expression that wrote it, because two
+/// specialisations of the enclosing function reach the same lambda with the
+/// same names live and therefore hand it the same captures.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
-struct Instance {
-    key: Key,
-    /// One entry per declared parameter, in declaration order: whether the
-    /// call site handed this parameter an argument.
-    ///
-    /// A variadic parameter is always supplied, because a call site collects
-    /// whatever is left over into the one `Array` it receives and an empty
-    /// `Array` is an argument like any other.
-    supplied: Vec<bool>,
+enum Instance {
+    Declared {
+        key: Key,
+        /// One entry per declared parameter, in declaration order: whether
+        /// the call site handed this parameter an argument.
+        ///
+        /// A variadic parameter is always supplied, because a call site
+        /// collects whatever is left over into the one `Array` it receives
+        /// and an empty `Array` is an argument like any other.
+        supplied: Vec<bool>,
+    },
+    /// An index into [`Lowering::lambdas`].
+    Lambda(usize),
 }
 
 impl Instance {
@@ -347,11 +367,35 @@ impl Instance {
     /// whole-package lowering seeds and what a call that omits nothing
     /// reaches.
     fn whole(key: Key, params: usize) -> Instance {
-        Instance {
+        Instance::Declared {
             key,
             supplied: vec![true; params],
         }
     }
+}
+
+/// One lambda the lowering has reached, and what the body that wrote it
+/// handed over.
+///
+/// The captures are settled *here*, by the enclosing body, before this
+/// lambda's own instructions exist. That is the whole difference from the
+/// interpreter: `Env::captures` builds the list as the closure is created,
+/// so a capture's position is a run-time fact there, and it is a fact about
+/// the lowering here. The set is the same set — the names the body mentions,
+/// intersected with what was live, one entry per name, outermost first — and
+/// [`mentioned_names`] is the interpreter's `mention_block` read at lowering
+/// time.
+struct LambdaSite<'a> {
+    /// The module the lambda's body resolves names in, which is the module
+    /// the lambda is written in.
+    module: &'a str,
+    params: &'a [Param],
+    body: &'a Block,
+    span: Span,
+    /// The names this lambda captures, in the order their values are pushed
+    /// before [`Inst::MakeClosure`] and in the order its
+    /// [`Inst::LoadCapture`] indices address.
+    captures: Vec<&'a str>,
 }
 
 /// The whole-program state one lowering carries: what the package declares,
@@ -389,6 +433,21 @@ struct Lowering<'a> {
     /// naming something that produces one — so this bounds which types a
     /// value written in a module can have.
     visible: BTreeMap<String, BTreeSet<String>>,
+    /// Every lambda some body has reached, in the order they were reached,
+    /// which is what [`Instance::Lambda`] indexes.
+    ///
+    /// A lambda has no declaration, so there is nothing to catalogue it with
+    /// ahead of time the way [`Lowering::catalog`] catalogues declarations:
+    /// a lambda becomes part of the program at the moment a body lowers the
+    /// expression that writes it, and that is the moment its captures are
+    /// known.
+    lambdas: Vec<LambdaSite<'a>>,
+    /// The entry each written lambda was catalogued as, so that one written
+    /// lambda is one function however many times a body is lowered.
+    ///
+    /// Keyed by file and expression id, because an [`ExprId`] is unique
+    /// within the file it was parsed from and a package has many files.
+    lambda_of: BTreeMap<(FileId, ExprId), usize>,
     constants: Vec<Const>,
 }
 
@@ -409,6 +468,8 @@ impl<'a> Lowering<'a> {
             methods: BTreeMap::new(),
             by_name: BTreeMap::new(),
             visible: visibility(checked),
+            lambdas: Vec::new(),
+            lambda_of: BTreeMap::new(),
             constants: Vec::new(),
         };
         for (module, resolved) in &checked.modules {
@@ -695,10 +756,140 @@ impl<'a> Lowering<'a> {
         Some(&resolved.structs.get(name)?.decl)
     }
 
+    /// The id the lambda `expr` writes, catalogued with `captures` the first
+    /// time something reaches it.
+    ///
+    /// One written lambda is one function. Two specialisations of the
+    /// enclosing declaration reach it with the same names live — a parameter
+    /// left to a default is still declared, only computed by the prologue —
+    /// so the capture list is the same list, and numbering it twice would be
+    /// two functions with one meaning.
+    fn number_lambda(&mut self, site: LambdaSite<'a>, at: (FileId, ExprId)) -> FunctionId {
+        if let Some(index) = self.lambda_of.get(&at) {
+            return self.number(Instance::Lambda(*index));
+        }
+        let index = self.lambdas.len();
+        self.lambdas.push(site);
+        self.lambda_of.insert(at, index);
+        self.number(Instance::Lambda(index))
+    }
+
     /// Lowers one function into its instructions.
     fn function(&mut self, id: FunctionId) -> Result<Function, Unsupported> {
-        let instance = self.reached[id.0 as usize].clone();
-        let key = instance.key;
+        match self.reached[id.0 as usize].clone() {
+            Instance::Declared { key, supplied } => self.declared_function(key, &supplied),
+            Instance::Lambda(index) => self.lambda_function(index),
+        }
+    }
+
+    /// Lowers a lambda: its parameters, then the captures the body that
+    /// wrote it handed over, then its own body.
+    ///
+    /// Everything about the convention is fixed rather than read off a
+    /// signature. Every parameter is a value slot and the answer comes back
+    /// on the value stack, because [`Inst::CallValue`] is emitted where
+    /// nothing knows which function it will reach — see that instruction.
+    /// The captures then take the value slots straight after the
+    /// parameters, which is exactly where the call puts them, and that
+    /// arrangement is only possible *because* the parameters are all in one
+    /// stack: a scalar parameter would leave a hole between the two.
+    ///
+    /// The captures are declared before the parameters although they are
+    /// numbered after them, and both halves of that matter.
+    /// `Env::declare_capture` puts a capture in a list searched *after* this
+    /// call's own bindings, so a parameter shadows a capture of the same
+    /// name; and `Env::captures` walks that list *before* the frame, so a
+    /// nested lambda's own captures come out in the same order. One `live`
+    /// list in this order answers both.
+    fn lambda_function(&mut self, index: usize) -> Result<Function, Unsupported> {
+        let site = &self.lambdas[index];
+        let module = site.module;
+        let span = site.span;
+        let decl_params = site.params;
+        let decl_body = site.body;
+        let captures: Vec<Rc<str>> = site.captures.iter().map(|name| Rc::from(*name)).collect();
+        let capture_names: Vec<&'a str> = site.captures.clone();
+
+        let mut body = Body::new(self, module);
+        body.returns = SlotKind::Value;
+        body.rooted = var_argument_roots(decl_body);
+
+        let mut params: Vec<SlotKind> = Vec::with_capacity(decl_params.len());
+        let mut slots: Vec<u32> = Vec::with_capacity(decl_params.len());
+        for (at, param) in decl_params.iter().enumerate() {
+            reject_parameter(param, at + 1 == decl_params.len())?;
+            if param.is_var {
+                // A `var` parameter names the caller's storage, and a call
+                // through a value has no way to hand one over: every
+                // argument of `Inst::CallValue` travels on the value stack.
+                // `shared.lock(fn(var value) { ... })` is where one is
+                // written, and `Shared` is refused already.
+                return Err(Unsupported::new(
+                    format!("a closure's `var` parameter `{}`", param.name.node),
+                    param.span,
+                ));
+            }
+            if param.default.is_some() {
+                // `bind_params` would evaluate it in the callee, exactly as
+                // it does for a declared function — but a call through a
+                // value supplies a count and nothing else, so there is no
+                // supplied-set for a specialisation to be keyed by. Nothing
+                // writes one; refusing says so.
+                return Err(Unsupported::new(
+                    format!("a closure's default for `{}`", param.name.node),
+                    param.span,
+                ));
+            }
+            params.push(SlotKind::Value);
+            slots.push(body.allocate(SlotKind::Value));
+        }
+        // Numbered after the parameters, because that is where the call
+        // copies them out of the closure.
+        let capture_slots: Vec<u32> = capture_names
+            .iter()
+            .map(|_| body.allocate(SlotKind::Value))
+            .collect();
+        for (index, name) in capture_names.iter().enumerate() {
+            body.declare_capture_at(name, index as u32, capture_slots[index]);
+        }
+        for (at, param) in decl_params.iter().enumerate() {
+            body.declare_at(
+                Some(param.name.node.as_str()),
+                false,
+                SlotKind::Value,
+                slots[at],
+            );
+        }
+
+        body.block_at(decl_body, Position::Value)?;
+        body.emit_final_return(decl_body.span);
+        let finished = body.finish();
+
+        Ok(Function {
+            module: module.into(),
+            // Stable, and unique within the program, because the index is
+            // the order lambdas were reached in and that order is the
+            // worklist's. A listing reads it, and nothing else does.
+            name: format!("<closure {index}>").into(),
+            value_frame_size: finished.value_frame_size,
+            scalar_frame_size: finished.scalar_frame_size,
+            place_frame_size: finished.place_frame_size,
+            arity: params.len() as u32,
+            params,
+            returns: SlotKind::Value,
+            has_receiver: false,
+            captures,
+            written_params: decl_params.to_vec(),
+            block_fuel: block_fuel(&finished.code),
+            code: finished.code,
+            spans: finished.spans,
+            arg_spans: finished.arg_spans,
+            span,
+        })
+    }
+
+    /// Lowers one declared function into its instructions.
+    fn declared_function(&mut self, key: Key, supplied: &[bool]) -> Result<Function, Unsupported> {
         let declared = self.declaration(key);
         let module = declared.module;
         let name: Rc<str> = declared.name.as_str().into();
@@ -766,7 +957,7 @@ impl<'a> Lowering<'a> {
             // parameter was *written* as rather than the array the body
             // sees: `items: Int...` would answer `Int` there, and a scalar
             // slot is exactly what this must not be.
-            kinds.push(if param.is_var && instance.supplied[at] {
+            kinds.push(if param.is_var && supplied[at] {
                 // A `var` parameter does not have a type's slot at all: it
                 // names the caller's storage, and what type that storage
                 // holds says nothing about where the *name* lives. Left to
@@ -793,13 +984,13 @@ impl<'a> Lowering<'a> {
         // them and the convention does not notice it exists.
         let mut slots: Vec<u32> = vec![0; decl.params.len()];
         for (at, kind) in kinds.iter().enumerate() {
-            if instance.supplied[at] {
+            if supplied[at] {
                 params.push(*kind);
                 slots[at] = body.allocate(*kind);
             }
         }
         for (at, kind) in kinds.iter().enumerate() {
-            if !instance.supplied[at] {
+            if !supplied[at] {
                 slots[at] = body.allocate(*kind);
             }
         }
@@ -814,7 +1005,7 @@ impl<'a> Lowering<'a> {
         // that reads a later one refuses here instead of quietly reading a
         // slot nothing has written.
         for (at, param) in decl.params.iter().enumerate() {
-            if !instance.supplied[at] {
+            if !supplied[at] {
                 let default = param.default.as_ref().unwrap_or_else(|| {
                     unreachable!("a parameter left unsupplied was reached through its default")
                 });
@@ -827,7 +1018,7 @@ impl<'a> Lowering<'a> {
             }
             body.declare_at(
                 Some(param.name.node.as_str()),
-                param.is_var && instance.supplied[at],
+                param.is_var && supplied[at],
                 kinds[at],
                 slots[at],
             );
@@ -851,6 +1042,9 @@ impl<'a> Lowering<'a> {
             returns,
             has_receiver: decl.receiver.is_some(),
             captures: Vec::new(),
+            // A declared function is not a closure until something makes one
+            // of it, and nothing does yet.
+            written_params: Vec::new(),
             block_fuel: block_fuel(&finished.code),
             code: finished.code,
             spans: finished.spans,
@@ -877,6 +1071,16 @@ struct Binding<'a> {
     name: Option<&'a str>,
     slot: u32,
     writable: bool,
+    /// Which of this function's captures this binding is, for the bindings
+    /// that are one.
+    ///
+    /// A capture is an ordinary value slot, so this changes nothing about
+    /// how it is reached; what it changes is which instruction says so.
+    /// [`Inst::LoadCapture`] carries the index into
+    /// [`Function::captures`] rather than the slot number the index works
+    /// out to, because the layout is a fact about the closure and the
+    /// capture list is what states it.
+    capture: Option<u32>,
     /// Which stack the slot lives in, decided when it was declared and never
     /// revisited: a binding's type does not change, so neither does where it
     /// is kept.
@@ -1304,7 +1508,23 @@ impl<'a, 'l> Body<'a, 'l> {
             name,
             slot,
             writable,
+            capture: None,
             kind,
+        });
+    }
+
+    /// Lets `name` reach the slot holding capture `index`.
+    ///
+    /// Read-only, because `Env::declare_capture` builds a
+    /// `Place::binding(value, false)`: a closure holds a copy of what it
+    /// captured, and writing to that copy is not something source may do.
+    fn declare_capture_at(&mut self, name: &'a str, index: u32, slot: u32) {
+        self.live.push(Binding {
+            name: Some(name),
+            slot,
+            writable: false,
+            capture: Some(index),
+            kind: SlotKind::Value,
         });
     }
 
@@ -2081,7 +2301,11 @@ impl<'a, 'l> Body<'a, 'l> {
                 end,
                 inclusive_end,
             } => self.range(start, end, *inclusive_end, span)?,
-            ExprKind::Lambda { .. } => return Err(Unsupported::new("a closure", span)),
+            ExprKind::Lambda {
+                is_async,
+                params,
+                body,
+            } => self.lambda(expr, *is_async, params, body, span)?,
             ExprKind::Match { scrutinee, arms } => {
                 return self.match_expr(scrutinee, arms, position, span)
             }
@@ -2177,15 +2401,16 @@ impl<'a, 'l> Body<'a, 'l> {
             return Ok(());
         }
         if let Some(binding) = self.binding(name) {
-            let (slot, kind) = (binding.slot, binding.kind);
-            match kind {
+            let (slot, kind, capture) = (binding.slot, binding.kind, binding.capture);
+            match (kind, capture) {
                 // A `var` parameter's slot holds a place, not the value, so
                 // reading the parameter is loading the place and reading
                 // through it — which is where the caller's own storage is.
-                SlotKind::Place => {
+                (SlotKind::Place, _) => {
                     self.emit(Inst::LoadPlace(slot), span);
                     self.emit(Inst::PlaceRead, span);
                 }
+                (_, Some(index)) => self.emit(Inst::LoadCapture(index), span),
                 _ => self.emit(Inst::LoadLocal(slot), span),
             }
             return Ok(());
@@ -2231,6 +2456,105 @@ impl<'a, 'l> Body<'a, 'l> {
             format!("`{name}`, a name the lowering cannot resolve"),
             span,
         ))
+    }
+
+    /// `fn(x) { ... }`: a function of its own, and the values it is handed.
+    ///
+    /// Two things happen here and the order is the whole of the semantics.
+    /// The captures are worked out first, from what this body has live and
+    /// what the lambda's own body mentions, which is `Env::captures` asked
+    /// at lowering time; then each of them is *read* onto the value stack,
+    /// left to right, and [`Inst::MakeClosure`] pairs them with their names.
+    ///
+    /// Reading is the point. The oracle captures by value at creation time —
+    /// a closure over a `var` binding still answers what the binding held
+    /// when the lambda was written, after the binding has been assigned to —
+    /// so a capture whose binding is a scalar slot crosses to the value
+    /// stack here, and a capture whose binding is a `var` parameter is the
+    /// value the place names rather than the place. See
+    /// [`Inst::PlaceLocal`], where that second one is what keeps a place
+    /// from outliving the frame that built it.
+    ///
+    /// A name the lambda mentions that this body has no binding for is not a
+    /// capture at all: a declaration, a type, and a host module resolve in
+    /// the module rather than in the environment, exactly as they do in the
+    /// interpreter, where `Env::captures` only walks bindings.
+    fn lambda(
+        &mut self,
+        expr: &'a Expr,
+        is_async: bool,
+        params: &'a [Param],
+        body: &'a Block,
+        span: Span,
+    ) -> Result<(), Unsupported> {
+        if is_async {
+            return Err(Unsupported::new("an `async` closure", span));
+        }
+        let mentioned = mentioned_names(body);
+        // Outermost first, one entry per name, and the *latest* binding of a
+        // name that is declared twice — which is `Env::captures`'s walk,
+        // where a repeated name overwrites the value it recorded and keeps
+        // the position it recorded it at.
+        let mut captured: Vec<(&'a str, u32)> = Vec::new();
+        for (at, binding) in self.live.iter().enumerate() {
+            let Some(name) = binding.name else { continue };
+            if !mentioned.contains(name) {
+                continue;
+            }
+            match captured.iter_mut().find(|(held, _)| *held == name) {
+                Some(slot) => slot.1 = at as u32,
+                None => captured.push((name, at as u32)),
+            }
+        }
+        if captured.len() >= u16::MAX as usize {
+            // `Inst::MakeClosure` holds the count in a `u16` for the reason
+            // `Inst::Call` holds its counts in one. Nothing writes a lambda
+            // with this many free names; the check is what makes the width a
+            // fact.
+            return Err(Unsupported::new(
+                "a closure with more than 65534 captures",
+                span,
+            ));
+        }
+        let names: Vec<&'a str> = captured.iter().map(|(name, _)| *name).collect();
+        for (_, at) in &captured {
+            let binding = &self.live[*at as usize];
+            let (slot, kind, capture) = (binding.slot, binding.kind, binding.capture);
+            match (kind, capture) {
+                // The value the place names, not the place: `Env::captures`
+                // calls `place.read`.
+                (SlotKind::Place, _) => {
+                    self.emit(Inst::LoadPlace(slot), span);
+                    self.emit(Inst::PlaceRead, span);
+                }
+                (SlotKind::Scalar(what), _) => {
+                    self.emit(Inst::LoadScalar(slot), span);
+                    self.emit(Inst::ScalarToValue(what), span);
+                }
+                (SlotKind::Value, Some(index)) => self.emit(Inst::LoadCapture(index), span),
+                (SlotKind::Value, None) => self.emit(Inst::LoadLocal(slot), span),
+            }
+        }
+        let count = names.len() as u16;
+        let module = self.module;
+        let function = self.outer.number_lambda(
+            LambdaSite {
+                module,
+                params,
+                body,
+                span,
+                captures: names,
+            },
+            (span.file, expr.id),
+        );
+        self.emit(
+            Inst::MakeClosure {
+                function,
+                captures: count,
+            },
+            span,
+        );
+        Ok(())
     }
 
     /// `base.name` written where a value is wanted.
@@ -2901,10 +3225,7 @@ impl<'a, 'l> Body<'a, 'l> {
         span: Span,
     ) -> Result<Option<Scalar>, Unsupported> {
         if self.lookup(name).is_some() {
-            return Err(Unsupported::new(
-                format!("a call through the local `{name}`"),
-                span,
-            ));
+            return self.call_through_value(name, args, span);
         }
         if let Some(key) = self.outer.function_of(self.module, name) {
             return self.call_declared(key, None, args, span);
@@ -2931,6 +3252,50 @@ impl<'a, 'l> Body<'a, 'l> {
             format!("a call to `{name}`, which the lowering cannot resolve"),
             span,
         ))
+    }
+
+    /// `f(...)`, where `f` is a local holding a callable value.
+    ///
+    /// The arguments go on the value stack left to right and the callee on
+    /// top of them, which is the one place an operand is not in source
+    /// order — see [`Inst::CallValue`] for why that is unobservable and what
+    /// it buys.
+    ///
+    /// Nothing here knows what `f` holds, so nothing here can put an
+    /// argument anywhere but the value stack, and nothing can put a label on
+    /// one either: `bind_params` matches a label against the callee's own
+    /// parameter names, which are a run-time fact about the closure. A
+    /// labelled argument is therefore refused rather than lowered as a
+    /// positional one, which is the direction a second backend is allowed to
+    /// be wrong in.
+    fn call_through_value(
+        &mut self,
+        name: &str,
+        args: &'a [Arg],
+        span: Span,
+    ) -> Result<Option<Scalar>, Unsupported> {
+        plain_arguments(args, name)?;
+        if let Some(arg) = args.iter().find(|arg| arg.label.is_some()) {
+            return Err(Unsupported::new(
+                format!("a labelled argument to `{name}`, which is called through a value"),
+                arg.span,
+            ));
+        }
+        if args.len() >= u16::MAX as usize {
+            return Err(Unsupported::new(
+                format!("a call to `{name}` with more than 65534 arguments"),
+                span,
+            ));
+        }
+        let argc = args.len() as u16;
+        for arg in args {
+            self.expr(&arg.value)?;
+        }
+        self.ident(name, span)?;
+        self.emit(Inst::CallValue { argc }, span);
+        // On the value stack, because a call through a value has no callee
+        // to read a convention off.
+        Ok(None)
     }
 
     /// `head.name(...)`, where `head` may be a host module, an enum, a
@@ -3249,7 +3614,7 @@ impl<'a, 'l> Body<'a, 'l> {
         // This is the whole of the reachability rule: the call being emitted
         // is what makes the target part of the program, so the target is
         // numbered here and nowhere else.
-        let function = self.outer.number(Instance { key, supplied });
+        let function = self.outer.number(Instance::Declared { key, supplied });
         self.emit(
             Inst::Call {
                 function,
@@ -4229,6 +4594,179 @@ fn snapshot_without_a_conformance(ty: &Ty) -> bool {
 ///
 /// The answer is a set of *names*, which over-approximates across shadowing
 /// on purpose — see [`Body::rooted`] for why that is free.
+/// Every name a lambda's body can read from the environment around it.
+///
+/// This is `crate::interp`'s `mention_block`, and it has to stay that
+/// function: what a closure captures is what its body mentions intersected
+/// with what is live, and a set that differed from the interpreter's would
+/// be a closure holding a different list. The set over-approximates on
+/// purpose — a name the body binds for itself is listed too — because
+/// capturing a name the body never reads costs one value and missing one
+/// leaves the body unable to resolve it. Over-approximating here is *also*
+/// harmless in a second way the interpreter does not need: a mentioned name
+/// that no binding answers is simply not a capture, since only bindings are
+/// walked.
+///
+/// The borrows are the source's, so the set is `&str` where the
+/// interpreter's is `String`. Nothing else differs.
+fn mentioned_names(block: &Block) -> BTreeSet<&str> {
+    let mut found = BTreeSet::new();
+    mention_block(block, &mut found);
+    found
+}
+
+fn mention_block<'a>(block: &'a Block, out: &mut BTreeSet<&'a str>) {
+    for stmt in &block.statements {
+        match &stmt.kind {
+            StmtKind::Let { value, .. } => mention_expr(value, out),
+            StmtKind::Expr(expr) => mention_expr(expr, out),
+            StmtKind::Item(item) => match &item.kind {
+                ItemKind::Fn(decl) => mention_fn(decl, out),
+                ItemKind::Impl(block) => {
+                    for item in &block.items {
+                        if let ItemKind::Fn(decl) = &item.kind {
+                            mention_fn(decl, out);
+                        }
+                    }
+                }
+                // A trait's default bodies are reached through the
+                // conformances resolution recorded them under, not through
+                // this closure's environment.
+                ItemKind::Struct(_)
+                | ItemKind::Enum(_)
+                | ItemKind::Trait(_)
+                | ItemKind::TypeAlias(_) => {}
+            },
+        }
+    }
+    if let Some(tail) = &block.tail {
+        mention_expr(tail, out);
+    }
+}
+
+fn mention_fn<'a>(decl: &'a FnDecl, out: &mut BTreeSet<&'a str>) {
+    mention_params(&decl.params, out);
+    mention_block(&decl.body, out);
+}
+
+/// A default argument is evaluated by the callee, so the names it reads
+/// belong to the body.
+fn mention_params<'a>(params: &'a [Param], out: &mut BTreeSet<&'a str>) {
+    for param in params {
+        if let Some(default) = &param.default {
+            mention_expr(default, out);
+        }
+    }
+}
+
+fn mention_expr<'a>(expr: &'a Expr, out: &mut BTreeSet<&'a str>) {
+    match &expr.kind {
+        ExprKind::Int(_)
+        | ExprKind::Float(_)
+        | ExprKind::Bool(_)
+        | ExprKind::Duration(_)
+        | ExprKind::Unit => {}
+        ExprKind::Str(parts) => {
+            for part in parts {
+                if let StrPart::Interpolation(inner) = part {
+                    mention_expr(inner, out);
+                }
+            }
+        }
+        ExprKind::Ident(name) => {
+            out.insert(name.as_str());
+        }
+        ExprKind::ArrayLit(items) => {
+            for item in items {
+                mention_expr(item, out);
+            }
+        }
+        // A field name is not a binding; only the base can read one.
+        ExprKind::Field { base, .. } => mention_expr(base, out),
+        ExprKind::Call {
+            callee,
+            args,
+            trailing,
+            ..
+        } => {
+            mention_expr(callee, out);
+            for arg in args {
+                mention_expr(&arg.value, out);
+            }
+            if let Some(trailing) = trailing {
+                mention_expr(trailing, out);
+            }
+        }
+        ExprKind::Unary { operand, .. } => mention_expr(operand, out),
+        ExprKind::Binary { lhs, rhs, .. } => {
+            mention_expr(lhs, out);
+            mention_expr(rhs, out);
+        }
+        ExprKind::Assign { target, value, .. } => {
+            mention_expr(target, out);
+            mention_expr(value, out);
+        }
+        ExprKind::Try(inner) | ExprKind::Await(inner) => mention_expr(inner, out),
+        ExprKind::Block(block) => mention_block(block, out),
+        ExprKind::If {
+            condition,
+            then_branch,
+            else_branch,
+        } => {
+            mention_expr(condition, out);
+            mention_block(then_branch, out);
+            if let Some(branch) = else_branch {
+                mention_expr(branch, out);
+            }
+        }
+        ExprKind::Match { scrutinee, arms } => {
+            mention_expr(scrutinee, out);
+            for arm in arms {
+                mention_pattern(&arm.pattern, out);
+                mention_expr(&arm.body, out);
+            }
+        }
+        ExprKind::For { iterable, body, .. } => {
+            mention_expr(iterable, out);
+            mention_block(body, out);
+        }
+        ExprKind::While { condition, body } => {
+            mention_expr(condition, out);
+            mention_block(body, out);
+        }
+        ExprKind::Return(inner) | ExprKind::Break(inner) => {
+            if let Some(inner) = inner {
+                mention_expr(inner, out);
+            }
+        }
+        ExprKind::Continue => {}
+        ExprKind::Lambda { params, body, .. } => {
+            mention_params(params, out);
+            mention_block(body, out);
+        }
+        // The scope name is bound by the `scope`, so it shadows anything the
+        // surrounding environment holds under that name.
+        ExprKind::Scope { body, .. } => mention_block(body, out),
+        ExprKind::Range { start, end, .. } => {
+            mention_expr(start, out);
+            mention_expr(end, out);
+        }
+    }
+}
+
+/// Pattern bindings are binders, so only a literal pattern reads a name.
+fn mention_pattern<'a>(pattern: &'a Pattern, out: &mut BTreeSet<&'a str>) {
+    match &pattern.kind {
+        PatternKind::Wildcard | PatternKind::Binding(_) => {}
+        PatternKind::Literal(expr) => mention_expr(expr, out),
+        PatternKind::Variant { payload, .. } => {
+            for sub in payload {
+                mention_pattern(sub, out);
+            }
+        }
+    }
+}
+
 fn var_argument_roots(body: &Block) -> BTreeSet<&str> {
     let mut found = BTreeSet::new();
     walk_block(body, &mut found);
@@ -4704,10 +5242,10 @@ fn reject_parameter(param: &Param, is_last: bool) -> Result<(), Unsupported> {
 /// Whether an instruction is the last one of a straight line: after it,
 /// control is somewhere the next index does not name.
 ///
-/// The five jumps go elsewhere or fall through, [`Inst::Call`] runs a whole
-/// callee in between, [`Inst::Try`] may leave the frame instead of continuing,
-/// and [`Inst::Return`], [`Inst::ReturnScalar`] and [`Inst::NoMatch`] do not
-/// continue at all.
+/// The five jumps go elsewhere or fall through, [`Inst::Call`] and
+/// [`Inst::CallValue`] run a whole callee in between, [`Inst::Try`] may leave
+/// the frame instead of continuing, and [`Inst::Return`],
+/// [`Inst::ReturnScalar`] and [`Inst::NoMatch`] do not continue at all.
 fn ends_a_block(inst: Inst) -> bool {
     matches!(
         inst,
@@ -4717,6 +5255,7 @@ fn ends_a_block(inst: Inst) -> bool {
             | Inst::JumpIfFalseScalar(_)
             | Inst::JumpIfTrueScalar(_)
             | Inst::Call { .. }
+            | Inst::CallValue { .. }
             | Inst::Try
             | Inst::Return
             | Inst::ReturnScalar
@@ -4899,6 +5438,30 @@ fn validate_function(program: &Program, id: FunctionId) -> Result<(), String> {
             render_return(other)
         ));
     }
+    // The captures stand in the value slots straight after the parameters,
+    // put there by the call out of the closure it went through, so the frame
+    // has to have room for both. `Inst::LoadCapture` addresses them by index
+    // into `captures` rather than by slot, so this is the one place the two
+    // are reconciled.
+    if !function.captures.is_empty() {
+        if value_params != function.arity {
+            return Err(format!(
+                "holds {} capture(s) and takes {} of its {} arguments off another stack",
+                function.captures.len(),
+                function.arity - value_params,
+                function.arity
+            ));
+        }
+        let window = function.arity as usize + function.captures.len();
+        if window > function.value_frame_size as usize {
+            return Err(format!(
+                "holds {} capture(s) after {} argument(s) in a value frame of {}",
+                function.captures.len(),
+                function.arity,
+                function.value_frame_size
+            ));
+        }
+    }
     for at in function.arg_spans.keys() {
         if *at as usize >= function.code.len() {
             return Err(format!(
@@ -4971,6 +5534,47 @@ fn validate_function(program: &Program, id: FunctionId) -> Result<(), String> {
                     )));
                 }
             }
+            Inst::MakeClosure {
+                function: target,
+                captures,
+            } => {
+                let Some(target) = program.functions.get(target.0 as usize) else {
+                    return Err(at(format!(
+                        "makes a closure of function {}, which does not exist",
+                        target.0
+                    )));
+                };
+                if target.captures.len() != usize::from(captures) {
+                    return Err(at(format!(
+                        "makes a closure of `{}.{}` over {captures} captures, which takes {}",
+                        target.module,
+                        target.name,
+                        target.captures.len()
+                    )));
+                }
+                // The convention `Inst::CallValue` calls under, checked
+                // where the closure is *made*, because that is the last
+                // point at which the target is known: the call itself
+                // reaches whatever value stands there. So a closure can only
+                // ever be made of a function that takes every argument on
+                // the value stack and answers on it.
+                if target
+                    .params
+                    .iter()
+                    .any(|kind| !matches!(kind, SlotKind::Value))
+                {
+                    return Err(at(format!(
+                        "makes a closure of `{}.{}`, which takes an argument off another stack",
+                        target.module, target.name
+                    )));
+                }
+                if target.returns.is_scalar() {
+                    return Err(at(format!(
+                        "makes a closure of `{}.{}`, which answers on the scalar stack",
+                        target.module, target.name
+                    )));
+                }
+            }
             Inst::Jump(to)
             | Inst::JumpIfFalse(to)
             | Inst::JumpIfTrue(to)
@@ -5016,6 +5620,15 @@ fn validate_function(program: &Program, id: FunctionId) -> Result<(), String> {
                     return Err(at(format!(
                         "calls `{}.{}` with {value_argc} value, {scalar_argc} scalar and {place_argc} place arguments, which takes {values}, {scalars} and {places}",
                         target.module, target.name
+                    )));
+                }
+                if !target.captures.is_empty() {
+                    return Err(at(format!(
+                        "calls `{}.{}` directly, which is entered through the closure that \
+                         holds its {} capture(s)",
+                        target.module,
+                        target.name,
+                        target.captures.len()
                     )));
                 }
                 if target.returns.is_scalar() != returns_scalar {
@@ -5291,6 +5904,12 @@ fn stack_shape(constants: &[Const], inst: Inst) -> Shape {
             places: (u32::from(place_argc), 0),
         },
         Inst::CallHost { argc, .. } | Inst::MakeBuiltin { argc, .. } => Shape::on_values(argc, 1),
+        // The captured values, in the order `Function::captures` names them.
+        Inst::MakeClosure { captures, .. } => Shape::on_values(u32::from(captures), 1),
+        // The arguments and the callee above them, and one answer back.
+        // Every one of them is on the value stack: nothing at a call through
+        // a value knows which function it will reach.
+        Inst::CallValue { argc } => Shape::on_values(u32::from(argc) + 1, 1),
         // The receiver sits below the arguments, and for a resource call the
         // receiver is the handle the call is routed by.
         Inst::CallBuiltin { argc, .. } | Inst::CallResource { argc, .. } => {
@@ -5496,6 +6115,142 @@ mod tests {
     }
 
     // ------------------------------------------------ one construct each
+
+    /// A lambda is a [`Function`] like any other, and what the environment
+    /// around it handed over is the list beside it.
+    ///
+    /// The order of the three is the whole story. `adder` reads `by` — off
+    /// the scalar stack, because that is where its own parameter lives, and
+    /// across to the value stack, because a capture is a value — and then
+    /// `make-closure` pairs it with the name. `main` pushes the argument,
+    /// then the callee above it, and `call-value` takes both. And the
+    /// closure's own body reaches `by` by index rather than by slot,
+    /// although the slot is `arity + 0` and a `load 1` would have found it.
+    #[test]
+    fn a_lambda_is_a_function_over_the_values_it_captured() {
+        let source = "fn adder(by: Int) -> fn(Int) -> Int {\n  \
+                      fn(n: Int) {\n    n + by\n  }\n}\n\n\
+                      fn main() -> Int {\n  let add = adder(3)\n  add(4)\n}\n";
+        assert_eq!(
+            listing(source, "adder"),
+            "fn m.adder arity=1 frame=0/1 params=[Int] -> value\n\
+             \x20  0  load-scalar 0\n\
+             \x20  1  scalar-to-value Int\n\
+             \x20  2  make-closure m.<closure 0> captures=1\n\
+             \x20  3  return\n"
+        );
+        assert_eq!(
+            listing(source, "main"),
+            "fn m.main arity=0 frame=1/0 -> Int\n\
+             \x20  0  scalar-const 3\n\
+             \x20  1  call m.adder argc=0/1\n\
+             \x20  2  store 0\n\
+             \x20  3  const Int(4)\n\
+             \x20  4  load 0\n\
+             \x20  5  call-value argc=1\n\
+             \x20  6  value-to-scalar\n\
+             \x20  7  return-scalar\n"
+        );
+        assert_eq!(
+            listing(source, "<closure 0>"),
+            "fn m.<closure 0> arity=1 frame=2/0 params=[value] captures=[by] -> value\n\
+             \x20  0  load 0\n\
+             \x20  1  value-to-scalar\n\
+             \x20  2  capture 0\n\
+             \x20  3  value-to-scalar\n\
+             \x20  4  int Add\n\
+             \x20  5  scalar-to-value Int\n\
+             \x20  6  return\n"
+        );
+    }
+
+    /// The oracle captures by value at creation time, and a `var` binding is
+    /// no exception: `place-read` is what `Env::captures` calls, and it is
+    /// what keeps a place from leaving the frame that built it.
+    #[test]
+    fn a_var_parameter_is_captured_as_the_value_its_place_names() {
+        let source = "fn g(var total: Int) -> fn() -> Int {\n  \
+                      fn() {\n    total\n  }\n}\n";
+        assert_eq!(
+            listing(source, "g"),
+            "fn m.g arity=1 frame=0/0/1 params=[place] -> value\n\
+             \x20  0  load-place 0\n\
+             \x20  1  place-read\n\
+             \x20  2  make-closure m.<closure 0> captures=1\n\
+             \x20  3  return\n"
+        );
+    }
+
+    /// A name the module answers is not a capture. `Env::captures` walks
+    /// bindings, so a declaration, a type, and a host module resolve where
+    /// they always did — and a lambda that mentions one holds nothing for
+    /// it.
+    #[test]
+    fn only_a_binding_is_captured() {
+        let source = "fn twice(n: Int) -> Int {\n  n * 2\n}\n\n\
+                      fn f() -> fn(Int) -> Int {\n  fn(n: Int) {\n    twice(n)\n  }\n}\n";
+        assert_eq!(
+            listing(source, "f"),
+            "fn m.f arity=0 frame=0/0 -> value\n\
+             \x20  0  make-closure m.<closure 0> captures=0\n\
+             \x20  1  return\n"
+        );
+    }
+
+    /// A lambda inside a lambda captures out of the outer one's captures as
+    /// well as out of its parameters, and in the order `Env::captures`
+    /// produces them: the captures the enclosing body was handed first, its
+    /// own bindings after.
+    #[test]
+    fn a_nested_lambda_captures_out_of_the_captures_it_stands_in() {
+        let source = "fn f(a: Int) -> fn(Int) -> fn() -> Int {\n  \
+                      fn(b: Int) {\n    fn() {\n      a + b\n    }\n  }\n}\n";
+        assert_eq!(
+            listing(source, "<closure 0>"),
+            "fn m.<closure 0> arity=1 frame=2/0 params=[value] captures=[a] -> value\n\
+             \x20  0  capture 0\n\
+             \x20  1  load 0\n\
+             \x20  2  make-closure m.<closure 1> captures=2\n\
+             \x20  3  return\n"
+        );
+        assert_eq!(
+            listing(source, "<closure 1>"),
+            "fn m.<closure 1> arity=0 frame=2/0 captures=[a, b] -> value\n\
+             \x20  0  capture 0\n\
+             \x20  1  value-to-scalar\n\
+             \x20  2  capture 1\n\
+             \x20  3  value-to-scalar\n\
+             \x20  4  int Add\n\
+             \x20  5  scalar-to-value Int\n\
+             \x20  6  return\n"
+        );
+    }
+
+    /// A name declared twice is captured once, holding what the innermost
+    /// declaration holds — which is `Env::captures` overwriting the value it
+    /// recorded and keeping the position it recorded it at.
+    #[test]
+    fn a_shadowed_name_is_captured_once_and_at_its_latest_binding() {
+        let source = "fn f() -> fn() -> Int {\n  \
+                      let a = 1\n  let b = 2\n  let a = 3\n  \
+                      fn() {\n    a + b\n  }\n}\n";
+        assert_eq!(
+            listing(source, "f"),
+            "fn m.f arity=0 frame=0/3 -> value\n\
+             \x20  0  scalar-const 1\n\
+             \x20  1  store-scalar 0\n\
+             \x20  2  scalar-const 2\n\
+             \x20  3  store-scalar 1\n\
+             \x20  4  scalar-const 3\n\
+             \x20  5  store-scalar 2\n\
+             \x20  6  load-scalar 2\n\
+             \x20  7  scalar-to-value Int\n\
+             \x20  8  load-scalar 1\n\
+             \x20  9  scalar-to-value Int\n\
+             \x20 10  make-closure m.<closure 0> captures=2\n\
+             \x20 11  return\n"
+        );
+    }
 
     #[test]
     fn every_literal_loads_one_constant() {
@@ -7289,12 +8044,16 @@ mod tests {
     fn every_unsupported_construct_is_named() {
         let cases: Vec<(&str, &str)> = vec![
             (
-                "a closure",
-                "fn f() -> Result<Int, Error> {\n  Err(Error(message: \"a\")).mapError(fn(e) {\n    Error(message: \"b\")\n  })\n}\n",
-            ),
-            (
                 "a trailing closure",
                 "fn f() -> Result<Int, Error> {\n  Err(Error(message: \"a\")).mapError {\n    Error(message: \"b\")\n  }\n}\n",
+            ),
+            (
+                "an `async` closure",
+                "fn f() -> Int {\n  let g = async fn() {\n    1\n  }\n  1\n}\n",
+            ),
+            (
+                "a closure's `var` parameter `n`",
+                "fn f() -> Int {\n  let g = fn(var n: Int) {\n    n = 2\n  }\n  1\n}\n",
             ),
             (
                 "a task scope",
@@ -7327,10 +8086,6 @@ mod tests {
             (
                 "a call to `g`, whose parameter `n` is not declared `var` and whose argument is written `var`",
                 "fn g(n: Int) -> Int {\n  n\n}\n\nfn f() -> Int {\n  var x = 1\n  g(var x)\n}\n",
-            ),
-            (
-                "a call through the local `g`",
-                "fn f(g: fn(Int) -> Int) -> Int {\n  g(1)\n}\n",
             ),
             (
                 "a function declared inside a function body",
@@ -7808,13 +8563,13 @@ mod tests {
             .collect()
     }
 
-    /// Issue #115 itself: `hello` is three lines and `callbacks/` holds a
-    /// closure, and the two share a package and nothing else.
+    /// Issue #115 itself: `hello` is three lines and `callbacks/` holds an
+    /// `async` closure, and the two share a package and nothing else.
     #[test]
     fn an_entry_lowers_past_a_construct_it_cannot_reach() {
         let checked = examples();
         let refused = lower(&checked).expect_err("`examples/` holds a program that does not lower");
-        assert_eq!(refused.what, "a closure");
+        assert_eq!(refused.what, "an `async` closure");
 
         let lowered = lower_entry(&checked, "hello", "main").expect("`hello.main` lowers");
         validate(&lowered.program).expect("it holds the VM's invariants");
@@ -7900,13 +8655,12 @@ mod tests {
     #[test]
     fn an_unsupported_construct_on_the_path_is_still_refused() {
         let source = "fn helper() -> Result<Int, Error> {\n  \
-                      Err(Error(message: \"a\")).mapError(fn(e) {\n    \
-                      Error(message: \"b\")\n  })\n}\n\n\
+                      let n = scope tasks {\n    1\n  }\n  Ok(n)\n}\n\n\
                       fn main() -> Result<Int, Error> {\n  helper()\n}\n";
         let checked = checked(source);
         let whole = lower(&checked).expect_err("the package does not lower");
         let entry = lower_entry(&checked, "m", "main").expect_err("nor does the entry");
-        assert_eq!(entry.what, "a closure");
+        assert_eq!(entry.what, "a task scope");
         assert_eq!(entry.what, whole.what);
         assert_eq!(entry.span, whole.span);
     }
@@ -8265,6 +9019,51 @@ mod tests {
         assert!(validate(&program)
             .expect_err("a mismatched call is refused")
             .contains("with 2 arguments, which takes 1"),);
+    }
+
+    /// A function that holds captures is entered through the closure that
+    /// holds them, so a direct `Call` to one would open a frame with the
+    /// capture slots left holding `Unit`.
+    #[test]
+    fn validate_refuses_a_direct_call_to_a_function_that_holds_captures() {
+        let mut program = lower(&checked(
+            "fn f(a: Int) -> fn() -> Int {\n  fn() {\n    a\n  }\n}\n",
+        ))
+        .expect("it lowers");
+        let closure = program
+            .function_named("m", "<closure 0>")
+            .expect("the lambda is lowered");
+        let id = program.function_named("m", "f").expect("`f` is lowered");
+        program.functions[id.0 as usize].code[0] = Inst::Call {
+            function: closure,
+            value_argc: 0,
+            scalar_argc: 0,
+            place_argc: 0,
+            returns_scalar: false,
+        };
+        assert!(validate(&program)
+            .expect_err("a direct call to a closure body is refused")
+            .contains("directly, which is entered through the closure"));
+    }
+
+    /// A closure is called under one convention, and the last point at which
+    /// the target is known is where the closure is made — so that is where
+    /// the convention is checked.
+    #[test]
+    fn validate_refuses_a_closure_made_of_a_function_that_answers_a_scalar() {
+        let mut program = lower(&checked(
+            "fn g() -> Int {\n  1\n}\n\nfn f() -> fn() -> Int {\n  fn() {\n    g()\n  }\n}\n",
+        ))
+        .expect("it lowers");
+        let scalar = program.function_named("m", "g").expect("`g` is lowered");
+        let id = program.function_named("m", "f").expect("`f` is lowered");
+        program.functions[id.0 as usize].code[0] = Inst::MakeClosure {
+            function: scalar,
+            captures: 0,
+        };
+        assert!(validate(&program)
+            .expect_err("a closure over a scalar answer is refused")
+            .contains("which answers on the scalar stack"));
     }
 
     /// The counts are per stack and not only in total, because a call that

@@ -282,10 +282,42 @@ pub struct Closure {
     pub params: Vec<Param>,
     /// `None` for lambdas, which have no declaration of their own.
     pub decl: Option<Arc<FnDecl>>,
-    pub body: Arc<cove_syntax::ast::Block>,
+    pub body: ClosureBody,
     /// The module a closure body resolves names in.
     pub module: Rc<str>,
     pub captures: Vec<(Rc<str>, Value)>,
+}
+
+/// Where a closure's body is, which is the one thing about a closure the two
+/// backends do not agree on.
+///
+/// Everything else a closure is — what it captured, how many parameters it
+/// declares, which module it resolves names in, whether it is `async` — is
+/// the same fact whichever backend made it, and a host that receives one
+/// reads those the same way either way. The body is not: the interpreter
+/// walks a tree and the VM runs a lowered function, and neither can run the
+/// other's.
+///
+/// So this is an enum rather than a second `Value` variant. Issue #109 asks
+/// that the internal representation become *less* exposed to an embedder,
+/// not more, and a `Value::LoweredClosure` beside `Value::Closure` would make
+/// every host that already handles a callback handle two — while the
+/// difference between them is one field that no host reads. A host calls a
+/// closure back through [`crate::host::Reentry`], which hands it to the
+/// backend that made it, and that backend is the only party that has to know
+/// which of these it is.
+#[derive(Clone, Debug)]
+pub enum ClosureBody {
+    /// The syntax [`crate::interp::Interpreter`] walks.
+    Tree(Arc<cove_syntax::ast::Block>),
+    /// The lowered function [`crate::vm::Vm`] runs, addressed in the
+    /// [`cove_ir::Program`] that run was given.
+    ///
+    /// An id and nothing else, because the captures are beside it in
+    /// [`Closure::captures`] and the program is the VM's. A closure built by
+    /// one run cannot be called by another, which is true of the tree form
+    /// as well: both name something a particular run owns.
+    Lowered(cove_ir::FunctionId),
 }
 
 /// A value usable as a `Map` key or `Set` element.

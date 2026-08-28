@@ -7,11 +7,15 @@ use console.println
 /// happens, naming the construct and pointing at it, rather than quietly
 /// finishing on the interpreter. The `println` below never runs, and the
 /// empty `expected.out` beside this file is how the case says so.
+///
+/// The construct is a task scope, which the lowering still refuses. It was a
+/// closure until closures lowered; whichever construct stands here, the
+/// point of the case is the rule and not the construct.
 export fn main() -> Result<Unit, Error> {
   println("this line never runs")?
-  let double: fn(Int) -> Int = fn(n) {
-    n * 2
+  let doubled = scope tasks {
+    21 * 2
   }
-  println("doubled {double(21)}")?
+  println("doubled {doubled}")?
   Ok(())
 }

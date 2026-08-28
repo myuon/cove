@@ -82,8 +82,9 @@
 //!
 //! `Place`, below, says why an index is the right thing to hold and what its
 //! validity rests on. The short version is that the value stack is one `Vec`
-//! that reallocates, and that a callee cannot outlive its caller while
-//! nothing lowers a closure.
+//! that reallocates, and that no place leaves the frame that built it — a
+//! closure captures the *value* a place names, which is what
+//! `Interpreter::make_closure` captures too.
 //!
 //! **A scalar slot holds no reference, and neither does a place.** That is
 //! what the root set is: the stacks are numbered separately, so a scalar slot
@@ -117,9 +118,23 @@
 //! one straight line more than before, bounded by the length of the
 //! function's code. `SAFEPOINT_INTERVAL` states that bound.
 //!
+//! # A closure is a function id and the values beside it
+//!
+//! `cove_ir::Inst::MakeClosure` builds a `Value::Closure` whose body is a
+//! `crate::value::ClosureBody::Lowered` — a `FunctionId` of this run's
+//! program — over the captures the lowering settled. `cove_ir::Inst::CallValue`
+//! is what enters one: the arguments are already the callee's first value
+//! slots, the captures are copied in behind them, and the frame is opened
+//! the way any other call opens one.
+//!
+//! A host that receives such a closure can run it, which is what
+//! [`Vm::call_from_host`] is: the dispatch loop, entered again on the stacks
+//! as they stand, with fuel, cancellation, the depth limit and the trace all
+//! still the loop's.
+//!
 //! # What is not here
 //!
-//! Closures, tasks, and everything else `cove_ir::lower` reports as
+//! Tasks, `dyn`, `Shared`, and everything else `cove_ir::lower` reports as
 //! [`cove_ir::Unsupported`]. ADR 0019's no-silent-fallback rule is
 //! what makes that the right shape: a program the lowering refuses never
 //! reaches this, so there is no construct this can be wrong about.
@@ -147,7 +162,7 @@ use crate::interp::{
 };
 use crate::runtime::{Runtime, ENTRY_TASK};
 use crate::trace::{RunOutcome, Timing, TraceEvent};
-use crate::value::{StructValue, Value};
+use crate::value::{Closure, ClosureBody, StructValue, Value};
 
 /// Fuel charged for executing one instruction.
 ///
@@ -279,16 +294,27 @@ struct Frame {
 /// travels: `bump(var total)` builds it in the caller's frame and reads and
 /// writes it in the callee's, where `frame.base` is a different number.
 ///
-/// **What makes it valid is that a callee cannot outlive its caller.** A
-/// frame's slots are live from the call that opened the window to the return
-/// that truncates it, and a place is built by an instruction of some frame
-/// and consumed by an instruction of that frame or of one it called. Nothing
-/// a lowered program can build outlives the frame it was built in, because
-/// nothing lowers a closure, and a closure is exactly the construct that
-/// could: it can be returned. Whoever lowers one has to decide what a
-/// captured `var` binding is before this stays sound, and
-/// `cove_ir::Inst::PlaceLocal` carries the same note on the other side of
-/// the boundary.
+/// **What makes it valid is that nothing a lowered program can build
+/// outlives the frame it was built in.** A frame's slots are live from the
+/// call that opened the window to the return that truncates it, and a place
+/// is built by an instruction of some frame and consumed by an instruction
+/// of that frame or of one it called. No call answers a place, and no value
+/// contains one.
+///
+/// A closure is the construct that could have broken that, because it can be
+/// returned. It does not, because **a closure captures the value a place
+/// names rather than the place**: `cove_ir::lower`'s `Body::lambda` reads a
+/// captured `var` parameter with a `cove_ir::Inst::PlaceRead`, which is the
+/// read `Env::captures` makes in the interpreter, and the oracle agrees that
+/// it is a read — a closure over a `var` binding still answers what the
+/// binding held when the closure was written, after the binding has been
+/// assigned to. `cove_ir::Inst::PlaceLocal` carries the same note on the
+/// other side of the boundary.
+///
+/// A callback a host runs re-entrantly does not break it either, for a
+/// narrower reason: [`Vm::call_from_host`] opens its frame *above* the
+/// frames that are standing and truncates back to where it found them, so a
+/// place standing in one of those frames still points where it pointed.
 ///
 /// # The path
 ///
@@ -430,6 +456,10 @@ pub struct Vm<'a> {
     /// Flags raised by a host call that bounds the work it was given, one for
     /// each such call this thread is inside, checked at every safepoint
     /// exactly as [`crate::interp::Interpreter`] checks them.
+    ///
+    /// [`Reentry::call_until`] is what pushes one, so this is empty until a
+    /// host runs a Cove callback under a bound — which is something this
+    /// backend can do now that closures lower, and could not before.
     stops: Vec<Cancellation>,
     /// Active timing contexts, one for the body this VM is running. A host
     /// call's wait is charged against every one, which is what lets
@@ -542,7 +572,7 @@ impl<'a> Vm<'a> {
             function: entry.name.to_string(),
         });
         self.timings.push(Timing::start());
-        let outcome = self.execute();
+        let outcome = self.execute(0);
         let timing = self
             .timings
             .pop()
@@ -671,19 +701,28 @@ impl<'a> Vm<'a> {
 
     // -------------------------------------------------------- the dispatch
 
-    /// The loop, from the frame [`Vm::run`] pushed to the value it answers.
+    /// The loop, from the frame on top of the frame stack to the value it
+    /// answers.
     ///
     /// The running function, its instructions, and its frame are held in
     /// locals rather than read back out of the frame stack on every
     /// instruction: they change only at a call and at a return, and reading
     /// them anywhere else is the re-derivation this backend exists to stop
     /// doing.
-    fn execute(&mut self) -> Result<Value, RuntimeError> {
+    ///
+    /// `floor` is how many frames stood below the one this is to run, and it
+    /// is what makes the loop re-entrant. A whole run is `floor = 0` and
+    /// ends when the entry's frame is popped; a callback a host runs while
+    /// this VM is inside a `call-host` is `floor = self.frames.len()` at the
+    /// moment the host was called, and ends when *its* frame is popped —
+    /// with the frames below it left standing, because the instruction that
+    /// made the host call has not finished. See [`Vm::call_from_host`].
+    fn execute(&mut self, floor: usize) -> Result<Value, RuntimeError> {
         let program = self.program;
         let mut frame = *self
             .frames
             .last()
-            .expect("`run` pushes the frame this executes");
+            .expect("the caller pushes the frame this executes");
         let mut running = program.function(frame.function);
         let mut code: &[Inst] = &running.code;
         let mut blocks: &[u32] = &running.block_fuel;
@@ -709,19 +748,16 @@ impl<'a> Vm<'a> {
                     self.stack[frame.base + slot as usize] = value;
                 }
                 Inst::LoadCapture(index) => {
-                    // Nothing lowers a closure yet, so a lowered function
-                    // carries no captures and `cove_ir::lower::validate`
-                    // refuses every index into the empty list. Reporting is
-                    // what is left: there is no capture storage to read, and
-                    // inventing one would be inventing a representation the
-                    // IR has not decided on.
-                    return Err(RuntimeError::new(format!(
-                        "capture {index} was asked for, but this call was given none"
-                    ))
-                    .at(running.span_at(pc))
-                    .with_rule(
-                        "A closure's captures are an explicit list, decided when it is lowered.",
-                    ));
+                    // A capture is a value slot: the call that entered this
+                    // body copied it out of the closure into
+                    // `arity + index`, which is where the captures stand
+                    // because every argument of a closure travels on the
+                    // value stack and so the parameters fill exactly
+                    // `0..arity`. `cove_ir::lower::validate` checked both
+                    // halves of that, so neither is asked about here.
+                    let slot = frame.base + (running.arity + index) as usize;
+                    let value = self.stack[slot].clone();
+                    self.stack.push(value);
                 }
                 Inst::Pop => {
                     self.pop();
@@ -890,6 +926,30 @@ impl<'a> Vm<'a> {
                     blocks = &callee.block_fuel;
                     pc = 0;
                     continue;
+                }
+                Inst::MakeClosure { function, captures } => {
+                    let value = self.close_over(function, captures);
+                    self.stack.push(value);
+                }
+                Inst::CallValue { argc } => {
+                    let span = running.span_at(pc);
+                    let callee = self.pop();
+                    match self.enter_value_call(&callee, argc, pc as u32 + 1, span)? {
+                        // A callee that is not a lowered body answers
+                        // without a frame: a bound host operation is a name
+                        // the registry resolves, exactly as it is on the
+                        // oracle.
+                        Entered::Answer(value) => self.stack.push(value),
+                        Entered::Frame(entered) => {
+                            frame = entered;
+                            running = program.function(frame.function);
+                            code = &running.code;
+                            blocks = &running.block_fuel;
+                            self.charge(blocks[0], || running.span_at(0))?;
+                            pc = 0;
+                            continue;
+                        }
+                    }
                 }
                 Inst::CallHost { module, op, argc } => {
                     let span = running.span_at(pc);
@@ -1210,7 +1270,7 @@ impl<'a> Vm<'a> {
                         }
                         Err(failure) => {
                             self.safepoint(span)?;
-                            match self.leave(Answered::Value(failure)) {
+                            match self.leave(Answered::Value(failure), floor) {
                                 Answer::Done(value) => return Ok(value),
                                 Answer::Caller(caller, resumed) => {
                                     frame = caller;
@@ -1231,7 +1291,7 @@ impl<'a> Vm<'a> {
                 Inst::Return => {
                     self.safepoint(running.span_at(pc))?;
                     let value = self.pop();
-                    match self.leave(Answered::Value(value)) {
+                    match self.leave(Answered::Value(value), floor) {
                         Answer::Done(value) => return Ok(value),
                         Answer::Caller(caller, resumed) => {
                             frame = caller;
@@ -1254,7 +1314,7 @@ impl<'a> Vm<'a> {
                     // put back on differs.
                     self.safepoint(running.span_at(pc))?;
                     let scalar = self.pop_scalar();
-                    match self.leave(Answered::Scalar(scalar)) {
+                    match self.leave(Answered::Scalar(scalar), floor) {
                         Answer::Done(value) => return Ok(value),
                         Answer::Caller(caller, resumed) => {
                             frame = caller;
@@ -1466,6 +1526,234 @@ impl<'a> Vm<'a> {
         self.stack.drain(at..).collect()
     }
 
+    // ----------------------------------------------------------- closures
+
+    /// Builds the closure `Inst::MakeClosure` names, over the top `captures`
+    /// values.
+    ///
+    /// Out of line for the reason [`Vm::place_inst`] is: this is where the
+    /// dispatch loop meets an `Rc`, a `Vec` and a clone of the written
+    /// parameters, and none of that belongs inside the `match` every
+    /// instruction is fetched through.
+    ///
+    /// What it builds is a `Value::Closure` and not a variant of its own.
+    /// Everything a host reads off a closure — the parameters it declares,
+    /// the module it belongs to, what it captured — is the same fact
+    /// whichever backend made it, and `cove_ir::Function` carries each of
+    /// them for exactly this. Only the body differs, and
+    /// [`crate::value::ClosureBody`] is where that difference is written
+    /// down.
+    #[inline(never)]
+    fn close_over(&mut self, function: FunctionId, captures: u16) -> Value {
+        let target = self.program.function(function);
+        let at = self.stack.len() - captures as usize;
+        // Paired with the names the lowering settled, in the order it
+        // settled them, which is the order the values were pushed.
+        let held: Vec<(Rc<str>, Value)> = target
+            .captures
+            .iter()
+            .cloned()
+            .zip(self.stack.drain(at..))
+            .collect();
+        // A closure is built from what it captured, so what it costs follows
+        // how much that was — the rule `Inst::MakeEnum` is charged by.
+        self.fuel += u64::from(captures);
+        Value::Closure(Rc::new(Closure {
+            // `cove_ir::lower` refuses an `async` closure, so nothing builds
+            // one here.
+            is_async: false,
+            params: target.written_params.clone(),
+            // A lambda has no declaration, which is the same `None` the
+            // interpreter's `make_closure` writes. The field is read for a
+            // written return type, and a `dyn` return type is refused.
+            decl: None,
+            body: ClosureBody::Lowered(function),
+            module: target.module.clone(),
+            captures: held,
+        }))
+    }
+
+    /// Opens the frame a call through a value enters, or answers the call
+    /// where there is no frame to open.
+    ///
+    /// The arguments already stand on the value stack, `argc` of them, and
+    /// the callee has been taken off the top — which is the arrangement
+    /// `cove_ir::Inst::CallValue` describes and the reason the callee is
+    /// pushed above its own arguments. So the arguments *are* the callee's
+    /// first value slots, exactly as an ordinary `Call`'s are, and what is
+    /// left is to copy the captures in behind them and give the rest of the
+    /// frame room.
+    ///
+    /// The order of the checks is `Interpreter::invoke`'s, through
+    /// [`Vm::enter`]: the depth limit, the host's own, and the safepoint
+    /// every call is. The arity is checked first and in the interpreter's
+    /// words, because `bind_params` reports it before it reaches any of
+    /// those.
+    #[inline(never)]
+    fn enter_value_call(
+        &mut self,
+        callee: &Value,
+        argc: u16,
+        return_pc: u32,
+        span: Span,
+    ) -> Result<Entered, RuntimeError> {
+        let closure = match callee {
+            Value::Closure(closure) => closure,
+            // A bound host operation is callable and is a name: the registry
+            // resolves it, which is what `Interpreter::call_value_slots`
+            // does with one. Nothing this backend lowers builds one — a host
+            // operation used as a value is refused — so this is here for a
+            // value a host handed back.
+            Value::HostFn(host) => {
+                let values = self.take(argc as usize);
+                let (module, op) = (host.module.clone(), host.op.clone());
+                return Ok(Entered::Answer(self.call_host(&module, &op, values, span)?));
+            }
+            other => {
+                return Err(
+                    RuntimeError::new(format!("`{}` is not callable", other.type_name())).at(span),
+                )
+            }
+        };
+        let ClosureBody::Lowered(target) = closure.body else {
+            // The reverse of what `Interpreter::call_value_slots` says about
+            // a lowered body, and unreachable for the same reason: a run has
+            // one backend, and this one never builds a tree.
+            return Err(RuntimeError::new(
+                "this closure was built by the interpreter, and the VM runs lowered functions",
+            )
+            .at(span)
+            .with_rule("A run has one backend, and a closure belongs to the run that made it."));
+        };
+        let callee = self.program.function(target);
+        if callee.arity != u32::from(argc) {
+            return Err(wrong_arity(callee, argc, span));
+        }
+        self.enter(callee, span)?;
+        let base = self.stack.len() - argc as usize;
+        for (_, value) in &closure.captures {
+            self.stack.push(value.clone());
+        }
+        self.stack
+            .resize(base + callee.value_frame_size as usize, Value::Unit);
+        let scalar_base = self.scalars.len();
+        self.scalars
+            .resize(scalar_base + callee.scalar_frame_size as usize, 0);
+        let place_base = self.places.len();
+        // A closure has no place slots — a `var` parameter is refused on one
+        // — so this is guarded the way the `Call` arm's is, and for the same
+        // reason.
+        if callee.place_frame_size > 0 {
+            self.places.resize(
+                place_base + callee.place_frame_size as usize,
+                Place::rooted_at(0),
+            );
+        }
+        let frame = Frame {
+            function: target,
+            return_pc,
+            base,
+            scalar_base,
+            place_base,
+        };
+        self.frames.push(frame);
+        Ok(Entered::Frame(frame))
+    }
+
+    /// Runs a Cove callable from outside the dispatch loop, which is what a
+    /// host callback and a higher-order builtin both need.
+    ///
+    /// # The convention
+    ///
+    /// **The call opens its frame at the top of the three stacks as they
+    /// stand, and leaves them exactly as it found them.** The arguments are
+    /// pushed as a caller's would be, become the callee's first slots, and
+    /// are truncated away by the return that answers; the answer is taken
+    /// off and handed back in Rust rather than left standing. The frame
+    /// stack grows above the frame the interrupted instruction belongs to
+    /// and comes back down to it, which is what `floor` means in
+    /// [`Vm::execute`].
+    ///
+    /// That the outer frames are *left* rather than unwound is the whole
+    /// reason this is a second loop rather than a jump: the instruction that
+    /// made the host call has not finished, its operands are on the stacks
+    /// below, and its frame's slots are live. A place standing in one of
+    /// those frames stays valid across this for the reason it stays valid
+    /// across any call — it is an index, and nothing here truncates below
+    /// where it points.
+    ///
+    /// # What a failure leaves
+    ///
+    /// Nothing. The outer run has no unwinding — an abandoned frame's slots
+    /// stay on the stack until the run ends, which is sound because the run
+    /// is ending — and that reasoning does not hold here: a host may catch
+    /// what a callback failed with and carry on, `clock.timeout` being the
+    /// one that does. So the three stacks and the frame stack are restored
+    /// to what they were, and a host that continues continues onto the
+    /// stacks it interrupted rather than onto ones the failure grew.
+    ///
+    /// # What is still accounted
+    ///
+    /// Everything the loop accounts, because it is the loop. Fuel is charged
+    /// per block, the depth limit and the host's own `max_call_depth` are
+    /// checked by [`Vm::enter`], and every safepoint the callee reaches asks
+    /// what a safepoint asks — including `self.stops`, which
+    /// [`Reentry::call_until`] pushes onto and which, until closures lowered,
+    /// nothing could have raised while this backend ran Cove code.
+    ///
+    /// One safepoint is paid twice: [`Vm::enter`] takes one because a call
+    /// is one, and [`Vm::execute`] takes one on entering the frame it was
+    /// handed. A safepoint spends the fuel standing and asks the budget, so
+    /// asking twice in a row costs a lock and changes no answer.
+    fn call_from_host(
+        &mut self,
+        callee: &Value,
+        args: Vec<Value>,
+        span: Span,
+    ) -> Result<Value, RuntimeError> {
+        let Ok(argc) = u16::try_from(args.len()) else {
+            return Err(RuntimeError::new(format!(
+                "a callback was given {} arguments",
+                args.len()
+            ))
+            .at(span));
+        };
+        let values = self.stack.len();
+        let scalars = self.scalars.len();
+        let places = self.places.len();
+        let floor = self.frames.len();
+        let result = self.run_callback(callee, args, argc, span);
+        if result.is_err() {
+            self.frames.truncate(floor);
+            self.stack.truncate(values);
+            self.scalars.truncate(scalars);
+            self.places.truncate(places);
+        }
+        result
+    }
+
+    /// [`Vm::call_from_host`] without the restoration, which is what makes
+    /// the restoration one place rather than one per way out.
+    fn run_callback(
+        &mut self,
+        callee: &Value,
+        args: Vec<Value>,
+        argc: u16,
+        span: Span,
+    ) -> Result<Value, RuntimeError> {
+        let floor = self.frames.len();
+        for value in args {
+            self.stack.push(value);
+        }
+        // The resumption point is never read: `leave` answers at the floor
+        // rather than resuming an instruction, because the instruction this
+        // frame would return into is one no loop fetched.
+        match self.enter_value_call(callee, argc, 0, span)? {
+            Entered::Answer(value) => Ok(value),
+            Entered::Frame(_) => self.execute(floor),
+        }
+    }
+
     /// Checks what a call is allowed to do before it does it.
     ///
     /// The three checks, in the order `Interpreter::invoke` makes them: the
@@ -1508,7 +1796,7 @@ impl<'a> Vm<'a> {
     /// asked for and the scalar stack is an internal representation. So a
     /// scalar answer that has no caller becomes the `Value` it stands for
     /// here, at the outermost boundary there is.
-    fn leave(&mut self, answer: Answered) -> Answer {
+    fn leave(&mut self, answer: Answered, floor: usize) -> Answer {
         let done = self.frames.pop().expect("a return leaves a frame");
         self.stack.truncate(done.base);
         self.scalars.truncate(done.scalar_base);
@@ -1518,7 +1806,14 @@ impl<'a> Vm<'a> {
         if self.places.len() != done.place_base {
             self.places.truncate(done.place_base);
         }
-        match (self.frames.last().copied(), answer) {
+        // Down to the floor is where this loop's work ends, whether or not
+        // frames stand below it: a re-entrant run answers its caller in Rust
+        // rather than resuming an instruction, because the instruction it
+        // would resume is one this loop never fetched.
+        let caller = (self.frames.len() > floor)
+            .then(|| self.frames.last().copied())
+            .flatten();
+        match (caller, answer) {
             (Some(caller), Answered::Value(value)) => {
                 self.stack.push(value);
                 Answer::Caller(caller, done.return_pc as usize)
@@ -1746,6 +2041,41 @@ impl<'a> Vm<'a> {
 enum Answer {
     Done(Value),
     Caller(Frame, usize),
+}
+
+/// What a call through a value did: opened a frame for the loop to run, or
+/// answered without one.
+///
+/// The second is a bound host operation, which is a name the registry
+/// resolves rather than a body with a frame. Both are callable values in the
+/// language, so both arrive at [`Vm::enter_value_call`], and only one of
+/// them is something to continue *into*.
+enum Entered {
+    Frame(Frame),
+    Answer(Value),
+}
+
+/// A callable value was given the wrong number of arguments.
+///
+/// In `bind_params`'s words, because that is where the interpreter notices:
+/// a callee that was given more than it declares is told so by
+/// `assign_labels`, and one that was given too few is told which parameter
+/// went unfilled. A checked program has neither — the checker settles a
+/// closure's arity at the call — so what reaches this is a host that called
+/// a callback with a list of its own choosing.
+fn wrong_arity(callee: &Function, argc: u16, span: Span) -> RuntimeError {
+    if u32::from(argc) > callee.arity {
+        return RuntimeError::new(format!(
+            "`this closure` takes {} argument(s), but more were given",
+            callee.arity
+        ))
+        .at(span);
+    }
+    let missing = callee.written_params.get(argc as usize).map_or_else(
+        || format!("argument {}", argc + 1),
+        |param| param.name.node.clone(),
+    );
+    RuntimeError::new(format!("`this closure` needs an argument for `{missing}`")).at(span)
 }
 
 /// The answer a return is carrying, and which stack it came off.
@@ -2121,10 +2451,11 @@ fn no_payload(case: &str, carried: usize, index: u32, span: Span) -> RuntimeErro
 
 /// The way back into a VM run that a host call was handed.
 ///
-/// Nothing the lowering covers can build a closure, so no host call this
-/// backend makes can be given one to run. What is still owed is the rest of
-/// the contract: a host that waits is standing where a safepoint would be, so
-/// it is told what a safepoint would find.
+/// A host that runs a Cove closure enters the dispatch loop again on the
+/// stacks as they stand — see [`Vm::call_from_host`], which is where the
+/// convention for that is written down. The rest of the contract is what a
+/// host that *waits* needs: it is standing where a safepoint would be, so it
+/// is told what a safepoint would find.
 struct Callback<'v, 'a> {
     vm: &'v mut Vm<'a>,
     /// Where the host call that is running this was written, so a failure
@@ -2133,13 +2464,15 @@ struct Callback<'v, 'a> {
 }
 
 impl Reentry for Callback<'_, '_> {
-    fn call(&mut self, callee: &Value, _args: Vec<Value>) -> Result<Value, RuntimeError> {
-        Err(RuntimeError::new(format!(
-            "this host call cannot run {}, because the VM has no closures yet",
-            callee.type_name()
-        ))
-        .at(self.span)
-        .with_rule("A construct the IR does not cover is named rather than approximated."))
+    /// The callback, run on this VM, from inside the host call that was
+    /// handed this.
+    ///
+    /// The span is the host call's own, so a failure inside the callback
+    /// that has no span of its own points at the call that ran it rather
+    /// than at nothing.
+    fn call(&mut self, callee: &Value, args: Vec<Value>) -> Result<Value, RuntimeError> {
+        let span = self.span;
+        self.vm.call_from_host(callee, args, span)
     }
 
     fn call_until(
@@ -2177,7 +2510,9 @@ impl Reentry for Callback<'_, '_> {
     }
 
     /// The task the boundary records the call against. A VM run is the
-    /// entry's, because nothing it can run spawns a task.
+    /// entry's, because nothing it can run spawns a task — a `scope` is
+    /// still refused by the lowering, and so a callback this runs is on the
+    /// entry's task as much as the instruction that called the host is.
     fn task(&self) -> u64 {
         ENTRY_TASK
     }
@@ -2202,20 +2537,26 @@ impl Callable for Vm<'_> {
         builtins::snapshot(self, value, span)
     }
 
+    /// A higher-order builtin's callback — `Result.mapError`'s, today — run
+    /// through the same re-entrant loop a host callback is.
     fn call_value(
         &mut self,
         callee: &Value,
-        _args: Vec<Value>,
+        args: Vec<Value>,
         span: Span,
     ) -> Result<Value, RuntimeError> {
-        Err(RuntimeError::new(format!(
-            "this builtin cannot run {}, because the VM has no closures yet",
-            callee.type_name()
-        ))
-        .at(span)
-        .with_rule("A construct the IR does not cover is named rather than approximated."))
+        self.call_from_host(callee, args, span)
     }
 
+    /// How many parameters a closure declares, read off the value.
+    ///
+    /// The interpreter's own answer, unchanged, and it stays correct for a
+    /// closure this backend built because `cove_ir::Function::written_params`
+    /// carries the parameters source wrote into the value. `mapError` reads
+    /// this to decide whether to hand its callback the error it replaces, so
+    /// a lowered closure that answered `0` where an interpreted one answered
+    /// `1` would be the two backends disagreeing about what `mapError`
+    /// passes.
     fn arity(&self, callee: &Value) -> Option<usize> {
         match callee {
             Value::Closure(closure) => Some(closure.params.len()),
@@ -2518,6 +2859,18 @@ mod tests {
     /// What both backends made of one expression, rendered as a `Value`.
     fn expression(ty: &str, expr: &str) -> String {
         agree_main(ty, &format!("  {expr}")).value().to_string()
+    }
+
+    /// What both backends made of a `main` written around `body`, with
+    /// `items` declared beside it — which is what a test about closures
+    /// needs, since a lambda is usually returned by or passed to something a
+    /// module declares.
+    fn value_of(ty: &str, items: &str, body: &str) -> String {
+        agree(&format!(
+            "use console.println\n\n{items}\nexport fn main() -> {ty} {{\n{body}\n}}\n"
+        ))
+        .value()
+        .to_string()
     }
 
     /// The instructions `m.main` was lowered to, rendered.
@@ -3459,6 +3812,111 @@ mod tests {
         );
     }
 
+    // -------------------------------------------------------- closures
+
+    /// A closure holds what it captured and answers with it, however far the
+    /// value has travelled from the frame that made it.
+    #[test]
+    fn a_returned_closure_still_holds_what_it_captured() {
+        assert_eq!(
+            value_of(
+                "Int",
+                "fn adder(by: Int) -> fn(Int) -> Int {\n  fn(n: Int) {\n    n + by\n  }\n}\n",
+                "  let add = adder(3)\n  add(4) + add(10)"
+            ),
+            "Int(20)"
+        );
+    }
+
+    /// The oracle captures by value at creation time, so assigning to the
+    /// binding afterwards does not change what the closure sees — including
+    /// where the binding is a `var` one, which is the case the place model
+    /// rests on.
+    #[test]
+    fn a_capture_is_the_value_the_binding_held_when_the_closure_was_written() {
+        assert_eq!(
+            value_of(
+                "Int",
+                "",
+                "  var b = 10\n  let g = fn() {\n    b\n  }\n  b = 20\n  g() + b"
+            ),
+            "Int(30)"
+        );
+    }
+
+    /// A closure is a value: it is bound, passed, returned, and called, and
+    /// each of those is the same value on both backends.
+    #[test]
+    fn a_closure_is_passed_and_called_like_any_other_value() {
+        assert_eq!(
+            value_of(
+                "Int",
+                "fn apply(v: Int, t: fn(Int) -> Int) -> Int {\n  t(v)\n}\n",
+                "  let double = fn(n: Int) {\n    n * 2\n  }\n  apply(5, double) + apply(5, fn(n: Int) { n + 1 })"
+            ),
+            "Int(16)"
+        );
+    }
+
+    /// A declared function used as a value is a closure over nothing, and
+    /// calling it through the value reaches the same body a direct call
+    /// does.
+    #[test]
+    fn a_function_used_as_a_value_answers_what_a_direct_call_answers() {
+        assert_eq!(
+            value_of(
+                "Int",
+                "fn twice(n: Int) -> Int {\n  n * 2\n}\n",
+                "  let g = twice\n  twice(3) + g(4)"
+            ),
+            "Int(14)"
+        );
+    }
+
+    /// A closure renders and compares the way the oracle's does: `<fn>`, and
+    /// equal to nothing including itself.
+    #[test]
+    fn a_closure_renders_and_compares_as_the_oracle_says() {
+        let outcome = agree_main(
+            "Result<Unit, Error>",
+            "  let h = fn() {\n    1\n  }\n  let i = fn() {\n    1\n  }\n  println(\"{h} {h == h} {h == i}\")?\n  Ok(())",
+        );
+        assert_eq!(outcome.output, "<fn> false false\n");
+    }
+
+    /// A higher-order builtin runs its callback by entering the loop again,
+    /// and the run carries on afterwards exactly where it was.
+    ///
+    /// `mapError` is the one the language has, and it reads the callback's
+    /// arity to decide whether to hand it the error it replaces — which is
+    /// why a lowered closure has to answer that question the way an
+    /// interpreted one does.
+    #[test]
+    fn a_builtin_runs_a_callback_and_the_run_continues() {
+        let outcome = agree_main(
+            "Result<Unit, Error>",
+            "  let n = 7\n  \
+             let a = Int.parse(\"x\").mapError {\n    Error(\"bad {n}\")\n  }\n  \
+             let b = Int.parse(\"3\").mapError {\n    Error(\"unreached\")\n  }\n  \
+             println(\"{a} {b} {n}\")?\n  Ok(())",
+        );
+        assert_eq!(outcome.output, "Err(bad 7) Ok(3) 7\n");
+    }
+
+    /// A callback that fails carries its failure out, and the failure is the
+    /// one the callback raised rather than anything the boundary added.
+    #[test]
+    fn a_callback_that_fails_ends_the_run_with_its_own_failure() {
+        let (sources, checked) = checked_module(
+            "use console.println\n\nexport fn main() -> Result<Int, Error> {\n  \
+             Int.parse(\"x\").mapError {\n    Error(\"{1 / 0}\")\n  }\n}\n",
+        );
+        let (interpreted, lowered) = on_both(&checked, &sources, "m", None);
+        assert_eq!(interpreted.error().message, "`Int` division by zero");
+        assert_eq!(lowered.error().message, interpreted.error().message);
+        assert_eq!(lowered.error().span, interpreted.error().span);
+    }
+
     // -------------------------------------------------------- the host
 
     /// The same calls, in the same order, with the same values.
@@ -3848,6 +4306,7 @@ mod tests {
                     returns: cove_ir::SlotKind::Value,
                     has_receiver: false,
                     captures: Vec::new(),
+                    written_params: Vec::new(),
                     spans: vec![span; code.len()],
                     block_fuel: cove_ir::lower::block_fuel(&code),
                     code,
@@ -3959,6 +4418,7 @@ mod tests {
                     returns: cove_ir::SlotKind::Value,
                     has_receiver: false,
                     captures: Vec::new(),
+                    written_params: Vec::new(),
                     spans: vec![span; code.len()],
                     block_fuel: cove_ir::lower::block_fuel(&code),
                     code,

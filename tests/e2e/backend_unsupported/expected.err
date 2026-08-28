@@ -1,8 +1,8 @@
-error[cove::backend::unsupported]: the VM cannot run a closure yet
-  --> <e2e>/backend_unsupported/main/main.cove:12:32
+error[cove::backend::unsupported]: the VM cannot run a task scope yet
+  --> <e2e>/backend_unsupported/main/main.cove:16:17
    |
-12 |   let double: fn(Int) -> Int = fn(n) {
-   |                                ^^^^^^^
+16 |   let doubled = scope tasks {
+   |                 ^^^^^^^^^^^^^
   rule: A run on the VM either finishes on the VM or fails before any side effect; it never falls back to the interpreter.
   help: run it on the interpreter with `--backend ast`, which is the default
 1 error(s)

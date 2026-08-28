@@ -28,13 +28,15 @@ use std::rc::Rc;
 use std::sync::Arc;
 use std::thread::JoinHandle;
 
-use cove_syntax::ast::{Block, FnDecl, Param};
+use cove_syntax::ast::{FnDecl, Param};
 
 use crate::budget::Cancellation;
 use crate::error::RuntimeError;
 use crate::host::ResourceHandle;
 use crate::shared::SharedCell;
-use crate::value::{Closure, DynValue, EnumValue, HostFnValue, MapKey, StructValue, Value};
+use crate::value::{
+    Closure, ClosureBody, DynValue, EnumValue, HostFnValue, MapKey, StructValue, Value,
+};
 
 /// What a task thread hands back to the task that spawned it: the value the
 /// body produced, in the form that may cross the boundary, or why it stopped.
@@ -331,7 +333,20 @@ pub struct TransferClosure {
     pub is_async: bool,
     pub params: Vec<Param>,
     pub decl: Option<Arc<FnDecl>>,
-    pub body: Arc<Block>,
+    /// The body, in whichever of the two forms the backend that made this
+    /// closure builds.
+    ///
+    /// [`ClosureBody::Tree`] is syntax and crosses the way the declaration
+    /// beside it does: an `Arc<Block>` is immutable, so two threads reading
+    /// one observe nothing about each other. [`ClosureBody::Lowered`] is an
+    /// id into *one run's* `cove_ir::Program`, and a receiving task holds a
+    /// program of its own — so an id that crossed would name whatever
+    /// function happened to have that number there. Nothing can carry one
+    /// across today, because the VM lowers neither `spawn` nor `Shared` and
+    /// those are the only two ways a value reaches this. Whoever lowers one
+    /// has to decide what a `FunctionId` means in a task that was handed a
+    /// different program before that stays true.
+    pub body: ClosureBody,
     pub module: String,
     pub captures: Vec<(String, Transfer)>,
 }
@@ -651,6 +666,7 @@ mod tests {
     use crate::schema::ResourceSchema;
     use crate::value::VectorStorage;
     use cove_diag::{FileId, Span};
+    use cove_syntax::ast::Block;
 
     /// The point of the type: a value that may cross a task boundary is a
     /// value a thread can own. If this ever stopped holding, `spawn` could
@@ -738,11 +754,11 @@ mod tests {
             is_async: false,
             params: Vec::new(),
             decl: None,
-            body: Arc::new(Block {
+            body: ClosureBody::Tree(Arc::new(Block {
                 statements: Vec::new(),
                 tail: None,
                 span,
-            }),
+            })),
             module: module.into(),
             captures: captures
                 .into_iter()

@@ -63,9 +63,28 @@
 //! An index rather than a pointer, because the value stack is one `Vec` that
 //! grows, and an index survives a reallocation that a borrow could not even
 //! be written across. It is sound for as long as the frame it addresses is
-//! live, and a callee cannot outlive its caller while nothing lowers a
-//! closure — see the note on [`Inst::PlaceLocal`], which is where that
-//! dependency is stated for whoever lowers one.
+//! live, and a place never leaves the frame that built it — see the note on
+//! [`Inst::PlaceLocal`], which is where that is argued now that closures
+//! lower.
+//!
+//! # A closure is a function and the values it was handed
+//!
+//! A lambda is lowered to a [`Function`] of its own, and what the
+//! environment around it handed that function is [`Function::captures`]: a
+//! list of names settled when the lambda was lowered, whose values the
+//! enclosing body pushes at [`Inst::MakeClosure`] and which the call copies
+//! into the value slots after the parameters. The interpreter decides the
+//! same set — the names the body mentions, intersected with what is live —
+//! but decides it as the closure is created, so a capture's position is a
+//! run-time fact there and a static layout here. That is ADR 0019's "slots,
+//! not names" asked of a capture.
+//!
+//! [`Inst::CallValue`] is the other half, and it is why a closure's
+//! convention is fixed rather than read off the callee: nothing at a call
+//! through a value knows which function it will reach, so every argument
+//! travels on the value stack and the answer comes back on it. A declared
+//! function *used* as a value is numbered as a second specialisation under
+//! that convention rather than called under its own.
 //!
 //! # What is not here
 //!
@@ -199,7 +218,42 @@ pub struct Function {
     pub has_receiver: bool,
     /// What the closure that created this body handed it, in the order the
     /// instructions expect. Empty for a declared function.
+    ///
+    /// The order is the interpreter's, because it has to be: `Env::captures`
+    /// walks the environment that wrote the lambda outermost first and keeps
+    /// one entry per name, and `crate::lower` walks the same bindings in the
+    /// same order. What differs is *when*. There, a capture's position is a
+    /// run-time fact — the list is built as the closure is created — and
+    /// here it is decided when the lambda is lowered, which is what lets
+    /// [`Inst::LoadCapture`] be an index.
+    ///
+    /// The names are kept although nothing reads one to find a capture:
+    /// `cove_runtime::value::Closure::captures` is a list of `(name, value)`
+    /// pairs on both backends, and a host that receives a closure reads it,
+    /// so the pairs have to be rebuildable. They are also what a listing
+    /// shows.
+    ///
+    /// The values themselves live in the first value slots after the
+    /// parameters — `arity .. arity + captures.len()` — put there by the
+    /// call that entered this body, out of the closure it was called
+    /// through. That is why every function a closure can be made of takes
+    /// all of its arguments on the value stack: the captures follow them
+    /// there, and a scalar parameter would leave a hole between the two.
     pub captures: Vec<Rc<str>>,
+    /// The parameters as source wrote them, for a function a closure value
+    /// can be made of, and empty for every other.
+    ///
+    /// `params` above says which stack each argument arrives on, which is
+    /// what a call needs. This says what a closure *value* has to be able to
+    /// answer about itself: `cove_runtime::value::Closure::params` is a
+    /// `Vec<Param>` whichever backend built the closure, and
+    /// `Result.mapError` reads its length to decide whether to hand the
+    /// callback the error it is replacing. A closure the VM built has to
+    /// answer that the way one the interpreter built does, so the written
+    /// parameters travel with the lowered body rather than being
+    /// reconstructed from the slot kinds, which have lost the names and the
+    /// defaults.
+    pub written_params: Vec<cove_syntax::ast::Param>,
     pub code: Vec<Inst>,
     /// How many instructions run from each index control can arrive at before
     /// it can go somewhere else, and 0 at every index it cannot arrive at.
@@ -361,7 +415,57 @@ pub enum Inst {
     /// Pops a value into a frame slot.
     StoreLocal(u32),
     /// Pushes one of this call's captures.
+    ///
+    /// A capture is a value slot like any other — the call that entered this
+    /// body copied it out of the closure into `arity + index`, which is
+    /// where the captures stand because every argument of a closure travels
+    /// on the value stack and so the parameters fill exactly `0..arity`
+    /// there. This could therefore have been a [`Inst::LoadLocal`] of that
+    /// number, and it is not, for two reasons that are the same reason: the
+    /// layout is a fact about the closure rather than about the body, and it
+    /// is [`Function::captures`] that states it. A listing reads
+    /// `capture 0` rather than `load 3`, and `crate::lower::validate` can
+    /// check an index against the capture list instead of against the frame.
     LoadCapture(u32),
+    /// Builds a closure over the top `captures` values, in the order
+    /// [`Function::captures`] names them, and pushes it.
+    ///
+    /// This is `Interpreter::make_closure` with the hard part already done.
+    /// There, the set of captures is worked out as the closure is created —
+    /// the names the body mentions, intersected with what is live — and the
+    /// list a closure ends up holding is therefore a run-time fact. Here the
+    /// same set is worked out when the lambda is lowered, the enclosing body
+    /// pushes exactly those values, and this only has to pair them with the
+    /// names beside them.
+    ///
+    /// The count is in the instruction as well as in the callee's own
+    /// `captures`, for the reason [`Inst::Call`]'s counts are in the
+    /// instruction: `crate::lower::stack_shape` is a pure function of one
+    /// instruction with no function table beside it, and a lambda is
+    /// numbered before its own [`Function`] exists. `validate` reconciles
+    /// the two.
+    MakeClosure { function: FunctionId, captures: u16 },
+    /// Calls the callable value on top of the stack, with `argc` arguments
+    /// standing below it.
+    ///
+    /// The callee is *above* its arguments, which is the one place in this
+    /// IR where an operand is not in source order. A call through a value is
+    /// lowered only where the callee is a bare name that resolves to a local
+    /// — `crate::lower` refuses every other shape — and reading a local has
+    /// no effect, so the order the two are evaluated in is not observable.
+    /// What it buys is that the callee is popped rather than left standing
+    /// under the frame the call opens: the arguments become the callee's
+    /// first slots without moving, exactly as [`Inst::Call`]'s do, and the
+    /// captures are copied in after them.
+    ///
+    /// Every argument travels on the value stack and the answer comes back
+    /// on it, whatever the callee's types are, because nothing at the call
+    /// site knows which function this will reach. `crate::lower` numbers a
+    /// separate specialisation of a declared function used as a value for
+    /// exactly that reason, so that the convention a closure is called under
+    /// is one convention rather than whatever the target happened to
+    /// declare.
+    CallValue { argc: u16 },
     /// Discards the top of the stack.
     Pop,
     /// Applies a unary operator to the top of the stack.
@@ -646,13 +750,23 @@ pub enum Inst {
     /// standing, and it is valid for exactly as long as the frame it
     /// addresses is live.
     ///
-    /// **That is sound because a callee cannot outlive its caller.** Nothing
-    /// lowers a closure, so nothing a lowered program can build holds a
-    /// place past the return of the frame that made it: a place travels down
-    /// into a call and back out as nothing at all. A closure would break
-    /// exactly that, since it can be returned, and whoever lowers one has to
-    /// decide what a captured `var` binding is before this instruction can
-    /// keep being an index. This paragraph is the note that says so.
+    /// **That is sound because nothing a lowered program can build holds a
+    /// place past the return of the frame that made it.** A place travels
+    /// down into a call and back out as nothing at all: no call answers one,
+    /// and no value contains one.
+    ///
+    /// A closure is the construct that could have broken that, because it
+    /// can be returned, and this note used to say that nothing lowered one.
+    /// One does now, and the answer is that **a closure captures the value a
+    /// place names, never the place**. `Body::lambda` reads a captured `var`
+    /// parameter with a [`Inst::LoadPlace`] and a [`Inst::PlaceRead`], which
+    /// is the same read `Env::captures` makes with `place.read` in the
+    /// interpreter — and the oracle agrees that it is a read: a closure over
+    /// a `var` binding still answers what the binding held when the closure
+    /// was written, after the binding has been assigned to. So
+    /// [`Inst::MakeClosure`] takes values off the value stack and a
+    /// `Value::Closure` holds `Value`s, and the place stack is still
+    /// something only a call's arguments travel on.
     ///
     /// The slot is a [`SlotKind::Value`] one, checked by `validate` rather
     /// than asked about here: a place cannot address the scalar stack, which
@@ -928,6 +1042,14 @@ fn render_inst(program: &Program, inst: Inst) -> String {
                 target.module, target.name
             )
         }
+        Inst::MakeClosure { function, captures } => {
+            let target = program.function(function);
+            format!(
+                "make-closure {}.{} captures={captures}",
+                target.module, target.name
+            )
+        }
+        Inst::CallValue { argc } => format!("call-value argc={argc}"),
         Inst::CallHost { module, op, argc } => {
             format!("call-host {}.{} argc={argc}", name(module), name(op))
         }

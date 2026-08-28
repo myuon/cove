@@ -195,7 +195,22 @@ use cove_sema::resolve::Program as Checked;
 /// spread argument's value and ignores its marking, so those are refused
 /// rather than reproduced. `tests/e2e:fn_variadic` is the case that gained a
 /// lowering, and it is the only one the corpus held.
-const LOWERED_FLOOR: usize = 72;
+///
+/// 72 to 74: a lambda is lowered to a function of its own and the values the
+/// environment around it handed over. `cove_ir::Function::captures` was
+/// scaffolding until now — an explicit list with an explicit layout, decided
+/// when the lambda is lowered rather than when the closure is created, which
+/// is ADR 0019's "slots, not names" asked of a capture — and
+/// `cove_ir::Inst::MakeClosure` fills it while `cove_ir::Inst::CallValue`
+/// enters one. `tests/e2e:closures` and `tests/e2e:gc_cycles` are the cases
+/// that gained a lowering.
+///
+/// Two of the three cases that refused for a closure are what moved.
+/// `tests/e2e/backend_unsupported:backend_unsupported` is the third and did
+/// not: it exists to pin ADR 0019's no-silent-fallback rule, so it was
+/// rewritten around a task scope, which the lowering still refuses. What the
+/// case is about is the rule and not the construct.
+const LOWERED_FLOOR: usize = 74;
 
 // ------------------------------------------------------------------ the test
 

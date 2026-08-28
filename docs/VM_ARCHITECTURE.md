@@ -148,17 +148,30 @@ from touching the stack. The index is absolute rather than relative to a
 frame, because a place travels — it is built in the caller's frame and read
 and written in the callee's, where `base` is a different number.
 
-**What makes it valid is that a callee cannot outlive its caller.** A frame's
-slots are live from the call that opened the window to the return that
-truncates it, and a place is built by an instruction of some frame and
-consumed by an instruction of that frame or of one it called. Nothing a
-lowered program can build outlives the frame it was built in, because nothing
-lowers a closure, and a closure is exactly the construct that could: it can be
-returned. So the dependency is worth stating rather than leaving to be
-discovered — whoever lowers a closure has to decide what a captured `var`
-binding is before an index into the stack stays sound, and both
-`cove_ir::Inst::PlaceLocal` and `cove_runtime::vm::Place` say so where they
-are defined.
+**What makes it valid is that nothing a lowered program can build outlives the
+frame it was built in.** A frame's slots are live from the call that opened the
+window to the return that truncates it, and a place is built by an instruction
+of some frame and consumed by an instruction of that frame or of one it called.
+No call answers a place, and no value contains one.
+
+This paragraph used to reach that conclusion the other way round — a callee
+cannot outlive its caller, because nothing lowers a closure and a closure is
+the construct that could, since it can be returned. A closure lowers now, and
+the answer is that **a closure captures the value a place names, never the
+place**. The lowering reads a captured `var` parameter with a `place-read`,
+which is the read `Env::captures` makes in the interpreter, and the oracle
+agrees that it is a read: a closure over a `var` binding still answers what
+the binding held when the closure was written, after the binding has been
+assigned to. So `make-closure` takes values off the value stack, a
+`Value::Closure` holds `Value`s, and the place stack is still something only
+a call's arguments travel on. Both `cove_ir::Inst::PlaceLocal` and
+`cove_runtime::vm::Place` say so where they are defined.
+
+A callback a host runs re-entrantly does not break it either, and for a
+different reason: such a call opens its frame *above* the frames that are
+standing and truncates back to where it found them, so a place standing in one
+of those frames still points where it pointed. "Host calls and reentry", below,
+is where that convention is written down.
 
 The path is a `Vec<u32>` of field positions, which is what the interpreter's
 own `Place::steps` is and costs what it costs there: an empty path allocates
@@ -266,21 +279,60 @@ A back edge asks one question on one schedule. A loop notices any stop — a
 bounded call's flag, the run's cancellation, its deadline, its fuel — at the
 first back edge at which `BACK_EDGE_FUEL` (64) of fuel has gathered since the
 last safepoint, so it stops within 63 fuel plus one turn rather than within one
-turn; a loop whose turn charges C fuel stops within ceil(64 / C) turns. Two
-facts narrow what that gives up, and both belong here. The run's own
-cancellation was never on the eager schedule to begin with, because it is read
-inside `Budget::safepoint`, which the gathered schedule already gated; and
-`self.stops` is pushed only by `Reentry::call_until`, which this backend answers
-without running any Cove code, so no VM run today can have a flag in that list
-while a loop turns. It is a bound given up for speed all the same, and it will
-start to matter when closures lower.
+turn; a loop whose turn charges C fuel stops within ceil(64 / C) turns. One
+fact narrows what that gives up: the run's own cancellation was never on the
+eager schedule to begin with, because it is read inside `Budget::safepoint`,
+which the gathered schedule already gated.
+
+The second fact that used to narrow it is gone. `self.stops` is pushed only by
+`Reentry::call_until`, and this backend answered such a call without running any
+Cove code, so no VM run could have a flag in that list while a loop turned.
+Closures lower now, so a `clock.timeout` around a Cove callback puts a flag
+there and the callback's own loops are what it has to stop — on this schedule,
+within 63 fuel plus one turn of noticing. That is the same bound the run's
+cancellation has always had, and it is now the bound a bounded call has too.
 
 ### Host calls and reentry
 
 A Host call goes through the same `HostRegistry` the interpreter uses, so the
 grant check, the budget charge, the trace event, and the wait accounting are
-the same code and cannot drift. Reentry — a host running a Cove closure — is
-not yet lowered, and the convention for it is unwritten.
+the same code and cannot drift. Reentry — a host running a Cove closure, and
+the same thing a higher-order builtin such as `Result.mapError` does — enters
+the dispatch loop again rather than jumping inside the one that is running,
+because the instruction that made the host call has not finished: its operands
+are on the stacks below and its frame's slots are live.
+
+**The convention is that a re-entrant call opens its frame at the top of the
+three stacks as they stand, and leaves them exactly as it found them.** The
+arguments are pushed as a caller's would be and become the callee's first
+slots; the return truncates them away and the answer is handed back in Rust
+rather than left standing. The frame stack grows above the frame the
+interrupted instruction belongs to and comes back down to it, which is what
+`Vm::execute`'s `floor` parameter is: the loop answers when the frame stack
+falls back to the depth it started at, instead of when it empties.
+
+**A failure leaves nothing behind**, and that is the one place this differs
+from the outer run. There, an abandoned frame's slots stay on the stack until
+the run ends, which is sound because the run is ending; here it is not, because
+a host may catch what the callback failed with and carry on — `clock.timeout`
+is the one that does. So the three stacks and the frame stack are restored to
+what they were, and a host that continues continues onto the stacks it
+interrupted.
+
+What this relies on is that the outer loop's own state survives it. The
+dispatch loop keeps the running function, its code, its block table and its
+frame in locals; a `Frame` is five words copied out of the frame stack and a
+`Place` is an index rather than a pointer, so a nested run that pushes and pops
+frames, and that may reallocate any of the three `Vec`s, leaves every one of
+those still meaning what it meant. That is the same property that makes a place
+survive an ordinary call, read from the other side.
+
+Everything the loop accounts is still accounted, because it *is* the loop: fuel
+per block, the depth limit and the host's own `max_call_depth` through
+`Vm::enter`, and every safepoint the callee reaches asking what a safepoint
+asks. One safepoint is paid twice — `Vm::enter` takes one because a call is
+one, and `Vm::execute` takes one on entering the frame it was handed — which
+costs a lock and changes no answer.
 
 ### Trace
 

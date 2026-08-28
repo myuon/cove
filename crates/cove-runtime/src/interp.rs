@@ -39,7 +39,9 @@ use crate::runtime::{Runtime, ENTRY_TASK};
 use crate::schema::TypeSchema;
 use crate::task::{Task, TaskOutcome, TaskScope, TaskState, Transfer};
 use crate::trace::{RunOutcome, Timing, TraceEvent};
-use crate::value::{Closure, DynValue, EnumValue, HostFnValue, RangeBounds, StructValue, Value};
+use crate::value::{
+    Closure, ClosureBody, DynValue, EnumValue, HostFnValue, RangeBounds, StructValue, Value,
+};
 
 /// How deep Cove calls may nest before the runtime reports a limit instead of
 /// exhausting the host stack.
@@ -1075,7 +1077,7 @@ impl<'a> Interpreter<'a> {
             return Ok(Value::Closure(Rc::new(Closure {
                 is_async: decl.is_async,
                 params: decl.params.clone(),
-                body: Arc::new(decl.body.clone()),
+                body: ClosureBody::Tree(Arc::new(decl.body.clone())),
                 decl: Some(decl),
                 module: owner.into(),
                 captures: Vec::new(),
@@ -1561,11 +1563,26 @@ impl<'a> Interpreter<'a> {
         match callee {
             Value::Closure(closure) => {
                 let module = closure.module.clone();
+                // The oracle walks syntax, so a closure whose body is a
+                // lowered function is one it cannot run. Nothing produces
+                // that pairing today — a run has one backend, and the VM is
+                // the only party that builds a lowered body — so this is
+                // said rather than approximated, exactly as the VM says the
+                // reverse.
+                let ClosureBody::Tree(body) = &closure.body else {
+                    return Err(RuntimeError::new(
+                        "this closure was built by the VM, and the interpreter runs syntax",
+                    )
+                    .at(span)
+                    .with_rule(
+                        "A run has one backend, and a closure belongs to the run that made it.",
+                    ));
+                };
                 self.invoke(
                     &Target {
                         name: "this closure",
                         params: &closure.params,
-                        body: &closure.body,
+                        body,
                         module,
                         receiver: None,
                         is_async: closure.is_async,
@@ -1943,7 +1960,7 @@ impl<'a> Interpreter<'a> {
             is_async,
             params,
             decl: None,
-            body: Arc::new(body),
+            body: ClosureBody::Tree(Arc::new(body)),
             module: env.module.clone(),
             captures,
         })))
@@ -2348,7 +2365,7 @@ impl<'a> Interpreter<'a> {
             return Ok(Value::Closure(Rc::new(Closure {
                 is_async: decl.is_async,
                 params: decl.params.clone(),
-                body: Arc::new(decl.body.clone()),
+                body: ClosureBody::Tree(Arc::new(decl.body.clone())),
                 decl: Some(decl),
                 module: owner,
                 captures: Vec::new(),
