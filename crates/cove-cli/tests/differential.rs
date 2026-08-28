@@ -276,7 +276,38 @@ use cove_sema::resolve::Program as Checked;
 /// not name fails in the same words on either. `examples:server` is the
 /// case that gained a lowering, and it needed the two changes before this
 /// one as well: a type a host declares, and a function used as a value.
-const LOWERED_FLOOR: usize = 82;
+/// 82 to 86: a task scope, and a VM of its own for each task spawned into
+/// it. ADR 0008 gives every task an evaluator, and `cove_runtime::vm::Vm` is
+/// now one of the two things that can be one — over the same `Runtime` and
+/// the same `cove_ir::Program`, which a run shares because a lowered
+/// closure's `FunctionId` has to mean the same function on both sides of the
+/// boundary. Everything a `spawn`, an `await` and a scope exit decide lives
+/// in `cove_runtime::task`, which both backends call, so there is no second
+/// statement of the task-safety rule for the two to drift apart on.
+/// `tests/e2e:fail_max_tasks`, `tests/e2e:gc_tasks`,
+/// `tests/e2e:tasks_host_order` and `tests/e2e:tasks_scope` are the cases
+/// that gained a lowering.
+///
+/// A fifth case refused for a task scope and did not gain one.
+/// `tests/e2e/backend_unsupported:backend_unsupported` exists to pin ADR
+/// 0019's no-silent-fallback rule, so it was rewritten again — around a call
+/// whose labelled arguments stand out of declaration order, which is refused
+/// deliberately rather than for want of work: the interpreter answers such a
+/// call by evaluating the arguments in the order they were *written*, and
+/// issue #112 is about moving that decision into the checker. It was a
+/// closure, then a task scope; what the case is about is the rule and not the
+/// construct.
+///
+/// One scope shape is refused and stays refused, which is worth recording
+/// because it is a wall rather than unfinished work. A child whose value is
+/// `Err(...)` returns that failure from the function the scope was written
+/// in, and `Interpreter::leave_scope` does that whatever the declared return
+/// type is — `fn f() -> Int { scope s { ... } }` answers `Err(boom)` on the
+/// oracle. A function the checker settled as answering `Int` or `Bool`
+/// returns on the scalar stack and every one of its returns is a
+/// `return-scalar`, so there is no stack for that failure to travel on. The
+/// lowering refuses such a scope rather than approximating it.
+const LOWERED_FLOOR: usize = 86;
 
 // ------------------------------------------------------------------ the test
 

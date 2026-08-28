@@ -973,6 +973,69 @@ pub enum Inst {
     /// where a type is written and does not convert a lambda's inferred
     /// result, and neither backend may tell the two apart.
     CallDyn { site: DispatchId, argc: u16 },
+    /// Opens the task scope `scope name { ... }` binds, and pushes it.
+    ///
+    /// `name` is a `Const::Name` holding the name the scope is bound to,
+    /// which is what its diagnostics call it. The value pushed is a
+    /// `cove_runtime::value::Value::TaskScope`, and the instruction after
+    /// this is the [`Inst::StoreLocal`] that binds it — the scope is an
+    /// ordinary value slot, because `scope.spawn` reads it the way any other
+    /// receiver is read.
+    ///
+    /// The VM also *registers* the scope against the frame that opened it,
+    /// which is the half a slot cannot hold. Leaving a scope waits for or
+    /// cancels its children, and a frame that returns out of the middle of
+    /// one — through `return`, or through a `?` that failed — never reaches
+    /// the [`Inst::LeaveScope`] written after its body. So the VM cancels
+    /// whatever the popped frame had opened, and the lowering emits an
+    /// [`Inst::CancelScope`] only for the exits that stay *inside* the
+    /// frame: a `break` and a `continue`.
+    EnterScope(ConstId),
+    /// Leaves the scope this frame opened last, waiting for every child the
+    /// body did not await, and answers a `Result`.
+    ///
+    /// The operand is the scope's own value — a scope is an expression, and
+    /// its value is the value of its block — and what is pushed back is that
+    /// value wrapped in `Ok`, or the `Err` of the first child that failed.
+    /// The [`Inst::Try`] the lowering writes immediately after is what turns
+    /// the second into a return from the enclosing call, which is exactly
+    /// what the oracle does with it: `Interpreter::leave_scope` answers
+    /// `Control::Return(Value::err(error))`, and `?` is the construct that
+    /// already means that here.
+    ///
+    /// A child that *raised* rather than answering `Err` is not a value at
+    /// all, so it propagates as the error it is and never reaches the `try`.
+    LeaveScope,
+    /// Cancels the scope this frame opened last and waits for its children
+    /// to stop.
+    ///
+    /// What a `break` or a `continue` written inside a scope's body needs,
+    /// exactly as [`Inst::Pop`] is what one written inside a half-evaluated
+    /// expression needs: it leaves the scope without reaching the
+    /// [`Inst::LeaveScope`] below it, and a scope never outlives a thread it
+    /// started. Every other early exit leaves the *frame* as well, which the
+    /// VM notices for itself when it pops one.
+    CancelScope,
+    /// `scope.spawn { ... }`: starts a thread for the closure on top of the
+    /// stack, in the scope below it, and pushes the handle.
+    ///
+    /// Converting the closure for the new thread is the task-safety check,
+    /// so a capture that may not cross a task boundary is reported here.
+    /// `cove_runtime::task::spawn_into` is the one implementation both
+    /// backends reach, and a lowered closure crosses because a
+    /// [`FunctionId`] means the same function on every thread of a run — see
+    /// this crate's "One program, and every thread of a run reads it".
+    Spawn,
+    /// `await task`, and the postfix `task.await()` that means the same
+    /// thing: waits for the task on top of the stack and pushes its value.
+    Await,
+    /// `task.cancel()`: asks the task on top of the stack to stop at its next
+    /// safepoint, and pushes `()`.
+    ///
+    /// Asking is all it does. Whether the task stopped or had already
+    /// finished is known only once something waits for it, which is what
+    /// `await` and leaving the scope do.
+    Cancel,
     /// Returns the top of the value stack.
     ///
     /// What a function whose `returns` is [`SlotKind::Value`] ends in, and
@@ -1234,6 +1297,12 @@ fn render_inst(program: &Program, inst: Inst) -> String {
                 cases.join(", ")
             )
         }
+        Inst::EnterScope(scope) => format!("enter-scope {}", name(scope)),
+        Inst::LeaveScope => "leave-scope".to_string(),
+        Inst::CancelScope => "cancel-scope".to_string(),
+        Inst::Spawn => "spawn".to_string(),
+        Inst::Await => "await".to_string(),
+        Inst::Cancel => "cancel".to_string(),
         Inst::SpreadArgument => "spread-argument".to_string(),
         Inst::TestCase(case) => format!("test-case {}", name(case)),
         Inst::GetPayload(index) => format!("get-payload {index}"),

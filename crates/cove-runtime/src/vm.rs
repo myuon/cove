@@ -132,9 +132,41 @@
 //! as they stand, with fuel, cancellation, the depth limit and the trace all
 //! still the loop's.
 //!
+//! # A task gets a VM of its own
+//!
+//! ADR 0008 runs a spawned task on a thread of its own, and gives it an
+//! evaluator of its own to run it with. For this backend that is a second
+//! `Vm`: [`Vm::for_task`] builds one on the new thread, over the same
+//! [`Runtime`] and the same `cove_ir::Program`, with its own three stacks,
+//! its own frames, its own heap, and its own constant values. Nothing about
+//! the spawning VM crosses, because nothing about it could — every one of
+//! those is `Rc`-based or is a `Vec` this thread owns.
+//!
+//! **What crosses is the program and the body.** The program is shared,
+//! which is what makes a `FunctionId` in a lowered closure mean the same
+//! function on the far side; see `cove_ir`'s "One program, and every thread
+//! of a run reads it". The body crosses as a `crate::task::Transfer`, which
+//! *is* the task-safety rule — the Language Card lets a value cross exactly
+//! when copying it is the whole of transferring it — and it is the same walk
+//! the interpreter's `spawn` makes.
+//!
+//! Every decision either backend makes about a task is `crate::task`'s, so
+//! there is no second statement of what may cross, of what a scope does with
+//! a child that failed, or of what a `spawn` charges. What is written here is
+//! the stack discipline: six instructions, one dispatch arm, and the one
+//! thing a stack machine has to answer that a tree walk does not — what
+//! happens to a scope whose frame returned out from under it. [`Vm::leave`]
+//! is that answer, because it is the one place a frame is popped.
+//!
+//! Fuel, the deadline, the run's cancellation, the task's own cancellation,
+//! the depth limit, and the trace are accounted inside a task exactly as they
+//! are outside one, because they are accounted by the same `Vm`: a task's VM
+//! reaches the run's one budget through the same [`HostRegistry`], and
+//! [`Vm::safepoint`] asks the task's own flag beside the rest.
+//!
 //! # What is not here
 //!
-//! Tasks, `dyn`, `Shared`, and everything else `cove_ir::lower` reports as
+//! An `async fn`, `Shared`, and everything else `cove_ir::lower` reports as
 //! [`cove_ir::Unsupported`]. ADR 0019's no-silent-fallback rule is
 //! what makes that the right shape: a program the lowering refuses never
 //! reaches this, so there is no construct this can be wrong about.
@@ -161,6 +193,7 @@ use crate::interp::{
     returned_error_message, source_text, unary, work_stopped, MAX_CALL_DEPTH,
 };
 use crate::runtime::{Runtime, ENTRY_TASK};
+use crate::task::{self, ChildFailure, TaskOutcome, TaskScope, Transfer};
 use crate::trace::{RunOutcome, Timing, TraceEvent};
 use crate::value::{Closure, ClosureBody, StructValue, Value};
 
@@ -393,12 +426,25 @@ struct EnumShape {
     decl: Arc<EnumDecl>,
 }
 
+/// A task scope this VM has entered and not yet left.
+///
+/// The depth is `frames.len()` at the `enter-scope`, so a frame that is
+/// popped can be asked what it had open: everything entered at a depth
+/// greater than the frames that remain.
+struct OpenScope {
+    depth: usize,
+    scope: Rc<TaskScope>,
+}
+
 /// Runs a lowered program.
 ///
-/// One VM runs one entry on one thread. Everything shared with the rest of
-/// the run — the checked program, the source map, the host boundary, the
-/// trace — is reached through the [`Runtime`] it borrows, which is the
-/// arrangement [`crate::interp::Interpreter`] already has.
+/// One VM runs one body on one thread: the entry, or the body of a spawned
+/// task. Everything shared with the rest of the run — the checked program,
+/// the source map, the host boundary, the trace — is reached through the
+/// [`Runtime`] it borrows, and the lowered program through the handle beside
+/// it, which is what a `spawn` hands the thread it starts. That is the
+/// arrangement [`crate::interp::Interpreter`] already has, with one thing
+/// more, because this backend has a program of its own to reach.
 pub struct Vm<'a> {
     runtime: &'a Runtime,
     hosts: &'a HostRegistry,
@@ -449,15 +495,19 @@ pub struct Vm<'a> {
     /// often as its instruction runs — so it is done once per VM, here,
     /// and every load after that is the `Rc` clone it always was.
     constants: Vec<Value>,
-    /// This run's heap.
+    /// This task's heap.
     ///
-    /// Nothing the lowering covers allocates growable storage — `Vector.of`
-    /// is an associated function of a builtin type and `push` writes through
-    /// its receiver, and both are refused — so this exists to answer
-    /// [`Callable::allocate_vector`] honestly rather than to be swept. There
-    /// is no collection here for the same reason there is nothing to collect:
-    /// a cycle needs a `Vector` that reaches itself, and nothing in the
-    /// subset can build one.
+    /// ADR 0011: a value belongs to one task or is immutable and shared, so a
+    /// task's objects are its own, and ADR 0008 gives each task a thread — so
+    /// this heap is reached only from the thread that owns it, exactly as
+    /// `Interpreter::heap` is. A spawned task's VM has one of its own, and
+    /// [`Vm::retire_heap`] folds what it did into the run's totals when the
+    /// thread ends.
+    ///
+    /// There is still no collection here. This backend has no collector, so
+    /// what a heap it owns can report is what it allocated; a cycle a lowered
+    /// program builds is not reclaimed, which is a gap in this backend rather
+    /// than a property of the subset it covers.
     heap: Heap,
     /// Fuel charged since the last safepoint, spent at the next one.
     fuel: u64,
@@ -471,6 +521,32 @@ pub struct Vm<'a> {
     /// many reasons and this moves for one, which is what makes it the figure
     /// a change to the lowering is judged by.
     instructions: u64,
+    /// This task's own cancellation flag, when this VM is running a spawned
+    /// task's body rather than the entry.
+    ///
+    /// Cancelling the *run* is the budget's flag, which every safepoint
+    /// already observes through the shared budget. This is the second flag a
+    /// safepoint checks: it stops one task without stopping the run, which is
+    /// what leaving a scope early asks for.
+    cancellation: Option<Cancellation>,
+    /// The task this VM is running: the spawned task's id, or
+    /// [`ENTRY_TASK`] when it is running the entry.
+    ///
+    /// This is the one answer to "which task" that every event naming a task
+    /// is written from, exactly as `Interpreter::task_id` is.
+    task: u64,
+    /// The task scopes this VM has entered and not yet left, with the frame
+    /// depth each was entered at.
+    ///
+    /// A scope's *value* is an ordinary slot, which is what `scope.spawn`
+    /// reads. This is the other half, and it is the half that makes "leaving
+    /// the scope waits for or cancels its child tasks" true however the scope
+    /// is left. A `leave-scope` pops one from here; a `cancel-scope` pops one
+    /// and cancels it, which is what a `break` needs; and a frame that
+    /// returns out of the middle of a scope — through `return`, or through a
+    /// `?` that failed — has whatever it opened cancelled by [`Vm::leave`],
+    /// which is the one place a frame is popped.
+    scopes: Vec<OpenScope>,
     /// Flags raised by a host call that bounds the work it was given, one for
     /// each such call this thread is inside, checked at every safepoint
     /// exactly as [`crate::interp::Interpreter`] checks them.
@@ -514,11 +590,36 @@ impl<'a> Vm<'a> {
             heap: Heap::new(),
             fuel: 0,
             instructions: 0,
+            cancellation: None,
+            task: ENTRY_TASK,
+            scopes: Vec::new(),
             stops: Vec::new(),
             timings: Vec::new(),
             wait: Duration::ZERO,
             assertion_failure: None,
         }
+    }
+
+    /// A VM for the body of the spawned task `id`, which stops when
+    /// `cancellation` is raised.
+    ///
+    /// ADR 0008 gives each task an evaluator of its own, and this is the VM's
+    /// side of that: the same two fields `Interpreter::for_task` sets, over
+    /// the same `Runtime` and the same lowered program, on a thread of its
+    /// own. Everything else — the stacks, the frames, the heap, the constant
+    /// values — is built here rather than carried across, because none of it
+    /// could cross and none of it needs to.
+    pub(crate) fn for_task(
+        runtime: &'a Runtime,
+        hosts: &'a HostRegistry,
+        program: &'a Arc<Program>,
+        id: u64,
+        cancellation: Cancellation,
+    ) -> Self {
+        let mut vm = Vm::new(runtime, hosts, program);
+        vm.cancellation = Some(cancellation);
+        vm.task = id;
+        vm
     }
 
     /// Runs `function` with `args`, answering what the entry answered.
@@ -592,6 +693,11 @@ impl<'a> Vm<'a> {
         });
         self.timings.push(Timing::start());
         let outcome = self.execute(0);
+        // A run that ended by raising abandoned its frames where they stood,
+        // and a scope one of them had open still owns threads. The run is
+        // ending, so what is left to do is what leaving a scope early does:
+        // ask its children to stop, and wait for them.
+        self.close_scopes_above(0);
         let timing = self
             .timings
             .pop()
@@ -1299,6 +1405,17 @@ impl<'a> Vm<'a> {
                     self.fuel += items.len() as u64;
                     self.stack.push(Value::Array(items.into()));
                 }
+                // Six instructions in one arm, calling an `#[inline(never)]`
+                // helper, for the reason the place and closure instructions
+                // are: the dispatch body's footprint is a cost every program
+                // pays, and no program in the benchmark suite executes any of
+                // these.
+                Inst::EnterScope(_)
+                | Inst::LeaveScope
+                | Inst::CancelScope
+                | Inst::Spawn
+                | Inst::Await
+                | Inst::Cancel => self.task_inst(inst, running.span_at(pc))?,
                 Inst::NoMatch => {
                     let span = running.span_at(pc);
                     let value = self.pop();
@@ -1777,6 +1894,107 @@ impl<'a> Vm<'a> {
         Ok(None)
     }
 
+    /// The six task instructions, off the dispatch loop's own body.
+    ///
+    /// Every decision any of them makes is `crate::task`'s, which is where
+    /// the oracle makes the same one: a rule about what may cross a task
+    /// boundary, about what a scope does with a child that failed, or about
+    /// what a `spawn` charges is a rule about the language, and one stated
+    /// twice is one that will drift. What is written here is the stack
+    /// discipline and nothing else.
+    ///
+    /// None of these leaves the frame, which is why the arm above needs no
+    /// tail. A `leave-scope` that found a failed child answers the `Err` that
+    /// child produced, and the `try` the lowering writes after it is what
+    /// returns it — `?` already means "return this failure from this call",
+    /// and that is exactly what `Interpreter::leave_scope` does with one.
+    #[inline(never)]
+    fn task_inst(&mut self, inst: Inst, span: Span) -> Result<(), RuntimeError> {
+        match inst {
+            Inst::EnterScope(named) => {
+                let scope = TaskScope::new(self.shared_name(named));
+                self.scopes.push(OpenScope {
+                    depth: self.frames.len(),
+                    scope: Rc::clone(&scope),
+                });
+                self.stack.push(Value::TaskScope(scope));
+            }
+            Inst::LeaveScope => {
+                let value = self.pop();
+                let open = self
+                    .scopes
+                    .pop()
+                    .expect("a validated `leave-scope` leaves a scope this frame entered");
+                let answered = match task::wait_for_children(self, &open.scope) {
+                    None => Value::ok(value),
+                    Some(failure) => {
+                        task::cancel_children(self, &open.scope);
+                        match failure {
+                            ChildFailure::Returned(value) => value,
+                            ChildFailure::Raised(error) => {
+                                open.scope.close();
+                                return Err(error);
+                            }
+                        }
+                    }
+                };
+                open.scope.close();
+                self.stack.push(answered);
+            }
+            Inst::CancelScope => {
+                let open = self
+                    .scopes
+                    .pop()
+                    .expect("a validated `cancel-scope` leaves a scope this frame entered");
+                task::cancel_children(self, &open.scope);
+                open.scope.close();
+            }
+            Inst::Spawn => {
+                let body = self.pop();
+                let scope = self.pop();
+                let Value::TaskScope(scope) = scope else {
+                    unreachable!("a validated `spawn` stands on a task scope");
+                };
+                let program = Arc::clone(self.program);
+                let spawned = task::spawn_into(
+                    self,
+                    &scope,
+                    body,
+                    span,
+                    move |runtime, id, flag, body, span| {
+                        run_task(&runtime, &program, id, flag, body, span)
+                    },
+                )?;
+                self.stack.push(spawned);
+            }
+            Inst::Await => {
+                // Every `await` is a safepoint, exactly as every call is:
+                // `Interpreter::call_task_method` charges one before it
+                // settles, and a task awaiting a task should notice a stop.
+                self.safepoint(span)?;
+                let value = self.pop();
+                let Value::Task(handle) = value else {
+                    unreachable!("a validated `await` stands on a task");
+                };
+                let settled = task::settle(self, &handle, span)?;
+                self.stack.push(settled);
+            }
+            Inst::Cancel => {
+                let value = self.pop();
+                let Value::Task(handle) = value else {
+                    unreachable!("a validated `cancel` stands on a task");
+                };
+                // Asking is all this does. A cancelled task stops at its next
+                // safepoint, and whether it stopped or had already finished is
+                // known only once something waits for it.
+                handle.cancel();
+                self.stack.push(Value::Unit);
+            }
+            other => unreachable!("`task_inst` was handed {other:?}"),
+        }
+        Ok(())
+    }
+
     /// The conversion `cove_ir::Inst::MakeDyn` names: the trait object a
     /// written `dyn Trait` asks for, under however many `Array` or `Option`
     /// layers that type put between it and the value.
@@ -1961,6 +2179,11 @@ impl<'a> Vm<'a> {
         let floor = self.frames.len();
         let result = self.run_callback(callee, args, argc, span);
         if result.is_err() {
+            // A host may catch what the callback failed with and carry on, so
+            // a scope the callback opened and did not leave is left here
+            // rather than at the end of the run: its threads would otherwise
+            // outlive every frame that could name them.
+            self.close_scopes_above(floor);
             self.frames.truncate(floor);
             self.stack.truncate(values);
             self.scalars.truncate(scalars);
@@ -2035,6 +2258,16 @@ impl<'a> Vm<'a> {
     /// here, at the outermost boundary there is.
     fn leave(&mut self, answer: Answered, floor: usize) -> Answer {
         let done = self.frames.pop().expect("a return leaves a frame");
+        // A frame that returns out of the middle of a task scope — through a
+        // `return`, or through a `?` that failed — never reaches the
+        // `leave-scope` written after that scope's body, and leaving a scope
+        // waits for or cancels its children whichever way it is left. This is
+        // the one place a frame is popped, so it is the one place that can
+        // notice. Guarded rather than called, because almost no program has a
+        // scope open and every program returns.
+        if !self.scopes.is_empty() {
+            self.close_scopes_above(self.frames.len());
+        }
         self.stack.truncate(done.base);
         self.scalars.truncate(done.scalar_base);
         // Guarded for the reason the `resize` in the `Call` arm is: a
@@ -2065,6 +2298,36 @@ impl<'a> Vm<'a> {
                 Answer::Done(as_value(returns, scalar))
             }
         }
+    }
+
+    /// Cancels and waits for every scope entered deeper than `depth`.
+    ///
+    /// What a scope left early does is `crate::task::cancel_children`, which
+    /// is the same call `Interpreter::leave_scope` makes on its own early
+    /// branch: every child is asked to stop first and waited for afterwards,
+    /// so they stop at the same time rather than one after another.
+    ///
+    /// Called where a frame is popped, where a re-entrant call was abandoned,
+    /// and once at the end of a run — the three ways a scope can be left
+    /// without its `leave-scope` running.
+    #[inline(never)]
+    fn close_scopes_above(&mut self, depth: usize) {
+        while self.scopes.last().is_some_and(|open| open.depth > depth) {
+            let open = self.scopes.pop().expect("the loop just looked at one");
+            task::cancel_children(self, &open.scope);
+            open.scope.close();
+        }
+    }
+
+    /// Ends this task's heap and folds what it did into the run's totals.
+    ///
+    /// `Interpreter::retire_heap` collects once first, because a `Weak` table
+    /// dropped without a sweep takes nothing with it. There is nothing to
+    /// collect here: this backend has no collector, so a heap it owns has
+    /// never been swept and the counters are the whole of what it can report.
+    fn retire_heap(&mut self) {
+        let stats = self.heap.take_stats();
+        self.runtime.retire_heap(&stats);
     }
 
     // ------------------------------------------------------------- budget
@@ -2142,6 +2405,11 @@ impl<'a> Vm<'a> {
     }
 
     fn safepoint(&mut self, span: Span) -> Result<(), RuntimeError> {
+        if let Some(cancellation) = &self.cancellation {
+            if cancellation.is_cancelled() {
+                return Err(crate::interp::task_cancelled(span));
+            }
+        }
         // A bounded call's flag stops only the body it bounds. The host that
         // raised it turns the stop into the answer it promised, so this need
         // only say that the body is not to continue.
@@ -2751,13 +3019,72 @@ impl Reentry for Callback<'_, '_> {
         })?
     }
 
-    /// The task the boundary records the call against. A VM run is the
-    /// entry's, because nothing it can run spawns a task — a `scope` is
-    /// still refused by the lowering, and so a callback this runs is on the
-    /// entry's task as much as the instruction that called the host is.
+    /// The task the boundary records the call against: this VM's own, which
+    /// is the entry's when it is running the entry and the spawned task's
+    /// when a `spawn` gave it a thread. A callback is on the same task as
+    /// the instruction that called the host, because it is running on the
+    /// same VM.
     fn task(&self) -> u64 {
-        ENTRY_TASK
+        self.vm.task
     }
+}
+
+/// The VM's half of what a task needs, which is the same four questions the
+/// interpreter answers. ADR 0008 gives every task an evaluator of its own,
+/// and this is what makes a `Vm` one of them.
+impl task::Tasking for Vm<'_> {
+    fn runtime(&self) -> &Runtime {
+        self.runtime
+    }
+
+    fn hosts(&self) -> &HostRegistry {
+        self.hosts
+    }
+
+    fn charge_wait(&mut self, wait: Duration) {
+        Vm::charge_wait(self, wait);
+    }
+
+    fn running_task(&self) -> Option<u64> {
+        (self.task != ENTRY_TASK).then_some(self.task)
+    }
+}
+
+/// Runs one spawned task's body on the thread `spawn` gave it.
+///
+/// This is `crate::interp`'s `run_task` with a `Vm` where the `Interpreter`
+/// is, and the parts that are not the evaluator — the trace event, and the
+/// form the value crosses back in — are `crate::task::finished`, so the two
+/// backends cannot come to disagree about what a task's thread reports.
+///
+/// **What crossed is the program and the body, and nothing else.** The
+/// program is the run's, shared: a `FunctionId` in the body's closure means a
+/// position in it, so it has to be the same program and not a copy. The body
+/// crossed as a `Transfer`, which is the task-safety rule applied. Everything
+/// this VM works with is built here, on this thread: its three stacks, its
+/// frames, its heap, and the values it turns the shared constant pool into.
+fn run_task(
+    runtime: &Runtime,
+    program: &Arc<Program>,
+    id: u64,
+    cancellation: Cancellation,
+    body: Transfer,
+    span: Span,
+) -> TaskOutcome {
+    let mut vm = Vm::for_task(runtime, runtime.hosts(), program, id, cancellation.clone());
+    vm.timings.push(Timing::start());
+    let result = vm.call_from_host(&body.into_value(), Vec::new(), span);
+    // A body that raised abandoned whatever it had open, and this thread is
+    // ending, so the scopes go the way they go at the end of a run.
+    vm.close_scopes_above(0);
+    let timing = vm
+        .timings
+        .pop()
+        .expect("a task pushes exactly the one timing it pops");
+    // This task's heap ends with this thread. What it did joins the run's
+    // totals before the value it produced crosses back.
+    vm.retire_heap();
+    task::finished(runtime, id, &cancellation, span, result, timing.cpu())
 }
 
 impl Callable for Vm<'_> {
@@ -4158,6 +4485,172 @@ mod tests {
         );
         let (interpreted, lowered) = on_both(&checked, &sources, "m", None);
         assert_eq!(interpreted.error().message, "`Int` division by zero");
+        assert_eq!(lowered.error().message, interpreted.error().message);
+        assert_eq!(lowered.error().span, interpreted.error().span);
+    }
+
+    // ----------------------------------------------------------- tasks
+
+    /// Two tasks in one scope, awaited, on a VM each.
+    ///
+    /// `agree` is the whole assertion: what the two backends answer and what
+    /// they printed. A task's own VM is a second one over the same program,
+    /// so a body that reaches a declared function is reaching the function
+    /// the same `FunctionId` names on the spawning thread.
+    #[test]
+    fn two_tasks_in_one_scope_answer_what_the_interpreter_answers() {
+        assert_eq!(
+            value_of(
+                "Result<Int, Error>",
+                "fn twice(n: Int) -> Int {\n  n * 2\n}\n",
+                "  scope work {\n    let a = work.spawn { twice(3) }\n    let b = work.spawn { twice(4) }\n    Ok(await a + await b)\n  }"
+            ),
+            "Enum(EnumValue { type_name: \"Result\", case: \"Ok\", payload: [Int(14)] })"
+        );
+    }
+
+    /// "Leaving the scope waits for or cancels its child tasks." A task
+    /// nobody awaited has still run by the time the scope is left, so its
+    /// line is printed before whatever follows the scope.
+    #[test]
+    fn leaving_a_scope_waits_for_a_task_nobody_awaited() {
+        let outcome = agree_main(
+            "Result<Unit, Error>",
+            "  scope work {\n    let quiet = work.spawn { println(\"from the task\") }\n  }\n  println(\"after the scope\")?\n  Ok(())",
+        );
+        assert_eq!(outcome.output, "from the task\nafter the scope\n");
+    }
+
+    /// A child whose value is `Err(...)` returns that failure from the call
+    /// the scope was written in, exactly as `?` would — which is why the
+    /// lowering writes a `try` after every `leave-scope`.
+    #[test]
+    fn a_child_whose_value_failed_returns_that_failure_from_the_call() {
+        let outcome = agree(
+            "use console.println\n\nfn boom() -> Result<Int, Error> {\n  Err(Error(\"boom\"))\n}\n\n             export fn main() -> Result<Unit, Error> {\n  scope work {\n    let t = work.spawn { boom() }\n  }\n               println(\"never\")?\n  Ok(())\n}\n",
+        );
+        assert_eq!(
+            outcome.value(),
+            "Enum(EnumValue { type_name: \"Result\", case: \"Err\", payload: [Struct(StructValue { type_name: \"Error\", fields: [(\"message\", Str(\"boom\"))], opaque: false })] })"
+        );
+        assert_eq!(outcome.output, "");
+    }
+
+    /// A child that *raised* is not a value, so it never reaches that `try`:
+    /// it propagates as the error it is, pointing where it was raised.
+    #[test]
+    fn a_child_that_raised_propagates_as_the_error_it_is() {
+        let (sources, checked) = checked_module(
+            "use console.println\n\nexport fn main() -> Result<Unit, Error> {\n               scope work {\n    let t = work.spawn { 1 / 0 }\n  }\n  Ok(())\n}\n",
+        );
+        let (interpreted, lowered) = on_both(&checked, &sources, "m", None);
+        assert_eq!(interpreted.error().message, "`Int` division by zero");
+        assert_eq!(lowered.error().message, interpreted.error().message);
+        assert_eq!(lowered.error().span, interpreted.error().span);
+    }
+
+    /// A `break` leaves a scope without reaching its `leave-scope`, so the
+    /// lowering emits the `cancel-scope` that does what leaving one does.
+    /// The oracle cancels there too — `Interpreter::leave_scope`'s early
+    /// branch treats a `Break` the way it treats a `return`.
+    #[test]
+    fn a_break_out_of_a_scope_cancels_it() {
+        let outcome = agree_main(
+            "Result<Unit, Error>",
+            "  var i = 0\n  while i < 3 {\n    scope work {\n      let t = work.spawn { i }\n      if i == 1 {\n        break\n      }\n      println(\"turn {await t}\")?\n    }\n    i += 1\n  }\n  println(\"done\")?\n  Ok(())",
+        );
+        assert_eq!(outcome.output, "turn 0\ndone\n");
+        assert!(
+            main_of(
+                "export fn main() -> Result<Unit, Error> {\n  while true {\n    scope work {\n      break\n    }\n  }\n  Ok(())\n}\n"
+            )
+            .contains("cancel-scope"),
+            "a `break` written inside a scope cancels it"
+        );
+    }
+
+    /// The whole shape of a scope, in one listing: the scope is opened, bound
+    /// to a slot, read back as the receiver of the `spawn`, and left through
+    /// a `leave-scope` and the `try` that turns a failed child into a return.
+    #[test]
+    fn a_scope_with_a_spawn_lowers_to_the_scope_and_the_try_that_leaves_it() {
+        assert_eq!(
+            main_of(
+                "export fn main() -> Result<Unit, Error> {\n  scope work {\n    let t = work.spawn { 1 }\n    await t\n  }\n  Ok(())\n}\n"
+            ),
+            concat!(
+                "fn m.main arity=0 frame=2/0 -> value\n",
+                "   0  enter-scope work\n",
+                "   1  store 0\n",
+                "   2  load 0\n",
+                "   3  make-closure m.<closure 0> captures=0\n",
+                "   4  spawn\n",
+                "   5  store 1\n",
+                "   6  load 1\n",
+                "   7  await\n",
+                "   8  leave-scope\n",
+                "   9  try\n",
+                "  10  pop\n",
+                "  11  const Unit\n",
+                "  12  make-builtin Ok argc=1\n",
+                "  13  return\n",
+            )
+        );
+    }
+
+    /// The task-safety rule at the boundary is `crate::task`'s, so a capture
+    /// that may not cross is refused at the `spawn` in the same words on
+    /// either backend — including the path that names how it was reached.
+    #[test]
+    fn a_capture_that_may_not_cross_is_refused_at_the_spawn() {
+        let (sources, checked) = checked_module(
+            "export fn main() -> Result<Unit, Error> {\n  var items = Vector.of(1)\n               scope work {\n    let t = work.spawn { items.length() }\n  }\n  Ok(())\n}\n",
+        );
+        let (interpreted, lowered) = on_both(&checked, &sources, "m", None);
+        assert_eq!(
+            interpreted.error().message,
+            "`spawn` cannot capture `items`, which is a `Vector`"
+        );
+        assert_eq!(lowered.error().message, interpreted.error().message);
+        assert_eq!(lowered.error().span, interpreted.error().span);
+    }
+
+    /// A scope inside a task is a scope like any other: the child's VM has
+    /// its own frame stack, so the depth a scope is registered at is that
+    /// VM's own and a nested `spawn` reaches the scope its own body opened.
+    #[test]
+    fn a_task_may_open_a_scope_of_its_own() {
+        assert_eq!(
+            value_of(
+                "Result<Int, Error>",
+                "fn inner() -> Result<Int, Error> {\n  scope deep {\n    let t = deep.spawn { 6 }\n    Ok(await t)\n  }\n}\n",
+                "  scope outer {\n    let a = outer.spawn { inner() }\n    await a\n  }"
+            ),
+            "Enum(EnumValue { type_name: \"Result\", case: \"Ok\", payload: [Int(6)] })"
+        );
+    }
+
+    /// A run stopped at its concurrency limit is stopped identically on both
+    /// backends: the charge happens in `crate::task::spawn_into`, before the
+    /// task has an id, an event, or a thread.
+    #[test]
+    fn a_spawn_past_the_concurrency_limit_is_refused_the_same_way() {
+        let (sources, checked) = checked_module(
+            "export fn main() -> Result<Unit, Error> {\n  scope work {\n                 let a = work.spawn { 1 }\n    let b = work.spawn { 2 }\n  }\n  Ok(())\n}\n",
+        );
+        let limits = Limits {
+            max_tasks: Some(1),
+            ..Limits::default()
+        };
+        let (interpreted, lowered) = on_both(&checked, &sources, "m", Some(limits));
+        assert!(
+            interpreted
+                .error()
+                .message
+                .contains("concurrency limit of 1 task(s) exceeded"),
+            "{:?}",
+            interpreted.error()
+        );
         assert_eq!(lowered.error().message, interpreted.error().message);
         assert_eq!(lowered.error().span, interpreted.error().span);
     }

@@ -12,9 +12,9 @@
 //! that thread: the body starts when the task is created and the value it
 //! produces is reachable only by joining it, which is what `await` and
 //! leaving a scope both do. The state machine still holds no scheduling
-//! policy — only [`crate::interp`] decides when a task is joined — because a
-//! value is observable through `await` or scope exit and through nothing
-//! else.
+//! policy — [`Tasking`] is what decides when a task is joined, and both
+//! evaluators reach it — because a value is observable through `await` or
+//! scope exit and through nothing else.
 //!
 //! A task's handle belongs to the thread that spawned it: [`Task`] is `Rc`
 //! and its state is a [`RefCell`], because only the spawning task ever
@@ -654,13 +654,15 @@ pub struct TransferClosure {
     /// [`ClosureBody::Tree`] is syntax and crosses the way the declaration
     /// beside it does: an `Arc<Block>` is immutable, so two threads reading
     /// one observe nothing about each other. [`ClosureBody::Lowered`] is an
-    /// id into *one run's* `cove_ir::Program`, and a receiving task holds a
-    /// program of its own — so an id that crossed would name whatever
-    /// function happened to have that number there. Nothing can carry one
-    /// across today, because the VM lowers neither `spawn` nor `Shared` and
-    /// those are the only two ways a value reaches this. Whoever lowers one
-    /// has to decide what a `FunctionId` means in a task that was handed a
-    /// different program before that stays true.
+    /// id into *one run's* `cove_ir::Program`, so what it means depends on
+    /// which program the receiving task holds — and the answer is that it
+    /// holds the same one. A `cove_ir::Program` is immutable once lowered and
+    /// holds `Arc<str>` throughout, so a run has one of them and every thread
+    /// of that run reads it; `crate::vm::Vm` therefore takes a share of the
+    /// handle rather than a bare reference, and a `FunctionId` names the same
+    /// function on the far side because it is the same `functions` it indexes
+    /// into. Lowering the program a second time on the receiving thread would
+    /// not have given that, which is why nothing does.
     pub body: ClosureBody,
     pub module: String,
     pub captures: Vec<(String, Transfer)>,

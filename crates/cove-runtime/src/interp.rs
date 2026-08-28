@@ -3961,7 +3961,10 @@ pub(crate) fn work_stopped(span: Span) -> RuntimeError {
 }
 
 /// A task that stopped because its own cancellation was requested.
-fn task_cancelled(span: Span) -> RuntimeError {
+///
+/// Both backends raise this one, at the same safepoint, so a task the
+/// program cancelled stops in the same words whichever ran it.
+pub(crate) fn task_cancelled(span: Span) -> RuntimeError {
     RuntimeError::new("this task was cancelled")
         .at(span)
         .with_rule("Leaving a task scope waits for or cancels its child tasks.")

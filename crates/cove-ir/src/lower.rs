@@ -1418,6 +1418,9 @@ impl Depth {
 struct LoopFrame {
     break_to: usize,
     continue_to: usize,
+    /// How many task scopes were open when the loop began, so that a `break`
+    /// or a `continue` written inside one knows how many it is leaving.
+    scopes: usize,
     /// The operand-stack depths the loop runs at, which is what a `break`
     /// written inside a half-evaluated expression has to get back down to —
     /// on every stack, because a half-evaluated `a + b` can have left
@@ -1557,6 +1560,15 @@ struct Body<'a, 'l> {
     labels: Vec<Label>,
     patches: Vec<(usize, usize)>,
     loops: Vec<LoopFrame>,
+    /// How many task scopes are open around the instruction being emitted.
+    ///
+    /// A `break` or a `continue` leaves every scope written between it and
+    /// its loop without reaching the `Inst::LeaveScope` below each of them,
+    /// so it emits one `Inst::CancelScope` per scope it leaves — which is
+    /// this count against the one [`LoopFrame`] recorded. Every other early
+    /// exit leaves the frame as well, and the VM cancels what a popped frame
+    /// had open for itself; see [`Inst::EnterScope`].
+    open_scopes: usize,
     /// The argument spans of the instructions whose diagnostic quotes source,
     /// which today is the two assertions and nothing else.
     arg_spans: BTreeMap<u32, Vec<Span>>,
@@ -1597,6 +1609,7 @@ impl<'a, 'l> Body<'a, 'l> {
             labels: Vec::new(),
             patches: Vec::new(),
             loops: Vec::new(),
+            open_scopes: 0,
             arg_spans: BTreeMap::new(),
             rooted: BTreeSet::new(),
         }
@@ -2718,8 +2731,11 @@ impl<'a, 'l> Body<'a, 'l> {
             ExprKind::Match { scrutinee, arms } => {
                 return self.match_expr(scrutinee, arms, position, span)
             }
-            ExprKind::Scope { .. } => return Err(Unsupported::new("a task scope", span)),
-            ExprKind::Await(_) => return Err(Unsupported::new("an `await`", span)),
+            ExprKind::Scope { name, body } => return self.scope_expr(name, body, position, span),
+            ExprKind::Await(inner) => {
+                self.expr(inner)?;
+                self.emit(Inst::Await, span);
+            }
         }
         if position == Position::Effect {
             // A value was computed and nothing reads it. Where control cannot
@@ -3454,6 +3470,7 @@ impl<'a, 'l> Body<'a, 'l> {
         self.loops.push(LoopFrame {
             break_to: end,
             continue_to: top,
+            scopes: self.open_scopes,
             depth: base,
         });
         let lowered = self.block_at(body, Position::Effect);
@@ -3586,6 +3603,7 @@ impl<'a, 'l> Body<'a, 'l> {
         self.loops.push(LoopFrame {
             break_to: end,
             continue_to: next,
+            scopes: self.open_scopes,
             depth: base,
         });
         let lowered = self.block_at(body, Position::Effect);
@@ -3625,6 +3643,16 @@ impl<'a, 'l> Body<'a, 'l> {
             frame.continue_to
         };
         let base = frame.depth;
+        // Every task scope written between here and the loop is left without
+        // reaching the `leave-scope` below its body, and leaving a scope waits
+        // for or cancels its children whichever way it is left. The oracle
+        // reaches the same place through `Interpreter::leave_scope`, whose
+        // early branch cancels for a `Break` exactly as it does for a `return`
+        // or an error.
+        let scopes = self.open_scopes - frame.scopes;
+        for _ in 0..scopes {
+            self.emit(Inst::CancelScope, span);
+        }
         // Whatever the half-evaluated expression around this left on any of
         // the stacks goes with it, so the loop's exit is reached at the
         // depths the loop runs at. A place can be standing for the reason a
@@ -4778,6 +4806,94 @@ impl<'a, 'l> Body<'a, 'l> {
         Ok(None)
     }
 
+    // ---------------------------------------------------------------- tasks
+
+    /// Lowers `scope name { ... }`.
+    ///
+    /// The Language Card's rule is the whole of it: leaving the scope waits
+    /// for or cancels its child tasks. The scope's value is the value of its
+    /// block, so a scope is an expression like any other block, and the name
+    /// is an ordinary value slot for the length of it — `scope.spawn` reads
+    /// its receiver the way every other method call does.
+    ///
+    /// The `try` written after the `leave-scope` is the whole of what a
+    /// failed child does. `Interpreter::leave_scope` answers
+    /// `Control::Return(Value::err(error))` for a child whose value was
+    /// `Err`, which is what `?` already means here, so the instruction
+    /// answers a `Result` and the `try` beside it turns one into the other.
+    /// A child that *raised* never reaches the `try`: an error is not a
+    /// value, and it propagates as itself.
+    ///
+    /// A function that answers on the scalar stack is refused rather than
+    /// approximated. Every one of its returns is a `return-scalar`, and the
+    /// value a failed child returns is a `Value`, so there is no stack for
+    /// the failure to travel on. The oracle answers such a program — it
+    /// returns an `Err` from a function declared `-> Int` — and this is one
+    /// of the few places a backend is allowed to refuse what the oracle
+    /// answers rather than reproduce it.
+    fn scope_expr(
+        &mut self,
+        name: &'a cove_syntax::ast::Ident,
+        body: &'a Block,
+        position: Position,
+        span: Span,
+    ) -> Result<(), Unsupported> {
+        if self.returns.is_scalar() {
+            return Err(Unsupported::new(
+                "a task scope in a function that answers an `Int` or a `Bool`",
+                span,
+            ));
+        }
+        let mark = self.scope();
+        let named = self.outer.name(name.node.as_str());
+        self.emit(Inst::EnterScope(named), span);
+        let slot = self.declare(Some(name.node.as_str()), false, SlotKind::Value);
+        self.emit(Inst::StoreLocal(slot), span);
+        self.open_scopes += 1;
+        let lowered = self.block_at(body, Position::Value);
+        self.open_scopes -= 1;
+        lowered?;
+        self.emit(Inst::LeaveScope, span);
+        self.emit(Inst::Try, span);
+        self.release(mark);
+        if position == Position::Effect {
+            self.emit(Inst::Pop, span);
+        }
+        Ok(())
+    }
+
+    /// `scope.spawn { ... }`: the scope, then the work to run in it.
+    ///
+    /// The receiver first and then the argument, which is the order
+    /// `Interpreter::eval_method_call` evaluates them in.
+    fn spawn(
+        &mut self,
+        receiver: &'a Expr,
+        args: Args<'a>,
+        span: Span,
+    ) -> Result<Option<Scalar>, Unsupported> {
+        task_arguments(args, "spawn", 1)?;
+        self.expr(receiver)?;
+        self.expr(args.at(0).value)?;
+        self.emit(Inst::Spawn, span);
+        Ok(None)
+    }
+
+    /// `task.await()` and `task.cancel()`, which take nothing.
+    fn task_op(
+        &mut self,
+        receiver: &'a Expr,
+        inst: Inst,
+        what: &str,
+        args: Args<'a>,
+        span: Span,
+    ) -> Result<Option<Scalar>, Unsupported> {
+        task_arguments(args, what, 0)?;
+        self.expr(receiver)?;
+        self.emit(inst, span);
+        Ok(None)
+    }
+
     fn method_call(
         &mut self,
         id: ExprId,
@@ -4854,6 +4970,23 @@ impl<'a, 'l> Body<'a, 'l> {
             // answers, exactly as `Inst::CallHost` leaves a host call's
             // answer.
             return Ok(None);
+        }
+        // The operations of a task scope and of a task handle, dispatched by
+        // the type the checker settled for the receiver where
+        // `Interpreter::call_task_method` dispatches by the value's own kind.
+        // Asked before the builtins for the reason the interpreter asks them
+        // before its own: a scope and a handle are runtime values that no
+        // declaration and no builtin answers for, and `spawn`, `await` and
+        // `cancel` are not names a builtin shares.
+        match self.settled(receiver) {
+            Some(Ty::Scope) if name == "spawn" => return self.spawn(receiver, args, span),
+            Some(Ty::Task(_)) if name == "await" => {
+                return self.task_op(receiver, Inst::Await, "await", args, span)
+            }
+            Some(Ty::Task(_)) if name == "cancel" => {
+                return self.task_op(receiver, Inst::Cancel, "cancel", args, span)
+            }
+            _ => {}
         }
         if name == "await" {
             return Err(Unsupported::new("an `await`", span));
@@ -5656,6 +5789,33 @@ fn var_marking_disagrees(what: &str, param: &str, declared_var: bool, span: Span
 /// refuses too; and none of them collects a variadic parameter's elements,
 /// so a `...` written at one is a marking the interpreter *ignores* — which
 /// is refused here instead. See [`no_spread_here`].
+/// The arguments of a task operation, which takes a fixed number of plain
+/// ones and nothing else.
+///
+/// `spawn`, `await`, `cancel` and `lock` are dispatched by the receiver's
+/// kind rather than resolved against a declaration, so there is no signature
+/// for a label to name and the interpreter reads one and ignores it. Refusing
+/// is the direction a second backend is allowed to be wrong in.
+fn task_arguments(args: Args<'_>, what: &str, takes: usize) -> Result<(), Unsupported> {
+    plain_arguments(args, what)?;
+    if let Some(arg) = args.iter().find(|arg| arg.label.is_some()) {
+        return Err(Unsupported::new(
+            format!("a labelled argument to `{what}`, which takes none"),
+            arg.span,
+        ));
+    }
+    if args.len() != takes {
+        return Err(Unsupported::new(
+            format!(
+                "a `{what}` given {} argument(s) where it takes {takes}",
+                args.len()
+            ),
+            args.at(0.min(args.len().saturating_sub(1))).span,
+        ));
+    }
+    Ok(())
+}
+
 fn plain_arguments(args: Args<'_>, what: &str) -> Result<(), Unsupported> {
     if let Some(arg) = args.iter().find(|arg| arg.is_var) {
         return Err(Unsupported::new(
@@ -6751,6 +6911,20 @@ fn stack_shape(constants: &[Const], inst: Inst) -> Shape {
         // The value no arm covered is what the message names, so it is read;
         // nothing is put back, because control does not continue.
         Inst::NoMatch => Shape::on_values(1, 0),
+        // A scope is a value, so opening one leaves it standing for the
+        // `store` that binds it.
+        Inst::EnterScope(_) => Shape::on_values(0, 1),
+        // The scope's own value in, and the `Result` the `try` below it
+        // reads out.
+        Inst::LeaveScope => Shape::on_values(1, 1),
+        // Nothing at all: what a `break` needs is the waiting, and the scope
+        // it waits for is the frame's rather than an operand.
+        Inst::CancelScope => Shape::on_values(0, 0),
+        // The scope and the closure to run in it, and the handle back.
+        Inst::Spawn => Shape::on_values(2, 1),
+        // The handle in and the value it settled to out; and the handle in
+        // and the `()` a `cancel` answers out.
+        Inst::Await | Inst::Cancel => Shape::on_values(1, 1),
     }
 }
 
@@ -9106,11 +9280,17 @@ mod tests {
                 "fn f() -> Int {\n  let g = fn(var n: Int) {\n    n = 2\n  }\n  1\n}\n",
             ),
             (
-                "a task scope",
+                // A scope lowers; what does not is a scope in a function
+                // whose answer travels on the scalar stack. A child that
+                // settled `Err` returns that failure from the enclosing
+                // call, and the oracle does exactly that whatever the
+                // declared return type is — so a function that answers an
+                // `Int` has no stack for the failure to come back on.
+                "a task scope in a function that answers an `Int` or a `Bool`",
                 "fn f() -> Int {\n  scope tasks {\n    1\n  }\n}\n",
             ),
             (
-                "an `await`",
+                "a call to the `async fn` `g`",
                 "async fn g() -> Int {\n  1\n}\n\nfn f() -> Int {\n  await g()\n}\n",
             ),
             (
@@ -9177,10 +9357,13 @@ mod tests {
     #[test]
     fn an_unsupported_construct_reads_as_a_sentence() {
         let why = lower(&checked(
-            "fn f() -> Int {\n  scope tasks {\n    1\n  }\n}\n",
+            "fn g(a: Int, b: Int) -> Int {\n  a\n}\n\nfn f() -> Int {\n  g(b: 2, a: 1)\n}\n",
         ))
-        .expect_err("a task scope is refused");
-        assert_eq!(why.to_string(), "the VM cannot run a task scope yet");
+        .expect_err("a call whose labelled arguments are out of order is refused");
+        assert_eq!(
+            why.to_string(),
+            "the VM cannot run a call to `g` whose arguments do not stand in declaration order yet"
+        );
     }
 
     // ------------------------------------------------------------ benches
@@ -9709,13 +9892,16 @@ mod tests {
     /// construct the entry reaches is reported in the words it always was.
     #[test]
     fn an_unsupported_construct_on_the_path_is_still_refused() {
-        let source = "fn helper() -> Result<Int, Error> {\n  \
-                      let n = scope tasks {\n    1\n  }\n  Ok(n)\n}\n\n\
-                      fn main() -> Result<Int, Error> {\n  helper()\n}\n";
+        let source = "fn g(a: Int, b: Int) -> Int {\n  a\n}\n\n\
+                      fn helper() -> Int {\n  g(b: 2, a: 1)\n}\n\n\
+                      fn main() -> Int {\n  helper()\n}\n";
         let checked = checked(source);
         let whole = lower(&checked).expect_err("the package does not lower");
         let entry = lower_entry(&checked, "m", "main").expect_err("nor does the entry");
-        assert_eq!(entry.what, "a task scope");
+        assert_eq!(
+            entry.what,
+            "a call to `g` whose arguments do not stand in declaration order"
+        );
         assert_eq!(entry.what, whole.what);
         assert_eq!(entry.span, whole.span);
     }

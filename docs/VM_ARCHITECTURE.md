@@ -408,11 +408,98 @@ asks. One safepoint is paid twice — `Vm::enter` takes one because a call is
 one, and `Vm::execute` takes one on entering the frame it was handed — which
 costs a lock and changes no answer.
 
+### Tasks, and the second VM each one gets
+
+ADR 0008 runs a spawned task on a thread of its own and gives it an evaluator
+of its own to run it with. Here that is a second `Vm`, built on the new thread
+by `Vm::for_task`, over the same `Runtime` and the same `cove_ir::Program`.
+Everything else it works with is built there rather than carried across: three
+stacks, a frame stack, a heap, and the `Value` a constant stands for. None of
+those could cross — every one is `Rc`-based or is a `Vec` this thread owns —
+and none of them needs to.
+
+**What crosses is the program, and the body.** The program had to become
+shareable for any of this to work, and that was the one real obstacle. A
+lowered closure's body is a `FunctionId`, which means a position in one
+program's `functions`; lowering the program a second time on the receiving
+thread would hand it ids that happened to line up, which is not an invariant
+anything states. So the IR holds every string as an `Arc<str>`, a `Program` is
+`Send + Sync`, and a `Vm` takes a share of the handle rather than a bare
+reference. A `FunctionId` then means the same function on the far side because
+it indexes the same `functions`. The one place that costs anything is the
+boundary where an `Arc<str>` becomes the `Rc<str>` a `Value` carries: the
+constants are turned into their values once per VM, in `Vm::constants`, where
+they used to be turned into them once per load.
+
+The body crosses as a `cove_runtime::task::Transfer`, which *is* the
+task-safety rule rather than a second statement of it: the Card lets a value
+cross exactly when copying it is the whole of transferring it, which is also
+what a thread requires. That walk is the interpreter's, unchanged, and so is
+everything else either backend decides about a task — what a scope does with a
+child that failed, what a `spawn` charges against the concurrency limit, what a
+trace records, how large a stack the new thread gets. `cove_runtime::task`
+holds all of it behind a trait naming the two things that genuinely differ:
+which evaluator runs a body, and which timing contexts a wait is charged
+against. A concurrency rule stated twice would be one that drifts, and a
+disagreement between the backends about concurrency is the kind that does not
+reproduce.
+
+Six instructions, in one dispatch arm calling an `#[inline(never)]` helper:
+`enter-scope`, `leave-scope`, `cancel-scope`, `spawn`, `await`, `cancel`. What
+is written in the VM is the stack discipline and one thing more, which is the
+thing a stack machine has to answer and a tree walk does not.
+
+**A scope has to be left however the frame that opened it goes away.** The tree
+walk gets this for free: `Interpreter::eval_scope` wraps the body, so a
+`return`, a failing `?`, a `break`, and a raised error all pass back through it
+and reach `leave_scope`. Here they do not. A `return` is an instruction that
+pops a frame; a `?` that failed leaves the frame from inside `Inst::Try`; a
+`break` is a jump. So the scopes a VM has open are a stack of its own, each
+recorded with the frame depth it was entered at, and the two ways out are split
+by which of them the exit crosses:
+
+- an exit that leaves the **frame** is noticed by `Vm::leave`, which is the one
+  place a frame is popped, and which cancels whatever that frame had open. The
+  same call covers a run that ended by raising and a re-entrant callback a host
+  abandoned, at the two other places the stacks are unwound.
+- an exit that stays **inside** the frame is a `break` or a `continue`, and the
+  lowering emits a `cancel-scope` for each scope it leaves — the same shape as
+  the `pop`, `scalar-pop` and `place-pop` a `break` out of a half-evaluated
+  expression already emits.
+
+`leave-scope` itself needs no arm of its own for the failure a child produces,
+because the language already has the construct that means it. A child whose
+value is `Err(...)` returns that failure from the enclosing call, which is what
+`?` does — so `leave-scope` answers a `Result` and the lowering writes a `try`
+after it. A child that *raised* is not a value and never reaches that `try`; it
+propagates as the error it is.
+
+One shape is refused and is a wall rather than unfinished work. That return of
+a child's failure happens whatever the enclosing function declared, so
+`fn f() -> Int { scope s { ... } }` answers `Err(boom)` on the oracle. A
+function the checker settled as answering `Int` or `Bool` returns on the scalar
+stack and every one of its returns is a `return-scalar`; there is no stack for
+that failure to come back on. The lowering refuses such a scope rather than
+approximating it.
+
+Fuel, the deadline, the run's cancellation, the task's own cancellation, the
+call-depth limit and the trace are accounted inside a task exactly as outside
+one, because the same `Vm` code accounts them: a task's VM reaches the run's
+one budget through the same `HostRegistry`, and `Vm::safepoint` reads the
+task's flag beside the bounded calls this thread is inside.
+`tests/e2e:fail_max_tasks` is in the corpus because a run's concurrency limit
+has to stop it identically on both backends, and it does.
+
 ### Trace
 
 `EntryEnter` and `EntryExit` are recorded with the CPU/wait split. Instructions
 are not traced: an instruction-level trace would be a different artifact and
 ADR 0019 does not propose one.
+
+`TaskSpawned`, `TaskCompleted` and `TaskCancelled` are recorded where the
+interpreter records them, because they are recorded by the same code: at the
+`spawn` before the thread exists, on the task's own thread as it ends, and at
+the join that learns a cancellation actually stopped something.
 
 ## What the target changes
 
