@@ -86,6 +86,30 @@
 //! function *used* as a value is numbered as a second specialisation under
 //! that convention rather than called under its own.
 //!
+//! # One program, and every thread of a run reads it
+//!
+//! ADR 0008 runs a spawned task on a thread of its own, and a task's body is
+//! a lowered function like any other — so the thread that runs it needs the
+//! program the body's id names. That program is *this* one. A [`Program`] is
+//! immutable once lowered and every string in it is an `Arc<str>`, so one of
+//! them is shared by every thread of a run rather than rebuilt on each.
+//!
+//! It has to be the same program and not a copy of it, and that is the whole
+//! reason for the `Arc`. A `cove_runtime::value::ClosureBody::Lowered` is a
+//! [`FunctionId`], which means a position in one program's `functions`; a
+//! task handed a program lowered a second time would be reading ids that
+//! happened to line up, which is not an invariant anything states. Sharing
+//! the one program is what makes a `FunctionId` mean the same function on
+//! whichever thread reads it.
+//!
+//! What crosses is therefore the program and nothing else about the
+//! execution. A `cove_runtime::Value` still cannot cross — it is `Rc`-based,
+//! and `cove_runtime::task::Transfer` is the form a value crosses in — and
+//! neither can a `Vm`, which owns stacks, a frame stack, and a heap. Those
+//! are rebuilt on the far side out of the program and the run, which is
+//! exactly what `cove_runtime::interp::Interpreter` already does with the
+//! checked program.
+//!
 //! # What is not here
 //!
 //! No serialization, no version number, no compatibility promise. Nothing
@@ -102,7 +126,7 @@ pub mod lower;
 
 use std::collections::BTreeMap;
 use std::fmt;
-use std::rc::Rc;
+use std::sync::Arc;
 
 use cove_diag::Span;
 
@@ -152,8 +176,8 @@ impl Program {
 pub struct Function {
     /// The module that declares it, and the name it declares — both kept for
     /// diagnostics and traces, and read by nothing on a hot path.
-    pub module: Rc<str>,
-    pub name: Rc<str>,
+    pub module: Arc<str>,
+    pub name: Arc<str>,
     /// How many slots of the *value* stack one call needs: `self` if it has
     /// a receiver, then each parameter `params` names a value slot for, then
     /// every `Value` local and temporary the body declares.
@@ -246,7 +270,7 @@ pub struct Function {
     /// through. That is why every function a closure can be made of takes
     /// all of its arguments on the value stack: the captures follow them
     /// there, and a scalar parameter would leave a hole between the two.
-    pub captures: Vec<Rc<str>>,
+    pub captures: Vec<Arc<str>>,
     /// The parameters as source wrote them, for a function a closure value
     /// can be made of, and empty for every other.
     ///
@@ -417,10 +441,10 @@ pub struct DispatchId(pub u32);
 pub struct Dispatch {
     /// The qualified trait the receiver was used at, for the listing and for
     /// the diagnostic.
-    pub trait_name: Rc<str>,
+    pub trait_name: Arc<str>,
     /// The method's own name, which is what a value carrying no
     /// implementation of it is reported against.
-    pub method: Rc<str>,
+    pub method: Arc<str>,
     /// One entry per type that conforms, keyed by the qualified name that
     /// type's values carry — `cove_runtime::value::Value::declared_type_name`
     /// — and holding the specialisation of its method that takes every
@@ -428,9 +452,9 @@ pub struct Dispatch {
     ///
     /// A `Vec` scanned by name rather than a map: a trait has as many
     /// implementations as a package wrote `impl` blocks for it, which is a
-    /// handful, and a scan of a handful of `Rc<str>` is cheaper than hashing
+    /// handful, and a scan of a handful of `Arc<str>` is cheaper than hashing
     /// one.
-    pub cases: Vec<(Rc<str>, FunctionId)>,
+    pub cases: Vec<(Arc<str>, FunctionId)>,
 }
 
 /// A value an instruction can push without computing it.
@@ -446,10 +470,10 @@ pub enum Const {
     Int(i64),
     Float(f64),
     Duration(i64),
-    Str(Rc<str>),
+    Str(Arc<str>),
     /// A name carried by an instruction: a field, a host module, a host
     /// operation, a builtin method, or a declared type.
-    Name(Rc<str>),
+    Name(Arc<str>),
 }
 
 /// One VM instruction.
@@ -1218,5 +1242,20 @@ fn render_inst(program: &Program, inst: Inst) -> String {
         Inst::Try => "try".to_string(),
         Inst::Return => "return".to_string(),
         Inst::ReturnScalar => "return-scalar".to_string(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Program;
+
+    /// The point of the `Arc<str>` throughout this file. ADR 0008 gives a
+    /// spawned task a thread, and that thread's VM runs a function of this
+    /// program — so if this ever stopped holding, a task's body could not be
+    /// reached from the thread that runs it.
+    #[test]
+    fn a_lowered_program_can_be_read_by_every_thread_of_a_run() {
+        fn assert_send_sync<T: Send + Sync>() {}
+        assert_send_sync::<Program>();
     }
 }

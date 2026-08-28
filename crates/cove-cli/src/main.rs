@@ -1139,7 +1139,7 @@ pub(crate) fn execute_entry(
                 ExecuteError::Setup(format!("the lowering of this program is not valid: {why}"))
             })?;
             Some(Lowered {
-                ir,
+                ir: Arc::new(ir),
                 lower,
                 validate: started.elapsed(),
             })
@@ -1270,7 +1270,7 @@ pub(crate) fn execute_entry(
 /// The program is what the entry reaches, so the figure measures what was
 /// lowered rather than what the package happened to hold beside it.
 struct Lowered {
-    ir: cove_ir::Program,
+    ir: Arc<cove_ir::Program>,
     lower: Duration,
     validate: Duration,
 }

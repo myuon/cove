@@ -284,7 +284,7 @@ struct LoweringReport {
     /// How many functions the lowering emitted, which is what the time is a
     /// time for.
     functions: usize,
-    ir: cove_ir::Program,
+    ir: Arc<cove_ir::Program>,
 }
 
 impl LoweringReport {
@@ -323,7 +323,10 @@ fn bench_lowering(
         iterations,
         wall_ns: Stats::of(&wall_ns),
         functions: ir.functions.len(),
-        ir,
+        // Shared rather than owned outright, because a `Vm` takes the handle
+        // a spawned task's thread would be given a share of. No benchmark
+        // spawns one; the handle is what the type asks for either way.
+        ir: Arc::new(ir),
     })
 }
 
@@ -493,7 +496,7 @@ fn run_once(
     entry: &str,
     allow: &[String],
     trace: Arc<dyn TraceSink>,
-    ir: Option<&cove_ir::Program>,
+    ir: Option<&Arc<cove_ir::Program>>,
 ) -> RunMeasurement {
     let mut hosts = fake_hosts(allow.to_vec());
     hosts.set_budget(Budget::with_cancellation(
@@ -633,7 +636,7 @@ fn bench_execution(
     name: &'static str,
     iterations: u32,
     backend: Backend,
-    ir: Option<&cove_ir::Program>,
+    ir: Option<&Arc<cove_ir::Program>>,
 ) -> Result<ExecutionReport, String> {
     let (module, entry, allow) = entry_for(package, program, name)?;
 
@@ -718,7 +721,7 @@ fn bench_trace_overhead(
     name: &'static str,
     iterations: u32,
     backend: Backend,
-    ir: Option<&cove_ir::Program>,
+    ir: Option<&Arc<cove_ir::Program>>,
 ) -> Result<TraceOverheadReport, String> {
     let (module, entry, allow) = entry_for(package, program, name)?;
 

@@ -287,10 +287,13 @@ const LOWERED_FLOOR: usize = 82;
 /// single run is what makes the coverage summary a summary.
 #[test]
 fn both_backends_agree_wherever_the_lowering_reaches() {
-    // Everything happens on the stack the runtime sizes. The interpreter is a
-    // recursive tree walker and a test thread's stack is not one it chose,
-    // and a `cove_ir::Program` is `Rc`-based, so the lowering cannot cross
-    // this boundary either. Only the report comes back out.
+    // Everything happens on the stack the runtime sizes: the interpreter is
+    // a recursive tree walker, a test thread's stack is not one it chose, and
+    // every `Value` either backend builds belongs to the thread that built
+    // it. The lowering could cross — a `cove_ir::Program` is shared by every
+    // thread of a run, which is what lets a spawned task run one — but it has
+    // no reason to, since what it is for is on the far side. Only the report
+    // comes back out.
     let report = cove_runtime::on_cove_stack(run_the_corpus).expect("a thread to run Cove on");
     let summary = report.summary();
     print!("{summary}");
@@ -355,7 +358,7 @@ fn run_the_corpus() -> Report {
         report.lowered.push(case.name.clone());
 
         let oracle = run_on_ast(&case, &prepared, module, entry);
-        let backend = run_on_vm(&case, &prepared, &ir, module, entry);
+        let backend = run_on_vm(&case, &prepared, &Arc::new(ir), module, entry);
         if oracle != backend {
             report
                 .disagreements
@@ -687,7 +690,7 @@ fn run_on_ast(case: &Case, prepared: &Prepared, module: &str, entry: &str) -> Ra
 fn run_on_vm(
     case: &Case,
     prepared: &Prepared,
-    ir: &cove_ir::Program,
+    ir: &Arc<cove_ir::Program>,
     module: &str,
     entry: &str,
 ) -> Ran {

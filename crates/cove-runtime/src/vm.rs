@@ -402,7 +402,16 @@ struct EnumShape {
 pub struct Vm<'a> {
     runtime: &'a Runtime,
     hosts: &'a HostRegistry,
-    program: &'a Program,
+    /// The lowered program, held through the handle a task's thread is given
+    /// a share of rather than as a bare reference.
+    ///
+    /// A `&Program` would say everything this VM needs and nothing the VM a
+    /// spawned task builds needs: that one runs on a thread of its own, for
+    /// as long as the task runs, which is not bounded by the frame that
+    /// spawned it. An `Arc` is what outlives that frame, and it is sound to
+    /// share because a `cove_ir::Program` is immutable once lowered and
+    /// holds `Arc<str>` rather than `Rc<str>` for exactly this reason.
+    program: &'a Arc<Program>,
     /// The run's sources, for the one diagnostic that quotes source text: a
     /// failing assertion names its condition in the words the test was
     /// written in. Read off the [`Runtime`] exactly as
@@ -431,6 +440,15 @@ pub struct Vm<'a> {
     shapes: Vec<Option<StructShape>>,
     /// The same table for the enums a `MakeEnum` builds a case of.
     enums: Vec<Option<EnumShape>>,
+    /// One entry per constant, as the [`Value`] that constant stands for.
+    ///
+    /// The pool holds a name as an `Arc<str>`, so that one lowered program
+    /// can be read by every thread of a run, and a `Value::Str` holds an
+    /// `Rc<str>`, because a value belongs to the task that built it. Turning
+    /// one into the other is an allocation, and a constant is loaded as
+    /// often as its instruction runs — so it is done once per VM, here,
+    /// and every load after that is the `Rc` clone it always was.
+    constants: Vec<Value>,
     /// This run's heap.
     ///
     /// Nothing the lowering covers allocates growable storage — `Vector.of`
@@ -480,7 +498,7 @@ pub struct Vm<'a> {
 impl<'a> Vm<'a> {
     /// A VM for `program`, running against `runtime` and calling through
     /// `hosts`.
-    pub fn new(runtime: &'a Runtime, hosts: &'a HostRegistry, program: &'a Program) -> Self {
+    pub fn new(runtime: &'a Runtime, hosts: &'a HostRegistry, program: &'a Arc<Program>) -> Self {
         Vm {
             runtime,
             hosts,
@@ -492,6 +510,7 @@ impl<'a> Vm<'a> {
             frames: Vec::new(),
             shapes: struct_shapes(runtime, program),
             enums: enum_shapes(runtime, program),
+            constants: program.constants.iter().map(constant).collect(),
             heap: Heap::new(),
             fuel: 0,
             instructions: 0,
@@ -718,7 +737,7 @@ impl<'a> Vm<'a> {
     /// with the frames below it left standing, because the instruction that
     /// made the host call has not finished. See [`Vm::call_from_host`].
     fn execute(&mut self, floor: usize) -> Result<Value, RuntimeError> {
-        let program = self.program;
+        let program: &'a Program = self.program;
         let mut frame = *self
             .frames
             .last()
@@ -738,7 +757,7 @@ impl<'a> Vm<'a> {
         loop {
             let inst = code[pc];
             match inst {
-                Inst::Const(id) => self.stack.push(constant(program.constant(id))),
+                Inst::Const(id) => self.stack.push(self.constants[id.0 as usize].clone()),
                 Inst::LoadLocal(slot) => {
                     let value = self.stack[frame.base + slot as usize].clone();
                     self.stack.push(value);
@@ -1611,11 +1630,14 @@ impl<'a> Vm<'a> {
         let target = self.program.function(function);
         let at = self.stack.len() - captures as usize;
         // Paired with the names the lowering settled, in the order it
-        // settled them, which is the order the values were pushed.
+        // settled them, which is the order the values were pushed. The names
+        // are copied rather than shared: the lowering holds one program for
+        // every thread of a run and so writes an `Arc<str>`, and a closure is
+        // a value of the task that built it and so holds an `Rc<str>`.
         let held: Vec<(Rc<str>, Value)> = target
             .captures
             .iter()
-            .cloned()
+            .map(|name| Rc::from(&**name))
             .zip(self.stack.drain(at..))
             .collect();
         // A closure is built from what it captured, so what it costs follows
@@ -1636,7 +1658,7 @@ impl<'a> Vm<'a> {
             // promised.
             decl: None,
             body: ClosureBody::Lowered(function),
-            module: target.module.clone(),
+            module: Rc::from(&*target.module),
             captures: held,
         }))
     }
@@ -1742,9 +1764,9 @@ impl<'a> Vm<'a> {
     ) -> Result<Option<Frame>, RuntimeError> {
         match inst {
             Inst::MakeDyn { trait_name, depth } => {
-                let trait_name = shared_name(self.program, trait_name);
+                let trait_name = self.shared_name(trait_name);
                 let value = self.pop();
-                let converted = self.make_dyn(value, trait_name, depth);
+                let converted = self.make_dyn(value, &trait_name, depth);
                 self.stack.push(converted);
             }
             Inst::CallDyn { site, argc } => {
@@ -1770,6 +1792,21 @@ impl<'a> Vm<'a> {
     /// it can afford to because it makes it inside `bind_params` rather than
     /// at an instruction; ADR 0019 makes fuel backend-specific for exactly
     /// this kind of difference.
+    /// A name an instruction carries, as the allocation this VM's own values
+    /// share.
+    ///
+    /// A `dyn` value *carries* the trait's name, so every value one
+    /// instruction converts should carry one `Rc` rather than a copy of the
+    /// text. The pool's own `Arc<str>` cannot be that one — a `Value` is
+    /// this task's and an `Arc` is the run's — so the `Rc` beside it in
+    /// [`Vm::constants`] is, and this hands out a share of it.
+    fn shared_name(&self, id: ConstId) -> Rc<str> {
+        match &self.constants[id.0 as usize] {
+            Value::Str(text) => text.clone(),
+            other => unreachable!("an instruction named {other} rather than a name"),
+        }
+    }
+
     fn make_dyn(&mut self, value: Value, trait_name: &Rc<str>, depth: u16) -> Value {
         self.fuel += 1;
         match depth {
@@ -1817,7 +1854,7 @@ impl<'a> Vm<'a> {
             dispatch
                 .cases
                 .iter()
-                .find(|(named, _)| named == type_name)
+                .find(|(named, _)| **named == **type_name)
                 .map(|(_, id)| *id)
         });
         let Some(target) = target else {
@@ -2343,27 +2380,21 @@ fn constant(held: &Const) -> Value {
         Const::Int(value) => Value::Int(*value),
         Const::Float(value) => Value::Float(*value),
         Const::Duration(value) => Value::Duration(*value),
-        Const::Str(text) => Value::Str(text.clone()),
+        // The pool holds its text as an `Arc<str>`, because one lowered
+        // program is read by every thread of a run, and a `Value::Str` holds
+        // an `Rc<str>`, because a value belongs to the task that built it.
+        // This is where the one becomes the other, and [`Vm::constants`] is
+        // why it happens once per VM rather than once per load.
+        Const::Str(text) => Value::Str(Rc::from(&**text)),
         // A name is carried by an instruction that already knows what to do
         // with it, and nothing loads one as a value. It is still a string, so
         // there is nothing to invent if something ever does.
-        Const::Name(text) => Value::Str(text.clone()),
+        Const::Name(text) => Value::Str(Rc::from(&**text)),
     }
 }
 
 /// The text an instruction's constant names.
 fn name(program: &Program, id: ConstId) -> &str {
-    match program.constant(id) {
-        Const::Name(text) | Const::Str(text) => text,
-        other => unreachable!("an instruction named {other:?} rather than a name"),
-    }
-}
-
-/// The same name, as the shared allocation the constant pool holds it in.
-///
-/// A `dyn` value *carries* the trait's name, so every value one instruction
-/// converts should carry the pool's `Rc` rather than a copy of the text.
-fn shared_name(program: &Program, id: ConstId) -> &Rc<str> {
     match program.constant(id) {
         Const::Name(text) | Const::Str(text) => text,
         other => unreachable!("an instruction named {other:?} rather than a name"),
@@ -2916,9 +2947,12 @@ mod tests {
 
     /// Lowers the program and runs `module.main` on the VM.
     ///
-    /// The lowering and the validation happen here rather than beside the
-    /// interpreted run because a `cove_ir::Program` holds `Rc`s and cannot
-    /// cross the thread boundary [`crate::on_cove_stack`] draws.
+    /// The lowering and the validation happen here, inside the thread
+    /// [`crate::on_cove_stack`] draws, because everything they are for is
+    /// here: a `Vm`, its stacks, and every `Value` it builds belong to this
+    /// thread. The program itself would cross — one is shared by every thread
+    /// of a run, which is what lets a spawned task run one — and there is
+    /// nothing to gain by lowering it on the other side of the boundary.
     fn lowered(
         checked: &Arc<Checked>,
         sources: &Arc<SourceMap>,
@@ -2937,7 +2971,7 @@ mod tests {
         let buffer = Buffer::default();
         let hosts = hosts(&buffer, budget);
         let runtime = Runtime::new(checked.clone(), sources.clone(), hosts.clone());
-        let answer = Vm::new(&runtime, &hosts, &program).run(entry, Vec::new());
+        let answer = Vm::new(&runtime, &hosts, &Arc::new(program)).run(entry, Vec::new());
         Outcome {
             answer: described(answer),
             output: buffer.text(),
@@ -4162,7 +4196,7 @@ mod tests {
                 let entry = program.function_named("m", "main").expect("`main` lowered");
                 let hosts = ungranted();
                 let runtime = Runtime::new(checked.clone(), sources.clone(), hosts.clone());
-                described(Vm::new(&runtime, &hosts, &program).run(entry, Vec::new()))
+                described(Vm::new(&runtime, &hosts, &Arc::new(program)).run(entry, Vec::new()))
             };
             (interpreted, lowered)
         })
@@ -4532,7 +4566,7 @@ mod tests {
             let buffer = Buffer::default();
             let hosts = hosts(&buffer, None);
             let runtime = Runtime::new(checked.clone(), sources.clone(), hosts.clone());
-            let on_the_vm = Vm::new(&runtime, &hosts, &program)
+            let on_the_vm = Vm::new(&runtime, &hosts, &Arc::new(program))
                 .run(FunctionId(0), Vec::new())
                 .expect_err("an `Int` cannot be walked")
                 .message;
@@ -4645,7 +4679,7 @@ mod tests {
             let buffer = Buffer::default();
             let hosts = hosts(&buffer, None);
             let runtime = Runtime::new(checked.clone(), sources.clone(), hosts.clone());
-            let on_the_vm = Vm::new(&runtime, &hosts, &program)
+            let on_the_vm = Vm::new(&runtime, &hosts, &Arc::new(program))
                 .run(FunctionId(0), Vec::new())
                 .expect_err("the case cannot be built")
                 .message;

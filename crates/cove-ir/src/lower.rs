@@ -158,7 +158,7 @@
 //! is.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::rc::Rc;
+use std::sync::Arc;
 
 use cove_diag::{FileId, Span};
 use cove_schema::builtins;
@@ -774,7 +774,7 @@ impl<'a> Lowering<'a> {
     /// here must carry the same name a value built there does, or the two
     /// would not compare equal. A name no module declares as a trait is left
     /// bare, which is what that function's `None` leaves too.
-    fn trait_named(&self, module: &str, name: &str) -> Rc<str> {
+    fn trait_named(&self, module: &str, name: &str) -> Arc<str> {
         let Some(resolved) = self.checked.modules.get(module) else {
             return name.into();
         };
@@ -812,7 +812,7 @@ impl<'a> Lowering<'a> {
     /// reach — `Map<String, dyn Display>`, a written function type — is
     /// refused, because converting it would be this pass deciding something
     /// the oracle does not do.
-    fn dyn_conversion(&self, module: &str, ty: &Type) -> Option<(Rc<str>, u16)> {
+    fn dyn_conversion(&self, module: &str, ty: &Type) -> Option<(Arc<str>, u16)> {
         let (name, depth) = dyn_shape(ty)?;
         Some((self.trait_named(module, name), depth))
     }
@@ -868,7 +868,7 @@ impl<'a> Lowering<'a> {
         // walked in name order but the types inside them were not.
         implementors.sort();
         implementors.dedup();
-        let mut cases: Vec<(Rc<str>, FunctionId)> = Vec::new();
+        let mut cases: Vec<(Arc<str>, FunctionId)> = Vec::new();
         for (type_module, type_name) in implementors {
             // `method_of` is `Interpreter::find_method`: the type's own
             // module first, and the module that declares the conformance
@@ -996,7 +996,7 @@ impl<'a> Lowering<'a> {
         let span = site.span;
         let decl_params = site.params;
         let decl_body = site.body;
-        let captures: Vec<Rc<str>> = site.captures.iter().map(|name| Rc::from(*name)).collect();
+        let captures: Vec<Arc<str>> = site.captures.iter().map(|name| Arc::from(*name)).collect();
         let capture_names: Vec<&'a str> = site.captures.clone();
 
         let mut body = Body::new(self, module);
@@ -1092,7 +1092,7 @@ impl<'a> Lowering<'a> {
     ) -> Result<Function, Unsupported> {
         let declared = self.declaration(key);
         let module = declared.module;
-        let name: Rc<str> = declared.name.as_str().into();
+        let name: Arc<str> = declared.name.as_str().into();
         let from_trait_default = declared.from_trait_default;
         let decl = declared.decl;
 
@@ -4660,7 +4660,7 @@ impl<'a, 'l> Body<'a, 'l> {
     /// through to the refusal it had, which is the honest answer: a receiver
     /// this pass cannot name a trait for is one it cannot collect the
     /// candidates of.
-    fn bound_of(&self, param: &str, method: &str) -> Option<Rc<str>> {
+    fn bound_of(&self, param: &str, method: &str) -> Option<Arc<str>> {
         let written: Vec<&str> = match param {
             "Self" => self.self_bound.into_iter().collect(),
             _ => self
