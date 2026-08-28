@@ -70,9 +70,11 @@ change is named.
 
 ### The stack
 
-Two contiguous vectors for the whole run, shared by every frame: a `Vec<Value>`
-and, beside it, a `Vec<i64>` for the slots and operands the checker proved are
-`Int` or `Bool`. A frame is a window into both:
+Three contiguous vectors for the whole run, shared by every frame: a
+`Vec<Value>`; beside it a `Vec<i64>` for the slots and operands the checker
+proved are `Int` or `Bool`; and beside that a `Vec<Place>` for the slots and
+operands that name storage rather than hold a value, which is what a `var`
+parameter has. A frame is a window into all three:
 
 ```rust
 struct Frame {
@@ -80,28 +82,33 @@ struct Frame {
     return_pc: usize,    // the instruction after the caller's `Call`
     base: usize,         // where this frame's value slots begin
     scalar_base: usize,  // where its scalar slots begin
+    place_base: usize,   // where its place slots begin
 }
 ```
 
-A frame's slots are `stack[base .. base + value_frame_size]` and
-`scalars[scalar_base .. scalar_base + scalar_frame_size]`, and its operands sit
-above them on each. The two are numbered separately, so which stack a slot
+A frame's slots are `stack[base .. base + value_frame_size]`,
+`scalars[scalar_base .. scalar_base + scalar_frame_size]` and
+`places[place_base .. place_base + place_frame_size]`, and its operands sit
+above them on each. The three are numbered separately, so which stack a slot
 lives in is decided by which instruction addresses it rather than by anything
-read at run time. Nothing is allocated per call: the frame is four words pushed
+read at run time. Nothing is allocated per call: the frame is five words pushed
 onto a `Vec<Frame>`, and the slots are stack that already exists.
 
 ### Argument placement
 
 Arguments are pushed onto the *caller's* operand stacks, left to right, and
 become the callee's first slots without moving. So `base` is the caller's
-value-operand top, read from the other side, and `scalar_base` is its
-scalar-operand top read the same way.
+value-operand top, read from the other side, and `scalar_base` and
+`place_base` are its scalar- and place-operand tops read the same way.
 
-Which of the two stacks an argument travels on is the callee's declared type,
-resolved by the checker and published as `Function::params`: a parameter the
-checker settled as `Int` or `Bool` is a scalar slot, so its argument is pushed
-onto the scalar stack and becomes that slot, and everything else is a value
-slot as before. `Call` carries the two counts rather than looking them up,
+Which of the three stacks an argument travels on is the callee's declaration,
+published as `Function::params`. Two of the three are the checker's answer
+about a type: a parameter it settled as `Int` or `Bool` is a scalar slot, so
+its argument is pushed onto the scalar stack and becomes that slot, and
+everything else is a value slot as before. The third is not a question about a
+type at all. A parameter written `var` names the caller's storage whatever its
+type is, so it is a place slot, and its argument is a place the caller built
+and pushed. `Call` carries the three counts rather than looking them up,
 because the lowering has to place a recursive call's arguments before the
 callee it is inside exists, and because the depth simulation is a function of
 one instruction with no function table beside it. `validate` reconciles the
@@ -111,10 +118,78 @@ rather than an agreement.
 Slot order is fixed at lowering and is dense within each stack: `self` when the
 function has a receiver, then each declared parameter in declaration order,
 then locals and temporaries in the order the body declares them, each drawing
-a number from the stack it lives in. `value_frame_size` and
-`scalar_frame_size` are the high-water marks of that, not the totals, because a
-block's slots are released at its end and a later sibling block reuses the
-numbers.
+a number from the stack it lives in. `value_frame_size`,
+`scalar_frame_size` and `place_frame_size` are the high-water marks of that,
+not the totals, because a block's slots are released at its end and a later
+sibling block reuses the numbers. The third is zero for almost every function:
+only a `var` parameter and a `var self` receiver take a place slot, and
+nothing a body declares takes one at all.
+
+### What a place is
+
+A place is an index into the value stack together with the field positions to
+walk from what stands there — `bump(var total)` builds one naming `total`'s
+slot with no path, and `bump(var c.hits)` builds one naming `c`'s slot with
+one step on the end. Reading through it clones what it names, which is the
+value-semantics rule; writing through it calls `Rc::make_mut` at every struct
+step, which is what makes sharing a copied struct unobservable and is the same
+call the interpreter's `Place::with_mut` makes at the same steps.
+
+It has to be an alias and not a copy that is written back, because the two are
+observably different. `two(var x, var x)` answers 11 on the oracle: both
+parameters name one cell, so the second parameter's `+= 10` is applied to what
+the first one's `+= 1` left. Copy-in/copy-out would answer 10.
+
+An index rather than a pointer, because the value stack is one `Vec` that
+grows: a push can move every element, and an index names the same slot before
+and after where a pointer would name freed memory. It is also the only form a
+safe Rust program could hold, since a borrow of the stack would stop the VM
+from touching the stack. The index is absolute rather than relative to a
+frame, because a place travels — it is built in the caller's frame and read
+and written in the callee's, where `base` is a different number.
+
+**What makes it valid is that a callee cannot outlive its caller.** A frame's
+slots are live from the call that opened the window to the return that
+truncates it, and a place is built by an instruction of some frame and
+consumed by an instruction of that frame or of one it called. Nothing a
+lowered program can build outlives the frame it was built in, because nothing
+lowers a closure, and a closure is exactly the construct that could: it can be
+returned. So the dependency is worth stating rather than leaving to be
+discovered — whoever lowers a closure has to decide what a captured `var`
+binding is before an index into the stack stays sound, and both
+`cove_ir::Inst::PlaceLocal` and `cove_runtime::vm::Place` say so where they
+are defined.
+
+The path is a `Vec<u32>` of field positions, which is what the interpreter's
+own `Place::steps` is and costs what it costs there: an empty path allocates
+nothing, and appending a step to a non-empty one copies it. A fixed-size
+inline path would make a place `Copy` and a refinement free, and it was not
+taken because the bound could not be enforced where a bound has to be
+enforced. The depth a place reaches is the sum of the static appends along a
+chain of calls, and the lowering of a callee cannot see what depth its callers
+will hand it; so the bound would have to be checked at run time, and a program
+that exceeded it would fail on this backend and answer on the oracle. That is
+the one difference between the two that is not allowed to exist.
+
+One binding has to move for any of this to work. `bump(var total: Int)` roots
+a place at `total`, and a place cannot address the scalar stack, so a binding
+a place is rooted at is kept on the value stack even where the checker settled
+it as `Int`. The lowering walks a body once before it emits anything and
+collects the names used as the root of a `var` argument or of a `freeze`
+receiver; a binding of one of those names is a value slot. It is a set of
+names rather than of bindings, so it over-approximates across shadowing —
+`bump(var total)` written anywhere in a body puts every `total` the body
+declares on the value stack. That costs a slot its representation and can cost
+nothing else, because both representations hold the same value.
+
+`freeze` is the case the place model is really needed for. It consumes
+uniquely owned storage, so `builtins::freeze` counts the handles and refuses
+when the count is not one — and a *read* of the receiver would be the second
+handle, produced by the very instruction that was arranging for the count to
+be taken. So `Inst::Freeze` takes the place, exactly as the interpreter runs
+it inside `place.with_mut`. `push`, the other `var self` builtin, needs
+nothing of the kind: it mutates through a handle, so a copy of the handle does
+as well as the original.
 
 ### Return
 
@@ -125,10 +200,14 @@ one of its returns is a `ReturnScalar`. Mixing the two in one function is a
 `validate` failure, because a caller reads exactly the stack the convention
 named and nothing tells it which of two a given return happened to use.
 
-Either return pops its answer, truncates *both* stacks to the frame's bases,
-pops the frame, and pushes the answer onto whichever stack it came off — which
-is now the caller's. Truncating to the bases is what discards the callee's
-slots and its arguments together, since they are the same storage.
+No call answers a place, and `validate` refuses a function that says it does:
+a place is what a parameter can be and not what a value can be, so there is no
+third return instruction for one to end in.
+
+Either return pops its answer, truncates *all three* stacks to the frame's
+bases, pops the frame, and pushes the answer onto whichever stack it came off
+— which is now the caller's. Truncating to the bases is what discards the
+callee's slots and its arguments together, since they are the same storage.
 
 A whole run still answers a `Value`, because that is the language the
 embedding API speaks. So the entry's arguments cross into their stacks on the
@@ -245,6 +324,13 @@ space to begin with. A frame's whole value window is its root set, with
 nothing inside it to skip, because a scalar slot holds no reference by
 construction and was never counted there. It is derived from the checker's
 facts rather than invented, which is also what a future JIT would need.
+
+The place window did not change that. A place holds an index into the value
+stack and a path of field positions, so whatever it reaches is already
+reachable from the value stack's own window, and `place_frame_size` is neither
+a root set nor a hole in one. What a *moving* collector would have to know is
+that a place is an index into the storage it is moving, which is a different
+statement and belongs with the collector that makes it.
 
 ### A VM-owned heap
 
