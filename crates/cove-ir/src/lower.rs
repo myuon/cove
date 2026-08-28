@@ -136,11 +136,12 @@
 //!
 //! # What is not lowered
 //!
-//! `scope`/`spawn`/`await`, traits and `dyn`, `Shared`, a `snapshot` a
-//! declared conformance would have to answer from inside a container,
-//! assignment to a field of anything but a local, and any call whose callee
-//! is neither a name nor a field of one. Each is reported in the words a
-//! Cove programmer writes it in.
+//! A `snapshot` a declared conformance would have to answer from inside a
+//! container, a task scope in a function that answers on the scalar stack, a
+//! `lock` whose closure is not written at the call, assignment to a field of
+//! anything but a local, and any call whose callee is neither a name nor a
+//! field of one. Each is reported in the words a Cove programmer writes it
+//! in.
 //!
 //! # What is refused because the program is wrong
 //!
@@ -451,6 +452,9 @@ struct LambdaSite<'a> {
     /// before [`Inst::MakeClosure`] and in the order its
     /// [`Inst::LoadCapture`] indices address.
     captures: Vec<&'a str>,
+    /// Whether this lambda was written `async`, and so answers a settled
+    /// task rather than the value its body produced.
+    is_async: bool,
     /// Whether this lambda's first parameter, if it is written `var`, names
     /// storage the caller holds rather than receiving a copy of it.
     ///
@@ -1015,6 +1019,7 @@ impl<'a> Lowering<'a> {
         let captures: Vec<Arc<str>> = site.captures.iter().map(|name| Arc::from(*name)).collect();
         let capture_names: Vec<&'a str> = site.captures.clone();
         let aliases = site.aliases_first_param;
+        let is_async = site.is_async;
 
         let mut body = Body::new(self, module);
         body.returns = SlotKind::Value;
@@ -1102,6 +1107,11 @@ impl<'a> Lowering<'a> {
             params,
             returns: SlotKind::Value,
             has_receiver: false,
+            // An `async` lambda answers a settled task exactly as an `async
+            // fn` does, and for the same reason: `Interpreter::invoke` reads
+            // `is_async` off the closure it was handed and wraps what the
+            // body produced.
+            answers_a_task: is_async,
             captures,
             capture_base,
             written_params: decl_params.to_vec(),
@@ -1126,9 +1136,6 @@ impl<'a> Lowering<'a> {
         let from_trait_default = declared.from_trait_default;
         let decl = declared.decl;
 
-        if decl.is_async {
-            return Err(Unsupported::new("an `async fn`", decl.span));
-        }
         if let Some(ty) = &decl.return_type {
             reject_dyn(ty, "a `dyn` return type")?;
         }
@@ -1143,10 +1150,13 @@ impl<'a> Lowering<'a> {
         // before it, which is the same thing an abstention about a binding
         // gets.
         let signature = self.signature(key);
-        let returns = match as_value {
+        let returns = match as_value || decl.is_async {
             // A closure answers on the value stack whatever the declaration
             // says, because `Inst::CallValue` reads exactly that one and has
-            // no callee to have asked.
+            // no callee to have asked. An `async fn` answers there too,
+            // whatever it declared, because what a call to one answers is a
+            // task and a task is a value: `async fn f() -> Int` hands back a
+            // `Task<Int>`, and only `await` produces the `Int`.
             true => SlotKind::Value,
             false => signature.map_or(SlotKind::Value, |signature| slot_kind_of(&signature.ret)),
         };
@@ -1343,6 +1353,7 @@ impl<'a> Lowering<'a> {
             params,
             returns,
             has_receiver: decl.receiver.is_some(),
+            answers_a_task: decl.is_async,
             // A declared function used as a value is a closure over nothing:
             // `Interpreter::eval_ident` builds one with `captures:
             // Vec::new()`, because a declaration reads no environment.
@@ -2966,9 +2977,6 @@ impl<'a, 'l> Body<'a, 'l> {
         span: Span,
         aliases_first_param: bool,
     ) -> Result<(), Unsupported> {
-        if is_async {
-            return Err(Unsupported::new("an `async` closure", span));
-        }
         let mentioned = mentioned_names(body);
         // Outermost first, one entry per name, and the *latest* binding of a
         // name that is declared twice — which is `Env::captures`'s walk,
@@ -3023,6 +3031,7 @@ impl<'a, 'l> Body<'a, 'l> {
                 body,
                 span,
                 captures: names,
+                is_async,
                 aliases_first_param,
             },
             (span.file, expr.id),
@@ -3897,12 +3906,6 @@ impl<'a, 'l> Body<'a, 'l> {
         let decl = declared.decl;
         let what = declared.name.clone();
 
-        if decl.is_async {
-            return Err(Unsupported::new(
-                format!("a call to the `async fn` `{what}`"),
-                span,
-            ));
-        }
         for (at, param) in decl.params.iter().enumerate() {
             reject_parameter(param, at + 1 == decl.params.len())?;
         }
@@ -4131,7 +4134,15 @@ impl<'a, 'l> Body<'a, 'l> {
             self.variadic_array(&elements, span)?;
             into(SlotKind::Value);
         }
-        let answer = signature.and_then(|signature| scalar_of_ty(&signature.ret));
+        // An `async fn` answers a settled task whatever its return type
+        // says, and a task is a value: `async fn f() -> Int` leaves a
+        // `Task<Int>` on the value stack, and only `await` produces the
+        // `Int`. `declared_function` settles `returns` the same way, and
+        // `validate` reconciles the two.
+        let answer = match decl.is_async {
+            true => None,
+            false => signature.and_then(|signature| scalar_of_ty(&signature.ret)),
+        };
         // This is the whole of the reachability rule: the call being emitted
         // is what makes the target part of the program, so the target is
         // numbered here and nowhere else.
@@ -4291,11 +4302,9 @@ impl<'a, 'l> Body<'a, 'l> {
         Ok(())
     }
 
-    /// `Ok(...)`, `Err(...)`, `Some(...)`, `Error(...)`, `assert(...)`, and
-    /// `assertEqual(...)`.
-    ///
-    /// `Shared(...)` is the free builtin that is not here: it makes a value
-    /// with storage shared across tasks, which nothing in this IR expresses.
+    /// `Ok(...)`, `Err(...)`, `Some(...)`, `Error(...)`, `Shared(...)`,
+    /// `assert(...)`, and `assertEqual(...)`, which is every free builtin
+    /// there is.
     ///
     /// The two assertions carry their arguments' spans as well as their own.
     /// A failing `assert` quotes the source text of its condition — that is
@@ -9398,10 +9407,12 @@ mod tests {
     fn every_unsupported_construct_is_named() {
         let cases: Vec<(&str, &str)> = vec![
             (
-                "an `async` closure",
-                "fn f() -> Int {\n  let g = async fn() {\n    1\n  }\n  1\n}\n",
-            ),
-            (
+                // Every lambda but one: the closure a `lock` is given may
+                // write its first parameter `var`, because `Inst::Lock` hands
+                // it a place rather than a value. Nothing else can, because
+                // every argument of an `Inst::CallValue` travels on the value
+                // stack. An `async` lambda is no different, and an `async fn`
+                // and a call to one both lower.
                 "a closure's `var` parameter `n`",
                 "fn f() -> Int {\n  let g = fn(var n: Int) {\n    n = 2\n  }\n  1\n}\n",
             ),
@@ -9414,10 +9425,6 @@ mod tests {
                 // `Int` has no stack for the failure to come back on.
                 "a task scope in a function that answers an `Int` or a `Bool`",
                 "fn f() -> Int {\n  scope tasks {\n    1\n  }\n}\n",
-            ),
-            (
-                "a call to the `async fn` `g`",
-                "async fn g() -> Int {\n  1\n}\n\nfn f() -> Int {\n  await g()\n}\n",
             ),
             (
                 "a `var` variadic parameter",
@@ -9935,10 +9942,14 @@ mod tests {
     /// Issue #115 itself: `hello` is three lines and `callbacks/` holds an
     /// `async` closure, and the two share a package and nothing else.
     #[test]
-    fn an_entry_lowers_past_a_construct_it_cannot_reach() {
+    fn an_entry_lowers_only_what_it_reaches_of_the_examples() {
         let checked = examples();
-        let refused = lower(&checked).expect_err("`examples/` holds a program that does not lower");
-        assert_eq!(refused.what, "an `async` closure");
+        // The whole package lowers now. It did not when this test was
+        // written — it stopped at an `async` closure, and the point of the
+        // test was that `hello` lowered anyway — so what is left is the half
+        // that was always the point: an entry is what it reaches, whatever
+        // else the package holds.
+        lower(&checked).expect("`examples/` lowers whole");
 
         let lowered = lower_entry(&checked, "hello", "main").expect("`hello.main` lowers");
         validate(&lowered.program).expect("it holds the VM's invariants");

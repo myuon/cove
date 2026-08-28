@@ -12,7 +12,7 @@
 //! that thread: the body starts when the task is created and the value it
 //! produces is reachable only by joining it, which is what `await` and
 //! leaving a scope both do. The state machine still holds no scheduling
-//! policy — [`Tasking`] is what decides when a task is joined, and both
+//! policy — `Tasking` below is what decides when a task is joined, and both
 //! evaluators reach it — because a value is observable through `await` or
 //! scope exit and through nothing else.
 //!

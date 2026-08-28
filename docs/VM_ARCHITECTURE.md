@@ -490,6 +490,43 @@ task's flag beside the bounded calls this thread is inside.
 `tests/e2e:fail_max_tasks` is in the corpus because a run's concurrency limit
 has to stop it identically on both backends, and it does.
 
+### An `async fn` answers a task, and the frame is where that happens
+
+ADR 0008 gives a thread to `spawn` and not to every `async fn`. So an
+`async fn` runs its body at the call site like any other function, and what a
+call to one answers is a handle that is already settled: the body has run
+whether or not anything awaits it, and only `await` produces the value.
+`Interpreter::invoke` says that in one line, by wrapping the result of the
+whole call in `Task::settled`.
+
+The VM cannot wrap at the call site, and the reason is the same one that fixes
+a closure's calling convention: nothing at a `call-value` knows which function
+it will reach, and an `async fn` used as a value — `f: async fn(Int) ->
+Result<Int, Error>` — is called through one. So `cove_ir::Function` carries
+`answers_a_task`, the call sites that open a frame read it, and `Vm::leave`
+wraps where the frame closes. That catches all three ways a body can end: a
+`return`, the last instruction, and a `?` that failed, which leaves the frame
+from inside `Inst::Try` and reaches no return instruction at all.
+
+Which frames are async is a `Vec<usize>` of depths beside the frame stack
+rather than a field on `Frame`. A frame is five words copied into a local of
+the dispatch loop and read by every instruction that addresses a slot, so a
+sixth field is register pressure in the loop `benches/arith` spends its run in
+— the reason `return_pc` became a `u32` when the place model landed. What
+`leave` pays instead is one length check on a vector that is empty in every
+program with no `async fn` in it, which is the same shape the open scopes use.
+
+Two things follow from a task being a value. An `async fn` answers on the value
+stack whatever its declared return type was, so `async fn f() -> Int` is
+`SlotKind::Value` and its call site expects a value: a `Task<Int>` is not an
+`Int`, and only `await` makes one. And a lowered `async` lambda's closure value
+carries `is_async`, read off the lowered function, so a host that receives one
+reads the same field it would read off a closure the interpreter built.
+
+The entry is the one caller that does not `await`. An async entry hands back a
+handle the host cannot settle, so `Interpreter::enter` settles it there and
+`Vm::run` does the same, through the same `task::settle`.
+
 ### `Shared`, and the one closure that is not called through a value
 
 `Shared` is the other half of ADR 0008, and the reason the type exists: it is

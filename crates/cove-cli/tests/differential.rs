@@ -323,7 +323,25 @@ use cove_sema::resolve::Program as Checked;
 /// A `lock` whose closure is a *value* rather than written at the call is
 /// therefore refused, which is narrower than the oracle and is what keeps
 /// such a closure from ever reaching a `call-value`.
-const LOWERED_FLOOR: usize = 88;
+/// 88 to 90: an `async fn`, which is the last of the concurrency cluster.
+/// ADR 0008 gives a thread to `spawn` and not to every `async fn`, so one
+/// runs its body at the call site and answers a handle that is already
+/// settled — `Interpreter::invoke` wraps the result of the whole call, and
+/// `cove_ir::Function::answers_a_task` is the same fact read where the VM
+/// closes the frame, which is what catches a `?` that failed as well as a
+/// `return`. It is the callee's answer and not the call site's, because an
+/// `async fn` used as a value is called through a `call-value` and nothing
+/// there knows which function it will reach. `examples:callbacks` and
+/// `examples:tasks` are the cases that gained a lowering, and they are the
+/// two the corpus held.
+///
+/// What is left refused is what was always going to be. Three cases name a
+/// call whose labelled arguments stand out of declaration order and one an
+/// assignment to a read-only place; both are programs the oracle rejects at
+/// *run* time and this refuses at lowering, which is deliberate and is what
+/// issues #112 and #113 are about moving into the checker. Nothing in the
+/// corpus is refused for want of an execution model any more.
+const LOWERED_FLOOR: usize = 90;
 
 // ------------------------------------------------------------------ the test
 

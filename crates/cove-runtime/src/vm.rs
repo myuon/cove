@@ -136,7 +136,7 @@
 //!
 //! ADR 0008 runs a spawned task on a thread of its own, and gives it an
 //! evaluator of its own to run it with. For this backend that is a second
-//! `Vm`: [`Vm::for_task`] builds one on the new thread, over the same
+//! `Vm`: `Vm::for_task` builds one on the new thread, over the same
 //! [`Runtime`] and the same `cove_ir::Program`, with its own three stacks,
 //! its own frames, its own heap, and its own constant values. Nothing about
 //! the spawning VM crosses, because nothing about it could — every one of
@@ -155,21 +155,21 @@
 //! a child that failed, or of what a `spawn` charges. What is written here is
 //! the stack discipline: six instructions, one dispatch arm, and the one
 //! thing a stack machine has to answer that a tree walk does not — what
-//! happens to a scope whose frame returned out from under it. [`Vm::leave`]
+//! happens to a scope whose frame returned out from under it. `Vm::leave`
 //! is that answer, because it is the one place a frame is popped.
 //!
 //! Fuel, the deadline, the run's cancellation, the task's own cancellation,
 //! the depth limit, and the trace are accounted inside a task exactly as they
 //! are outside one, because they are accounted by the same `Vm`: a task's VM
 //! reaches the run's one budget through the same [`HostRegistry`], and
-//! [`Vm::safepoint`] asks the task's own flag beside the rest.
+//! `Vm::safepoint` asks the task's own flag beside the rest.
 //!
 //! # What is not here
 //!
-//! An `async fn`, and everything else `cove_ir::lower` reports as
-//! [`cove_ir::Unsupported`]. ADR 0019's no-silent-fallback rule is
-//! what makes that the right shape: a program the lowering refuses never
-//! reaches this, so there is no construct this can be wrong about.
+//! Whatever `cove_ir::lower` reports as [`cove_ir::Unsupported`], which no
+//! longer includes anything about concurrency. ADR 0019's no-silent-fallback
+//! rule is what makes that the right shape: a program the lowering refuses
+//! never reaches this, so there is no construct this can be wrong about.
 
 use std::rc::Rc;
 use std::sync::Arc;
@@ -193,7 +193,7 @@ use crate::interp::{
     returned_error_message, source_text, unary, work_stopped, MAX_CALL_DEPTH,
 };
 use crate::runtime::{Runtime, ENTRY_TASK};
-use crate::task::{self, ChildFailure, TaskOutcome, TaskScope, Transfer};
+use crate::task::{self, ChildFailure, Task, TaskOutcome, TaskScope, Transfer};
 use crate::trace::{RunOutcome, Timing, TraceEvent};
 use crate::value::{Closure, ClosureBody, StructValue, Value};
 
@@ -547,6 +547,23 @@ pub struct Vm<'a> {
     /// `?` that failed — has whatever it opened cancelled by [`Vm::leave`],
     /// which is the one place a frame is popped.
     scopes: Vec<OpenScope>,
+    /// The frame depths at which a call to a function that answers a settled
+    /// task is standing, innermost last.
+    ///
+    /// An `async fn` runs its body at the call site and hands back a handle
+    /// that is already settled, so what a call to one answers is not what its
+    /// body produced. Wrapping has to happen where the frame *closes*, since
+    /// a body ends by returning, by reaching its last instruction, or by a
+    /// `?` that failed, and all three go through [`Vm::leave`].
+    ///
+    /// A stack of depths rather than a flag on the frame, because a `Frame`
+    /// is five words copied into a local of the dispatch loop and read by
+    /// every instruction that addresses a slot: a sixth field would be
+    /// register pressure in the loop `benches/arith` spends its run in. This
+    /// is the arrangement [`Vm::scopes`] uses, and it costs `leave` the same
+    /// thing — one length check, on a vector that is empty in every program
+    /// that writes no `async fn`.
+    async_frames: Vec<usize>,
     /// Flags raised by a host call that bounds the work it was given, one for
     /// each such call this thread is inside, checked at every safepoint
     /// exactly as [`crate::interp::Interpreter`] checks them.
@@ -593,6 +610,7 @@ impl<'a> Vm<'a> {
             cancellation: None,
             task: ENTRY_TASK,
             scopes: Vec::new(),
+            async_frames: Vec::new(),
             stops: Vec::new(),
             timings: Vec::new(),
             wait: Duration::ZERO,
@@ -650,6 +668,7 @@ impl<'a> Vm<'a> {
         self.scalars.clear();
         self.places.clear();
         self.frames.clear();
+        self.async_frames.clear();
         self.fuel = 0;
         for (kind, value) in entry.params.iter().zip(args) {
             match kind {
@@ -692,7 +711,17 @@ impl<'a> Vm<'a> {
             function: entry.name.to_string(),
         });
         self.timings.push(Timing::start());
-        let outcome = self.execute(0);
+        let outcome = self.execute(0).and_then(|value| match value {
+            // The host awaits the entry it chose, so an `async fn` entry
+            // hands back its value rather than a handle the host cannot
+            // settle. `Interpreter::enter` does the same thing at the same
+            // place, and through the same `crate::task::settle`.
+            Value::Task(handle) => {
+                let span = self.program.function(function).span;
+                task::settle(self, &handle, span)
+            }
+            value => Ok(value),
+        });
         // A run that ended by raising abandoned its frames where they stood,
         // and a scope one of them had open still owns threads. The run is
         // ending, so what is left to do is what leaving a scope early does:
@@ -1009,6 +1038,9 @@ impl<'a> Vm<'a> {
                     let span = running.span_at(pc);
                     let callee = program.function(target);
                     self.enter(callee, span)?;
+                    if callee.answers_a_task {
+                        self.async_frames.push(self.frames.len());
+                    }
                     // The callee's first block, charged where the callee is
                     // entered: the caller's own line ended at this `Call`, so
                     // nothing of the callee has been paid for yet.
@@ -1762,9 +1794,10 @@ impl<'a> Vm<'a> {
         // how much that was — the rule `Inst::MakeEnum` is charged by.
         self.fuel += u64::from(captures);
         Value::Closure(Rc::new(Closure {
-            // `cove_ir::lower` refuses an `async` closure, so nothing builds
-            // one here.
-            is_async: false,
+            // Read off the lowered function, because that is where `async`
+            // ends up: a host that receives this closure reads the same field
+            // off one the interpreter built.
+            is_async: target.answers_a_task,
             params: target.written_params.clone(),
             // A lambda has no declaration, which is the same `None` the
             // interpreter's `make_closure` writes. The field is read for a
@@ -1839,6 +1872,9 @@ impl<'a> Vm<'a> {
             return Err(wrong_arity(callee, argc + place_argc, span));
         }
         self.enter(callee, span)?;
+        if callee.answers_a_task {
+            self.async_frames.push(self.frames.len());
+        }
         let base = self.stack.len() - argc as usize;
         for (_, value) in &closure.captures {
             self.stack.push(value.clone());
@@ -2184,6 +2220,9 @@ impl<'a> Vm<'a> {
             return Err(wrong_arity(callee, argc, span));
         }
         self.enter(callee, span)?;
+        if callee.answers_a_task {
+            self.async_frames.push(self.frames.len());
+        }
         self.stack
             .resize(base + callee.value_frame_size as usize, Value::Unit);
         let scalar_base = self.scalars.len();
@@ -2280,6 +2319,9 @@ impl<'a> Vm<'a> {
             // rather than at the end of the run: its threads would otherwise
             // outlive every frame that could name them.
             self.close_scopes_above(floor);
+            // A frame abandoned by a failure never reached `Vm::leave`, so
+            // what it recorded here goes with it.
+            self.async_frames.retain(|depth| *depth < floor);
             self.frames.truncate(floor);
             self.stack.truncate(values);
             self.scalars.truncate(scalars);
@@ -2352,8 +2394,28 @@ impl<'a> Vm<'a> {
     /// asked for and the scalar stack is an internal representation. So a
     /// scalar answer that has no caller becomes the `Value` it stands for
     /// here, at the outermost boundary there is.
-    fn leave(&mut self, answer: Answered, floor: usize) -> Answer {
+    fn leave(&mut self, mut answer: Answered, floor: usize) -> Answer {
         let done = self.frames.pop().expect("a return leaves a frame");
+        // An `async fn` and an `async` lambda answer a task that is already
+        // settled: the body ran here, at the call, and only `await` produces
+        // the value. Wrapping where the frame closes catches every way a body
+        // can end — a `return`, the last instruction, and a `?` that failed —
+        // which is what `Interpreter::invoke` gets by wrapping the result of
+        // the whole call. Guarded rather than read off the callee, for the
+        // reason `Vm::async_frames` gives.
+        if self.async_frames.last() == Some(&self.frames.len()) {
+            self.async_frames.pop();
+            let value = match answer {
+                Answered::Value(value) => value,
+                // Unreachable: a function that answers a task answers on the
+                // value stack, whatever it declared, and `crate::lower` is
+                // what makes that so.
+                Answered::Scalar(scalar) => {
+                    as_value(self.program.function(done.function).returns, scalar)
+                }
+            };
+            answer = Answered::Value(Value::Task(Task::settled(value)));
+        }
         // A frame that returns out of the middle of a task scope — through a
         // `return`, or through a `?` that failed — never reaches the
         // `leave-scope` written after that scope's body, and leaving a scope
@@ -4751,6 +4813,57 @@ mod tests {
         assert_eq!(lowered.error().span, interpreted.error().span);
     }
 
+    // ------------------------------------------------------- `async fn`
+
+    /// An `async fn` runs its body at the call site and hands back a handle
+    /// that is already settled, so the body has run whether or not anything
+    /// awaits it, and awaiting twice repeats no effect.
+    #[test]
+    fn an_async_fn_runs_at_the_call_and_settles_once() {
+        let outcome = agree(
+            "use console.println\n\nasync fn answer() -> Result<Int, Error> {\n               println(\"ran\")?\n  Ok(7)\n}\n\n             export fn main() -> Result<Unit, Error> {\n  let t = answer()\n               println(\"{await t?} {await t?}\")?\n  Ok(())\n}\n",
+        );
+        assert_eq!(outcome.output, "ran\n7 7\n");
+    }
+
+    /// A `?` that failed leaves the body without reaching a `return`, and the
+    /// failure is still wrapped: `Vm::leave` is where the frame closes,
+    /// whichever of the three ways a body ended.
+    #[test]
+    fn a_question_mark_inside_an_async_fn_settles_the_task_it_failed_with() {
+        let outcome = agree(
+            "use console.println\n\nfn boom() -> Result<Int, Error> {\n  Err(Error(\"boom\"))\n}\n\n             async fn load() -> Result<Int, Error> {\n  let n = boom()?\n               println(\"never\")?\n  Ok(n)\n}\n\n             export fn main() -> Result<Unit, Error> {\n  let v = await load()\n               println(\"{v}\")?\n  Ok(())\n}\n",
+        );
+        assert_eq!(outcome.output, "Err(boom)\n");
+    }
+
+    /// `async fn f() -> Int` answers a `Task<Int>`, which is a value — so the
+    /// call leaves it on the value stack whatever the checker settled about
+    /// the declared return type, and only `await` produces the `Int`.
+    #[test]
+    fn an_async_fn_that_declares_an_int_still_answers_on_the_value_stack() {
+        assert_eq!(
+            value_of(
+                "Int",
+                "async fn twice(n: Int) -> Int {\n  n * 2\n}\n",
+                "  await twice(4) + await twice(10)"
+            ),
+            "Int(28)"
+        );
+    }
+
+    /// An `async` lambda is the same rule read off the closure rather than
+    /// off a declaration, which is why the VM wraps where the frame closes
+    /// rather than at the call site: nothing at a `call-value` knows which
+    /// function it will reach.
+    #[test]
+    fn an_async_lambda_called_through_a_value_answers_a_task() {
+        let outcome = agree(
+            "use console.println\n\n             fn run(f: async fn(Int) -> Result<Int, Error>) -> Result<Int, Error> {\n  await f(3)\n}\n\n             export fn main() -> Result<Unit, Error> {\n               let n = run(async fn(x) {\n    println(\"in the lambda\")?\n    Ok(x * 2)\n  })?\n               println(\"{n}\")?\n  Ok(())\n}\n",
+        );
+        assert_eq!(outcome.output, "in the lambda\n6\n");
+    }
+
     // ---------------------------------------------------------- `Shared`
 
     /// A `var` closure names the cell's contents, so what it leaves behind is
@@ -5234,6 +5347,7 @@ mod tests {
                     params: Vec::new(),
                     returns: cove_ir::SlotKind::Value,
                     has_receiver: false,
+                    answers_a_task: false,
                     captures: Vec::new(),
                     capture_base: 0,
                     written_params: Vec::new(),
@@ -5348,6 +5462,7 @@ mod tests {
                     params: Vec::new(),
                     returns: cove_ir::SlotKind::Value,
                     has_receiver: false,
+                    answers_a_task: false,
                     captures: Vec::new(),
                     capture_base: 0,
                     written_params: Vec::new(),

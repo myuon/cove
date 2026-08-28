@@ -257,6 +257,28 @@ pub struct Function {
     pub returns: SlotKind,
     /// Whether slot 0 is a receiver rather than the first parameter.
     pub has_receiver: bool,
+    /// Whether a call to this function answers a settled task rather than
+    /// the value the body produced.
+    ///
+    /// True for an `async fn` and for an `async` lambda, and it is the whole
+    /// of what `async` means to a run. `Interpreter::invoke` runs the body at
+    /// the call site and wraps whatever came out in
+    /// `cove_runtime::task::Task::settled`, because ADR 0008 gives a thread
+    /// to `spawn` and not to every `async fn`: nothing may depend on when an
+    /// `async fn` body ran, only on the value `await` produces.
+    ///
+    /// It is the *callee's* answer and not the call site's, for the reason
+    /// `returns` is: an `async fn` used as a value is called through
+    /// [`Inst::CallValue`], which knows nothing about the function it will
+    /// reach. So the VM reads this where it opens the frame and wraps where
+    /// it closes one, which catches every way a body can end — a `return`,
+    /// the final return, and a `?` that failed.
+    ///
+    /// `returns` is [`SlotKind::Value`] whenever this is true, whatever the
+    /// declared return type was, because a task is a value: `async fn f() ->
+    /// Int` answers a `Task<Int>` and the caller reads it off the value
+    /// stack.
+    pub answers_a_task: bool,
     /// What the closure that created this body handed it, in the order the
     /// instructions expect. Empty for a declared function.
     ///
