@@ -210,7 +210,17 @@ use cove_sema::resolve::Program as Checked;
 /// not: it exists to pin ADR 0019's no-silent-fallback rule, so it was
 /// rewritten around a task scope, which the lowering still refuses. What the
 /// case is about is the rule and not the construct.
-const LOWERED_FLOOR: usize = 74;
+///
+/// 74 to 76: a trailing closure is the last positional argument.
+/// `Interpreter::eval_args` evaluates the written arguments and then pushes
+/// the trailing one on the end with no label, no `var` and no spread, and the
+/// parser has already built the block as a lambda — so once a lambda lowers
+/// there is nothing left for the sugar to do but land where a written
+/// argument would. `Args` is that said once, rather than a second parameter
+/// every path that reads a call's arguments would have to remember to use.
+/// `tests/e2e:type_result` and `examples:config` are the cases that gained a
+/// lowering.
+const LOWERED_FLOOR: usize = 76;
 
 // ------------------------------------------------------------------ the test
 

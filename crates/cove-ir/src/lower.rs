@@ -136,11 +136,11 @@
 //!
 //! # What is not lowered
 //!
-//! Closures and trailing closures, `scope`/`spawn`/`await`, traits and
-//! `dyn`, `Shared`, a `snapshot` a declared conformance would have to answer
-//! from inside a container, assignment to a field of anything but a local,
-//! and any call whose target cannot be named at lowering time. Each is
-//! reported in the words a Cove programmer writes it in.
+//! `scope`/`spawn`/`await`, traits and `dyn`, `Shared`, a `snapshot` a
+//! declared conformance would have to answer from inside a container,
+//! assignment to a field of anything but a local, and any call whose callee
+//! is neither a name nor a field of one. Each is reported in the words a
+//! Cove programmer writes it in.
 //!
 //! # What is refused because the program is wrong
 //!
@@ -2108,7 +2108,7 @@ impl<'a, 'l> Body<'a, 'l> {
                 // stop emitting. Only a call that landed on the value stack
                 // crosses.
                 if self
-                    .call(expr.id, callee, args, trailing.is_some(), span)?
+                    .call(expr.id, callee, args, trailing.as_deref(), span)?
                     .is_none()
                 {
                     self.emit(Inst::ValueToScalar, span);
@@ -2210,7 +2210,7 @@ impl<'a, 'l> Body<'a, 'l> {
                 // this position needs is on the other one: one boundary
                 // instruction where a value is wanted, and the scalar
                 // stack's own discard where nothing is.
-                if let Some(what) = self.call(expr.id, callee, args, trailing.is_some(), span)? {
+                if let Some(what) = self.call(expr.id, callee, args, trailing.as_deref(), span)? {
                     if position == Position::Effect {
                         self.emit(Inst::ScalarPop, span);
                         return Ok(());
@@ -2576,7 +2576,7 @@ impl<'a, 'l> Body<'a, 'l> {
                     // `enum_case`, at run time — because a case that does not
                     // exist is a failure with a message rather than a shape
                     // the lowering could produce something else for.
-                    return self.make_enum(owner, head, name, &[], span);
+                    return self.make_enum(owner, head, name, Args::new(&[], None), span);
                 }
                 if self.outer.is_host_module(self.module, head) {
                     return Err(Unsupported::new(
@@ -3199,13 +3199,11 @@ impl<'a, 'l> Body<'a, 'l> {
         &mut self,
         id: ExprId,
         callee: &'a Expr,
-        args: &'a [Arg],
-        trailing: bool,
+        written: &'a [Arg],
+        trailing: Option<&'a Expr>,
         span: Span,
     ) -> Result<Option<Scalar>, Unsupported> {
-        if trailing {
-            return Err(Unsupported::new("a trailing closure", span));
-        }
+        let args = Args::new(written, trailing);
         match &callee.kind {
             ExprKind::Ident(name) => self.call_named(name, args, span),
             ExprKind::Field { base, name } => self.call_qualified(id, base, &name.node, args, span),
@@ -3221,7 +3219,7 @@ impl<'a, 'l> Body<'a, 'l> {
     fn call_named(
         &mut self,
         name: &str,
-        args: &'a [Arg],
+        args: Args<'a>,
         span: Span,
     ) -> Result<Option<Scalar>, Unsupported> {
         if self.lookup(name).is_some() {
@@ -3271,7 +3269,7 @@ impl<'a, 'l> Body<'a, 'l> {
     fn call_through_value(
         &mut self,
         name: &str,
-        args: &'a [Arg],
+        args: Args<'a>,
         span: Span,
     ) -> Result<Option<Scalar>, Unsupported> {
         plain_arguments(args, name)?;
@@ -3288,8 +3286,8 @@ impl<'a, 'l> Body<'a, 'l> {
             ));
         }
         let argc = args.len() as u16;
-        for arg in args {
-            self.expr(&arg.value)?;
+        for arg in args.iter() {
+            self.expr(arg.value)?;
         }
         self.ident(name, span)?;
         self.emit(Inst::CallValue { argc }, span);
@@ -3306,7 +3304,7 @@ impl<'a, 'l> Body<'a, 'l> {
         id: ExprId,
         base: &'a Expr,
         name: &str,
-        args: &'a [Arg],
+        args: Args<'a>,
         span: Span,
     ) -> Result<Option<Scalar>, Unsupported> {
         if let ExprKind::Ident(head) = &base.kind {
@@ -3369,7 +3367,7 @@ impl<'a, 'l> Body<'a, 'l> {
         &mut self,
         key: Key,
         receiver: Option<&'a Expr>,
-        args: &'a [Arg],
+        args: Args<'a>,
         span: Span,
     ) -> Result<Option<Scalar>, Unsupported> {
         let declared = self.outer.declaration(key);
@@ -3520,7 +3518,7 @@ impl<'a, 'l> Body<'a, 'l> {
             let Some(position) = assigned.slots[at] else {
                 continue;
             };
-            let arg = &args[position];
+            let arg = args.at(position);
             // A `...` here fills one parameter's slot, and `bind_params`
             // reads that slot through `value_of` without looking at
             // `spread` — the whole array becomes the argument. Refused
@@ -3541,10 +3539,10 @@ impl<'a, 'l> Body<'a, 'l> {
                 ));
             }
             if declared_var {
-                match self.place_mutability(&arg.value) {
+                match self.place_mutability(arg.value) {
                     Some(true) => {}
                     Some(false) => {
-                        return Err(read_only_place(&place_text(&arg.value), arg.span));
+                        return Err(read_only_place(&place_text(arg.value), arg.span));
                     }
                     None => {
                         return Err(Unsupported::new(
@@ -3557,7 +3555,7 @@ impl<'a, 'l> Body<'a, 'l> {
                     }
                 }
                 into(SlotKind::Place);
-                self.place(&arg.value)?;
+                self.place(arg.value)?;
                 continue;
             }
             let kind = signature
@@ -3565,8 +3563,8 @@ impl<'a, 'l> Body<'a, 'l> {
                 .map_or(SlotKind::Value, slot_kind_of);
             into(kind);
             match kind {
-                SlotKind::Scalar(_) => self.expr_scalar(&arg.value)?,
-                SlotKind::Value => self.expr(&arg.value)?,
+                SlotKind::Scalar(_) => self.expr_scalar(arg.value)?,
+                SlotKind::Value => self.expr(arg.value)?,
                 SlotKind::Place => unreachable!("only a `var` parameter is a place"),
             }
         }
@@ -3592,14 +3590,14 @@ impl<'a, 'l> Body<'a, 'l> {
             // there is a marking nothing acts on and is refused rather than
             // spread.
             if let Some(position) = assigned.slots[names.len() - 1] {
-                if args[position].spread {
-                    return Err(no_spread_here(&what, args[position].span));
+                if args.at(position).spread {
+                    return Err(no_spread_here(&what, args.at(position).span));
                 }
             }
-            let elements: Vec<&Arg> = assigned.slots[names.len() - 1]
+            let elements: Vec<CallArg<'a>> = assigned.slots[names.len() - 1]
                 .into_iter()
                 .chain(assigned.rest.iter().copied())
-                .map(|position| &args[position])
+                .map(|position| args.at(position))
                 .collect();
             if let Some(arg) = elements.iter().find(|arg| arg.is_var) {
                 return Err(Unsupported::new(
@@ -3650,10 +3648,10 @@ impl<'a, 'l> Body<'a, 'l> {
     /// is a check-time diagnostic — so the order is unobservable in a
     /// checked program, and stating it is cheaper than an instruction that
     /// would have to carry which of its operands were spreads.
-    fn variadic_array(&mut self, elements: &[&'a Arg], span: Span) -> Result<(), Unsupported> {
+    fn variadic_array(&mut self, elements: &[CallArg<'a>], span: Span) -> Result<(), Unsupported> {
         if !elements.iter().any(|arg| arg.spread) {
             for arg in elements {
-                self.expr(&arg.value)?;
+                self.expr(arg.value)?;
             }
             self.emit(Inst::MakeArray(elements.len() as u32), span);
             return Ok(());
@@ -3662,7 +3660,7 @@ impl<'a, 'l> Body<'a, 'l> {
         let mut at = 0;
         while at < elements.len() {
             if elements[at].spread {
-                self.expr(&elements[at].value)?;
+                self.expr(elements[at].value)?;
                 // The argument's own span, because this is the instruction
                 // that reports a spread of something that is neither
                 // sequence and `bind_params` reports it at `arg.span`.
@@ -3675,7 +3673,7 @@ impl<'a, 'l> Body<'a, 'l> {
                 at += 1;
             }
             for arg in &elements[from..at] {
-                self.expr(&arg.value)?;
+                self.expr(arg.value)?;
             }
             self.emit(Inst::MakeArray((at - from) as u32), span);
             // Appending an `Array` this instruction just built, which cannot
@@ -3690,15 +3688,15 @@ impl<'a, 'l> Body<'a, 'l> {
         &mut self,
         module: &str,
         op: &str,
-        args: &'a [Arg],
+        args: Args<'a>,
         span: Span,
     ) -> Result<(), Unsupported> {
         if let Some(declared) = hosts::module(module).and_then(|schema| schema.declared_type(op)) {
             return self.make_host_type(module, declared, args, span);
         }
         plain_arguments(args, op)?;
-        for arg in args {
-            self.expr(&arg.value)?;
+        for arg in args.iter() {
+            self.expr(arg.value)?;
         }
         let module = self.outer.name(module);
         let op = self.outer.name(op);
@@ -3742,7 +3740,7 @@ impl<'a, 'l> Body<'a, 'l> {
         &mut self,
         module: &str,
         declared: &'static TypeSchema,
-        args: &'a [Arg],
+        args: Args<'a>,
         span: Span,
     ) -> Result<(), Unsupported> {
         if declared.is_enum() {
@@ -3757,8 +3755,8 @@ impl<'a, 'l> Body<'a, 'l> {
         let names: Vec<&str> = declared.fields.iter().map(|field| field.name).collect();
         every_argument_supplied(&names, args, declared.name, span)?;
         plain_arguments(args, declared.name)?;
-        for arg in args {
-            self.expr(&arg.value)?;
+        for arg in args.iter() {
+            self.expr(arg.value)?;
         }
         let ty = self.outer.name(&format!("{module}.{}", declared.name));
         let fields = self.outer.name(&names.join(","));
@@ -3778,7 +3776,7 @@ impl<'a, 'l> Body<'a, 'l> {
     /// instruction's own span covers the whole call, so the argument's span
     /// is recorded beside it in [`crate::Function::arg_spans`]. The
     /// interpreter reads exactly these spans, out of the same `SourceMap`.
-    fn make_builtin(&mut self, name: &str, args: &'a [Arg], span: Span) -> Result<(), Unsupported> {
+    fn make_builtin(&mut self, name: &str, args: Args<'a>, span: Span) -> Result<(), Unsupported> {
         if !matches!(
             name,
             "Ok" | "Err" | "Some" | "Error" | "assert" | "assertEqual"
@@ -3787,8 +3785,8 @@ impl<'a, 'l> Body<'a, 'l> {
         }
         let quotes_its_arguments = matches!(name, "assert" | "assertEqual");
         plain_arguments(args, name)?;
-        for arg in args {
-            self.expr(&arg.value)?;
+        for arg in args.iter() {
+            self.expr(arg.value)?;
         }
         let name = self.outer.name(name);
         let pc = self.code.len();
@@ -3816,7 +3814,7 @@ impl<'a, 'l> Body<'a, 'l> {
         &mut self,
         owner: &str,
         decl: &'a StructDecl,
-        args: &'a [Arg],
+        args: Args<'a>,
         span: Span,
     ) -> Result<(), Unsupported> {
         for field in &decl.fields {
@@ -3829,8 +3827,8 @@ impl<'a, 'l> Body<'a, 'l> {
             .collect();
         every_argument_supplied(&names, args, &decl.name.node, span)?;
         plain_arguments(args, &decl.name.node)?;
-        for arg in args {
-            self.expr(&arg.value)?;
+        for arg in args.iter() {
+            self.expr(arg.value)?;
         }
         let ty = self.outer.name(&format!("{owner}.{}", decl.name.node));
         let fields = self.outer.name(&names.join(","));
@@ -3855,12 +3853,12 @@ impl<'a, 'l> Body<'a, 'l> {
         owner: &str,
         enum_name: &str,
         case: &str,
-        args: &'a [Arg],
+        args: Args<'a>,
         span: Span,
     ) -> Result<(), Unsupported> {
         plain_arguments(args, case)?;
-        for arg in args {
-            self.expr(&arg.value)?;
+        for arg in args.iter() {
+            self.expr(arg.value)?;
         }
         let ty = self.outer.name(&format!("{owner}.{enum_name}"));
         let case = self.outer.name(case);
@@ -3891,12 +3889,12 @@ impl<'a, 'l> Body<'a, 'l> {
         &mut self,
         ty: &str,
         name: &str,
-        args: &'a [Arg],
+        args: Args<'a>,
         span: Span,
     ) -> Result<(), Unsupported> {
         plain_arguments(args, name)?;
-        for arg in args {
-            self.expr(&arg.value)?;
+        for arg in args.iter() {
+            self.expr(arg.value)?;
         }
         let ty = self.outer.name(ty);
         let name = self.outer.name(name);
@@ -3920,7 +3918,7 @@ impl<'a, 'l> Body<'a, 'l> {
     /// declaration order. `assign_labels` is what the interpreter puts them
     /// in that order with, and [`arguments_in_order`] is the same rule read
     /// at lowering time.
-    fn make_map_entry(&mut self, args: &'a [Arg], span: Span) -> Result<(), Unsupported> {
+    fn make_map_entry(&mut self, args: Args<'a>, span: Span) -> Result<(), Unsupported> {
         let names: Vec<&str> = builtins::MAP_ENTRY
             .fields
             .iter()
@@ -3928,8 +3926,8 @@ impl<'a, 'l> Body<'a, 'l> {
             .collect();
         every_argument_supplied(&names, args, builtins::MAP_ENTRY.name, span)?;
         plain_arguments(args, builtins::MAP_ENTRY.name)?;
-        for arg in args {
-            self.expr(&arg.value)?;
+        for arg in args.iter() {
+            self.expr(arg.value)?;
         }
         let name = self.outer.name(builtins::MAP_ENTRY.name);
         self.emit(
@@ -4172,7 +4170,7 @@ impl<'a, 'l> Body<'a, 'l> {
         id: ExprId,
         receiver: &'a Expr,
         name: &str,
-        args: &'a [Arg],
+        args: Args<'a>,
         span: Span,
     ) -> Result<Option<Scalar>, Unsupported> {
         // Before anything is asked about the name, because a recorded target
@@ -4198,8 +4196,8 @@ impl<'a, 'l> Body<'a, 'l> {
             // `Interpreter::eval_method_call` evaluates the receiver before
             // `eval_args`, and the order two effects happen in is observable.
             self.expr(receiver)?;
-            for arg in args {
-                self.expr(&arg.value)?;
+            for arg in args.iter() {
+                self.expr(arg.value)?;
             }
             let op = self.outer.name(name);
             self.emit(
@@ -4355,8 +4353,8 @@ impl<'a, 'l> Body<'a, 'l> {
         if builtin_method {
             plain_arguments(args, name)?;
             self.expr(receiver)?;
-            for arg in args {
-                self.expr(&arg.value)?;
+            for arg in args.iter() {
+                self.expr(arg.value)?;
             }
             let name = self.outer.name(name);
             self.emit(
@@ -4444,7 +4442,7 @@ fn qualified_case(type_name: &str, case: &str) -> String {
 /// collects leftovers is reported.
 fn arguments_in_order(
     names: &[&str],
-    args: &[Arg],
+    args: Args<'_>,
     what: &str,
     variadic: bool,
     span: Span,
@@ -4506,6 +4504,87 @@ fn arguments_in_order(
     Ok(Arguments { slots, rest })
 }
 
+/// A call's arguments: the ones written inside the parentheses, and the
+/// trailing closure written after them.
+///
+/// `f(x) { ... }` is sugar and nothing more. `Interpreter::eval_args`
+/// evaluates the written arguments left to right and then pushes the
+/// trailing one on the end as an unlabelled, non-`var`, non-spread argument
+/// — so a trailing closure *is* the last positional argument, and the whole
+/// of what this type does is let every path that reads a call's arguments
+/// say so once instead of each of them taking a second parameter it would
+/// have to remember to use.
+///
+/// The parser has already built the block as an `ExprKind::Lambda` with no
+/// parameters, so the value is an ordinary expression here and lowers
+/// through the ordinary lambda path.
+#[derive(Clone, Copy)]
+struct Args<'a> {
+    written: &'a [Arg],
+    trailing: Option<&'a Expr>,
+}
+
+/// One argument of a call, whichever side of the parentheses it was written
+/// on.
+///
+/// A written one is its [`Arg`] read field by field; a trailing one is the
+/// expression with the four answers `eval_args` gives it — no label, not
+/// `var`, not a spread, and its own span.
+#[derive(Clone, Copy)]
+struct CallArg<'a> {
+    label: Option<&'a cove_syntax::ast::Ident>,
+    is_var: bool,
+    spread: bool,
+    value: &'a Expr,
+    span: Span,
+}
+
+impl<'a> Args<'a> {
+    /// The arguments written inside the parentheses, and the trailing
+    /// closure when one was written.
+    fn new(written: &'a [Arg], trailing: Option<&'a Expr>) -> Args<'a> {
+        Args { written, trailing }
+    }
+
+    fn len(self) -> usize {
+        self.written.len() + usize::from(self.trailing.is_some())
+    }
+
+    fn is_empty(self) -> bool {
+        self.len() == 0
+    }
+
+    /// The argument at `position`, where the trailing closure is the one
+    /// past the written ones.
+    fn at(self, position: usize) -> CallArg<'a> {
+        match self.written.get(position) {
+            Some(arg) => CallArg {
+                label: arg.label.as_ref(),
+                is_var: arg.is_var,
+                spread: arg.spread,
+                value: &arg.value,
+                span: arg.span,
+            },
+            None => {
+                let trailing = self
+                    .trailing
+                    .expect("a position past the written arguments is the trailing closure");
+                CallArg {
+                    label: None,
+                    is_var: false,
+                    spread: false,
+                    value: trailing,
+                    span: trailing.span,
+                }
+            }
+        }
+    }
+
+    fn iter(self) -> impl Iterator<Item = CallArg<'a>> {
+        (0..self.len()).map(move |position| self.at(position))
+    }
+}
+
 /// Which argument fills each parameter, and which arguments a variadic
 /// parameter collects.
 struct Arguments {
@@ -4526,7 +4605,7 @@ struct Arguments {
 /// default it does not have.
 fn every_argument_supplied(
     names: &[&str],
-    args: &[Arg],
+    args: Args<'_>,
     what: &str,
     span: Span,
 ) -> Result<(), Unsupported> {
@@ -4934,7 +5013,7 @@ fn var_marking_disagrees(what: &str, param: &str, declared_var: bool, span: Span
 /// refuses too; and none of them collects a variadic parameter's elements,
 /// so a `...` written at one is a marking the interpreter *ignores* — which
 /// is refused here instead. See [`no_spread_here`].
-fn plain_arguments(args: &[Arg], what: &str) -> Result<(), Unsupported> {
+fn plain_arguments(args: Args<'_>, what: &str) -> Result<(), Unsupported> {
     if let Some(arg) = args.iter().find(|arg| arg.is_var) {
         return Err(Unsupported::new(
             format!("a `var` argument to `{what}`, which takes values"),
@@ -6161,6 +6240,35 @@ mod tests {
              \x20  4  int Add\n\
              \x20  5  scalar-to-value Int\n\
              \x20  6  return\n"
+        );
+    }
+
+    /// `f(x) { ... }` is sugar: the trailing closure is the last positional
+    /// argument and is lowered exactly where a written one would be.
+    ///
+    /// The two listings are the same listing but for the constant, which is
+    /// the assertion: `Interpreter::eval_args` pushes the trailing one onto
+    /// the end of the evaluated arguments with no label, no `var` and no
+    /// spread, and that is all this reproduces.
+    #[test]
+    fn a_trailing_closure_lands_where_a_written_argument_would() {
+        let apply = "fn apply(v: Int, t: fn() -> Int) -> Int {\n  v + t()\n}\n\n";
+        let trailing = listing(
+            &format!("{apply}fn f() -> Int {{\n  apply(5) {{ 3 }}\n}}\n"),
+            "f",
+        );
+        let written = listing(
+            &format!("{apply}fn f() -> Int {{\n  apply(5, fn() {{ 3 }})\n}}\n"),
+            "f",
+        );
+        assert_eq!(trailing, written);
+        assert_eq!(
+            trailing,
+            "fn m.f arity=0 frame=0/0 -> Int\n\
+             \x20  0  scalar-const 5\n\
+             \x20  1  make-closure m.<closure 0> captures=0\n\
+             \x20  2  call m.apply argc=1/1 -> scalar\n\
+             \x20  3  return-scalar\n"
         );
     }
 
@@ -8043,10 +8151,6 @@ mod tests {
     #[test]
     fn every_unsupported_construct_is_named() {
         let cases: Vec<(&str, &str)> = vec![
-            (
-                "a trailing closure",
-                "fn f() -> Result<Int, Error> {\n  Err(Error(message: \"a\")).mapError {\n    Error(message: \"b\")\n  }\n}\n",
-            ),
             (
                 "an `async` closure",
                 "fn f() -> Int {\n  let g = async fn() {\n    1\n  }\n  1\n}\n",
