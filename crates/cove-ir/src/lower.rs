@@ -4921,7 +4921,7 @@ impl<'a, 'l> Body<'a, 'l> {
         args: Args<'a>,
         span: Span,
     ) -> Result<Option<Scalar>, Unsupported> {
-        task_arguments(args, "spawn", 1)?;
+        task_arguments(args, "spawn", 1, span)?;
         self.expr(receiver)?;
         self.expr(args.at(0).value)?;
         self.emit(Inst::Spawn, span);
@@ -4946,7 +4946,7 @@ impl<'a, 'l> Body<'a, 'l> {
         args: Args<'a>,
         span: Span,
     ) -> Result<Option<Scalar>, Unsupported> {
-        task_arguments(args, "lock", 1)?;
+        task_arguments(args, "lock", 1, span)?;
         let written = args.at(0).value;
         let ExprKind::Lambda {
             is_async,
@@ -4983,7 +4983,7 @@ impl<'a, 'l> Body<'a, 'l> {
         args: Args<'a>,
         span: Span,
     ) -> Result<Option<Scalar>, Unsupported> {
-        task_arguments(args, what, 0)?;
+        task_arguments(args, what, 0, span)?;
         self.expr(receiver)?;
         self.emit(inst, span);
         Ok(None)
@@ -5904,7 +5904,7 @@ fn value_params(params: &[SlotKind]) -> u32 {
 /// kind rather than resolved against a declaration, so there is no signature
 /// for a label to name and the interpreter reads one and ignores it. Refusing
 /// is the direction a second backend is allowed to be wrong in.
-fn task_arguments(args: Args<'_>, what: &str, takes: usize) -> Result<(), Unsupported> {
+fn task_arguments(args: Args<'_>, what: &str, takes: usize, span: Span) -> Result<(), Unsupported> {
     plain_arguments(args, what)?;
     if let Some(arg) = args.iter().find(|arg| arg.label.is_some()) {
         return Err(Unsupported::new(
@@ -5918,7 +5918,10 @@ fn task_arguments(args: Args<'_>, what: &str, takes: usize) -> Result<(), Unsupp
                 "a `{what}` given {} argument(s) where it takes {takes}",
                 args.len()
             ),
-            args.at(0.min(args.len().saturating_sub(1))).span,
+            // The first argument where there is one, and the call itself
+            // where there is none: a `spawn` given nothing has no argument
+            // to point at, and `Args::at` would index past the end.
+            args.iter().next().map_or(span, |arg| arg.span),
         ));
     }
     Ok(())
