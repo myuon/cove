@@ -173,7 +173,18 @@ use cove_sema::resolve::Program as Checked;
 /// — a case of an enum a host declares, which is a construct of its own —
 /// so the case now refuses for that instead. The function it passes as
 /// `handler:` is a third.
-const LOWERED_FLOOR: usize = 70;
+///
+/// 70 to 71: `snapshot` splits by the receiver's type rather than by its
+/// name. A struct or an enum with an `impl Snapshot for Type` was already a
+/// `Call`, because the checker records which declaration that call reaches;
+/// what was refused outright is the half of the trait no conformance answers
+/// for, and `cove_ir::Inst::Snapshot` is that half — a `Vector`, which
+/// allocates storage of its own, and every value with nothing mutable inside
+/// it, which returns itself. A `Vector` whose elements would each dispatch is
+/// still refused, because an instruction cannot run a whole Cove function in
+/// the middle of itself. `tests/e2e:type_snapshot` is the case that gained a
+/// lowering, and it is the only one the corpus held.
+const LOWERED_FLOOR: usize = 71;
 
 // ------------------------------------------------------------------ the test
 

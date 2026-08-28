@@ -3169,32 +3169,16 @@ impl<'a> Interpreter<'a> {
     /// cycles" is not yet a case the MVP can exercise.
     fn snapshot(&mut self, value: &Value, span: Span) -> Result<Value, RuntimeError> {
         match value {
-            Value::Unit
-            | Value::Bool(_)
-            | Value::Int(_)
-            | Value::Float(_)
-            | Value::Duration(_)
-            | Value::Str(_)
-            | Value::Array(_)
-            | Value::Map(_)
-            | Value::Set(_)
-            | Value::Range { .. } => Ok(value.clone()),
-            Value::Vector(storage) => {
-                builtins::check_live(storage, "snapshot", span)?;
-                let elements = storage.elements.borrow().clone();
-                let mut snapshotted = Vec::with_capacity(elements.len());
-                for item in &elements {
-                    snapshotted.push(self.snapshot(item, span)?);
-                }
-                Ok(self.allocate_vector(snapshotted))
-            }
             Value::Dyn(wrapped) => Ok(Value::Dyn(Rc::new(DynValue {
                 trait_name: wrapped.trait_name.clone(),
                 value: self.snapshot(&wrapped.value, span)?,
             }))),
             Value::Struct(s) => self.dispatch_snapshot(&s.type_name, value.clone(), span),
             Value::Enum(e) => self.dispatch_snapshot(&e.type_name, value.clone(), span),
-            other => Err(no_snapshot_conformance(other, span)),
+            // Everything a conformance is not consulted about, which both
+            // backends answer the same way and therefore answer in one
+            // place.
+            other => builtins::snapshot(self, other, span),
         }
     }
 
@@ -3207,10 +3191,10 @@ impl<'a> Interpreter<'a> {
         span: Span,
     ) -> Result<Value, RuntimeError> {
         let Some((type_module, short)) = type_name.rsplit_once('.') else {
-            return Err(no_snapshot_conformance(&receiver, span));
+            return Err(builtins::no_snapshot_conformance(&receiver, span));
         };
         let Some((module, decl)) = self.find_method(type_module, short, "snapshot") else {
-            return Err(no_snapshot_conformance(&receiver, span));
+            return Err(builtins::no_snapshot_conformance(&receiver, span));
         };
         self.invoke(
             &Target {
@@ -3233,6 +3217,10 @@ impl<'a> Interpreter<'a> {
 impl Callable for Interpreter<'_> {
     fn allocate_vector(&mut self, elements: Vec<Value>) -> Value {
         Interpreter::allocate_vector(self, elements)
+    }
+
+    fn snapshot(&mut self, value: &Value, span: Span) -> Result<Value, RuntimeError> {
+        Interpreter::snapshot(self, value, span)
     }
 
     fn call_value(
@@ -4194,17 +4182,6 @@ fn identity_not_available(value: &Value, span: Span) -> RuntimeError {
 
 /// `value.snapshot()` where `value` is a closure, a task, a task scope, a
 /// host handle, or a struct or enum with no `impl Snapshot for Type`.
-fn no_snapshot_conformance(value: &Value, span: Span) -> RuntimeError {
-    RuntimeError::new(format!(
-        "`{}` does not implement `Snapshot`",
-        value.type_name()
-    ))
-    .at(span)
-    .with_rule(
-        "Closures, synchronized values, and Host resources do not implement `Snapshot` by default; a struct or enum conforms explicitly with `impl Snapshot for Type`.",
-    )
-}
-
 /// The source text `span` covers, for a diagnostic that quotes the code it is
 /// about.
 ///

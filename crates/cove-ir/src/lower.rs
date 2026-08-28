@@ -136,11 +136,11 @@
 //!
 //! # What is not lowered
 //!
-//! Closures and trailing closures, `scope`/`spawn`/`await`, `var`
-//! parameters, traits and `dyn`, `Shared`, `snapshot`, assignment to a field
-//! of anything but a local, and any call whose target cannot be named at
-//! lowering time. Each is reported in the words a Cove programmer writes it
-//! in.
+//! Closures and trailing closures, `scope`/`spawn`/`await`, traits and
+//! `dyn`, `Shared`, a `snapshot` a declared conformance would have to answer
+//! from inside a container, assignment to a field of anything but a local,
+//! and any call whose target cannot be named at lowering time. Each is
+//! reported in the words a Cove programmer writes it in.
 //!
 //! # What is refused because the program is wrong
 //!
@@ -3789,7 +3789,35 @@ impl<'a, 'l> Body<'a, 'l> {
             return Err(Unsupported::new("an `await`", span));
         }
         if name == "snapshot" {
-            return Err(Unsupported::new("`snapshot`", span));
+            // A struct or an enum with an `impl Snapshot for Type` never
+            // reaches here: the checker recorded which declaration that call
+            // means, and the recorded target above took it. What is left is
+            // the half of the trait no conformance answers for, and it is
+            // emitted only where the checker settled a type that cannot
+            // reach one — see `snapshot_without_a_conformance`, which is
+            // where the receiver decides and not the name.
+            let Some(ty) = self.settled(receiver) else {
+                return Err(Unsupported::new(
+                    "`snapshot` on a receiver whose type nothing settled",
+                    span,
+                ));
+            };
+            if !snapshot_without_a_conformance(ty) {
+                return Err(Unsupported::new(
+                    format!("`snapshot` on a `{}`, which a conformance answers", ty),
+                    span,
+                ));
+            }
+            if !args.is_empty() {
+                // `snapshot` takes none, and `Interpreter::eval_method_call`
+                // says so before it reads the receiver; refusing keeps the
+                // instruction's shape a fact rather than something a call
+                // site could vary.
+                return Err(Unsupported::new("`snapshot` given arguments", span));
+            }
+            self.expr(receiver)?;
+            self.emit(Inst::Snapshot, span);
+            return Ok(None);
         }
         if builtins::is_mutating_method(name) {
             if name == "freeze" && self.place_mutability(receiver) == Some(true) {
@@ -4081,6 +4109,40 @@ fn every_argument_supplied(
         ));
     }
     Ok(())
+}
+
+/// Whether `Interpreter::snapshot` answers about a value of this type
+/// without reaching a declared conformance.
+///
+/// The interpreter dispatches a `Value::Struct`, a `Value::Enum` and a
+/// `Value::Dyn` to an `impl Snapshot for Type`, and answers everything else
+/// itself. An instruction cannot run a whole Cove function in the middle of
+/// itself, so the VM covers the second half and this is the question that
+/// decides which half a receiver is in.
+///
+/// An `Array`, a `Map` and a `Set` are cloned rather than walked — each is
+/// immutable, so there is nothing inside one for a copy to separate — and
+/// that is why their element types are not asked about. A `Vector` *is*
+/// walked, one element at a time, so a `Vector<T>` is only in this half when
+/// `T` is: a `Vector<Booking>` dispatches once per element and is refused.
+///
+/// An abstention is not an answer, and neither is [`Ty::Unknown`]. Both are
+/// refused by the caller, which asks for a settled type before asking this.
+fn snapshot_without_a_conformance(ty: &Ty) -> bool {
+    match ty {
+        Ty::Unit
+        | Ty::Bool
+        | Ty::Int
+        | Ty::Float
+        | Ty::Str
+        | Ty::Duration
+        | Ty::Range
+        | Ty::Array(_)
+        | Ty::Map(_, _)
+        | Ty::Set(_) => true,
+        Ty::Vector(inner) => snapshot_without_a_conformance(inner),
+        _ => false,
+    }
 }
 
 /// Every name a body uses as the root of a place, collected before anything
@@ -5078,7 +5140,7 @@ fn stack_shape(constants: &[Const], inst: Inst) -> Shape {
         Inst::Const(_) | Inst::LoadLocal(_) | Inst::LoadCapture(_) => Shape::on_values(0, 1),
         Inst::StoreLocal(_) | Inst::Pop => Shape::on_values(1, 0),
         Inst::Dup => Shape::on_values(1, 2),
-        Inst::Unary(_) | Inst::GetField(_) | Inst::GetFieldAt(_) | Inst::Try => {
+        Inst::Unary(_) | Inst::GetField(_) | Inst::GetFieldAt(_) | Inst::Try | Inst::Snapshot => {
             Shape::on_values(1, 1)
         }
         // The fusion of `Inst::GetFieldAt` with `Inst::ValueToScalar`: the
@@ -6542,6 +6604,53 @@ mod tests {
         );
     }
 
+    /// `snapshot` splits in two by the receiver's type, not by its name.
+    ///
+    /// A struct with an `impl Snapshot for Type` is an ordinary method call:
+    /// the checker recorded which declaration it reaches, so it lowers to a
+    /// `Call` before the name is asked about at all. Everything a
+    /// conformance is not consulted about is the `snapshot` instruction.
+    #[test]
+    fn snapshot_is_a_call_where_a_conformance_answers_and_an_instruction_where_none_does() {
+        assert_eq!(
+            listing(
+                "struct B {\n  n: Int\n}\n\nimpl Snapshot for B {\n  fn snapshot(self) -> B {\n    B(n: self.n)\n  }\n}\n\nfn f(b: B) -> B {\n  b.snapshot()\n}\n",
+                "f"
+            ),
+            "fn m.f arity=1 frame=1/0 params=[value] -> value\n\
+             \x20  0  load 0\n\
+             \x20  1  call m.B.snapshot argc=1/0\n\
+             \x20  2  return\n"
+        );
+        assert_eq!(
+            listing(
+                "fn f(v: Vector<Int>) -> Vector<Int> {\n  v.snapshot()\n}\n",
+                "f"
+            ),
+            "fn m.f arity=1 frame=1/0 params=[value] -> value\n\
+             \x20  0  load 0\n\
+             \x20  1  snapshot\n\
+             \x20  2  return\n"
+        );
+    }
+
+    /// A `Vector` whose elements dispatch is refused, and so is a receiver
+    /// the checker settled nothing about.
+    ///
+    /// `Interpreter::snapshot` walks a `Vector` one element at a time and
+    /// sends each struct to its own conformance. An instruction cannot run a
+    /// whole Cove function in the middle of itself, so the refusal is here,
+    /// before the run, rather than a failure during one.
+    #[test]
+    fn snapshot_refuses_where_it_would_have_to_reach_a_conformance() {
+        assert_eq!(
+            refused(
+                "struct B {\n  n: Int\n}\n\nimpl Snapshot for B {\n  fn snapshot(self) -> B {\n    B(n: self.n)\n  }\n}\n\nfn f(v: Vector<B>) -> Vector<B> {\n  v.snapshot()\n}\n"
+            ),
+            "`snapshot` on a `Vector<B>`, which a conformance answers"
+        );
+    }
+
     /// A type a host module declares is built here rather than asked for
     /// across the boundary.
     ///
@@ -7042,8 +7151,8 @@ mod tests {
                 "fn f() -> Int {\n  let s = Shared(1)\n  1\n}\n",
             ),
             (
-                "`snapshot`",
-                "fn f(a: Array<Int>) -> Array<Int> {\n  a.snapshot()\n}\n",
+                "`snapshot` on a `Vector<B>`, which a conformance answers",
+                "struct B {\n  n: Int\n}\n\nimpl Snapshot for B {\n  fn snapshot(self) -> B {\n    B(n: self.n)\n  }\n}\n\nfn f(v: Vector<B>) -> Vector<B> {\n  v.snapshot()\n}\n",
             ),
             (
                 "a call to `g`, whose parameter `n` is declared `var` and whose argument is not written `var`",

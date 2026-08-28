@@ -923,6 +923,17 @@ impl<'a> Vm<'a> {
                     // a VM run to more than an interpreted one is held to.
                     self.stack.push(value);
                 }
+                Inst::Snapshot => {
+                    let span = running.span_at(pc);
+                    let value = self.pop();
+                    let copied = builtins::snapshot(self, &value, span)?;
+                    // Priced like a builtin's answer, by `Inst::CallBuiltin`'s
+                    // own rule and for its own reason: this is a call to
+                    // `snapshot` written as an instruction rather than
+                    // dispatched by name, so it costs what that call costs.
+                    self.fuel += size_of_value(&copied);
+                    self.stack.push(copied);
+                }
                 Inst::CallBuiltin { name: method, argc } => {
                     let span = running.span_at(pc);
                     let method = name(program, method);
@@ -2151,6 +2162,20 @@ impl Reentry for Callback<'_, '_> {
 impl Callable for Vm<'_> {
     fn allocate_vector(&mut self, elements: Vec<Value>) -> Value {
         Value::Vector(self.heap.allocate(elements))
+    }
+
+    /// The half of `Snapshot` no conformance answers, and nothing else.
+    ///
+    /// The interpreter's own answer dispatches a struct or an enum to its
+    /// `impl Snapshot for Type`, which is a whole Cove function; an
+    /// instruction here cannot run one in the middle of itself, so this
+    /// reports one instead. That is why `Body::method_call` emits
+    /// `cove_ir::Inst::Snapshot` only where the checker settled a receiver
+    /// type that no conformance can be reached through — the refusal is at
+    /// lowering time, and this is the invariant it maintains rather than a
+    /// second place the question is decided.
+    fn snapshot(&mut self, value: &Value, span: Span) -> Result<Value, RuntimeError> {
+        builtins::snapshot(self, value, span)
     }
 
     fn call_value(
@@ -4223,6 +4248,43 @@ mod tests {
             )
             .value(),
             "Int(3)"
+        );
+    }
+
+    /// `snapshot` on a `Vector` allocates storage of its own, and both
+    /// backends see the copy stop sharing.
+    ///
+    /// The observable difference between an ordinary copy and a snapshot is
+    /// exactly this: pushing onto one is seen by the other or it is not.
+    #[test]
+    fn snapshot_of_a_vector_allocates_storage_the_original_does_not_share() {
+        assert_eq!(
+            agree(
+                "export fn main() -> String {\n  var original = Vector.of(1)\n  var alias = original\n  var copy = original.snapshot()\n  alias.push(2)\n  copy.push(3)\n  \"{original.length()} {alias.length()} {copy.length()}\"\n}\n"
+            )
+            .value(),
+            "Str(\"2 2 2\")"
+        );
+    }
+
+    /// A struct's own conformance is reached through the `Call` the checker
+    /// recorded, and the builtin half through the instruction.
+    #[test]
+    fn snapshot_dispatches_to_a_conformance_and_falls_back_to_the_instruction() {
+        let source = "struct B {\n  guests: Vector<String>\n}\n\nimpl Snapshot for B {\n  fn snapshot(self) -> B {\n    B(guests: self.guests.snapshot())\n  }\n}\n\nexport fn main() -> String {\n  var original = B(guests: Vector.of(\"a\"))\n  var copy = original.snapshot()\n  copy.guests.push(\"b\")\n  \"{original.guests.length()} {copy.guests.length()} {5.snapshot()} {[1, 2].snapshot()}\"\n}\n";
+        assert_eq!(agree(source).value(), "Str(\"1 2 5 [1, 2]\")");
+        let listed = main_of(source);
+        assert!(
+            listed
+                .lines()
+                .any(|line| line.contains("call m.B.snapshot")),
+            "the struct's conformance is a call:\n{listed}"
+        );
+        assert!(
+            listed
+                .lines()
+                .any(|line| line.trim().ends_with("snapshot") && !line.contains("call")),
+            "the builtin half is the instruction:\n{listed}"
         );
     }
 

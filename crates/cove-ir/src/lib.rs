@@ -699,6 +699,22 @@ pub enum Inst {
     /// builtin, needs no such thing: it mutates *through* a handle, so a
     /// copy of the handle does as well as the original.
     Freeze,
+    /// Replaces the top of the value stack with the independent copy
+    /// `Snapshot` makes of it.
+    ///
+    /// `x.snapshot()` where no declared conformance answers for `x`. A
+    /// struct or an enum that wrote `impl Snapshot for Type` is an ordinary
+    /// method call and lowers to [`Inst::Call`] like any other, because the
+    /// checker recorded which declaration it reaches; this is the rest of
+    /// the trait — a `Vector`, which allocates storage of its own, and every
+    /// value with nothing mutable inside it, which returns itself.
+    ///
+    /// The lowering emits it only where the checker settled a receiver type
+    /// that cannot reach a conformance, `Vector<T>` included: an instruction
+    /// cannot run a whole Cove function in the middle of itself, so a
+    /// `Vector<SomeStruct>` — whose elements each dispatch — is refused
+    /// before the run rather than failed during it.
+    Snapshot,
     /// Returns the top of the value stack.
     ///
     /// What a function whose `returns` is [`SlotKind::Value`] ends in, and
@@ -929,6 +945,7 @@ fn render_inst(program: &Program, inst: Inst) -> String {
         Inst::PlaceRead => "place-read".to_string(),
         Inst::PlaceWrite => "place-write".to_string(),
         Inst::Freeze => "freeze".to_string(),
+        Inst::Snapshot => "snapshot".to_string(),
         Inst::TestCase(case) => format!("test-case {}", name(case)),
         Inst::GetPayload(index) => format!("get-payload {index}"),
         Inst::IterItems => "iter-items".to_string(),
