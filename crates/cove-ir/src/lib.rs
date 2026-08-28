@@ -677,6 +677,18 @@ pub enum Inst {
     /// and it has to stay the same walk: `is`, aliasing, and struct value
     /// semantics are all decided by where that happens.
     PlaceWrite,
+    /// Pops a place naming a `Vector`, consumes its storage, and pushes the
+    /// `Array` that storage becomes.
+    ///
+    /// The one builtin that needs the place rather than a read of it.
+    /// `freeze` is O(1) because it takes the elements out of storage nobody
+    /// else observes, so `crate::builtins::freeze` counts the handles and
+    /// refuses when the count is not one — and a read of the receiver would
+    /// be the second handle, produced by the very instruction that was
+    /// arranging for the count to be taken. `push`, the other `var self`
+    /// builtin, needs no such thing: it mutates *through* a handle, so a
+    /// copy of the handle does as well as the original.
+    Freeze,
     /// Returns the top of the value stack.
     ///
     /// What a function whose `returns` is [`SlotKind::Value`] ends in, and
@@ -906,6 +918,7 @@ fn render_inst(program: &Program, inst: Inst) -> String {
         Inst::PlacePop => "place-pop".to_string(),
         Inst::PlaceRead => "place-read".to_string(),
         Inst::PlaceWrite => "place-write".to_string(),
+        Inst::Freeze => "freeze".to_string(),
         Inst::TestCase(case) => format!("test-case {}", name(case)),
         Inst::GetPayload(index) => format!("get-payload {index}"),
         Inst::IterItems => "iter-items".to_string(),

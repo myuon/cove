@@ -1145,6 +1145,40 @@ impl<'a> Vm<'a> {
                     self.fuel += place.path.len() as u64;
                     *self.place_mut(&place) = value;
                 }
+                Inst::Freeze => {
+                    let span = running.span_at(pc);
+                    let place = self.pop_place();
+                    self.fuel += place.path.len() as u64;
+                    // Through the place, so that the uniqueness count sees
+                    // the caller's own handle exactly once: a read of the
+                    // receiver would be a second one. This is
+                    // `Interpreter::call_builtin_method`'s `freeze` arm, and
+                    // it calls the same function with the same handle.
+                    //
+                    // The receiver is asked what it is, unlike a typed
+                    // instruction's operand, because this instruction is
+                    // emitted from the *name* `freeze` rather than from a
+                    // settled receiver type — the same ground
+                    // `Inst::CallBuiltin` stands on. So a receiver that is
+                    // not a `Vector` is a program that fails, in the words
+                    // `builtins::call_method` fails in, and not a broken
+                    // invariant.
+                    let value = match self.place_mut(&place) {
+                        Value::Vector(storage) => builtins::freeze(storage, span)?,
+                        other => {
+                            return Err(RuntimeError::new(format!(
+                                "`{}` has no method `freeze`",
+                                other.type_name()
+                            ))
+                            .at(span))
+                        }
+                    };
+                    // `freeze` is O(1) in the storage it consumes and O(n)
+                    // in the `Array` it hands back, which is what
+                    // `Inst::CallBuiltin` charges a builtin's answer by.
+                    self.fuel += size_of_value(&value);
+                    self.stack.push(value);
+                }
                 Inst::TestCase(case) => {
                     let case = name(program, case);
                     let subject = self.stack.last().expect("`test-case` has a value to test");
@@ -4036,6 +4070,44 @@ mod tests {
             )
             .value(),
             "Str(\"Document(title: first, meta: Meta(version: 1)) Document(title: second, meta: Meta(version: 2))\")"
+        );
+    }
+
+    /// `freeze` consumes uniquely owned storage, so it has to see the
+    /// caller's own handle exactly once — which is what taking the place
+    /// rather than a read of it arranges. Both backends answer the array,
+    /// and both refuse when a second alias exists.
+    #[test]
+    fn freeze_through_a_place_consumes_the_storage_it_names() {
+        assert_eq!(
+            agree(
+                "export fn main() -> String {\n  var v = Vector.of(\"a\", \"b\")\n  let frozen = v.freeze()\n  \"{frozen}\"\n}\n"
+            )
+            .value(),
+            "Str(\"[a, b]\")"
+        );
+        let aliased = agree(
+            "export fn main() -> String {\n  var v = Vector.of(\"a\")\n  let other = v\n  let frozen = v.freeze()\n  \"{frozen}\"\n}\n",
+        );
+        assert!(
+            aliased.error().message.contains("uniquely owned"),
+            "{}",
+            aliased.error().message
+        );
+    }
+
+    /// A `break` written inside a call that has already pushed a place has
+    /// to take the place with it, or the loop's exit is reached at a depth
+    /// nothing else reaches it at. That is what `place-pop` is for, and
+    /// `validate` is what would have caught its absence.
+    #[test]
+    fn a_break_inside_a_half_built_call_leaves_no_place_standing() {
+        assert_eq!(
+            agree(
+                "fn add(var n: Int, by: Int) {\n  n += by\n}\n\nexport fn main() -> Int {\n  var total = 0\n  var i = 0\n  while i < 10 {\n    add(var total, by: if i == 3 {\n      break\n    } else {\n      i\n    })\n    i += 1\n  }\n  total\n}\n"
+            )
+            .value(),
+            "Int(3)"
         );
     }
 

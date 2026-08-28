@@ -3539,8 +3539,28 @@ impl<'a, 'l> Body<'a, 'l> {
             return Err(Unsupported::new("`snapshot`", span));
         }
         if builtins::is_mutating_method(name) {
-            if name == "freeze" {
-                return Err(freeze_needs_the_handle(span));
+            if name == "freeze" && self.place_mutability(receiver) == Some(true) {
+                // The one builtin that needs the place rather than a read of
+                // it. `builtins::freeze` counts the handles to the storage
+                // and refuses when the count is not one, and a read of the
+                // receiver would be the second handle — which is why
+                // `Interpreter::call_builtin_method` runs it inside
+                // `place.with_mut` and why `Inst::Freeze` takes a place.
+                //
+                // A receiver that is not a place at all falls through to the
+                // ordinary builtin lowering below, exactly as it does in the
+                // interpreter: `Vector.of(1).freeze()` has no place, and
+                // `builtins::call_method`'s own `freeze` arm answers it from
+                // the temporary — which holds the only handle there is.
+                if !args.is_empty() {
+                    // `freeze()` takes none, and the checker says so before
+                    // this does; refusing keeps the instruction's shape a
+                    // fact rather than something a call site could vary.
+                    return Err(Unsupported::new("`freeze` given arguments", span));
+                }
+                self.place(receiver)?;
+                self.emit(Inst::Freeze, span);
+                return Ok(None);
             }
             match self.place_mutability(receiver) {
                 // A mutable place: fall through to the ordinary
@@ -3557,7 +3577,13 @@ impl<'a, 'l> Body<'a, 'l> {
                         span,
                     ));
                 }
-                None => return Err(mutating_method_needs_a_place(name, span)),
+                // The asymmetry is `Interpreter::call_builtin_method`'s and
+                // is kept: only `push` demands a place. `freeze` on a
+                // temporary is answered by `builtins::call_method` from the
+                // temporary itself, which holds the only handle there is, so
+                // there is no second handle for a place to have prevented.
+                None if name == "push" => return Err(mutating_method_needs_a_place(name, span)),
+                None => {}
             }
         }
         // Which types declare a method of this name is a question for the
@@ -3771,12 +3797,13 @@ fn arguments_in_order(
 /// `total` lives. So the body is walked once first, and
 /// [`Body::rooted`] is what the walk found.
 ///
-/// One form roots a place today: a `var` argument, whose root is the name at
-/// the bottom of the `a.b.c` it is written as. A `var self` receiver roots
-/// one too and is not collected here, because a method that declares one is
-/// declared on a struct or an enum and a binding of such a type is a value
-/// slot already; `Body::place` refuses rather than guessing if that ever
-/// stops being true.
+/// Two forms root a place: a `var` argument, whose root is the name at the
+/// bottom of the `a.b.c` it is written as, and the receiver of `freeze`,
+/// which is the one builtin that needs the storage handle where it lies
+/// rather than a read of it. A `var self` receiver roots one too and is not
+/// collected here, because a method that declares one is declared on a
+/// struct or an enum and a binding of such a type is a value slot already;
+/// `Body::place` refuses rather than guessing if that ever stops being true.
 ///
 /// The answer is a set of *names*, which over-approximates across shadowing
 /// on purpose — see [`Body::rooted`] for why that is free.
@@ -3848,6 +3875,15 @@ fn walk_expr<'a>(expr: &'a Expr, found: &mut BTreeSet<&'a str>) {
             trailing,
             ..
         } => {
+            // `x.freeze()` is a call whose callee is `x.freeze`, so the
+            // receiver is inside the callee rather than beside it.
+            if let ExprKind::Field { base, name } = &callee.kind {
+                if name.node == "freeze" {
+                    if let Some(root) = place_root(base) {
+                        found.insert(root);
+                    }
+                }
+            }
             walk_expr(callee, found);
             for arg in args {
                 if arg.is_var {
@@ -3944,25 +3980,6 @@ fn no_var_argument(args: &[Arg], what: &str) -> Result<(), Unsupported> {
         )),
         None => Ok(()),
     }
-}
-
-/// `freeze`, which the lowering still refuses even where the receiver is a
-/// mutable place.
-///
-/// `push` needs no place because `Value::Vector` is a handle and mutating
-/// through one is mutating through all of them, so the receiver can be read
-/// like any other value's. `freeze` cannot follow it: `Interpreter::freeze`
-/// consumes uniquely-owned storage, so `builtins::freeze`'s uniqueness check
-/// has to see the caller's own handle exactly once — which is why the
-/// interpreter runs it inside `place.with_mut` rather than reading the place
-/// first. Reading the receiver the way the ordinary builtin-method lowering
-/// does would hand `builtins::freeze` a second handle to the same storage,
-/// the clone `Place::read` produces, and the count would be wrong.
-fn freeze_needs_the_handle(span: Span) -> Unsupported {
-    Unsupported::new(
-        "`freeze`, which needs the storage handle where it lives, not a read of it that would count as a second handle",
-        span,
-    )
 }
 
 /// A write to a place the program is not allowed to write.
@@ -4800,7 +4817,7 @@ fn stack_shape(constants: &[Const], inst: Inst) -> Shape {
         Inst::PlaceLocal(_) | Inst::LoadPlace(_) => Shape::on_places(0, 1),
         Inst::PlaceField(_) => Shape::on_places(1, 1),
         Inst::PlacePop => Shape::on_places(1, 0),
-        Inst::PlaceRead => Shape {
+        Inst::PlaceRead | Inst::Freeze => Shape {
             values: (0, 1),
             scalars: (0, 0),
             places: (1, 0),
@@ -6830,16 +6847,191 @@ mod tests {
         );
     }
 
-    /// `freeze` still refuses unconditionally, but for the reason that is
-    /// actually true of it: the interpreter needs the storage handle where it
-    /// lives so its uniqueness check counts the caller's own handle once, and
-    /// reading the receiver first — which is what a mutable place would
-    /// otherwise let `push` do — would be a second handle.
+    /// `freeze` takes the place and not a read of it, which is the whole
+    /// difference between it and `push`: the uniqueness check has to see the
+    /// caller's own handle exactly once, and `place-read` would be a second
+    /// one.
     #[test]
-    fn freeze_is_refused_for_its_own_reason() {
+    fn freeze_takes_the_place_and_not_a_read_of_it() {
         assert_eq!(
-            refused("fn f() -> Int {\n  var v = Vector.of()\n  v.freeze()\n  0\n}\n"),
-            "`freeze`, which needs the storage handle where it lives, not a read of it that would count as a second handle"
+            listing(
+                "fn f() -> Int {\n  var v = Vector.of()\n  let frozen = v.freeze()\n  frozen.length()\n}\n",
+                "f"
+            ),
+            "fn m.f arity=0 frame=2/0 -> Int\n\
+             \x20  0  call-assoc Vector.of argc=0\n\
+             \x20  1  store 0\n\
+             \x20  2  place 0\n\
+             \x20  3  freeze\n\
+             \x20  4  store 1\n\
+             \x20  5  load 1\n\
+             \x20  6  call-builtin length argc=0\n\
+             \x20  7  value-to-scalar\n\
+             \x20  8  return-scalar\n"
+        );
+    }
+
+    /// A receiver that is not a place at all keeps the ordinary builtin
+    /// lowering, exactly as `Interpreter::call_builtin_method` falls through
+    /// to `builtins::call_method` for one: the temporary holds the only
+    /// handle there is, so the count is right without a place.
+    #[test]
+    fn freeze_on_a_temporary_reads_it_like_any_other_builtin() {
+        assert_eq!(
+            listing(
+                "fn f() -> Int {\n  Vector.of(1).freeze().length()\n}\n",
+                "f"
+            ),
+            "fn m.f arity=0 frame=0/0 -> Int\n\
+             \x20  0  const Int(1)\n\
+             \x20  1  call-assoc Vector.of argc=1\n\
+             \x20  2  call-builtin freeze argc=0\n\
+             \x20  3  call-builtin length argc=0\n\
+             \x20  4  value-to-scalar\n\
+             \x20  5  return-scalar\n"
+        );
+    }
+
+    /// A `let` receiver is a read-only place, and `freeze` refuses it the
+    /// way `push` does rather than performing a write the interpreter would
+    /// refuse at run time.
+    #[test]
+    fn freeze_on_a_let_binding_is_refused() {
+        assert_eq!(
+            refused("fn f() -> Int {\n  let v = Vector.of()\n  v.freeze()\n  0\n}\n"),
+            "`freeze` on `v`, which is a read-only place"
+        );
+    }
+
+    // ------------------------------------------------------------- places
+
+    /// `two(var x, var x)` is what a place has to be an alias for: both
+    /// arguments are the same `place 0`, so the callee's two parameters name
+    /// one slot of the caller's frame and the second write sees the first.
+    #[test]
+    fn two_var_arguments_naming_one_binding_push_the_same_place_twice() {
+        assert_eq!(
+            listing(
+                "fn two(var a: Int, var b: Int) {\n  a += 1\n  b += 10\n}\n\nfn f() -> Int {\n  var x = 0\n  two(var x, var x)\n  x\n}\n",
+                "f"
+            ),
+            "fn m.f arity=0 frame=1/0 -> Int\n\
+             \x20  0  const Int(0)\n\
+             \x20  1  store 0\n\
+             \x20  2  place 0\n\
+             \x20  3  place 0\n\
+             \x20  4  call m.two argc=0/0/2\n\
+             \x20  5  pop\n\
+             \x20  6  load 0\n\
+             \x20  7  value-to-scalar\n\
+             \x20  8  return-scalar\n"
+        );
+        assert_eq!(
+            listing(
+                "fn two(var a: Int, var b: Int) {\n  a += 1\n  b += 10\n}\n\nfn f() -> Int {\n  var x = 0\n  two(var x, var x)\n  x\n}\n",
+                "two"
+            ),
+            "fn m.two arity=2 frame=0/0/2 params=[place, place] -> value\n\
+             \x20  0  load-place 0\n\
+             \x20  1  load-place 0\n\
+             \x20  2  place-read\n\
+             \x20  3  value-to-scalar\n\
+             \x20  4  scalar-const 1\n\
+             \x20  5  int Add\n\
+             \x20  6  scalar-to-value Int\n\
+             \x20  7  place-write\n\
+             \x20  8  load-place 1\n\
+             \x20  9  load-place 1\n\
+             \x20 10  place-read\n\
+             \x20 11  value-to-scalar\n\
+             \x20 12  scalar-const 10\n\
+             \x20 13  int Add\n\
+             \x20 14  scalar-to-value Int\n\
+             \x20 15  place-write\n\
+             \x20 16  const Unit\n\
+             \x20 17  return\n"
+        );
+    }
+
+    /// A `var self` receiver is a place argument, and the body writes
+    /// through it: `self.hits += 1` is the place built twice, read through
+    /// once, and written through once.
+    #[test]
+    fn a_var_self_receiver_is_a_place_argument() {
+        let source = "struct Counter {\n  hits: Int\n}\n\nimpl Counter {\n  fn hit(var self) {\n    self.hits += 1\n  }\n}\n\nfn f() -> Int {\n  var c = Counter(hits: 0)\n  c.hit()\n  c.hits\n}\n";
+        assert_eq!(
+            listing(source, "Counter.hit"),
+            "fn m.Counter.hit arity=1 frame=0/0/1 params=[place] receiver -> value\n\
+             \x20  0  load-place 0\n\
+             \x20  1  place-field 0\n\
+             \x20  2  load-place 0\n\
+             \x20  3  place-field 0\n\
+             \x20  4  place-read\n\
+             \x20  5  value-to-scalar\n\
+             \x20  6  scalar-const 1\n\
+             \x20  7  int Add\n\
+             \x20  8  scalar-to-value Int\n\
+             \x20  9  place-write\n\
+             \x20 10  const Unit\n\
+             \x20 11  return\n"
+        );
+        assert_eq!(
+            listing(source, "f"),
+            "fn m.f arity=0 frame=1/0 -> Int\n\
+             \x20  0  const Int(0)\n\
+             \x20  1  make-struct m.Counter fields=hits\n\
+             \x20  2  store 0\n\
+             \x20  3  place 0\n\
+             \x20  4  call m.Counter.hit argc=0/0/1\n\
+             \x20  5  pop\n\
+             \x20  6  load 0\n\
+             \x20  7  get-field-at-scalar 0\n\
+             \x20  8  return-scalar\n"
+        );
+    }
+
+    /// A `var` parameter passed on as a `var` argument is one `load-place`
+    /// and nothing else, which is what makes the callee's callee alias the
+    /// original binding rather than this frame's slot.
+    #[test]
+    fn a_forwarded_var_argument_is_the_place_the_parameter_holds() {
+        assert_eq!(
+            listing(
+                "fn bump(var n: Int) {\n  n += 1\n}\n\nfn forward(var n: Int) {\n  bump(var n)\n}\n",
+                "forward"
+            ),
+            "fn m.forward arity=1 frame=0/0/1 params=[place] -> value\n\
+             \x20  0  load-place 0\n\
+             \x20  1  call m.bump argc=0/0/1\n\
+             \x20  2  return\n"
+        );
+    }
+
+    /// A path deeper than one field is written through a place even where
+    /// the root is an ordinary local: the whole-value update
+    /// `Body::assign_field` performs replaces a local's struct, and it has
+    /// nowhere to put the intermediate one back.
+    #[test]
+    fn a_field_two_deep_is_written_through_a_place() {
+        assert_eq!(
+            listing(
+                "struct Inner {\n  n: Int\n}\n\nstruct Outer {\n  inner: Inner\n}\n\nfn f() -> Int {\n  var o = Outer(inner: Inner(n: 1))\n  o.inner.n = 2\n  o.inner.n\n}\n",
+                "f"
+            ),
+            "fn m.f arity=0 frame=1/0 -> Int\n\
+             \x20  0  const Int(1)\n\
+             \x20  1  make-struct m.Inner fields=n\n\
+             \x20  2  make-struct m.Outer fields=inner\n\
+             \x20  3  store 0\n\
+             \x20  4  place 0\n\
+             \x20  5  place-field 0\n\
+             \x20  6  place-field 0\n\
+             \x20  7  const Int(2)\n\
+             \x20  8  place-write\n\
+             \x20  9  load 0\n\
+             \x20 10  get-field-at 0\n\
+             \x20 11  get-field-at-scalar 0\n\
+             \x20 12  return-scalar\n"
         );
     }
 
