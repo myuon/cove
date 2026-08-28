@@ -667,22 +667,26 @@ impl<'a> Lowering<'a> {
         let mut params: Vec<SlotKind> = Vec::new();
         let mut body = Body::new(self, module);
         body.returns = returns;
+        body.rooted = var_argument_roots(&decl.body);
         if let Some(receiver) = decl.receiver {
-            if receiver.is_var {
-                return Err(Unsupported::new("a `var self` receiver", receiver.span));
-            }
-            // Derived rather than assumed. A receiver is a value in every
-            // program that can be written today, because a method is
-            // declared on a struct or an enum, but which stack it lives in
-            // is the signature's answer and not this pass's guess.
+            // `var self` is a place slot and nothing else is. Which stack an
+            // ordinary receiver lives in is derived rather than assumed — a
+            // receiver is a value in every program that can be written
+            // today, because a method is declared on a struct or an enum,
+            // but that is the signature's answer and not this pass's guess.
             //
-            // A receiver is read-only in the body: a `var self` receiver is
-            // refused above, so nothing writes through this one.
-            let kind = signature
-                .and_then(|signature| signature.receiver.as_ref())
-                .map_or(SlotKind::Value, slot_kind_of);
+            // An ordinary receiver is read-only in the body and a `var self`
+            // one is not, which is the same `writable` a `let` and a `var`
+            // binding get and is what a write through it is checked against.
+            let kind = if receiver.is_var {
+                SlotKind::Place
+            } else {
+                signature
+                    .and_then(|signature| signature.receiver.as_ref())
+                    .map_or(SlotKind::Value, slot_kind_of)
+            };
             params.push(kind);
-            body.declare(Some("self"), false, kind);
+            body.declare(Some("self"), receiver.is_var, kind);
         }
         for (at, param) in decl.params.iter().enumerate() {
             reject_parameter(param, at + 1 == decl.params.len())?;
@@ -699,7 +703,12 @@ impl<'a> Lowering<'a> {
             // parameter was *written* as rather than the array the body
             // sees: `items: Int...` would answer `Int` there, and a scalar
             // slot is exactly what this must not be.
-            let kind = if param.variadic {
+            let kind = if param.is_var {
+                // A `var` parameter does not have a type's slot at all: it
+                // names the caller's storage, and what type that storage
+                // holds says nothing about where the *name* lives.
+                SlotKind::Place
+            } else if param.variadic {
                 SlotKind::Value
             } else {
                 signature
@@ -707,7 +716,7 @@ impl<'a> Lowering<'a> {
                     .map_or(SlotKind::Value, slot_kind_of)
             };
             params.push(kind);
-            body.declare(Some(param.name.node.as_str()), false, kind);
+            body.declare(Some(param.name.node.as_str()), param.is_var, kind);
         }
 
         // The body's value is the function's answer, so it is lowered into
@@ -722,6 +731,7 @@ impl<'a> Lowering<'a> {
             name,
             value_frame_size: finished.value_frame_size,
             scalar_frame_size: finished.scalar_frame_size,
+            place_frame_size: finished.place_frame_size,
             arity: decl.params.len() as u32 + u32::from(decl.receiver.is_some()),
             params,
             returns,
@@ -762,13 +772,14 @@ struct Binding<'a> {
 /// Where a scope begins: [`Body::scope`] takes one and [`Body::release`]
 /// restores it, which is what ends the scope.
 ///
-/// The value and scalar slot counters are numbered separately, so ending a
-/// scope has to roll back both of them, not just how many bindings are live.
+/// The three slot counters are numbered separately, so ending a scope has to
+/// roll all of them back, not just how many bindings are live.
 #[derive(Clone, Copy)]
 struct Mark {
     live: usize,
     next_value: u32,
     next_scalar: u32,
+    next_place: u32,
 }
 
 /// A jump target, resolved once the instruction it points at exists.
@@ -779,22 +790,25 @@ struct Label {
     depth: Option<Depth>,
 }
 
-/// How much stands on each of the two operand stacks.
+/// How much stands on each of the three operand stacks.
 ///
-/// Two numbers rather than one because there are two stacks. Every join point
-/// has to be arrived at with the same amount on both, and `validate` simulates
-/// both, so tracking one and guessing the other would be tracking neither.
+/// Three numbers rather than one because there are three stacks. Every join
+/// point has to be arrived at with the same amount on all of them, and
+/// `validate` simulates all of them, so tracking one and guessing the rest
+/// would be tracking none.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct Depth {
     values: u32,
     scalars: u32,
+    places: u32,
 }
 
 impl Depth {
-    /// Both stacks empty, which is where a body and a loop's operands start.
+    /// Every stack empty, which is where a body and a loop's operands start.
     const EMPTY: Depth = Depth {
         values: 0,
         scalars: 0,
+        places: 0,
     };
 
     /// The depths after one instruction of this shape has run.
@@ -802,6 +816,7 @@ impl Depth {
         Depth {
             values: self.values.saturating_sub(shape.values.0) + shape.values.1,
             scalars: self.scalars.saturating_sub(shape.scalars.0) + shape.scalars.1,
+            places: self.places.saturating_sub(shape.places.0) + shape.places.1,
         }
     }
 }
@@ -812,8 +827,8 @@ struct LoopFrame {
     continue_to: usize,
     /// The operand-stack depths the loop runs at, which is what a `break`
     /// written inside a half-evaluated expression has to get back down to —
-    /// on both stacks, because a half-evaluated `a + b` can have left
-    /// something on either.
+    /// on every stack, because a half-evaluated `a + b` can have left
+    /// something on any of them.
     depth: Depth,
 }
 
@@ -881,6 +896,7 @@ struct Finished {
     arg_spans: BTreeMap<u32, Vec<Span>>,
     value_frame_size: u32,
     scalar_frame_size: u32,
+    place_frame_size: u32,
 }
 
 /// Everything one function's instructions are built from.
@@ -908,16 +924,35 @@ struct Body<'a, 'l> {
     /// The high-water mark of scalar slots handed out: every `Int` or `Bool`
     /// local and temporary.
     scalar_frame_size: u32,
+    /// The high-water mark of place slots handed out, which is every `var`
+    /// parameter and a `var self` receiver: nothing a body declares takes
+    /// one.
+    place_frame_size: u32,
     /// The next value slot number to hand out, restored when a scope ends.
     next_value: u32,
     /// The next scalar slot number to hand out, restored when a scope ends.
     next_scalar: u32,
+    /// The next place slot number to hand out, restored when a scope ends.
+    next_place: u32,
     labels: Vec<Label>,
     patches: Vec<(usize, usize)>,
     loops: Vec<LoopFrame>,
     /// The argument spans of the instructions whose diagnostic quotes source,
     /// which today is the two assertions and nothing else.
     arg_spans: BTreeMap<u32, Vec<Span>>,
+    /// Every name this body uses as the root of a place — see
+    /// [`var_argument_roots`], which collects them before a single
+    /// instruction is emitted.
+    ///
+    /// A binding of one of these names is kept on the value stack even where
+    /// the checker settled it as `Int`, because a place is an index into the
+    /// value stack and cannot address the scalar one. It is a set of names
+    /// rather than of bindings, so it over-approximates across shadowing:
+    /// `bump(var total)` written anywhere in a body puts *every* `total` the
+    /// body declares on the value stack, including ones no place ever names.
+    /// That costs a slot its representation and can cost nothing else,
+    /// because both representations hold the same value.
+    rooted: BTreeSet<&'a str>,
 }
 
 impl<'a, 'l> Body<'a, 'l> {
@@ -932,12 +967,15 @@ impl<'a, 'l> Body<'a, 'l> {
             live: Vec::new(),
             value_frame_size: 0,
             scalar_frame_size: 0,
+            place_frame_size: 0,
             next_value: 0,
             next_scalar: 0,
+            next_place: 0,
             labels: Vec::new(),
             patches: Vec::new(),
             loops: Vec::new(),
             arg_spans: BTreeMap::new(),
+            rooted: BTreeSet::new(),
         }
     }
 
@@ -962,6 +1000,7 @@ impl<'a, 'l> Body<'a, 'l> {
             arg_spans: self.arg_spans,
             value_frame_size: self.value_frame_size,
             scalar_frame_size: self.scalar_frame_size,
+            place_frame_size: self.place_frame_size,
         }
     }
 
@@ -1007,6 +1046,7 @@ impl<'a, 'l> Body<'a, 'l> {
                 Depth {
                     values: 1,
                     scalars: 0,
+                    places: 0,
                 },
             ),
             SlotKind::Scalar(_) => (
@@ -1014,8 +1054,13 @@ impl<'a, 'l> Body<'a, 'l> {
                 Depth {
                     values: 0,
                     scalars: 1,
+                    places: 0,
                 },
             ),
+            // No function answers a place, so no function ends in a return
+            // that reads one: `slot_kind_of` never says `Place`, and
+            // `Lowering::function` reads `returns` from it alone.
+            SlotKind::Place => unreachable!("a function does not answer a place"),
         };
         if self.depth.is_none() {
             if matches!(self.code.last(), Some(Inst::Return | Inst::ReturnScalar)) {
@@ -1115,6 +1160,12 @@ impl<'a, 'l> Body<'a, 'l> {
                 self.scalar_frame_size = self.scalar_frame_size.max(self.next_scalar);
                 slot
             }
+            SlotKind::Place => {
+                let slot = self.next_place;
+                self.next_place += 1;
+                self.place_frame_size = self.place_frame_size.max(self.next_place);
+                slot
+            }
         };
         self.live.push(Binding {
             name,
@@ -1132,20 +1183,22 @@ impl<'a, 'l> Body<'a, 'l> {
             live: self.live.len(),
             next_value: self.next_value,
             next_scalar: self.next_scalar,
+            next_place: self.next_place,
         }
     }
 
     /// Releases every binding declared since `mark`, which is what ends a
     /// scope.
     ///
-    /// Both slot counters go back with them, restored from the mark rather
+    /// Every slot counter goes back with them, restored from the mark rather
     /// than recomputed from what remains live: a scope's declarations are on
-    /// two independent stacks now, and the mark is what was true of both
-    /// before either grew.
+    /// three independent stacks now, and the mark is what was true of all of
+    /// them before any grew.
     fn release(&mut self, mark: Mark) {
         self.live.truncate(mark.live);
         self.next_value = mark.next_value;
         self.next_scalar = mark.next_scalar;
+        self.next_place = mark.next_place;
     }
 
     /// The binding `name` reaches: the most recent declaration of it, because
@@ -1170,7 +1223,7 @@ impl<'a, 'l> Body<'a, 'l> {
         let binding = self.binding(name)?;
         match binding.kind {
             SlotKind::Scalar(what) => Some((binding.slot, what)),
-            SlotKind::Value => None,
+            SlotKind::Value | SlotKind::Place => None,
         }
     }
 
@@ -1200,6 +1253,112 @@ impl<'a, 'l> Body<'a, 'l> {
             ExprKind::Ident(name) => self.binding(name).is_some().then(|| self.is_writable(name)),
             ExprKind::Field { base, .. } => self.place_mutability(base),
             _ => None,
+        }
+    }
+
+    /// Where a binding of `name` declared from something of `kind` actually
+    /// lives.
+    ///
+    /// The one thing that overrides the checker's answer, and it overrides it
+    /// in one direction only: a name a place is rooted at keeps its value
+    /// slot even where the checker settled it as `Int`, because a place is
+    /// an index into the value stack and there is nothing in the scalar
+    /// stack for one to address. See [`Body::rooted`] for what the set is
+    /// and why it over-approximates.
+    fn rooted_kind(&self, name: &str, kind: SlotKind) -> SlotKind {
+        match kind.is_scalar() && self.rooted.contains(name) {
+            true => SlotKind::Value,
+            false => kind,
+        }
+    }
+
+    /// Builds the place `expr` names, leaving it on the place stack.
+    ///
+    /// The two forms are the interpreter's two: a name, which is the root,
+    /// and a field of one, which is `Place::field` — the base's place with
+    /// one more step on the end. A root that is itself a `var` parameter is
+    /// the place that parameter *holds* rather than a place naming its slot,
+    /// which is what makes a `var` argument passed on as a `var` argument
+    /// alias the original binding and not the parameter.
+    ///
+    /// Mutability is not asked here. Every caller has already asked
+    /// [`Body::place_mutability`] and refused in words about what it was
+    /// doing — assigning, or calling a method that writes through its
+    /// receiver — because "read-only" is the same fact reported differently
+    /// depending on who noticed it.
+    fn place(&mut self, expr: &'a Expr) -> Result<(), Unsupported> {
+        match &expr.kind {
+            ExprKind::Ident(name) => {
+                let Some(binding) = self.binding(name) else {
+                    return Err(Unsupported::new(
+                        format!("`{name}` as a place, which is not a local"),
+                        expr.span,
+                    ));
+                };
+                let (slot, kind) = (binding.slot, binding.kind);
+                match kind {
+                    SlotKind::Value => self.emit(Inst::PlaceLocal(slot), expr.span),
+                    SlotKind::Place => self.emit(Inst::LoadPlace(slot), expr.span),
+                    // The pre-pass puts every name a `var` argument is
+                    // rooted at on the value stack, so this is a root it did
+                    // not see rather than one it declined. Refusing says so
+                    // instead of addressing eight bytes of the wrong stack.
+                    SlotKind::Scalar(_) => {
+                        return Err(Unsupported::new(
+                            format!("`{name}` as a place, which is a scalar slot"),
+                            expr.span,
+                        ))
+                    }
+                }
+                Ok(())
+            }
+            ExprKind::Field { base, name } => {
+                // A step is a position, and a position needs the checker to
+                // have settled the type it is a position in. A read can fall
+                // back to the name — `Inst::GetField` scans a list that is
+                // there — and a place cannot, because the same path is
+                // walked to write as well and `Inst::PlaceWrite` descends by
+                // index.
+                let Some(index) = self.field_position(base, &name.node) else {
+                    return Err(Unsupported::new(
+                        format!(
+                            "`{}` as a place, whose field position the checker did not settle",
+                            place_text(expr)
+                        ),
+                        expr.span,
+                    ));
+                };
+                self.place(base)?;
+                self.emit(Inst::PlaceField(index), expr.span);
+                Ok(())
+            }
+            _ => Err(Unsupported::new(
+                "an expression that is not a place, written where one is needed",
+                expr.span,
+            )),
+        }
+    }
+
+    /// Whether an assignment to `target` is a write through a place.
+    ///
+    /// Two shapes are: a target rooted at a `var` parameter, whose storage
+    /// belongs to the caller and cannot be replaced by storing a slot; and a
+    /// path of more than one field, which the whole-value update
+    /// [`Body::assign_field`] performs has no way to put back — it replaces
+    /// a local's struct, and a deeper path would need every struct between
+    /// replaced too.
+    ///
+    /// A single field of a local is left where it was. It is the same write
+    /// either way, and the existing lowering is what `benches/field` runs.
+    fn written_through_a_place(&self, target: &'a Expr) -> bool {
+        match &target.kind {
+            ExprKind::Ident(name) => self.binding(name).is_some_and(|b| b.kind.is_place()),
+            ExprKind::Field { base, .. } => match &base.kind {
+                ExprKind::Ident(name) => self.binding(name).is_some_and(|b| b.kind.is_place()),
+                ExprKind::Field { .. } => self.place_mutability(target).is_some(),
+                _ => false,
+            },
+            _ => false,
         }
     }
 
@@ -1488,10 +1647,14 @@ impl<'a, 'l> Body<'a, 'l> {
                 // typed instruction is settled by: the type the checker gave
                 // what it is declared from. An abstention keeps the slot a
                 // `Value`, and the whole function then reads as it always did.
-                let kind = self.slot_kind(value);
+                let kind = self.rooted_kind(name.node.as_str(), self.slot_kind(value));
                 match kind {
                     SlotKind::Scalar(_) => self.expr_scalar(value)?,
                     SlotKind::Value => self.expr(value)?,
+                    // `slot_kind` answers about a type and never says
+                    // `Place`, and `rooted_kind` only ever moves an answer
+                    // towards the value stack.
+                    SlotKind::Place => unreachable!("a `let` does not declare a place"),
                 }
                 let slot = self.declare(Some(name.node.as_str()), *is_var, kind);
                 self.emit(store_slot(kind, slot), statement.span);
@@ -1765,6 +1928,11 @@ impl<'a, 'l> Body<'a, 'l> {
                     self.expr(value)?;
                     self.emit(Inst::Return, span);
                 }
+                // `slot_kind_of` never answers `Place` about a return type,
+                // so no function's `returns` is one.
+                (SlotKind::Place, _) => {
+                    unreachable!("a function does not answer a place")
+                }
             },
             ExprKind::Break(value) => {
                 // The operand is evaluated for its effects and discarded: a
@@ -1876,8 +2044,18 @@ impl<'a, 'l> Body<'a, 'l> {
             self.emit(Inst::ScalarToValue(what), span);
             return Ok(());
         }
-        if let Some(slot) = self.lookup(name) {
-            self.emit(Inst::LoadLocal(slot), span);
+        if let Some(binding) = self.binding(name) {
+            let (slot, kind) = (binding.slot, binding.kind);
+            match kind {
+                // A `var` parameter's slot holds a place, not the value, so
+                // reading the parameter is loading the place and reading
+                // through it — which is where the caller's own storage is.
+                SlotKind::Place => {
+                    self.emit(Inst::LoadPlace(slot), span);
+                    self.emit(Inst::PlaceRead, span);
+                }
+                _ => self.emit(Inst::LoadLocal(slot), span),
+            }
             return Ok(());
         }
         if name == builtins::NONE_CASE.name {
@@ -2080,6 +2258,9 @@ impl<'a, 'l> Body<'a, 'l> {
         position: Position,
         span: Span,
     ) -> Result<(), Unsupported> {
+        if self.written_through_a_place(target) {
+            return self.assign_through_place(op, target, value, position, span);
+        }
         if matches!(target.kind, ExprKind::Field { .. }) {
             return self.assign_field(op, target, value, position, span);
         }
@@ -2100,6 +2281,9 @@ impl<'a, 'l> Body<'a, 'l> {
             None => match kind {
                 SlotKind::Scalar(_) => self.expr_scalar(value)?,
                 SlotKind::Value => self.expr(value)?,
+                SlotKind::Place => {
+                    unreachable!("a place binding is written by `assign_through_place`")
+                }
             },
             Some(op) => {
                 let Some(op) = binary_op(op) else {
@@ -2138,10 +2322,78 @@ impl<'a, 'l> Body<'a, 'l> {
                         self.expr(value)?;
                         self.emit(inst, span);
                     }
+                    (SlotKind::Place, _) => {
+                        unreachable!("a place binding is written by `assign_through_place`")
+                    }
                 }
             }
         }
         self.emit(store_slot(kind, slot), span);
+        self.unit_at(position, span);
+        Ok(())
+    }
+
+    /// An assignment written through a place: `n = 1` where `n` is a `var`
+    /// parameter, and `a.b.c = 1` wherever the path is longer than one step.
+    ///
+    /// The place is built twice for a compound assignment, once for the read
+    /// and once for the write, rather than duplicated on the place stack.
+    /// Building it is a slot load and a run of `place-field`s, none of which
+    /// can have an effect and none of which can fail, so doing it twice is
+    /// the same program — and the alternative would be an instruction whose
+    /// only reader is this one lowering.
+    ///
+    /// The read happens before the right-hand side is evaluated, which is
+    /// the order `Interpreter::eval`'s `ExprKind::Assign` arm reads in:
+    /// `place.read(span)?` and then `self.eval(env, value)?`.
+    fn assign_through_place(
+        &mut self,
+        op: Option<SourceBinary>,
+        target: &'a Expr,
+        value: &'a Expr,
+        position: Position,
+        span: Span,
+    ) -> Result<(), Unsupported> {
+        match self.place_mutability(target) {
+            Some(true) => {}
+            Some(false) => return Err(read_only_place(&place_text(target), span)),
+            None => return Err(Unsupported::new("assignment to this place", span)),
+        }
+        match op {
+            None => {
+                self.place(target)?;
+                self.expr(value)?;
+            }
+            Some(op) => {
+                let Some(op) = binary_op(op) else {
+                    return Err(Unsupported::new("this compound assignment", span));
+                };
+                // The place read is the left operand, so the type the checker
+                // settled for it is what says whether this is integer
+                // arithmetic — the same question `a + b` asks.
+                let inst = self.binary_inst(op, target, value);
+                // The place the write will consume, built below the one the
+                // read consumes: `place-read` takes the top of the place
+                // stack and `place-write` takes what was under it.
+                self.place(target)?;
+                self.place(target)?;
+                self.emit(Inst::PlaceRead, target.span);
+                if let Inst::IntBinary(typed) = inst {
+                    // A place is read and written as a `Value` whatever it
+                    // holds, so this is the boundary in both directions
+                    // around one typed operator — the same shape a written
+                    // struct field has, and for the same reason.
+                    self.emit(Inst::ValueToScalar, target.span);
+                    self.expr_scalar(value)?;
+                    self.emit(inst, span);
+                    self.emit(Inst::ScalarToValue(int_result(typed)), span);
+                } else {
+                    self.expr(value)?;
+                    self.emit(inst, span);
+                }
+            }
+        }
+        self.emit(Inst::PlaceWrite, span);
         self.unit_at(position, span);
         Ok(())
     }
@@ -2456,15 +2708,20 @@ impl<'a, 'l> Body<'a, 'l> {
             frame.continue_to
         };
         let base = frame.depth;
-        // Whatever the half-evaluated expression around this left on either
-        // stack goes with it, so the loop's exit is reached at the depths the
-        // loop runs at.
+        // Whatever the half-evaluated expression around this left on any of
+        // the stacks goes with it, so the loop's exit is reached at the
+        // depths the loop runs at. A place can be standing for the reason a
+        // value can: `f(var x, if c { break } else { 1 })` has pushed one
+        // before it evaluates the argument the `break` is written in.
         if let Some(depth) = self.depth {
             for _ in base.values..depth.values {
                 self.emit(Inst::Pop, span);
             }
             for _ in base.scalars..depth.scalars {
                 self.emit(Inst::ScalarPop, span);
+            }
+            for _ in base.places..depth.places {
+                self.emit(Inst::PlacePop, span);
             }
         }
         self.jump(Inst::Jump, target, span);
@@ -2494,9 +2751,6 @@ impl<'a, 'l> Body<'a, 'l> {
             return Err(Unsupported::new("a trailing closure", span));
         }
         for arg in args {
-            if arg.is_var {
-                return Err(Unsupported::new("a `var` argument", arg.span));
-            }
             if arg.spread {
                 return Err(Unsupported::new("a `...` spread argument", arg.span));
             }
@@ -2656,26 +2910,47 @@ impl<'a, 'l> Body<'a, 'l> {
         let signature = self.outer.signature(key);
         let mut value_argc = 0;
         let mut scalar_argc = 0;
+        let mut place_argc = 0;
         let mut into = |kind: SlotKind| match kind {
             SlotKind::Value => value_argc += 1,
             SlotKind::Scalar(_) => scalar_argc += 1,
+            SlotKind::Place => place_argc += 1,
         };
 
         match (decl.receiver, receiver) {
             (Some(declared), Some(expr)) => {
                 if declared.is_var {
-                    return Err(Unsupported::new(
-                        format!("a call to `{what}`, which takes a `var self` receiver"),
-                        span,
-                    ));
-                }
-                let kind = signature
-                    .and_then(|signature| signature.receiver.as_ref())
-                    .map_or(SlotKind::Value, slot_kind_of);
-                into(kind);
-                match kind {
-                    SlotKind::Scalar(_) => self.expr_scalar(expr)?,
-                    SlotKind::Value => self.expr(expr)?,
+                    // A `var self` receiver is a place, and it is the one
+                    // the method writes through. The two ways it can fail
+                    // are the interpreter's `var_self_needs_mutable` and
+                    // `var_self_needs_place`, refused here in the words
+                    // `push` is refused in — it is the same question about
+                    // the same receiver.
+                    match self.place_mutability(expr) {
+                        Some(true) => {}
+                        Some(false) => {
+                            return Err(mutating_method_needs_a_mutable_place(
+                                &what,
+                                &place_text(expr),
+                                span,
+                            ))
+                        }
+                        None => return Err(mutating_method_needs_a_place(&what, span)),
+                    }
+                    into(SlotKind::Place);
+                    self.place(expr)?;
+                } else {
+                    let kind = signature
+                        .and_then(|signature| signature.receiver.as_ref())
+                        .map_or(SlotKind::Value, slot_kind_of);
+                    into(kind);
+                    match kind {
+                        SlotKind::Scalar(_) => self.expr_scalar(expr)?,
+                        SlotKind::Value => self.expr(expr)?,
+                        SlotKind::Place => {
+                            unreachable!("only a `var self` receiver is a place")
+                        }
+                    }
                 }
             }
             (Some(_), None) => {
@@ -2697,6 +2972,38 @@ impl<'a, 'l> Body<'a, 'l> {
         // not stand in order.
         let fixed = names.len() - usize::from(variadic);
         for (at, arg) in args.iter().take(fixed).enumerate() {
+            // The marking is at both ends and has to agree at both, which is
+            // what `bind_params` checks at run time and what this checks
+            // before the run.
+            let declared_var = decl.params[at].is_var;
+            if declared_var != arg.is_var {
+                return Err(var_marking_disagrees(
+                    &what,
+                    &decl.params[at].name.node,
+                    declared_var,
+                    arg.span,
+                ));
+            }
+            if declared_var {
+                match self.place_mutability(&arg.value) {
+                    Some(true) => {}
+                    Some(false) => {
+                        return Err(read_only_place(&place_text(&arg.value), arg.span));
+                    }
+                    None => {
+                        return Err(Unsupported::new(
+                            format!(
+                                "a `var` argument for `{}`, which is not a place",
+                                decl.params[at].name.node
+                            ),
+                            arg.span,
+                        ))
+                    }
+                }
+                into(SlotKind::Place);
+                self.place(&arg.value)?;
+                continue;
+            }
             let kind = signature
                 .and_then(|signature| signature.params.get(at))
                 .map_or(SlotKind::Value, slot_kind_of);
@@ -2704,6 +3011,7 @@ impl<'a, 'l> Body<'a, 'l> {
             match kind {
                 SlotKind::Scalar(_) => self.expr_scalar(&arg.value)?,
                 SlotKind::Value => self.expr(&arg.value)?,
+                SlotKind::Place => unreachable!("only a `var` parameter is a place"),
             }
         }
         if variadic {
@@ -2720,6 +3028,7 @@ impl<'a, 'l> Body<'a, 'l> {
             // `Array`, which is what `bind_params` builds when
             // `assign_labels` left it nothing.
             let elements = &args[fixed..];
+            no_var_argument(elements, &what)?;
             for arg in elements {
                 self.expr(&arg.value)?;
             }
@@ -2736,6 +3045,7 @@ impl<'a, 'l> Body<'a, 'l> {
                 function,
                 value_argc,
                 scalar_argc,
+                place_argc,
                 returns_scalar: answer.is_some(),
             },
             span,
@@ -2757,6 +3067,7 @@ impl<'a, 'l> Body<'a, 'l> {
                 span,
             ));
         }
+        no_var_argument(args, op)?;
         for arg in args {
             self.expr(&arg.value)?;
         }
@@ -2793,6 +3104,7 @@ impl<'a, 'l> Body<'a, 'l> {
             return Err(Unsupported::new(format!("`{name}`"), span));
         }
         let quotes_its_arguments = matches!(name, "assert" | "assertEqual");
+        no_var_argument(args, name)?;
         for arg in args {
             self.expr(&arg.value)?;
         }
@@ -2834,6 +3146,7 @@ impl<'a, 'l> Body<'a, 'l> {
             .map(|field| field.name.node.as_str())
             .collect();
         arguments_in_order(&names, args, &decl.name.node, false, span)?;
+        no_var_argument(args, &decl.name.node)?;
         for arg in args {
             self.expr(&arg.value)?;
         }
@@ -2863,6 +3176,7 @@ impl<'a, 'l> Body<'a, 'l> {
         args: &'a [Arg],
         span: Span,
     ) -> Result<(), Unsupported> {
+        no_var_argument(args, case)?;
         for arg in args {
             self.expr(&arg.value)?;
         }
@@ -2898,6 +3212,7 @@ impl<'a, 'l> Body<'a, 'l> {
         args: &'a [Arg],
         span: Span,
     ) -> Result<(), Unsupported> {
+        no_var_argument(args, name)?;
         for arg in args {
             self.expr(&arg.value)?;
         }
@@ -2930,6 +3245,7 @@ impl<'a, 'l> Body<'a, 'l> {
             .map(|field| field.name)
             .collect();
         arguments_in_order(&names, args, builtins::MAP_ENTRY.name, false, span)?;
+        no_var_argument(args, builtins::MAP_ENTRY.name)?;
         for arg in args {
             self.expr(&arg.value)?;
         }
@@ -3195,6 +3511,7 @@ impl<'a, 'l> Body<'a, 'l> {
         // own: none of them is about a handle, and a name a host answers is
         // not a name this package or the builtins have to share.
         if self.resource_op(receiver, name) {
+            no_var_argument(args, name)?;
             // The receiver first and then the arguments, left to right:
             // `Interpreter::eval_method_call` evaluates the receiver before
             // `eval_args`, and the order two effects happen in is observable.
@@ -3300,6 +3617,7 @@ impl<'a, 'l> Body<'a, 'l> {
             return self.call_declared(key, Some(receiver), args, span);
         }
         if builtin_method {
+            no_var_argument(args, name)?;
             self.expr(receiver)?;
             for arg in args {
                 self.expr(&arg.value)?;
@@ -3443,6 +3761,210 @@ fn arguments_in_order(
     Ok(())
 }
 
+/// Every name a body uses as the root of a place, collected before anything
+/// is lowered.
+///
+/// A place is an index into the *value* stack, so a binding a place can be
+/// rooted at has to live there — which is a fact about the whole body and
+/// not about the statement that declares the binding, since
+/// `bump(var total)` is written after `var total = 0` and decides where
+/// `total` lives. So the body is walked once first, and
+/// [`Body::rooted`] is what the walk found.
+///
+/// One form roots a place today: a `var` argument, whose root is the name at
+/// the bottom of the `a.b.c` it is written as. A `var self` receiver roots
+/// one too and is not collected here, because a method that declares one is
+/// declared on a struct or an enum and a binding of such a type is a value
+/// slot already; `Body::place` refuses rather than guessing if that ever
+/// stops being true.
+///
+/// The answer is a set of *names*, which over-approximates across shadowing
+/// on purpose — see [`Body::rooted`] for why that is free.
+fn var_argument_roots(body: &Block) -> BTreeSet<&str> {
+    let mut found = BTreeSet::new();
+    walk_block(body, &mut found);
+    found
+}
+
+/// The name at the bottom of a place expression, or `None` where the
+/// expression does not name one.
+///
+/// `a`, `a.b`, and `a.b.c` all root at `a`, which is `Place::field` carrying
+/// its base's identity down unchanged, read here as a question about syntax.
+fn place_root(expr: &Expr) -> Option<&str> {
+    match &expr.kind {
+        ExprKind::Ident(name) => Some(name),
+        ExprKind::Field { base, .. } => place_root(base),
+        _ => None,
+    }
+}
+
+fn walk_block<'a>(block: &'a Block, found: &mut BTreeSet<&'a str>) {
+    for statement in &block.statements {
+        match &statement.kind {
+            StmtKind::Let { value, .. } => walk_expr(value, found),
+            StmtKind::Expr(expr) => walk_expr(expr, found),
+            StmtKind::Item(_) => {}
+        }
+    }
+    if let Some(tail) = &block.tail {
+        walk_expr(tail, found);
+    }
+}
+
+/// Walks every expression a body holds, recording the roots as it goes.
+///
+/// Exhaustive over [`ExprKind`] rather than defaulting, because a form this
+/// forgot to walk would be a `var` argument the pre-pass did not see and a
+/// binding left on the scalar stack that a place then could not address.
+/// `Body::place` would refuse such a program rather than mislower it, but a
+/// refusal for a construct the corpus writes is a coverage loss, so the
+/// match is written out.
+fn walk_expr<'a>(expr: &'a Expr, found: &mut BTreeSet<&'a str>) {
+    match &expr.kind {
+        ExprKind::Int(_)
+        | ExprKind::Float(_)
+        | ExprKind::Bool(_)
+        | ExprKind::Duration(_)
+        | ExprKind::Unit
+        | ExprKind::Ident(_)
+        | ExprKind::Continue => {}
+        ExprKind::Str(parts) => {
+            for part in parts {
+                if let StrPart::Interpolation(inner) = part {
+                    walk_expr(inner, found);
+                }
+            }
+        }
+        ExprKind::ArrayLit(items) => {
+            for item in items {
+                walk_expr(item, found);
+            }
+        }
+        ExprKind::Field { base, .. } => walk_expr(base, found),
+        ExprKind::Call {
+            callee,
+            args,
+            trailing,
+            ..
+        } => {
+            walk_expr(callee, found);
+            for arg in args {
+                if arg.is_var {
+                    if let Some(root) = place_root(&arg.value) {
+                        found.insert(root);
+                    }
+                }
+                walk_expr(&arg.value, found);
+            }
+            if let Some(trailing) = trailing {
+                walk_expr(trailing, found);
+            }
+        }
+        ExprKind::Unary { operand, .. } => walk_expr(operand, found),
+        ExprKind::Binary { lhs, rhs, .. } => {
+            walk_expr(lhs, found);
+            walk_expr(rhs, found);
+        }
+        ExprKind::Assign { target, value, .. } => {
+            walk_expr(target, found);
+            walk_expr(value, found);
+        }
+        ExprKind::Try(inner) | ExprKind::Await(inner) => walk_expr(inner, found),
+        ExprKind::Block(block) => walk_block(block, found),
+        ExprKind::If {
+            condition,
+            then_branch,
+            else_branch,
+        } => {
+            walk_expr(condition, found);
+            walk_block(then_branch, found);
+            if let Some(branch) = else_branch {
+                walk_expr(branch, found);
+            }
+        }
+        ExprKind::Match { scrutinee, arms } => {
+            walk_expr(scrutinee, found);
+            for arm in arms {
+                walk_expr(&arm.body, found);
+            }
+        }
+        ExprKind::For { iterable, body, .. } => {
+            walk_expr(iterable, found);
+            walk_block(body, found);
+        }
+        ExprKind::While { condition, body } => {
+            walk_expr(condition, found);
+            walk_block(body, found);
+        }
+        ExprKind::Return(value) | ExprKind::Break(value) => {
+            if let Some(value) = value {
+                walk_expr(value, found);
+            }
+        }
+        ExprKind::Lambda { body, .. } | ExprKind::Scope { body, .. } => walk_block(body, found),
+        ExprKind::Range { start, end, .. } => {
+            walk_expr(start, found);
+            walk_expr(end, found);
+        }
+    }
+}
+
+/// A `var` argument written where the parameter is not declared `var`, or a
+/// parameter declared `var` given an argument that is not.
+///
+/// The interpreter refuses both at run time, in `bind_params`, and it
+/// refuses them because the marking is deliberately at both ends: "A `var`
+/// parameter is a non-escaping inout alias, marked at both the declaration
+/// and the call site." A checked program should not reach either message,
+/// and a backend that quietly accepted one would be more permissive than the
+/// oracle.
+fn var_marking_disagrees(what: &str, param: &str, declared_var: bool, span: Span) -> Unsupported {
+    Unsupported::new(
+        match declared_var {
+            true => format!("a call to `{what}`, whose parameter `{param}` is declared `var` and whose argument is not written `var`"),
+            false => format!("a call to `{what}`, whose parameter `{param}` is not declared `var` and whose argument is written `var`"),
+        },
+        span,
+    )
+}
+
+/// A `var` argument written at a call this backend does not route through a
+/// declared function's parameters.
+///
+/// A struct initializer, a host operation, an enum case, a builtin, and a
+/// builtin's associated function all take values; none of them declares a
+/// `var` parameter, so `var` written at one is a program the interpreter
+/// refuses too.
+fn no_var_argument(args: &[Arg], what: &str) -> Result<(), Unsupported> {
+    match args.iter().find(|arg| arg.is_var) {
+        Some(arg) => Err(Unsupported::new(
+            format!("a `var` argument to `{what}`, which takes values"),
+            arg.span,
+        )),
+        None => Ok(()),
+    }
+}
+
+/// `freeze`, which the lowering still refuses even where the receiver is a
+/// mutable place.
+///
+/// `push` needs no place because `Value::Vector` is a handle and mutating
+/// through one is mutating through all of them, so the receiver can be read
+/// like any other value's. `freeze` cannot follow it: `Interpreter::freeze`
+/// consumes uniquely-owned storage, so `builtins::freeze`'s uniqueness check
+/// has to see the caller's own handle exactly once — which is why the
+/// interpreter runs it inside `place.with_mut` rather than reading the place
+/// first. Reading the receiver the way the ordinary builtin-method lowering
+/// does would hand `builtins::freeze` a second handle to the same storage,
+/// the clone `Place::read` produces, and the count would be wrong.
+fn freeze_needs_the_handle(span: Span) -> Unsupported {
+    Unsupported::new(
+        "`freeze`, which needs the storage handle where it lives, not a read of it that would count as a second handle",
+        span,
+    )
+}
+
 /// A write to a place the program is not allowed to write.
 ///
 /// This refuses at lowering time what the interpreter refuses at run time —
@@ -3505,25 +4027,6 @@ fn place_text(expr: &Expr) -> String {
     }
 }
 
-/// `freeze`, which the lowering still refuses even where the receiver is a
-/// mutable place.
-///
-/// `push` needs no place because `Value::Vector` is a handle and mutating
-/// through one is mutating through all of them, so the receiver can be read
-/// like any other value's. `freeze` cannot follow it: `Interpreter::freeze`
-/// consumes uniquely-owned storage, so `builtins::freeze`'s uniqueness check
-/// has to see the caller's own handle exactly once — which is why the
-/// interpreter runs it inside `place.with_mut` rather than reading the place
-/// first. Reading the receiver the way the ordinary builtin-method lowering
-/// does would hand `builtins::freeze` a second handle to the same storage,
-/// the clone `Place::read` produces, and the count would be wrong.
-fn freeze_needs_the_handle(span: Span) -> Unsupported {
-    Unsupported::new(
-        "`freeze`, which needs the storage handle where it lives, not a read of it that would count as a second handle",
-        span,
-    )
-}
-
 /// A call that answers on the value stack, whatever it produced.
 ///
 /// Everything a call can lower to other than [`Inst::Call`] hands back a
@@ -3571,6 +4074,10 @@ fn position_of(kind: SlotKind) -> Position {
     match kind {
         SlotKind::Value => Position::Value,
         SlotKind::Scalar(_) => Position::Scalar,
+        // Only a function's `returns` is asked this, and `slot_kind_of`
+        // never answers `Place` about a return type: a place is what a
+        // parameter can be, not what a value can be.
+        SlotKind::Place => unreachable!("no expression is written in place position"),
     }
 }
 
@@ -3599,6 +4106,12 @@ fn store_slot(kind: SlotKind, slot: u32) -> Inst {
     match kind {
         SlotKind::Value => Inst::StoreLocal(slot),
         SlotKind::Scalar(_) => Inst::StoreScalar(slot),
+        // A place slot is filled by the calling convention and never
+        // written: a `var` parameter is the one thing that has one, and
+        // assigning to a `var` parameter writes through the place rather
+        // than replacing it. Every caller of this has already sent a place
+        // binding down `Body::assign_through_place`.
+        SlotKind::Place => unreachable!("a place slot is never stored into"),
     }
 }
 
@@ -3698,8 +4211,13 @@ fn mentions_dyn(ty: &Type) -> bool {
 /// construct whose meaning is an accident of the order two `if`s are
 /// written in.
 fn reject_parameter(param: &Param, is_last: bool) -> Result<(), Unsupported> {
-    if param.is_var {
-        return Err(Unsupported::new("a `var` parameter", param.span));
+    if param.is_var && param.variadic {
+        // A variadic parameter is bound to an `Array` the call site
+        // collected, which is storage the caller never named, so there is
+        // nothing for a `var` to alias. `bind_params` binds one immutably
+        // and never reads `is_var` for it, so the two markings written
+        // together mean nothing rather than something this declines.
+        return Err(Unsupported::new("a `var` variadic parameter", param.span));
     }
     if param.variadic {
         if !is_last {
@@ -3876,8 +4394,13 @@ fn validate_function(program: &Program, id: FunctionId) -> Result<(), String> {
             function.params.len()
         ));
     }
-    let value_params = function.params.iter().filter(|k| !k.is_scalar()).count() as u32;
+    let value_params = function
+        .params
+        .iter()
+        .filter(|k| matches!(k, SlotKind::Value))
+        .count() as u32;
     let scalar_params = function.params.iter().filter(|k| k.is_scalar()).count() as u32;
+    let place_params = function.params.iter().filter(|k| k.is_place()).count() as u32;
     if value_params > function.value_frame_size {
         return Err(format!(
             "takes {value_params} value arguments but has a value frame of {}",
@@ -3890,23 +4413,29 @@ fn validate_function(program: &Program, id: FunctionId) -> Result<(), String> {
             function.scalar_frame_size
         ));
     }
+    if place_params > function.place_frame_size {
+        return Err(format!(
+            "takes {place_params} place arguments but has a place frame of {}",
+            function.place_frame_size
+        ));
+    }
     // One return instruction per function, decided by where the answer
     // travels: a caller reads exactly the stack `returns` names, and nothing
-    // tells it which of the two a given return happened to use.
-    let (ends_in, other) = match function.returns {
-        SlotKind::Value => (Inst::Return, Inst::ReturnScalar),
-        SlotKind::Scalar(_) => (Inst::ReturnScalar, Inst::Return),
+    // tells it which of the two a given return happened to use. There is no
+    // third: a place is what a parameter can be and not what a call can
+    // answer, so a function that claimed to answer one is refused here
+    // rather than left for a return instruction that does not exist.
+    let (ends_in, other, stack) = match function.returns {
+        SlotKind::Value => (Inst::Return, Inst::ReturnScalar, "value"),
+        SlotKind::Scalar(_) => (Inst::ReturnScalar, Inst::Return, "scalar"),
+        SlotKind::Place => return Err("answers a place, which no call reads".to_string()),
     };
     if function.code.last() != Some(&ends_in) {
         return Err(format!("does not end in a `{}`", render_return(ends_in)));
     }
     if function.code.contains(&other) {
         return Err(format!(
-            "answers on the {} stack and holds a `{}`",
-            match function.returns {
-                SlotKind::Value => "value",
-                SlotKind::Scalar(_) => "scalar",
-            },
+            "answers on the {stack} stack and holds a `{}`",
             render_return(other)
         ));
     }
@@ -3954,6 +4483,26 @@ fn validate_function(program: &Program, id: FunctionId) -> Result<(), String> {
                     )));
                 }
             }
+            Inst::LoadPlace(slot) => {
+                if slot >= function.place_frame_size {
+                    return Err(at(format!(
+                        "reaches slot {slot} of a frame of {}",
+                        function.place_frame_size
+                    )));
+                }
+            }
+            // A place names a slot of the *value* stack, which is the whole
+            // of why `crate::lower` keeps a binding a place is rooted at
+            // there. Checking it here is what makes that a fact rather than
+            // an intention.
+            Inst::PlaceLocal(slot) => {
+                if slot >= function.value_frame_size {
+                    return Err(at(format!(
+                        "names value slot {slot} of a frame of {}",
+                        function.value_frame_size
+                    )));
+                }
+            }
             Inst::LoadCapture(index) => {
                 if index as usize >= function.captures.len() {
                     return Err(at(format!(
@@ -3975,6 +4524,7 @@ fn validate_function(program: &Program, id: FunctionId) -> Result<(), String> {
                 function: target,
                 value_argc,
                 scalar_argc,
+                place_argc,
                 returns_scalar,
             } => {
                 let Some(target) = program.functions.get(target.0 as usize) else {
@@ -3983,20 +4533,25 @@ fn validate_function(program: &Program, id: FunctionId) -> Result<(), String> {
                         target.0
                     )));
                 };
-                if target.arity != value_argc + scalar_argc {
+                if target.arity != value_argc + scalar_argc + place_argc {
                     return Err(at(format!(
                         "calls `{}.{}` with {} arguments, which takes {}",
                         target.module,
                         target.name,
-                        value_argc + scalar_argc,
+                        value_argc + scalar_argc + place_argc,
                         target.arity
                     )));
                 }
-                let values = target.params.iter().filter(|k| !k.is_scalar()).count() as u32;
+                let values = target
+                    .params
+                    .iter()
+                    .filter(|k| matches!(k, SlotKind::Value))
+                    .count() as u32;
                 let scalars = target.params.iter().filter(|k| k.is_scalar()).count() as u32;
-                if values != value_argc || scalars != scalar_argc {
+                let places = target.params.iter().filter(|k| k.is_place()).count() as u32;
+                if values != value_argc || scalars != scalar_argc || places != place_argc {
                     return Err(at(format!(
-                        "calls `{}.{}` with {value_argc} value and {scalar_argc} scalar arguments, which takes {values} and {scalars}",
+                        "calls `{}.{}` with {value_argc} value, {scalar_argc} scalar and {place_argc} place arguments, which takes {values}, {scalars} and {places}",
                         target.module, target.name
                     )));
                 }
@@ -4042,8 +4597,8 @@ fn validate_function(program: &Program, id: FunctionId) -> Result<(), String> {
     // Both operand stacks, simulated over every path control can take. Code
     // no path reaches is not simulated: it cannot be run, so its depths are
     // not a fact about anything.
-    let mut depths: Vec<Option<(i64, i64)>> = vec![None; length];
-    let mut pending = vec![(0usize, (0i64, 0i64))];
+    let mut depths: Vec<Option<(i64, i64, i64)>> = vec![None; length];
+    let mut pending = vec![(0usize, (0i64, 0i64, 0i64))];
     while let Some((pc, depth)) = pending.pop() {
         if pc >= length {
             return Err(format!(
@@ -4054,8 +4609,8 @@ fn validate_function(program: &Program, id: FunctionId) -> Result<(), String> {
         if let Some(seen) = depths[pc] {
             if seen != depth {
                 return Err(format!(
-                    "{pc}: reached with {} values and {} scalars on the stack and with {} and {}",
-                    depth.0, depth.1, seen.0, seen.1
+                    "{pc}: reached with {} values, {} scalars and {} places on the stack and with {}, {} and {}",
+                    depth.0, depth.1, depth.2, seen.0, seen.1, seen.2
                 ));
             }
             continue;
@@ -4075,9 +4630,16 @@ fn validate_function(program: &Program, id: FunctionId) -> Result<(), String> {
                 shape.scalars.0, depth.1
             ));
         }
+        if depth.2 < i64::from(shape.places.0) {
+            return Err(format!(
+                "{pc}: takes {} places off a stack of {}",
+                shape.places.0, depth.2
+            ));
+        }
         let after = (
             depth.0 - i64::from(shape.values.0) + i64::from(shape.values.1),
             depth.1 - i64::from(shape.scalars.0) + i64::from(shape.scalars.1),
+            depth.2 - i64::from(shape.places.0) + i64::from(shape.places.1),
         );
         match inst {
             // None continues: a return leaves the frame, whichever stack it
@@ -4148,15 +4710,18 @@ fn validate_function(program: &Program, id: FunctionId) -> Result<(), String> {
 
 /// How many operands an instruction takes off each stack and puts back.
 ///
-/// Two pairs rather than one, because there are two stacks and an
-/// instruction may read one and write the other: that is what a boundary
-/// instruction *is*.
+/// Three pairs rather than one, because there are three stacks and an
+/// instruction may read one and write another: that is what a boundary
+/// instruction *is*, and reading a place is the boundary between the place
+/// stack and the value stack.
 #[derive(Clone, Copy)]
 struct Shape {
     /// Taken off, and put back on, the value stack.
     values: (u32, u32),
     /// Taken off, and put back on, the scalar stack.
     scalars: (u32, u32),
+    /// Taken off, and put back on, the place stack.
+    places: (u32, u32),
 }
 
 impl Shape {
@@ -4165,6 +4730,7 @@ impl Shape {
         Shape {
             values: (taken, left),
             scalars: (0, 0),
+            places: (0, 0),
         }
     }
 
@@ -4173,6 +4739,16 @@ impl Shape {
         Shape {
             values: (0, 0),
             scalars: (taken, left),
+            places: (0, 0),
+        }
+    }
+
+    /// An instruction that touches only the place stack.
+    const fn on_places(taken: u32, left: u32) -> Shape {
+        Shape {
+            values: (0, 0),
+            scalars: (0, 0),
+            places: (taken, left),
         }
     }
 }
@@ -4195,6 +4771,7 @@ fn stack_shape(constants: &[Const], inst: Inst) -> Shape {
         Inst::GetFieldAtScalar(_) => Shape {
             values: (1, 0),
             scalars: (0, 1),
+            places: (0, 0),
         },
         Inst::Binary(_) | Inst::SetField(_) => Shape::on_values(2, 1),
         // The typed operator is the scalar stack's: two `i64` in, one out.
@@ -4209,10 +4786,29 @@ fn stack_shape(constants: &[Const], inst: Inst) -> Shape {
         Inst::ScalarToValue(_) => Shape {
             values: (0, 1),
             scalars: (1, 0),
+            places: (0, 0),
         },
         Inst::ValueToScalar => Shape {
             values: (1, 0),
             scalars: (0, 1),
+            places: (0, 0),
+        },
+        // The place stack's own three, and then the two that cross out of
+        // it. A place is built and refined where it stands; reading one puts
+        // a `Value` on the value stack and writing one takes a `Value` off
+        // it, which is the same kind of boundary the two above are.
+        Inst::PlaceLocal(_) | Inst::LoadPlace(_) => Shape::on_places(0, 1),
+        Inst::PlaceField(_) => Shape::on_places(1, 1),
+        Inst::PlacePop => Shape::on_places(1, 0),
+        Inst::PlaceRead => Shape {
+            values: (0, 1),
+            scalars: (0, 0),
+            places: (1, 0),
+        },
+        Inst::PlaceWrite => Shape {
+            values: (1, 0),
+            scalars: (0, 0),
+            places: (1, 0),
         },
         Inst::Jump(_) => Shape::on_values(0, 0),
         Inst::JumpIfFalse(_) | Inst::JumpIfTrue(_) | Inst::Return => Shape::on_values(1, 0),
@@ -4222,11 +4818,13 @@ fn stack_shape(constants: &[Const], inst: Inst) -> Shape {
         Inst::Call {
             value_argc,
             scalar_argc,
+            place_argc,
             returns_scalar,
             ..
         } => Shape {
             values: (value_argc, u32::from(!returns_scalar)),
             scalars: (scalar_argc, u32::from(returns_scalar)),
+            places: (place_argc, 0),
         },
         Inst::CallHost { argc, .. } | Inst::MakeBuiltin { argc, .. } => Shape::on_values(argc, 1),
         // The receiver sits below the arguments, and for a resource call the
@@ -4240,6 +4838,7 @@ fn stack_shape(constants: &[Const], inst: Inst) -> Shape {
         Inst::MakeRange { .. } => Shape {
             values: (0, 1),
             scalars: (2, 0),
+            places: (0, 0),
         },
         Inst::Concat(parts) => Shape::on_values(parts, 1),
         Inst::MakeStruct { fields, .. } => Shape::on_values(field_count(constants, fields), 1),
@@ -5942,8 +6541,8 @@ mod tests {
                 "async fn g() -> Int {\n  1\n}\n\nfn f() -> Int {\n  await g()\n}\n",
             ),
             (
-                "a `var` parameter",
-                "fn g(var x: Int) {\n  x = 1\n}\n",
+                "a `var` variadic parameter",
+                "fn g(var x: Int...) -> Int {\n  1\n}\n",
             ),
             (
                 "a `dyn` parameter",
@@ -5958,8 +6557,12 @@ mod tests {
                 "fn f(a: Array<Int>) -> Array<Int> {\n  a.snapshot()\n}\n",
             ),
             (
-                "assignment to a field of anything but a local",
-                "struct Q {\n  x: Int\n}\n\nstruct P {\n  q: Q\n}\n\nfn f() -> Int {\n  var p = P(q: Q(x: 1))\n  p.q.x = 2\n  p.q.x\n}\n",
+                "a call to `g`, whose parameter `n` is declared `var` and whose argument is not written `var`",
+                "fn g(var n: Int) {\n  n = 1\n}\n\nfn f() -> Int {\n  var x = 1\n  g(x)\n  x\n}\n",
+            ),
+            (
+                "a call to `g`, whose parameter `n` is not declared `var` and whose argument is written `var`",
+                "fn g(n: Int) -> Int {\n  n\n}\n\nfn f() -> Int {\n  var x = 1\n  g(var x)\n}\n",
             ),
             (
                 "a call through the local `g`",
@@ -6753,7 +7356,7 @@ mod tests {
         }
         assert!(validate(&program)
             .expect_err("a call on the wrong stacks is refused")
-            .contains("with 1 value and 0 scalar arguments, which takes 0 and 1"),);
+            .contains("with 1 value, 0 scalar and 0 place arguments, which takes 0, 1 and 0"),);
     }
 
     /// And the answer's stack likewise: a caller that read the wrong one

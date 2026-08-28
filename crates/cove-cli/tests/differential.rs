@@ -142,7 +142,20 @@ use cove_sema::resolve::Program as Checked;
 /// refuse for that instead: `examples:cq` and `examples:cqSample` for
 /// `freeze`, and `examples:server` for `http.Route`, which initializes a type
 /// a host declares.
-const LOWERED_FLOOR: usize = 59;
+/// 59 to 64: the VM has a place model. A `var` parameter's slot holds a
+/// place — an index into the value stack and the field positions to walk from
+/// it — and a `var` argument and a `var self` receiver travel on a third
+/// stack the way a scalar argument travels on the second. Five cases refused
+/// for a `var` argument or a `var self` receiver and all five lower now:
+/// `tests/e2e:fn_var_param`, `tests/e2e:values_bool`, `tests/e2e:values_unit`,
+/// `tests/e2e:type_impl`, and `tests/e2e:type_struct_copy`.
+///
+/// The `freeze` count went from four to five while this was happening, which
+/// is worth recording rather than leaving as a number that moved the wrong
+/// way. `examples:values` refused for a `var self` receiver and now reaches
+/// `self.guests.freeze()` further down the same program, which is the next
+/// thing the place model is for.
+const LOWERED_FLOOR: usize = 64;
 
 // ------------------------------------------------------------------ the test
 

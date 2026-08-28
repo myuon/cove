@@ -42,6 +42,31 @@
 //! scalar slot without moving, and an answer comes back the way it was
 //! computed.
 //!
+//! # A third stack, for the arguments that are not values either
+//!
+//! A `var` parameter does not receive a copy of anything. It names the
+//! caller's own storage, so that `bump(var total)` adds to the binding the
+//! caller wrote and not to a copy that is written back afterwards — which is
+//! observably a different language, since `two(var x, var x)` answers 11
+//! rather than 10 and only aliasing gives that answer.
+//!
+//! What names storage here is a *place*: an index into the value stack,
+//! together with the field positions to walk from what stands there.
+//! [`SlotKind::Place`] is the third kind a slot can have, a `var`
+//! parameter's argument travels on the third stack, and
+//! [`Function::place_frame_size`] is that stack's window the way the other
+//! two have theirs. Nothing about it is new machinery: it is
+//! [`SlotKind::Scalar`]'s arrangement asked of a third representation, and
+//! `Inst::Call`'s per-stack counts, `Function::params`, and `validate`
+//! already generalise over the question.
+//!
+//! An index rather than a pointer, because the value stack is one `Vec` that
+//! grows, and an index survives a reallocation that a borrow could not even
+//! be written across. It is sound for as long as the frame it addresses is
+//! live, and a callee cannot outlive its caller while nothing lowers a
+//! closure — see the note on [`Inst::PlaceLocal`], which is where that
+//! dependency is stated for whoever lowers one.
+//!
 //! # What is not here
 //!
 //! No serialization, no version number, no compatibility promise. Nothing
@@ -126,6 +151,20 @@ pub struct Function {
     /// type names and becomes the callee's slot there without moving; see
     /// `params`.
     pub scalar_frame_size: u32,
+    /// How many slots of the *place* stack one call needs, which today is
+    /// every `var` parameter and a `var self` receiver and nothing else.
+    ///
+    /// [`Inst::LoadPlace`] addresses `0..place_frame_size` of the place
+    /// stack; nothing else does, and nothing stores into it, because a place
+    /// slot is filled by the calling convention and never assigned. A body
+    /// declares no place slots of its own: `var` is a property of a
+    /// parameter, and a local that a `var` argument is rooted at is an
+    /// ordinary value slot that a place *names* rather than a place itself.
+    ///
+    /// Not a root set, and not a hole in one either. A place holds an index
+    /// and a path of field positions, so it reaches a `Value` only by way of
+    /// the value stack, whose own window is already scanned.
+    pub place_frame_size: u32,
     /// How many arguments a call must supply, `self` included.
     pub arity: u32,
     /// Which stack each of those arguments arrives on, in the order a call
@@ -248,18 +287,36 @@ pub enum Scalar {
 /// `None`, or `Some(Ty::Unknown(_))` — is not a settled type and keeps the
 /// representation every slot had before, which is what makes a function the
 /// checker said nothing useful about run exactly as it ran yesterday.
+///
+/// [`SlotKind::Place`] is not settled that way, because it is not a question
+/// about a type at all: a parameter written `var` names the caller's storage
+/// whatever its type is, and a parameter written without it receives a copy
+/// whatever its type is. So the declaration decides that one and the checker
+/// decides between the other two.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SlotKind {
     /// A `Value` in the value stack.
     Value,
     /// An `i64` in the scalar stack, meaning what [`Scalar`] says.
     Scalar(Scalar),
+    /// A place in the place stack: an index into the value stack and the
+    /// field positions to walk from it.
+    ///
+    /// What a `var` parameter's slot holds. Reading such a parameter is a
+    /// [`Inst::LoadPlace`] and then a [`Inst::PlaceRead`], and writing to it
+    /// is a [`Inst::PlaceWrite`]; the slot itself is never the value.
+    Place,
 }
 
 impl SlotKind {
     /// Whether this slot lives in the scalar stack.
     pub fn is_scalar(self) -> bool {
         matches!(self, SlotKind::Scalar(_))
+    }
+
+    /// Whether this slot lives in the place stack.
+    pub fn is_place(self) -> bool {
+        matches!(self, SlotKind::Place)
     }
 }
 
@@ -399,12 +456,14 @@ pub enum Inst {
     JumpIfTrue(u32),
     /// Duplicates the top of the stack.
     Dup,
-    /// Calls a lowered function whose arguments are already on the two
-    /// stacks: `value_argc` of them on the value stack and `scalar_argc` on
-    /// the scalar stack, each in the callee's parameter order within its own
-    /// stack. `returns_scalar` says which stack the answer comes back on.
+    /// Calls a lowered function whose arguments are already on the three
+    /// stacks: `value_argc` of them on the value stack, `scalar_argc` on the
+    /// scalar stack, and `place_argc` on the place stack, each in the
+    /// callee's parameter order within its own stack. `returns_scalar` says
+    /// which stack the answer comes back on; no call answers a place,
+    /// because a place is not a value a function can return.
     ///
-    /// The three numbers are in the instruction rather than looked up in the
+    /// The four numbers are in the instruction rather than looked up in the
     /// callee, and both reasons are structural. `crate::lower::stack_shape`
     /// is a pure function of one instruction and has no function table to
     /// ask; and a recursive call is emitted before its own callee's
@@ -416,6 +475,7 @@ pub enum Inst {
         function: FunctionId,
         value_argc: u32,
         scalar_argc: u32,
+        place_argc: u32,
         returns_scalar: bool,
     },
     /// Calls a Host operation. `module` and `op` are `Const::Name`.
@@ -550,6 +610,73 @@ pub enum Inst {
     /// `expr?`: pops a `Result` or `Option`, pushes its payload, or returns
     /// the failure from this call.
     Try,
+    /// Pushes the place that names one of this frame's *value* slots, with
+    /// no path: the whole of what stands in that slot.
+    ///
+    /// This is where a `var` argument rooted at a local comes from, and it
+    /// is where the place model's one soundness obligation lives. A place is
+    /// an absolute index into the value stack rather than a borrow of it,
+    /// which is what lets the `Vec` reallocate under a place that is
+    /// standing, and it is valid for exactly as long as the frame it
+    /// addresses is live.
+    ///
+    /// **That is sound because a callee cannot outlive its caller.** Nothing
+    /// lowers a closure, so nothing a lowered program can build holds a
+    /// place past the return of the frame that made it: a place travels down
+    /// into a call and back out as nothing at all. A closure would break
+    /// exactly that, since it can be returned, and whoever lowers one has to
+    /// decide what a captured `var` binding is before this instruction can
+    /// keep being an index. This paragraph is the note that says so.
+    ///
+    /// The slot is a [`SlotKind::Value`] one, checked by `validate` rather
+    /// than asked about here: a place cannot address the scalar stack, which
+    /// is why `crate::lower` puts a binding that a `var` argument is rooted
+    /// at into a value slot even where the checker settled it as `Int`.
+    PlaceLocal(u32),
+    /// Pushes a copy of the place in one of this frame's *place* slots.
+    ///
+    /// A `var` parameter's slot holds a place, so this is how the parameter
+    /// is reached at all: passing it on as a `var` argument is this alone,
+    /// which is what makes the callee's callee alias the original binding
+    /// rather than the parameter's own slot; reading it is this and a
+    /// [`Inst::PlaceRead`]; writing to it is this and a
+    /// [`Inst::PlaceWrite`].
+    LoadPlace(u32),
+    /// Refines the place on top of the place stack by one field, named by
+    /// its position.
+    ///
+    /// The position is knowable for the reason [`Inst::GetFieldAt`]'s is:
+    /// the lowering emitted this only where the checker settled the type the
+    /// step is taken from, and a struct's fields stand in declaration order
+    /// wherever one is built. A step whose position the checker did not
+    /// settle has no lowering at all and is refused, rather than falling
+    /// back to a name the way a *read* can — a read by name is a scan of a
+    /// list that is there, and a place is a path that has to be walked twice,
+    /// once to read and once to write.
+    PlaceField(u32),
+    /// Discards the top of the place stack.
+    ///
+    /// What a `break` written inside a half-built call's arguments needs —
+    /// `f(var x, if c { break } else { 1 })` leaves a place standing that
+    /// the loop's exit is not reached with — exactly as [`Inst::Pop`] and
+    /// [`Inst::ScalarPop`] are what one written inside a half-evaluated
+    /// value or scalar expression needs.
+    PlacePop,
+    /// Pops a place and pushes what it names onto the value stack.
+    ///
+    /// Reading a place clones, which is the value-semantics rule and is what
+    /// `Place::read` does in `crates/cove-runtime/src/interp.rs`.
+    PlaceRead,
+    /// Pops a value off the value stack and a place off the place stack, and
+    /// writes the value where the place names.
+    ///
+    /// The walk down the path makes each struct it descends through private
+    /// again, which is the whole of why a copied struct's fields can be
+    /// written without the copy being observable. `Place::with_mut` in the
+    /// interpreter is the same walk with the same call at the same steps,
+    /// and it has to stay the same walk: `is`, aliasing, and struct value
+    /// semantics are all decided by where that happens.
+    PlaceWrite,
     /// Returns the top of the value stack.
     ///
     /// What a function whose `returns` is [`SlotKind::Value`] ends in, and
@@ -659,6 +786,13 @@ pub fn render(program: &Program, id: FunctionId) -> String {
         function.value_frame_size,
         function.scalar_frame_size
     ));
+    // The third window is written only where there is one, exactly as
+    // `params` and `captures` below are written only where they are not
+    // empty. A listing should say what a function has and stay quiet about
+    // what it does not, and almost no function has a place slot.
+    if function.place_frame_size > 0 {
+        out.push_str(&format!("/{}", function.place_frame_size));
+    }
     if !function.params.is_empty() {
         let params: Vec<&str> = function.params.iter().copied().map(render_kind).collect();
         out.push_str(&format!(" params=[{}]", params.join(", ")));
@@ -684,6 +818,7 @@ fn render_kind(kind: SlotKind) -> &'static str {
         SlotKind::Value => "value",
         SlotKind::Scalar(Scalar::Int) => "Int",
         SlotKind::Scalar(Scalar::Bool) => "Bool",
+        SlotKind::Place => "place",
     }
 }
 
@@ -721,12 +856,21 @@ fn render_inst(program: &Program, inst: Inst) -> String {
             function,
             value_argc,
             scalar_argc,
+            place_argc,
             returns_scalar,
         } => {
             let target = program.function(function);
             let answer = if returns_scalar { " -> scalar" } else { "" };
+            // The third count only where there is one, for the reason
+            // `render` writes the third frame window only where there is
+            // one: a call that passes no place has nothing to say about it.
+            let places = if place_argc > 0 {
+                format!("/{place_argc}")
+            } else {
+                String::new()
+            };
             format!(
-                "call {}.{} argc={value_argc}/{scalar_argc}{answer}",
+                "call {}.{} argc={value_argc}/{scalar_argc}{places}{answer}",
                 target.module, target.name
             )
         }
@@ -756,6 +900,12 @@ fn render_inst(program: &Program, inst: Inst) -> String {
         Inst::CallBuiltinAssoc { ty, name: n, argc } => {
             format!("call-assoc {}.{} argc={argc}", name(ty), name(n))
         }
+        Inst::PlaceLocal(slot) => format!("place {slot}"),
+        Inst::LoadPlace(slot) => format!("load-place {slot}"),
+        Inst::PlaceField(index) => format!("place-field {index}"),
+        Inst::PlacePop => "place-pop".to_string(),
+        Inst::PlaceRead => "place-read".to_string(),
+        Inst::PlaceWrite => "place-write".to_string(),
         Inst::TestCase(case) => format!("test-case {}", name(case)),
         Inst::GetPayload(index) => format!("get-payload {index}"),
         Inst::IterItems => "iter-items".to_string(),

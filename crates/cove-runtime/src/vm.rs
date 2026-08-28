@@ -72,15 +72,31 @@
 //! struct, without a `Value` built only to be handed to `ValueToScalar` and
 //! thrown away.
 //!
-//! **A scalar slot holds no reference.** That is what it is for, and it is
-//! also what the root set is: the two stacks are numbered separately, so a
-//! scalar slot is not a number in the value stack's space at all, and a
-//! frame's whole value window, `stack[base .. base + value_frame_size]`, is
-//! its root set with nothing inside it to skip. There is no collection in
-//! this VM yet — nothing the lowering covers allocates growable storage — so
-//! this is a statement about where the roots are rather than code that reads
-//! them, said here so that whoever writes that collection does not have to
-//! infer it.
+//! # A third stack, for the places a `var` parameter names
+//!
+//! A `var` parameter names the caller's own storage rather than a copy of
+//! it, and what names storage here is a *place*: an index into the value
+//! stack, and the field positions to walk from what stands there. Those live
+//! in a third `Vec` beside the other two, a frame is a window into all
+//! three, and `cove_ir::Inst::Call` carries a third argument count.
+//!
+//! `Place`, below, says why an index is the right thing to hold and what its
+//! validity rests on. The short version is that the value stack is one `Vec`
+//! that reallocates, and that a callee cannot outlive its caller while
+//! nothing lowers a closure.
+//!
+//! **A scalar slot holds no reference, and neither does a place.** That is
+//! what the root set is: the stacks are numbered separately, so a scalar slot
+//! is not a number in the value stack's space at all, and a frame's whole
+//! value window, `stack[base .. base + value_frame_size]`, is its root set
+//! with nothing inside it to skip. A place holds an index into that same
+//! window, so whatever it reaches is reachable from what is already scanned.
+//! There is no collection in this VM yet — nothing the lowering covers
+//! allocates growable storage — so this is a statement about where the roots
+//! are rather than code that reads them, said here so that whoever writes
+//! that collection does not have to infer it. A *moving* collector would need
+//! one thing more, which is that a place is an index into the storage it is
+//! moving.
 //!
 //! # Fuel is charged by the block, not by the instruction
 //!
@@ -103,8 +119,8 @@
 //!
 //! # What is not here
 //!
-//! Closures, tasks, `var` places, and everything else `cove_ir::lower`
-//! reports as [`cove_ir::Unsupported`]. ADR 0019's no-silent-fallback rule is
+//! Closures, tasks, and everything else `cove_ir::lower` reports as
+//! [`cove_ir::Unsupported`]. ADR 0019's no-silent-fallback rule is
 //! what makes that the right shape: a program the lowering refuses never
 //! reaches this, so there is no construct this can be wrong about.
 
@@ -223,6 +239,91 @@ struct Frame {
     /// this one, so which stack a slot lives in is decided by which
     /// instruction addresses it rather than by anything read at run time.
     scalar_base: usize,
+    /// Where this frame's place slots begin in the place stack, read from
+    /// the other side exactly as the two above are: it is the caller's place
+    /// operand top before it pushed the place arguments, so those arguments
+    /// become this frame's first place slots without moving.
+    place_base: usize,
+}
+
+/// An assignable location: a slot of the value stack, and the struct fields
+/// to navigate from what stands in it.
+///
+/// This is `crate::interp::Place` with the one thing that made it allocate
+/// taken out. The interpreter gives every binding an `Rc<RefCell<Value>>` of
+/// its own, so a place can be a share of that cell; this VM put every
+/// binding into one contiguous `Vec<Value>` precisely so that a call would
+/// allocate nothing, and reintroducing a cell per binding to make places
+/// possible would give back the whole of what the arrangement bought.
+///
+/// # Why an index, and what it rests on
+///
+/// An index into the value stack, rather than a pointer into it, because the
+/// stack is a `Vec` that grows: a push can move every element, and a raw
+/// pointer taken before that push would name freed memory afterwards, while
+/// an index names the same slot before and after. It is also the only form a
+/// safe Rust program can hold at all, since a borrow of the stack would stop
+/// the VM from touching the stack.
+///
+/// The index is absolute rather than relative to a frame, because a place
+/// travels: `bump(var total)` builds it in the caller's frame and reads and
+/// writes it in the callee's, where `frame.base` is a different number.
+///
+/// **What makes it valid is that a callee cannot outlive its caller.** A
+/// frame's slots are live from the call that opened the window to the return
+/// that truncates it, and a place is built by an instruction of some frame
+/// and consumed by an instruction of that frame or of one it called. Nothing
+/// a lowered program can build outlives the frame it was built in, because
+/// nothing lowers a closure, and a closure is exactly the construct that
+/// could: it can be returned. Whoever lowers one has to decide what a
+/// captured `var` binding is before this stays sound, and
+/// `cove_ir::Inst::PlaceLocal` carries the same note on the other side of
+/// the boundary.
+///
+/// # The path
+///
+/// A `Vec<u32>` of field positions, outermost first, which is exactly the
+/// shape `crate::interp::Place::steps` has and costs exactly what it costs
+/// there: an empty path allocates nothing, and appending a step to a
+/// non-empty one copies it.
+///
+/// A fixed-size inline path was the alternative, and it would make a place
+/// `Copy` and a refinement free. It was not taken because the bound could
+/// not be enforced where a bound has to be enforced. The depth a place
+/// reaches is the sum of the static appends along a chain of calls —
+/// `f(var c.inner)` inside a body that was itself handed a place with a path
+/// — and the lowering of a callee cannot see what depth its callers will
+/// hand it. So the bound would have to be checked at run time, and a program
+/// that exceeded it would fail on this backend and answer on the oracle,
+/// which is the one difference between the two that is not allowed to exist.
+#[derive(Clone, Debug)]
+struct Place {
+    /// Which slot of the value stack this is rooted at, absolutely.
+    slot: usize,
+    /// The field positions to walk from there, outermost first. Empty for a
+    /// place that names a binding.
+    path: Vec<u32>,
+}
+
+impl Place {
+    /// The place naming `slot` of the value stack, with no path.
+    fn rooted_at(slot: usize) -> Place {
+        Place {
+            slot,
+            path: Vec::new(),
+        }
+    }
+
+    /// This place with one more field step on the end, which is
+    /// `crate::interp::Place::field` by position rather than by name.
+    fn field(&self, index: u32) -> Place {
+        let mut path = self.path.clone();
+        path.push(index);
+        Place {
+            slot: self.slot,
+            path,
+        }
+    }
 }
 
 /// What a `MakeStruct` builds, worked out once for the whole run.
@@ -281,6 +382,13 @@ pub struct Vm<'a> {
     /// Nothing in here is a GC root: a scalar is a number, and a number
     /// reaches nothing.
     scalars: Vec<i64>,
+    /// The same arrangement again for the places a `var` parameter names:
+    /// slots below, operands above, one window per frame.
+    ///
+    /// Nothing in here is a GC root either, and for a related reason: a
+    /// place holds an index into the value stack, so whatever it reaches is
+    /// already reachable from the value stack's own window.
+    places: Vec<Place>,
     frames: Vec<Frame>,
     /// One entry per constant, filled for the constants a `MakeStruct` names
     /// its type with and empty everywhere else.
@@ -340,6 +448,7 @@ impl<'a> Vm<'a> {
             sources: runtime.sources(),
             stack: Vec::new(),
             scalars: Vec::new(),
+            places: Vec::new(),
             frames: Vec::new(),
             shapes: struct_shapes(runtime, program),
             enums: enum_shapes(runtime, program),
@@ -379,22 +488,39 @@ impl<'a> Vm<'a> {
         }
         self.stack.clear();
         self.scalars.clear();
+        self.places.clear();
         self.frames.clear();
         self.fuel = 0;
         for (kind, value) in entry.params.iter().zip(args) {
             match kind {
                 SlotKind::Value => self.stack.push(value),
                 SlotKind::Scalar(_) => self.scalars.push(promised_scalar(&value)),
+                // There is no place for an embedder to hand over: a place
+                // names a slot of this VM's own stack, and an entry is
+                // called from outside it. `cove_ir::lower` emits none —
+                // `var` is a property of a parameter and an entry declares
+                // either none or one `Array<String>` — so this is a program
+                // built by hand rather than one that was lowered.
+                SlotKind::Place => {
+                    return Err(RuntimeError::new(format!(
+                        "`{}.{}` takes a `var` parameter, which an entry cannot be given",
+                        entry.module, entry.name
+                    ))
+                    .at(entry.span))
+                }
             }
         }
         self.stack
             .resize(entry.value_frame_size as usize, Value::Unit);
         self.scalars.resize(entry.scalar_frame_size as usize, 0);
+        self.places
+            .resize(entry.place_frame_size as usize, Place::rooted_at(0));
         self.frames.push(Frame {
             function,
             return_pc: 0,
             base: 0,
             scalar_base: 0,
+            place_base: 0,
         });
 
         // The two events an entry is bracketed by are source-level, which is
@@ -706,6 +832,7 @@ impl<'a> Vm<'a> {
                     function: target,
                     value_argc,
                     scalar_argc,
+                    place_argc,
                     ..
                 } => {
                     let span = running.span_at(pc);
@@ -728,11 +855,17 @@ impl<'a> Vm<'a> {
                     let scalar_base = self.scalars.len() - scalar_argc as usize;
                     self.scalars
                         .resize(scalar_base + callee.scalar_frame_size as usize, 0);
+                    let place_base = self.places.len() - place_argc as usize;
+                    self.places.resize(
+                        place_base + callee.place_frame_size as usize,
+                        Place::rooted_at(0),
+                    );
                     frame = Frame {
                         function: target,
                         return_pc: pc + 1,
                         base,
                         scalar_base,
+                        place_base,
                     };
                     self.frames.push(frame);
                     running = callee;
@@ -965,6 +1098,53 @@ impl<'a> Vm<'a> {
                     self.fuel += u64::from(argc);
                     self.stack.push(value);
                 }
+                Inst::PlaceLocal(slot) => {
+                    // Absolute, because a place travels into a call and the
+                    // callee's `base` is a different number — see `Place`.
+                    self.places
+                        .push(Place::rooted_at(frame.base + slot as usize));
+                }
+                Inst::LoadPlace(slot) => {
+                    let place = self.places[frame.place_base + slot as usize].clone();
+                    self.places.push(place);
+                }
+                Inst::PlaceField(index) => {
+                    let refined = self
+                        .places
+                        .last()
+                        .expect("`place-field` has a place to refine")
+                        .field(index);
+                    // A path is copied rather than extended in place because
+                    // the place below may be the one a write consumes, and a
+                    // compound assignment builds both. `cove_ir::lower`
+                    // builds them separately for that reason, so this could
+                    // extend in place; it does not, so that the instruction
+                    // means the same thing wherever the lowering puts it.
+                    *self
+                        .places
+                        .last_mut()
+                        .expect("`place-field` has a place to refine") = refined;
+                }
+                Inst::PlacePop => {
+                    self.pop_place();
+                }
+                Inst::PlaceRead => {
+                    let place = self.pop_place();
+                    // Walking a path is not constant work, so it is charged
+                    // where it happens; the clone below is not, for the
+                    // reason `Inst::LoadLocal`'s is not.
+                    self.fuel += place.path.len() as u64;
+                    // Reading a place clones: that is the value-semantics
+                    // rule, and it is `crate::interp::Place::read`'s comment.
+                    let value = self.place_ref(&place).clone();
+                    self.stack.push(value);
+                }
+                Inst::PlaceWrite => {
+                    let value = self.pop();
+                    let place = self.pop_place();
+                    self.fuel += place.path.len() as u64;
+                    *self.place_mut(&place) = value;
+                }
                 Inst::TestCase(case) => {
                     let case = name(program, case);
                     let subject = self.stack.last().expect("`test-case` has a value to test");
@@ -1106,6 +1286,68 @@ impl<'a> Vm<'a> {
             .expect("a validated instruction takes only scalars that are there")
     }
 
+    /// The top of the place stack.
+    ///
+    /// Empty here means what an empty value stack means: a broken invariant
+    /// of this backend, because `cove_ir::lower::validate` simulated all
+    /// three depths before the VM was handed the program.
+    fn pop_place(&mut self) -> Place {
+        self.places
+            .pop()
+            .expect("a validated instruction takes only places that are there")
+    }
+
+    /// What a place names, for reading.
+    ///
+    /// `crate::interp::Place::with_ref` walking a path of names, walked here
+    /// as a path of positions. Neither the type nor the position is asked
+    /// about, exactly as `Inst::GetFieldAt` asks about neither: a step is
+    /// emitted only where the checker settled the type it is taken from, and
+    /// a struct's fields stand in declaration order wherever one is built.
+    fn place_ref(&self, place: &Place) -> &Value {
+        let mut current = &self.stack[place.slot];
+        for step in &place.path {
+            let Value::Struct(held) = current else {
+                unreachable!(
+                    "a place step was emitted for a struct, and reached a `{}`",
+                    current.type_name()
+                );
+            };
+            current = &held
+                .fields
+                .get(*step as usize)
+                .expect("a place step names a field of the struct it was emitted for")
+                .1;
+        }
+        current
+    }
+
+    /// What a place names, for writing.
+    ///
+    /// `crate::interp::Place::with_mut`, and it has to stay that function:
+    /// `Rc::make_mut` at every struct step is "the one place a struct's
+    /// field is written, and so the one place its shared storage becomes
+    /// private again", which is what makes sharing a copied struct
+    /// unobservable. The same call at the same steps in the same order, or
+    /// `is`, aliasing, and struct value semantics all change.
+    fn place_mut(&mut self, place: &Place) -> &mut Value {
+        let mut current = &mut self.stack[place.slot];
+        for step in &place.path {
+            let Value::Struct(held) = current else {
+                unreachable!(
+                    "a place step was emitted for a struct, and reached a `{}`",
+                    current.type_name()
+                );
+            };
+            current = &mut Rc::make_mut(held)
+                .fields
+                .get_mut(*step as usize)
+                .expect("a place step names a field of the struct it was emitted for")
+                .1;
+        }
+        current
+    }
+
     /// The top `count` values, in the order they were pushed.
     fn take(&mut self, count: usize) -> Vec<Value> {
         let at = self.stack.len() - count;
@@ -1143,7 +1385,7 @@ impl<'a> Vm<'a> {
 
     /// Pops the running frame and hands `answer` back to whoever called it.
     ///
-    /// Both windows are truncated to the frame's bases, which are where the
+    /// All three windows are truncated to the frame's bases, which are where the
     /// caller's operands ended on each stack before it pushed the arguments,
     /// so the frame's slots and its arguments are discarded together — they
     /// are the same storage. The answer is then pushed onto whichever stack
@@ -1158,6 +1400,7 @@ impl<'a> Vm<'a> {
         let done = self.frames.pop().expect("a return leaves a frame");
         self.stack.truncate(done.base);
         self.scalars.truncate(done.scalar_base);
+        self.places.truncate(done.place_base);
         match (self.frames.last().copied(), answer) {
             (Some(caller), Answered::Value(value)) => {
                 self.stack.push(value);
@@ -1535,6 +1778,7 @@ fn as_value(returns: SlotKind, scalar: i64) -> Value {
     match returns {
         SlotKind::Scalar(Scalar::Int) => Value::Int(scalar),
         SlotKind::Scalar(Scalar::Bool) => Value::Bool(scalar != 0),
+        SlotKind::Place => unreachable!("no function answers a place; `validate` refuses one"),
         SlotKind::Value => unreachable!(
             "`return-scalar` was reached in a function that answers on the value stack"
         ),
@@ -3457,6 +3701,7 @@ mod tests {
                     name: "main".into(),
                     value_frame_size: 0,
                     scalar_frame_size: 0,
+                    place_frame_size: 0,
                     arity: 0,
                     params: Vec::new(),
                     returns: cove_ir::SlotKind::Value,
@@ -3567,6 +3812,7 @@ mod tests {
                     name: "main".into(),
                     value_frame_size: 0,
                     scalar_frame_size: 0,
+                    place_frame_size: 0,
                     arity: 0,
                     params: Vec::new(),
                     returns: cove_ir::SlotKind::Value,
@@ -3706,6 +3952,122 @@ mod tests {
     ///
     /// `a_declared_method_a_builtin_also_names_lowers_and_agrees` is the
     /// same fact read from the other side, with both calls written together.
+    /// **A `var` parameter is an alias, not a copy that is written back.**
+    ///
+    /// `two(var x, var x)` is the case that separates the two, and the oracle
+    /// answers 11: both parameters name the same cell, so the second
+    /// parameter's `+= 10` is applied to what the first one's `+= 1` left.
+    /// Copy-in/copy-out would answer 10, because the second write-back would
+    /// overwrite the first with a value read before it happened. There is no
+    /// design here that answers 10.
+    #[test]
+    fn two_var_parameters_naming_one_binding_are_one_binding() {
+        assert_eq!(
+            agree(
+                "fn two(var a: Int, var b: Int) {\n  a += 1\n  b += 10\n}\n\nexport fn main() -> Int {\n  var x = 0\n  two(var x, var x)\n  x\n}\n"
+            )
+            .value(),
+            "Int(11)"
+        );
+    }
+
+    /// A place can carry a field path, so `var c.hits` names one field of the
+    /// caller's struct and leaves the rest of it alone.
+    #[test]
+    fn a_var_argument_can_name_a_field_of_the_callers_struct() {
+        assert_eq!(
+            agree(
+                "struct C {\n  hits: Int\n  other: Int\n}\n\nfn bump(var n: Int) {\n  n += 1\n}\n\nexport fn main() -> String {\n  var c = C(hits: 0, other: 0)\n  bump(var c.hits)\n  \"{c}\"\n}\n"
+            )
+            .value(),
+            "Str(\"C(hits: 1, other: 0)\")"
+        );
+    }
+
+    /// A place is forwarded through a call: a `var` parameter passed on as a
+    /// `var` argument aliases the original binding rather than the
+    /// parameter's own slot, which is what `load-place` alone does.
+    #[test]
+    fn a_var_parameter_passed_on_still_names_the_original_binding() {
+        assert_eq!(
+            agree(
+                "fn bump(var n: Int) {\n  n += 1\n}\n\nfn forward(var n: Int) {\n  bump(var n)\n}\n\nexport fn main() -> Int {\n  var x = 5\n  forward(var x)\n  x\n}\n"
+            )
+            .value(),
+            "Int(6)"
+        );
+    }
+
+    /// And it forwards with a step added on the way: the incoming place
+    /// already has a path, and a field is appended to it at run time.
+    #[test]
+    fn a_place_forwarded_with_a_field_appended_reaches_two_deep() {
+        assert_eq!(
+            agree(
+                "struct Inner {\n  hits: Int\n}\n\nstruct Outer {\n  inner: Inner\n}\n\nfn bump(var n: Int) {\n  n += 1\n}\n\nfn deep(var o: Outer) {\n  bump(var o.inner.hits)\n}\n\nexport fn main() -> String {\n  var o = Outer(inner: Inner(hits: 1))\n  deep(var o)\n  \"{o}\"\n}\n"
+            )
+            .value(),
+            "Str(\"Outer(inner: Inner(hits: 2))\")"
+        );
+    }
+
+    /// A `var self` receiver is a place like any other, and a method that
+    /// takes one writes into the caller's binding.
+    #[test]
+    fn a_var_self_method_writes_into_the_callers_binding() {
+        assert_eq!(
+            agree(
+                "struct Counter {\n  hits: Int\n}\n\nimpl Counter {\n  fn hit(var self) {\n    self.hits += 1\n  }\n\n  fn hitMany(var self, n: Int) -> Int {\n    for _step in 0..<n {\n      self.hits += 1\n    }\n    self.hits\n  }\n}\n\nexport fn main() -> String {\n  var counter = Counter(hits: 0)\n  counter.hit()\n  let total = counter.hitMany(3)\n  \"{counter} {total}\"\n}\n"
+            )
+            .value(),
+            "Str(\"Counter(hits: 4) 4\")"
+        );
+    }
+
+    /// Writing a field through a place makes the struct private again at the
+    /// step it is written, which is what keeps a copy of a struct a copy.
+    /// The same program without that call answers with both documents
+    /// renamed.
+    #[test]
+    fn writing_through_a_place_leaves_a_copy_of_the_struct_alone() {
+        assert_eq!(
+            agree(
+                "struct Meta {\n  version: Int\n}\n\nstruct Document {\n  title: String\n  meta: Meta\n}\n\nimpl Document {\n  fn rename(var self, title: String) {\n    self.title = title\n  }\n\n  fn bumpVersion(var self) {\n    self.meta.version += 1\n  }\n}\n\nexport fn main() -> String {\n  var original = Document(title: \"first\", meta: Meta(version: 1))\n  var copy = original\n  copy.rename(\"second\")\n  copy.bumpVersion()\n  \"{original} {copy}\"\n}\n"
+            )
+            .value(),
+            "Str(\"Document(title: first, meta: Meta(version: 1)) Document(title: second, meta: Meta(version: 2))\")"
+        );
+    }
+
+    /// A `var` parameter whose type the checker settled as `Int` still has a
+    /// place, because the binding it names was kept on the value stack — a
+    /// place is an index into that stack and there is nothing in the scalar
+    /// one for it to address.
+    #[test]
+    fn a_binding_a_place_is_rooted_at_is_kept_on_the_value_stack() {
+        let listed = main_of(
+            "fn bump(var n: Int) {\n  n += 1\n}\n\nexport fn main() -> Int {\n  var total = 1\n  var counted = 2\n  bump(var total)\n  total + counted\n}\n",
+        );
+        // `total` is slot 0 of the *value* frame and `counted` is slot 0 of
+        // the scalar frame: only the name a place is rooted at moved.
+        assert_eq!(
+            listed,
+            "fn m.main arity=0 frame=1/1 -> Int\n\
+             \x20  0  const Int(1)\n\
+             \x20  1  store 0\n\
+             \x20  2  scalar-const 2\n\
+             \x20  3  store-scalar 0\n\
+             \x20  4  place 0\n\
+             \x20  5  call m.bump argc=0/0/1\n\
+             \x20  6  pop\n\
+             \x20  7  load 0\n\
+             \x20  8  value-to-scalar\n\
+             \x20  9  load-scalar 0\n\
+             \x20 10  int Add\n\
+             \x20 11  return-scalar\n"
+        );
+    }
+
     #[test]
     fn a_method_name_a_builtin_and_a_declared_type_share_reaches_the_builtin() {
         let source = "struct Box {\n  n: Int\n}\n\nimpl Box {\n  fn length(self) -> Int {\n    self.n\n  }\n}\n\nexport fn main() -> Int {\n  [1, 2, 3].length()\n}\n";
