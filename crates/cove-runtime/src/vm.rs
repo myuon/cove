@@ -128,7 +128,7 @@
 //! the way any other call opens one.
 //!
 //! A host that receives such a closure can run it, which is what
-//! [`Vm::call_from_host`] is: the dispatch loop, entered again on the stacks
+//! `Vm::call_from_host` is: the dispatch loop, entered again on the stacks
 //! as they stand, with fuel, cancellation, the depth limit and the trace all
 //! still the loop's.
 //!
@@ -312,7 +312,7 @@ struct Frame {
 /// other side of the boundary.
 ///
 /// A callback a host runs re-entrantly does not break it either, for a
-/// narrower reason: [`Vm::call_from_host`] opens its frame *above* the
+/// narrower reason: `Vm::call_from_host` opens its frame *above* the
 /// frames that are standing and truncates back to where it found them, so a
 /// place standing in one of those frames still points where it pointed.
 ///
@@ -927,28 +927,20 @@ impl<'a> Vm<'a> {
                     pc = 0;
                     continue;
                 }
-                Inst::MakeClosure { function, captures } => {
-                    let value = self.close_over(function, captures);
-                    self.stack.push(value);
-                }
-                Inst::CallValue { argc } => {
-                    let span = running.span_at(pc);
-                    let callee = self.pop();
-                    match self.enter_value_call(&callee, argc, pc as u32 + 1, span)? {
-                        // A callee that is not a lowered body answers
-                        // without a frame: a bound host operation is a name
-                        // the registry resolves, exactly as it is on the
-                        // oracle.
-                        Entered::Answer(value) => self.stack.push(value),
-                        Entered::Frame(entered) => {
-                            frame = entered;
-                            running = program.function(frame.function);
-                            code = &running.code;
-                            blocks = &running.block_fuel;
-                            self.charge(blocks[0], || running.span_at(0))?;
-                            pc = 0;
-                            continue;
-                        }
+                // Both closure instructions, out of line: see
+                // `Vm::closure_inst` for why the bodies are not written
+                // here. Only a call that opened a frame comes back with
+                // one, and that is the only thing this arm can do that the
+                // function cannot.
+                Inst::MakeClosure { .. } | Inst::CallValue { .. } => {
+                    if let Some(entered) = self.closure_inst(inst, pc, running.span_at(pc))? {
+                        frame = entered;
+                        running = program.function(frame.function);
+                        code = &running.code;
+                        blocks = &running.block_fuel;
+                        self.charge(blocks[0], || running.span_at(0))?;
+                        pc = 0;
+                        continue;
                     }
                 }
                 Inst::CallHost { module, op, argc } => {
@@ -1528,13 +1520,49 @@ impl<'a> Vm<'a> {
 
     // ----------------------------------------------------------- closures
 
+    /// The two instructions that build a closure and enter one.
+    ///
+    /// Out of line, and not because they are long. `Vm::execute`'s `match`
+    /// is the hottest code in this VM and `benches/field` is sensitive
+    /// enough to feel its footprint — the place instructions cost `arith`
+    /// about eight percent as seven inline arms and gave it back as one arm
+    /// calling one function, which is the ablation study in
+    /// `docs/VM_ARCHITECTURE.md` read from the other side. No benchmark
+    /// executes either of these, so nothing is paid for the call that is not
+    /// paid by a program that uses a closure at all.
+    ///
+    /// `Some` is the frame a call through a value opened, which is the one
+    /// thing the caller has to do that this cannot: the running function,
+    /// its code and its block table are locals of the loop.
+    #[inline(never)]
+    fn closure_inst(
+        &mut self,
+        inst: Inst,
+        pc: usize,
+        span: Span,
+    ) -> Result<Option<Frame>, RuntimeError> {
+        match inst {
+            Inst::MakeClosure { function, captures } => {
+                let value = self.close_over(function, captures);
+                self.stack.push(value);
+            }
+            Inst::CallValue { argc } => {
+                let callee = self.pop();
+                match self.enter_value_call(&callee, argc, pc as u32 + 1, span)? {
+                    // A callee that is not a lowered body answers without a
+                    // frame: a bound host operation is a name the registry
+                    // resolves, exactly as it is on the oracle.
+                    Entered::Answer(value) => self.stack.push(value),
+                    Entered::Frame(entered) => return Ok(Some(entered)),
+                }
+            }
+            other => unreachable!("`closure_inst` was handed {other:?}"),
+        }
+        Ok(None)
+    }
+
     /// Builds the closure `Inst::MakeClosure` names, over the top `captures`
     /// values.
-    ///
-    /// Out of line for the reason [`Vm::place_inst`] is: this is where the
-    /// dispatch loop meets an `Rc`, a `Vec` and a clone of the written
-    /// parameters, and none of that belongs inside the `match` every
-    /// instruction is fetched through.
     ///
     /// What it builds is a `Value::Closure` and not a variant of its own.
     /// Everything a host reads off a closure — the parameters it declares,
@@ -1543,7 +1571,6 @@ impl<'a> Vm<'a> {
     /// them for exactly this. Only the body differs, and
     /// [`crate::value::ClosureBody`] is where that difference is written
     /// down.
-    #[inline(never)]
     fn close_over(&mut self, function: FunctionId, captures: u16) -> Value {
         let target = self.program.function(function);
         let at = self.stack.len() - captures as usize;
