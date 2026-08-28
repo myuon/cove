@@ -27,13 +27,17 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::rc::Rc;
 use std::sync::Arc;
 use std::thread::JoinHandle;
+use std::time::{Duration, Instant};
 
+use cove_diag::Span;
 use cove_syntax::ast::{FnDecl, Param};
 
 use crate::budget::Cancellation;
 use crate::error::RuntimeError;
-use crate::host::ResourceHandle;
+use crate::host::{HostRegistry, ResourceHandle};
+use crate::runtime::Runtime;
 use crate::shared::SharedCell;
+use crate::trace::TraceEvent;
 use crate::value::{
     Closure, ClosureBody, DynValue, EnumValue, HostFnValue, MapKey, StructValue, Value,
 };
@@ -243,6 +247,317 @@ impl TaskScope {
     pub fn close(&self) {
         self.closed.set(true);
     }
+}
+
+// ------------------------------------------------------- both backends
+
+/// What an evaluator has to answer for a task to be spawned into a scope,
+/// waited for, and charged for.
+///
+/// Everything below this trait is the same on both backends by construction
+/// rather than by agreement. A task-safety rule, a budget charge, or a trace
+/// event stated twice is one that will drift, and a concurrency bug that only
+/// one backend has is the kind that does not reproduce — so `spawn`, `await`,
+/// and leaving a scope are written once here, and the two things that really
+/// differ are the two this trait asks about: which evaluator runs a body, and
+/// which timing contexts a wait is charged against.
+///
+/// [`crate::interp::Interpreter`] and [`crate::vm::Vm`] are the two
+/// implementations, and ADR 0008's "each task gets an evaluator of its own" is
+/// what makes them symmetrical: each holds a run's [`Runtime`], a stack of
+/// timings, and the id of the task it is running.
+pub(crate) trait Tasking {
+    /// What every thread of this run shares, which is what a `spawn` hands
+    /// the thread it starts.
+    fn runtime(&self) -> &Runtime;
+
+    /// The host boundary, which owns the run's budget.
+    fn hosts(&self) -> &HostRegistry;
+
+    /// Records `wait` against every timing context this body is inside.
+    ///
+    /// A body blocked on `await` is doing nothing, exactly as a body blocked
+    /// on a host call is, so the two are charged the same way and a trace can
+    /// tell a scope that waited for two tasks from one that computed for as
+    /// long as they ran.
+    fn charge_wait(&mut self, wait: Duration);
+
+    /// The task whose body this evaluator is running, or `None` for the
+    /// entry, so that a nested `spawn` can name its immediate parent.
+    fn running_task(&self) -> Option<u64>;
+}
+
+/// `scope.spawn { ... }`: starts a thread for `body` and hands back the
+/// handle the scope now owns.
+///
+/// Converting the closure for the new thread *is* the task-safety check:
+/// what may cross a task boundary is exactly what a thread can own, so a
+/// capture that may not cross is reported at the `spawn` that would have
+/// carried it, before any thread exists.
+///
+/// This returns once the thread exists and orders nothing else: whether the
+/// child has run an instruction by the time the parent's next statement runs
+/// is the operating system's answer, not this runtime's. A rendezvous here
+/// would be a scheduling policy, which ADR 0008's amendment refuses for the
+/// same reason the concurrency limit below refuses to wait.
+///
+/// `run` is the whole of what a backend contributes: it receives a
+/// [`Runtime`] of its own, the id, the flag the body observes, and the body
+/// in the form that crossed, and it evaluates it on the new thread. The
+/// evaluator it builds there is the receiving task's; nothing of this one
+/// crosses, because nothing of this one could.
+pub(crate) fn spawn_into<H: Tasking>(
+    host: &mut H,
+    scope: &Rc<TaskScope>,
+    body: Value,
+    span: Span,
+    run: impl FnOnce(Runtime, u64, Cancellation, Transfer, Span) -> TaskOutcome + Send + 'static,
+) -> Result<Value, RuntimeError> {
+    if scope.is_closed() {
+        return Err(RuntimeError::new(format!(
+            "scope `{}` has already been left, so it can take no more tasks",
+            scope.name
+        ))
+        .at(span)
+        .with_rule("Leaving a task scope waits for or cancels its child tasks."));
+    }
+    if !matches!(body, Value::Closure(_)) {
+        return Err(RuntimeError::new(format!(
+            "`spawn` takes the work to run as a trailing closure, but found `{}`",
+            body.type_name()
+        ))
+        .at(span)
+        .with_help(format!("write `{}.spawn {{ ... }}`", scope.name)));
+    }
+    let body = Transfer::of(&body).map_err(|found| {
+        RuntimeError::new(format!(
+            "`spawn` cannot capture `{}`, which is a `{}`",
+            found.path, found.type_name
+        ))
+        .at(span)
+        .with_rule(TASK_SAFETY_RULE)
+        .with_help(found.help("spawning"))
+    })?;
+
+    // Charged before this task is given an id, an event, or a thread: a
+    // thread that has started is a resource already taken, which no later
+    // safepoint could refuse. A run past its concurrency limit is stopped
+    // here the way an exhausted fuel budget stops one, rather than made to
+    // wait for a sibling to end, because waiting would be a scheduling
+    // policy and ADR 0008 has none.
+    if let Some(Err(error)) = host.hosts().with_budget(|budget| {
+        budget
+            .charge_task()
+            .map_err(|stopped| budget.to_runtime_error(stopped))
+    }) {
+        return Err(error.at(span));
+    }
+
+    let runtime = host.runtime().clone();
+    let id = runtime.next_task_id();
+    // Traced before the thread starts, so a task is never seen completing
+    // before it was seen spawning.
+    runtime.trace(TraceEvent::TaskSpawned {
+        id,
+        parent: host.running_task(),
+        scope: scope.name.to_string(),
+    });
+
+    let cancellation = Cancellation::new();
+    let flag = cancellation.clone();
+    let thread = std::thread::Builder::new()
+        .name(format!("cove task {id}"))
+        // A task evaluates Cove, so it gets the stack the depth limit is
+        // calibrated against rather than whatever the platform hands a thread
+        // by default. Without this a task overflows its stack long before
+        // `MAX_CALL_DEPTH` stops it, which ends the process and takes every
+        // sibling task with it.
+        .stack_size(crate::interp::STACK_SIZE)
+        .spawn(move || run(runtime, id, flag, body, span))
+        .map_err(|e| {
+            // A task the machine refused is not a task the run holds, so the
+            // place charged for it above goes back.
+            host.hosts().with_budget(|budget| budget.release_task());
+            RuntimeError::new(format!("this task could not be given a thread: {e}")).at(span)
+        })?;
+
+    let task = Task::running(
+        id,
+        scope.name.clone(),
+        scope.next_position(),
+        cancellation,
+        thread,
+    );
+    Ok(Value::Task(scope.adopt(task)))
+}
+
+/// Waits for a task's thread, charging the time against this body's timings
+/// as wait rather than as work.
+///
+/// This is also the one place that learns whether a cancellation actually
+/// stopped a task, so it is where `TaskCancelled` is traced. A task is waited
+/// for once, so the event is recorded once; a task that had already finished
+/// is unaffected by cancellation, and tracing it as cancelled would say work
+/// was stopped that in fact happened.
+pub(crate) fn join<H: Tasking>(host: &mut H, task: &Rc<Task>) {
+    if !task.is_running() {
+        return;
+    }
+    let started = Instant::now();
+    task.join();
+    // A task ends by finishing, by failing, by being cancelled, or by
+    // breaking an invariant in its own thread, and a join is where all four
+    // are observed — so this is where the place it held under the
+    // concurrency limit goes back. Releasing it on the task's own thread
+    // instead would make what a `spawn` is refused for depend on how quickly
+    // a sibling happened to finish.
+    host.hosts().with_budget(|budget| budget.release_task());
+    host.charge_wait(started.elapsed());
+    if matches!(&*task.state.borrow(), TaskState::Cancelled) {
+        host.runtime()
+            .trace(TraceEvent::TaskCancelled { id: task.id });
+    }
+}
+
+/// `await`: waits for a task's thread and answers the value its body produced.
+///
+/// A task's body runs at most once and is waited for at most once, so
+/// awaiting the same handle twice returns the same value and repeats no
+/// effect.
+pub(crate) fn settle<H: Tasking>(
+    host: &mut H,
+    task: &Rc<Task>,
+    span: Span,
+) -> Result<Value, RuntimeError> {
+    join(host, task);
+    match &*task.state.borrow() {
+        TaskState::Settled(value) => Ok(value.clone()),
+        TaskState::Failed(error) => Err(error.clone()),
+        TaskState::Cancelled => Err(awaiting_a_cancelled_task(task, span)),
+        TaskState::Running => {
+            unreachable!("joining a task leaves it settled, failed, or cancelled")
+        }
+    }
+}
+
+/// Cancels every running child of `scope` and waits for it to stop.
+///
+/// Every child is asked first and waited for afterwards, so they stop at the
+/// same time rather than one after another. Leaving a scope waits for or
+/// cancels its children, so this does both: a scope never outlives a thread
+/// it started.
+pub(crate) fn cancel_children<H: Tasking>(host: &mut H, scope: &Rc<TaskScope>) {
+    scope.cancel_running();
+    let mut index = 0;
+    while let Some(task) = scope.task_at(index) {
+        index += 1;
+        join(host, &task);
+    }
+}
+
+/// How a child ended, where that is something the scope has to pass on.
+pub(crate) enum ChildFailure {
+    /// The task's value was `Err(...)`, already wrapped as the value the
+    /// enclosing call is to answer.
+    ///
+    /// A task whose value is a failed `Result` returns that failure from the
+    /// function the scope was written in, exactly as `?` would, which is what
+    /// makes `scope s { s.spawn { f()? } }` mean what a reader expects: the
+    /// failure reaches the caller rather than sitting unread in a handle
+    /// nobody awaited.
+    Returned(Value),
+    /// The task's body raised. The error propagates as itself.
+    Raised(RuntimeError),
+}
+
+/// Waits for every task the body did not await, in spawn order, and reports
+/// the first child that did not simply finish.
+///
+/// A task that fails is not swallowed — a [`RuntimeError`] propagates as
+/// itself, and a task whose value is `Err(error)` returns that error from the
+/// enclosing function, exactly as `?` would. A task the program itself
+/// cancelled is neither: the program asked for that stop, so leaving the
+/// scope is not the place to complain about it. Either way the tasks still
+/// running are cancelled and waited for, which is what the caller does with
+/// what this answers.
+///
+/// Waiting happens in spawn order, which is an order of *observation* only:
+/// the tasks ran at the same time on threads of their own, so only the set of
+/// effects a scope produces is defined, never their sequence.
+pub(crate) fn wait_for_children<H: Tasking>(
+    host: &mut H,
+    scope: &Rc<TaskScope>,
+) -> Option<ChildFailure> {
+    // Waiting reads the scope's children by index rather than from a
+    // snapshot, so a scope that grew while it was being left is still waited
+    // for to the end.
+    let mut index = 0;
+    while let Some(task) = scope.task_at(index) {
+        index += 1;
+        if !task.is_running() {
+            continue;
+        }
+        join(host, &task);
+        // The state is read and released before anything else runs, so
+        // cancelling the rest of the scope can borrow these same tasks.
+        let outcome = match &*task.state.borrow() {
+            TaskState::Settled(value) => {
+                failure_of(value).map(|error| ChildFailure::Returned(Value::err(error)))
+            }
+            TaskState::Failed(error) => Some(ChildFailure::Raised(error.clone())),
+            TaskState::Cancelled | TaskState::Running => None,
+        };
+        if outcome.is_some() {
+            return outcome;
+        }
+    }
+    None
+}
+
+/// The trace event a finished task's thread writes, and the form its value
+/// crosses back in.
+///
+/// A task stopped by its own cancellation did not run to completion, so it is
+/// traced as cancelled — by whoever waits for it, which is the only place
+/// that knows it stopped rather than finished — and not here.
+pub(crate) fn finished(
+    runtime: &Runtime,
+    id: u64,
+    cancellation: &Cancellation,
+    span: Span,
+    result: Result<Value, RuntimeError>,
+    cpu: Duration,
+) -> TaskOutcome {
+    if !(result.is_err() && cancellation.is_cancelled()) {
+        runtime.trace(TraceEvent::TaskCompleted { id, cpu });
+    }
+    let value = result?;
+    Transfer::of(&value).map_err(|found| {
+        RuntimeError::new(format!(
+            "this task produced {}, which cannot leave a task",
+            found.subject()
+        ))
+        .at(span)
+        .with_rule(TASK_SAFETY_RULE)
+        .with_help(found.help("returning it from a task"))
+    })
+}
+
+/// The error a `Result` carries, when the value is one and it failed.
+fn failure_of(value: &Value) -> Option<Value> {
+    value
+        .err_payload()
+        .map(|payload| payload.first().cloned().unwrap_or(Value::Unit))
+}
+
+fn awaiting_a_cancelled_task(task: &Task, span: Span) -> RuntimeError {
+    RuntimeError::new(format!(
+        "{} was cancelled, so it has no value to await",
+        task.describe()
+    ))
+    .at(span)
+    .with_rule("Leaving a task scope waits for or cancels its child tasks, and a cancelled task never runs.")
+    .with_help("await the task before cancelling it, and before leaving its scope early")
 }
 
 // ------------------------------------------------------------ task safety

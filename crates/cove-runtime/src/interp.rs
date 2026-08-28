@@ -37,7 +37,7 @@ use crate::heap::{Collection, Heap, HeapStats, Roots};
 use crate::host::{HostRegistry, Reentry, ResourceHandle};
 use crate::runtime::{Runtime, ENTRY_TASK};
 use crate::schema::TypeSchema;
-use crate::task::{Task, TaskOutcome, TaskScope, TaskState, Transfer};
+use crate::task::{self, ChildFailure, Task, TaskOutcome, TaskScope, Tasking, Transfer};
 use crate::trace::{RunOutcome, Timing, TraceEvent};
 use crate::value::{
     Closure, ClosureBody, DynValue, EnumValue, HostFnValue, RangeBounds, StructValue, Value,
@@ -255,14 +255,6 @@ enum Control {
 impl From<RuntimeError> for Control {
     fn from(error: RuntimeError) -> Self {
         Control::Error(error)
-    }
-}
-
-impl Control {
-    /// Returns `Err(error)` from the enclosing function, which is what a task
-    /// whose value is a failed `Result` does to the scope that waited for it.
-    fn error_value(error: Value) -> Control {
-        Control::Return(Value::err(error))
     }
 }
 
@@ -534,6 +526,31 @@ struct Target<'t> {
     /// what tells the interpreter to wrap the result; a lambda writes no
     /// return type, so it never converts.
     return_type: Option<&'t Type>,
+}
+
+/// The interpreter's half of what a task needs, which is what makes `spawn`,
+/// `await`, and leaving a scope one implementation rather than two.
+///
+/// Each of the four is a field this evaluator already had for its own
+/// reasons, exposed rather than duplicated: ADR 0008 gives every task an
+/// evaluator of its own, so "the run this belongs to" and "the task this is
+/// running" are questions any evaluator can answer.
+impl Tasking for Interpreter<'_> {
+    fn runtime(&self) -> &Runtime {
+        self.runtime
+    }
+
+    fn hosts(&self) -> &HostRegistry {
+        self.hosts
+    }
+
+    fn charge_wait(&mut self, wait: Duration) {
+        Interpreter::charge_wait(self, wait);
+    }
+
+    fn running_task(&self) -> Option<u64> {
+        self.task_stack.last().copied()
+    }
 }
 
 /// Executes a resolved program.
@@ -1995,20 +2012,14 @@ impl<'a> Interpreter<'a> {
 
     /// Waits for or cancels the children of a scope that is being left.
     ///
-    /// A normal exit waits for every task the body did not await, in spawn
-    /// order, and discards its value: a scope waits for its children, it does
-    /// not collect them. A task that fails is not swallowed — a `RuntimeError`
-    /// propagates as itself, and a task whose value is `Err(error)` returns
-    /// that error from the enclosing function, exactly as `?` would. A task
-    /// the program itself cancelled is neither: the program asked for that
-    /// stop, so leaving the scope is not the place to complain about it.
-    /// Either way the tasks still running are cancelled and waited for, as
-    /// they are when the body itself leaves early through `return`, `?`, or
-    /// an error.
-    ///
-    /// Waiting happens in spawn order, which is an order of *observation*
-    /// only: the tasks ran at the same time on threads of their own, so only
-    /// the set of effects a scope produces is defined, never their sequence.
+    /// The waiting, the order it happens in, and what a failed child does are
+    /// [`crate::task::wait_for_children`]'s, which is the same code the VM
+    /// leaves a scope through. What is here is the translation into this
+    /// evaluator's own control flow: a child that answered `Err(error)`
+    /// returns that error from the enclosing function, exactly as `?` would,
+    /// and a child that raised propagates as itself. Either way the tasks
+    /// still running are cancelled and waited for, as they are when the body
+    /// itself leaves early through `return`, `?`, or an error.
     fn leave_scope(&mut self, scope: &Rc<TaskScope>, result: Eval) -> Eval {
         let value = match result {
             Ok(value) => value,
@@ -2017,95 +2028,26 @@ impl<'a> Interpreter<'a> {
                 return early;
             }
         };
-
-        // Waiting reads the scope's children by index rather than from a
-        // snapshot, so a scope that grew while it was being left is still
-        // waited for to the end.
-        let mut index = 0;
-        while let Some(task) = scope.task_at(index) {
-            index += 1;
-            if !task.is_running() {
-                continue;
-            }
-            self.join_task(&task);
-            // The state is read and released before anything else runs, so
-            // cancelling the rest of the scope can borrow these same tasks.
-            let outcome = match &*task.state.borrow() {
-                TaskState::Settled(value) => failure_of(value).map(Control::error_value),
-                TaskState::Failed(error) => Some(Control::Error(error.clone())),
-                TaskState::Cancelled | TaskState::Running => None,
-            };
-            if let Some(control) = outcome {
+        match task::wait_for_children(self, scope) {
+            None => Ok(value),
+            Some(failure) => {
                 self.cancel_scope(scope);
-                return Err(control);
+                Err(match failure {
+                    ChildFailure::Returned(value) => Control::Return(value),
+                    ChildFailure::Raised(error) => Control::Error(error),
+                })
             }
         }
-        Ok(value)
     }
 
     /// Cancels every running child of `scope` and waits for it to stop.
-    ///
-    /// Every child is asked first and waited for afterwards, so they stop at
-    /// the same time rather than one after another. Leaving a scope waits for
-    /// or cancels its children, so this does both: a scope never outlives a
-    /// thread it started.
     fn cancel_scope(&mut self, scope: &Rc<TaskScope>) {
-        scope.cancel_running();
-        let mut index = 0;
-        while let Some(task) = scope.task_at(index) {
-            index += 1;
-            self.join_task(&task);
-        }
-    }
-
-    /// Waits for a task's thread, charging the time against this body's
-    /// [`Timing`] as wait rather than as work.
-    ///
-    /// A body blocked on `await` is doing nothing, exactly as a body blocked
-    /// on a host call is. Counting it as CPU would report a scope that waits
-    /// for two tasks as having computed for as long as they ran, which is the
-    /// attribution ADR 0001 asks a trace to get right.
-    ///
-    /// This is also the one place that learns whether a cancellation actually
-    /// stopped a task, so it is where `TaskCancelled` is traced. A task is
-    /// waited for once, so the event is recorded once; a task that had
-    /// already finished is unaffected by cancellation, and tracing it as
-    /// cancelled would say work was stopped that in fact happened.
-    fn join_task(&mut self, task: &Rc<Task>) {
-        if !task.is_running() {
-            return;
-        }
-        let started = Instant::now();
-        task.join();
-        // A task ends by finishing, by failing, by being cancelled, or by
-        // breaking an invariant in its own thread, and a join is where all
-        // four are observed — so this is where the place it held under the
-        // concurrency limit goes back. Releasing it on the task's own thread
-        // instead would make what a `spawn` is refused for depend on how
-        // quickly a sibling happened to finish.
-        self.hosts.with_budget(|budget| budget.release_task());
-        self.charge_wait(started.elapsed());
-        if matches!(&*task.state.borrow(), TaskState::Cancelled) {
-            self.runtime
-                .trace(TraceEvent::TaskCancelled { id: task.id });
-        }
+        task::cancel_children(self, scope);
     }
 
     /// Waits for a task's thread and returns the value its body produced.
-    ///
-    /// A task's body runs at most once and is waited for at most once, so
-    /// awaiting the same handle twice returns the same value and repeats no
-    /// effect.
     fn settle(&mut self, task: &Rc<Task>, span: Span) -> Result<Value, RuntimeError> {
-        self.join_task(task);
-        match &*task.state.borrow() {
-            TaskState::Settled(value) => Ok(value.clone()),
-            TaskState::Failed(error) => Err(error.clone()),
-            TaskState::Cancelled => Err(awaiting_a_cancelled_task(task, span)),
-            TaskState::Running => {
-                unreachable!("joining a task leaves it settled, failed, or cancelled")
-            }
-        }
+        task::settle(self, task, span)
     }
 
     /// `await expr`, and the postfix `expr.await()` that means the same thing.
@@ -2126,99 +2068,19 @@ impl<'a> Interpreter<'a> {
 
     /// `scope.spawn { ... }`, which starts a thread for the body.
     ///
-    /// Converting the closure for the new thread *is* the task-safety check:
-    /// what may cross a task boundary is exactly what a thread can own, so a
-    /// capture that may not cross is reported at the `spawn` that would have
-    /// carried it, before any thread exists.
-    ///
-    /// This returns once the thread exists and orders nothing else: whether
-    /// the child has run an instruction by the time the parent's next
-    /// statement runs is the operating system's answer, not this runtime's. A
-    /// rendezvous here would be a scheduling policy, which ADR 0008's
-    /// amendment refuses for the same reason the concurrency limit below
-    /// refuses to wait.
+    /// Everything a `spawn` decides — that the scope is still open, that the
+    /// body is a closure, that every capture may cross, what the concurrency
+    /// limit says, and what a trace records — is
+    /// [`crate::task::spawn_into`]'s, and is therefore the same decision the
+    /// VM's `spawn` reaches. What this contributes is the one thing that
+    /// differs: the new thread runs an [`Interpreter`] of its own.
     fn spawn(
         &mut self,
         scope: &Rc<TaskScope>,
         body: Value,
         span: Span,
     ) -> Result<Value, RuntimeError> {
-        if scope.is_closed() {
-            return Err(RuntimeError::new(format!(
-                "scope `{}` has already been left, so it can take no more tasks",
-                scope.name
-            ))
-            .at(span)
-            .with_rule("Leaving a task scope waits for or cancels its child tasks."));
-        }
-        if !matches!(body, Value::Closure(_)) {
-            return Err(RuntimeError::new(format!(
-                "`spawn` takes the work to run as a trailing closure, but found `{}`",
-                body.type_name()
-            ))
-            .at(span)
-            .with_help(format!("write `{}.spawn {{ ... }}`", scope.name)));
-        }
-        let body = Transfer::of(&body).map_err(|found| {
-            RuntimeError::new(format!(
-                "`spawn` cannot capture `{}`, which is a `{}`",
-                found.path, found.type_name
-            ))
-            .at(span)
-            .with_rule(crate::task::TASK_SAFETY_RULE)
-            .with_help(found.help("spawning"))
-        })?;
-
-        // Charged before this task is given an id, an event, or a thread: a
-        // thread that has started is a resource already taken, which no later
-        // safepoint could refuse. A run past its concurrency limit is stopped
-        // here the way an exhausted fuel budget stops one, rather than made
-        // to wait for a sibling to end, because waiting would be a scheduling
-        // policy and ADR 0008 has none.
-        if let Some(Err(error)) = self.hosts.with_budget(|budget| {
-            budget
-                .charge_task()
-                .map_err(|stopped| budget.to_runtime_error(stopped))
-        }) {
-            return Err(error.at(span));
-        }
-
-        let id = self.runtime.next_task_id();
-        // Traced before the thread starts, so a task is never seen completing
-        // before it was seen spawning.
-        self.runtime.trace(TraceEvent::TaskSpawned {
-            id,
-            parent: self.task_stack.last().copied(),
-            scope: scope.name.to_string(),
-        });
-
-        let cancellation = Cancellation::new();
-        let runtime = self.runtime.clone();
-        let flag = cancellation.clone();
-        let thread = std::thread::Builder::new()
-            .name(format!("cove task {id}"))
-            // A task evaluates Cove, so it gets the stack the depth limit is
-            // calibrated against rather than whatever the platform hands a
-            // thread by default. Without this a task overflows its stack long
-            // before `MAX_CALL_DEPTH` stops it, which ends the process and
-            // takes every sibling task with it.
-            .stack_size(STACK_SIZE)
-            .spawn(move || run_task(&runtime, id, flag, body, span))
-            .map_err(|e| {
-                // A task the machine refused is not a task the run holds, so
-                // the place charged for it above goes back.
-                self.hosts.with_budget(|budget| budget.release_task());
-                RuntimeError::new(format!("this task could not be given a thread: {e}")).at(span)
-            })?;
-
-        let task = Task::running(
-            id,
-            scope.name.clone(),
-            scope.next_position(),
-            cancellation,
-            thread,
-        );
-        Ok(Value::Task(scope.adopt(task)))
+        task::spawn_into(self, scope, body, span, run_task)
     }
 
     /// Dispatches the operations of a task scope and of a task handle.
@@ -3916,13 +3778,13 @@ fn mention_pattern(pattern: &Pattern, out: &mut BTreeSet<String>) {
 /// demands. A task that produces a value no boundary may carry is reported
 /// here rather than handing the value to a thread that cannot own it.
 fn run_task(
-    runtime: &Runtime,
+    runtime: Runtime,
     id: u64,
     cancellation: Cancellation,
     body: Transfer,
     span: Span,
 ) -> TaskOutcome {
-    let mut interpreter = Interpreter::for_task(runtime, id, cancellation.clone());
+    let mut interpreter = Interpreter::for_task(&runtime, id, cancellation.clone());
     interpreter.timings.push(Timing::start());
     let result = interpreter.call_value_slots(body.into_value(), Vec::new(), span);
     let timing = interpreter
@@ -3933,25 +3795,7 @@ fn run_task(
     // totals, and what it was holding stops counting against the run's memory
     // budget, before the value it produced crosses back.
     interpreter.retire_heap();
-    // A task stopped by its own cancellation did not run to completion, so it
-    // is traced as cancelled — by whoever waits for it, which is the only
-    // place that knows it stopped rather than finished — and not here.
-    if !(result.is_err() && cancellation.is_cancelled()) {
-        runtime.trace(TraceEvent::TaskCompleted {
-            id,
-            cpu: timing.cpu(),
-        });
-    }
-    let value = result?;
-    Transfer::of(&value).map_err(|found| {
-        RuntimeError::new(format!(
-            "this task produced {}, which cannot leave a task",
-            found.subject()
-        ))
-        .at(span)
-        .with_rule(crate::task::TASK_SAFETY_RULE)
-        .with_help(found.help("returning it from a task"))
-    })
+    task::finished(&runtime, id, &cancellation, span, result, timing.cpu())
 }
 
 /// What an entry that returned `Err(...)` said, for the run's terminal event.
@@ -4123,13 +3967,6 @@ fn task_cancelled(span: Span) -> RuntimeError {
         .with_rule("Leaving a task scope waits for or cancels its child tasks.")
 }
 
-/// The error a `Result` carries, when the value is one and it failed.
-fn failure_of(value: &Value) -> Option<Value> {
-    value
-        .err_payload()
-        .map(|payload| payload.first().cloned().unwrap_or(Value::Unit))
-}
-
 fn expect_no_arguments(what: &str, values: &[Value], span: Span) -> Result<(), RuntimeError> {
     if values.is_empty() {
         return Ok(());
@@ -4139,16 +3976,6 @@ fn expect_no_arguments(what: &str, values: &[Value], span: Span) -> Result<(), R
         values.len()
     ))
     .at(span))
-}
-
-fn awaiting_a_cancelled_task(task: &Task, span: Span) -> RuntimeError {
-    RuntimeError::new(format!(
-        "{} was cancelled, so it has no value to await",
-        task.describe()
-    ))
-    .at(span)
-    .with_rule("Leaving a task scope waits for or cancels its child tasks, and a cancelled task never runs.")
-    .with_help("await the task before cancelling it, and before leaving its scope early")
 }
 
 // ------------------------------------------------------------ diagnostics
