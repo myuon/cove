@@ -204,14 +204,24 @@ const BACK_EDGE_FUEL: u64 = 64;
 
 /// One call in progress.
 ///
-/// The three numbers are what a return needs and nothing more, which is why a
+/// The four numbers are what a return needs and nothing more, which is why a
 /// call costs a push here rather than an allocation.
+///
+/// It is 32 bytes, and staying 32 bytes is why `return_pc` is a `u32` rather
+/// than the `usize` it was. A frame is copied into a local of
+/// [`Vm::execute`]'s hot loop and read by every instruction that addresses a
+/// slot, so its width is register pressure in the loop `benches/arith`
+/// spends its whole run in; adding the place window without narrowing
+/// something would have made it 40. An instruction index is a `u32`
+/// everywhere else in the IR — every jump target is one, and
+/// `cove_ir::lower::validate` bounds them all by the code's length — so a
+/// resumption point being one too is the same fact read from the other side.
 #[derive(Clone, Copy)]
 struct Frame {
     /// The function whose instructions are running.
     function: FunctionId,
     /// Where the caller resumes: the instruction after its `Call`.
-    return_pc: usize,
+    return_pc: u32,
     /// Where this frame's value slots begin in the value stack. Its slots
     /// are `stack[base .. base + value_frame_size]`, and its operands sit
     /// above them.
@@ -856,13 +866,20 @@ impl<'a> Vm<'a> {
                     self.scalars
                         .resize(scalar_base + callee.scalar_frame_size as usize, 0);
                     let place_base = self.places.len() - place_argc as usize;
-                    self.places.resize(
-                        place_base + callee.place_frame_size as usize,
-                        Place::rooted_at(0),
-                    );
+                    // Only where the callee has a place window or was given
+                    // a place. Almost no function has either, and `resize`
+                    // on a `Vec<Place>` is a call with drop glue behind it
+                    // rather than the two instructions the scalar stack's is
+                    // — worth a compare to skip, in the arm every call runs.
+                    if callee.place_frame_size as usize != place_argc as usize {
+                        self.places.resize(
+                            place_base + callee.place_frame_size as usize,
+                            Place::rooted_at(0),
+                        );
+                    }
                     frame = Frame {
                         function: target,
-                        return_pc: pc + 1,
+                        return_pc: pc as u32 + 1,
                         base,
                         scalar_base,
                         place_base,
@@ -1098,87 +1115,15 @@ impl<'a> Vm<'a> {
                     self.fuel += u64::from(argc);
                     self.stack.push(value);
                 }
-                Inst::PlaceLocal(slot) => {
-                    // Absolute, because a place travels into a call and the
-                    // callee's `base` is a different number — see `Place`.
-                    self.places
-                        .push(Place::rooted_at(frame.base + slot as usize));
-                }
-                Inst::LoadPlace(slot) => {
-                    let place = self.places[frame.place_base + slot as usize].clone();
-                    self.places.push(place);
-                }
-                Inst::PlaceField(index) => {
-                    let refined = self
-                        .places
-                        .last()
-                        .expect("`place-field` has a place to refine")
-                        .field(index);
-                    // A path is copied rather than extended in place because
-                    // the place below may be the one a write consumes, and a
-                    // compound assignment builds both. `cove_ir::lower`
-                    // builds them separately for that reason, so this could
-                    // extend in place; it does not, so that the instruction
-                    // means the same thing wherever the lowering puts it.
-                    *self
-                        .places
-                        .last_mut()
-                        .expect("`place-field` has a place to refine") = refined;
-                }
-                Inst::PlacePop => {
-                    self.pop_place();
-                }
-                Inst::PlaceRead => {
-                    let place = self.pop_place();
-                    // Walking a path is not constant work, so it is charged
-                    // where it happens; the clone below is not, for the
-                    // reason `Inst::LoadLocal`'s is not.
-                    self.fuel += place.path.len() as u64;
-                    // Reading a place clones: that is the value-semantics
-                    // rule, and it is `crate::interp::Place::read`'s comment.
-                    let value = self.place_ref(&place).clone();
-                    self.stack.push(value);
-                }
-                Inst::PlaceWrite => {
-                    let value = self.pop();
-                    let place = self.pop_place();
-                    self.fuel += place.path.len() as u64;
-                    *self.place_mut(&place) = value;
-                }
-                Inst::Freeze => {
-                    let span = running.span_at(pc);
-                    let place = self.pop_place();
-                    self.fuel += place.path.len() as u64;
-                    // Through the place, so that the uniqueness count sees
-                    // the caller's own handle exactly once: a read of the
-                    // receiver would be a second one. This is
-                    // `Interpreter::call_builtin_method`'s `freeze` arm, and
-                    // it calls the same function with the same handle.
-                    //
-                    // The receiver is asked what it is, unlike a typed
-                    // instruction's operand, because this instruction is
-                    // emitted from the *name* `freeze` rather than from a
-                    // settled receiver type — the same ground
-                    // `Inst::CallBuiltin` stands on. So a receiver that is
-                    // not a `Vector` is a program that fails, in the words
-                    // `builtins::call_method` fails in, and not a broken
-                    // invariant.
-                    let value = match self.place_mut(&place) {
-                        Value::Vector(storage) => builtins::freeze(storage, span)?,
-                        other => {
-                            return Err(RuntimeError::new(format!(
-                                "`{}` has no method `freeze`",
-                                other.type_name()
-                            ))
-                            .at(span))
-                        }
-                    };
-                    // `freeze` is O(1) in the storage it consumes and O(n)
-                    // in the `Array` it hands back, which is what
-                    // `Inst::CallBuiltin` charges a builtin's answer by.
-                    self.fuel += size_of_value(&value);
-                    self.stack.push(value);
-                }
+                // Every place instruction, out of line: see `Vm::place_inst`
+                // for why the bodies are not written here.
+                Inst::PlaceLocal(_)
+                | Inst::LoadPlace(_)
+                | Inst::PlaceField(_)
+                | Inst::PlacePop
+                | Inst::PlaceRead
+                | Inst::PlaceWrite
+                | Inst::Freeze => self.place_inst(inst, frame, running.span_at(pc))?,
                 Inst::TestCase(case) => {
                     let case = name(program, case);
                     let subject = self.stack.last().expect("`test-case` has a value to test");
@@ -1320,6 +1265,104 @@ impl<'a> Vm<'a> {
             .expect("a validated instruction takes only scalars that are there")
     }
 
+    /// The seven instructions that read or write the place stack.
+    ///
+    /// Out of line, and not because they are long. `Vm::execute`'s `match`
+    /// is the hottest code in this VM and `benches/arith` is small enough to
+    /// feel its layout — the ablation study in `docs/VM_ARCHITECTURE.md`
+    /// found `arith` moving several percent for changes that altered nothing
+    /// it executes. Adding seven arms inline cost it about eight percent;
+    /// collapsing them to one arm that calls this gave that back. No
+    /// benchmark executes a single one of these, so nothing is paid for the
+    /// call that is not paid by a program that uses places at all.
+    #[inline(never)]
+    fn place_inst(&mut self, inst: Inst, frame: Frame, span: Span) -> Result<(), RuntimeError> {
+        match inst {
+            Inst::PlaceLocal(slot) => {
+                // Absolute, because a place travels into a call and the
+                // callee's `base` is a different number — see `Place`.
+                self.places
+                    .push(Place::rooted_at(frame.base + slot as usize));
+            }
+            Inst::LoadPlace(slot) => {
+                let place = self.places[frame.place_base + slot as usize].clone();
+                self.places.push(place);
+            }
+            Inst::PlaceField(index) => {
+                let refined = self
+                    .places
+                    .last()
+                    .expect("`place-field` has a place to refine")
+                    .field(index);
+                // A path is copied rather than extended in place because
+                // the place below may be the one a write consumes, and a
+                // compound assignment builds both. `cove_ir::lower`
+                // builds them separately for that reason, so this could
+                // extend in place; it does not, so that the instruction
+                // means the same thing wherever the lowering puts it.
+                *self
+                    .places
+                    .last_mut()
+                    .expect("`place-field` has a place to refine") = refined;
+            }
+            Inst::PlacePop => {
+                self.pop_place();
+            }
+            Inst::PlaceRead => {
+                let place = self.pop_place();
+                // Walking a path is not constant work, so it is charged
+                // where it happens; the clone below is not, for the
+                // reason `Inst::LoadLocal`'s is not.
+                self.fuel += place.path.len() as u64;
+                // Reading a place clones: that is the value-semantics
+                // rule, and it is `crate::interp::Place::read`'s comment.
+                let value = self.place_ref(&place).clone();
+                self.stack.push(value);
+            }
+            Inst::PlaceWrite => {
+                let value = self.pop();
+                let place = self.pop_place();
+                self.fuel += place.path.len() as u64;
+                *self.place_mut(&place) = value;
+            }
+            Inst::Freeze => {
+                let place = self.pop_place();
+                self.fuel += place.path.len() as u64;
+                // Through the place, so that the uniqueness count sees
+                // the caller's own handle exactly once: a read of the
+                // receiver would be a second one. This is
+                // `Interpreter::call_builtin_method`'s `freeze` arm, and
+                // it calls the same function with the same handle.
+                //
+                // The receiver is asked what it is, unlike a typed
+                // instruction's operand, because this instruction is
+                // emitted from the *name* `freeze` rather than from a
+                // settled receiver type — the same ground
+                // `Inst::CallBuiltin` stands on. So a receiver that is
+                // not a `Vector` is a program that fails, in the words
+                // `builtins::call_method` fails in, and not a broken
+                // invariant.
+                let value = match self.place_mut(&place) {
+                    Value::Vector(storage) => builtins::freeze(storage, span)?,
+                    other => {
+                        return Err(RuntimeError::new(format!(
+                            "`{}` has no method `freeze`",
+                            other.type_name()
+                        ))
+                        .at(span))
+                    }
+                };
+                // `freeze` is O(1) in the storage it consumes and O(n)
+                // in the `Array` it hands back, which is what
+                // `Inst::CallBuiltin` charges a builtin's answer by.
+                self.fuel += size_of_value(&value);
+                self.stack.push(value);
+            }
+            other => unreachable!("`place_inst` was handed {other:?}"),
+        }
+        Ok(())
+    }
+
     /// The top of the place stack.
     ///
     /// Empty here means what an empty value stack means: a broken invariant
@@ -1434,15 +1477,20 @@ impl<'a> Vm<'a> {
         let done = self.frames.pop().expect("a return leaves a frame");
         self.stack.truncate(done.base);
         self.scalars.truncate(done.scalar_base);
-        self.places.truncate(done.place_base);
+        // Guarded for the reason the `resize` in the `Call` arm is: a
+        // truncation to the length the vector already has is free only once
+        // the call to find that out has been made.
+        if self.places.len() != done.place_base {
+            self.places.truncate(done.place_base);
+        }
         match (self.frames.last().copied(), answer) {
             (Some(caller), Answered::Value(value)) => {
                 self.stack.push(value);
-                Answer::Caller(caller, done.return_pc)
+                Answer::Caller(caller, done.return_pc as usize)
             }
             (Some(caller), Answered::Scalar(scalar)) => {
                 self.scalars.push(scalar);
-                Answer::Caller(caller, done.return_pc)
+                Answer::Caller(caller, done.return_pc as usize)
             }
             (None, Answered::Value(value)) => Answer::Done(value),
             (None, Answered::Scalar(scalar)) => {

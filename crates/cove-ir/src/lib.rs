@@ -471,11 +471,21 @@ pub enum Inst {
     /// the instruction is written. `validate` reconciles them with the
     /// callee's own `params` and `returns`, which is what makes the
     /// convention an invariant rather than a convention.
+    ///
+    /// The counts are `u16` because this is the widest variant and an enum
+    /// is as wide as its widest one. Three `u32` counts beside a
+    /// [`FunctionId`] made `Inst` 24 bytes where 16 does, which is 50% more
+    /// of every function's code array for a number that cannot use the
+    /// width: an argument count is bounded by the parameters a declaration
+    /// writes, and `crate::lower` refuses a declaration with more of them
+    /// than this holds rather than truncating one. `benches/arith` reads its
+    /// loop out of that array two million times, and it noticed the
+    /// difference.
     Call {
         function: FunctionId,
-        value_argc: u32,
-        scalar_argc: u32,
-        place_argc: u32,
+        value_argc: u16,
+        scalar_argc: u16,
+        place_argc: u16,
         returns_scalar: bool,
     },
     /// Calls a Host operation. `module` and `op` are `Const::Name`.

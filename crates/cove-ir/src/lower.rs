@@ -2908,9 +2908,20 @@ impl<'a, 'l> Body<'a, 'l> {
         // checker recorded nothing about falls back to the convention every
         // function had before, on both sides at once.
         let signature = self.outer.signature(key);
-        let mut value_argc = 0;
-        let mut scalar_argc = 0;
-        let mut place_argc = 0;
+        // `Inst::Call` holds each count in a `u16` — see its doc comment for
+        // what that buys — so a declaration with more parameters than that
+        // is refused here rather than counted into a number that cannot
+        // hold it. Nothing writes one; the check is what makes the width a
+        // fact rather than an assumption.
+        if decl.params.len() >= u16::MAX as usize {
+            return Err(Unsupported::new(
+                format!("a call to `{what}`, which has more than 65534 parameters"),
+                span,
+            ));
+        }
+        let mut value_argc: u16 = 0;
+        let mut scalar_argc: u16 = 0;
+        let mut place_argc: u16 = 0;
         let mut into = |kind: SlotKind| match kind {
             SlotKind::Value => value_argc += 1,
             SlotKind::Scalar(_) => scalar_argc += 1,
@@ -4550,6 +4561,9 @@ fn validate_function(program: &Program, id: FunctionId) -> Result<(), String> {
                         target.0
                     )));
                 };
+                let value_argc = u32::from(value_argc);
+                let scalar_argc = u32::from(scalar_argc);
+                let place_argc = u32::from(place_argc);
                 if target.arity != value_argc + scalar_argc + place_argc {
                     return Err(at(format!(
                         "calls `{}.{}` with {} arguments, which takes {}",
@@ -4839,9 +4853,9 @@ fn stack_shape(constants: &[Const], inst: Inst) -> Shape {
             returns_scalar,
             ..
         } => Shape {
-            values: (value_argc, u32::from(!returns_scalar)),
-            scalars: (scalar_argc, u32::from(returns_scalar)),
-            places: (place_argc, 0),
+            values: (u32::from(value_argc), u32::from(!returns_scalar)),
+            scalars: (u32::from(scalar_argc), u32::from(returns_scalar)),
+            places: (u32::from(place_argc), 0),
         },
         Inst::CallHost { argc, .. } | Inst::MakeBuiltin { argc, .. } => Shape::on_values(argc, 1),
         // The receiver sits below the arguments, and for a resource call the

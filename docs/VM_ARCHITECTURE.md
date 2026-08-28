@@ -627,6 +627,58 @@ about what a hot path carries: `size_of::<Span>()` is 12,
 `size_of::<Result<(), RuntimeError>>()` is 120 against 8 for
 `Result<(), Box<RuntimeError>>`.
 
+### What the place model cost, and what it cost it on
+
+The place instructions were measured against that sensitivity rather than
+assumed to be under it, because the first version of them was not. Adding
+them cost `arith` 14.9%, `pure` 10.5% and `call` 9.3% — on programs that
+execute no place instruction at all, and while the AST column, which is
+untouched code, stayed within 2% of itself. Every number here is VM-only,
+`cove-bench --iterations 15`, on the machine and build the tables above were
+measured on, against commit `aff6550` re-measured in the same session.
+
+| bench       | `aff6550` | first version | as landed |
+| ----------- | --------: | ------------: | --------: |
+| `pure`      |    2.5 ms |        2.8 ms |    2.6 ms |
+| `call`      |  260.6 ms |      288.3 ms |  268.8 ms |
+| `arith`     |   81.4 ms |       94.3 ms |   86.8 ms |
+| `method`    |  861.5 ms |      906.9 ms |  891.1 ms |
+| `chars`     |  800.6 ms |      807.9 ms |  816.1 ms |
+| `arrayget`  |  674.2 ms |      667.2 ms |  663.1 ms |
+| `field`     |  430.5 ms |      451.4 ms |  447.1 ms |
+| `hostheavy` |    3.7 ms |        3.8 ms |    3.8 ms |
+
+Three things were wrong with the first version, and all three were about
+carrying the capability rather than about using it.
+
+`Inst::Call` gained a third argument count, and three `u32` counts beside a
+`FunctionId` made `size_of::<Inst>()` 24 where it had been 16 — 50% more of
+every function's code array, for a number bounded by the parameters a
+declaration writes. The counts are `u16` now and the lowering refuses a
+declaration with more parameters than that holds; `Inst` is 16 again.
+
+`Frame` gained a fifth field and would have gone from 32 bytes to 40. A frame
+is copied into a local of the dispatch loop and read by every instruction
+that addresses a slot, so its width is register pressure in exactly the loop
+`arith` spends its run in. `return_pc` is a `u32` now — an instruction index
+is a `u32` everywhere else in the IR — and the frame is 32 bytes again.
+
+The largest of the three was the seven new arms in `Vm::execute`'s `match`.
+They are one arm now, calling an `#[inline(never)]` function, and that alone
+was worth about six points of `arith`. It is the ablation study's own finding
+read from the other side: a change that alters nothing a program executes can
+still cost it several percent, because the dispatch body's footprint is a
+cost every program pays.
+
+What is left is `arith` at +6.7% and everything else at or below +3.9%, with
+`arrayget` at −1.6%. `arith` runs 31,142,877 instructions and spends
+31,142,877 fuel on both builds — identical, which is what says the remaining
+difference is per-instruction cost and not work — and the same source change
+measured through the `cove` binary rather than through `cove-bench` shows
++4.5% rather than +6.7%, which is what says the remaining cost is layout. It
+is at the edge of the ±6% band this section already established for `arith`
+and is not separable from it by anything measured here.
+
 ## The value representation, audited
 
 Issue #116 asked that no representation be chosen without a measurement and an
