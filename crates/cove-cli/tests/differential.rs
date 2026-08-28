@@ -230,7 +230,31 @@ use cove_sema::resolve::Program as Checked;
 /// convention is what a slot number means, so the body is lowered a second
 /// time under that convention. `examples:cq` — `step: foldRevenue` — is the
 /// case that gained a lowering, and it is the only one the corpus held.
-const LOWERED_FLOOR: usize = 77;
+///
+/// 77 to 78: a `dyn Trait` value is built where one is written, and a method
+/// called on one dispatches from the value rather than from the type.
+/// `cove_ir::Inst::MakeDyn` is the language's one implicit conversion, made
+/// at the four places a type is *written* — a parameter, an annotated `let`,
+/// a struct's field, and a declared return type — which is where
+/// `Interpreter::coerce` makes it. `cove_ir::Inst::CallDyn` is the other
+/// half: a lookup by the concrete type's name over every implementation the
+/// package declares, which is the first call in this IR whose target is not
+/// a `FunctionId` written into the instruction.
+/// `tests/e2e/outline_dyn_field:app` is the case that gained a lowering.
+///
+/// Three more cases refused for a `dyn` parameter and none of them gained
+/// one, which is worth recording rather than leaving as a gap between two
+/// numbers. `tests/e2e:module_conformance`, `tests/e2e:type_trait` and
+/// `examples:traits` each also call a method on a value whose type is a
+/// *bounded type parameter* — `render<T: Display>(value: T)`,
+/// `headline<T: Summary>(entry: T)` — and each also reaches a trait's
+/// default body, whose `self` is `Self: Trait` and is the same construct
+/// again. A call through a trait bound is not a call through a `dyn`, and
+/// the lowering has no name for it, so all three now refuse as "a call to
+/// `summarize`, which no declared type and no builtin has": the name is
+/// all that is left once the receiver's type turns out to be one this pass
+/// cannot resolve a method against.
+const LOWERED_FLOOR: usize = 78;
 
 // ------------------------------------------------------------------ the test
 

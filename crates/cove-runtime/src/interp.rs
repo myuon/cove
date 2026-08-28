@@ -1413,9 +1413,6 @@ impl<'a> Interpreter<'a> {
     fn coerce(&self, module: &str, value: Value, ty: &Type) -> Value {
         match &ty.kind {
             TypeKind::Dyn(trait_name) => {
-                if matches!(value, Value::Dyn(_)) {
-                    return value;
-                }
                 // A trait belongs to the module that declares it, which may
                 // be one this module imported the trait from: a `dyn` value
                 // built here must carry the same name a value built there
@@ -1424,29 +1421,17 @@ impl<'a> Interpreter<'a> {
                     Some(owner) => format!("{owner}.{}", trait_name.node).into(),
                     None => trait_name.node.as_str().into(),
                 };
-                Value::Dyn(Rc::new(DynValue {
-                    trait_name: qualified,
-                    value,
-                }))
+                as_dyn(value, &qualified)
             }
             TypeKind::Named { path, args } if args.len() == 1 => {
                 let Some(head) = path.last() else {
                     return value;
                 };
-                match (head.node.as_str(), value) {
-                    ("Array", Value::Array(items)) => Value::Array(
-                        items
-                            .iter()
-                            .map(|item| self.coerce(module, item.clone(), &args[0]))
-                            .collect(),
-                    ),
-                    ("Option", Value::Enum(mut option)) if &*option.type_name == "Option" => {
-                        for item in &mut option.payload {
-                            *item = self.coerce(module, item.clone(), &args[0]);
-                        }
-                        Value::Enum(option)
+                match head.node.as_str() {
+                    "Array" | "Option" => {
+                        coerce_inside(value, |item| self.coerce(module, item, &args[0]))
                     }
-                    (_, value) => value,
+                    _ => value,
                 }
             }
             _ => value,
@@ -2761,15 +2746,12 @@ impl<'a> Interpreter<'a> {
         // *that* value's type. This is what makes the dispatch dynamic — the
         // static type says only which trait the method must come from.
         let mut place = place;
-        let dyn_receiver = match (&place, &temporary) {
-            (Some(place), _) => place.with_ref(span, |value| match value {
-                Value::Dyn(d) => Some(d.value.clone()),
-                _ => None,
-            })?,
-            (_, Some(Value::Dyn(d))) => Some(d.value.clone()),
+        let dispatch_from = match (&place, &temporary) {
+            (Some(place), _) => place.with_ref(span, dyn_receiver)?,
+            (_, Some(value)) => dyn_receiver(value),
             _ => None,
         };
-        if let Some(concrete) = dyn_receiver {
+        if let Some(concrete) = dispatch_from {
             place = None;
             temporary = Some(concrete);
         }
@@ -3277,6 +3259,79 @@ impl Callable for Interpreter<'_> {
 /// and enums; nothing else in the value domain can be behind a trait object.
 fn conformable(value: &Value) -> bool {
     matches!(value, Value::Struct(_) | Value::Enum(_))
+}
+
+/// Wraps a concrete value as the `dyn Trait` value a written type asks for.
+///
+/// The language's one implicit conversion, and the one place a Cove value's
+/// runtime representation depends on its static type. Both backends build a
+/// trait object here so that neither can build a different one: the
+/// interpreter reaches it from [`Interpreter::coerce`], which walks the
+/// written type at the moment of the conversion, and the VM from
+/// `cove_ir::Inst::MakeDyn`, whose walk happened when the type was lowered.
+///
+/// A value that is already a trait object is left alone rather than wrapped
+/// again, so `dyn Trait` does not nest. That is what makes the conversion
+/// idempotent — `f(x)` and `f(g(x))`, where `f` and `g` both take and
+/// answer a `dyn Display`, hand the body the same value — and it is why
+/// dispatch finds the concrete type exactly one step in.
+pub(crate) fn as_dyn(value: Value, trait_name: &Rc<str>) -> Value {
+    if matches!(value, Value::Dyn(_)) {
+        return value;
+    }
+    Value::Dyn(Rc::new(DynValue {
+        trait_name: Rc::clone(trait_name),
+        value,
+    }))
+}
+
+/// Applies `each` to what an `Array` holds and to what an `Option` holds,
+/// and answers everything else unchanged.
+///
+/// One step into a container whose elements a written type says are `dyn`
+/// too, taken by both backends here. `Array<dyn Display>` and
+/// `Option<dyn Display>` are the two forms of it, and nothing else is
+/// reached: a `Vector` is a shared handle whose elements cannot be rewritten
+/// behind its other aliases, and a `Map`'s and a `Set`'s elements are not
+/// what one argument of one head names.
+///
+/// The step does not ask which of the two it is taking, and neither does the
+/// lowering: `cove_ir::Inst::MakeDyn` carries a *depth* rather than a list of
+/// steps, because the value is what says whether a layer was an array or an
+/// option.
+pub(crate) fn coerce_inside(value: Value, mut each: impl FnMut(Value) -> Value) -> Value {
+    match value {
+        Value::Array(items) => Value::Array(items.iter().cloned().map(each).collect()),
+        Value::Enum(mut option) if &*option.type_name == "Option" => {
+            for item in &mut option.payload {
+                *item = each(item.clone());
+            }
+            Value::Enum(option)
+        }
+        other => other,
+    }
+}
+
+/// The value a method call dispatches from, when its receiver is a trait
+/// object, and nothing when it is not one.
+///
+/// A `dyn Trait` receiver is unwrapped to the concrete value it carries, and
+/// the implementation is found from *that* value's type. This is what makes
+/// the dispatch dynamic: the static type says only which trait the method
+/// must come from. Both backends ask it here — the interpreter of a place or
+/// of a temporary, the VM of the slot its receiver argument stands in — so
+/// neither can decide to dispatch from the wrapper instead.
+///
+/// `None` is not an error. The checker converts where a type is *written*
+/// and does not convert a lambda's inferred result, though it gives both the
+/// type `dyn Trait`, so a receiver whose static type is a trait object may
+/// hold the concrete value unwrapped — and it dispatches from itself, which
+/// is the same answer.
+pub(crate) fn dyn_receiver(value: &Value) -> Option<Value> {
+    match value {
+        Value::Dyn(object) => Some(object.value.clone()),
+        _ => None,
+    }
 }
 
 pub(crate) fn binary(

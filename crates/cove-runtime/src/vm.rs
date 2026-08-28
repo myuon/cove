@@ -145,8 +145,8 @@ use std::time::{Duration, Instant};
 
 use cove_diag::{SourceMap, Span};
 use cove_ir::{
-    BinaryOp as IrBinary, Const, ConstId, Function, FunctionId, Inst, IntOp, Program, Scalar,
-    SlotKind, UnaryOp as IrUnary,
+    BinaryOp as IrBinary, Const, ConstId, DispatchId, Function, FunctionId, Inst, IntOp, Program,
+    Scalar, SlotKind, UnaryOp as IrUnary,
 };
 use cove_schema::builtins::{free_builtin, FreeBuiltinKind, MAP_ENTRY, NONE_CASE, OPTION, RESULT};
 use cove_syntax::ast::{BinaryOp, EnumDecl, UnaryOp};
@@ -157,8 +157,8 @@ use crate::error::RuntimeError;
 use crate::heap::{Heap, HeapStats};
 use crate::host::{HostRegistry, Reentry, ResourceHandle};
 use crate::interp::{
-    binary, divide_by_zero, no_field, not_a_struct, overflow, returned_error_message, source_text,
-    unary, work_stopped, MAX_CALL_DEPTH,
+    as_dyn, binary, coerce_inside, divide_by_zero, dyn_receiver, no_field, not_a_struct, overflow,
+    returned_error_message, source_text, unary, work_stopped, MAX_CALL_DEPTH,
 };
 use crate::runtime::{Runtime, ENTRY_TASK};
 use crate::trace::{RunOutcome, Timing, TraceEvent};
@@ -943,6 +943,21 @@ impl<'a> Vm<'a> {
                         continue;
                     }
                 }
+                // Both `dyn` instructions, out of line, for the reason the
+                // two closure instructions above are: neither is on any
+                // benchmark's path, and this `match` is on all of them. Only
+                // a dispatch that opened a frame comes back with one.
+                Inst::MakeDyn { .. } | Inst::CallDyn { .. } => {
+                    if let Some(entered) = self.dyn_inst(inst, pc, running.span_at(pc))? {
+                        frame = entered;
+                        running = program.function(frame.function);
+                        code = &running.code;
+                        blocks = &running.block_fuel;
+                        self.charge(blocks[0], || running.span_at(0))?;
+                        pc = 0;
+                        continue;
+                    }
+                }
                 Inst::CallHost { module, op, argc } => {
                     let span = running.span_at(pc);
                     let module = name(program, module);
@@ -1592,7 +1607,12 @@ impl<'a> Vm<'a> {
             params: target.written_params.clone(),
             // A lambda has no declaration, which is the same `None` the
             // interpreter's `make_closure` writes. The field is read for a
-            // written return type, and a `dyn` return type is refused.
+            // written return type, and a lowered body has already made that
+            // conversion itself: `cove_ir::lower` emits a
+            // `cove_ir::Inst::MakeDyn` before every return of a function
+            // whose return type is written `dyn Trait`, so the answer that
+            // comes back out is already the trait object the declaration
+            // promised.
             decl: None,
             body: ClosureBody::Lowered(function),
             module: target.module.clone(),
@@ -1685,6 +1705,138 @@ impl<'a> Vm<'a> {
         };
         self.frames.push(frame);
         Ok(Entered::Frame(frame))
+    }
+
+    /// The two instructions a `dyn Trait` value needs, out of the loop.
+    ///
+    /// `Some` is the frame a dispatch opened, which is the one thing the
+    /// caller has to do that this cannot: the running function, its code and
+    /// its block table are locals of the loop.
+    #[inline(never)]
+    fn dyn_inst(
+        &mut self,
+        inst: Inst,
+        pc: usize,
+        span: Span,
+    ) -> Result<Option<Frame>, RuntimeError> {
+        match inst {
+            Inst::MakeDyn { trait_name, depth } => {
+                let trait_name = shared_name(self.program, trait_name);
+                let value = self.pop();
+                let converted = self.make_dyn(value, trait_name, depth);
+                self.stack.push(converted);
+            }
+            Inst::CallDyn { site, argc } => {
+                return self.enter_dyn_call(site, argc, pc as u32 + 1, span);
+            }
+            other => unreachable!("`dyn_inst` was handed {other:?}"),
+        }
+        Ok(None)
+    }
+
+    /// The conversion `cove_ir::Inst::MakeDyn` names: the trait object a
+    /// written `dyn Trait` asks for, under however many `Array` or `Option`
+    /// layers that type put between it and the value.
+    ///
+    /// The wrap itself and the step inwards are both `crate::interp`'s, so
+    /// this is only the arithmetic that says how many steps to take — which
+    /// is what the lowering already counted, out of the same written type
+    /// `Interpreter::coerce` walks at run time.
+    ///
+    /// One wrapper is one allocation, so the conversion is charged by how
+    /// many it made — the rule `Inst::MakeArray` and `Inst::MakeClosure` are
+    /// charged by. The oracle charges nothing for the same conversion, which
+    /// it can afford to because it makes it inside `bind_params` rather than
+    /// at an instruction; ADR 0019 makes fuel backend-specific for exactly
+    /// this kind of difference.
+    fn make_dyn(&mut self, value: Value, trait_name: &Rc<str>, depth: u16) -> Value {
+        self.fuel += 1;
+        match depth {
+            0 => as_dyn(value, trait_name),
+            _ => coerce_inside(value, |item| self.make_dyn(item, trait_name, depth - 1)),
+        }
+    }
+
+    /// Opens the frame a call through a `dyn Trait` receiver enters, or
+    /// answers the call where no implementation names the receiver's type.
+    ///
+    /// The receiver stands below the arguments and *is* the first of them,
+    /// so the whole of `argc` is already in place as the callee's first
+    /// value slots. What this does to the receiver is unwrap it, because the
+    /// implementation runs on the concrete value and not on the wrapper —
+    /// `crate::interp::dyn_receiver` is that step, and the interpreter takes
+    /// the same one.
+    ///
+    /// The lookup is by the concrete type's name, which is the only thing
+    /// that could have chosen between the candidates: the static type named
+    /// the trait, and a trait has as many implementations as the package
+    /// wrote `impl` blocks for it.
+    ///
+    /// A receiver whose type no candidate names is answered the way the
+    /// oracle answers one, by falling through to `builtins::call_method` —
+    /// which is where a receiver that reached no declaration falls in
+    /// `Interpreter::eval_method_call`, and which reports `has no method` in
+    /// its words. A checked program cannot get here, because the checker
+    /// converts to `dyn Trait` only what conforms to it.
+    #[inline(never)]
+    fn enter_dyn_call(
+        &mut self,
+        site: DispatchId,
+        argc: u16,
+        return_pc: u32,
+        span: Span,
+    ) -> Result<Option<Frame>, RuntimeError> {
+        let program = self.program;
+        let dispatch = program.dispatch(site);
+        let base = self.stack.len() - argc as usize;
+        if let Some(concrete) = dyn_receiver(&self.stack[base]) {
+            self.stack[base] = concrete;
+        }
+        let target = self.stack[base].declared_type_name().and_then(|type_name| {
+            dispatch
+                .cases
+                .iter()
+                .find(|(named, _)| named == type_name)
+                .map(|(_, id)| *id)
+        });
+        let Some(target) = target else {
+            let values = self.take(argc as usize - 1);
+            let receiver = self.pop();
+            let value = builtins::call_method(self, &receiver, &dispatch.method, values, span)?;
+            self.fuel += size_of_value(&value);
+            self.stack.push(value);
+            return Ok(None);
+        };
+        let callee = program.function(target);
+        if callee.arity != u32::from(argc) {
+            return Err(wrong_arity(callee, argc, span));
+        }
+        self.enter(callee, span)?;
+        self.stack
+            .resize(base + callee.value_frame_size as usize, Value::Unit);
+        let scalar_base = self.scalars.len();
+        self.scalars
+            .resize(scalar_base + callee.scalar_frame_size as usize, 0);
+        let place_base = self.places.len();
+        // A trait method reached through a `dyn` has no place slots — the
+        // checker refuses `var self` through a trait object, and a `var`
+        // parameter is refused on the value-stack convention — so this is
+        // guarded the way the `Call` arm's is, and for the same reason.
+        if callee.place_frame_size > 0 {
+            self.places.resize(
+                place_base + callee.place_frame_size as usize,
+                Place::rooted_at(0),
+            );
+        }
+        let frame = Frame {
+            function: target,
+            return_pc,
+            base,
+            scalar_base,
+            place_base,
+        };
+        self.frames.push(frame);
+        Ok(Some(frame))
     }
 
     /// Runs a Cove callable from outside the dispatch loop, which is what a
@@ -2180,6 +2332,17 @@ fn constant(held: &Const) -> Value {
 
 /// The text an instruction's constant names.
 fn name(program: &Program, id: ConstId) -> &str {
+    match program.constant(id) {
+        Const::Name(text) | Const::Str(text) => text,
+        other => unreachable!("an instruction named {other:?} rather than a name"),
+    }
+}
+
+/// The same name, as the shared allocation the constant pool holds it in.
+///
+/// A `dyn` value *carries* the trait's name, so every value one instruction
+/// converts should carry the pool's `Rc` rather than a copy of the text.
+fn shared_name(program: &Program, id: ConstId) -> &Rc<str> {
     match program.constant(id) {
         Const::Name(text) | Const::Str(text) => text,
         other => unreachable!("an instruction named {other:?} rather than a name"),
@@ -4321,6 +4484,7 @@ mod tests {
                 cove_ir::Inst::Return,
             ];
             let program = Program {
+                dispatches: Vec::new(),
                 constants: vec![Const::Int(1)],
                 functions: vec![cove_ir::Function {
                     module: "m".into(),
@@ -4429,6 +4593,7 @@ mod tests {
             });
             code.push(cove_ir::Inst::Return);
             let program = Program {
+                dispatches: Vec::new(),
                 constants: vec![
                     Const::Name("m.Status".into()),
                     Const::Name(case.into()),

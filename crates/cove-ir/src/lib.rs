@@ -114,6 +114,8 @@ pub struct Program {
     pub functions: Vec<Function>,
     /// Every constant any function loads, addressed by [`ConstId`].
     pub constants: Vec<Const>,
+    /// Every dynamic dispatch site, addressed by [`DispatchId`].
+    pub dispatches: Vec<Dispatch>,
 }
 
 impl Program {
@@ -125,6 +127,11 @@ impl Program {
     /// The constant `id` names.
     pub fn constant(&self, id: ConstId) -> &Const {
         &self.constants[id.0 as usize]
+    }
+
+    /// The dispatch site `id` names.
+    pub fn dispatch(&self, id: DispatchId) -> &Dispatch {
+        &self.dispatches[id.0 as usize]
     }
 
     /// The function a qualified name denotes, if this program lowered one.
@@ -381,6 +388,50 @@ pub struct FunctionId(pub u32);
 /// Addresses a [`Const`] of a [`Program`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ConstId(pub u32);
+
+/// Addresses a [`Dispatch`] of a [`Program`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct DispatchId(pub u32);
+
+/// What one call through a `dyn Trait` receiver can reach.
+///
+/// A call on a trait object is the one call in the language whose target is
+/// not knowable before the run: the static type says which trait the method
+/// comes from, and the *value* says which implementation. So the lowering
+/// cannot write a [`FunctionId`] into the instruction, and writes the whole
+/// answer instead — every implementation the method has, by the name of the
+/// concrete type that carries it — for [`Inst::CallDyn`] to choose from with
+/// the name the receiver turns out to hold.
+///
+/// # Why every implementation in the package, and not the visible ones
+///
+/// A trait object is how a value crosses a `use` edge that does not exist.
+/// `tests/e2e/outline_dyn_field` is the shape: `lib` declares the trait and
+/// holds a `dyn Summary` in a field, `plugin` supplies the conformance, and
+/// `lib` never imports `plugin` — so the type standing in `lib`'s field is
+/// one `lib` cannot name. That is what ADR 0015 calls capability-open, and it
+/// is why bounding the candidates by what the calling module can reach — the
+/// bound `crate::lower`'s `could_dispatch` puts on a call resolved by *name*
+/// — would leave out exactly the case dynamic dispatch exists for.
+#[derive(Debug)]
+pub struct Dispatch {
+    /// The qualified trait the receiver was used at, for the listing and for
+    /// the diagnostic.
+    pub trait_name: Rc<str>,
+    /// The method's own name, which is what a value carrying no
+    /// implementation of it is reported against.
+    pub method: Rc<str>,
+    /// One entry per type that conforms, keyed by the qualified name that
+    /// type's values carry — `cove_runtime::value::Value::declared_type_name`
+    /// — and holding the specialisation of its method that takes every
+    /// argument on the value stack.
+    ///
+    /// A `Vec` scanned by name rather than a map: a trait has as many
+    /// implementations as a package wrote `impl` blocks for it, which is a
+    /// handful, and a scan of a handful of `Rc<str>` is cheaper than hashing
+    /// one.
+    pub cases: Vec<(Rc<str>, FunctionId)>,
+}
 
 /// A value an instruction can push without computing it.
 ///
@@ -845,6 +896,51 @@ pub enum Inst {
     /// `Vector<SomeStruct>` — whose elements each dispatch — is refused
     /// before the run rather than failed during it.
     Snapshot,
+    /// Converts the value on top of the stack to the `dyn Trait` a written
+    /// type asks for. `trait_name` is a `Const::Name` holding the qualified
+    /// trait, and `depth` is how many `Array` or `Option` layers stand
+    /// between the value and it.
+    ///
+    /// This is the language's one implicit conversion, and it is
+    /// `Interpreter::coerce` with the type already read. There, a written
+    /// type is walked at run time to find the `dyn` inside it; here the walk
+    /// happened when the type was lowered, and what is left is the part that
+    /// depends on the value — whether it is already a trait object, and how
+    /// many elements an `Array` turned out to have.
+    ///
+    /// `depth` is one number rather than a list of `Array`/`Option` steps
+    /// because the interpreter's walk does not branch on which of the two it
+    /// is either: `cove_runtime::interp::coerce_inside` reaches into an
+    /// `Array`'s elements and an `Option`'s payload and leaves everything
+    /// else alone, so a layer is a layer and the value says which kind it
+    /// was. The lowering emits a
+    /// depth only for those two heads, which is what keeps a `Map<K, dyn V>`
+    /// — whose elements the interpreter does *not* convert — from being
+    /// reached by counting.
+    MakeDyn { trait_name: ConstId, depth: u16 },
+    /// Calls a trait method on the `dyn Trait` receiver standing below
+    /// `argc - 1` arguments, choosing the implementation from the concrete
+    /// value the receiver carries. `site` names the [`Dispatch`] holding the
+    /// implementations.
+    ///
+    /// The dispatch is dynamic in the strict sense: nothing before the run
+    /// says which function this reaches, because the static type names only
+    /// the trait. So this is the second call whose target is a run-time fact
+    /// — [`Inst::CallValue`] is the first — and it takes the same convention
+    /// for the same reason: every argument travels on the value stack and the
+    /// answer comes back on it, since no candidate's own signature can be the
+    /// one the call site placed its arguments by. `crate::lower` numbers each
+    /// candidate as a specialisation under that convention, exactly as it
+    /// numbers a declared function used as a value.
+    ///
+    /// The receiver is the first argument rather than a fourth operand: it is
+    /// `self`, it becomes the callee's slot 0, and unwrapping it is what this
+    /// instruction does to it in place. A receiver that is not a trait object
+    /// at all is dispatched from itself, which is what
+    /// `Interpreter::eval_method_call` does with one — the checker converts
+    /// where a type is written and does not convert a lambda's inferred
+    /// result, and neither backend may tell the two apart.
+    CallDyn { site: DispatchId, argc: u16 },
     /// Returns the top of the value stack.
     ///
     /// What a function whose `returns` is [`SlotKind::Value`] ends in, and
@@ -1084,6 +1180,25 @@ fn render_inst(program: &Program, inst: Inst) -> String {
         Inst::PlaceWrite => "place-write".to_string(),
         Inst::Freeze => "freeze".to_string(),
         Inst::Snapshot => "snapshot".to_string(),
+        // The depth is written only where there is one, exactly as a
+        // listing writes a place window only where a function has one.
+        Inst::MakeDyn { trait_name, depth } => match depth {
+            0 => format!("make-dyn {}", name(trait_name)),
+            _ => format!("make-dyn {} inside {depth}", name(trait_name)),
+        },
+        // The candidates are written out, because they are the whole of what
+        // this instruction is: a listing that named the site by number would
+        // say nothing about where the call can go.
+        Inst::CallDyn { site, argc } => {
+            let dispatch = &program.dispatches[site.0 as usize];
+            let cases: Vec<&str> = dispatch.cases.iter().map(|(ty, _)| &**ty).collect();
+            format!(
+                "call-dyn {}.{} argc={argc} [{}]",
+                dispatch.trait_name,
+                dispatch.method,
+                cases.join(", ")
+            )
+        }
         Inst::SpreadArgument => "spread-argument".to_string(),
         Inst::TestCase(case) => format!("test-case {}", name(case)),
         Inst::GetPayload(index) => format!("get-payload {index}"),

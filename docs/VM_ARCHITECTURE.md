@@ -125,6 +125,69 @@ sibling block reuses the numbers. The third is zero for almost every function:
 only a `var` parameter and a `var self` receiver take a place slot, and
 nothing a body declares takes one at all.
 
+### A call whose target is not known
+
+Two calls do not name a function. `call-value` reaches whatever callable
+stands on the stack, and `call-dyn` reaches whichever implementation of a
+trait method the receiver's concrete type carries. Both take the same
+convention, and for the same reason rather than by coincidence: nothing at
+either call site knows which body it will enter, so neither can have placed
+its arguments by that body's `Function::params`. Every argument travels on
+the value stack and the answer comes back on it, and the lowering numbers a
+*second specialisation* of any declaration reached that way — one function
+under the convention its own signature names, one under this one. A
+declaration both roads reach is one function, because it is one key.
+
+`call-dyn` differs from `call-value` in where the answer comes from. There,
+the callee is a value the program built and popped; here, the candidates were
+settled when the call was lowered and the instruction names the list —
+`cove_ir::Dispatch`, one entry per type that conforms, keyed by the qualified
+name that type's values carry. What happens at run time is a scan of that
+list for the receiver's own type name. It is a scan rather than a map because
+a trait has as many implementations as the package wrote `impl` blocks for it,
+which is a handful.
+
+The list is every conformance the *package* declares, deliberately not the
+ones the calling module can see. `tests/e2e/outline_dyn_field` is the shape
+that forces it: `lib` declares the trait and holds a `dyn Summary` in a field,
+`plugin` supplies the conformance, and `lib` never imports `plugin`. The type
+standing in that field is one the calling module cannot name, which is what
+ADR 0015 calls capability-open — so bounding the candidates by visibility
+would leave out exactly the case dynamic dispatch exists for.
+
+The receiver is the first argument rather than a fourth operand: it is `self`,
+it becomes the callee's slot 0, and what the instruction does to it is unwrap
+it, because the implementation runs on the concrete value and not on the
+`dyn Trait` wrapper. `crate::interp::dyn_receiver` is that step and both
+backends take it there.
+
+### Where a trait object is made
+
+`make-dyn` is the language's one implicit conversion, and it is the one place
+a Cove value's runtime representation depends on its static type. The
+interpreter makes it in `Interpreter::coerce`, walking the *written* type at
+the moment of the conversion; the VM makes it at an instruction whose walk
+happened when the type was lowered. Both end in
+`crate::interp::as_dyn`, so neither can build a different wrapper — including
+the rule that a value already wrapped is left alone, which is what keeps
+`dyn Trait` from nesting.
+
+Four sites convert, because four are where a type is *written*: a parameter,
+including one left to its default; an annotated `let`; a struct's field; and a
+declared return type. Three of the four are the callee's or the constructor's
+rather than the caller's, which is where the interpreter makes them too — a
+call knows nothing about the callee's annotations, and a `call-value` or a
+`call-dyn` knows nothing about the callee at all.
+
+The instruction carries a *depth* rather than a path, because the walk into
+`Array<dyn T>` and `Option<dyn T>` does not branch on which of the two it is
+taking: `crate::interp::coerce_inside` reaches into an array's elements and an
+option's payload and leaves everything else alone, so the value is what says
+which kind a layer was. The lowering counts a layer only for those two heads,
+which is what keeps a `Map<K, dyn V>` — whose elements the interpreter does
+not convert — from being reached by counting. A `dyn` written somewhere the
+walk cannot reach is refused rather than converted.
+
 ### What a place is
 
 A place is an index into the value stack together with the field positions to

@@ -174,8 +174,8 @@ use cove_syntax::ast::{
 };
 
 use crate::{
-    BinaryOp, Const, ConstId, Function, FunctionId, Inst, IntOp, Program, Scalar, SlotKind,
-    UnaryOp, Unsupported,
+    BinaryOp, Const, ConstId, Dispatch, DispatchId, Function, FunctionId, Inst, IntOp, Program,
+    Scalar, SlotKind, UnaryOp, Unsupported,
 };
 
 /// A lowered program and the function to start it at.
@@ -357,7 +357,8 @@ enum Instance {
         /// collects whatever is left over into the one `Array` it receives
         /// and an empty `Array` is an argument like any other.
         supplied: Vec<bool>,
-        /// Whether this is the specialisation a closure is made of.
+        /// Whether this is the specialisation reached under the
+        /// value-stack convention.
         ///
         /// A declared function used as a value is called through
         /// [`Inst::CallValue`], which knows nothing about its target, so
@@ -366,6 +367,14 @@ enum Instance {
         /// declaration's own signature names, and a convention is what a
         /// slot number means — so it is a different function, numbered
         /// beside the one a direct call reaches rather than replacing it.
+        ///
+        /// A trait method reached through [`Inst::CallDyn`] is the second
+        /// road to the same place, and it is the same flag rather than one
+        /// of its own because it is the same convention and the same
+        /// reason for it: the call site cannot know which implementation it
+        /// will enter, so it cannot have placed its arguments by any one of
+        /// their signatures. A method a closure and a dynamic dispatch both
+        /// reach is therefore one function.
         ///
         /// A body under this convention is lowered the way a body whose
         /// bindings the checker abstained about is: an `Int` parameter is a
@@ -388,6 +397,24 @@ impl Instance {
             key,
             supplied: vec![true; params],
             as_value: false,
+        }
+    }
+
+    /// The instance a dynamic dispatch reaches: every parameter supplied,
+    /// under the value-stack convention.
+    ///
+    /// The same convention a closure is called under, for the same reason
+    /// and reached by a second road. Nothing at a `Inst::CallDyn` knows
+    /// which implementation it will enter, so the call cannot have placed
+    /// its arguments by any one candidate's signature; every argument
+    /// travels on the value stack and the answer comes back on it. A
+    /// declaration both roads reach is one function, because this is the
+    /// same key.
+    fn dynamic(key: Key, params: usize) -> Instance {
+        Instance::Declared {
+            key,
+            supplied: vec![true; params],
+            as_value: true,
         }
     }
 }
@@ -467,6 +494,13 @@ struct Lowering<'a> {
     /// within the file it was parsed from and a package has many files.
     lambda_of: BTreeMap<(FileId, ExprId), usize>,
     constants: Vec<Const>,
+    /// Every dynamic dispatch site some body has reached, in the order they
+    /// were reached, which is what [`DispatchId`] indexes.
+    ///
+    /// One entry per `(trait, method)` pair rather than per call site: the
+    /// implementations a call can reach are a fact about the pair, and two
+    /// calls to `label()` on a `dyn Display` reach the same set.
+    dispatches: Vec<Dispatch>,
 }
 
 impl<'a> Lowering<'a> {
@@ -489,6 +523,7 @@ impl<'a> Lowering<'a> {
             lambdas: Vec::new(),
             lambda_of: BTreeMap::new(),
             constants: Vec::new(),
+            dispatches: Vec::new(),
         };
         for (module, resolved) in &checked.modules {
             for (name, entry) in &resolved.functions {
@@ -622,6 +657,7 @@ impl<'a> Lowering<'a> {
         Ok(Program {
             functions,
             constants: self.constants,
+            dispatches: self.dispatches,
         })
     }
 
@@ -716,6 +752,125 @@ impl<'a> Lowering<'a> {
                 .get(&(module.clone(), type_name.to_string(), name.to_string()))
                 .copied()
         })
+    }
+
+    /// The name a `dyn` value built in `module` carries.
+    ///
+    /// `Interpreter::declaring_module` asked before the run instead of
+    /// during it. A trait belongs to the module that declares it, which may
+    /// be one this module imported the trait from, and a `dyn` value built
+    /// here must carry the same name a value built there does, or the two
+    /// would not compare equal. A name no module declares as a trait is left
+    /// bare, which is what that function's `None` leaves too.
+    fn trait_named(&self, module: &str, name: &str) -> Rc<str> {
+        let Some(resolved) = self.checked.modules.get(module) else {
+            return name.into();
+        };
+        if resolved.traits.contains_key(name) {
+            return format!("{module}.{name}").into();
+        }
+        match resolved.imports.get(name) {
+            Some(owner)
+                if self
+                    .checked
+                    .modules
+                    .get(owner)
+                    .is_some_and(|owner| owner.traits.contains_key(name)) =>
+            {
+                format!("{owner}.{name}").into()
+            }
+            _ => name.into(),
+        }
+    }
+
+    /// The conversion a type written in `module` asks for: the qualified
+    /// trait a `dyn` inside it names, and how many `Array` or `Option`
+    /// layers stand between the value and that `dyn`.
+    ///
+    /// This is the walk `Interpreter::coerce` makes over the written type,
+    /// made once here instead of once per conversion there. It reaches into
+    /// `Array<T>` and `Option<T>` and nothing else, for the reason that
+    /// function gives: those are the forms whose elements are written as
+    /// `dyn` too, and a `Vector` is a shared handle whose elements cannot be
+    /// rewritten behind its other aliases.
+    ///
+    /// `None` is two different things, and the caller tells them apart with
+    /// [`mentions_dyn`]: a type with no `dyn` in it at all needs no
+    /// conversion, and a type that mentions one somewhere this walk does not
+    /// reach — `Map<String, dyn Display>`, a written function type — is
+    /// refused, because converting it would be this pass deciding something
+    /// the oracle does not do.
+    fn dyn_conversion(&self, module: &str, ty: &Type) -> Option<(Rc<str>, u16)> {
+        let (name, depth) = dyn_shape(ty)?;
+        Some((self.trait_named(module, name), depth))
+    }
+
+    /// The dispatch site a call to `method` through `dyn trait_name`
+    /// reaches, numbering one the first time such a call is lowered.
+    ///
+    /// The candidates are every conformance to that trait the *package*
+    /// declares, and deliberately not the ones the calling module can see:
+    /// see [`Dispatch`] for why a bound would leave out the case dynamic
+    /// dispatch exists for. Each is numbered as a specialisation under the
+    /// value-stack convention, exactly as a declared function used as a
+    /// value is, because nothing at the call site knows which of them it
+    /// will reach.
+    ///
+    /// One site per `(trait, method)` pair, so two calls to `label()` on a
+    /// `dyn Display` share it: the implementations are a fact about the
+    /// pair, and rebuilding the list per call site would be the same answer
+    /// written twice.
+    fn dispatch_site(&mut self, trait_name: &str, method: &str) -> DispatchId {
+        if let Some(index) = self
+            .dispatches
+            .iter()
+            .position(|site| &*site.trait_name == trait_name && &*site.method == method)
+        {
+            return DispatchId(index as u32);
+        }
+        // Numbered before the candidates are, so that a trait method that
+        // dispatches on its own receiver — a default body calling another of
+        // the trait's methods — finds this site already there rather than
+        // numbering a second one.
+        let id = DispatchId(self.dispatches.len() as u32);
+        self.dispatches.push(Dispatch {
+            trait_name: trait_name.into(),
+            method: method.into(),
+            cases: Vec::new(),
+        });
+        let mut implementors: Vec<(String, String)> = Vec::new();
+        for resolved in self.checked.modules.values() {
+            for conformance in resolved.conformances.values() {
+                let qualified = format!("{}.{}", conformance.trait_module, conformance.trait_name);
+                if qualified == trait_name && conformance.methods.contains(method) {
+                    implementors.push((
+                        conformance.type_module.clone(),
+                        conformance.type_name.clone(),
+                    ));
+                }
+            }
+        }
+        // A type conforms to a trait once, so this is a sort for
+        // determinism rather than a deduplication: the listing a golden test
+        // reads has to be the same list every run, and the modules were
+        // walked in name order but the types inside them were not.
+        implementors.sort();
+        implementors.dedup();
+        let mut cases: Vec<(Rc<str>, FunctionId)> = Vec::new();
+        for (type_module, type_name) in implementors {
+            // `method_of` is `Interpreter::find_method`: the type's own
+            // module first, and the module that declares the conformance
+            // second. A conformance whose method this pass cannot find is
+            // one the run could not have called either.
+            let Some(key) = self.method_of(&type_module, &type_name, method) else {
+                continue;
+            };
+            let params = self.declaration(key).decl.params.len();
+            let function = self.number(Instance::dynamic(key, params));
+            cases.push((format!("{type_module}.{type_name}").into(), function));
+        }
+        self.dispatches[id.0 as usize].cases = cases;
+        id
     }
 
     /// Whether `name` is a host module `module` may address.
@@ -881,6 +1036,12 @@ impl<'a> Lowering<'a> {
                 SlotKind::Value,
                 slots[at],
             );
+            // A lambda's parameters are bound by the same `bind_params`, so
+            // one written `dyn Trait` receives a trait object exactly as a
+            // declaration's does. A lambda has no written return type, so
+            // there is no second conversion here: `Interpreter::invoke`
+            // reads one off `Closure::decl`, and a lambda's is `None`.
+            body.coerce_param(module, param, SlotKind::Value, slots[at], true);
         }
 
         body.block_at(decl_body, Position::Value)?;
@@ -989,8 +1150,21 @@ impl<'a> Lowering<'a> {
         // become a slot without moving: the receiver first, then the
         // parameters as declared.
         let mut params: Vec<SlotKind> = Vec::new();
+        // Read before the body borrows the lowering, because a name has to
+        // be interned to carry it and interning is the lowering's.
+        let dyn_return = match (returns, &decl.return_type) {
+            (SlotKind::Value, Some(ty)) => match self.dyn_conversion(module, ty) {
+                Some((trait_name, depth)) => {
+                    let trait_name = self.name(&trait_name);
+                    Some(Inst::MakeDyn { trait_name, depth })
+                }
+                None => None,
+            },
+            _ => None,
+        };
         let mut body = Body::new(self, module);
         body.returns = returns;
+        body.dyn_return = dyn_return;
         body.rooted = var_argument_roots(&decl.body);
         if let Some(receiver) = decl.receiver {
             // `var self` is a place slot and nothing else is. Which stack an
@@ -1004,6 +1178,14 @@ impl<'a> Lowering<'a> {
             // binding get and is what a write through it is checked against.
             let kind = if receiver.is_var {
                 SlotKind::Place
+            } else if as_value {
+                // Under the value-stack convention a receiver is an argument
+                // like any other, and the caller has no callee to have read
+                // the signature's answer off. Nothing a method is declared
+                // on today is scalar — a trait is implemented for a struct
+                // or an enum — so this states the convention rather than
+                // changing where a receiver goes.
+                SlotKind::Value
             } else {
                 signature
                     .and_then(|signature| signature.receiver.as_ref())
@@ -1085,7 +1267,10 @@ impl<'a> Lowering<'a> {
                     SlotKind::Value => body.expr(default)?,
                     SlotKind::Place => unreachable!("a default does not produce a place"),
                 }
+                body.coerce_param(module, param, kinds[at], slots[at], false);
                 body.emit(store_slot(kinds[at], slots[at]), default.span);
+            } else {
+                body.coerce_param(module, param, kinds[at], slots[at], true);
             }
             body.declare_at(
                 Some(param.name.node.as_str()),
@@ -1301,6 +1486,16 @@ struct Body<'a, 'l> {
     /// it leaves its operand. Read from the declaration's signature once, in
     /// [`Lowering::function`].
     returns: SlotKind,
+    /// The conversion this function's written return type asks for, emitted
+    /// before every one of its returns.
+    ///
+    /// `Interpreter::invoke` converts what a body answered against the type
+    /// the declaration *wrote*, so the conversion belongs to the callee and
+    /// not to the call: a declaration with a `dyn Trait` return type answers
+    /// a trait object whichever call site asked. Kept here rather than
+    /// re-derived at each `return`, because a body has one return type and a
+    /// `return` written inside a `match` arm has no declaration in reach.
+    dyn_return: Option<Inst>,
     code: Vec<Inst>,
     spans: Vec<Span>,
     /// The operand-stack depths, or `None` where control cannot arrive.
@@ -1354,6 +1549,7 @@ impl<'a, 'l> Body<'a, 'l> {
             outer,
             module,
             returns: SlotKind::Value,
+            dyn_return: None,
             code: Vec::new(),
             spans: Vec::new(),
             depth: Some(Depth::EMPTY),
@@ -1461,7 +1657,91 @@ impl<'a, 'l> Body<'a, 'l> {
             }
             self.depth = Some(arrival);
         }
+        if inst == Inst::Return {
+            self.emit_dyn_return(span);
+        }
         self.emit(inst, span);
+    }
+
+    /// The conversion a `dyn` return type asks for, before the return that
+    /// carries the answer out.
+    ///
+    /// Every return of a function reaches this, because
+    /// `Interpreter::invoke` converts the one value a call answered and does
+    /// not ask which `return` produced it.
+    fn emit_dyn_return(&mut self, span: Span) {
+        if let Some(inst) = self.dyn_return {
+            self.emit(inst, span);
+        }
+    }
+
+    /// Emits the conversion a type written in `module` asks for, and nothing
+    /// where it asks for none.
+    ///
+    /// What is converted is the top of the value stack, which is where every
+    /// site the interpreter coerces at has left its value: a parameter just
+    /// read back out of its slot, a default just computed, an annotated
+    /// `let`'s value, and a struct field's argument.
+    ///
+    /// `module` is the module the type was *written* in, which is not always
+    /// the one this body belongs to: a struct's fields are written where the
+    /// struct is declared, and `Interpreter::init_struct` passes that module
+    /// to `coerce` for exactly this reason — a trait's qualified name is read
+    /// against the module that wrote the annotation.
+    fn coerce_to(&mut self, module: &str, ty: &Type, span: Span) {
+        let Some((trait_name, depth)) = self.outer.dyn_conversion(module, ty) else {
+            return;
+        };
+        let trait_name = self.outer.name(&trait_name);
+        self.emit(Inst::MakeDyn { trait_name, depth }, span);
+    }
+
+    /// The conversion a parameter's written type asks for, made where
+    /// `bind_params` makes it.
+    ///
+    /// A parameter written `dyn Trait` receives a trait object, and the
+    /// interpreter builds it as the parameter is *bound* — in declaration
+    /// order, before the next parameter's default is evaluated, which is
+    /// what lets that default read this one already converted. So it is
+    /// emitted in the callee's prologue and not at the call site: a call
+    /// knows nothing about the callee's annotations, and a call through a
+    /// value or through a `dyn` knows nothing about the callee at all.
+    ///
+    /// `in_slot` says where the value is. A supplied parameter is already
+    /// standing in its slot, so it is read out, converted, and written back;
+    /// a parameter left to its default has just been computed onto the
+    /// stack, and the store that follows is the caller's.
+    ///
+    /// Two shapes are left alone because `bind_params` leaves them alone: a
+    /// `var` parameter, which names the caller's storage rather than
+    /// receiving a copy of it, and a variadic one, which receives the
+    /// `Array` the call site collected whatever its element type was
+    /// written as.
+    fn coerce_param(
+        &mut self,
+        module: &str,
+        param: &Param,
+        kind: SlotKind,
+        slot: u32,
+        in_slot: bool,
+    ) {
+        if param.variadic || !matches!(kind, SlotKind::Value) {
+            return;
+        }
+        let Some(ty) = &param.ty else {
+            return;
+        };
+        let Some((trait_name, depth)) = self.outer.dyn_conversion(module, ty) else {
+            return;
+        };
+        let trait_name = self.outer.name(&trait_name);
+        if in_slot {
+            self.emit(Inst::LoadLocal(slot), param.span);
+        }
+        self.emit(Inst::MakeDyn { trait_name, depth }, param.span);
+        if in_slot {
+            self.emit(Inst::StoreLocal(slot), param.span);
+        }
     }
 
     fn constant(&mut self, value: Const, span: Span) {
@@ -2074,7 +2354,18 @@ impl<'a, 'l> Body<'a, 'l> {
                 // typed instruction is settled by: the type the checker gave
                 // what it is declared from. An abstention keeps the slot a
                 // `Value`, and the whole function then reads as it always did.
-                let kind = self.rooted_kind(name.node.as_str(), self.slot_kind(value));
+                //
+                // An annotation that converts settles it instead: what the
+                // binding holds is the trait object the conversion makes,
+                // which is a `Value` whatever the value it was declared from
+                // was. No annotation the checker settles as `Int` or `Bool`
+                // can convert, so this only ever moves an answer the way
+                // `rooted_kind` does.
+                let converts = ty.as_ref().is_some_and(|ty| dyn_shape(ty).is_some());
+                let kind = match converts {
+                    true => SlotKind::Value,
+                    false => self.rooted_kind(name.node.as_str(), self.slot_kind(value)),
+                };
                 match kind {
                     SlotKind::Scalar(_) => self.expr_scalar(value)?,
                     SlotKind::Value => self.expr(value)?,
@@ -2082,6 +2373,13 @@ impl<'a, 'l> Body<'a, 'l> {
                     // `Place`, and `rooted_kind` only ever moves an answer
                     // towards the value stack.
                     SlotKind::Place => unreachable!("a `let` does not declare a place"),
+                }
+                if let Some(ty) = ty {
+                    // `eval_block_body` converts the value against the
+                    // annotation before it declares the name, so this stands
+                    // between the value and the store the same way.
+                    let module = self.module;
+                    self.coerce_to(module, ty, statement.span);
                 }
                 let slot = self.declare(Some(name.node.as_str()), *is_var, kind);
                 self.emit(store_slot(kind, slot), statement.span);
@@ -2349,10 +2647,12 @@ impl<'a, 'l> Body<'a, 'l> {
                 // instead of the VM reading a word that was never written.
                 (SlotKind::Scalar(_), None) | (SlotKind::Value, None) => {
                     self.constant(Const::Unit, span);
+                    self.emit_dyn_return(span);
                     self.emit(Inst::Return, span);
                 }
                 (SlotKind::Value, Some(value)) => {
                     self.expr(value)?;
+                    self.emit_dyn_return(span);
                     self.emit(Inst::Return, span);
                 }
                 // `slot_kind_of` never answers `Place` about a return type,
@@ -3927,8 +4227,16 @@ impl<'a, 'l> Body<'a, 'l> {
             .collect();
         every_argument_supplied(&names, args, &decl.name.node, span)?;
         plain_arguments(args, &decl.name.node)?;
-        for arg in args.iter() {
+        for (at, arg) in args.iter().enumerate() {
             self.expr(arg.value)?;
+            // Each field's value is converted against the type the field was
+            // written with, in the module that declares the struct rather
+            // than the one initializing it — which is what
+            // `Interpreter::init_struct` passes to `coerce`. The `at`th
+            // argument fills the `at`th field because
+            // `every_argument_supplied` accepted this call: every field has
+            // an argument and the arguments fill them in increasing order.
+            self.coerce_to(owner, &decl.fields[at].ty, arg.span);
         }
         let ty = self.outer.name(&format!("{owner}.{}", decl.name.node));
         let fields = self.outer.name(&names.join(","));
@@ -4265,6 +4573,93 @@ impl<'a, 'l> Body<'a, 'l> {
     /// Guessing there is the one mistake a second backend must not make:
     /// `[1, 2, 3].length()` is the builtin's `3` on the oracle, and a `Call`
     /// to a declared `Box.length` is a different program.
+    /// `value.label()` where `value` is a `dyn Trait`: the one call in the
+    /// language whose target is not knowable before the run.
+    ///
+    /// The receiver's static type names the trait and nothing else, so what
+    /// finds the implementation is the concrete value the trait object
+    /// carries — a run-time fact, and therefore a run-time lookup.
+    /// [`Inst::CallDyn`] is that lookup. It is an instruction of its own
+    /// rather than an [`Inst::Call`] with a target guessed at, which is what
+    /// [issue #116](https://github.com/myuon/cove/issues/116) asks for: an
+    /// operation whose target is not statically known says so, instead of
+    /// hiding behind one that looks static.
+    ///
+    /// The arity is the *trait's*, not any one implementation's. A
+    /// conformance's method must match the signature its trait declares —
+    /// `cove_sema`'s `signature_difference` compares the receiver, the
+    /// parameter names, the parameter types and the return type — so the
+    /// trait's own declaration is the one thing every candidate agrees about
+    /// and is what a call site can place its arguments by.
+    fn call_dyn(
+        &mut self,
+        trait_name: &str,
+        receiver: &'a Expr,
+        name: &str,
+        args: Args<'a>,
+        span: Span,
+    ) -> Result<Option<Scalar>, Unsupported> {
+        // `Ty::Dyn` carries the trait qualified by the module that declares
+        // it, which is the same name `Interpreter::coerce` builds and the
+        // same one `Dispatch` is keyed by.
+        let declared = trait_name.rsplit_once('.').and_then(|(module, short)| {
+            let resolved = self.outer.checked.modules.get(module)?;
+            resolved.traits.get(short)?.method(name)
+        });
+        let Some(declared) = declared else {
+            return Err(Unsupported::new(
+                format!("a call to `{name}`, which `{trait_name}` does not declare here"),
+                span,
+            ));
+        };
+        // A call through a `dyn` supplies a count and nothing else, exactly
+        // as a call through a value does: there is no supplied-set for a
+        // specialisation to be keyed by, and no callee in reach for a label
+        // to be matched against. Both shapes are refused rather than
+        // rearranged.
+        plain_arguments(args, name)?;
+        if let Some(arg) = args.iter().find(|arg| arg.label.is_some()) {
+            return Err(Unsupported::new(
+                format!("a labelled argument to `{name}`, which is called through a `dyn`"),
+                arg.span,
+            ));
+        }
+        if args.len() != declared.params.len() {
+            return Err(Unsupported::new(
+                format!(
+                    "a call to `{name}` through `dyn {trait_name}` that supplies {} of its {} argument(s)",
+                    args.len(),
+                    declared.params.len()
+                ),
+                span,
+            ));
+        }
+        if args.len() >= u16::MAX as usize {
+            return Err(Unsupported::new(
+                format!("a call to `{name}` with more than 65534 arguments"),
+                span,
+            ));
+        }
+        let site = self.outer.dispatch_site(trait_name, name);
+        // The receiver first and then the arguments, left to right:
+        // `Interpreter::eval_method_call` resolves the receiver before
+        // `eval_args`, and the order two effects happen in is observable.
+        self.expr(receiver)?;
+        for arg in args.iter() {
+            self.expr(arg.value)?;
+        }
+        self.emit(
+            Inst::CallDyn {
+                site,
+                argc: args.len() as u16 + 1,
+            },
+            span,
+        );
+        // On the value stack, because no candidate's own signature is one
+        // this call could have read a convention off.
+        Ok(None)
+    }
+
     fn method_call(
         &mut self,
         id: ExprId,
@@ -4281,6 +4676,24 @@ impl<'a, 'l> Body<'a, 'l> {
         let recorded = self.target(id, span);
         if let Some(key) = recorded.and_then(|target| self.declared_by(target)) {
             return self.call_declared(key, Some(receiver), args, span);
+        }
+        // A `dyn Trait` receiver dispatches from the value it carries rather
+        // than from its static type, which is the whole of what makes the
+        // dispatch dynamic. Asked before every question below for the reason
+        // `Interpreter::eval_method_call` unwraps its receiver before it asks
+        // any of its own: none of them is a question about a trait object,
+        // and the checker records no target for one — a call through a trait
+        // reaches a declaration the call site cannot name.
+        if let Some(Ty::Dyn(trait_name)) = self.settled(receiver) {
+            // `Facts::ty` holds the type as the checker held it while it
+            // walked this body, and there a trait the module declares is
+            // named bare while an imported one already carries the module it
+            // came from — `cove_sema`'s `qualified_name`, which is what
+            // `Signature` publishes after applying it and what a `dyn` value
+            // carries. `trait_named` applies the same rule from the same
+            // tables, and leaves a name that already carries a module alone.
+            let qualified = self.outer.trait_named(self.module, trait_name);
+            return self.call_dyn(&qualified, receiver, name, args, span);
         }
         // A resource handle's methods belong to the host that issued it, so
         // they are dispatched through the boundary rather than looked up in
@@ -5335,15 +5748,42 @@ fn int_op(op: BinaryOp) -> Option<IntOp> {
     })
 }
 
-/// Refuses a `dyn` written anywhere in a type.
+/// Refuses a `dyn` written where this pass has no conversion to make.
 ///
 /// A `dyn` value is the language's one implicit conversion, made where a
-/// type is *written*, and the IR has no instruction that makes one.
+/// type is *written*, and [`Inst::MakeDyn`] is what makes one. What is left
+/// to refuse is a type that mentions `dyn` somewhere the conversion does not
+/// reach — a `Map`'s value type, a written function type's parameter — which
+/// is exactly where `Interpreter::coerce` leaves the value alone. Lowering
+/// those as a conversion would convert something the oracle does not, and
+/// lowering them as nothing at all would leave a value unconverted with no
+/// record that it was; so they are named instead.
 fn reject_dyn(ty: &Type, what: &str) -> Result<(), Unsupported> {
-    if mentions_dyn(ty) {
+    if mentions_dyn(ty) && dyn_shape(ty).is_none() {
         return Err(Unsupported::new(what, ty.span));
     }
     Ok(())
+}
+
+/// Where the `dyn` inside a written type is: the trait it names, and how
+/// many `Array` or `Option` layers stand above it.
+///
+/// The pure half of [`Lowering::dyn_conversion`], which is the half a
+/// refusal asks about — whether a conversion exists at all is a question
+/// about the shape of the type and not about which module wrote it.
+fn dyn_shape(ty: &Type) -> Option<(&str, u16)> {
+    match &ty.kind {
+        TypeKind::Dyn(name) => Some((name.node.as_str(), 0)),
+        TypeKind::Named { path, args } if args.len() == 1 => {
+            let head = path.last()?;
+            if !matches!(head.node.as_str(), "Array" | "Option") {
+                return None;
+            }
+            let (name, depth) = dyn_shape(&args[0])?;
+            Some((name, depth + 1))
+        }
+        _ => None,
+    }
 }
 
 /// Whether a type mentions `dyn` anywhere inside it.
@@ -5421,10 +5861,11 @@ fn reject_parameter(param: &Param, is_last: bool) -> Result<(), Unsupported> {
 /// Whether an instruction is the last one of a straight line: after it,
 /// control is somewhere the next index does not name.
 ///
-/// The five jumps go elsewhere or fall through, [`Inst::Call`] and
-/// [`Inst::CallValue`] run a whole callee in between, [`Inst::Try`] may leave
-/// the frame instead of continuing, and [`Inst::Return`],
-/// [`Inst::ReturnScalar`] and [`Inst::NoMatch`] do not continue at all.
+/// The five jumps go elsewhere or fall through, [`Inst::Call`],
+/// [`Inst::CallValue`] and [`Inst::CallDyn`] run a whole callee in between,
+/// [`Inst::Try`] may leave the frame instead of continuing, and
+/// [`Inst::Return`], [`Inst::ReturnScalar`] and [`Inst::NoMatch`] do not
+/// continue at all.
 fn ends_a_block(inst: Inst) -> bool {
     matches!(
         inst,
@@ -5435,6 +5876,7 @@ fn ends_a_block(inst: Inst) -> bool {
             | Inst::JumpIfTrueScalar(_)
             | Inst::Call { .. }
             | Inst::CallValue { .. }
+            | Inst::CallDyn { .. }
             | Inst::Try
             | Inst::Return
             | Inst::ReturnScalar
@@ -5752,6 +6194,59 @@ fn validate_function(program: &Program, id: FunctionId) -> Result<(), String> {
                         "makes a closure of `{}.{}`, which answers on the scalar stack",
                         target.module, target.name
                     )));
+                }
+            }
+            Inst::MakeDyn { trait_name, .. } => constant(trait_name, "the trait")?,
+            // The same convention `Inst::MakeClosure` is checked against,
+            // and checked here for the same reason: this is the last point
+            // at which the targets are known, because the call itself
+            // reaches whichever of them the receiver turns out to carry. So
+            // every candidate has to take every argument on the value stack
+            // and answer on it, and they all have to take the same number.
+            Inst::CallDyn { site, argc } => {
+                let Some(dispatch) = program.dispatches.get(site.0 as usize) else {
+                    return Err(at(format!(
+                        "dispatches through site {}, which does not exist",
+                        site.0
+                    )));
+                };
+                for (type_name, id) in &dispatch.cases {
+                    let Some(target) = program.functions.get(id.0 as usize) else {
+                        return Err(at(format!(
+                            "dispatches to function {}, which does not exist",
+                            id.0
+                        )));
+                    };
+                    if target.arity != u32::from(argc) {
+                        return Err(at(format!(
+                            "dispatches to `{type_name}.{}` with {argc} arguments, which takes {}",
+                            dispatch.method, target.arity
+                        )));
+                    }
+                    if target
+                        .params
+                        .iter()
+                        .any(|kind| !matches!(kind, SlotKind::Value))
+                    {
+                        return Err(at(format!(
+                            "dispatches to `{type_name}.{}`, which takes an argument off another stack",
+                            dispatch.method
+                        )));
+                    }
+                    if target.returns.is_scalar() {
+                        return Err(at(format!(
+                            "dispatches to `{type_name}.{}`, which answers on the scalar stack",
+                            dispatch.method
+                        )));
+                    }
+                    if !target.captures.is_empty() {
+                        return Err(at(format!(
+                            "dispatches to `{type_name}.{}`, which is entered through the closure \
+                             that holds its {} capture(s)",
+                            dispatch.method,
+                            target.captures.len()
+                        )));
+                    }
                 }
             }
             Inst::Jump(to)
@@ -6089,6 +6584,12 @@ fn stack_shape(constants: &[Const], inst: Inst) -> Shape {
         // Every one of them is on the value stack: nothing at a call through
         // a value knows which function it will reach.
         Inst::CallValue { argc } => Shape::on_values(u32::from(argc) + 1, 1),
+        // The receiver is the first of the arguments rather than a fourth
+        // operand: it is `self`, and it becomes the callee's slot 0.
+        Inst::CallDyn { argc, .. } => Shape::on_values(u32::from(argc), 1),
+        // One value in and the trait object made of it out, whatever the
+        // conversion turned out to reach inside.
+        Inst::MakeDyn { .. } => Shape::on_values(1, 1),
         // The receiver sits below the arguments, and for a resource call the
         // receiver is the handle the call is routed by.
         Inst::CallBuiltin { argc, .. } | Inst::CallResource { argc, .. } => {
@@ -8290,6 +8791,110 @@ mod tests {
         );
     }
 
+    // ---------------------------------------------------------------- dyn
+
+    /// A parameter written `dyn Trait` is converted in the callee's
+    /// prologue, which is where `bind_params` converts one, and a call on it
+    /// dispatches from the value rather than from the type.
+    #[test]
+    fn a_dyn_parameter_is_converted_where_it_is_bound_and_dispatches_from_the_value() {
+        assert_eq!(
+            listing(
+                "trait Show {\n  fn show(self) -> String\n}\n\n\
+                 struct A {\n  n: Int\n}\n\n\
+                 impl Show for A {\n  fn show(self) -> String {\n    \"a\"\n  }\n}\n\n\
+                 fn f(v: dyn Show) -> String {\n  v.show()\n}\n",
+                "f"
+            ),
+            "fn m.f arity=1 frame=1/0 params=[value] -> value\n\
+             \x20  0  load 0\n\
+             \x20  1  make-dyn m.Show\n\
+             \x20  2  store 0\n\
+             \x20  3  load 0\n\
+             \x20  4  call-dyn m.Show.show argc=1 [m.A]\n\
+             \x20  5  return\n"
+        );
+    }
+
+    /// A field written `dyn Trait` is converted where the struct is built,
+    /// which is where `init_struct` converts one, and a dispatch through the
+    /// field reaches every type the package conforms to the trait — here two
+    /// of them, which is what makes the choice a run-time one.
+    #[test]
+    fn a_dyn_field_is_converted_where_the_struct_is_built() {
+        assert_eq!(
+            listing(
+                "trait Show {\n  fn show(self) -> String\n}\n\n\
+                 struct A {\n  n: Int\n}\n\n\
+                 struct B {\n  n: Int\n}\n\n\
+                 impl Show for A {\n  fn show(self) -> String {\n    \"a\"\n  }\n}\n\n\
+                 impl Show for B {\n  fn show(self) -> String {\n    \"b\"\n  }\n}\n\n\
+                 struct Box {\n  item: dyn Show\n}\n\n\
+                 fn f() -> String {\n  let held = Box(item: A(n: 1))\n  held.item.show()\n}\n",
+                "f"
+            ),
+            "fn m.f arity=0 frame=1/0 -> value\n\
+             \x20  0  const Int(1)\n\
+             \x20  1  make-struct m.A fields=n\n\
+             \x20  2  make-dyn m.Show\n\
+             \x20  3  make-struct m.Box fields=item\n\
+             \x20  4  store 0\n\
+             \x20  5  load 0\n\
+             \x20  6  get-field-at 0\n\
+             \x20  7  call-dyn m.Show.show argc=1 [m.A, m.B]\n\
+             \x20  8  return\n"
+        );
+    }
+
+    /// An `Array<dyn Trait>` converts each element, and the depth in the
+    /// instruction is the walk `Interpreter::coerce` makes into the array.
+    #[test]
+    fn an_array_of_dyn_converts_each_element() {
+        assert_eq!(
+            listing(
+                "trait Show {\n  fn show(self) -> String\n}\n\n\
+                 struct A {\n  n: Int\n}\n\n\
+                 impl Show for A {\n  fn show(self) -> String {\n    \"a\"\n  }\n}\n\n\
+                 fn f(v: Array<dyn Show>) -> Int {\n  v.length()\n}\n",
+                "f"
+            ),
+            "fn m.f arity=1 frame=1/0 params=[value] -> Int\n\
+             \x20  0  load 0\n\
+             \x20  1  make-dyn m.Show inside 1\n\
+             \x20  2  store 0\n\
+             \x20  3  load 0\n\
+             \x20  4  call-builtin length argc=0\n\
+             \x20  5  value-to-scalar\n\
+             \x20  6  return-scalar\n"
+        );
+    }
+
+    /// A declared `dyn Trait` return type converts the answer before it
+    /// leaves, which is where `Interpreter::invoke` converts one — so the
+    /// conversion belongs to the callee and every `return` of it reaches
+    /// one.
+    #[test]
+    fn a_dyn_return_type_converts_every_return() {
+        assert_eq!(
+            listing(
+                "trait Show {\n  fn show(self) -> String\n}\n\n\
+                 struct A {\n  n: Int\n}\n\n\
+                 impl Show for A {\n  fn show(self) -> String {\n    \"a\"\n  }\n}\n\n\
+                 fn f(v: A, c: Bool) -> dyn Show {\n  if c {\n    return v\n  }\n  v\n}\n",
+                "f"
+            ),
+            "fn m.f arity=2 frame=1/1 params=[value, Bool] -> value\n\
+             \x20  0  load-scalar 0\n\
+             \x20  1  jump-if-false-scalar 5\n\
+             \x20  2  load 0\n\
+             \x20  3  make-dyn m.Show\n\
+             \x20  4  return\n\
+             \x20  5  load 0\n\
+             \x20  6  make-dyn m.Show\n\
+             \x20  7  return\n"
+        );
+    }
+
     // -------------------------------------------------------- unsupported
 
     #[test]
@@ -8316,8 +8921,13 @@ mod tests {
                 "fn g(var x: Int...) -> Int {\n  1\n}\n",
             ),
             (
+                // A `dyn` the conversion does not reach. A `Map`'s value
+                // type is written inside a head with two arguments, which
+                // is where `Interpreter::coerce` stops walking, so nothing
+                // converts what stands there and this is refused rather
+                // than converted anyway.
                 "a `dyn` parameter",
-                "trait Show {\n  fn show(self) -> String\n}\n\nstruct A {\n  n: Int\n}\n\nimpl Show for A {\n  fn show(self) -> String {\n    \"a\"\n  }\n}\n\nfn f(v: dyn Show) -> String {\n  v.show()\n}\n",
+                "trait Show {\n  fn show(self) -> String\n}\n\nstruct A {\n  n: Int\n}\n\nimpl Show for A {\n  fn show(self) -> String {\n    \"a\"\n  }\n}\n\nfn f(v: Map<String, dyn Show>) -> Int {\n  v.length()\n}\n",
             ),
             (
                 "`Shared`",
