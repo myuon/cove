@@ -582,6 +582,71 @@ interpreter records them, because they are recorded by the same code: at the
 `spawn` before the thread exists, on the task's own thread as it ends, and at
 the join that learns a cancellation actually stopped something.
 
+### What a trace says on both backends, and what it does not
+
+`crates/cove-cli/tests/differential.rs` now records a trace of every corpus
+case on both backends and compares the two files, so the question of which
+parts of a trace are the program's and which are the backend's has an answer
+made of measurements rather than of expectations. Most of a trace is the
+program's. The entry's module and function, every host call's task, module,
+operation, capability, grant, arguments and outcome, each task's id, parent
+and scope, how the run ended and with what message, and what the run allocated
+are all compared exactly and all agree over the ninety-three cases that lower.
+Two of those were expected to need normalizing and did not. Task ids agree
+because both backends draw them from the one counter the `Runtime` holds, so
+there is no renumbering to undo; and no trace event carries `fuel_spent`,
+which ADR 0019 makes backend-specific, so the one figure that could not have
+been compared never reaches the artifact.
+
+What a trace does not say the same way on both backends is when a collection
+happened, what it found live, and in what order two tasks' events were
+written. The first two are the collector's, and the section on the heap
+figures below is where they are argued; the practical consequence is that
+`heap_collected` is dropped from the comparison whole, because both what it
+reports and where it stands in the sequence move with the safepoint — the same
+program collects after 64 allocations on the interpreter and after 66 on the
+VM, and runs one of its collections a host call earlier here than there. What
+survives is `heap_summary`, whose `allocated`, `allocated_bytes` and
+`collections` are compared and agree, and whose `live_bytes` and `peak_bytes`
+are not, because a live set is a question about a root set and the two
+backends have different ones.
+
+That `collections` agrees is worth recording, because this document predicted
+it would not: a run that allocates identically, it says below, can collect five
+times on one backend and six on the other. Over the whole corpus it never
+does. The prediction is still right about the mechanism and wrong about this
+corpus — the threshold counts allocations, the two backends allocate the same
+objects, and the VM's overshoot therefore moves the boundary between two
+collections without removing a boundary. Losing one would take an overshoot
+large enough to swallow a whole threshold between two safepoints, and nothing
+written so far allocates that fast. The figure is compared rather than trusted
+now, so if something ever does, a test says so.
+
+The ordering is not the collector's but ADR 0008's. Every spawned task runs on
+a thread of its own and every event goes to the one sink the run shares, so
+which of two tasks appears first in the file is which of two threads reached
+the lock first. The interpreter alone wrote a differently interleaved trace of
+`tests/e2e:gc_tasks` on each of thirty consecutive runs, and wrote the same
+trace every time once the file was read per task. So the comparison reads per
+task, which drops the interleaving and keeps every task's own order, and this
+is a fact about the runtime rather than about either backend: a comparison
+that failed on the interleaving would fail the oracle against itself.
+
+One thing is given up rather than normalized, and it is worth naming. A task
+that a scope cancels may or may not have reached its next host call before the
+cancellation landed, which is the scheduler's answer and not the program's:
+`tests/e2e:fail_max_tasks` records `task_completed` for its first task in three
+of twenty runs on the interpreter and `task_cancelled` in the other seventeen,
+and `examples:callbacks` flips the same way on the VM, losing the `clock.every`
+call the cancelled task would have made along with it. Such a task is compared
+only by the `task_spawned` that made it, so a backend that always cancelled
+where the other always completed would not be caught by this comparison. What
+would catch it is everything the task's work reaches — what it printed, what
+it left in the filesystem, what the entry answered — all of which the same
+harness compares whether or not a trace was written. The two cases the rule
+applies to are named in the harness's summary on every run, so the cost is
+printed rather than quiet.
+
 ## What the target changes
 
 ### Compact typed slots
@@ -745,6 +810,13 @@ asks, and a run that allocates identically can collect five times here and six
 times there. That is a schedule, not a semantics, and the differential tests
 compare what a run allocated and what it was left holding rather than how many
 sweeps it took to get there.
+
+That last sentence is now less true than it was, in the direction nobody
+expected. The differential compares the number of sweeps too, because when the
+traces were first compared the number turned out to agree on every case in the
+corpus; what it still does not compare is where each sweep fell, which is the
+part of the schedule that does move. "What a trace says on both backends, and
+what it does not", above, is why.
 
 **The peak live set.** This one differs by more than a margin, and in a
 direction that is easy to misread as a leak. A `var v` declared inside a loop
@@ -1372,6 +1444,16 @@ per-block charging, the fused typed field read, and `Value` at 24 bytes. Every
 one of those was taken because a number said to, and two of them — the fused
 field read and the 24-byte `Value` — were named as open in an earlier section
 of this document before they were.
+
+**Settled by evidence that was missing.** What a trace says. It was the last
+of issue #111's three blockers and it was a gap rather than a suspicion: the
+differential harness compared what a program answered and never what it did at
+the Host API boundary. It now compares the recording both backends write, and
+the source-level half of it — the entry, the host calls with their arguments
+and results, the task identities, the ending — agrees exactly. What had to be
+normalized away is wall time, where a collection fell, what it found live, and
+the order two threads reached one sink, and each of those is the backend's or
+the scheduler's rather than the program's.
 
 **Settled by semantics.** The 16-byte floor. It follows from `Int` being a full
 64 bits with overflow a broken invariant, and no measurement can move it,
