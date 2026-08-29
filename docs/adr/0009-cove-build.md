@@ -5,6 +5,11 @@
 - Amended by: [ADR 0012](0012-performance-gate-and-native-backend.md), which
   measured the performance criterion this ADR could not evaluate and wrote down
   what would have to be true before a real backend is worth building
+- Superseded in part by
+  [ADR 0022](0022-the-vm-is-the-default-backend.md), which replaces this ADR's
+  decision that the executable embeds the tree-walking interpreter, and with
+  it the property that a built binary's startup and throughput are the
+  interpreter's
 - Implemented by: PR #24
 - Implementation status: complete
 

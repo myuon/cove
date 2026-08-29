@@ -1,8 +1,8 @@
 error[cove::backend::unsupported]: the VM cannot yet run a function declared inside a function body
-  --> <e2e>/backend_unsupported/main/main.cove:23:3
+  --> <e2e>/backend_unsupported/main/main.cove:29:3
    |
-23 |   fn double(n: Int) -> Int {
+29 |   fn double(n: Int) -> Int {
    |   ^^^^^^^^^^^^^^^^^^^^^^^^^^
   rule: A run on the VM either finishes on the VM or fails before any side effect; it never falls back to the interpreter.
-  help: run it on the interpreter with `--backend ast`, which is the default
+  help: run it on the interpreter with `--backend ast`
 1 error(s)

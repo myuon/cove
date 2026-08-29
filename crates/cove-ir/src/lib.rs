@@ -138,7 +138,7 @@ use std::collections::BTreeMap;
 use std::fmt;
 use std::sync::Arc;
 
-use cove_diag::Span;
+use cove_diag::{Diagnostic, Span};
 
 /// One lowered program: every function it can execute, and the constants they
 /// share.
@@ -1205,6 +1205,30 @@ impl Unsupported {
             what: what.into(),
             span,
         }
+    }
+
+    /// The diagnostic a refusal is reported as, wherever it is reported
+    /// from.
+    ///
+    /// It names the construct and points at it, because the only useful
+    /// thing to say about a backend that cannot run a program is which part
+    /// of the program it was. It is an error rather than a note because
+    /// ADR 0019 forbids the alternative: a run that continued here would be
+    /// a run that finished on the interpreter while reporting the VM, and
+    /// every measurement and every conformance claim taken from it would be
+    /// about a mixture.
+    ///
+    /// It lives beside the refusal rather than in the CLI because four
+    /// commands can now produce it -- `cove run`, `cove generate`, `cove
+    /// test`, and `cove build` -- and a construct named in three wordings
+    /// would read as three different problems.
+    pub fn to_diagnostic(&self) -> Diagnostic {
+        Diagnostic::error("cove::backend::unsupported", self.to_string())
+            .at(self.span)
+            .rule(
+                "A run on the VM either finishes on the VM or fails before any side effect; it never falls back to the interpreter.",
+            )
+            .help("run it on the interpreter with `--backend ast`")
     }
 }
 

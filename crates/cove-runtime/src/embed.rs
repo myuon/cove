@@ -1,9 +1,23 @@
 //! Running a Cove program that a native executable carries inside itself.
 //!
 //! `cove build` writes a small Rust crate whose `main` hands the package's
-//! sources and its `[run.<name>]` table to [`Embedded::main`]. That crate
-//! links this one, so the executable it produces embeds the interpreter
-//! rather than compiling Cove to machine code; see ADR 0009.
+//! sources, its `[run.<name>]` table, and the backend it was built for to
+//! [`Embedded::main`]. That crate links this one, so the executable it
+//! produces embeds a backend rather than compiling Cove to machine code; see
+//! ADR 0009, and ADR 0022 for which backend that now is.
+//!
+//! # Why the binary lowers, and why `cove build` lowers too
+//!
+//! ADR 0019 leaves the IR unserialized on purpose, so a built binary cannot
+//! carry one: it carries its sources, resolves them, and lowers them when it
+//! starts. That is a few hundred microseconds against a run that lasts as
+//! long as the program does.
+//!
+//! What it must not do is discover at that moment that it cannot run. So
+//! `cove build` lowers the same entry at build time and refuses to write a
+//! binary it would refuse to start -- because the person who can act on the
+//! refusal is the one holding the source, and they are not the one holding
+//! the binary.
 //!
 //! [`register_hosts`] is the one place the host implementations a run gets
 //! are chosen. `cove run` and a built binary both call it, so a built binary
@@ -30,6 +44,7 @@ use crate::interp::Interpreter;
 use crate::process::Process;
 use crate::runtime::Runtime;
 use crate::trace::create_trace_file;
+use crate::vm::Vm;
 use crate::{
     Budget, Cancellation, JsonlSink, Limits, NullSink, TraceHeader, TraceSink, Value, ValueCapture,
 };
@@ -134,14 +149,30 @@ pub struct EmbeddedRun {
     pub allow_exec: &'static [&'static str],
 }
 
-/// A whole program: the sources a built binary carries and the run it
-/// carries them for.
+/// Which backend a built binary runs its program on.
+///
+/// Fixed at build time like everything else the binary carries, and for the
+/// same reason: a flag that chose it would be a flag, and a built binary
+/// honours none. `cove build --backend ast` is where the choice is made.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum EmbeddedBackend {
+    /// The tree-walking interpreter.
+    Ast,
+    /// The dedicated VM of ADR 0019, and the default since ADR 0022.
+    Vm,
+}
+
+/// A whole program: the sources a built binary carries, the run it carries
+/// them for, and the backend it runs them on.
 pub struct Embedded {
     /// Every `.cove` file of the package, which together are the whole
     /// program: the binary reads no source from disk.
     pub sources: &'static [EmbeddedSource],
     /// The run the sources were built for.
     pub run: EmbeddedRun,
+    /// The backend `cove build` chose, which is the VM unless the build
+    /// asked otherwise.
+    pub backend: EmbeddedBackend,
 }
 
 impl Embedded {
@@ -154,7 +185,7 @@ impl Embedded {
     pub fn main(&self) -> ExitCode {
         // On a thread this runtime sized, for the reason `on_cove_stack`
         // gives: a built binary's `main` runs on whatever stack the platform
-        // gave the process, and the interpreter's depth limit is calibrated
+        // gave the process, and a backend's depth limit is calibrated
         // against a stack the runtime chose.
         match crate::on_cove_stack(|| self.run_and_report()) {
             Ok(code) => code,
@@ -202,18 +233,69 @@ impl Embedded {
             sources: sources.clone(),
             items,
         })?;
-        // The program was checked when it was built, so this is resolution
-        // only: the type checker's answer cannot have changed for sources
-        // that cannot have changed.
-        let program =
-            cove_sema::resolve::resolve(&package).map_err(|items| Failure::Diagnostics {
-                sources: sources.clone(),
-                items,
-            })?;
+        // The program was checked when it was built, so an interpreted
+        // binary resolves and does not check: the type checker's answer
+        // cannot have changed for sources that cannot have changed.
+        //
+        // A binary on the VM checks anyway, and not because the answer might
+        // differ. The lowering *reads* the checker's answers rather than
+        // recomputing them -- what a reference denotes, what a receiver's
+        // type is, where a field sits -- and resolution does not produce
+        // them. So the check here is how those answers get made, not a
+        // second opinion about whether the program is well formed. Its
+        // diagnostics are unreachable for a binary `cove build` wrote,
+        // because that command refused to write one for a package that did
+        // not check.
+        //
+        // This is the startup cost ADR 0022 names: proportional to the size
+        // of the program, paid once, before anything runs. Serializing the
+        // IR would remove it and ADR 0019 declined to make the IR a format,
+        // so it stays until something supersedes that.
+        let program = match self.backend {
+            EmbeddedBackend::Ast => {
+                cove_sema::resolve::resolve(&package).map_err(|items| Failure::Diagnostics {
+                    sources: sources.clone(),
+                    items,
+                })?
+            }
+            EmbeddedBackend::Vm => {
+                cove_sema::Compiler::new()
+                    .compile(&package)
+                    .map_err(|items| Failure::Diagnostics {
+                        sources: sources.clone(),
+                        items,
+                    })?
+            }
+        };
 
         let (module, entry) = self.run.entry.rsplit_once('.').ok_or_else(|| {
             Failure::Message(format!("`{}` is not a qualified entry", self.run.entry))
         })?;
+
+        // Before a host is registered and before anything the program could
+        // be observed by, exactly as `cove run` lowers: ADR 0019's rule is
+        // that a VM run either finishes on the VM or fails before any side
+        // effect, and a binary is a run.
+        //
+        // Reaching the refusal here means `cove build` did not reach it,
+        // which it cannot for a binary built from these sources -- so this
+        // arm is the one that would catch a lowering that stopped agreeing
+        // with itself between the two, rather than a program anybody wrote.
+        let lowered = match self.backend {
+            EmbeddedBackend::Ast => None,
+            EmbeddedBackend::Vm => {
+                let ir = cove_ir::lower::lower_entry(&program, module, entry).map_err(|why| {
+                    Failure::Diagnostics {
+                        sources: sources.clone(),
+                        items: vec![why.to_diagnostic()],
+                    }
+                })?;
+                cove_ir::lower::validate(&ir.program).map_err(|why| {
+                    Failure::Message(format!("the lowering of this program is not valid: {why}"))
+                })?;
+                Some(Arc::new(ir.program))
+            }
+        };
 
         let working_dir = std::env::current_dir()
             .map_err(|e| Failure::Message(format!("cannot read the current directory: {e}")))?;
@@ -255,7 +337,11 @@ impl Embedded {
         let args: Vec<Rc<str>> = program_args.iter().map(|a| a.as_str().into()).collect();
         let runtime =
             Runtime::new(Arc::new(program), sources.clone(), Arc::new(hosts)).with_trace(sink);
-        match Interpreter::new(&runtime).run_entry(module, entry, args) {
+        let outcome = match &lowered {
+            Some(ir) => Vm::new(&runtime, runtime.hosts(), ir).run_entry(module, entry, args),
+            None => Interpreter::new(&runtime).run_entry(module, entry, args),
+        };
+        match outcome {
             Ok(value) => report_exit(&value).map_err(Failure::Message),
             Err(error) => Err(Failure::Diagnostics {
                 sources,
@@ -408,8 +494,19 @@ export fn main() -> Result<Unit, Error> {
 ",
     }];
 
+    /// A binary built for `entry`, on the backend `cove build` would have
+    /// chosen for it.
     fn embedded(sources: &'static [EmbeddedSource], entry: &'static str) -> Embedded {
+        embedded_on(sources, entry, EmbeddedBackend::Vm)
+    }
+
+    fn embedded_on(
+        sources: &'static [EmbeddedSource],
+        entry: &'static str,
+        backend: EmbeddedBackend,
+    ) -> Embedded {
         Embedded {
+            backend,
             sources,
             run: EmbeddedRun {
                 name: "app",
