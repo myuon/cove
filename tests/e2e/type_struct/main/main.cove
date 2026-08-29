@@ -18,9 +18,16 @@ export struct Tag {
   weight: Int
 }
 
-/// Prints struct initialization and field reads, then fails: a synthesized
-/// struct initializer rejects labels out of declaration order, just like an
-/// ordinary function call.
+/// Initializes structs and reads their fields, and then writes one
+/// initializer whose labels stand out of declaration order.
+///
+/// A synthesized struct initializer takes its labels in declaration order
+/// exactly as an ordinary function does, and `cove check` refuses the last
+/// one rather than the run — so nothing above it happens either and
+/// `expected.out` is empty. It was a run-time failure until ADR 0021 moved
+/// the rule into the checker; this case is in a package of its own because it
+/// no longer checks. `type_struct_copy` is the case that still *runs* struct
+/// initialization, field reads and rendering.
 export fn main() -> Result<Unit, Error> {
   let point = Point(x: 1, y: 2)
   println("point {point}")?

@@ -1,0 +1,3 @@
+[run.fail_assign_let]
+entry = "main.main"
+allow = ["console"]

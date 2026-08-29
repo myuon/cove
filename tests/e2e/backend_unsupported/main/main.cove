@@ -1,10 +1,5 @@
 use console.println
 
-/// Names two arguments in the other order than the declaration writes them.
-fn describe(width: Int, height: Int) -> String {
-  "{width}x{height}"
-}
-
 /// A program the VM cannot run, asked for on the VM.
 ///
 /// ADR 0019's no-silent-fallback rule is what this case pins: a run that
@@ -13,16 +8,21 @@ fn describe(width: Int, height: Int) -> String {
 /// finishing on the interpreter. The `println` below never runs, and the
 /// empty `expected.out` beside this file is how the case says so.
 ///
-/// The construct is a call whose labelled arguments stand out of declaration
-/// order. It was a closure until closures lowered and a task scope until
-/// task scopes did; this one is refused deliberately rather than for want of
-/// work, because the interpreter answers such a call by evaluating the
-/// arguments in the order they were written and issue #112 is about moving
-/// the decision into the checker. Whichever construct stands here, the point
-/// of the case is the rule and not the construct.
+/// The construct is a function declared inside a function body. It was a
+/// closure until closures lowered, a task scope until task scopes did, and a
+/// call whose labelled arguments stand out of declaration order until
+/// ADR 0021 made that a check-time error — which is why it had to move again:
+/// a program `cove check` refuses never reaches a backend at all, so it can
+/// no longer pin what a backend does with one. This construct is unsupported
+/// in the plain sense. The interpreter runs it, the lowering has no
+/// instruction for it yet, and nothing about the program is wrong.
+/// Whichever construct stands here, the point of the case is the rule and not
+/// the construct.
 export fn main() -> Result<Unit, Error> {
   println("this line never runs")?
-  let size = describe(height: 3, width: 4)
-  println("size {size}")?
+  fn double(n: Int) -> Int {
+    n * 2
+  }
+  println("doubled {double(21)}")?
   Ok(())
 }

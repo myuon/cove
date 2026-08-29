@@ -1,0 +1,25 @@
+use console.println
+
+/// Formats a closed range from two labeled parameters.
+fn between(low: Int, high: Int) -> String {
+  "[{low}, {high}]"
+}
+
+/// Names positional, labeled, and mixed call forms, and then one whose labels
+/// stand out of declaration order.
+///
+/// The last call is refused by `cove check` rather than by the run, so none
+/// of the four above it happens either and `expected.out` is empty. It was a
+/// run-time failure until ADR 0021 moved the rule into the checker; this case
+/// is in a package of its own because it no longer checks, which is what a
+/// case that does not check has to be. What it pins is that the four accepted
+/// forms are still accepted — a check that reported any of them would report
+/// more than one error here.
+export fn main() -> Result<Unit, Error> {
+  println("positional {between(1, 2)}")?
+  println("labeled {between(low: 1, high: 2)}")?
+  println("positional before labeled {between(1, high: 2)}")?
+  println("labels in declaration order {between(low: 3, high: 4)}")?
+  println("labels out of declaration order {between(high: 6, low: 5)}")?
+  Ok(())
+}

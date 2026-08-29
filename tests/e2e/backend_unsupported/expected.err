@@ -1,8 +1,8 @@
-error[cove::backend::unsupported]: the VM cannot run a call to `describe` whose arguments do not stand in declaration order yet
-  --> <e2e>/backend_unsupported/main/main.cove:25:34
+error[cove::backend::unsupported]: the VM cannot yet run a function declared inside a function body
+  --> <e2e>/backend_unsupported/main/main.cove:23:3
    |
-25 |   let size = describe(height: 3, width: 4)
-   |                                  ^^^^^^^^
+23 |   fn double(n: Int) -> Int {
+   |   ^^^^^^^^^^^^^^^^^^^^^^^^^^
   rule: A run on the VM either finishes on the VM or fails before any side effect; it never falls back to the interpreter.
   help: run it on the interpreter with `--backend ast`, which is the default
 1 error(s)
