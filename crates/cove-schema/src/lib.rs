@@ -393,7 +393,7 @@ impl ResourceSchema {
 /// at all. A live module is asked through `HostApi`, whose answers are these
 /// same tables.
 ///
-/// # A schema assembled at run time has to leak
+/// # A schema assembled at run time is built once and leaked
 ///
 /// Every field here is `&'static`, and so is every payload a [`HostType`]
 /// inside one points at. A schema written as a `const` — every module the
@@ -405,32 +405,97 @@ impl ResourceSchema {
 /// though. A name from configuration, operations from a plugin manifest,
 /// resources from a table list discovered at connect time — none of that is
 /// `'static`, and `HostApi::module_schema` hands the table back by value, so
-/// there is nowhere to borrow from. Such a host leaks what it assembled:
+/// there is nowhere to borrow from. Such a host assembles its table once, the
+/// first time it is asked, leaks it, and hands out the same copy afterwards:
 ///
 /// ```
-/// # use cove_schema::{ModuleSchema, OperationSchema};
-/// # let configured_name = String::from("company");
-/// # let operations: Vec<OperationSchema> = Vec::new();
-/// let schema = ModuleSchema {
-///     name: String::leak(configured_name),
-///     capability: "company",
-///     operations: Vec::leak(operations),
-///     types: &[],
-///     resources: &[],
-/// };
+/// # use cove_schema::{Effect, HostType, ModuleSchema, OperationSchema};
+/// # use std::sync::OnceLock;
+/// struct Plugin {
+///     /// The operations the manifest named, read once at startup.
+///     manifest: Vec<String>,
+///     /// The table they describe, assembled on the first ask and no other.
+///     schema: OnceLock<ModuleSchema>,
+/// }
+///
+/// impl Plugin {
+///     fn module_schema(&self) -> ModuleSchema {
+///         *self.schema.get_or_init(|| ModuleSchema {
+///             name: "plugin",
+///             capability: "plugin",
+///             operations: Vec::leak(
+///                 self.manifest
+///                     .iter()
+///                     .map(|name| OperationSchema {
+///                         name: String::leak(name.clone()),
+///                         params: &[HostType::String],
+///                         variadic: false,
+///                         result: HostType::Result(&HostType::String, &HostType::Error),
+///                         capability: "plugin",
+///                         effect: Effect::Read,
+///                         cancellable: false,
+///                         recordable: true,
+///                         result_is_task_safe: true,
+///                     })
+///                     .collect::<Vec<_>>(),
+///             ),
+///             types: &[],
+///             resources: &[],
+///         })
+///     }
+/// }
 /// ```
 ///
-/// Every `&'static str` inside each operation is another one, so a
-/// non-trivial module has several. Build the schema once — a `OnceLock`
-/// beside the host, filled the first time it is asked — and hand the same
-/// copy out afterwards: a leak per module for the life of a process is what
-/// `'static` costs here, and a host that leaks one per call is leaking per
-/// call.
+/// The [`OnceLock`](std::sync::OnceLock) is the whole of the discipline, and
+/// it is what makes the cost a bounded one. A handful of allocations per
+/// module for the life of a process is what an in-process embedding
+/// registered at startup pays, once; a host that assembles its table inside
+/// `module_schema` instead pays it again on every call the registry
+/// dispatches, which is not bounded by anything.
+/// `crates/cove-runtime/tests/embedding.rs` runs the pattern end to end and
+/// asserts the bound.
 ///
-/// The alternative is a lifetime parameter, which is not free: it reaches
-/// every crate that names this type. `Cow` is not the alternative — `Box::new`
-/// is not const-constructible, so the shipped tables could not stay `const`.
-/// [Issue #86](https://github.com/myuon/cove/issues/86) carries that decision.
+/// # Why the fields are `&'static` and not `&'a`
+///
+/// [Issue #86](https://github.com/myuon/cove/issues/86) asked for
+/// `ModuleSchema<'a>` and called it the principled fix. It is not a fix. It
+/// would spread a lifetime through every crate that names this type and
+/// leave the leak where it was, because neither of the two things a host
+/// could borrow a schema from is available to it.
+///
+/// It cannot borrow from itself. A host holding `names: Vec<String>` beside
+/// `operations: Vec<OperationSchema<'a>>` needs `'a` to be the lifetime of
+/// the field next to it, which is a self-referential struct and not
+/// something safe Rust builds.
+///
+/// It cannot borrow from anything longer-lived either, because a registered
+/// module is a `Box<dyn HostApi>`, which is `Box<dyn HostApi + 'static>`. It
+/// has to be: ADR 0008 gives every spawned task a thread of its own,
+/// `std::thread::Builder::spawn` takes a `'static` closure, and that closure
+/// holds the `Arc<Runtime>` that holds the registry. A registry that
+/// borrowed its modules would be a run that could not spawn a task.
+///
+/// The representation that *would* remove the leak is the other one: a
+/// schema that owns what it describes, so a host keeps one in a field and
+/// hands back `&self.schema`. What rules it out is not the reason issue #86
+/// gives. `Cow::Borrowed` is const-constructible, so the shipped tables
+/// could stay `const` — though the recursive [`HostType`] payloads would
+/// need a hand-written `Static | Shared` pair beside it, because
+/// `Cow<'static, HostType>` is a layout cycle. What rules it out is the
+/// price. Some 260 fields across `hosts.rs` stop being written as literals
+/// and start being written as constructor calls, in a table that is
+/// hand-written because being read by hand is the point of it. [`Copy`]
+/// goes, and with it the shape of every reader that holds a schema while it
+/// goes on working: `HostRegistry::host_type` hands the interpreter an entry
+/// rather than a borrow precisely because the interpreter is about to
+/// evaluate arguments, which it cannot do while borrowing the registry. And
+/// a clone of an owned half is a deep copy where a copy of a static one was
+/// free. A trait with two implementations pays the same noise for a dynamic
+/// call on every read, and gives one description two vocabularies — the
+/// drift this crate exists to prevent.
+///
+/// So the tables stay literals, the readers stay [`Copy`], and the leak
+/// stays: bounded, documented here, and exercised by a test.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ModuleSchema {
     /// The name Cove source uses, such as `console`.

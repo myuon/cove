@@ -127,8 +127,17 @@ use crate::value::Value;
 /// and a `Vec<OperationSchema>` and return references into itself;
 /// [`ModuleSchema`] is `Copy` with `'static` contents, so a module whose
 /// shape comes from configuration or a manifest builds its table once, leaks
-/// it, and hands out the same copy. [`ModuleSchema`]'s own documentation
-/// spells that pattern out.
+/// it, and hands out the same copy.
+///
+/// Putting a lifetime on [`ModuleSchema`] would not give the old form back.
+/// A module registered here is a `Box<dyn HostApi>`, which is
+/// `Box<dyn HostApi + 'static>` — a spawned task's thread holds the registry
+/// and `std::thread::Builder::spawn` takes a `'static` closure — so a host
+/// has nothing outside itself to borrow a schema from, and borrowing from a
+/// field beside another one of its own is a self-referential struct.
+/// [`ModuleSchema`]'s own documentation weighs that against the alternatives
+/// and spells the pattern out; `crates/cove-runtime/tests/embedding.rs` runs
+/// it end to end.
 pub trait HostApi: Send + Sync {
     /// The whole of what this module declares about itself: the name Cove
     /// source uses, the capability a host must grant for it, the operations
