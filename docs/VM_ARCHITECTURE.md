@@ -342,7 +342,8 @@ to the first instruction at or after it that control can leave from, so the
 extent above a join reaches past it and pays for the walk. `validate` refuses a
 table that is not that, from both sides.
 
-Safepoints are at: entering the entry, every call, every return, every back edge
+Safepoints are at: entering the entry, every call, every return, a `?` that
+failed, every back edge
 at which enough fuel has gathered, and `SAFEPOINT_INTERVAL`, which is read where
 the charge is made rather than per instruction — so what it bounds is the fuel
 standing when a straight line is entered, and the work between two safepoints is
@@ -376,9 +377,10 @@ shape and is why the constant exists at all.
 ### What each stop mode may run past it, and what it may leave behind
 
 Everything above says where the checks are. What a program can be told is a
-different question, and it is [issue #120](https://github.com/myuon/cove/issues/120)'s:
-for each way a run can be stopped, how much work may still happen, and what a
-host or a surviving caller may see afterwards.
+different question, and it is
+[issue #120](https://github.com/myuon/cove/issues/120)'s: for each way a run
+can be stopped, how much work may still happen, and what a host or a surviving
+caller may see afterwards.
 `crates/cove-runtime/tests/responsiveness.rs` measures every figure below and
 asserts it as a maximum. Nothing here is a number a comment claims.
 
@@ -389,8 +391,8 @@ for. What does not hold is that the limit bounds the work, in two different
 directions at once. A run may overspend its limit — by one gathering plus one
 turn, which for a loop charging 13 fuel a turn is a bound of 77 and measures 9
 to 44 over three limits — because fuel is counted where it is charged and
-compared where it is spent. And a run may be
-charged for work it did not do, which is the other question:
+compared where it is spent. And a run may be charged for work it did not do,
+which is the other question:
 
 **A block is refused entire, and a prefix that would have fitted does not
 run.** The charge happens on arriving at a head, and the safepoint that may
@@ -427,10 +429,10 @@ The deadline's two rows are the same code reading two schedules.
 `Budget::safepoint` reads the clock at every safepoint when no fuel limit is
 set, because then nothing else bounds the run; with one set it reads every
 `DEADLINE_CHECK_INTERVAL`th, because `Instant::now` is a system call and fuel
-is already bounding the loop. Measured on a loop with no Host call in it — a Host call would be
-stopped by the clock the boundary reads, rather than on the schedule under
-test — that is 0 and 4,099 fuel on the VM, against a bound of 4,928, and 10
-and 640 on the tree walk against 1,280.
+is already bounding the loop. Measured on a loop with no Host call in it — a
+Host call would be stopped by the clock the boundary reads, rather than on the
+schedule under test — that is 0 and 4,099 fuel on the VM, against a bound of
+4,928, and 10 and 640 on the tree walk against 1,280.
 
 **A Host call is not a safepoint, and it is not meant to become one.** What
 stands in front of it is `Budget::charge_host_call`, which refuses a call from
@@ -448,9 +450,9 @@ be.
 
 That has a consequence worth stating plainly rather than leaving to be
 discovered. Every Host call in one straight line is made before the charge
-that line incurred is measured. Forty Host calls with no branch between them all
-happen under a fuel limit of one on the VM, which then stops at the return
-having charged 286 for a budget of 1. The tree walk reaches no safepoint
+that line incurred is measured. Forty Host calls with no branch between them
+all happen under a fuel limit of one on the VM, which then stops at the return
+having charged 286 against a budget of 1. The tree walk reaches no safepoint
 between the entry and the return either, so any limit that lets it in at all
 lets all forty through and it answers. The bound is `SAFEPOINT_INTERVAL` of
 standing fuel plus one extent — finite, known before the run, and much larger
@@ -515,7 +517,9 @@ run's cancellation and not this task's, and not the flag of a bounded call this
 thread is inside. Those two are read here, before the call is dispatched, so
 that a cancelled task and a stopped `clock.timeout` body perform no further
 effect. "What each stop mode may run past it" is where that bound is stated
-and why fuel is not on the same schedule. Reentry — a host running a Cove closure, and
+and why fuel is not on the same schedule.
+
+Reentry — a host running a Cove closure, and
 the same thing a higher-order builtin such as `Result.mapError` does — enters
 the dispatch loop again rather than jumping inside the one that is running,
 because the instruction that made the host call has not finished: its operands
@@ -1317,6 +1321,12 @@ covered:
 | `chars`    |  6,048,003 |    41,856,022 |                     6.9 |
 | `field`    |  6,000,003 |    47,428,595 |                     7.9 |
 | `arrayget` |  4,000,003 |    42,000,027 |                    10.5 |
+
+Two of those instruction counts are lower than the table under "What each
+change bought" says, and the difference is the fused typed field read landing
+between the two measurements: `field` went from 53,714,311 to 47,428,595 and
+`method` from 65,714,314 to 59,428,598, and nothing else moved. The earlier
+table is left as it was measured.
 
 A charge is one bounds-checked load from a second array, one add and one
 compare, against the add and compare per instruction it replaces, so the
