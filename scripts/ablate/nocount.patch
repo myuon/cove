@@ -1,0 +1,10 @@
+--- a/crates/cove-runtime/src/vm.rs
++++ b/crates/cove-runtime/src/vm.rs
+@@ -2849,7 +2849,6 @@
+     #[inline]
+     fn charge(&mut self, block: u32, span: impl FnOnce() -> Span) -> Result<(), RuntimeError> {
+         let count = u64::from(block);
+-        self.instructions += count;
+         self.fuel += count * INSTRUCTION_FUEL;
+         if self.fuel >= SAFEPOINT_INTERVAL {
+             self.safepoint(span())?;

@@ -1,0 +1,13 @@
+--- a/crates/cove-runtime/src/vm.rs
++++ b/crates/cove-runtime/src/vm.rs
+@@ -2898,9 +2898,7 @@
+     /// named: a loop notices a stop within that much fuel plus the one turn
+     /// that crosses it, rather than at its next turn.
+     fn back_edge(&mut self, span: Span) -> Result<(), RuntimeError> {
+-        if self.fuel >= BACK_EDGE_FUEL {
+-            self.safepoint(span)?;
+-        }
++        let _ = span;
+         Ok(())
+     }
+ 

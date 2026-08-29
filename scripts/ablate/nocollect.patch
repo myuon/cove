@@ -1,0 +1,10 @@
+--- a/crates/cove-runtime/src/vm.rs
++++ b/crates/cove-runtime/src/vm.rs
+@@ -2937,7 +2937,6 @@
+         }) {
+             return Err(error.at(span));
+         }
+-        self.collect_if_due();
+         Ok(())
+     }
+ 

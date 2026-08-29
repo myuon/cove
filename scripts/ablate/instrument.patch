@@ -1,0 +1,112 @@
+--- a/crates/cove-runtime/src/vm.rs
++++ b/crates/cove-runtime/src/vm.rs
+@@ -644,6 +644,9 @@
+     /// limit". [`Vm::host_call_depth_limit`] is where the distinction is
+     /// made and why the answer may be kept.
+     call_depth_limit: Option<Option<usize>>,
++    /// Scratch: how many times each opcode ran, and the peaks.
++    opcodes: std::collections::HashMap<std::mem::Discriminant<Inst>, (String, u64)>,
++    peaks: [usize; 4],
+     /// This task's own cancellation flag, when this VM is running a spawned
+     /// task's body rather than the entry.
+     ///
+@@ -730,6 +733,8 @@
+             heap: Heap::new(),
+             fuel: 0,
+             instructions: 0,
++            opcodes: std::collections::HashMap::new(),
++            peaks: [0; 4],
+             call_depth_limit: None,
+             cancellation: None,
+             task: ENTRY_TASK,
+@@ -794,6 +799,7 @@
+         self.frames.clear();
+         self.async_frames.clear();
+         self.fuel = 0;
++        let allocated_before = crate::allocation_counts();
+         for (kind, value) in entry.params.iter().zip(args) {
+             match kind {
+                 SlotKind::Value => self.stack.push(value),
+@@ -882,6 +888,18 @@
+             peak_bytes: heap.peak_bytes,
+             pause: heap.pause,
+         });
++        let (allocations, allocated_bytes) = crate::allocation_counts();
++        let allocations = allocations - allocated_before.0;
++        let allocated_bytes = allocated_bytes - allocated_before.1;
++        eprintln!(
++            "instrument: peak_value_stack={} peak_scalar_stack={} peak_place_stack={} peak_frames={} allocations={allocations} allocated_bytes={allocated_bytes}",
++            self.peaks[0], self.peaks[1], self.peaks[2], self.peaks[3]
++        );
++        let mut rows: Vec<(String, u64)> = self.opcodes.values().cloned().collect();
++        rows.sort_by_key(|(name, count)| (std::cmp::Reverse(*count), name.clone()));
++        for (name, count) in rows {
++            eprintln!("opcode: {count:>12}  {name}");
++        }
+         outcome
+     }
+ 
+@@ -1048,6 +1066,26 @@
+         self.charge(blocks[0], || running.span_at(0))?;
+ 
+         loop {
++            {
++                let inst = &code[pc];
++                let entry = self
++                    .opcodes
++                    .entry(std::mem::discriminant(inst))
++                    .or_insert_with(|| {
++                        let text = format!("{inst:?}");
++                        let name = text
++                            .split(|c: char| c == '(' || c == '{' || c == ' ')
++                            .next()
++                            .unwrap_or("?")
++                            .to_string();
++                        (name, 0)
++                    });
++                entry.1 += 1;
++                self.peaks[0] = self.peaks[0].max(self.stack.len());
++                self.peaks[1] = self.peaks[1].max(self.scalars.len());
++                self.peaks[2] = self.peaks[2].max(self.places.len());
++                self.peaks[3] = self.peaks[3].max(self.frames.len());
++            }
+             match code[pc] {
+                 Inst::Const(id) => self.stack.push(self.constants[id.0 as usize].clone()),
+                 Inst::LoadLocal(slot) => {
+--- a/crates/cove-runtime/src/lib.rs
++++ b/crates/cove-runtime/src/lib.rs
+@@ -46,3 +46,34 @@
+ };
+ pub use value::Value;
+ pub use vm::Vm;
++
++// ------------------------------------------------------- scratch instrument
++
++/// Counts every allocation the process makes, for issue #123's matrix.
++pub struct CountingAllocator;
++
++/// How many allocations, and how many bytes.
++pub static ALLOCATIONS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
++pub static ALLOCATED_BYTES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
++
++unsafe impl std::alloc::GlobalAlloc for CountingAllocator {
++    unsafe fn alloc(&self, layout: std::alloc::Layout) -> *mut u8 {
++        ALLOCATIONS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
++        ALLOCATED_BYTES.fetch_add(layout.size() as u64, std::sync::atomic::Ordering::Relaxed);
++        std::alloc::System.alloc(layout)
++    }
++    unsafe fn dealloc(&self, ptr: *mut u8, layout: std::alloc::Layout) {
++        std::alloc::System.dealloc(ptr, layout)
++    }
++}
++
++#[global_allocator]
++static COUNTING: CountingAllocator = CountingAllocator;
++
++/// What the process has allocated so far: a count and a total size.
++pub fn allocation_counts() -> (u64, u64) {
++    (
++        ALLOCATIONS.load(std::sync::atomic::Ordering::Relaxed),
++        ALLOCATED_BYTES.load(std::sync::atomic::Ordering::Relaxed),
++    )
++}
