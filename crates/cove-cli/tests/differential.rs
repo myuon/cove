@@ -360,7 +360,14 @@ use cove_sema::resolve::Program as Checked;
 /// was written, which is the measurement: what they exercise is collection,
 /// and collection is not something a lowering has to reach.
 ///
-/// 87 to 89: two cases and no construct again. `tests/e2e:host_console_streams`
+/// 87 to 88: `tests/e2e:gc_struct`, the program issue #128 asks for. It is
+/// the one case in this corpus whose two answers came apart because of a
+/// collector bug rather than a lowering one, and the oracle is the side that
+/// was wrong: the interpreter printed an emptied vector where the VM printed
+/// the one the program built. It lowered on the day it was written, for the
+/// same reason the six before it did.
+///
+/// 88 to 90: two cases and no construct again. `tests/e2e:host_console_streams`
 /// writes records to `console.println` and complaints to `console.eprintln`,
 /// and `tests/e2e:fail_console_error_not_granted` is refused the second of
 /// those by a run that granted `console` and not `console.error`. Both lowered
@@ -371,7 +378,7 @@ use cove_sema::resolve::Program as Checked;
 /// measure is the fake console, which now has a buffer per stream so that a
 /// line written to the other one on one backend is a disagreement rather than
 /// a coincidence.
-const LOWERED_FLOOR: usize = 89;
+const LOWERED_FLOOR: usize = 90;
 
 // ------------------------------------------------------------------ the test
 

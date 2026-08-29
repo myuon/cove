@@ -16,16 +16,21 @@ fn parseOrFail(text: String) -> Result<Int, ParseError> {
   Int.parse(text).mapError { ParseError.NotANumber(text) }
 }
 
-/// Prints `Result` construction, queries, mapping, and propagation.
+/// Prints `Result` construction, queries, unwrapping, mapping, and
+/// propagation.
 export fn main() -> Result<Unit, Error> {
   let ok = Ok(1)
   let failed = Err(Error("broken"))
   println("values {ok} {failed}")?
   println("isOk {ok.isOk()} {failed.isOk()}")?
   println("isError {ok.isError()} {failed.isError()}")?
+  println("unwrapOr {ok.unwrapOr(0)} {failed.unwrapOr(0)}")?
   println("`?` on Ok {double("21")}")?
   println("`?` on Err {double("x")}")?
   println("mapError leaves Ok alone {parseOrFail("7")}")?
   println("mapError replaces Err {parseOrFail("x")}")?
+  // The error type is not named by `unwrapOr`, so a domain error unwraps
+  // exactly as the builtin one does.
+  println("unwrapOr a domain error {parseOrFail("x").unwrapOr(0)}")?
   Ok(())
 }

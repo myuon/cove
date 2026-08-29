@@ -231,6 +231,11 @@ static EXERCISES: &[Exercise] = &[
     },
     Exercise {
         ty: "String",
+        name: "fromCodePoint",
+        body: "  String.fromCodePoint(65).unwrapOr(\"\").length()",
+    },
+    Exercise {
+        ty: "String",
         name: "split",
         body: "  let text = \"a,b\"\n  text.split(\",\").length()",
     },
@@ -334,6 +339,11 @@ static EXERCISES: &[Exercise] = &[
         name: "isError",
         body: "  let outcome = Int.parse(\"x\")\n  let failed = outcome.isError()\n  0",
     },
+    Exercise {
+        ty: "Result",
+        name: "unwrapOr",
+        body: "  Int.parse(\"x\").unwrapOr(0)",
+    },
     // The Language Card writes `mapError { ... }` with a trailing closure
     // that may ignore the error it replaces, which is the shape the schema
     // does not declare and both ends accept anyway.
@@ -351,6 +361,11 @@ static EXERCISES: &[Exercise] = &[
         ty: "Int",
         name: "parse",
         body: "  let parsed = Int.parse(\"7\")\n  let fine = parsed.isOk()\n  0",
+    },
+    Exercise {
+        ty: "Int",
+        name: "parseRadix",
+        body: "  Int.parseRadix(\"ff\", 16).unwrapOr(0)",
     },
     Exercise {
         ty: "Int",

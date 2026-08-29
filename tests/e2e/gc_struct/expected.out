@@ -1,0 +1,2 @@
+the vector the garbage shared twice is Some([0, 1, 2])
+the one built after the collection is Some([0, 1, 2, 3])
