@@ -1,6 +1,8 @@
 # ADR 0022: The VM is the default backend
 
 - Status: Accepted
+- Superseded in part by [ADR 0023](0023-a-replay-chooses-its-backend.md),
+  which replaces the decision below that `cove replay` does not move
 - Date: 2026-08-29
 - Supersedes: [ADR 0009](0009-cove-build.md)'s decision that the executable
   `cove build` writes embeds the tree-walking interpreter — "a binary that
