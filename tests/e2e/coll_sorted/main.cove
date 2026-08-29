@@ -1,0 +1,56 @@
+use console.println
+
+/// A row a report ranks by its total.
+struct Row {
+  name: String
+  total: Int
+}
+
+/// The names of `rows`, in the order they stand in.
+fn names(rows: Array<Row>) -> Array<String> {
+  rows.map(fn(row) {
+    row.name
+  })
+}
+
+/// Prints `sorted(by:)` on both sequences: what it orders, what it leaves
+/// alone, and what a callback that reaches the vector it is walking sees.
+export fn main() -> Result<Unit, Error> {
+  let items = [3, 1, 2]
+  println("ascending {items.sorted(by: fn(a, b) { a < b })}")?
+  println("descending {items.sorted(by: fn(a, b) { a > b })}")?
+  println("the receiver is untouched {items}")?
+
+  let empty: Array<Int> = []
+  let one = [7]
+  println("empty {empty.sorted(by: fn(a, b) { a < b })}")?
+  println("one {one.sorted(by: fn(a, b) { a < b })}")?
+
+  // Stability: three rows, two of which tie on `total`. `a` was written
+  // before `c`, so `a` comes before `c` however the tie is resolved.
+  let rows = [
+    Row(name: "a", total: 2),
+    Row(name: "b", total: 1),
+    Row(name: "c", total: 2),
+  ]
+  println("ranked {names(rows.sorted(by: fn(x, y) { x.total > y.total }))}")?
+  println("ties keep their order {names(rows.sorted(by: fn(x, y) { false }))}")?
+
+  // A `Vector` answers an `Array` and is not written through, so the handle
+  // still holds what it held.
+  var pending = Vector.of(5, 4, 6)
+  println("vector {pending.sorted(by: fn(a, b) { a < b })} still {pending}")?
+
+  // The callback reaches the very vector being sorted and reads it. It
+  // cannot write to it — a capture is a read-only place — but the walk holds
+  // no borrow on the storage either way, because it took the elements out
+  // before the first comparison.
+  var reentrant = Vector.of(2, 1, 3)
+  println("read during the walk {reentrant.sorted(by: fn(a, b) {
+    a + reentrant.length() < b + reentrant.length()
+  })}")?
+
+  let strings = ["pear", "apple", "fig"]
+  println("strings {strings.sorted(by: fn(a, b) { a < b })}")?
+  Ok(())
+}

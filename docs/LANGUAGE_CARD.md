@@ -114,6 +114,24 @@ Assignment and ordinary argument passing perform field-wise shallow copies.
   and not the text.
 - Vector assignment is O(1), and aliases share elements and length.
 - `Map` and `Set` are immutable in the MVP.
+- `map`, `filter`, `fold`, and `sorted` walk a sequence with a closure. All
+  four are on `Array` and on `Vector`, and all four answer an `Array`,
+  because what a walk produces is a finished sequence rather than a handle to
+  go on appending to. Nothing is written through the receiver, so an alias of
+  a `Vector` sees no change.
+- Each takes the elements once, before it calls anything, and visits every
+  one of them exactly once from front to back. An empty sequence answers an
+  empty `Array` — or, for `fold`, its `initial` — without calling anything.
+- `sorted(by:)` is stable, and `by` is a strict less-than: `by(a, b)` says
+  that `a` comes first, ascending order is `sorted(by: fn(a, b) { a < b })`,
+  and two elements neither of which comes before the other keep the order
+  they were in. A `by` that contradicts itself gets some permutation and no
+  promise about which; it is the comparison that is wrong, so the run does
+  not stop. There is no natural-order `sorted()`, because `<` already spells
+  one for every type it is defined on.
+- A callback that fails stops the call it was made from, and nothing partly
+  built is observable: `fold` answers no total and the other three answer no
+  array.
 - Cove never performs an implicit deep copy.
 
 ```cove

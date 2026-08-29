@@ -78,6 +78,26 @@ static EXERCISES: &[Exercise] = &[
         body: "  let items = [1, 2]\n  items.snapshot().length()",
     },
     Exercise {
+        ty: "Array",
+        name: "map",
+        body: "  let items = [1, 2]\n  items.map(fn(n) { n * 10 }).length()",
+    },
+    Exercise {
+        ty: "Array",
+        name: "filter",
+        body: "  let items = [1, 2]\n  items.filter(fn(n) { n > 1 }).length()",
+    },
+    Exercise {
+        ty: "Array",
+        name: "fold",
+        body: "  let items = [1, 2]\n  items.fold(0, fn(total, n) { total + n })",
+    },
+    Exercise {
+        ty: "Array",
+        name: "sorted",
+        body: "  let items = [2, 1]\n  items.sorted(by: fn(a, b) { a < b }).length()",
+    },
+    Exercise {
         ty: "Vector",
         name: "get",
         body: "  var items = Vector.of(1, 2)\n  items.get(1).unwrapOr(0)",
@@ -118,6 +138,26 @@ static EXERCISES: &[Exercise] = &[
         ty: "Vector",
         name: "of",
         body: "  var items = Vector.of(1, 2, 3)\n  items.length()",
+    },
+    Exercise {
+        ty: "Vector",
+        name: "map",
+        body: "  var items = Vector.of(1, 2)\n  items.map(fn(n) { n * 10 }).length()",
+    },
+    Exercise {
+        ty: "Vector",
+        name: "filter",
+        body: "  var items = Vector.of(1, 2)\n  items.filter(fn(n) { n > 1 }).length()",
+    },
+    Exercise {
+        ty: "Vector",
+        name: "fold",
+        body: "  var items = Vector.of(1, 2)\n  items.fold(0, fn(total, n) { total + n })",
+    },
+    Exercise {
+        ty: "Vector",
+        name: "sorted",
+        body: "  var items = Vector.of(2, 1)\n  items.sorted(by: fn(a, b) { a < b }).length()",
     },
     Exercise {
         ty: "Map",
