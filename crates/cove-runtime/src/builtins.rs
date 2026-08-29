@@ -717,6 +717,18 @@ pub fn call_method(
                     expect_args(name, args, 0, span)?;
                     Ok(Value::Bool(!ok))
                 }
+                // `Option.unwrapOr` above, with `Ok` where it has `Some`.
+                // The error an `Err` carries is dropped rather than passed
+                // to anything, which is the whole difference between this
+                // and `mapError`: a caller that wants to see the error has
+                // that one, and a caller that has a default has this one.
+                "unwrapOr" => {
+                    let mut args = expect_args("unwrapOr", args, 1, span)?;
+                    Ok(match value.payload.first() {
+                        Some(inner) if ok => inner.clone(),
+                        _ => args.remove(0),
+                    })
+                }
                 "mapError" => {
                     let mut args = expect_args("mapError", args, 1, span)?;
                     let callback = args.remove(0);

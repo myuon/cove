@@ -1349,6 +1349,24 @@ pub const RESULT: BuiltinSchema = BuiltinSchema {
             result: BuiltinType::Bool,
             mutating: false,
         },
+        // `Option.unwrapOr`'s sibling, and deliberately the same signature
+        // word for word: the fallback is the type the value would have
+        // carried, and the result is that type whichever case the receiver
+        // is. It sits here, after the two queries, because that is where
+        // `Option` puts it — the methods that ask, and then the one that
+        // takes the value out. What it does *not* do is see the error, which
+        // is `mapError`'s job below.
+        MethodSchema {
+            name: "unwrapOr",
+            generics: &[],
+            params: &[ParamSchema {
+                name: "fallback",
+                ty: BuiltinType::Param("T"),
+            }],
+            variadic: false,
+            result: BuiltinType::Param("T"),
+            mutating: false,
+        },
         // The one builtin whose callback has two accepted shapes. The
         // Language Card writes `mapError { ... }` with a trailing closure
         // that may ignore the error it replaces, so a closure of no

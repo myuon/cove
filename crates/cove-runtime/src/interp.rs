@@ -5913,19 +5913,45 @@ export fn main() -> Result<Unit, Error> {
 
     #[test]
     fn int_parse_returns_a_result() {
-        let body = "  console.println(\"{Int.parse(\"12\").isOk()} {Int.parse(\"x\").isError()} {Int.parse(\"12\").unwrapOr(0)}\")?";
-        let error = error_of(body);
-        assert!(
-            error.message.contains("has no method `unwrapOr`"),
-            "`unwrapOr` belongs to `Option`, not `Result`: {}",
-            error.message
-        );
         assert_eq!(
             output_of(
                 "  console.println(\"{Int.parse(\"12\").isOk()} {Int.parse(\"x\").isError()}\")?"
             ),
             "true true\n"
         );
+    }
+
+    /// `Result.unwrapOr` answers what an `Ok` carries and the fallback for an
+    /// `Err`, which is `Option.unwrapOr` with `Ok` where it has `Some`. The
+    /// error itself is dropped: a caller that wants to see it has `mapError`.
+    #[test]
+    fn result_unwrap_or_answers_the_ok_or_the_fallback() {
+        let body = "  console.println(\"{Int.parse(\"12\").unwrapOr(0)} {Int.parse(\"x\").unwrapOr(0)}\")?";
+        assert_eq!(output_of(body), "12 0\n");
+    }
+
+    /// The fallback is the `Ok` type and the error type is not named at all,
+    /// so a `Result` carrying a domain error unwraps exactly as one carrying
+    /// the builtin `Error` does.
+    #[test]
+    fn result_unwrap_or_says_nothing_about_the_error_type() {
+        let source = r#"
+use console.println
+
+enum ConfigError {
+  InvalidPort(String)
+}
+
+fn port(text: String) -> Result<Int, ConfigError> {
+  Int.parse(text).mapError { ConfigError.InvalidPort(text) }
+}
+
+export fn main() -> Result<Unit, Error> {
+  console.println("{port("7").unwrapOr(80)} {port("x").unwrapOr(80)}")?
+  Ok(())
+}
+"#;
+        assert_eq!(run_entry_of(source, "main", &[]).output, "7 80\n");
     }
 
     #[test]
