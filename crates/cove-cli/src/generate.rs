@@ -24,8 +24,8 @@ use cove_diag::SourceMap;
 use cove_sema::resolve::Program;
 
 use crate::{
-    execute_entry, load, lookup_entry, lookup_run, runtime_failure, CliError, ExecuteError,
-    RunFlags,
+    execute_entry, load, lookup_entry, lookup_run, runtime_failure, Backend, CliError,
+    ExecuteError, RunFlags,
 };
 
 /// The return type ADR 0010 requires of a generator's entry, so its output
@@ -33,17 +33,55 @@ use crate::{
 const REQUIRED_RETURN_TYPE: &str = "Result<String, Error>";
 
 /// Runs `cove generate <name>` or `cove generate --check`.
+///
+/// `--backend` is the one run flag this command takes, and it takes it for
+/// the reason [`crate::unsupported_by_backend`] gives: since ADR 0022 a
+/// generator runs on the VM, and a generator the lowering refuses would
+/// otherwise have no way to run at all. Every other budget stays
+/// `[run.<name>]`'s, per ADR 0010.
 pub(crate) fn cmd_generate(args: &[String]) -> Result<(), CliError> {
-    if args.first().map(String::as_str) == Some("--check") {
-        return generate_check(None);
+    let (backend, rest) = parse_backend(args)?;
+    let mut flags = RunFlags::none();
+    flags.set_backend(backend);
+    if rest.first().map(String::as_str) == Some("--check") {
+        return generate_check(None, &flags);
     }
-    let Some(name) = args.first() else {
+    let Some(name) = rest.first() else {
         return Err(CliError::Message(
             "`cove generate` needs the name of a `[run.<name>]` table that sets `generates`, or `--check`"
                 .into(),
         ));
     };
-    generate_one(None, name)
+    generate_one(None, name, &flags)
+}
+
+/// Splits `--backend <ast|vm>` out of `cove generate`'s arguments, leaving
+/// the rest in the order they were written.
+///
+/// It may appear anywhere, exactly as it may on `cove run`: one flag spelled
+/// two ways depending on which command it is passed to would be a flag with
+/// two meanings.
+fn parse_backend(args: &[String]) -> Result<(Backend, Vec<String>), CliError> {
+    let mut backend = Backend::default_for_a_run();
+    let mut rest = Vec::new();
+    let mut i = 0;
+    while i < args.len() {
+        if args[i] == "--backend" {
+            let value = args.get(i + 1).ok_or_else(|| {
+                CliError::Message("`--backend` needs a value: `ast` or `vm`".to_string())
+            })?;
+            backend = Backend::parse(value).ok_or_else(|| {
+                CliError::Message(format!(
+                    "`--backend` must be `ast` or `vm`, found `{value}`"
+                ))
+            })?;
+            i += 2;
+            continue;
+        }
+        rest.push(args[i].clone());
+        i += 1;
+    }
+    Ok((backend, rest))
 }
 
 /// Runs `[run.<name>]`'s entry and writes its returned source to the
@@ -52,7 +90,7 @@ pub(crate) fn cmd_generate(args: &[String]) -> Result<(), CliError> {
 /// `path` is `None` for the real CLI, which resolves the package from the
 /// current directory exactly as `cove run` does; tests pass a fixture's root
 /// directly instead of relying on the process's current directory.
-fn generate_one(path: Option<&Path>, name: &str) -> Result<(), CliError> {
+fn generate_one(path: Option<&Path>, name: &str, flags: &RunFlags) -> Result<(), CliError> {
     let (sources, package, program) = load(path)?;
     let run = lookup_run(&package, name)?;
     let Some(output) = run.generates.clone() else {
@@ -72,13 +110,14 @@ fn generate_one(path: Option<&Path>, name: &str) -> Result<(), CliError> {
         run,
         module,
         entry,
-        RunFlags::none(),
+        flags.clone(),
     ) {
         Ok(value) => expect_generated_source(&run.entry, value)?,
         Err(ExecuteError::Setup(message)) => return Err(CliError::Message(message)),
-        // `cove generate` runs under `RunFlags::none()`, which selects
-        // the interpreter, so nothing here is ever lowered and this arm
-        // is unreachable rather than merely unlikely.
+        // `cove generate` runs on whichever backend `cove run` runs on, so
+        // since ADR 0022 this arm is reachable: a generator that reaches a
+        // construct the lowering does not cover is refused before it writes
+        // anything, and told which flag runs it.
         Err(ExecuteError::Unsupported(why)) => {
             return Err(CliError::Diagnostics {
                 items: vec![crate::unsupported_by_backend(&why)],
@@ -109,7 +148,7 @@ fn generate_one(path: Option<&Path>, name: &str) -> Result<(), CliError> {
 
 /// Regenerates every run that sets `generates` into memory and compares it
 /// against what is on disk, failing on the first one that differs.
-fn generate_check(path: Option<&Path>) -> Result<(), CliError> {
+fn generate_check(path: Option<&Path>, flags: &RunFlags) -> Result<(), CliError> {
     let (sources, package, program) = load(path)?;
 
     let program = Arc::new(program);
@@ -129,13 +168,13 @@ fn generate_check(path: Option<&Path>) -> Result<(), CliError> {
             run,
             module,
             entry,
-            RunFlags::none(),
+            flags.clone(),
         ) {
             Ok(value) => expect_generated_source(&run.entry, value)?,
             Err(ExecuteError::Setup(message)) => return Err(CliError::Message(message)),
-            // `cove generate` runs under `RunFlags::none()`, which selects
-            // the interpreter, so nothing here is ever lowered and this arm
-            // is unreachable rather than merely unlikely.
+            // Reachable since ADR 0022, for the reason `generate_one`
+            // gives: `--check` lowers every generator the package declares,
+            // so one the VM cannot run stops the check by name.
             Err(ExecuteError::Unsupported(why)) => {
                 return Err(CliError::Diagnostics {
                     items: vec![crate::unsupported_by_backend(&why)],
@@ -289,6 +328,12 @@ mod tests {
         }
     }
 
+    /// The flags every test below generates under: none at all, which is
+    /// what the command itself uses and so is the backend a user gets.
+    fn flags() -> RunFlags {
+        RunFlags::none()
+    }
+
     /// A tiny generator package: `[run.gen]` writes `out/generated.cove`
     /// from `gen/build.cove`'s `build` entry, which needs no capability.
     fn write_generator_fixture(root: &Path, body: &str) {
@@ -314,7 +359,10 @@ mod tests {
             "/// A generated constant.\\nexport fn answer() -> Int \\{\\n42\\n\\}\\n",
         );
 
-        expect_ok(generate_one(Some(dir.path()), "gen"), "generation succeeds");
+        expect_ok(
+            generate_one(Some(dir.path()), "gen", &flags()),
+            "generation succeeds",
+        );
 
         let written =
             std::fs::read_to_string(dir.path().join("out/generated.cove")).expect("file exists");
@@ -343,7 +391,8 @@ mod tests {
             "/// Wrong shape: returns `Result<Int, Error>`, not `Result<String, Error>`.\nexport fn build() -> Result<Int, Error> {\n  Ok(1)\n}\n",
         );
 
-        let error = generate_one(Some(dir.path()), "gen").expect_err("wrong shape must fail");
+        let error =
+            generate_one(Some(dir.path()), "gen", &flags()).expect_err("wrong shape must fail");
         match error {
             CliError::Message(message) => {
                 assert!(
@@ -362,8 +411,8 @@ mod tests {
         let dir = TempDir::new("generate-broken-output");
         write_generator_fixture(dir.path(), "fn (");
 
-        let error =
-            generate_one(Some(dir.path()), "gen").expect_err("unparseable output must fail");
+        let error = generate_one(Some(dir.path()), "gen", &flags())
+            .expect_err("unparseable output must fail");
         assert!(matches!(error, CliError::Diagnostics { .. }));
         // The file is still written: a person can open it to see the broken
         // source a generator produced.
@@ -376,10 +425,13 @@ mod tests {
     fn generate_check_passes_when_the_written_file_matches() {
         let dir = TempDir::new("generate-check-fresh");
         write_generator_fixture(dir.path(), "export fn answer() -> Int \\{\\n  42\\n\\}\\n");
-        expect_ok(generate_one(Some(dir.path()), "gen"), "generation succeeds");
+        expect_ok(
+            generate_one(Some(dir.path()), "gen", &flags()),
+            "generation succeeds",
+        );
 
         expect_ok(
-            generate_check(Some(dir.path())),
+            generate_check(Some(dir.path()), &flags()),
             "a freshly generated file passes --check",
         );
     }
@@ -394,7 +446,8 @@ mod tests {
             "// Code generated by `cove generate gen`. DO NOT EDIT.\n\nexport fn answer() -> Int {\n  0\n}\n",
         );
 
-        let error = generate_check(Some(dir.path())).expect_err("a stale file must fail --check");
+        let error =
+            generate_check(Some(dir.path()), &flags()).expect_err("a stale file must fail --check");
         assert!(matches!(error, CliError::GenerateStale));
     }
 
@@ -403,7 +456,7 @@ mod tests {
         let dir = TempDir::new("generate-check-nothing-to-generate");
         write(dir.path(), "cove.toml", "");
         expect_ok(
-            generate_check(Some(dir.path())),
+            generate_check(Some(dir.path()), &flags()),
             "nothing to generate is not a failure",
         );
     }
@@ -427,7 +480,7 @@ mod tests {
              }\n",
         );
 
-        let error = generate_one(Some(dir.path()), "gen")
+        let error = generate_one(Some(dir.path()), "gen", &flags())
             .expect_err("an ungranted capability must fail the generator");
         match error {
             CliError::Diagnostics { items, .. } => {
@@ -460,7 +513,7 @@ mod tests {
             "/// Never runs.\nexport fn build() -> Result<String, Error> {\n  Ok(\"\")\n}\n",
         );
 
-        let error = generate_one(Some(dir.path()), "gen")
+        let error = generate_one(Some(dir.path()), "gen", &flags())
             .expect_err("a run with no `generates` key cannot be generated");
         match error {
             CliError::Message(message) => assert!(message.contains("has no `generates` key")),

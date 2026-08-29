@@ -75,16 +75,18 @@ limits are the ones `[run.<name>]` recorded when it was built, and a
 and this toolchain's own source, because an executable has to link the
 runtime; `cove build --help` says so in full, and ADR 0009 says why.
 
-`cove run --backend vm` runs the entry on the dedicated VM of ADR 0019
-instead of the tree-walking interpreter. The interpreter is the default and
-the oracle; the VM cannot run every construct yet, so a program it cannot run
-is refused before anything happens rather than finished on the interpreter,
-and the refusal names the construct and points at it. What is lowered is what
-the entry can reach, so a construct elsewhere in the package refuses only the
-entries that reach it. `--stats` reports how long lowering took apart from
-how long the run took, and how many instructions the run executed — the
-figure a change to the lowering is judged by, because wall time moves for
-many reasons and that moves for one.
+The dedicated VM of ADR 0019 is what runs a program, and ADR 0022 is why.
+`cove run --backend ast` runs the entry on the tree-walking interpreter
+instead, which is still the semantic oracle and still what a disagreement
+between the two is decided by. The VM cannot run every construct yet, so a
+program it cannot run is refused before anything happens rather than finished
+on the interpreter, and the refusal names the construct, points at it, and
+says which flag runs it. What is lowered is what the entry can reach, so a
+construct elsewhere in the package refuses only the entries that reach it.
+`--stats` reports how long lowering took apart from how long the run took,
+and how many instructions the run executed — the figure a change to the
+lowering is judged by, because wall time moves for many reasons and that
+moves for one.
 
 `cove test` runs every `test fn` in the package, reports each one, and exits
 non-zero when any failed. `--filter` runs only the tests whose qualified name
@@ -119,6 +121,9 @@ generate: `cove generate` is the only command that runs project code besides
 an explicit `run`. `cove generate --check` regenerates every run that sets
 `generates` into memory, compares it against what is on disk, and exits
 non-zero on the first file that differs, which is the form to run in CI.
+`--backend <ast|vm>` chooses the backend a generator runs on, defaulting to
+the VM; it is the only `cove run` flag `cove generate` takes, because every
+other budget is `[run.<name>]`'s.
 
 `cove trace` reads a JSONL trace written by `cove run --trace` and prints a
 summary and a timeline. It reports which of the distinctions ADR 0001 asks a
@@ -139,7 +144,7 @@ literal `--` is a program argument, even if it looks like a flag):
   --trace <path>        write a JSONL trace to <path>, or `-` for stderr
   --trace-values <mode> `full` (the default) records each host call's arguments and result, which is what `cove replay` needs; `redacted` records only their types
   --max-tasks <n>       stop the run when it would hold more than <n> tasks at once
-  --backend <ast|vm>    which backend runs the entry: `ast`, the tree-walking interpreter and the default, or `vm`, the dedicated VM of ADR 0019
+  --backend <ast|vm>    which backend runs the entry: `vm`, the dedicated VM of ADR 0019 and the default, or `ast`, the tree-walking interpreter and the semantic oracle
   --stats               print the backend's lowering and execution times and the instructions it executed, then fuel spent, host calls, irreversible writes, elapsed time, host-call wait, and the heap, to stderr
   --files-root <path>   the one directory the `files` host may reach; defaults to `files/` in the package
   --allow-exec <path>   an absolute path `process.run` may start; repeat to allow more, and omit to allow none
@@ -984,19 +989,11 @@ fn cmd_run(args: &[String]) -> Result<(), CliError> {
 
 /// The diagnostic a construct the VM cannot run is refused with.
 ///
-/// It names the construct and points at it, because the only useful thing to
-/// say about a backend that cannot run a program is which part of the program
-/// it was. It is an error rather than a note because ADR 0019 forbids the
-/// alternative: a run that continued here would be a run that finished on the
-/// interpreter while reporting the VM, and every measurement and every
-/// conformance claim taken from it would be about a mixture.
+/// A thin name for [`cove_ir::Unsupported::to_diagnostic`], which is where
+/// the words live: a built binary produces the same refusal and does not
+/// link this crate.
 pub(crate) fn unsupported_by_backend(why: &cove_ir::Unsupported) -> Diagnostic {
-    Diagnostic::error("cove::backend::unsupported", why.to_string())
-        .at(why.span)
-        .rule(
-            "A run on the VM either finishes on the VM or fails before any side effect; it never falls back to the interpreter.",
-        )
-        .help("run it on the interpreter with `--backend ast`, which is the default")
+    why.to_diagnostic()
 }
 
 /// The diagnostic a run's failure is reported as, with what a
@@ -1325,10 +1322,12 @@ fn print_backend_stats(
 /// duplicating one. Neither fits "if it is not straightforward with std
 /// alone, skip it," so `cove run` cannot yet be interrupted through
 /// `Cancellation` from outside; only the limits below can stop a run.
+#[derive(Clone)]
 pub(crate) struct RunFlags {
-    /// Which backend runs the entry. `ast` is the default because ADR 0012
-    /// ranks the oracle above a backend and issue #111 is the gate that has
-    /// not yet been passed.
+    /// Which backend runs the entry. `vm` is the default: issue #111's gate
+    /// was passed and ADR 0022 records the decision. `ast` remains what a
+    /// disagreement is decided by, which is a different job from running a
+    /// program.
     backend: Backend,
     fuel: Option<u64>,
     deadline: Option<Duration>,
@@ -1352,9 +1351,15 @@ impl RunFlags {
     /// `[run.<name>]`, which is what `cove generate` uses so a generator
     /// runs under exactly the authority its config table grants, nothing
     /// more and nothing a flag could add.
+    ///
+    /// "No overrides" includes the backend, so a generator runs on whichever
+    /// backend `cove run` runs on. ADR 0010 makes a generator an ordinary
+    /// capability-controlled Cove entry and `execute_entry` is the one seam
+    /// both reach it through; a generator pinned to the other backend would
+    /// be a second kind of run.
     pub(crate) fn none() -> RunFlags {
         RunFlags {
-            backend: Backend::Ast,
+            backend: Backend::default_for_a_run(),
             fuel: None,
             deadline: None,
             max_host_calls: None,
@@ -1367,13 +1372,19 @@ impl RunFlags {
             program_args: Vec::new(),
         }
     }
+
+    /// Selects a backend, for a command that parses `--backend` itself
+    /// rather than through [`parse_run_flags`].
+    pub(crate) fn set_backend(&mut self, backend: Backend) {
+        self.backend = backend;
+    }
 }
 
 /// Which of the two backends ADR 0019 leaves in place runs the entry.
 ///
-/// The interpreter is the default and stays the default until issue #111's
-/// gate is passed: it is the oracle, and a backend checked against it is
-/// presumed wrong when the two disagree.
+/// The VM is the default since ADR 0022. The interpreter stays selectable,
+/// and stays the oracle: a backend checked against it is presumed wrong when
+/// the two disagree, whichever of them a run reached by default.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum Backend {
     /// The tree-walking interpreter.
@@ -1383,7 +1394,21 @@ pub(crate) enum Backend {
 }
 
 impl Backend {
-    fn parse(value: &str) -> Option<Backend> {
+    /// The backend a command that runs a program uses when nobody named
+    /// one.
+    ///
+    /// One function rather than a literal at each command, because "the
+    /// default backend" is one decision and four commands make it: `cove
+    /// run`, `cove generate`, `cove test`, and `cove build`. Written out
+    /// four times it could be changed in three places, and a toolchain whose
+    /// commands disagreed about which backend runs a program would be the
+    /// mixture ADR 0019's no-silent-fallback rule exists to prevent, arrived
+    /// at by a different road.
+    pub(crate) fn default_for_a_run() -> Backend {
+        Backend::Vm
+    }
+
+    pub(crate) fn parse(value: &str) -> Option<Backend> {
         match value {
             "ast" => Some(Backend::Ast),
             "vm" => Some(Backend::Vm),
@@ -1402,6 +1427,7 @@ impl std::fmt::Display for Backend {
 }
 
 /// Where `--trace` (or the config's `trace` key) sends trace lines.
+#[derive(Clone)]
 enum TraceTarget {
     Stderr,
     File(PathBuf),
@@ -1425,7 +1451,7 @@ impl TraceTarget {
 /// keeps working exactly as it always has.
 fn parse_run_flags(args: &[String]) -> Result<RunFlags, CliError> {
     let mut flags = RunFlags {
-        backend: Backend::Ast,
+        backend: Backend::default_for_a_run(),
         fuel: None,
         deadline: None,
         max_host_calls: None,
@@ -2126,13 +2152,15 @@ module auth
         assert_eq!(flags.program_args, ["first", "second"]);
     }
 
-    /// The interpreter is the default backend, and stays the default until
-    /// issue #111's gate is passed: ADR 0012 ranks the oracle above a
-    /// backend, so a run nobody chose a backend for gets the oracle.
+    /// The VM is the default backend since ADR 0022, and `cove generate`
+    /// reaches it through the same `RunFlags::none()` `cove run` reaches it
+    /// through, so the two are asserted together rather than separately:
+    /// they are one decision, and a change that moved only one of them
+    /// would be the drift ADR 0010's one-seam rule exists to prevent.
     #[test]
-    fn a_run_that_names_no_backend_gets_the_interpreter() {
-        assert_eq!(flags(&["input.txt"]).backend, Backend::Ast);
-        assert_eq!(RunFlags::none().backend, Backend::Ast);
+    fn a_run_that_names_no_backend_gets_the_vm() {
+        assert_eq!(flags(&["input.txt"]).backend, Backend::Vm);
+        assert_eq!(RunFlags::none().backend, Backend::Vm);
     }
 
     #[test]
