@@ -19,6 +19,8 @@
   sentence "until #111 passes, the interpreter is the default backend" was
   satisfied rather than contradicted, and its no-silent-fallback rule is
   enforced here in four more places than it was
+- Implemented by: [PR #141](https://github.com/myuon/cove/pull/141), closing
+  [issue #111](https://github.com/myuon/cove/issues/111)
 - Implementation status: complete for `cove run`, `cove generate`,
   `cove test`, and `cove build`. `cove replay` deliberately stays on the
   interpreter, argued below and tracked by
