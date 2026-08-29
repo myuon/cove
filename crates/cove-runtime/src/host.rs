@@ -1181,11 +1181,13 @@ const CONSOLE_SCHEMA: ModuleSchema = cove_schema::hosts::CONSOLE;
 /// is why a program's records can now be piped somewhere while its complaints
 /// stay on the terminal.
 ///
-/// The streams are separately grantable, because they are separate
-/// capabilities in the schema: a run granted `console` and not `console.error`
-/// reaches `println` and is refused `eprintln`, and the refusal happens at the
-/// boundary before this host is asked. Nothing here consults the grants — the
-/// only thing this type decides is where the bytes go.
+/// The two streams are one capability. All four operations require
+/// `console`, so a run that may print may complain, and this type is where
+/// the difference between the streams is: an embedding that wants a program's
+/// output captured while its complaints reach the terminal hands over a
+/// buffer and `std::io::stderr()`, which is a wiring choice rather than an
+/// authority one. Nothing here consults the grants at all — the boundary has
+/// already decided by the time an operation arrives.
 ///
 /// # Migrating from the one-writer form
 ///
@@ -1881,9 +1883,9 @@ mod tests {
     }
 
     /// A registry holding one [`Console`] over the two writers given, granted
-    /// both of the console's capabilities.
+    /// the one capability both of its streams answer to.
     fn registry_with_console(out: Shared, err: Shared) -> HostRegistry {
-        let mut hosts = HostRegistry::new(Grants::new(["console", "console.error"]));
+        let mut hosts = HostRegistry::new(Grants::new(["console"]));
         hosts.register(Box::new(Console::new(out, err)));
         hosts
     }
@@ -1932,59 +1934,39 @@ mod tests {
         assert_eq!(err.written(), "two parts");
     }
 
-    /// The two streams are two capabilities, so a host can grant one and
-    /// refuse the other. Granting `console` alone is what every run written
-    /// before the diagnostic stream existed asked for, and it still reaches
-    /// exactly the operations it reached then.
+    /// One capability covers both streams. A run granted `console` may write
+    /// a record and may complain about it, which is why a grant written
+    /// before `eprintln` existed did not have to be read again when it
+    /// arrived; a run granted nothing may do neither, and is refused under
+    /// the one name either way.
     #[test]
-    fn the_diagnostic_stream_is_granted_apart_from_the_output_stream() {
+    fn one_grant_covers_both_streams() {
         let out = Shared::default();
         let err = Shared::default();
-        let mut hosts = HostRegistry::new(Grants::new(["console"]));
-        hosts.register(Box::new(Console::new(out.clone(), err.clone())));
+        let granted = registry_with_console(out.clone(), err.clone());
 
-        hosts
+        granted
             .call("console", "println", vec![Value::Str("record".into())])
             .expect("`console` grants the output stream");
-        let refused = hosts
+        granted
             .call("console", "eprintln", vec![Value::Str("warning".into())])
-            .expect_err("`console` does not grant the diagnostic stream");
-
-        assert_eq!(
-            refused.denied_capability.as_deref(),
-            Some("console.error"),
-            "{}",
-            refused.message
-        );
+            .expect("`console` grants the diagnostic stream too");
         assert_eq!(out.written(), "record\n");
-        assert_eq!(err.written(), "");
-    }
-
-    /// And the other way round, which is the configuration issue #102 asks
-    /// for: a host capturing a program's output while its complaints reach
-    /// the terminal grants the diagnostic stream and not the output one.
-    #[test]
-    fn the_output_stream_is_granted_apart_from_the_diagnostic_stream() {
-        let out = Shared::default();
-        let err = Shared::default();
-        let mut hosts = HostRegistry::new(Grants::new(["console.error"]));
-        hosts.register(Box::new(Console::new(out.clone(), err.clone())));
-
-        let refused = hosts
-            .call("console", "println", vec![Value::Str("record".into())])
-            .expect_err("`console.error` does not grant the output stream");
-        hosts
-            .call("console", "eprintln", vec![Value::Str("warning".into())])
-            .expect("`console.error` grants the diagnostic stream");
-
-        assert_eq!(
-            refused.denied_capability.as_deref(),
-            Some("console"),
-            "{}",
-            refused.message
-        );
-        assert_eq!(out.written(), "");
         assert_eq!(err.written(), "warning\n");
+
+        let mut ungranted = HostRegistry::new(Grants::new(Vec::<String>::new()));
+        ungranted.register(Box::new(Console::new(Shared::default(), Shared::default())));
+        for op in ["println", "print", "eprintln", "eprint"] {
+            let refused = ungranted
+                .call("console", op, vec![Value::Str("anything".into())])
+                .expect_err("a run granted nothing reaches neither stream");
+            assert_eq!(
+                refused.denied_capability.as_deref(),
+                Some("console"),
+                "`console.{op}`: {}",
+                refused.message
+            );
+        }
     }
 
     #[test]

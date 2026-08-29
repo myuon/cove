@@ -367,18 +367,23 @@ use cove_sema::resolve::Program as Checked;
 /// the one the program built. It lowered on the day it was written, for the
 /// same reason the six before it did.
 ///
-/// 88 to 90: two cases and no construct again. `tests/e2e:host_console_streams`
-/// writes records to `console.println` and complaints to `console.eprintln`,
-/// and `tests/e2e:fail_console_error_not_granted` is refused the second of
-/// those by a run that granted `console` and not `console.error`. Both lowered
-/// on the day they were written, and that is the whole of what issue #102 had
-/// to check about the backends: a second stream is a second operation on a
-/// module, `cove_ir::Inst::CallHost` already carries the module and the
-/// operation as names, and there was no instruction to add. What the two cases
-/// measure is the fake console, which now has a buffer per stream so that a
-/// line written to the other one on one backend is a disagreement rather than
-/// a coincidence.
-const LOWERED_FLOOR: usize = 90;
+/// 88 to 89: one case and no construct again.
+/// `tests/e2e:host_console_streams` writes records to `console.println` and
+/// complaints to `console.eprintln`, and it lowered on the day it was
+/// written. That is the whole of what issue #102 had to check about the
+/// backends: a second stream is a second operation on a module,
+/// `cove_ir::Inst::CallHost` already carries the module and the operation as
+/// names, and there was no instruction to add. What the case measures is the
+/// fake console, which now has a buffer per stream so that a line written to
+/// the other one on one backend is a disagreement rather than a coincidence.
+///
+/// It was briefly two. A second case, `fail_console_error_not_granted`, was
+/// written and then removed before the change merged: it pinned a run that
+/// granted `console` and not `console.error`, and the repository decided
+/// against a second capability, so there is no refusal for it to pin. The
+/// floor is 89 rather than 90 because that case is gone and for no other
+/// reason — nothing stopped lowering.
+const LOWERED_FLOOR: usize = 89;
 
 // ------------------------------------------------------------------ the test
 

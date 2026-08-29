@@ -5,11 +5,9 @@
 - Implemented by: [PR #132](https://github.com/myuon/cove/pull/132)
 - Implementation status: complete — `console.eprintln` and `console.eprint`
   exist in the schema, in the host, and in every fake console the workspace
-  builds; `cove run` gives them the process's standard error;
+  builds; `cove run` gives them the process's standard error, and
   `tests/e2e/host_console_streams` drives both streams through the real
-  binary, and `tests/e2e/fail_console_error_not_granted` pins what a run that
-  granted one of the two capabilities and not the other is told. Standard
-  input is still not part of it, for the reason
+  binary. Standard input is still not part of it, for the reason
   [ADR 0018](0018-streaming-file-io.md) gives, and
   [issue #94](https://github.com/myuon/cove/issues/94) keeps that question.
 
@@ -39,23 +37,15 @@ The runtime has known the difference all along. `cove run` writes its own
 diagnostics and its `--stats` lines to stderr and its program's output to
 stdout; a built binary does the same. It was only Cove code that could not.
 
-Nothing here is a new mechanism. [ADR 0001](0001-mvp-language-design.md) had
-each operation describe "its argument, result, and error types; capability;
-..." — a capability *per operation*, not per module — and ADR 0013's second
-amendment made both ends of the boundary read it: `cove_sema`'s
-`operation_capability` and `HostRegistry::dispatch` each take
-`OperationSchema::capability` and fall back to the module's only for an
-operation no schema declares. No shipped module had used it. This one does.
-
 ## Decision
 
-`console` gains two operations, on a capability of its own.
+`console` gains two operations, under the capability it already had.
 
 ```text
 console.println(String...)  -> Result<Unit, Error>   requires console
 console.print(String...)    -> Result<Unit, Error>   requires console
-console.eprintln(String...) -> Result<Unit, Error>   requires console.error
-console.eprint(String...)   -> Result<Unit, Error>   requires console.error
+console.eprintln(String...) -> Result<Unit, Error>   requires console
+console.eprint(String...)   -> Result<Unit, Error>   requires console
 ```
 
 `Console` holds two writers instead of one, under two locks. `cove run` and a
@@ -82,39 +72,44 @@ are neither opened nor closed and there is exactly one of each. A
 `console.Stream` would add a handle, a `close` nothing should call, and a
 lifetime nothing has, to say what two names say.
 
-The cost is that `console` is now a module whose operations do not all require
-the same capability, and the schema test that used to assert they did is
-replaced by one asserting the thing that actually matters: an operation's
-capability is the module's own or the module's with a suffix, so a name in
-`allow = [...]` always says which module it opens.
+### One capability, because a stream is not an authority
 
-### Two capabilities, and which one keeps the old name
+All four operations require `console`. A program that may write to the
+terminal may write to the terminal, and which of the process's two file
+descriptors a line reaches is a fact about that program's output rather than
+about what it was permitted to do.
 
-`console` keeps meaning exactly what it meant: the output stream, `println`
-and `print`, and nothing else. The diagnostic stream is `console.error`.
+Splitting authority at the stream would be a finer grain than the thing being
+authorised deserves. The unit a grant is written in has to be a unit somebody
+can reason about when they write it, and "may print, may not complain" is not
+one: the danger a `console` grant is weighed against is that a run can put
+bytes in front of a person or into a pipe, and both streams do exactly that,
+in the same amount, with the same consequences. A second capability would buy
+no protection and would make every `allow = ["console"]` in existence a
+question about which half of the console was meant — a list that used to say
+one thing would now be read as having taken a position on something its author
+never considered.
 
-This is the direction that leaves every existing grant alone. A `cove.toml`
-that says `allow = ["console"]`, a binary `cove build` produced carrying that
-list, an embedder's `Grants::new(["console"])` — all of them were written when
-`console` was the whole module, and under this decision all of them still
-reach exactly the operations they reached the day they were written. Widening
-`console` to cover both streams would have silently granted every one of them
-a stream to the terminal that its author never considered, and a capability
-that quietly grows is the one thing a capability may not do.
+So a grant written before `eprintln` existed covers it, which is the property
+this decision is chosen for: nothing already written has to be read again.
+`crates/cove-schema/src/hosts.rs`'s
+`every_operation_declares_its_module_capability` stays true, and `console`
+stays a module with one answer to "what does granting this allow".
 
-It is also the configuration the issue asks for. "A host that wants to capture
-a program's output but let its diagnostics through is a real configuration,
-and it needs the two to be separately grantable to express it" — that host
-grants `console.error` and not `console`, and the boundary refuses `println`
-with the name of what is missing. `cove test` is now such a host in the small:
-`[test] allow_real = ["console"]` gives a test the real stdout and still fakes
-its diagnostics into a sink, because that list was written when `console` was
-the whole module too.
+### The two writers are the wiring, and that is where the choice lives
 
-A dotted name rather than `console_error` or `stderr`, because a capability is
-read by whoever decides what a run may do, and `console.error` says which
-module it opens where `stderr` says only what a POSIX process calls a file
-descriptor. Cove writes qualified names with dots everywhere else.
+A host that means to capture what a run produces while letting its complaints
+reach the terminal is a real configuration, and it is expressed by handing
+`Console::new` a buffer and `std::io::stderr()`. That is where it belongs. It
+is a decision about where output goes, made by whoever is assembling the run's
+plumbing, and it needs no vocabulary in the grant list and no new name in
+anybody's `cove.toml`.
+
+`Console::new` takes both writers rather than defaulting the second, and this
+is deliberate: a host that captured a program's output before this existed
+would otherwise silently begin capturing its diagnostics too, which is the
+mixing the second stream exists to undo. `Console::new(w)` fails to compile
+instead, and the type's documentation says what to write.
 
 ### Effects, and what the streams do not differ in
 
@@ -122,9 +117,8 @@ All four operations are irreversible writes: bytes handed to a terminal cannot
 be taken back, whichever stream carried them. All four are variadic over
 `String`, join their arguments with a space, are not cancellable, are
 recordable, and answer a task-safe `Result<Unit, Error>`. `eprintln` differs
-from `println` in exactly two things — where it writes, and what it requires —
-because anything else would be a second way to print rather than a second
-place to print to.
+from `println` in exactly one thing — where it writes — because anything else
+would be a second way to print rather than a second place to print to.
 
 The two locks are separate, so a task writing a diagnostic never waits behind
 a task writing a record. Ordering *between* the streams is not defined and
@@ -156,6 +150,13 @@ pipeline needs a capability that is not "one directory", and what happens when
 there is no terminal has to be answered. This ADR is the smaller cousin, and
 being able to write to stderr does not settle anything about reading stdin.
 
+**How a host separates the two streams, beyond handing over two writers.**
+Capturing output while passing diagnostics through is a wiring choice now, and
+there is no way to express it as a grant. If a host ever genuinely needs the
+*authority* split — an embedder that must be able to prove a run cannot write
+to one of them — this ADR is what it will have to argue against, and
+"Alternatives considered" is where the argument already is.
+
 **Whether a stream is a terminal.** Nothing here says whether either stream is
 attached to one, and so nothing here supports a program that colours its
 output when a human is reading and does not when a pipe is. That is a third
@@ -164,40 +165,67 @@ operation on `console`, and it wants its own reason.
 **Moving `examples/cq`'s reports onto the new stream.** It is exactly what the
 stream exists for and it is a change to a program, not to the language, so it
 belongs to [issue #88](https://github.com/myuon/cove/issues/88) rather than
-here. `crates/cove-cli/tests/examples.rs` pins today's behaviour, complaints
-in the CSV and an empty diagnostic stream, so that the move shows up as the
+here. `crates/cove-cli/tests/examples.rs` pins today's behaviour — complaints
+in the CSV and an empty diagnostic stream — so that the move shows up as the
 improvement it is instead of as two goldens changing at once.
 
 ## Alternatives considered
 
-**One capability covering both streams.** Fewer names, and it makes every
-grant already written mean more than it did. See above.
+**A `console.error` capability for the diagnostic stream.** This was written
+first and then rejected, so it is worth recording as the argument it is rather
+than as a note that someone said no.
 
-**A `console.Stream` resource, with `out` and `err` as values.** It is the
-most general shape and it buys nothing: a program would open something that
-was never closed, hold a handle to one of exactly two things, and pay ADR
-0013's machinery for it. It would also make the two streams one capability
-again, since a resource's operations are reached through the module's, unless
-each stream were issued by a differently-grant-checked operation — at which
-point the capability split is back and the handle is the only thing added.
+The case for it: the issue asks for a host that captures a program's output
+and lets its diagnostics through, and observes that "it needs the two to be
+separately grantable to express it". A capability already belongs to an
+operation rather than to a module — ADR 0001 says each operation describes its
+own, and ADR 0013's second amendment made both `cove_sema` and the boundary
+read it — so `console.error` needed no mechanism, only a string. It would also
+have left `console` meaning precisely the set of operations it meant on the
+day any given `allow` list was written, which is a genuine virtue: a
+capability that quietly grows is the thing a capability may not do.
+
+The case against, which is the one that decided it: authority split at the
+stream is a finer grain than the thing being authorised. The two streams carry
+the same risk to the same places, so the split protects nothing, and what it
+costs is paid by every list already written — each one becomes a question
+about which half of the console its author meant, when its author meant the
+console. The configuration the issue wants is still available and is better
+placed: it is two writers rather than two grants, and it belongs to whoever
+wires the run rather than to whoever audits it.
+
+The narrower reading of "a grant must not grow" survives that: `console` did
+not gain authority over anything it could not already do, because writing to
+the terminal is what it always meant. What it gained is a second place to put
+the bytes, which is what the host chooses.
+
+**A second host module.** Fewer questions about capabilities and two unrelated
+names for one idea. See above.
+
+**A `console.Stream` resource, with `out` and `err` as values.** The most
+general shape, and it buys nothing: a program would open something that is
+never closed and hold a handle to one of exactly two things, paying ADR 0013's
+machinery for it.
 
 **`console.log`, `console.warn`, `console.error` as levels.** A level is a
 policy — which messages matter — and a stream is a destination. Deciding the
-first in the schema would fix every program's idea of severity in the Host API,
-where a program that wants levels can write them itself on the stream this
-adds.
+first in the schema would fix every program's idea of severity in the Host
+API, where a program that wants levels can write them itself on the stream
+this adds.
 
 ## Consequences
 
 - A Cove program can be a filter: records on stdout, complaints on stderr,
   `cove run prog > out.csv` leaving the complaints on the terminal.
-- `console` is the first shipped module with two capabilities, so the
-  per-operation capability ADR 0001 asked for and ADR 0013 wired up now has a
-  caller. A module that wants to split a narrow authority out of a broad one
-  has a worked example to copy.
+- Every `allow` list, every built binary's carried grants, and every
+  embedder's `Grants::new(["console"])` keeps working and keeps meaning what
+  its author meant, without anybody reading it again.
 - A run's `--stats` irreversible-write count now includes diagnostics, which
   is what that number has always meant: writes that cannot be undone,
   wherever they went.
+- `cove test` fakes both streams together, because `[test] allow_real` names
+  capabilities and there is one to name. A test that reaches the console
+  reaches the whole of it, real or sunk.
 - `tests/e2e`'s harness had to stop treating stderr as evidence of failure. A
   case that writes diagnostics and succeeds is neither a failing case nor a
   case with empty stderr, so a case may now state the exit status it must exit

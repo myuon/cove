@@ -175,17 +175,13 @@ allow = ["clock", "console"]
 entry = "host_http_resource.main"
 allow = ["http", "console"]
 
-[run.fail_console_error_not_granted]
-entry = "fail_console_error_not_granted.main"
-allow = ["console"]
-
 [run.host_console]
 entry = "host_console.main"
 allow = ["console"]
 
 [run.host_console_streams]
 entry = "host_console_streams.main"
-allow = ["console", "console.error"]
+allow = ["console"]
 
 [run.host_documents]
 entry = "host_documents.main"

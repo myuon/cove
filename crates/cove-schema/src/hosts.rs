@@ -212,15 +212,13 @@ impl FromIterator<ModuleSchema> for HostSchemas {
 /// Bytes already handed to the terminal cannot be taken back, so all four are
 /// irreversible writes.
 ///
-/// The two streams are two capabilities. `console` is the output stream and
-/// nothing else, so a grant written before `eprintln` existed still means
-/// exactly what it meant then; `console.error` is the diagnostic stream, and
-/// a host that captures a program's output while letting its complaints reach
-/// the terminal grants the one and not the other. This is the first shipped
-/// module whose operations do not all answer to the module's own capability —
-/// something both ends of the boundary have read since ADR 0013's second
-/// amendment, since a call requires `OperationSchema::capability` and the
-/// module's own stands in only for an operation no schema declares.
+/// All four are the `console` capability, and the two streams are not two
+/// authorities: a program that may write to the terminal may write to the
+/// terminal, and where a line lands is a question about the program's output
+/// rather than about what it was allowed to do. A host that means to capture
+/// what a run produces and let its complaints through says so by handing
+/// `cove_runtime::host::Console` two different writers, which is where that
+/// choice belongs. ADR 0020 says why.
 pub const CONSOLE: ModuleSchema = ModuleSchema {
     name: "console",
     capability: "console",
@@ -252,7 +250,7 @@ pub const CONSOLE: ModuleSchema = ModuleSchema {
             params: &[HostType::String],
             variadic: true,
             result: HostType::Result(&HostType::Unit, &HostType::Error),
-            capability: "console.error",
+            capability: "console",
             effect: Effect::IrreversibleWrite,
             cancellable: false,
             recordable: true,
@@ -263,7 +261,7 @@ pub const CONSOLE: ModuleSchema = ModuleSchema {
             params: &[HostType::String],
             variadic: true,
             result: HostType::Result(&HostType::Unit, &HostType::Error),
-            capability: "console.error",
+            capability: "console",
             effect: Effect::IrreversibleWrite,
             cancellable: false,
             recordable: true,
@@ -883,56 +881,22 @@ pub const HTTP: ModuleSchema = ModuleSchema {
 mod tests {
     use super::*;
 
-    /// A capability names the module it belongs to.
-    ///
-    /// An operation's capability is either the module's own — which is the
-    /// usual case, and was every case until `console` gained a second
-    /// stream — or the module's with a suffix, as `console.error` is.
-    /// Nothing else. Both ends of the boundary read
-    /// `OperationSchema::capability` and fall back to the module's, so a
-    /// module *may* mix capabilities and this does not forbid it; what it
-    /// forbids is a capability whose name does not say which module it opens,
-    /// because `allow = [...]` is read by whoever decides what a run may do
-    /// and a name that named nothing would tell them nothing.
+    /// The registry gates on the module's capability, and each operation
+    /// declares the capability it needs. Nothing today mixes capabilities
+    /// inside one module, and a module whose operations disagreed with it
+    /// would make the grant check and the schema tell different stories.
     #[test]
-    fn every_operation_s_capability_belongs_to_its_module() {
+    fn every_operation_declares_its_module_capability() {
         for module in SHIPPED {
-            let operations = module
-                .operations
-                .iter()
-                .chain(module.resources.iter().flat_map(|r| r.operations));
-            for entry in operations {
-                let qualified = format!("{}.", module.capability);
-                assert!(
-                    entry.capability == module.capability
-                        || entry.capability.starts_with(&qualified),
-                    "`{}.{}` requires `{}`, which is neither `{}` nor a capability of it",
-                    module.name,
-                    entry.name,
-                    entry.capability,
-                    module.capability
-                );
+            for entry in module.operations {
+                assert_eq!(entry.capability, module.capability, "`{}`", module.name);
+            }
+            for resource in module.resources {
+                for entry in resource.operations {
+                    assert_eq!(entry.capability, module.capability, "`{}`", module.name);
+                }
             }
         }
-    }
-
-    /// The console's two streams are two capabilities, and which operation
-    /// belongs to which is the whole of the distinction: a host that captures
-    /// a program's output and lets its diagnostics through grants `console`
-    /// and not `console.error`, or the other way about, and it is this table
-    /// that decides what each of those two grants reaches.
-    #[test]
-    fn the_console_s_two_streams_are_two_capabilities() {
-        let capability = |name: &str| {
-            CONSOLE
-                .operation(name)
-                .unwrap_or_else(|| panic!("`console.{name}` is declared"))
-                .capability
-        };
-        assert_eq!(capability("println"), "console");
-        assert_eq!(capability("print"), "console");
-        assert_eq!(capability("eprintln"), "console.error");
-        assert_eq!(capability("eprint"), "console.error");
     }
 
     /// Every `Named` type a shipped operation mentions is one a shipped
