@@ -878,13 +878,24 @@ impl Marker<'_> {
                     }
                 }
             }
+            // A `Struct` is an `Rc`, so two paths can reach the same one;
+            // walk its fields on the first sighting only, exactly as every
+            // other `Rc` container above does. Without the guard, a struct
+            // reached twice has its header and its field names added to
+            // `live_bytes` twice, and a chain of structs each holding two
+            // references to the one below is walked in time exponential in
+            // the chain's length.
             Value::Struct(structure) => {
-                self.bytes += size_of::<crate::value::StructValue>() as u64;
-                for (name, field) in &structure.fields {
-                    self.bytes += (name.len() + size_of::<Value>()) as u64;
-                    self.visit(field);
+                if self.walked.insert(Rc::as_ptr(structure) as usize) {
+                    self.bytes += size_of::<crate::value::StructValue>() as u64;
+                    for (name, field) in &structure.fields {
+                        self.bytes += (name.len() + size_of::<Value>()) as u64;
+                        self.visit(field);
+                    }
                 }
             }
+            // An `Enum` is `Box`ed, so it is owned by exactly one value and
+            // no two paths reach the same one.
             Value::Enum(enumeration) => {
                 self.bytes += size_of::<crate::value::EnumValue>() as u64;
                 for item in &enumeration.payload {
@@ -1238,6 +1249,103 @@ mod tests {
         let after = heap.collect(&roots).live_bytes;
         assert!(before > 0);
         assert_eq!(after, 0, "live bytes should fall to nothing: {before}");
+    }
+
+    /// `Marker::visit`'s struct arm has no `walked` guard, unlike every other
+    /// container it walks, so a struct reached from two live roots has its
+    /// header and its field names added to `live_bytes` twice. That
+    /// contradicts `Heap::live_bytes`'s own documented accounting: "each
+    /// shared allocation counted once."
+    #[test]
+    fn a_struct_shared_by_two_live_paths_reports_its_bytes_once() {
+        let mut roots = SlotRoots::new();
+        let mut heap = Heap::new();
+        let structure = Rc::new(StructValue {
+            type_name: "test.Shared".into(),
+            fields: vec![("value".into(), Value::Int(7))],
+            opaque: false,
+        });
+        let _a = root(&mut roots, Value::Struct(Rc::clone(&structure)));
+        let _b = root(&mut roots, Value::Struct(Rc::clone(&structure)));
+        // Drop the local so the only two references left are the roots' —
+        // otherwise this binding is itself an unrooted temporary, and the
+        // shortfall rule would (correctly) treat it as a third live path.
+        drop(structure);
+
+        let collected = heap.collect(&roots);
+        let expected =
+            size_of::<StructValue>() as u64 + ("value".len() + size_of::<Value>()) as u64;
+        assert_eq!(
+            collected.live_bytes, expected,
+            "a struct reached from two roots should be counted once, not once per root"
+        );
+    }
+
+    /// The same missing guard makes the walk exponential rather than merely
+    /// wrong. A chain of struct values, each holding two references to the
+    /// one below, is walked once per *path* to a struct rather than once per
+    /// struct when nothing deduplicates it — so reaching depth `N` costs
+    /// `2^N` visits to the bottom of the chain.
+    ///
+    /// Depth 30 is chosen so the two shapes are unmistakable rather than
+    /// merely different: a walk that visits each of the 31 structs once, as
+    /// the fix does, finishes in microseconds regardless of depth, while one
+    /// that revisits every shared struct along every path needs on the order
+    /// of `2^30` (roughly a billion) visits to the deepest struct alone. That
+    /// is far past anything a slow-but-linear walk could rack up by
+    /// accident, so a timeout firing here can only mean the exponential
+    /// shape came back, not that the machine running the suite is loaded.
+    ///
+    /// The whole heap, and every `Rc` it touches, is built on a spawned
+    /// thread and never leaves it — only the resulting byte count, a `u64`,
+    /// crosses back over the channel — because `Rc` is not `Send` and cannot
+    /// be moved across the boundary a wall-clock bound needs. Not joining
+    /// that thread is deliberate: if the walk is exponential again, the
+    /// `recv_timeout` below still reports the failure promptly, and the
+    /// still-running thread is simply killed when the test process exits,
+    /// rather than hanging the suite.
+    #[test]
+    fn a_chain_of_shared_structs_is_walked_without_exponential_blowup() {
+        const DEPTH: usize = 30;
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let mut roots = SlotRoots::new();
+            let mut heap = Heap::new();
+
+            let mut current = Value::Struct(Rc::new(StructValue {
+                type_name: "test.Level0".into(),
+                fields: Vec::new(),
+                opaque: false,
+            }));
+            for level in 1..=DEPTH {
+                current = Value::Struct(Rc::new(StructValue {
+                    type_name: format!("test.Level{level}").into(),
+                    fields: vec![("a".into(), current.clone()), ("b".into(), current)],
+                    opaque: false,
+                }));
+            }
+            let _slot = root(&mut roots, current);
+
+            let collected = heap.collect(&roots);
+            // The sender is dropped along with this thread whether or not the
+            // receiver is still listening; a failed send just means the main
+            // thread already gave up and timed out.
+            let _ = tx.send(collected.live_bytes);
+        });
+
+        let live_bytes = rx.recv_timeout(std::time::Duration::from_secs(10)).expect(
+            "collection did not finish in time — the struct arm is walking \
+                 the chain exponentially again",
+        );
+
+        let mut expected = size_of::<StructValue>() as u64;
+        for _ in 1..=DEPTH {
+            expected += size_of::<StructValue>() as u64 + 2 * (1 + size_of::<Value>()) as u64;
+        }
+        assert_eq!(
+            live_bytes, expected,
+            "each struct in the chain should be counted once, not once per path to it"
+        );
     }
 
     #[test]
