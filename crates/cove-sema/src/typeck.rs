@@ -3752,7 +3752,7 @@ impl<'a> Checker<'a> {
                         .at(span)
                         .label(self.ret_span, format!("the declared return type is `{other}`"))
                         .rule("`expr?` returns the error from the current function.")
-                        .help(format!("declare this function `-> Result<{other}, {error}>`")),
+                        .help(format!("declare this function `-> Result<{other}, {error}>`, or handle the `Err` with `unwrapOr`")),
                     ),
                 }
                 ok
@@ -7339,6 +7339,11 @@ fn conversion_help(expected: &Ty, found: &Ty) -> Option<String> {
                 "unwrap it, as in `value.unwrapOr(<{other}>)`, which always produces a `{other}`"
             )
         }
+        (other, Ty::Result(ok, _)) if other.matches(ok) => {
+            format!(
+                "unwrap it, as in `value.unwrapOr(<{other}>)`, which always produces a `{other}`"
+            )
+        }
         (Ty::Array(element), Ty::Vector(other)) if element.matches(other) => {
             "finish the vector, as in `vector.freeze()` or `vector.toArray()`".to_string()
         }
@@ -7764,6 +7769,75 @@ fn build() -> Array<Int> {
         );
         assert_eq!(error.code, MISMATCH);
         assert_eq!(error.message, "expected `Int`, found `String`");
+    }
+
+    /// `Result.unwrapOr` is `Option.unwrapOr`'s sibling, so the two are
+    /// checked together: the fallback is the type inside, the result is that
+    /// type, and the error type is not named by either half of the
+    /// signature.
+    #[test]
+    fn unwrap_or_takes_the_type_inside_on_both_option_and_result() {
+        accepts_body(
+            "  let found: Int = [1].get(0).unwrapOr(0)\n\
+             \x20 let parsed: Int = Int.parse(\"1\").unwrapOr(0)\n\
+             \x20 let mapped: Int = Int.parse(\"1\").mapError { \"bad\" }.unwrapOr(0)",
+        );
+        let error = rejects_body("  Int.parse(\"1\").unwrapOr(\"zero\")");
+        assert_eq!(error.code, MISMATCH);
+        assert_eq!(error.message, "expected `Int`, found `String`");
+        let error = rejects_body("  let n: String = Int.parse(\"1\").unwrapOr(0)");
+        assert_eq!(error.code, MISMATCH);
+        assert_eq!(error.message, "expected `String`, found `Int`");
+    }
+
+    /// A `Result` where its own `Ok` type was expected now has the same one
+    /// correction an `Option` has, because it now has the same method.
+    #[test]
+    fn a_result_where_its_ok_type_belongs_is_told_about_unwrap_or() {
+        let error = rejects_body("  let n: Int = Int.parse(\"1\")");
+        assert_eq!(error.code, MISMATCH);
+        assert_eq!(
+            error.help.unwrap(),
+            "unwrap it, as in `value.unwrapOr(<Int>)`, which always produces a `Int`"
+        );
+    }
+
+    /// `Int.parse` is one argument and decimal, and `Int.parseRadix` is two
+    /// and is not. That `parse` keeps its arity is the point of their being
+    /// two functions, so it is what this checks first.
+    #[test]
+    fn int_parse_and_parse_radix_are_two_signatures() {
+        accepts_body(
+            "  let decimal: Result<Int, Error> = Int.parse(\"12\")\n\
+             \x20 let hex: Result<Int, Error> = Int.parseRadix(\"ff\", 16)",
+        );
+        let error = rejects_body("  Int.parse(\"ff\", 16)");
+        assert_eq!(error.code, ARITY);
+        let error = rejects_body("  Int.parseRadix(\"ff\")");
+        assert_eq!(error.code, MISSING_ARGUMENT);
+        let error = rejects_body("  Int.parseRadix(\"ff\", \"16\")");
+        assert_eq!(error.code, MISMATCH);
+        assert_eq!(error.message, "expected `Int`, found `String`");
+    }
+
+    /// A character is a `String` of length 1, so this answers a `String` and
+    /// not some type of its own — and a `Result`, because a number that names
+    /// no character is a failure the caller handles.
+    #[test]
+    fn from_code_point_answers_a_result_of_string() {
+        accepts_body(
+            "  let character: Result<String, Error> = String.fromCodePoint(65)\n\
+             \x20 let letter: String = String.fromCodePoint(65).unwrapOr(\"?\")",
+        );
+        let error = rejects_body("  String.fromCodePoint(\"A\")");
+        assert_eq!(error.code, MISMATCH);
+        assert_eq!(error.message, "expected `Int`, found `String`");
+        let error = rejects_body("  let letter: String = String.fromCodePoint(65)");
+        assert_eq!(error.code, MISMATCH);
+        assert_eq!(
+            error.message,
+            "expected `String`, found `Result<String, Error>`"
+        );
     }
 
     #[test]
@@ -8307,9 +8381,11 @@ fn run() -> Counter {
         );
     }
 
-    /// The help lists what the shared table declares, all of it. The
-    /// hand-written candidate list it replaced had never gained `mapError`,
-    /// so a `Result` used to be told it had two methods when it has three.
+    /// The help lists what the shared table declares, all of it, in the
+    /// order the table declares it. The hand-written candidate list it
+    /// replaced had never gained `mapError`, so a `Result` used to be told
+    /// it had two methods when it has four; `unwrapOr` reads between the
+    /// queries and `mapError` here because that is where `Option` puts it.
     #[test]
     fn the_methods_a_diagnostic_lists_are_the_ones_the_table_declares() {
         let error = rejects_body("  let outcome = Ok(1)\n  println(\"{outcome.unwrap()}\")?");
@@ -8317,7 +8393,7 @@ fn run() -> Counter {
         assert_eq!(error.message, "`Result` has no method `unwrap`");
         assert_eq!(
             error.help.unwrap(),
-            "`Result` has `isOk`, `isError`, `mapError`"
+            "`Result` has `isOk`, `isError`, `unwrapOr`, `mapError`"
         );
     }
 
@@ -8338,7 +8414,7 @@ fn run() -> Counter {
         assert_eq!(error.message, "`Array` has no associated function `of`");
         assert_eq!(
             error.rule.unwrap(),
-            "A builtin type's associated functions are `Vector.of`, `Map.of`, `Set.of`, `Int.parse`, and `Float.parse`."
+            "A builtin type's associated functions are `Vector.of`, `Map.of`, `Set.of`, `String.fromCodePoint`, `Int.parse`, `Int.parseRadix`, and `Float.parse`."
         );
     }
 
@@ -9642,7 +9718,7 @@ fn double(text: String) -> Int {
         );
         assert_eq!(
             error.help.unwrap(),
-            "declare this function `-> Result<Int, Error>`"
+            "declare this function `-> Result<Int, Error>`, or handle the `Err` with `unwrapOr`"
         );
     }
 

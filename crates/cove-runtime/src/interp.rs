@@ -5913,18 +5913,146 @@ export fn main() -> Result<Unit, Error> {
 
     #[test]
     fn int_parse_returns_a_result() {
-        let body = "  console.println(\"{Int.parse(\"12\").isOk()} {Int.parse(\"x\").isError()} {Int.parse(\"12\").unwrapOr(0)}\")?";
-        let error = error_of(body);
-        assert!(
-            error.message.contains("has no method `unwrapOr`"),
-            "`unwrapOr` belongs to `Option`, not `Result`: {}",
-            error.message
-        );
         assert_eq!(
             output_of(
                 "  console.println(\"{Int.parse(\"12\").isOk()} {Int.parse(\"x\").isError()}\")?"
             ),
             "true true\n"
+        );
+    }
+
+    /// `Result.unwrapOr` answers what an `Ok` carries and the fallback for an
+    /// `Err`, which is `Option.unwrapOr` with `Ok` where it has `Some`. The
+    /// error itself is dropped: a caller that wants to see it has `mapError`.
+    #[test]
+    fn result_unwrap_or_answers_the_ok_or_the_fallback() {
+        let body = "  console.println(\"{Int.parse(\"12\").unwrapOr(0)} {Int.parse(\"x\").unwrapOr(0)}\")?";
+        assert_eq!(output_of(body), "12 0\n");
+    }
+
+    /// The fallback is the `Ok` type and the error type is not named at all,
+    /// so a `Result` carrying a domain error unwraps exactly as one carrying
+    /// the builtin `Error` does.
+    #[test]
+    fn result_unwrap_or_says_nothing_about_the_error_type() {
+        let source = r#"
+use console.println
+
+enum ConfigError {
+  InvalidPort(String)
+}
+
+fn port(text: String) -> Result<Int, ConfigError> {
+  Int.parse(text).mapError { ConfigError.InvalidPort(text) }
+}
+
+export fn main() -> Result<Unit, Error> {
+  console.println("{port("7").unwrapOr(80)} {port("x").unwrapOr(80)}")?
+  Ok(())
+}
+"#;
+        assert_eq!(run_entry_of(source, "main", &[]).output, "7 80\n");
+    }
+
+    /// A radix that exists reads the notation it names, and text that is not
+    /// a number in that notation is the data's failure, so it answers `Err`
+    /// exactly as `Int.parse` does. `Int.parse` itself stays decimal.
+    #[test]
+    fn int_parse_radix_reads_the_base_it_is_given() {
+        let body = "  console.println(\"{Int.parseRadix(\"ff\", 16).unwrapOr(0)} {Int.parseRadix(\"1010\", 2).unwrapOr(0)} {Int.parseRadix(\"z\", 36).unwrapOr(0)}\")?";
+        assert_eq!(output_of(body), "255 10 35\n");
+        let signs = "  console.println(\"{Int.parseRadix(\"-ff\", 16).unwrapOr(0)} {Int.parseRadix(\"+10\", 8).unwrapOr(0)}\")?";
+        assert_eq!(output_of(signs), "-255 8\n");
+        let wrong = "  console.println(\"{Int.parseRadix(\"ff\", 10)}\")?";
+        assert_eq!(output_of(wrong), "Err(`ff` is not an Int in radix 10)\n");
+        // Radix ten is what `Int.parse` already reads, and the two agree.
+        let decimal = "  console.println(\"{Int.parse(\"12\")} {Int.parseRadix(\"12\", 10)}\")?";
+        assert_eq!(output_of(decimal), "Ok(12) Ok(12)\n");
+    }
+
+    /// A radix outside `2..=36` is the call being wrong rather than the data,
+    /// so it stops the run instead of answering `Err` — the line
+    /// `String.split` draws at an empty separator.
+    #[test]
+    fn int_parse_radix_refuses_a_radix_that_names_no_notation() {
+        for radix in ["1", "0", "37", "-16"] {
+            let error = error_of(&format!("  let n = Int.parseRadix(\"1\", {radix})"));
+            assert_eq!(
+                error.message,
+                format!("`Int.parseRadix` cannot read a number in radix `{radix}`")
+            );
+            assert!(error.rule.as_ref().unwrap().contains("2 through 36"));
+        }
+    }
+
+    /// `String.fromCodePoint` is `chars()` run backwards: it builds the
+    /// one-character `String` a code point names, whatever plane it is in.
+    #[test]
+    fn string_from_code_point_builds_one_character() {
+        let body = "  console.println(\"{String.fromCodePoint(65).unwrapOr(\"?\")}{String.fromCodePoint(12354).unwrapOr(\"?\")}{String.fromCodePoint(128512).unwrapOr(\"?\")}\")?";
+        assert_eq!(output_of(body), "Aあ😀\n");
+        // One character, so one element of `chars()` and a `length()` of 1,
+        // even for the code point that takes four bytes to write.
+        let counted =
+            "  console.println(\"{String.fromCodePoint(128512).unwrapOr(\"\").length()}\")?";
+        assert_eq!(output_of(counted), "1\n");
+        let zero = "  console.println(\"{String.fromCodePoint(0).isOk()}\")?";
+        assert_eq!(output_of(zero), "true\n");
+    }
+
+    /// A number that names no character is an expected failure of the data,
+    /// so it answers `Err` the way `Float.toInt` does, and the surrogates say
+    /// which failure they are: a caller decoding UTF-16 has half a character
+    /// rather than a bad one.
+    #[test]
+    fn string_from_code_point_says_which_way_a_number_names_no_character() {
+        let out_of_range =
+            "  console.println(\"{String.fromCodePoint(1114112)} {String.fromCodePoint(-1)}\")?";
+        assert_eq!(
+            output_of(out_of_range),
+            "Err(`1114112` is not a Unicode code point) \
+             Err(`-1` is not a Unicode code point)\n"
+        );
+        let surrogate = "  console.println(\"{String.fromCodePoint(55296)}\")?";
+        assert_eq!(
+            output_of(surrogate),
+            "Err(`55296` is a surrogate half, which is not a character on its own)\n"
+        );
+        // The last code point there is, and the first one past it.
+        let edges = "  console.println(\"{String.fromCodePoint(1114111).isOk()} {String.fromCodePoint(57343).isOk()} {String.fromCodePoint(57344).isOk()}\")?";
+        assert_eq!(output_of(edges), "true false true\n");
+    }
+
+    /// The two together are what issue #101 asked for: a `\u` escape read
+    /// out of text, including the surrogate pair a format that writes code
+    /// points in sixteen bits spells a supplementary character as.
+    #[test]
+    fn a_hex_escape_can_be_decoded_in_cove() {
+        let source = r#"
+use console.println
+
+/// The character a four-hex-digit escape names.
+fn unescape(digits: String) -> Result<String, Error> {
+  String.fromCodePoint(Int.parseRadix(digits, 16)?)
+}
+
+/// The character a UTF-16 surrogate pair names.
+fn unescapePair(high: String, low: String) -> Result<String, Error> {
+  let lead = Int.parseRadix(high, 16)?
+  let trail = Int.parseRadix(low, 16)?
+  String.fromCodePoint(65536 + (lead - 55296) * 1024 + (trail - 56320))
+}
+
+export fn main() -> Result<Unit, Error> {
+  console.println("{unescape("0041")?}{unescape("3042")?}")?
+  console.println("{unescapePair("D83D", "DE00")?}")?
+  console.println("{unescape("D83D")}")?
+  Ok(())
+}
+"#;
+        assert_eq!(
+            run_entry_of(source, "main", &[]).output,
+            "Aあ\n😀\nErr(`55357` is a surrogate half, which is not a character on its own)\n"
         );
     }
 

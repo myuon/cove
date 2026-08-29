@@ -18,6 +18,16 @@ export fn main() -> Result<Unit, Error> {
   let word = "cove"
   println("chars {word.chars()}")?
 
+  // `chars()` run backwards: a character is a `String` of length 1, and
+  // this builds one from the number that names it.
+  println("fromCodePoint {String.fromCodePoint(99).unwrapOr("?")}")?
+  println("fromCodePoint {String.fromCodePoint(12354)} {String.fromCodePoint(128512)}")?
+  // A number that names no character is an expected failure, and the
+  // surrogates say which failure they are: a format that writes code points
+  // in sixteen bits spells anything past 0xFFFF as a pair of them.
+  println("fromCodePoint {String.fromCodePoint(1114112)}")?
+  println("fromCodePoint {String.fromCodePoint(55296)}")?
+
   let csv = "a,,b,"
   println("split {csv.split(",")}")?
   println("split none {"abc".split(",")}")?
