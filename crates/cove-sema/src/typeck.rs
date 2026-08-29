@@ -230,8 +230,8 @@
 //! exactly the request that it did not.
 //!
 //! What none of these guarantee is anything the runtime keeps for itself:
-//! mutability, argument order, task safety of a host resource, and every
-//! rule listed under *What the runtime keeps* below.
+//! task safety of a host resource, and every rule listed under *What the
+//! runtime keeps* below.
 //!
 //! Two things about a shipped host module are read here and *not* enforced by
 //! the boundary, which is worth stating in one place. A host type's fields
@@ -243,16 +243,39 @@
 //! boundary, so a resource declaring `task_safe: false` is refused where it
 //! crosses and not before.
 //!
+//! # Places, and what kind of analysis this pass is
+//!
+//! This pass is not only a type checker. ADR 0021 settles what else it is:
+//! it may decide any fact the source settles through the binding structure
+//! it already walks, and mutability is one. `let` creates a read-only place
+//! and `var` a mutable one, so which places a program may write is read off
+//! the scope stack — `Checker::place_mutability` is the definition, and
+//! the interpreter and `cove_ir::lower` had a reading of it each until it
+//! moved here.
+//!
+//! Four constructs are refused by it, in the words the interpreter refused
+//! them in: an assignment to a read-only place, a `var` argument that is a
+//! read-only place or is no place at all, and a mutating receiver that is
+//! either. A fifth is the same kind of fact about a call's shape rather than
+//! about a place: labeled arguments appear in declaration order, and
+//! [`LABEL_ORDER`] is what says so.
+//!
+//! Two things bound it, and both are abstentions rather than gaps in the
+//! rule. A name this pass did not bind is not a place and is not reported as
+//! one — see `Checker::not_a_place`. And a receiver whose type is an
+//! unknown or a host type is left alone, because the interpreter reaches a
+//! host resource's own operations before it reaches any of this.
+//!
 //! # What the runtime keeps
 //!
-//! The interpreter's own checks stay, as ADR 0004 says. Two rules are left to
-//! it entirely, because they are not about types:
-//!
-//! - assignment to a `let` place, and the mutability of a `var` argument or
-//!   `var self` receiver;
-//! - the order of labeled arguments. Labels are matched to parameters by
-//!   name here, and the rule that they must appear in declaration order stays
-//!   where it was.
+//! The interpreter's own checks stay, as ADR 0004 says. One rule about a
+//! call is left to it entirely, and it is worth naming because it is
+//! decidable here and is not decided here: whether a `var` marking written
+//! at a call site agrees with the one written at the declaration. A function
+//! *type* carries no marking, so a call through a value has nothing to check
+//! against, and the parameters this pass builds for a builtin, a host
+//! operation and a struct's initializer are not written with a marking at
+//! all. ADR 0021 records it as unfinished rather than as decided.
 //!
 //! # Where a form's value comes from
 //!
@@ -278,8 +301,8 @@ use std::sync::Arc;
 
 use cove_diag::{Diagnostic, FileId, Span};
 use cove_schema::builtins::{
-    BuiltinSchema, BuiltinType, FreeBuiltinKind, FreeBuiltinSchema, MethodSchema, ParamSchema,
-    MAP_ENTRY, NONE_CASE, SCOPE,
+    is_mutating_method, BuiltinSchema, BuiltinType, FreeBuiltinKind, FreeBuiltinSchema,
+    MethodSchema, ParamSchema, MAP_ENTRY, NONE_CASE, SCOPE,
 };
 use cove_schema::{
     HostSchemas, HostType, ModuleSchema, OperationSchema, ResourceSchema, TypeSchema,
@@ -357,8 +380,20 @@ pub const NOT_CALLABLE: &str = "cove::type::not_callable";
 pub const PATTERN: &str = "cove::type::pattern";
 /// A method was called without a receiver, or an associated function with one.
 pub const RECEIVER: &str = "cove::type::receiver";
-/// An assignment target is not a place.
+/// An expression written where a place is required is not one: an
+/// assignment's target, a `var` argument, or a `var self` receiver.
 pub const NOT_A_PLACE: &str = "cove::type::not_a_place";
+/// A place `let` made read-only is written, passed as `var`, or given to a
+/// `var self` receiver.
+///
+/// One code for the one rule — `let` creates a read-only place; `var`
+/// creates a mutable place — however it is broken. The three messages differ
+/// because what the program was doing differs; the fact reported is the
+/// same, and a reader who wants to suppress or search for it wants all three.
+pub const READ_ONLY_PLACE: &str = "cove::type::read_only_place";
+/// A labeled argument fills a parameter that stands before one an earlier
+/// argument already filled.
+pub const LABEL_ORDER: &str = "cove::type::label_order";
 /// An entry function's shape does not fit the host boundary.
 pub const ENTRY: &str = "cove::type::entry";
 /// A `dyn` or a bound names something that is not a trait this module can see.
@@ -1177,6 +1212,14 @@ struct ParamSig {
     ty: Ty,
     variadic: bool,
     has_default: bool,
+    /// Whether the declaration wrote `var` before this parameter's name, so
+    /// that a body binds it as the mutable place it is.
+    ///
+    /// Only a `fn` declaration, a method and a lambda can write one; a
+    /// struct's field, a builtin's parameter, a host operation's and the
+    /// parameters read off a function *type* are all `false`, because none
+    /// of those is written with a marking at all.
+    is_var: bool,
     span: Span,
 }
 
@@ -1203,6 +1246,9 @@ struct FnSig {
     is_async: bool,
     /// The type of `self`, for a method.
     receiver: Option<Ty>,
+    /// Whether that receiver is written `var self`, which is what makes a
+    /// call through it a write to the caller's place.
+    receiver_is_var: bool,
 }
 
 impl FnSig {
@@ -1237,6 +1283,7 @@ impl FnSig {
             ret_span: self.ret_span,
             is_async: self.is_async,
             receiver: self.receiver.as_ref().map(|ty| qualify(ty, module)),
+            receiver_is_var: self.receiver_is_var,
         }
     }
 
@@ -1283,6 +1330,15 @@ struct CaseSig {
 #[derive(Clone, Debug)]
 struct Binding {
     ty: Ty,
+    /// Whether source may write the place this name binds.
+    ///
+    /// `var` and a `var` parameter make one; `let`, an ordinary parameter, a
+    /// variadic parameter, a pattern's binding, a `for` header's binding, a
+    /// `scope`'s name and a local `fn` do not. It is `is_var` where a
+    /// declaration writes one and `false` everywhere else, which is the same
+    /// answer `Place::binding` gives each of them in
+    /// `crates/cove-runtime/src/interp.rs`.
+    mutable: bool,
 }
 
 /// Where an expectation came from, so a mismatch can point at the
@@ -1368,6 +1424,16 @@ struct Checker<'a> {
     /// The bounds of the type parameters currently in scope.
     bounds: BTreeMap<Arc<str>, Vec<TraitBound>>,
     scopes: Vec<BTreeMap<String, Binding>>,
+    /// The lowest scope that belongs to the function value currently being
+    /// checked.
+    ///
+    /// A lambda and a local `fn` are checked with the scopes around them
+    /// still standing, because a body reads the names it closes over. What
+    /// it closes over it holds a *copy* of: `Env::declare_capture` builds a
+    /// `Place::binding(value, false)`, so a captured `var` is read-only
+    /// inside the closure however it was declared outside. A name found
+    /// below this index is therefore a capture, and no capture is writable.
+    capture_floor: usize,
     /// The declared return type of the function whose body is being checked,
     /// and where it was written.
     ret: Ty,
@@ -1427,6 +1493,7 @@ impl<'a> Checker<'a> {
             type_params: Vec::new(),
             bounds: BTreeMap::new(),
             scopes: Vec::new(),
+            capture_floor: 0,
             // No body is being checked yet, and every one of them sets all
             // three of these before it can reach a `return`.
             ret: Ty::placeholder(),
@@ -1870,8 +1937,8 @@ impl<'a> Checker<'a> {
                 self.ret_span = sig.ret_span;
                 self.ret_stated = true;
                 self.scopes.push(BTreeMap::new());
-                if method.receiver.is_some() {
-                    self.declare("self", Ty::Param(self_param.clone()));
+                if let Some(receiver) = method.receiver {
+                    self.declare("self", Ty::Param(self_param.clone()), receiver.is_var);
                 }
                 for param in &sig.params {
                     let ty = if param.variadic {
@@ -1879,7 +1946,7 @@ impl<'a> Checker<'a> {
                     } else {
                         param.ty.clone()
                     };
-                    self.declare(&param.name, ty);
+                    self.declare(&param.name, ty, param.is_var);
                 }
                 for (param, declared) in method.params.iter().zip(&sig.params) {
                     if let Some(default) = &param.default {
@@ -2000,6 +2067,7 @@ impl<'a> Checker<'a> {
             ret_span,
             is_async: method.is_async,
             receiver: method.receiver.map(|_| Ty::placeholder()),
+            receiver_is_var: method.receiver.is_some_and(|receiver| receiver.is_var),
         }
     }
 
@@ -2087,7 +2155,11 @@ impl<'a> Checker<'a> {
         self.ret_stated = true;
         self.scopes.push(BTreeMap::new());
         if let Some(receiver) = &sig.receiver {
-            self.declare("self", receiver.clone());
+            // `var self` is the one receiver a body may write through, and
+            // it is written at the declaration exactly as a `var` parameter
+            // is.
+            let is_var = decl.receiver.is_some_and(|receiver| receiver.is_var);
+            self.declare("self", receiver.clone(), is_var);
         }
         for param in &sig.params {
             let ty = if param.variadic {
@@ -2095,7 +2167,7 @@ impl<'a> Checker<'a> {
             } else {
                 param.ty.clone()
             };
-            self.declare(&param.name, ty);
+            self.declare(&param.name, ty, param.is_var);
         }
         for (param, declared) in decl.params.iter().zip(&sig.params) {
             if let Some(default) = &param.default {
@@ -2136,6 +2208,7 @@ impl<'a> Checker<'a> {
                 ty: self.resolve(&field.ty),
                 variadic: false,
                 has_default: false,
+                is_var: false,
                 span: field.name.span,
             })
             .collect();
@@ -2242,6 +2315,7 @@ impl<'a> Checker<'a> {
             ret_span,
             is_async: decl.is_async,
             receiver,
+            receiver_is_var: decl.receiver.is_some_and(|receiver| receiver.is_var),
         }
     }
 
@@ -2258,6 +2332,10 @@ impl<'a> Checker<'a> {
             ty,
             variadic: param.variadic,
             has_default: param.default.is_some(),
+            // A variadic parameter is an immutable `Array<T>` inside the
+            // body whatever stands in front of it, which is the
+            // `Place::binding(_, false)` `bind_params` builds for one.
+            is_var: param.is_var && !param.variadic,
             span: param.span,
         }
     }
@@ -2665,7 +2743,15 @@ impl<'a> Checker<'a> {
 
     // ------------------------------------------------------------ scopes
 
-    fn declare(&mut self, name: &str, ty: Ty) {
+    /// Brings `name` into scope, saying whether source may write the place
+    /// it binds.
+    ///
+    /// Mutability is a parameter rather than a default because a default is
+    /// how the two halves of this rule came apart in the first place: every
+    /// site that binds a name knows which kind it is binding, and a site
+    /// that had to be *remembered* to mark is a site that will one day be
+    /// forgotten.
+    fn declare(&mut self, name: &str, ty: Ty, mutable: bool) {
         // The other half of the placeholder invariant `Checker::expr`
         // asserts: a binding's type is read by every later use of the name,
         // so a placeholder reaching one is a site that was wrong about
@@ -2675,12 +2761,203 @@ impl<'a> Checker<'a> {
             "a placeholder unknown escaped into the type of `{name}`: `{ty}`"
         );
         if let Some(scope) = self.scopes.last_mut() {
-            scope.insert(name.to_string(), Binding { ty });
+            scope.insert(name.to_string(), Binding { ty, mutable });
         }
     }
 
     fn lookup(&self, name: &str) -> Option<&Binding> {
         self.scopes.iter().rev().find_map(|scope| scope.get(name))
+    }
+
+    /// Whether `name` reaches a binding source may write.
+    ///
+    /// A name is writable when the binding it reaches is a `var` *and* that
+    /// binding belongs to the function value being checked. A capture is
+    /// read-only whatever it was declared as — see [`Checker::capture_floor`]
+    /// — so the depth the name was found at is part of the answer and not
+    /// bookkeeping.
+    fn writable(&self, name: &str) -> bool {
+        self.scopes
+            .iter()
+            .enumerate()
+            .rev()
+            .find_map(|(depth, scope)| scope.get(name).map(|binding| (depth, binding)))
+            .is_some_and(|(depth, binding)| binding.mutable && depth >= self.capture_floor)
+    }
+
+    /// Whether `expr` is a place, and whether source may write it.
+    ///
+    /// **This is the definition.** A place is a name a body bound, or a
+    /// field of a place — nothing else, and no deeper analysis. The two
+    /// readings of it that used to exist are readings of this one:
+    /// `Interpreter::resolve_place_opt` asks it of an `Env` at run time, and
+    /// `cove_ir::lower`'s `Body::place_mutability` asked it of a slot table
+    /// while lowering. Both answer what a scope stack already knows, which
+    /// is why the question belongs here.
+    ///
+    /// `None` is not a place at all: a call's result, a literal, an operator
+    /// applied to anything, or a name this body did not bind. `Some` is a
+    /// place, `true` where source may write it and `false` where `let` made
+    /// it read-only. A field does not ask a question of its own — it
+    /// inherits its root's answer, exactly as `Place::field` copies
+    /// `mutable` down from the base.
+    ///
+    /// A name this body did not bind answers `None` rather than a refusal:
+    /// it is a module's declaration, or a name resolution already reported,
+    /// and neither is this rule's to speak about. [`Checker::not_a_place`]
+    /// is what decides that abstention, and says why it is safe.
+    fn place_mutability(&self, expr: &Expr) -> Option<bool> {
+        match &expr.kind {
+            ExprKind::Ident(name) => self.lookup(name).map(|_| self.writable(name)),
+            ExprKind::Field { base, .. } => self.place_mutability(base),
+            _ => None,
+        }
+    }
+
+    /// The `var` arguments of a call, checked against the place rule.
+    ///
+    /// `Interpreter::eval_args` resolves a `var` argument to a place before
+    /// it knows which declaration the call reaches, and refuses one that is
+    /// not a place or is a read-only one; this is the same question asked in
+    /// the same position, so it covers a `var` written at a call to anything
+    /// at all.
+    ///
+    /// What is *not* asked here is whether the callee declared that
+    /// parameter `var`. That is a fact about the two markings agreeing
+    /// rather than about places, a function type carries no marking for a
+    /// call through a value to be checked against, and the interpreter still
+    /// answers it — see the module docs under "What the runtime keeps".
+    fn var_arguments(&mut self, args: &[Arg]) {
+        for arg in args.iter().filter(|arg| arg.is_var) {
+            match self.place_mutability(&arg.value) {
+                Some(true) => {}
+                Some(false) => {
+                    let place = place_text(&arg.value);
+                    self.diagnostics.push(
+                        Diagnostic::error(
+                            READ_ONLY_PLACE,
+                            format!(
+                                "`{place}` is a read-only place, so it cannot be passed as `var`"
+                            ),
+                        )
+                        .at(arg.span)
+                        .rule("`let` creates a read-only place; `var` creates a mutable place.")
+                        .help(format!("declare it with `var {place}`")),
+                    );
+                }
+                None if Checker::not_a_place(&arg.value) => {
+                    self.diagnostics.push(
+                        Diagnostic::error(
+                            NOT_A_PLACE,
+                            "this expression is not a place, so it cannot be assigned or aliased",
+                        )
+                        .at(arg.value.span)
+                        .rule("Only variables and their struct fields are places.")
+                        .help("bind it with `var` first, then pass that binding"),
+                    );
+                }
+                None => {}
+            }
+        }
+    }
+
+    /// A method that writes through its receiver, checked against the place
+    /// rule.
+    ///
+    /// The receiver of a `var self` method is the caller's own place, so it
+    /// must be one and must be writable — `Interpreter::eval_method_call`
+    /// asks both before it makes the alias. `freeze` is the one mutating
+    /// builtin that tolerates a receiver which is no place at all: a
+    /// temporary holds the only handle to its own storage, so freezing it
+    /// answers from the temporary rather than writing anywhere, which is
+    /// what `builtins::call_method`'s own arm does.
+    fn mutating_receiver(&mut self, receiver: &Ty, method: &Ident, base: &Expr, span: Span) {
+        let Some(needs_a_place) = self.mutating_method(receiver, &method.node) else {
+            return;
+        };
+        match self.place_mutability(base) {
+            Some(true) => {}
+            Some(false) => {
+                let place = place_text(base);
+                self.diagnostics.push(
+                    Diagnostic::error(
+                        READ_ONLY_PLACE,
+                        format!(
+                            "`{}` takes a `var self` receiver, but `{place}` is a read-only place",
+                            method.node
+                        ),
+                    )
+                    .at(span)
+                    .rule("`let` creates a read-only place; `var` creates a mutable place.")
+                    .help(format!("declare it with `var {place}`")),
+                );
+            }
+            None if needs_a_place && Checker::not_a_place(base) => {
+                self.diagnostics.push(
+                    Diagnostic::error(
+                        NOT_A_PLACE,
+                        format!(
+                            "`{}` takes a `var self` receiver, but `{}` is not a place",
+                            method.node,
+                            place_text(base)
+                        ),
+                    )
+                    .at(span)
+                    .rule("A mutating receiver declares `var self` and mutates the caller's place.")
+                    .help("bind the value with `var` first, then call the method on that binding"),
+                );
+            }
+            None => {}
+        }
+    }
+
+    /// Whether `method` called on a receiver of type `ty` writes through it,
+    /// and whether it needs a place even where the receiver is a temporary.
+    ///
+    /// `None` is *not mutating, or this pass will not say*. A receiver whose
+    /// type is an unknown, a `Never`, or a host type is the second: the
+    /// interpreter reaches a host resource's own operations before it
+    /// reaches any of this, and an unknown receiver could be one.
+    fn mutating_method(&self, ty: &Ty, method: &str) -> Option<bool> {
+        match ty {
+            Ty::Unknown(_) | Ty::Never | Ty::Host(_) => None,
+            Ty::Struct(name, _) | Ty::Enum(name, _) => self
+                .methods
+                .get(&(name.to_string(), method.to_string()))
+                .and_then(|sig| sig.receiver_is_var.then_some(true)),
+            // A method reached through a bound or through `dyn` dispatches
+            // on the concrete value's own type at run time, so the receiver
+            // is the caller's place there exactly as it is for a direct
+            // call.
+            Ty::Param(param) => self
+                .bound_method(param, method)
+                .and_then(|(trait_name, _)| {
+                    self.mutating_trait_method(&trait_name, method)
+                        .then_some(true)
+                }),
+            Ty::Dyn(trait_name) => self
+                .mutating_trait_method(trait_name, method)
+                .then_some(true),
+            // A builtin type: `push` and `freeze` are the two that write
+            // through their receiver, and `push` is the one that needs a
+            // place to write to.
+            _ => is_mutating_method(method).then(|| method == "push"),
+        }
+    }
+
+    /// Whether an expression that is not a place should be reported as one.
+    ///
+    /// An `Ident`, or a field path rooted at one, that this body did not
+    /// bind is left alone. It names a declaration the module holds — which
+    /// the interpreter refuses with `cannot find` from its own environment,
+    /// a resolution answer rather than a place one — or a name that failed
+    /// to resolve and has been reported already. Either way a second
+    /// diagnostic here would say less than the first.
+    ///
+    /// Everything else — a call's result, a literal, an operator — is
+    /// decidedly not a place, from the shape of the expression alone.
+    fn not_a_place(expr: &Expr) -> bool {
+        !matches!(expr.kind, ExprKind::Ident(_) | ExprKind::Field { .. })
     }
 
     // ------------------------------------------------------- expressions
@@ -2709,7 +2986,10 @@ impl<'a> Checker<'a> {
     fn stmt(&mut self, stmt: &Stmt) {
         match &stmt.kind {
             StmtKind::Let {
-                name, ty, value, ..
+                is_var,
+                name,
+                ty,
+                value,
             } => {
                 let bound = match ty {
                     Some(written) => {
@@ -2736,7 +3016,7 @@ impl<'a> Checker<'a> {
                         }
                     }
                 };
-                self.declare(&name.node, bound);
+                self.declare(&name.node, bound, *is_var);
             }
             StmtKind::Expr(expr) => {
                 self.expr(expr, None);
@@ -2746,7 +3026,7 @@ impl<'a> Checker<'a> {
                 if let ItemKind::Fn(decl) = &item.kind {
                     let outer_params = self.type_params.clone();
                     let sig = self.fn_sig(decl, None);
-                    self.declare(&decl.name.node, sig.as_value());
+                    self.declare(&decl.name.node, sig.as_value(), false);
                     let outer_ret = std::mem::replace(&mut self.ret, sig.ret.clone());
                     let outer_span = std::mem::replace(&mut self.ret_span, sig.ret_span);
                     let outer_stated = std::mem::replace(&mut self.ret_stated, true);
@@ -2757,9 +3037,12 @@ impl<'a> Checker<'a> {
                             .iter()
                             .map(|(name, bounds)| (name.clone(), bounds.clone())),
                     );
+                    // A local `fn` is built as a closure, so the names
+                    // around it are captures and a capture is read-only.
+                    let outer_floor = std::mem::replace(&mut self.capture_floor, self.scopes.len());
                     self.scopes.push(BTreeMap::new());
                     for param in &sig.params {
-                        self.declare(&param.name, param.ty.clone());
+                        self.declare(&param.name, param.ty.clone(), param.is_var);
                     }
                     let expected = Expected::new(
                         sig.ret.clone(),
@@ -2768,6 +3051,7 @@ impl<'a> Checker<'a> {
                     );
                     self.block(&decl.body, Some(&expected));
                     self.scopes.pop();
+                    self.capture_floor = outer_floor;
                     self.bounds = outer_bounds;
                     self.type_params = outer_params;
                     self.ret_span = outer_span;
@@ -2928,7 +3212,7 @@ impl<'a> Checker<'a> {
             } => return self.lambda(*is_async, params, body, span, expected),
             ExprKind::Scope { name, body } => {
                 self.scopes.push(BTreeMap::new());
-                self.declare(&name.node, Ty::Scope);
+                self.declare(&name.node, Ty::Scope, false);
                 let ty = self.block(body, expected);
                 self.scopes.pop();
                 return ty;
@@ -3686,6 +3970,25 @@ impl<'a> Checker<'a> {
             self.expr(value, None);
             return Ty::Unit;
         }
+        // The target is a place; whether it is a *writable* one is decided
+        // from the binding it is rooted at. Reported before the types are
+        // checked and the walk carries on afterwards, because an assignment
+        // whose value is also the wrong type is two mistakes and both are
+        // worth saying.
+        if self.place_mutability(target) == Some(false) {
+            let place = place_text(target);
+            self.diagnostics.push(
+                Diagnostic::error(
+                    READ_ONLY_PLACE,
+                    format!("cannot assign to `{place}`, which is a read-only place"),
+                )
+                .at(span)
+                .rule("`let` creates a read-only place; `var` creates a mutable place.")
+                .help(format!(
+                    "declare it with `var {place}` to make it assignable"
+                )),
+            );
+        }
         // The target is checked as the place it is, so a field refused
         // across an opaque boundary is refused as a write rather than as a
         // read. Only the target itself is the place: the value, and any
@@ -3954,7 +4257,7 @@ impl<'a> Checker<'a> {
     fn pattern(&mut self, pattern: &Pattern, scrutinee: &Ty) {
         match &pattern.kind {
             PatternKind::Wildcard => {}
-            PatternKind::Binding(name) => self.declare(name, scrutinee.clone()),
+            PatternKind::Binding(name) => self.declare(name, scrutinee.clone(), false),
             PatternKind::Literal(expr) => {
                 let ty = self.expr(expr, None);
                 if !ty.matches(scrutinee) {
@@ -4151,7 +4454,7 @@ impl<'a> Checker<'a> {
             }
         };
         self.scopes.push(BTreeMap::new());
-        self.declare(&binding.node, element);
+        self.declare(&binding.node, element, false);
         self.block(body, None);
         self.scopes.pop();
         Ty::Unit
@@ -4219,6 +4522,10 @@ impl<'a> Checker<'a> {
         }
 
         let mut param_types = Vec::with_capacity(params.len());
+        // Everything outside this scope is a capture from here on, and
+        // `Env::declare_capture` binds a capture read-only. See
+        // `Checker::capture_floor`.
+        let outer_floor = std::mem::replace(&mut self.capture_floor, self.scopes.len());
         self.scopes.push(BTreeMap::new());
         for (index, param) in params.iter().enumerate() {
             let ty = match &param.ty {
@@ -4246,7 +4553,7 @@ impl<'a> Checker<'a> {
                 },
             };
             param_types.push(ty.clone());
-            self.declare(&param.name.node, ty);
+            self.declare(&param.name.node, ty, param.is_var);
         }
 
         // The expected type decides the result only when it has one to give;
@@ -4273,6 +4580,7 @@ impl<'a> Checker<'a> {
         self.ret_span = outer_span;
         self.ret_stated = outer_stated;
         self.scopes.pop();
+        self.capture_floor = outer_floor;
 
         let value = Ty::func(is_async, param_types, declared_ret.unwrap_or(body_ty));
         // A function value given to a place that is not a function type is a
@@ -4313,6 +4621,9 @@ impl<'a> Checker<'a> {
         span: Span,
         expected: Option<&Expected>,
     ) -> Ty {
+        // Before the callee is resolved, exactly as `Interpreter::eval_args`
+        // aliases a `var` argument before it knows what it is calling.
+        self.var_arguments(args);
         match &callee.kind {
             ExprKind::Ident(name) if self.lookup(name).is_none() => {
                 self.call_named(name, generics, args, trailing, span, callee.span, expected)
@@ -4328,6 +4639,7 @@ impl<'a> Checker<'a> {
                     }
                 }
                 let receiver = self.expr(base, None);
+                self.mutating_receiver(&receiver, name, base, span);
                 self.method_call(id, &receiver, name, args, trailing, span)
             }
             _ => {
@@ -4785,6 +5097,7 @@ impl<'a> Checker<'a> {
                     ty: host_ty(declared),
                     variadic,
                     has_default: false,
+                    is_var: false,
                     span,
                 }
             })
@@ -4855,6 +5168,7 @@ impl<'a> Checker<'a> {
                 ty: host_ty(&field.ty),
                 variadic: false,
                 has_default: false,
+                is_var: false,
                 span,
             })
             .collect();
@@ -5300,6 +5614,10 @@ impl<'a> Checker<'a> {
                         ty: ty.clone(),
                         variadic: false,
                         has_default: false,
+                        // A function type has no marking to read. See
+                        // `Checker::var_arguments` for what this pass does
+                        // and does not decide about a call through a value.
+                        is_var: false,
                         span: callee_span,
                     })
                     .collect();
@@ -5370,6 +5688,31 @@ impl<'a> Checker<'a> {
                     labeled = true;
                     match params.iter().position(|p| p.name == label.node) {
                         Some(index) => {
+                            // A label whose parameter stands before one an
+                            // earlier argument already filled. The same
+                            // label twice lands here too, and is left to the
+                            // missing-argument report the parameter it never
+                            // filled already earns: one mistake, one
+                            // diagnostic.
+                            if index < next && slots[index].is_none() {
+                                let order: Vec<&str> =
+                                    params.iter().map(|p| p.name.as_str()).collect();
+                                self.diagnostics.push(
+                                    Diagnostic::error(
+                                        LABEL_ORDER,
+                                        format!(
+                                            "{what} was given the label `{}` out of declaration order",
+                                            label.node
+                                        ),
+                                    )
+                                    .at(arg.span)
+                                    .rule("Labeled arguments appear in declaration order, so argument order matches parameter order.")
+                                    .help(format!(
+                                        "write the arguments in this order: {}",
+                                        order.join(", ")
+                                    )),
+                                );
+                            }
                             slots[index] = Some(arg);
                             next = index + 1;
                         }
@@ -6237,6 +6580,7 @@ impl<'a> Checker<'a> {
                 ty: ty.clone(),
                 variadic: sig.variadic && index == last,
                 has_default: false,
+                is_var: false,
                 span,
             })
             .collect();
@@ -6691,6 +7035,22 @@ fn host_ty(declared: &HostType) -> Ty {
         HostType::Result(ok, error) => Ty::Result(Box::new(host_ty(ok)), Box::new(host_ty(error))),
         HostType::Named(name) => Ty::Host((*name).into()),
         HostType::Any => Ty::unconstrained(),
+    }
+}
+
+/// The dotted name a place is written with in source, for a diagnostic.
+///
+/// The same rendering `Interpreter::describe_place` produces, because a
+/// place refused here is a place that expression would have been refused as
+/// there, and the words a reader has seen for years are the words to keep.
+/// Anything that is not a name or a field of one renders as `this
+/// expression`, which is how a receiver that is no place at all reads in a
+/// sentence.
+fn place_text(expr: &Expr) -> String {
+    match &expr.kind {
+        ExprKind::Ident(name) => name.clone(),
+        ExprKind::Field { base, name } => format!("{}.{}", place_text(base), name.node),
+        _ => "this expression".to_string(),
     }
 }
 
@@ -8491,9 +8851,22 @@ fn run() -> Int {
 
     #[test]
     fn labels_bind_arguments_to_the_parameters_they_name() {
-        // Argument *order* is the runtime's rule, so a label out of
-        // declaration order still binds by name here.
         accepts(
+            "\
+fn between(low: Int, high: Int) -> Int {
+  high - low
+}
+
+fn run() -> Int {
+  between(low: 1, high: 2)
+}
+",
+        );
+    }
+
+    #[test]
+    fn rejects_labels_that_stand_out_of_declaration_order() {
+        let error = rejects(
             "\
 fn between(low: Int, high: Int) -> Int {
   high - low
@@ -8503,6 +8876,255 @@ fn run() -> Int {
   between(high: 2, low: 1)
 }
 ",
+        );
+        assert_eq!(error.code, LABEL_ORDER);
+        assert_eq!(
+            error.message,
+            "`between` was given the label `low` out of declaration order"
+        );
+        assert_eq!(
+            error.rule.unwrap(),
+            "Labeled arguments appear in declaration order, so argument order matches parameter order."
+        );
+        assert_eq!(
+            error.help.unwrap(),
+            "write the arguments in this order: low, high"
+        );
+    }
+
+    /// A struct's synthesized initializer takes its labels in declaration
+    /// order exactly as a declared function does, which is the half of this
+    /// rule a reader is most likely to meet.
+    #[test]
+    fn rejects_a_struct_initializer_whose_labels_are_out_of_order() {
+        let error = rejects(
+            "\
+struct Point {
+  x: Int
+  y: Int
+}
+
+fn run() -> Point {
+  Point(y: 20, x: 10)
+}
+",
+        );
+        assert_eq!(error.code, LABEL_ORDER);
+        assert_eq!(
+            error.message,
+            "`Point` was given the label `x` out of declaration order"
+        );
+    }
+
+    /// The same label twice is reported once, as the parameter it left
+    /// unfilled, rather than twice.
+    #[test]
+    fn a_label_written_twice_is_one_diagnostic() {
+        let error = rejects(
+            "\
+fn between(low: Int, high: Int) -> Int {
+  high - low
+}
+
+fn run() -> Int {
+  between(low: 1, low: 2)
+}
+",
+        );
+        assert_eq!(error.code, MISSING_ARGUMENT);
+    }
+
+    // ------------------------------------------------------------- places
+
+    // A place is a name a body bound, or a field of one, and `let` makes a
+    // read-only place. ADR 0021 is why these are here rather than at run
+    // time; the wording is the interpreter's, because it is what a person
+    // reading Cove errors has always seen.
+
+    #[test]
+    fn rejects_an_assignment_to_a_let_binding() {
+        let error = rejects("fn run() -> Int {\n  let x = 1\n  x = 2\n  x\n}\n");
+        assert_eq!(error.code, READ_ONLY_PLACE);
+        assert_eq!(
+            error.message,
+            "cannot assign to `x`, which is a read-only place"
+        );
+        assert_eq!(
+            error.rule.unwrap(),
+            "`let` creates a read-only place; `var` creates a mutable place."
+        );
+        assert_eq!(
+            error.help.unwrap(),
+            "declare it with `var x` to make it assignable"
+        );
+    }
+
+    /// An ordinary parameter is a read-only place too: it receives a shallow
+    /// copy, and only `var` names the caller's own storage.
+    #[test]
+    fn rejects_an_assignment_to_a_parameter_that_is_not_var() {
+        let error = rejects("fn run(n: Int) -> Int {\n  n = 2\n  n\n}\n");
+        assert_eq!(error.code, READ_ONLY_PLACE);
+        assert_eq!(
+            error.message,
+            "cannot assign to `n`, which is a read-only place"
+        );
+    }
+
+    /// A field of a read-only place is a read-only place: the walk asks the
+    /// root and a field inherits its answer.
+    #[test]
+    fn rejects_an_assignment_to_a_field_of_a_let_binding() {
+        let error = rejects(
+            "struct P {\n  x: Int\n}\n\nfn run() -> Int {\n  let p = P(x: 1)\n  p.x = 2\n  p.x\n}\n",
+        );
+        assert_eq!(error.code, READ_ONLY_PLACE);
+        assert_eq!(
+            error.message,
+            "cannot assign to `p.x`, which is a read-only place"
+        );
+    }
+
+    /// A `var` binding, a `var` parameter, and a field of either are the
+    /// places source may write.
+    #[test]
+    fn accepts_a_write_to_a_var_binding_and_to_its_fields() {
+        accepts(
+            "struct P {\n  x: Int\n}\n\nfn bump(var n: Int) {\n  n += 1\n}\n\nfn run() -> Int {\n  var p = P(x: 1)\n  p.x = 2\n  var n = 0\n  n += 1\n  bump(var n)\n  p.x + n\n}\n",
+        );
+    }
+
+    /// A closure holds a *copy* of what it captured, so a captured `var` is
+    /// a read-only place inside it — which is the `Place::binding(value,
+    /// false)` `Env::declare_capture` builds, read here instead.
+    #[test]
+    fn rejects_an_assignment_to_a_captured_var_binding() {
+        let error = rejects(
+            "fn run() -> Int {\n  var count = 0\n  let bump = fn() {\n    count = count + 1\n  }\n  count\n}\n",
+        );
+        assert_eq!(error.code, READ_ONLY_PLACE);
+        assert_eq!(
+            error.message,
+            "cannot assign to `count`, which is a read-only place"
+        );
+    }
+
+    /// A local `fn` is built as a closure too, so the same rule reaches it.
+    #[test]
+    fn rejects_an_assignment_to_a_var_captured_by_a_local_fn() {
+        let error = rejects(
+            "fn run() -> Int {\n  var count = 0\n  fn bump() {\n    count = count + 1\n  }\n  count\n}\n",
+        );
+        assert_eq!(error.code, READ_ONLY_PLACE);
+    }
+
+    #[test]
+    fn rejects_a_var_argument_that_is_a_read_only_place() {
+        let error = rejects(
+            "fn bump(var n: Int) {\n  n += 1\n}\n\nfn run() -> Int {\n  let total = 1\n  bump(var total)\n  total\n}\n",
+        );
+        assert_eq!(error.code, READ_ONLY_PLACE);
+        assert_eq!(
+            error.message,
+            "`total` is a read-only place, so it cannot be passed as `var`"
+        );
+    }
+
+    #[test]
+    fn rejects_a_var_argument_that_is_not_a_place() {
+        let error = rejects(
+            "fn bump(var n: Int) {\n  n += 1\n}\n\nfn run() -> Int {\n  bump(var 1 + 2)\n  0\n}\n",
+        );
+        assert_eq!(error.code, NOT_A_PLACE);
+        assert_eq!(
+            error.message,
+            "this expression is not a place, so it cannot be assigned or aliased"
+        );
+        assert_eq!(
+            error.rule.unwrap(),
+            "Only variables and their struct fields are places."
+        );
+    }
+
+    #[test]
+    fn rejects_push_on_a_read_only_place() {
+        let error = rejects(
+            "fn run() -> Int {\n  let items = Vector.of(1)\n  items.push(2)\n  items.length()\n}\n",
+        );
+        assert_eq!(error.code, READ_ONLY_PLACE);
+        assert_eq!(
+            error.message,
+            "`push` takes a `var self` receiver, but `items` is a read-only place"
+        );
+        assert_eq!(error.help.unwrap(), "declare it with `var items`");
+    }
+
+    #[test]
+    fn rejects_push_on_a_receiver_that_is_not_a_place() {
+        let error = rejects("fn run() -> () {\n  Vector.of(1).push(2)\n}\n");
+        assert_eq!(error.code, NOT_A_PLACE);
+        assert_eq!(
+            error.message,
+            "`push` takes a `var self` receiver, but `this expression` is not a place"
+        );
+        assert_eq!(
+            error.rule.unwrap(),
+            "A mutating receiver declares `var self` and mutates the caller's place."
+        );
+    }
+
+    /// `freeze` is the one mutating builtin that tolerates a receiver which
+    /// is no place at all: a temporary holds the only handle to its own
+    /// storage, so freezing it answers from the temporary. It still needs a
+    /// *writable* place when it has one.
+    #[test]
+    fn freeze_needs_a_writable_place_only_when_it_has_one() {
+        accepts("fn run() -> Int {\n  Vector.of(1).freeze().length()\n}\n");
+        let error =
+            rejects("fn run() -> Int {\n  let v = Vector.of(1)\n  v.freeze().length()\n}\n");
+        assert_eq!(error.code, READ_ONLY_PLACE);
+        assert_eq!(
+            error.message,
+            "`freeze` takes a `var self` receiver, but `v` is a read-only place"
+        );
+    }
+
+    /// A declared `var self` method is the same question asked of a
+    /// declaration rather than of a builtin.
+    #[test]
+    fn rejects_a_var_self_method_on_a_read_only_place() {
+        let error = rejects(
+            "struct Counter {\n  value: Int\n}\n\nimpl Counter {\n  fn bump(var self) {\n    self.value += 1\n  }\n}\n\nfn run() -> Int {\n  let counter = Counter(value: 1)\n  counter.bump()\n  counter.value\n}\n",
+        );
+        assert_eq!(error.code, READ_ONLY_PLACE);
+        assert_eq!(
+            error.message,
+            "`bump` takes a `var self` receiver, but `counter` is a read-only place"
+        );
+    }
+
+    /// A `lock` closure that does not declare `var` receives a copy, and the
+    /// `var self` method that would change it is refused, because a copy is
+    /// not the place the value lives in.
+    #[test]
+    fn rejects_a_mutating_method_on_a_lock_closures_copy() {
+        let source = "struct Counter {\n  value: Int\n}\n\nimpl Counter {\n  fn bump(var self) {\n    self.value += 1\n  }\n}\n\nfn run() -> () {\n  let shared = Shared(Counter(value: 0))\n  shared.lock(fn(value) {\n    value.bump()\n  })\n}\n";
+        let error = rejects(source);
+        assert_eq!(error.code, READ_ONLY_PLACE);
+        assert_eq!(
+            error.message,
+            "`bump` takes a `var self` receiver, but `value` is a read-only place"
+        );
+        accepts(&source.replace("fn(value)", "fn(var value)"));
+    }
+
+    /// A receiver whose type nothing settled is left alone. The interpreter
+    /// reaches a host resource's own operations before it reaches any of
+    /// this, so a name that means `push` there might not mean it here.
+    #[test]
+    fn abstains_about_a_mutating_method_on_an_unknown_receiver() {
+        accepts(
+            "use unknownhost.open\n\nfn run() -> () {\n  let handle = open()\n  handle.push(1)\n}\n",
         );
     }
 
@@ -11217,10 +11839,17 @@ fn run() -> Int {
 
     /// Every program in the repository, checked the way the CLI checks one.
     ///
-    /// A package whose directory name begins with `fail_` exists to pin a
-    /// failure, so it must fail; every other package must check with no
-    /// errors at all. That is the acceptance bar for this pass, and it keeps
-    /// itself honest: a new example or end-to-end case joins it by existing.
+    /// A package that exists to pin a check-time failure must fail; every
+    /// other package must check with no errors at all. That is the
+    /// acceptance bar for this pass, and it keeps itself honest: a new
+    /// example or end-to-end case joins it by existing.
+    ///
+    /// Most such packages are named `fail_...`. Two are not, and are named
+    /// here rather than renamed: `fn_labels` and `type_struct` were cases
+    /// that ran, printed, and then failed at run time until ADR 0021 made
+    /// their last line a check-time error, and their names say what they are
+    /// about — every accepted call form, and every accepted struct form —
+    /// rather than what the last line of each does.
     #[test]
     fn every_program_in_the_repository_checks() {
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
@@ -11244,7 +11873,8 @@ fn run() -> Int {
                 .expect("a package directory has a name")
                 .to_string_lossy()
                 .into_owned();
-            let must_fail = name.starts_with("fail_");
+            let must_fail =
+                name.starts_with("fail_") || matches!(name.as_str(), "fn_labels" | "type_struct");
 
             let mut sources = SourceMap::new();
             let package = match crate::package::load(directory, &mut sources) {
