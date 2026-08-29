@@ -1,8 +1,8 @@
-error[cove::runtime]: cannot assign to `limit`, which is a read-only place
- --> <e2e>/fail_assign_let/main.cove:7:3
-  |
-7 |   limit = 20
-  |   ^^^^^^^^^^
+error[cove::type::read_only_place]: cannot assign to `limit`, which is a read-only place
+  --> <e2e>/fail_assign_let/main/main.cove:13:3
+   |
+13 |   limit = 20
+   |   ^^^^^^^^^^
   rule: `let` creates a read-only place; `var` creates a mutable place.
   help: declare it with `var limit` to make it assignable
 1 error(s)

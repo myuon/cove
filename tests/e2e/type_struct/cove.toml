@@ -1,0 +1,3 @@
+[run.type_struct]
+entry = "main.main"
+allow = ["console"]

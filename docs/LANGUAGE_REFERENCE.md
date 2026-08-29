@@ -94,8 +94,8 @@ statement is one of:
   written `T` is what `value` is checked against; without one the binding
   takes `value`'s type, except that an initializer that never produces a value
   has no type to give and the binding becomes unknown. `let` makes a
-  read-only place and `var` a mutable one — a distinction `cove check` does
-  not use and the run time enforces.
+  read-only place and `var` a mutable one, which `cove check` enforces: a
+  write to a read-only place is `cove::type::read_only_place`.
 - **An expression.** Evaluated for its effects; its value is discarded and its
   type is unconstrained. A non-`()` expression in statement position is not an
   error.
@@ -195,10 +195,16 @@ Errors: `cove::type::mismatch` on an element that disagrees.
   `cove::type::receiver`, `cove::type::unsatisfied_bound`,
   `cove::type::unbounded_parameter`, `cove::type::dyn_associated_function`,
   `cove::type::dyn_mutating_method`, `cove::type::unknown_host_operation`,
-  `cove::type::task_safety`. At run time, `<value> is not callable`,
-  `<type> has no method <name>`, a label out of declaration order, a `var`
-  argument on a parameter that is not `var`, a refused capability, and every
-  failure a host operation or a builtin can raise.
+  `cove::type::task_safety`, `cove::type::label_order`,
+  `cove::type::read_only_place`, `cove::type::not_a_place`. At run time,
+  `<value> is not callable`, `<type> has no method <name>`, a `var` argument
+  on a parameter that is not `var`, a refused capability, and every failure a
+  host operation or a builtin can raise.
+
+  Labels appear in declaration order, and a call whose labels do not is
+  `cove::type::label_order`. A `var` argument and a `var self` receiver name
+  the caller's own place, so each must *be* a place — `cove::type::not_a_place`
+  otherwise — and a writable one — `cove::type::read_only_place` otherwise.
 
 ### Operators
 
@@ -242,9 +248,11 @@ remainder by zero. `Float` arithmetic is IEEE 754 and traps on nothing:
 - **Evaluates to** `()`. A compound assignment reads the place, then evaluates
   the right operand, then applies the operator.
 - **Errors**: `cove::type::not_a_place`, `cove::type::mismatch`,
-  `cove::type::operator`. At run time, `cannot assign to <name>, which is a
-  read-only place` — mutability is not a type, so `cove check` does not
-  enforce it.
+  `cove::type::operator`, `cove::type::read_only_place`. Mutability is not a
+  type, but which binding a place is rooted at and how that binding was
+  declared are settled by the same scope the checker already walks, so
+  `cove check` enforces it: writing a place `let` made read-only is
+  `cannot assign to <name>, which is a read-only place`, before the run.
 
 ### `?`
 
@@ -596,16 +604,23 @@ else to write it as.
 
 ## What the run time decides
 
-Three rules are the interpreter's alone, because none of them is about a
-type. A program can pass `cove check` and fail on all three:
+One family of rule is the interpreter's alone, because deciding it needs the
+run: every capability, budget, and task-safety decision at the host and task
+boundaries. A program can pass `cove check` and fail on it.
 
-- assignment to a `let` place, and the mutability of a `var` argument or a
-  `var self` receiver;
-- labeled arguments appearing in declaration order;
-- every capability, budget, and task-safety decision at the host and task
-  boundaries.
+Two families used to stand here beside it — which places source may write,
+and whether labeled arguments stand in declaration order. Neither is about a
+type, and both are decided by the scope the checker already walks, so ADR
+0021 moved them to `cove check`. A program that breaks either does not
+compile.
 
-The last of those is why a derived capability requirement is a lower bound
+One rule about a call still waits for the run, and it is named where it is
+enforced rather than here: a `var` marking that disagrees between the
+declaration and the call site. It is decidable from the source too, and the
+checker does not decide it yet, because a function *type* carries no marking
+for a call through a value to be checked against.
+
+The capability rule is why a derived capability requirement is a lower bound
 rather than an exact set. `cove check` follows the calls it can see; a
 declaration that reaches a call it cannot follow — a call to a function value,
 or a method dispatched through a `dyn Trait` or a bounded generic parameter,

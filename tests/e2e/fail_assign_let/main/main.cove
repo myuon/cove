@@ -1,0 +1,16 @@
+use console.println
+
+/// Assigns to a `let` place, which is read-only.
+///
+/// The assignment is refused by `cove check` rather than by the run, so
+/// the `println` above it never happens and `expected.out` is empty. It was
+/// a run-time failure until ADR 0021 moved the rule into the checker; this
+/// case is in a package of its own because it no longer checks, which is
+/// what a case that does not check has to be.
+export fn main() -> Result<Unit, Error> {
+  let limit = 10
+  println("limit {limit}")?
+  limit = 20
+  println("never printed {limit}")?
+  Ok(())
+}

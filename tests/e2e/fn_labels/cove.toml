@@ -1,0 +1,3 @@
+[run.fn_labels]
+entry = "main.main"
+allow = ["console"]

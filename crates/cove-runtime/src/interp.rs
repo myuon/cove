@@ -5,8 +5,9 @@
 //!
 //! - assignment and ordinary argument passing clone a [`Value`], and `Clone`
 //!   already encodes field-wise shallow copy, so there is no deep-copy path;
-//! - `let` binds a read-only place and `var` a mutable one, so mutation always
-//!   resolves an lvalue down to a slot the caller owns;
+//! - mutation resolves an lvalue down to a slot the caller owns. Which
+//!   lvalues source may write — `let` binds a read-only place and `var` a
+//!   mutable one — is checked before the run, by `cove-sema`, since ADR 0021;
 //! - `var self` and `var` parameters bind the caller's place instead of a copy;
 //! - Host API calls go through [`HostRegistry::call`], which enforces grants;
 //! - concurrent work belongs to a task scope, and leaving the scope waits for
@@ -14,7 +15,14 @@
 //!
 //! Static checking (types, exhaustiveness, uniqueness) is future work; the
 //! interpreter enforces the same rules dynamically and says which rule it
-//! enforced.
+//! enforced. Two families of rule are no longer among them, because
+//! `cove check` decides them from the source and a program it refuses never
+//! reaches here: which places source may write, and whether a labelled
+//! argument stands in declaration order. ADR 0021 says why they went, and
+//! what is left in their place is a guard rather than a diagnostic —
+//! `var_self_needs_place` and `Interpreter::resolve_place`'s last arm are
+//! this evaluator saying it was handed something it cannot address, not the
+//! language saying a program is wrong.
 
 use std::cell::RefCell;
 use std::collections::BTreeSet;
@@ -284,20 +292,24 @@ fn finish(result: Eval) -> Result<Value, RuntimeError> {
 ///
 /// Every step is taken under a single borrow, so a place never holds a
 /// reference across the evaluation of another expression.
+///
+/// A place carried a `mutable` flag until ADR 0021, because `let` binds a
+/// read-only place and `var` a mutable one and this is where that used to be
+/// enforced. The rule has not changed; where it is enforced has.
+/// `Checker::place_mutability` in `cove-sema` is the one statement of it now,
+/// and a flag kept here would be a second — read by nothing, and free to
+/// drift from the one that decides.
 #[derive(Clone)]
 struct Place {
     slot: Rc<RefCell<Value>>,
     steps: Vec<Rc<str>>,
-    /// `var` places are assignable; `let` places are not.
-    mutable: bool,
 }
 
 impl Place {
-    fn binding(value: Value, mutable: bool) -> Place {
+    fn binding(value: Value) -> Place {
         Place {
             slot: Rc::new(RefCell::new(value)),
             steps: Vec::new(),
-            mutable,
         }
     }
 
@@ -307,7 +319,6 @@ impl Place {
         Place {
             slot: self.slot.clone(),
             steps,
-            mutable: self.mutable,
         }
     }
 
@@ -1402,14 +1413,14 @@ impl<'a> Interpreter<'a> {
     ) -> Result<Value, RuntimeError> {
         let mut env = Env::new(target.module.clone(), Rc::clone(&self.roots));
         for (name, value) in target.captures {
-            env.declare_capture(name.clone(), Place::binding(value.clone(), false));
+            env.declare_capture(name.clone(), Place::binding(value.clone()));
         }
 
         match (target.receiver, receiver) {
-            (Some(declared), Some(slot)) => {
+            (Some(_), Some(slot)) => {
                 let place = match slot {
                     ArgSlot::Alias(place) => place,
-                    ArgSlot::Value(value) => Place::binding(value, declared.is_var),
+                    ArgSlot::Value(value) => Place::binding(value),
                 };
                 env.declare("self".into(), place);
             }
@@ -1510,18 +1521,13 @@ impl<'a> Interpreter<'a> {
                     }
                 }
                 // A variadic parameter is an immutable `Array<T>` inside the body.
-                env.declare(name, Place::binding(Value::Array(items.into()), false));
+                env.declare(name, Place::binding(Value::Array(items.into())));
                 continue;
             }
 
             match slots[index].take() {
                 Some(arg) => match (param.is_var, arg.slot) {
-                    (true, ArgSlot::Alias(place)) => {
-                        if !place.mutable {
-                            return Err(var_arg_needs_mutable(&param.name.node, arg.span));
-                        }
-                        env.declare(name, place);
-                    }
+                    (true, ArgSlot::Alias(place)) => env.declare(name, place),
                     (true, ArgSlot::Value(_)) => {
                         return Err(RuntimeError::new(format!(
                             "parameter `{}` of `{what}` is declared `var`, but the call site passes a value",
@@ -1550,7 +1556,7 @@ impl<'a> Interpreter<'a> {
                             Some(ty) => self.coerce(&env.module, value, ty),
                             None => value,
                         };
-                        env.declare(name, Place::binding(value, false));
+                        env.declare(name, Place::binding(value));
                     }
                 },
                 None => match &param.default {
@@ -1561,7 +1567,7 @@ impl<'a> Interpreter<'a> {
                             Some(ty) => self.coerce(&env.module, value, ty),
                             None => value,
                         };
-                        env.declare(name, Place::binding(value, false));
+                        env.declare(name, Place::binding(value));
                     }
                     None => {
                         return Err(RuntimeError::new(format!(
@@ -1643,17 +1649,14 @@ impl<'a> Interpreter<'a> {
         for stmt in &block.statements {
             match &stmt.kind {
                 StmtKind::Let {
-                    is_var,
-                    name,
-                    ty,
-                    value,
+                    name, ty, value, ..
                 } => {
                     let value = self.eval(env, value)?;
                     let value = match ty {
                         Some(ty) => self.coerce(&env.module, value, ty),
                         None => value,
                     };
-                    env.declare(name.node.as_str().into(), Place::binding(value, *is_var));
+                    env.declare(name.node.as_str().into(), Place::binding(value));
                 }
                 StmtKind::Expr(expr) => {
                     self.eval(env, expr)?;
@@ -1667,10 +1670,7 @@ impl<'a> Interpreter<'a> {
                             decl.body.clone(),
                             stmt.span,
                         )?;
-                        env.declare(
-                            decl.name.node.as_str().into(),
-                            Place::binding(closure, false),
-                        );
+                        env.declare(decl.name.node.as_str().into(), Place::binding(closure));
                     }
                     _ => {
                         return Err(unsupported(
@@ -1747,20 +1747,11 @@ impl<'a> Interpreter<'a> {
                 }
             },
             ExprKind::Assign { op, target, value } => {
+                // That the place is a writable one is `cove-sema`'s to say
+                // and it has said it: ADR 0021 makes an assignment to a
+                // read-only place a check-time error, and this is the
+                // refusal that went with it.
                 let place = self.resolve_place(env, target)?;
-                if !place.mutable {
-                    return Err(RuntimeError::new(format!(
-                        "cannot assign to `{}`, which is a read-only place",
-                        describe_place(target)
-                    ))
-                    .at(span)
-                    .with_rule("`let` creates a read-only place; `var` creates a mutable place.")
-                    .with_help(format!(
-                        "declare it with `var {}` to make it assignable",
-                        describe_place(target)
-                    ))
-                    .into());
-                }
                 let new_value = match op {
                     None => self.eval(env, value)?,
                     Some(op) => {
@@ -1878,7 +1869,7 @@ impl<'a> Interpreter<'a> {
                     // iterable, since Cove does not prove termination.
                     self.charge_safepoint(span)?;
                     env.push();
-                    env.declare(binding.node.as_str().into(), Place::binding(item, false));
+                    env.declare(binding.node.as_str().into(), Place::binding(item));
                     let result = self.eval_block(env, body);
                     env.pop();
                     match result {
@@ -2001,7 +1992,7 @@ impl<'a> Interpreter<'a> {
         env.push();
         env.declare(
             name.node.as_str().into(),
-            Place::binding(Value::TaskScope(scope.clone()), false),
+            Place::binding(Value::TaskScope(scope.clone())),
         );
         let result = self.eval_block(env, body);
         env.pop();
@@ -2196,7 +2187,7 @@ impl<'a> Interpreter<'a> {
         // as an ordinary parameter does anywhere else in the language.
         let wants_alias = param.is_var;
         Ok(cell.lock(span, |value| {
-            let place = Place::binding(value, true);
+            let place = Place::binding(value);
             let slot = match wants_alias {
                 true => ArgSlot::Alias(place.clone()),
                 false => ArgSlot::Value(place.read(span)?),
@@ -2675,13 +2666,14 @@ impl<'a> Interpreter<'a> {
         {
             if let Some((module, decl)) = self.find_method(type_module, short, name) {
                 let receiver_slot = match decl.receiver {
+                    // That the receiver of a `var self` method is a
+                    // writable place is `cove-sema`'s to say (ADR 0021).
+                    // What is left is a receiver that is no place at all,
+                    // which leaves nothing to alias.
                     Some(Receiver { is_var: true, .. }) => {
                         let Some(place) = place else {
                             return Err(var_self_needs_place(name, receiver, span).into());
                         };
-                        if !place.mutable {
-                            return Err(var_self_needs_mutable(name, receiver, span).into());
-                        }
                         ArgSlot::Alias(place)
                     }
                     _ => ArgSlot::Value(match (place, temporary) {
@@ -2772,15 +2764,14 @@ impl<'a> Interpreter<'a> {
             return self.call_task_method(env, receiver_value, name, args, trailing, span);
         }
 
-        // `push` and `freeze` take a `var self` receiver.
-        if builtins::is_mutating_method(name) {
-            if let Some(place) = &place {
-                if !place.mutable {
-                    return Err(var_self_needs_mutable(name, receiver, span).into());
-                }
-            } else if name == "push" {
-                return Err(var_self_needs_place(name, receiver, span).into());
-            }
+        // `push` and `freeze` take a `var self` receiver, and that the
+        // receiver is a place — and a writable one — is `cove-sema`'s to say
+        // (ADR 0021). What is left is a `push` on something that is no place
+        // at all, which has nowhere to push *to*: refusing is not a language
+        // rule but the last thing this evaluator can do with an argument it
+        // was not given.
+        if name == "push" && place.is_none() {
+            return Err(var_self_needs_place(name, receiver, span).into());
         }
 
         let args = self.eval_args(env, args, trailing)?;
@@ -2873,10 +2864,10 @@ impl<'a> Interpreter<'a> {
         let mut evaluated = Vec::with_capacity(args.len() + usize::from(trailing.is_some()));
         for arg in args {
             let slot = if arg.is_var {
+                // That the argument is a writable place is `cove-sema`'s to
+                // say (ADR 0021); `resolve_place` still answers whether it
+                // is a place at all, because it has to build one either way.
                 let place = self.resolve_place(env, &arg.value)?;
-                if !place.mutable {
-                    return Err(var_arg_needs_mutable(&describe_place(&arg.value), arg.span).into());
-                }
                 ArgSlot::Alias(place)
             } else {
                 ArgSlot::Value(self.eval(env, &arg.value)?)
@@ -2913,6 +2904,12 @@ impl<'a> Interpreter<'a> {
     // --------------------------------------------------------------- places
 
     /// Resolves an lvalue, or reports why the expression is not a place.
+    ///
+    /// The last arm — an expression that is no place at all — is refused by
+    /// `cove-sema` before the run (ADR 0021), so no checked program reaches
+    /// it. It stays for the same reason `var_self_needs_place` does: this
+    /// function must answer with a `Place` or with an error, and there is no
+    /// place to build from a call's result.
     fn resolve_place(&mut self, env: &mut Env, expr: &Expr) -> Result<Place, Control> {
         match &expr.kind {
             ExprKind::Ident(name) => match env.lookup(name) {
@@ -2980,7 +2977,7 @@ impl<'a> Interpreter<'a> {
                         }
                     }
                 }
-                env.declare(name.as_str().into(), Place::binding(value.clone(), false));
+                env.declare(name.as_str().into(), Place::binding(value.clone()));
                 Ok(true)
             }
             PatternKind::Literal(expr) => {
@@ -3508,6 +3505,13 @@ fn init_map_entry(args: Vec<EvaluatedArg>, span: Span) -> Result<Value, RuntimeE
 ///
 /// Positional arguments may precede labels and are matched to names in
 /// declaration order; after the first label every argument must be labeled.
+///
+/// The out-of-order refusal below is one `cove-sema` reports before the run
+/// (ADR 0021), so no checked program reaches it. It stays because this is
+/// the oracle's own statement of the evaluation-order rule the VM's calling
+/// convention is built on — `cove_ir::lower`'s `arguments_in_order` keeps
+/// the matching one — and a rule two backends both rely on is better stated
+/// twice than assumed twice.
 #[allow(clippy::type_complexity)]
 fn assign_labels(
     names: &[&str],
@@ -4124,6 +4128,14 @@ pub(crate) fn not_a_struct(value: &Value, field: &str, span: Span) -> RuntimeErr
         .with_rule("Only struct fields are places.")
 }
 
+/// A `var self` receiver that is no place at all, which leaves nothing to
+/// alias.
+///
+/// `cove-sema` refuses this before the run (ADR 0021), so no checked program
+/// reaches it. It stays because deleting it would not leave this evaluator
+/// doing something defined: a `var self` method binds the caller's place,
+/// and with no place there is nothing to bind. That makes it the guard ADR
+/// 0004 describes rather than a user-facing diagnostic.
 fn var_self_needs_place(method: &str, receiver: &Expr, span: Span) -> RuntimeError {
     RuntimeError::new(format!(
         "`{method}` takes a `var self` receiver, but `{}` is not a place",
@@ -4132,27 +4144,6 @@ fn var_self_needs_place(method: &str, receiver: &Expr, span: Span) -> RuntimeErr
     .at(span)
     .with_rule("A mutating receiver declares `var self` and mutates the caller's place.")
     .with_help("bind the value with `var` first, then call the method on that binding")
-}
-
-fn var_self_needs_mutable(method: &str, receiver: &Expr, span: Span) -> RuntimeError {
-    RuntimeError::new(format!(
-        "`{method}` takes a `var self` receiver, but `{}` is a read-only place",
-        describe_place(receiver)
-    ))
-    .at(span)
-    .with_rule("`let` creates a read-only place; `var` creates a mutable place.")
-    .with_help(format!(
-        "declare it with `var {}`",
-        describe_place(receiver)
-    ))
-}
-
-fn var_arg_needs_mutable(name: &str, span: Span) -> RuntimeError {
-    RuntimeError::new(format!(
-        "`{name}` is a read-only place, so it cannot be passed as `var`"
-    ))
-    .at(span)
-    .with_rule("`let` creates a read-only place; `var` creates a mutable place.")
 }
 
 fn expect_bool(value: Value, op: BinaryOp, span: Span) -> Result<bool, RuntimeError> {
@@ -5032,19 +5023,12 @@ export fn main() -> Result<Unit, Error> {
 
     // ------------------------------------------------------------- rule 2
 
-    #[test]
-    fn assigning_to_a_let_binding_is_rejected() {
-        let error = error_of("  let total = 1\n  total = 2");
-        assert!(
-            error.message.contains("read-only place"),
-            "{}",
-            error.message
-        );
-        assert!(error
-            .rule
-            .unwrap()
-            .contains("`let` creates a read-only place"));
-    }
+    // Assigning to a `let` binding, calling a `var self` method through
+    // one, and passing one as a `var` argument were three tests here. ADR
+    // 0021 made all three check-time errors and this evaluator stopped
+    // refusing them, so a test here would assert that a program `cove check`
+    // rejects still runs. `cove-sema` pins the rule now; what is left below
+    // is what this evaluator still decides.
 
     #[test]
     fn assigning_to_a_var_field_updates_the_place() {
@@ -5101,25 +5085,9 @@ export fn main() -> Result<Unit, Error> {{
         assert_eq!(run_entry_of(&source, "main", &[]).output, "3 3\n");
     }
 
-    #[test]
-    fn var_self_through_a_let_binding_is_rejected() {
-        let source = format!(
-            "{COUNTER}
-export fn main() -> Result<Unit, Error> {{
-  let counter = Counter(value: 1)
-  counter.bump()
-  Ok(())
-}}
-"
-        );
-        let error = run_entry_of(&source, "main", &[]).error();
-        assert!(
-            error.message.contains("`var self`") && error.message.contains("read-only place"),
-            "{}",
-            error.message
-        );
-    }
-
+    /// A receiver that is no place at all leaves a `var self` method
+    /// nothing to alias, so this evaluator still refuses it — as a guard
+    /// rather than as a diagnostic, since `cove-sema` reports it first.
     #[test]
     fn var_self_on_a_temporary_is_rejected() {
         let source = format!(
@@ -5178,27 +5146,6 @@ export fn main() -> Result<Unit, Error> {
             error.message
         );
         assert_eq!(error.help.unwrap(), "write `fill(var output)`");
-    }
-
-    #[test]
-    fn a_var_argument_needs_a_mutable_place() {
-        let source = r#"
-fn fill(var output: Vector<Int>) {
-  output.push(1)
-}
-
-export fn main() -> Result<Unit, Error> {
-  let items = Vector.of()
-  fill(var items)
-  Ok(())
-}
-"#;
-        let error = run_entry_of(source, "main", &[]).error();
-        assert!(
-            error.message.contains("read-only place"),
-            "{}",
-            error.message
-        );
     }
 
     // ------------------------------------------------------------- rule 4
@@ -5370,17 +5317,23 @@ export fn main() -> Result<Unit, Error> {
         assert!(error.rule.unwrap().contains("Closures"));
     }
 
+    /// `push` on something that is no place at all has nowhere to push to,
+    /// so this evaluator still refuses it — as a guard rather than as a
+    /// diagnostic, since `cove-sema` reports it first.
     #[test]
-    fn push_through_a_read_only_place_is_rejected() {
+    fn push_on_a_temporary_is_rejected() {
         let source = r#"
 export fn main() -> Result<Unit, Error> {
-  let items = Vector.of(1)
-  items.push(2)
+  Vector.of(1).push(2)
   Ok(())
 }
 "#;
         let error = run_entry_of(source, "main", &[]).error();
-        assert!(error.message.contains("`var self`"), "{}", error.message);
+        assert!(
+            error.message.contains("is not a place"),
+            "{}",
+            error.message
+        );
     }
 
     // ------------------------------------------------------------- rule 5
@@ -8946,21 +8899,15 @@ impl Metrics {
     /// ordinary parameter does anywhere else in the language: it can read the
     /// wrapped value, and the `var self` method that would change it is
     /// refused, because a copy is not the place the value lives in.
+    ///
+    /// That refusal is `cove check`'s since ADR 0021, so what is left here
+    /// is that the copy can be read.
     #[test]
     fn a_lock_closure_without_var_receives_a_read_only_copy() {
         let run = run_shared_body(
             "  let metrics = Shared(Metrics(requests: 1, failures: 0))\n  metrics.lock(fn(value) {\n    println(\"{value.requests}\")\n  })?",
         );
         assert_eq!(run.output, "1\n");
-
-        let error = run_shared_body(
-            "  let metrics = Shared(Metrics(requests: 1, failures: 0))\n  metrics.lock(fn(value) {\n    value.record(true)\n  })",
-        )
-        .error();
-        assert_eq!(
-            error.message,
-            "`record` takes a `var self` receiver, but `value` is a read-only place"
-        );
     }
 
     /// The whole reason the type exists: a `Shared` crosses a task boundary

@@ -296,7 +296,8 @@ use cove_sema::resolve::Program as Checked;
 /// call by evaluating the arguments in the order they were *written*, and
 /// issue #112 is about moving that decision into the checker. It was a
 /// closure, then a task scope; what the case is about is the rule and not the
-/// construct.
+/// construct. (ADR 0021 moved that decision, so the case has moved again;
+/// the note at the end of this comment says where.)
 ///
 /// One scope shape is refused and stays refused, which is worth recording
 /// because it is a wall rather than unfinished work. A child whose value is
@@ -340,7 +341,9 @@ use cove_sema::resolve::Program as Checked;
 /// assignment to a read-only place; both are programs the oracle rejects at
 /// *run* time and this refuses at lowering, which is deliberate and is what
 /// issues #112 and #113 are about moving into the checker. Nothing in the
-/// corpus is refused for want of an execution model any more.
+/// corpus is refused for want of an execution model any more. (ADR 0021
+/// moved all four; the note at the end of this comment says where they
+/// went.)
 ///
 /// 90 to 81, and it is the one time this number has gone *down*. Nine
 /// benchmarks left the corpus, not the lowering: `benches/` is no longer one
@@ -415,6 +418,26 @@ use cove_sema::resolve::Program as Checked;
 /// reachable only through a task and a task's cancellation is a race no
 /// golden file can pin; the budget stop is the deterministic member of the
 /// same family, and it is what this records instead.
+///
+/// It then did not move at all when three of the four refusals went, and
+/// that is worth recording rather than leaving as a number that stood
+/// still. ADR 0021
+/// made assignment to a read-only place and a labelled argument out of
+/// declaration order `cove check` errors, so `tests/e2e:fail_assign_let`,
+/// `tests/e2e:fn_labels` and `tests/e2e:type_struct` moved from *refused* to
+/// *does not check* — 4 refused and 25 not checking became 1 and 28, over a
+/// corpus the four cases above had meanwhile grown to 122 — and
+/// each is now a package of its own, so their case names gained a directory.
+/// Nothing gained a lowering and nothing lost one. The refusals went because
+/// the checker catches them, not because the VM learned anything.
+///
+/// The one refusal left is `tests/e2e/backend_unsupported:backend_unsupported`,
+/// which pins ADR 0019's no-silent-fallback rule and had to be rewritten a
+/// fourth time: a program `cove check` refuses never reaches a backend, so a
+/// construct this pass refuses *because the program is wrong* can no longer
+/// pin what a backend does with one. It names a function declared inside a
+/// function body now, which is unsupported in the plain sense — the
+/// interpreter runs it and the lowering has no instruction for it.
 const LOWERED_FLOOR: usize = 93;
 
 // ------------------------------------------------------------------ the test

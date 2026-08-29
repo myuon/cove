@@ -595,6 +595,26 @@ static REJECTIONS: &[Rejection] = &[
         code: "cove::type::operator",
     },
     Rejection {
+        section: "Assignment",
+        source: "/// Assigns to a place `let` made read-only.\nexport fn probe() -> Int {\n  let fixed = 1\n  fixed = 2\n  fixed\n}\n",
+        code: "cove::type::read_only_place",
+    },
+    Rejection {
+        section: "Calls",
+        source: "/// Names two labels in the other order than the declaration writes them.\nfn between(low: Int, high: Int) -> Int {\n  high - low\n}\n\n/// Calls it out of order.\nexport fn probe() -> Int {\n  between(high: 2, low: 1)\n}\n",
+        code: "cove::type::label_order",
+    },
+    Rejection {
+        section: "Calls",
+        source: "/// Pushes onto a place `let` made read-only.\nexport fn probe() -> Int {\n  let items = Vector.of(1)\n  items.push(2)\n  items.length()\n}\n",
+        code: "cove::type::read_only_place",
+    },
+    Rejection {
+        section: "Calls",
+        source: "/// Pushes onto a temporary, which is no place at all.\nexport fn probe() -> () {\n  Vector.of(1).push(2)\n}\n",
+        code: "cove::type::not_a_place",
+    },
+    Rejection {
         section: "Operators",
         source: "/// Compares the identity of a value type.\nexport fn probe() -> Bool {\n  1 is 1\n}\n",
         code: "cove::type::operator",
@@ -713,13 +733,6 @@ static TRAPS: &[Trap] = &[
         body: "let zero = 0\n1 / zero",
         ty: "Int",
         message: "by zero",
-    },
-    Trap {
-        section: "Assignment",
-        decls: "",
-        body: "let fixed = 1\nfixed = 2\nfixed",
-        ty: "Int",
-        message: "read-only place",
     },
     // Two enums declare a `Red`, so resolution cannot tell which enum a
     // bare `Red` pattern belongs to and abstains about exhaustiveness.

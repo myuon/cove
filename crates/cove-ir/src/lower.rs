@@ -116,11 +116,14 @@
 //!   is evaluated in the enclosing one.
 //! - **Evaluation is left to right everywhere**: arguments, operands, array
 //!   elements, and struct fields.
-//! - **A struct's fields are pushed in declaration order.** `assign_labels`
-//!   in the interpreter refuses a label whose parameter stands before one
-//!   already filled, so a call it accepts fills the parameters in increasing
-//!   order; `arguments_in_order` below is that rule, and a call it cannot put
-//!   in order is reported rather than rearranged.
+//! - **A struct's fields are pushed in declaration order.** A call whose
+//!   labels stand in declaration order fills the parameters in increasing
+//!   order, which is what makes pushing the arguments left to right the same
+//!   as pushing them in declaration order. `cove-sema` is what holds a
+//!   program to that (ADR 0021); `arguments_in_order` below states the same
+//!   rule as this pass's own invariant, because it is what the calling
+//!   convention is built on and a lowering that assumed it silently would be
+//!   assuming it.
 //! - **A default argument is evaluated by the callee**, in an environment
 //!   holding the parameters declared before it. `bind_params` walks the
 //!   parameters in order and reaches `None => match &param.default` inside
@@ -1071,16 +1074,7 @@ impl<'a> Lowering<'a> {
             body.declare_capture_at(name, index as u32, capture_slots[index]);
         }
         for (at, param) in decl_params.iter().enumerate() {
-            // A `var` parameter is writable, which is what a `PlaceWrite`
-            // through it is checked against, and every other parameter is
-            // read-only: that is the `Place::binding` the interpreter builds
-            // for each, read at lowering time.
-            body.declare_at(
-                Some(param.name.node.as_str()),
-                params[at].is_place(),
-                params[at],
-                slots[at],
-            );
+            body.declare_at(Some(param.name.node.as_str()), params[at], slots[at]);
             // A lambda's parameters are bound by the same `bind_params`, so
             // one written `dyn Trait` receives a trait object exactly as a
             // declaration's does. A lambda has no written return type, so
@@ -1247,15 +1241,11 @@ impl<'a> Lowering<'a> {
                     .map_or(SlotKind::Value, slot_kind_of)
             };
             params.push(kind);
-            body.declare(Some("self"), receiver.is_var, kind);
+            body.declare(Some("self"), kind);
         }
         let mut kinds: Vec<SlotKind> = Vec::with_capacity(decl.params.len());
         for (at, param) in decl.params.iter().enumerate() {
             reject_parameter(param, at + 1 == decl.params.len())?;
-            // An ordinary parameter receives a shallow copy and is a
-            // read-only place inside the body, exactly as the interpreter
-            // declares one; a `var` parameter is refused above.
-            //
             // A variadic parameter is one ordinary value slot holding the
             // `Array<T>` the call site collected, which is what
             // `bind_params` declares one as — `env.declare(name,
@@ -1327,12 +1317,7 @@ impl<'a> Lowering<'a> {
             } else {
                 body.coerce_param(module, param, kinds[at], slots[at], true);
             }
-            body.declare_at(
-                Some(param.name.node.as_str()),
-                param.is_var && supplied[at],
-                kinds[at],
-                slots[at],
-            );
+            body.declare_at(Some(param.name.node.as_str()), kinds[at], slots[at]);
         }
 
         // The body's value is the function's answer, so it is lowered into
@@ -1381,14 +1366,13 @@ impl<'a> Lowering<'a> {
 /// it walks, and those places are slots like any other — they simply cannot
 /// be reached from source, because no Cove name resolves to them.
 ///
-/// `writable` is `is_var` carried through the lowering: a `var` binds a
-/// mutable place and everything else — a `let`, a parameter, a receiver, a
-/// `for` binding — binds a read-only one, which is the interpreter's
-/// `Place::binding` read at lowering time rather than at run time.
+/// Whether source may *write* the binding is not here. It was, as `is_var`
+/// carried through the lowering, and ADR 0021 moved the rule to `cove-sema`
+/// — so the answer is one this pass would only be repeating, and repeating
+/// it is how the two could come apart.
 struct Binding<'a> {
     name: Option<&'a str>,
     slot: u32,
-    writable: bool,
     /// Which of this function's captures this binding is, for the bindings
     /// that are one.
     ///
@@ -1902,16 +1886,15 @@ impl<'a, 'l> Body<'a, 'l> {
     /// Declares a binding, which always takes a slot of its own.
     ///
     /// Shadowing declares rather than overwrites, exactly as `Env::declare`
-    /// does, so `let x = 1; let x = 2` is two slots. `writable` is what a
-    /// write to the binding is checked against, and only a `var` is.
+    /// does, so `let x = 1; let x = 2` is two slots.
     ///
     /// The value stack and the scalar stack are numbered separately, so
     /// `kind` picks which counter this draws from. A number is dense within
     /// its own stack — nothing to skip, because the other stack's numbers
     /// are not in this space at all.
-    fn declare(&mut self, name: Option<&'a str>, writable: bool, kind: SlotKind) -> u32 {
+    fn declare(&mut self, name: Option<&'a str>, kind: SlotKind) -> u32 {
         let slot = self.allocate(kind);
-        self.declare_at(name, writable, kind, slot);
+        self.declare_at(name, kind, slot);
         slot
     }
 
@@ -1948,26 +1931,20 @@ impl<'a, 'l> Body<'a, 'l> {
     }
 
     /// Lets `name` reach a slot [`Body::allocate`] already reserved.
-    fn declare_at(&mut self, name: Option<&'a str>, writable: bool, kind: SlotKind, slot: u32) {
+    fn declare_at(&mut self, name: Option<&'a str>, kind: SlotKind, slot: u32) {
         self.live.push(Binding {
             name,
             slot,
-            writable,
             capture: None,
             kind,
         });
     }
 
     /// Lets `name` reach the slot holding capture `index`.
-    ///
-    /// Read-only, because `Env::declare_capture` builds a
-    /// `Place::binding(value, false)`: a closure holds a copy of what it
-    /// captured, and writing to that copy is not something source may do.
     fn declare_capture_at(&mut self, name: &'a str, index: u32, slot: u32) {
         self.live.push(Binding {
             name: Some(name),
             slot,
-            writable: false,
             capture: Some(index),
             kind: SlotKind::Value,
         });
@@ -2024,32 +2001,23 @@ impl<'a, 'l> Body<'a, 'l> {
         }
     }
 
-    /// Whether source may write the binding `name` reaches.
-    fn is_writable(&self, name: &str) -> bool {
-        self.binding(name).is_some_and(|binding| binding.writable)
-    }
-
-    /// Whether `expr` is a place, and whether source may write it — `Place`'s
-    /// own rule in `crates/cove-runtime/src/interp.rs`, read here at lowering
-    /// time instead of at run time.
+    /// Whether `expr` is a place: something this pass can address, rather
+    /// than something it can only read.
     ///
-    /// Mirrors `Interpreter::resolve_place_opt`: walk down through
-    /// `ExprKind::Field { base, .. }` to the expression's root, which is a
-    /// place only where it is an `ExprKind::Ident` naming a local. A field
-    /// does not ask a question of its own — it inherits the root's
-    /// mutability, exactly as `Place::field` copies `mutable` down from the
-    /// base unchanged — so the walk asks [`Body::is_writable`] of the root
-    /// and nowhere else.
+    /// Walk down through `ExprKind::Field { base, .. }` to the expression's
+    /// root, which is a place only where it is an `ExprKind::Ident` naming a
+    /// local. A field asks no question of its own; it is a step from a place
+    /// to a place, exactly as `Place::field` is.
     ///
-    /// `None` is not a place at all: a call's result, a literal, an index
-    /// expression, or a name that resolves to something other than a local.
-    /// `Some` is a place, `true` where source may write it and `false` where
-    /// it is read-only.
-    fn place_mutability(&self, expr: &'a Expr) -> Option<bool> {
+    /// Whether source may *write* that place is not asked here and is not
+    /// this pass's to answer. `Checker::place_mutability` in `cove-sema` is
+    /// the definition and the only statement of it; ADR 0021 says why there
+    /// is one rather than three.
+    fn is_a_place(&self, expr: &'a Expr) -> bool {
         match &expr.kind {
-            ExprKind::Ident(name) => self.binding(name).is_some().then(|| self.is_writable(name)),
-            ExprKind::Field { base, .. } => self.place_mutability(base),
-            _ => None,
+            ExprKind::Ident(name) => self.binding(name).is_some(),
+            ExprKind::Field { base, .. } => self.is_a_place(base),
+            _ => false,
         }
     }
 
@@ -2152,7 +2120,7 @@ impl<'a, 'l> Body<'a, 'l> {
             ExprKind::Ident(name) => self.binding(name).is_some_and(|b| b.kind.is_place()),
             ExprKind::Field { base, .. } => match &base.kind {
                 ExprKind::Ident(name) => self.binding(name).is_some_and(|b| b.kind.is_place()),
-                ExprKind::Field { .. } => self.place_mutability(target).is_some(),
+                ExprKind::Field { .. } => self.is_a_place(target),
                 _ => false,
             },
             _ => false,
@@ -2429,10 +2397,7 @@ impl<'a, 'l> Body<'a, 'l> {
     fn statement(&mut self, statement: &'a Stmt) -> Result<(), Unsupported> {
         match &statement.kind {
             StmtKind::Let {
-                is_var,
-                name,
-                ty,
-                value,
+                name, ty, value, ..
             } => {
                 if let Some(ty) = ty {
                     reject_dyn(ty, "a `dyn` binding")?;
@@ -2471,7 +2436,7 @@ impl<'a, 'l> Body<'a, 'l> {
                     let module = self.module;
                     self.coerce_to(module, ty, statement.span);
                 }
-                let slot = self.declare(Some(name.node.as_str()), *is_var, kind);
+                let slot = self.declare(Some(name.node.as_str()), kind);
                 self.emit(store_slot(kind, slot), statement.span);
                 Ok(())
             }
@@ -3250,9 +3215,6 @@ impl<'a, 'l> Body<'a, 'l> {
             ));
         };
         let (slot, kind) = (binding.slot, binding.kind);
-        if !self.is_writable(name) {
-            return Err(read_only_place(name, span));
-        }
         match op {
             None => match kind {
                 SlotKind::Scalar(_) => self.expr_scalar(value)?,
@@ -3330,10 +3292,8 @@ impl<'a, 'l> Body<'a, 'l> {
         position: Position,
         span: Span,
     ) -> Result<(), Unsupported> {
-        match self.place_mutability(target) {
-            Some(true) => {}
-            Some(false) => return Err(read_only_place(&place_text(target), span)),
-            None => return Err(Unsupported::new("assignment to this place", span)),
+        if !self.is_a_place(target) {
+            return Err(Unsupported::new("assignment to this place", span));
         }
         match op {
             None => {
@@ -3412,11 +3372,6 @@ impl<'a, 'l> Body<'a, 'l> {
                 span,
             ));
         };
-        if !self.is_writable(name) {
-            // A field of a read-only binding is a read-only place too, which
-            // is what `Place::field` carries down from its base.
-            return Err(read_only_place(&format!("{name}.{field}"), span));
-        }
         // The write goes by name whatever the checker settled: `SetField`
         // puts a value back where a name stands, and only the read has a
         // position to take instead.
@@ -3563,8 +3518,8 @@ impl<'a, 'l> Body<'a, 'l> {
                 end,
                 inclusive_end,
             } => {
-                let cursor = self.declare(None, false, SlotKind::Value);
-                let limit = self.declare(None, false, SlotKind::Value);
+                let cursor = self.declare(None, SlotKind::Value);
+                let limit = self.declare(None, SlotKind::Value);
                 self.expr(start)?;
                 self.emit(Inst::StoreLocal(cursor), start.span);
                 self.expr(end)?;
@@ -3578,9 +3533,9 @@ impl<'a, 'l> Body<'a, 'l> {
                 )
             }
             _ => {
-                let sequence = self.declare(None, false, SlotKind::Value);
-                let length = self.declare(None, false, SlotKind::Value);
-                let cursor = self.declare(None, false, SlotKind::Value);
+                let sequence = self.declare(None, SlotKind::Value);
+                let length = self.declare(None, SlotKind::Value);
+                let cursor = self.declare(None, SlotKind::Value);
                 self.expr(iterable)?;
                 self.emit(Inst::IterItems, iterable.span);
                 self.emit(Inst::StoreLocal(sequence), iterable.span);
@@ -3598,7 +3553,7 @@ impl<'a, 'l> Body<'a, 'l> {
         // block opens a scope inside this one.
         // A `for` binding is read-only, which is what the interpreter
         // declares one as.
-        let element = self.declare(Some(binding), false, SlotKind::Value);
+        let element = self.declare(Some(binding), SlotKind::Value);
 
         let top = self.label();
         let next = self.label();
@@ -3987,22 +3942,9 @@ impl<'a, 'l> Body<'a, 'l> {
             (Some(declared), Some(expr)) => {
                 if declared.is_var {
                     // A `var self` receiver is a place, and it is the one
-                    // the method writes through. The two ways it can fail
-                    // are the interpreter's `var_self_needs_mutable` and
-                    // `var_self_needs_place`, refused here in the words
-                    // `push` is refused in — it is the same question about
-                    // the same receiver.
-                    match self.place_mutability(expr) {
-                        Some(true) => {}
-                        Some(false) => {
-                            return Err(mutating_method_needs_a_mutable_place(
-                                &what,
-                                &place_text(expr),
-                                span,
-                            ))
-                        }
-                        None => return Err(mutating_method_needs_a_place(&what, span)),
-                    }
+                    // the method writes through. That it *is* a writable
+                    // place is `cove-sema`'s to say and it has said it — see
+                    // ADR 0021 — so this builds the place and nothing else.
                     into(SlotKind::Place);
                     self.place(expr)?;
                 } else {
@@ -4065,21 +4007,9 @@ impl<'a, 'l> Body<'a, 'l> {
                 ));
             }
             if declared_var {
-                match self.place_mutability(arg.value) {
-                    Some(true) => {}
-                    Some(false) => {
-                        return Err(read_only_place(&place_text(arg.value), arg.span));
-                    }
-                    None => {
-                        return Err(Unsupported::new(
-                            format!(
-                                "a `var` argument for `{}`, which is not a place",
-                                decl.params[at].name.node
-                            ),
-                            arg.span,
-                        ))
-                    }
-                }
+                // A `var` argument names the caller's own place, and that it
+                // is one, and a writable one, is `cove-sema`'s to say — see
+                // ADR 0021.
                 into(SlotKind::Place);
                 self.place(arg.value)?;
                 continue;
@@ -4629,7 +4559,7 @@ impl<'a, 'l> Body<'a, 'l> {
     ) -> Result<(), Unsupported> {
         if name != builtins::NONE_CASE.name {
             self.emit(Inst::Dup, span);
-            let slot = self.declare(Some(name), false, SlotKind::Value);
+            let slot = self.declare(Some(name), SlotKind::Value);
             self.emit(Inst::StoreLocal(slot), span);
             return Ok(());
         }
@@ -4650,7 +4580,7 @@ impl<'a, 'l> Body<'a, 'l> {
         self.fail_arm(next, subject, span);
         self.bind(bind_it);
         self.emit(Inst::Dup, span);
-        let slot = self.declare(Some(name), false, SlotKind::Value);
+        let slot = self.declare(Some(name), SlotKind::Value);
         self.emit(Inst::StoreLocal(slot), span);
         self.bind(matched);
         Ok(())
@@ -4896,7 +4826,7 @@ impl<'a, 'l> Body<'a, 'l> {
         let mark = self.scope();
         let named = self.outer.name(name.node.as_str());
         self.emit(Inst::EnterScope(named), span);
-        let slot = self.declare(Some(name.node.as_str()), false, SlotKind::Value);
+        let slot = self.declare(Some(name.node.as_str()), SlotKind::Value);
         self.emit(Inst::StoreLocal(slot), span);
         self.open_scopes += 1;
         let lowered = self.block_at(body, Position::Value);
@@ -5118,53 +5048,32 @@ impl<'a, 'l> Body<'a, 'l> {
             self.emit(Inst::Snapshot, span);
             return Ok(None);
         }
-        if builtins::is_mutating_method(name) {
-            if name == "freeze" && self.place_mutability(receiver) == Some(true) {
-                // The one builtin that needs the place rather than a read of
-                // it. `builtins::freeze` counts the handles to the storage
-                // and refuses when the count is not one, and a read of the
-                // receiver would be the second handle — which is why
-                // `Interpreter::call_builtin_method` runs it inside
-                // `place.with_mut` and why `Inst::Freeze` takes a place.
-                //
-                // A receiver that is not a place at all falls through to the
-                // ordinary builtin lowering below, exactly as it does in the
-                // interpreter: `Vector.of(1).freeze()` has no place, and
-                // `builtins::call_method`'s own `freeze` arm answers it from
-                // the temporary — which holds the only handle there is.
-                if !args.is_empty() {
-                    // `freeze()` takes none, and the checker says so before
-                    // this does; refusing keeps the instruction's shape a
-                    // fact rather than something a call site could vary.
-                    return Err(Unsupported::new("`freeze` given arguments", span));
-                }
-                self.place(receiver)?;
-                self.emit(Inst::Freeze, span);
-                return Ok(None);
+        // `freeze` is the one builtin that needs the place rather than a read
+        // of it. `builtins::freeze` counts the handles to the storage and
+        // refuses when the count is not one, and a read of the receiver would
+        // be the second handle — which is why
+        // `Interpreter::call_builtin_method` runs it inside `place.with_mut`
+        // and why `Inst::Freeze` takes a place.
+        //
+        // A receiver that is not a place at all falls through to the ordinary
+        // builtin lowering below, exactly as it does in the interpreter:
+        // `Vector.of(1).freeze()` has no place, and `builtins::call_method`'s
+        // own `freeze` arm answers it from the temporary — which holds the
+        // only handle there is. `push` falls through as well, whatever its
+        // receiver: it mutates through the handle a `Vector` is, so there is
+        // nothing to write back to the receiver's slot. That the receiver of
+        // a mutating method is a place, and a writable one, is `cove-sema`'s
+        // to say and it has said it (ADR 0021).
+        if name == "freeze" && self.is_a_place(receiver) {
+            if !args.is_empty() {
+                // `freeze()` takes none, and the checker says so before this
+                // does; refusing keeps the instruction's shape a fact rather
+                // than something a call site could vary.
+                return Err(Unsupported::new("`freeze` given arguments", span));
             }
-            match self.place_mutability(receiver) {
-                // A mutable place: fall through to the ordinary
-                // builtin-method lowering below, exactly as a non-mutating
-                // method does. `push` mutates through the handle a `Vector`
-                // is, so there is nothing here to write back to the
-                // receiver's slot — see `builtins::call_method`'s `push` arm
-                // and `Value::Vector`'s storage.
-                Some(true) => {}
-                Some(false) => {
-                    return Err(mutating_method_needs_a_mutable_place(
-                        name,
-                        &place_text(receiver),
-                        span,
-                    ));
-                }
-                // The asymmetry is `Interpreter::call_builtin_method`'s and
-                // is kept: only `push` demands a place. `freeze` on a
-                // temporary is answered by `builtins::call_method` from the
-                // temporary itself, which holds the only handle there is, so
-                // there is no second handle for a place to have prevented.
-                None if name == "push" => return Err(mutating_method_needs_a_place(name, span)),
-                None => {}
-            }
+            self.place(receiver)?;
+            self.emit(Inst::Freeze, span);
+            return Ok(None);
         }
         // Which types declare a method of this name is a question for the
         // shared table rather than for a list written here, so a builtin
@@ -5304,6 +5213,16 @@ fn qualified_case(type_name: &str, case: &str) -> String {
 /// longer a most: `assign_labels` puts a positional argument past the last
 /// parameter into `rest` rather than reporting one too many. And a variadic
 /// parameter is never missing, since one given nothing is an empty `Array`.
+///
+/// The out-of-order case is the checker's, not this pass's. `cove-sema`
+/// reports `cove::type::label_order` for a label whose parameter stands
+/// before one an earlier argument already filled, so no checked program
+/// reaches here with one — and this still refuses it, because
+/// [`Arguments::slots`] is read by call sites that push arguments left to
+/// right and the property they rely on is worth stating where it is relied
+/// on rather than assumed from somewhere else. ADR 0021 is why the two are
+/// not the same kind of statement: the checker's is a language rule and this
+/// is an invariant of a calling convention.
 ///
 /// The surprising case is the one refused by name. `assign_labels` will
 /// accept `f(1, 2, items: 3)` and bind `items` to `[3, 2]` — the labelled
@@ -5954,56 +5873,6 @@ fn no_spread_here(what: &str, span: Span) -> Unsupported {
         format!("a `...` spread argument to `{what}`, which collects nothing"),
         span,
     )
-}
-
-/// A write to a place the program is not allowed to write.
-///
-/// This refuses at lowering time what the interpreter refuses at run time —
-/// ``cannot assign to `x`, which is a read-only place`` — because a backend
-/// that performed the write would be more permissive than the oracle ADR
-/// 0012 ranks above it, and being wrong in the other direction is the only
-/// direction a second backend may be wrong in.
-///
-/// The wording says the program is wrong rather than that the VM is
-/// incapable, because it is. The right home for the check is the checker,
-/// where a read-only place is a static fact rather than a runtime one;
-/// `cove-sema` catches neither backend's case today — mutability is not a
-/// type, so `cove check` does not enforce it — and whoever moves it there
-/// deletes this and the interpreter's own refusal both.
-fn read_only_place(place: &str, span: Span) -> Unsupported {
-    Unsupported::new(
-        format!("assignment to `{place}`, which is a read-only place"),
-        span,
-    )
-}
-
-/// A mutating builtin method — today only `push` — called on a receiver
-/// [`Body::place_mutability`] says is a place, but a read-only one.
-///
-/// This is [`read_only_place`]'s case again, asked of a receiver rather than
-/// of an assignment's target, and it refuses at lowering time what the
-/// interpreter's `var_self_needs_mutable` refuses at run time: ``push` takes
-/// a `var self` receiver, but `fixed` is a read-only place``. The same
-/// argument applies unchanged: a backend that performed the call would be
-/// more permissive than the oracle, and mutability belongs in the checker
-/// rather than in either backend — see [`read_only_place`] for why.
-fn mutating_method_needs_a_mutable_place(name: &str, place: &str, span: Span) -> Unsupported {
-    Unsupported::new(
-        format!("`{name}` on `{place}`, which is a read-only place"),
-        span,
-    )
-}
-
-/// A mutating builtin method called on a receiver that is not a place at
-/// all — a call's result, a literal, or anything else
-/// [`Body::place_mutability`] answers `None` for.
-///
-/// Mirrors the interpreter's `var_self_needs_place`: ``push` takes a `var
-/// self` receiver, but `this expression` is not a place``. See
-/// [`read_only_place`] for why refusing here, rather than performing the
-/// call, is the direction a second backend is allowed to be wrong in.
-fn mutating_method_needs_a_place(name: &str, span: Span) -> Unsupported {
-    Unsupported::new(format!("`{name}`, whose receiver is not a place"), span)
 }
 
 /// The dotted name a place is written with in source, for a diagnostic — the
@@ -9471,26 +9340,56 @@ mod tests {
                 "`g` used as a value, whose parameter `n` has a default",
                 "fn g(n: Int = 1) -> Int {\n  n\n}\n\nfn f() -> Int {\n  let h = g\n  1\n}\n",
             ),
-            (
-                "a call to `g` whose arguments do not stand in declaration order",
-                "fn g(a: Int, b: Int) -> Int {\n  a\n}\n\nfn f() -> Int {\n  g(b: 2, a: 1)\n}\n",
-            ),
-            (
-                "assignment to `x`, which is a read-only place",
-                "fn f() -> Int {\n  let x = 1\n  x = 2\n  x\n}\n",
-            ),
-            (
-                "assignment to `n`, which is a read-only place",
-                "fn f(n: Int) -> Int {\n  n = 2\n  n\n}\n",
-            ),
-            (
-                "assignment to `p.x`, which is a read-only place",
-                "struct P {\n  x: Int\n}\n\nfn f() -> Int {\n  let p = P(x: 1)\n  p.x = 2\n  p.x\n}\n",
-            ),
         ];
         for (what, source) in cases {
             assert_eq!(refused(source), what, "for:\n{source}");
         }
+    }
+
+    /// The one refusal in this pass no checked program can reach.
+    ///
+    /// [`arguments_in_order`] is the invariant the calling convention rests
+    /// on: `Body::call_declared` pushes the arguments in the order the
+    /// parameters are declared, and that is the order they were *written* in
+    /// only because the labels stand in declaration order. `cove-sema`
+    /// refuses a call whose labels do not (ADR 0021), so this is reached by
+    /// driving the function rather than a program — which is what an
+    /// invariant is worth stating for, and is why it stays.
+    #[test]
+    fn arguments_that_do_not_stand_in_declaration_order_are_refused() {
+        let span = Span::new(cove_diag::FileId(0), 0, 0);
+        let arg = |label: &str| Arg {
+            label: Some(cove_diag::Spanned {
+                node: label.to_string(),
+                span,
+            }),
+            is_var: false,
+            spread: false,
+            value: Expr {
+                id: cove_syntax::ast::ExprId(0),
+                kind: ExprKind::Int(1),
+                span,
+            },
+            span,
+        };
+        let written = vec![arg("b"), arg("a")];
+        let why = match arguments_in_order(&["a", "b"], Args::new(&written, None), "g", false, span)
+        {
+            Ok(_) => panic!("labels out of declaration order are refused"),
+            Err(why) => why,
+        };
+        assert_eq!(
+            why.what,
+            "a call to `g` whose arguments do not stand in declaration order"
+        );
+
+        let in_order = vec![arg("a"), arg("b")];
+        let assigned =
+            match arguments_in_order(&["a", "b"], Args::new(&in_order, None), "g", false, span) {
+                Ok(assigned) => assigned,
+                Err(why) => panic!("labels in declaration order are accepted, but {why}"),
+            };
+        assert_eq!(assigned.slots, vec![Some(0), Some(1)]);
     }
 
     /// The `Display` a diagnostic shows says which backend refused, so a
@@ -9498,12 +9397,27 @@ mod tests {
     #[test]
     fn an_unsupported_construct_reads_as_a_sentence() {
         let why = lower(&checked(
-            "fn g(a: Int, b: Int) -> Int {\n  a\n}\n\nfn f() -> Int {\n  g(b: 2, a: 1)\n}\n",
+            "fn f() -> Int {\n  fn g() -> Int {\n    1\n  }\n  g()\n}\n",
         ))
-        .expect_err("a call whose labelled arguments are out of order is refused");
+        .expect_err("a function declared inside a function body is refused");
         assert_eq!(
             why.to_string(),
-            "the VM cannot run a call to `g` whose arguments do not stand in declaration order yet"
+            "the VM cannot yet run a function declared inside a function body"
+        );
+    }
+
+    /// "yet" stands before the construct, so a construct named by a phrase
+    /// that ends in a clause still reads as a sentence. It used to be
+    /// appended, and several of the names below end in one.
+    #[test]
+    fn a_construct_named_by_a_clause_still_reads_as_a_sentence() {
+        let why = lower(&checked(
+            "fn g(n: Int = 1) -> Int {\n  n\n}\n\nfn f() -> Int {\n  let h = g\n  1\n}\n",
+        ))
+        .expect_err("a declaration with a default used as a value is refused");
+        assert_eq!(
+            why.to_string(),
+            "the VM cannot yet run `g` used as a value, whose parameter `n` has a default"
         );
     }
 
@@ -9674,9 +9588,9 @@ mod tests {
     }
 
     /// A field path is still a place: `Place::field` in
-    /// `crates/cove-runtime/src/interp.rs` carries the root's mutability down
-    /// unchanged, and `Body::place_mutability` mirrors it, so `s.items.push`
-    /// reaches the same fall-through `v.push` above does.
+    /// `crates/cove-runtime/src/interp.rs` steps from a place to a place, and
+    /// `Body::is_a_place` mirrors it, so `s.items.push` reaches the same
+    /// fall-through `v.push` above does.
     #[test]
     fn push_through_a_var_struct_field_lowers() {
         assert_eq!(
@@ -9701,28 +9615,9 @@ mod tests {
         );
     }
 
-    /// `let` makes a read-only place, and `Body::place_mutability` answers
-    /// that about the receiver exactly as it would about an assignment's
-    /// target — so `push` refuses it rather than performing a write the
-    /// interpreter would refuse too.
-    #[test]
-    fn push_on_a_let_binding_is_refused() {
-        assert_eq!(
-            refused("fn f() -> Int {\n  let v = Vector.of()\n  v.push(1)\n  v.length()\n}\n"),
-            "`push` on `v`, which is a read-only place"
-        );
-    }
-
-    /// A call's result is not a place at all — there is no binding for
-    /// `Body::place_mutability` to ask about — so `push` refuses it the way
-    /// the interpreter's `var_self_needs_place` does.
-    #[test]
-    fn push_on_a_temporary_is_refused() {
-        assert_eq!(
-            refused("fn f() -> Int {\n  Vector.of().push(1)\n  0\n}\n"),
-            "`push`, whose receiver is not a place"
-        );
-    }
+    // `push` on a read-only place and `push` on a temporary were two tests
+    // here. Both are `cove::type::` errors since ADR 0021, so neither
+    // program reaches this pass and `cove-sema` is where they are pinned.
 
     /// `freeze` takes the place and not a read of it, which is the whole
     /// difference between it and `push`: the uniqueness check has to see the
@@ -9766,17 +9661,6 @@ mod tests {
              \x20  3  call-builtin length argc=0\n\
              \x20  4  value-to-scalar\n\
              \x20  5  return-scalar\n"
-        );
-    }
-
-    /// A `let` receiver is a read-only place, and `freeze` refuses it the
-    /// way `push` does rather than performing a write the interpreter would
-    /// refuse at run time.
-    #[test]
-    fn freeze_on_a_let_binding_is_refused() {
-        assert_eq!(
-            refused("fn f() -> Int {\n  let v = Vector.of()\n  v.freeze()\n  0\n}\n"),
-            "`freeze` on `v`, which is a read-only place"
         );
     }
 
@@ -10037,16 +9921,12 @@ mod tests {
     /// construct the entry reaches is reported in the words it always was.
     #[test]
     fn an_unsupported_construct_on_the_path_is_still_refused() {
-        let source = "fn g(a: Int, b: Int) -> Int {\n  a\n}\n\n\
-                      fn helper() -> Int {\n  g(b: 2, a: 1)\n}\n\n\
+        let source = "fn helper() -> Int {\n  fn g() -> Int {\n    1\n  }\n  g()\n}\n\n\
                       fn main() -> Int {\n  helper()\n}\n";
         let checked = checked(source);
         let whole = lower(&checked).expect_err("the package does not lower");
         let entry = lower_entry(&checked, "m", "main").expect_err("nor does the entry");
-        assert_eq!(
-            entry.what,
-            "a call to `g` whose arguments do not stand in declaration order"
-        );
+        assert_eq!(entry.what, "a function declared inside a function body");
         assert_eq!(entry.what, whole.what);
         assert_eq!(entry.span, whole.span);
     }

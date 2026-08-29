@@ -1183,8 +1183,18 @@ pub struct Unsupported {
 }
 
 impl fmt::Display for Unsupported {
+    /// "yet" stands before the construct rather than after it.
+    ///
+    /// It used to be appended, which reads well for a construct named by a
+    /// noun phrase — "the VM cannot run a task scope yet" — and falls over
+    /// for one named by a phrase ending in a clause, which several are:
+    /// "the VM cannot run `g` used as a value, whose parameter `n` has a
+    /// default yet" attaches the "yet" to the wrong verb. Moving it leaves
+    /// the sentence correct whatever [`Unsupported::what`] is, which is what
+    /// a template has to be, since what goes into it is written a construct
+    /// at a time.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "the VM cannot run {} yet", self.what)
+        write!(f, "the VM cannot yet run {}", self.what)
     }
 }
 

@@ -30,10 +30,6 @@ allow = ["console"]
 entry = "coll_vector.main"
 allow = ["console"]
 
-[run.fail_assign_let]
-entry = "fail_assign_let.main"
-allow = ["console"]
-
 [run.fail_database_connect_denied]
 entry = "fail_database_connect_denied.main"
 allow = ["database", "console"]
@@ -122,10 +118,6 @@ allow = ["console"]
 
 [run.fn_defaults]
 entry = "fn_defaults.main"
-allow = ["console"]
-
-[run.fn_labels]
-entry = "fn_labels.main"
 allow = ["console"]
 
 [run.fn_recursion]
@@ -274,10 +266,6 @@ allow = ["console"]
 
 [run.type_snapshot]
 entry = "type_snapshot.main"
-allow = ["console"]
-
-[run.type_struct]
-entry = "type_struct.main"
 allow = ["console"]
 
 [run.type_struct_copy]
