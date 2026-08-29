@@ -5590,26 +5590,6 @@ mod tests {
         );
     }
 
-    // ------------------------ where a program is refused before it runs
-
-    /// What the lowering said when it refused `source`.
-    ///
-    /// A program the lowering refuses never reaches the VM, which is ADR
-    /// 0019's no-silent-fallback rule from the other side: the run stops
-    /// before any side effect and says what stopped it.
-    fn not_lowered(checked: &Arc<Checked>) -> String {
-        match cove_ir::lower::lower(checked) {
-            Ok(_) => panic!("the program lowered, and was expected not to"),
-            Err(why) => why.what,
-        }
-    }
-
-    /// One interpreted run, on a stack the runtime sized.
-    fn only_interpreted(checked: &Arc<Checked>, sources: &Arc<SourceMap>) -> Outcome {
-        crate::on_cove_stack(|| interpreted(checked, sources, "m", None))
-            .expect("a thread to run Cove on")
-    }
-
     /// A value no `for` can walk fails in `interp::items_of`'s words on the
     /// VM, because they *are* its words: `IterItems` calls that function
     /// rather than restating what it decides.
@@ -5832,45 +5812,18 @@ mod tests {
         assert_eq!(interpreted.value(), lowered.value());
     }
 
-    /// Assigning to a `let` binding is refused by both backends: by the
-    /// interpreter when the write happens, and by the lowering before the VM
-    /// is handed anything.
-    ///
-    /// The interpreter's message is asserted here rather than only in
-    /// `interp`, because what the two say is the point: a backend that
-    /// performed this write would be more permissive than the oracle, and
-    /// the two refusals have to stay comparable for a reader to see that
-    /// they are the same rule.
-    #[test]
-    fn writing_a_let_binding_is_refused_by_both_backends() {
-        let (sources, checked) =
-            checked_module("export fn main() -> Int {\n  let x = 1\n  x = 2\n  x\n}\n");
-        assert_eq!(
-            only_interpreted(&checked, &sources).error().message,
-            "cannot assign to `x`, which is a read-only place"
-        );
-        assert_eq!(
-            not_lowered(&checked),
-            "assignment to `x`, which is a read-only place"
-        );
-    }
-
-    /// A field of a `let` binding is a read-only place too, and the write is
-    /// refused on both backends for the same reason.
-    #[test]
-    fn writing_a_field_of_a_let_binding_is_refused_by_both_backends() {
-        let (sources, checked) = checked_module(
-            "struct P {\n  x: Int\n}\n\nexport fn main() -> Int {\n  let p = P(x: 1)\n  p.x = 2\n  p.x\n}\n",
-        );
-        assert_eq!(
-            only_interpreted(&checked, &sources).error().message,
-            "cannot assign to `p.x`, which is a read-only place"
-        );
-        assert_eq!(
-            not_lowered(&checked),
-            "assignment to `p.x`, which is a read-only place"
-        );
-    }
+    // ------------------------ where a program is refused before it runs
+    //
+    // Assigning to a `let` binding, and to a field of one, used to be two
+    // tests here: the interpreter refused the write when it happened and the
+    // lowering refused the program before the VM was handed anything, and
+    // what the two said was the point. ADR 0021 made both a check-time
+    // error, so neither program reaches a backend at all and there is
+    // nothing here for the two to agree about. `cove-sema`'s
+    // `rejects_an_assignment_to_a_let_binding` and its neighbours are where
+    // the rule is pinned now, and the two helpers that drove one backend at a
+    // time — `not_lowered` and `only_interpreted` — went with them, because
+    // everything left in this file runs both.
 
     /// A `var` binding is still written, on both backends.
     ///
