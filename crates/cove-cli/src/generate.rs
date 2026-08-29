@@ -24,8 +24,8 @@ use cove_diag::SourceMap;
 use cove_sema::resolve::Program;
 
 use crate::{
-    execute_entry, load, lookup_entry, lookup_run, runtime_failure, Backend, CliError,
-    ExecuteError, RunFlags,
+    execute_entry, load, lookup_entry, lookup_run, runtime_failure, CliError, ExecuteError,
+    RunFlags,
 };
 
 /// The return type ADR 0010 requires of a generator's entry, so its output
@@ -40,7 +40,7 @@ const REQUIRED_RETURN_TYPE: &str = "Result<String, Error>";
 /// otherwise have no way to run at all. Every other budget stays
 /// `[run.<name>]`'s, per ADR 0010.
 pub(crate) fn cmd_generate(args: &[String]) -> Result<(), CliError> {
-    let (backend, rest) = parse_backend(args)?;
+    let (backend, rest) = crate::split_backend(args)?;
     let mut flags = RunFlags::none();
     flags.set_backend(backend);
     if rest.first().map(String::as_str) == Some("--check") {
@@ -53,35 +53,6 @@ pub(crate) fn cmd_generate(args: &[String]) -> Result<(), CliError> {
         ));
     };
     generate_one(None, name, &flags)
-}
-
-/// Splits `--backend <ast|vm>` out of `cove generate`'s arguments, leaving
-/// the rest in the order they were written.
-///
-/// It may appear anywhere, exactly as it may on `cove run`: one flag spelled
-/// two ways depending on which command it is passed to would be a flag with
-/// two meanings.
-fn parse_backend(args: &[String]) -> Result<(Backend, Vec<String>), CliError> {
-    let mut backend = Backend::default_for_a_run();
-    let mut rest = Vec::new();
-    let mut i = 0;
-    while i < args.len() {
-        if args[i] == "--backend" {
-            let value = args.get(i + 1).ok_or_else(|| {
-                CliError::Message("`--backend` needs a value: `ast` or `vm`".to_string())
-            })?;
-            backend = Backend::parse(value).ok_or_else(|| {
-                CliError::Message(format!(
-                    "`--backend` must be `ast` or `vm`, found `{value}`"
-                ))
-            })?;
-            i += 2;
-            continue;
-        }
-        rest.push(args[i].clone());
-        i += 1;
-    }
-    Ok((backend, rest))
 }
 
 /// Runs `[run.<name>]`'s entry and writes its returned source to the
