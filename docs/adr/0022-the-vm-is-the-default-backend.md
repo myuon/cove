@@ -271,12 +271,14 @@ The refusal is scoped by reachability, which softens all of the above by
 exactly as much as it should: `lower_entry` lowers what the entry reaches,
 so an unlowerable declaration nothing calls refuses nothing.
 
-**The corpus exercises one of them.** `tests/e2e/backend_unsupported` names
-a function declared inside a function body, and it is the only refusal in
-123 cases. So the honest shape of this break is two numbers that do not
-agree: the corpus says the flip costs one construct, and the code says it
-costs about fifteen. Neither is wrong. The corpus is what this project
-writes, and this project does not write those constructs.
+**The corpus exercises one of them.** Over 123 cases the lowering refuses
+exactly one construct, a function declared inside a function body, and the
+two cases it refuses — `tests/e2e/backend_unsupported` and its new companion
+`tests/e2e/backend_ast` — were both written to hold it. So the honest shape
+of this break is two numbers that do not agree: the corpus says the flip
+costs one construct, and the code says it costs about fifteen. Neither is
+wrong. The corpus is what this project writes, and this project does not
+write those constructs.
 
 ### The collector is new
 
