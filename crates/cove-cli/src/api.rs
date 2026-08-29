@@ -202,21 +202,46 @@ impl Decl {
         header_name(&self.header)
     }
 
+    /// The kind of declaration this is: `fn`, `struct`, `enum`, `trait`, or
+    /// `type`.
+    ///
+    /// A module's five declaration namespaces are checked for duplicates
+    /// independently (see `resolve`'s `fn_spans`, `struct_spans`, and so on),
+    /// so `export struct Widget` and `export fn Widget` may legally coexist.
+    /// Nothing may key a declaration by name alone without conflating them.
+    fn kind(&self) -> &str {
+        header_kind(&self.header)
+    }
+
     /// This declaration and every method under it.
     fn count(&self) -> usize {
         1 + self.methods.len()
     }
 }
 
-/// The name a header declares: `export async fn greet(name: String)` names
-/// `greet`, and `export opaque struct Widget<T>` names `Widget`.
-fn header_name(header: &str) -> &str {
+/// Splits a header into the keyword that names its kind and the text that
+/// follows it: `export async fn greet(name: String)` splits into `fn` and
+/// `greet(name: String)`, and `export opaque struct Widget<T>` splits into
+/// `struct` and `Widget<T>`.
+fn header_kind_and_tail(header: &str) -> (&str, &str) {
     let mut rest = header;
     for prefix in ["export ", "opaque ", "async "] {
         rest = rest.strip_prefix(prefix).unwrap_or(rest);
     }
-    let rest = rest.split_once(' ').map_or(rest, |(_, tail)| tail);
-    rest.split(['(', '<', ' ', '='])
+    rest.split_once(' ').unwrap_or((rest, ""))
+}
+
+/// The kind a header declares: `fn`, `struct`, `enum`, `trait`, or `type`.
+fn header_kind(header: &str) -> &str {
+    header_kind_and_tail(header).0
+}
+
+/// The name a header declares: `export async fn greet(name: String)` names
+/// `greet`, and `export opaque struct Widget<T>` names `Widget`.
+fn header_name(header: &str) -> &str {
+    header_kind_and_tail(header)
+        .1
+        .split(['(', '<', ' ', '='])
         .next()
         .unwrap_or_default()
         .trim()
@@ -675,16 +700,27 @@ struct Facts<'a> {
     conforms: BTreeSet<&'a str>,
 }
 
-/// Every declaration of `interface`, keyed by the path a reader names it by.
-fn flatten(interface: &Interface) -> BTreeMap<String, Facts<'_>> {
+/// Every declaration of `interface`, keyed by the path a reader names it by
+/// and the kind of declaration it is.
+///
+/// The kind has to be part of the key, not just the path: a module's five
+/// declaration namespaces (function, struct, enum, trait, alias) are checked
+/// for duplicate names independently, so `export struct Widget` and
+/// `export fn Widget` may coexist in the same module. Keying by path alone
+/// collapses them into one entry, and whichever sorts last silently hides
+/// the other from every comparison below — see issue #84.
+fn flatten(interface: &Interface) -> BTreeMap<(String, &str), Facts<'_>> {
     let mut flat = BTreeMap::new();
     for (module, decls) in &interface.modules {
         for decl in decls {
             let path = format!("{module}.{}", decl.name());
             for method in &decl.methods {
-                flat.insert(format!("{path}.{}", method.name()), facts(method));
+                flat.insert(
+                    (format!("{path}.{}", method.name()), method.kind()),
+                    facts(method),
+                );
             }
-            flat.insert(path, facts(decl));
+            flat.insert((path, decl.kind()), facts(decl));
         }
     }
     flat
@@ -733,8 +769,9 @@ pub(crate) fn diff(recorded: &Interface, current: &Interface) -> Vec<Change> {
     let new = flatten(current);
     let mut changes = Vec::new();
 
-    for (path, was) in &old {
-        let Some(now) = new.get(path) else {
+    for (key, was) in &old {
+        let path = &key.0;
+        let Some(now) = new.get(key) else {
             changes.push(Change::new(
                 Severity::Breaking,
                 path,
@@ -744,11 +781,11 @@ pub(crate) fn diff(recorded: &Interface, current: &Interface) -> Vec<Change> {
         };
         compare(path, was, now, &mut changes);
     }
-    for (path, now) in &new {
-        if !old.contains_key(path) {
+    for (key, now) in &new {
+        if !old.contains_key(key) {
             changes.push(Change::new(
                 Severity::Compatible,
-                path,
+                &key.0,
                 format!("new export `{}`", now.header),
             ));
         }
@@ -1255,6 +1292,133 @@ impl Token {
         assert_eq!(change.severity, Severity::Compatible);
         assert_eq!(change.path, "app.Token");
         assert!(change.detail[0].contains("no longer opaque"), "{change:?}");
+    }
+
+    /// A module whose export declares both a struct and a function under the
+    /// name `Widget`. `resolve` checks each of the five declaration
+    /// namespaces for duplicates independently, so this is legal source, not
+    /// a fixture that only an adversarial test would write.
+    const WIDGET_STRUCT_AND_FN: &str = "\
+/// A widget.
+export struct Widget {
+  id: Int
+}
+
+/// Builds a widget's id.
+export fn Widget(id: Int) -> Int {
+  id
+}
+";
+
+    /// Issue #84: `flatten` used to key a declaration by `module.name`
+    /// alone, so `export struct Widget` and `export fn Widget` collapsed to
+    /// one entry and whichever sorted last hid the other from every
+    /// comparison. Deleting the function then diffed as no change at all,
+    /// even though the interface hash moved.
+    #[test]
+    fn deleting_one_of_two_same_named_different_kind_exports_is_breaking() {
+        let before = TempDir::new("api-kind-collision-before");
+        let recorded = interface_of(&one_module(&before, WIDGET_STRUCT_AND_FN));
+        let after = TempDir::new("api-kind-collision-after");
+        let current = interface_of(&one_module(
+            &after,
+            "\
+/// A widget.
+export struct Widget {
+  id: Int
+}
+",
+        ));
+
+        assert_ne!(
+            recorded.hash(),
+            current.hash(),
+            "removing the function must move the interface hash"
+        );
+
+        let changes = diff(&recorded, &current);
+        let change = only(&changes);
+        assert_eq!(change.severity, Severity::Breaking);
+        assert_eq!(change.path, "app.Widget");
+        assert_eq!(
+            change.detail[0],
+            "removed export `export fn Widget(id: Int) -> Int`"
+        );
+    }
+
+    /// The other direction: deleting the struct leaves the function alone.
+    /// A name-only key would drop this the same way, just with the other
+    /// declaration surviving in the recorded map.
+    #[test]
+    fn deleting_the_other_of_two_same_named_different_kind_exports_is_breaking() {
+        let before = TempDir::new("api-kind-collision-reverse-before");
+        let recorded = interface_of(&one_module(&before, WIDGET_STRUCT_AND_FN));
+        let after = TempDir::new("api-kind-collision-reverse-after");
+        let current = interface_of(&one_module(
+            &after,
+            "\
+/// Builds a widget's id.
+export fn Widget(id: Int) -> Int {
+  id
+}
+",
+        ));
+
+        assert_ne!(recorded.hash(), current.hash());
+
+        let changes = diff(&recorded, &current);
+        let change = only(&changes);
+        assert_eq!(change.severity, Severity::Breaking);
+        assert_eq!(change.path, "app.Widget");
+        assert_eq!(change.detail[0], "removed export `export struct Widget`");
+    }
+
+    /// The pair unchanged: both declarations survive, so nothing does.
+    #[test]
+    fn two_same_named_different_kind_exports_left_alone_diff_clean() {
+        let dir = TempDir::new("api-kind-collision-unchanged");
+        let root = one_module(&dir, WIDGET_STRUCT_AND_FN);
+        let recorded = interface_of(&root);
+        let current = interface_of(&root);
+        assert_eq!(recorded.hash(), current.hash());
+        assert_eq!(diff(&recorded, &current), Vec::new());
+    }
+
+    /// The guarantee `cove api diff` exists to provide: whenever the
+    /// interface hash moves, `diff` must say something, never `no interface
+    /// change`. This is the invariant issue #84's bug violated.
+    #[test]
+    fn the_hash_and_the_diff_verdict_cannot_disagree() {
+        let cases: &[(&str, &str)] = &[
+            (GREETER, &GREETER.replace("greeting(", "greet(")),
+            (
+                WIDGET_STRUCT_AND_FN,
+                "\
+/// A widget.
+export struct Widget {
+  id: Int
+}
+",
+            ),
+            (
+                OPAQUE,
+                &OPAQUE.replace("export opaque struct", "export struct"),
+            ),
+        ];
+        for (i, (before, after)) in cases.iter().enumerate() {
+            let old_dir = TempDir::new(&format!("api-agree-before-{i}"));
+            let recorded = interface_of(&one_module(&old_dir, before));
+            let new_dir = TempDir::new(&format!("api-agree-after-{i}"));
+            let current = interface_of(&one_module(&new_dir, after));
+
+            let hash_moved = recorded.hash() != current.hash();
+            let changes = diff(&recorded, &current);
+            assert_eq!(
+                hash_moved,
+                !changes.is_empty(),
+                "case {i}: hash_moved={hash_moved} but changes={changes:?}"
+            );
+        }
     }
 
     #[test]
