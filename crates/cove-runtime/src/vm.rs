@@ -638,6 +638,12 @@ pub struct Vm<'a> {
     /// many reasons and this moves for one, which is what makes it the figure
     /// a change to the lowering is judged by.
     instructions: u64,
+    /// The host's `max_call_depth`, once a call has asked for it.
+    ///
+    /// `None` is "not asked yet"; `Some(None)` is "asked, and there is no
+    /// limit". [`Vm::host_call_depth_limit`] is where the distinction is
+    /// made and why the answer may be kept.
+    call_depth_limit: Option<Option<usize>>,
     /// This task's own cancellation flag, when this VM is running a spawned
     /// task's body rather than the entry.
     ///
@@ -724,6 +730,7 @@ impl<'a> Vm<'a> {
             heap: Heap::new(),
             fuel: 0,
             instructions: 0,
+            call_depth_limit: None,
             cancellation: None,
             task: ENTRY_TASK,
             scopes: Vec::new(),
@@ -2549,18 +2556,52 @@ impl<'a> Vm<'a> {
             .with_rule("Recursion depth is a runtime control, not a proof obligation."));
         }
         let depth = self.frames.len() + 1;
-        if let Some(Some(error)) =
-            self.hosts
-                .with_budget(|budget| match budget.limits().max_call_depth {
-                    Some(limit) if depth > limit => {
-                        Some(budget.to_runtime_error(Stopped::CallDepth))
-                    }
-                    _ => None,
-                })
-        {
-            return Err(error.at(span));
+        if let Some(limit) = self.host_call_depth_limit() {
+            if depth > limit {
+                if let Some(error) = self
+                    .hosts
+                    .with_budget(|budget| budget.to_runtime_error(Stopped::CallDepth))
+                {
+                    return Err(error.at(span));
+                }
+            }
         }
         self.safepoint(span)
+    }
+
+    /// The host's own `max_call_depth`, read once and remembered.
+    ///
+    /// A limit belongs to the [`crate::budget::Budget`] a run was given, and
+    /// a `Budget` is installed with `HostRegistry::set_budget` before the run
+    /// begins and cannot be replaced while it lasts: setting one needs
+    /// `&mut HostRegistry`, and a [`Vm`] holds the registry by shared
+    /// reference for as long as it exists. So the answer is fixed for the
+    /// whole run, and asking for it is what [`Vm::enter`] did through the
+    /// budget's mutex at every call.
+    ///
+    /// That cost `benches/call` 16.7% and `benches/method` 9.4% — measured by
+    /// removing the question entirely, which is the ceiling this recovers —
+    /// for a number that could not have changed since the last call asked.
+    /// Issue #123 is where the whole of the safepoint's locking is measured;
+    /// this is the part of it that was buying nothing.
+    ///
+    /// The lock is still taken the first time, rather than in [`Vm::new`],
+    /// because a `Vm` is public and nothing about its construction promises
+    /// that a budget has been installed yet. `None` from `with_budget` means
+    /// no budget at all, which is what an embedder that installed none has,
+    /// and what it has always meant here: no limit.
+    fn host_call_depth_limit(&mut self) -> Option<usize> {
+        match self.call_depth_limit {
+            Some(limit) => limit,
+            None => {
+                let limit = self
+                    .hosts
+                    .with_budget(|budget| budget.limits().max_call_depth)
+                    .flatten();
+                self.call_depth_limit = Some(limit);
+                limit
+            }
+        }
     }
 
     /// Pops the running frame and hands `answer` back to whoever called it.

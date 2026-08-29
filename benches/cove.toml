@@ -39,3 +39,45 @@ allow = []
 [run.chars]
 entry = "chars.main"
 allow = []
+
+# The calling-convention matrix. Issue #123 asks what each boundary of the
+# typed three-stack convention costs, so each of these is `arith`'s loop with
+# exactly one route from the turn's `i` to the arithmetic that consumes it.
+# `cove-bench --matrix` runs them; the ordinary suite does not, because they
+# answer a question about one backend rather than compare two.
+
+[run.conv_local]
+entry = "convention.scalarLocal"
+allow = []
+
+[run.conv_var]
+entry = "convention.varRooted"
+allow = []
+
+[run.conv_static]
+entry = "convention.staticCall"
+allow = []
+
+[run.conv_fnvalue]
+entry = "convention.fnValue"
+allow = []
+
+[run.conv_closure]
+entry = "convention.closureCall"
+allow = []
+
+[run.conv_capture]
+entry = "convention.capturedScalar"
+allow = []
+
+[run.conv_generic]
+entry = "convention.genericCall"
+allow = []
+
+[run.conv_fresh]
+entry = "convention.freshClosure"
+allow = []
+
+[run.conv_host]
+entry = "convention.hostReentry"
+allow = ["clock"]

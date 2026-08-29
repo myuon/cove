@@ -1,0 +1,18 @@
+--- a/crates/cove-runtime/src/vm.rs
++++ b/crates/cove-runtime/src/vm.rs
+@@ -2929,14 +2929,7 @@
+ 
+     fn safepoint(&mut self, span: Span) -> Result<(), RuntimeError> {
+         stopped_here(self.cancellation.as_ref(), &self.stops, span)?;
+-        let fuel = std::mem::take(&mut self.fuel);
+-        if let Some(Err(error)) = self.hosts.with_budget(|budget| {
+-            budget
+-                .safepoint(fuel)
+-                .map_err(|stopped| budget.to_runtime_error(stopped))
+-        }) {
+-            return Err(error.at(span));
+-        }
++        let _fuel = std::mem::take(&mut self.fuel);
+         self.collect_if_due();
+         Ok(())
+     }

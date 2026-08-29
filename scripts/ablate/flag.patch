@@ -1,0 +1,30 @@
+--- a/crates/cove-runtime/src/vm.rs
++++ b/crates/cove-runtime/src/vm.rs
+@@ -638,6 +638,8 @@
+     /// many reasons and this moves for one, which is what makes it the figure
+     /// a change to the lowering is judged by.
+     instructions: u64,
++    /// Whether to collect the count above.
++    count_instructions: bool,
+     /// The host's `max_call_depth`, once a call has asked for it.
+     ///
+     /// `None` is "not asked yet"; `Some(None)` is "asked, and there is no
+@@ -730,6 +732,7 @@
+             heap: Heap::new(),
+             fuel: 0,
+             instructions: 0,
++            count_instructions: std::env::var_os("COVE_NO_COUNT").is_none(),
+             call_depth_limit: None,
+             cancellation: None,
+             task: ENTRY_TASK,
+@@ -2849,7 +2852,9 @@
+     #[inline]
+     fn charge(&mut self, block: u32, span: impl FnOnce() -> Span) -> Result<(), RuntimeError> {
+         let count = u64::from(block);
+-        self.instructions += count;
++        if self.count_instructions {
++            self.instructions += count;
++        }
+         self.fuel += count * INSTRUCTION_FUEL;
+         if self.fuel >= SAFEPOINT_INTERVAL {
+             self.safepoint(span())?;

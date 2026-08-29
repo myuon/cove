@@ -1,0 +1,28 @@
+--- a/crates/cove-runtime/src/vm.rs
++++ b/crates/cove-runtime/src/vm.rs
+@@ -1560,7 +1560,6 @@
+                     }
+                 }
+                 Inst::Return => {
+-                    self.safepoint(running.span_at(pc))?;
+                     let value = self.pop();
+                     match self.leave(Answered::Value(value), floor) {
+                         Answer::Done(value) => return Ok(value),
+@@ -1583,7 +1582,6 @@
+                     // because a return is a return however its answer
+                     // travels: only which stack the answer is taken off and
+                     // put back on differs.
+-                    self.safepoint(running.span_at(pc))?;
+                     let scalar = self.pop_scalar();
+                     match self.leave(Answered::Scalar(scalar), floor) {
+                         Answer::Done(value) => return Ok(value),
+@@ -2566,7 +2564,8 @@
+                 }
+             }
+         }
+-        self.safepoint(span)
++        let _ = span;
++        Ok(())
+     }
+ 
+     /// The host's own `max_call_depth`, read once and remembered.

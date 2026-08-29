@@ -1,0 +1,16 @@
+--- a/crates/cove-runtime/src/vm.rs
++++ b/crates/cove-runtime/src/vm.rs
+@@ -2848,12 +2848,7 @@
+     /// that a taken jump should not pay per turn.
+     #[inline]
+     fn charge(&mut self, block: u32, span: impl FnOnce() -> Span) -> Result<(), RuntimeError> {
+-        let count = u64::from(block);
+-        self.instructions += count;
+-        self.fuel += count * INSTRUCTION_FUEL;
+-        if self.fuel >= SAFEPOINT_INTERVAL {
+-            self.safepoint(span())?;
+-        }
++        let _ = (block, span);
+         Ok(())
+     }
+ 

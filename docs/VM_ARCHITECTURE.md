@@ -1115,14 +1115,24 @@ on the same machine:
 
 | bench       | AST       | VM       | ratio |
 | ----------- | --------: | -------: | ----: |
-| `pure`      |   16.8 ms |   2.8 ms | **6.00×** |
-| `call`      | 1570.4 ms | 279.4 ms | 5.62× |
-| `arith`     |  439.1 ms |  84.3 ms | 5.21× |
-| `method`    | 2841.5 ms | 912.9 ms | 3.11× |
-| `chars`     | 1871.6 ms | 825.6 ms | 2.27× |
-| `arrayget`  | 1421.9 ms | 671.7 ms | 2.12× |
-| `field`     |  860.0 ms | 443.4 ms | 1.94× |
-| `hostheavy` |    5.3 ms |   4.1 ms | 1.30× |
+| `pure`      |   15.2 ms |   2.3 ms | **6.62×** |
+| `call`      | 1479.5 ms | 254.5 ms | 5.81× |
+| `arith`     |  429.5 ms |  86.5 ms | 4.97× |
+| `method`    | 2792.2 ms | 815.7 ms | 3.42× |
+| `chars`     | 1744.9 ms | 819.8 ms | 2.13× |
+| `arrayget`  | 1355.9 ms | 668.7 ms | 2.03× |
+| `field`     |  846.2 ms | 433.1 ms | 1.95× |
+| `hostheavy` |    4.8 ms |   3.9 ms | 1.25× |
+
+That is a re-measurement, and how much of it to believe is bounded by its own
+control. The change under "One acquisition of three was buying nothing"
+below moved `pure`, `call` and `method`, and the previous reading of this
+table was 2.8, 279.4 and 912.9 ms against 2.3, 254.5 and 815.7 here. But the
+AST column moved too, by −3.0% to −9.5%, on code nothing has touched — so
+somewhere between three and nine points of every VM figure here belongs to
+the session rather than to the change, and the attribution that does not have
+that problem is the before-and-after in that section, measured through one
+binary in one sitting.
 
 This table held worse numbers for a while, and the difference was real
 rather than drift. When closures, dynamic dispatch and tasks had been lowered
@@ -1662,6 +1672,452 @@ its time, and `method` 9.6% and 3%. It is written here rather than left in the
 list because the list is what was named from a profile, and this is what came
 of one of them.
 
+## What the measurement itself costs
+
+[Issue #123](https://github.com/myuon/cove/issues/123) asks for one workload
+under five configurations — production; instruction statistics off with fuel
+unchanged; both off, for attribution only; a sampling profiler attached; and
+trace off against trace on — and for wall-time distributions rather than
+single runs. Two of those five did not exist when it asked, and the reason is
+the thing being measured. `Vm::charge` adds a block's length to `self.fuel`
+and to `self.instructions` in the same two lines, which is most of why
+charging by the block is cheap, so there was no configuration in which one of
+them was off and the other was on.
+
+### The mechanism that turns a thing off can cost more than the thing
+
+Two mechanisms could build that configuration, and the choice between them is
+not a detail of the measurement — it is the first result.
+
+A compile-time removal costs nothing at run time and changes the binary, which
+matters here more than it would elsewhere: this document has established twice
+that a change altering nothing a program executes can still move `arith` by
+several percent, because the dispatch body's footprint and its branch-target
+alignment are costs every program pays. A runtime flag leaves the binary alone
+and puts a branch on the path, and the branch is the same shape as the
+increment it guards.
+
+Both were built and both were measured. The flag is a `bool` on the `Vm`, read
+from the environment once at construction so that one binary gives both
+halves, and tested in `Vm::charge` around the increment. Fifteen runs of
+`cove run <bench> --backend vm --stats`, medians of `execute=`, interleaved
+over three rounds:
+
+| build                          | `arith` | `field` |
+| ------------------------------ | ------: | ------: |
+| production                     | 84.7 ms | 447.9 ms |
+| the flag, counting             | 86.6 ms | 448.4 ms |
+| the flag, not counting         | 88.7 ms | 449.3 ms |
+| the counter removed at compile time | 84.1 ms | 441.7 ms |
+
+**The flag recovers nothing, and on `arith` it costs 2.4% to have the counter
+switched off.** That last figure reproduced on all three rounds and it is
+within one binary, so it is not layout; what it is has not been established
+here, and it is reported because it was measured rather than because it is
+understood. What the table does establish is the shape of the answer: the
+branch costs what the increment costs, so a flag would put the whole of the
+mechanism on every production run in order to save a figure that is worth
+between 0.7% and 1.9% on the benchmark most sensitive to it.
+
+**So no flag is shipped**, and configuration 2 is a build made to be measured
+and thrown away. The patch that makes it, and eight others, are
+`scripts/ablate/*.patch`, with `scripts/ablate/run.sh` to apply each one,
+build it, and put the binary somewhere a measurement can name. They are
+patches rather than a cargo feature for the reason above: a feature would be
+carried by the production binary, and this is a measurement rather than a
+capability. They are expected to rot, and `git apply` refuses loudly when they
+do, which is the wanted behaviour — an ablation that applied to code it was
+not written for would measure something nobody named.
+
+### What each part of the bookkeeping costs
+
+Every row below was removed *alone* from the shipped build, and the shipped
+build was measured on both sides of the study: it read 84.6 ms and 84.8 ms on
+`arith`, 448.4 ms and 447.4 ms on `field`, and 232.2 ms and 232.0 ms on
+`call`, so the machine did not move under it. Medians of fifteen, through the
+`cove` binary. A positive number is what the removal saved.
+
+| removed                                                 | `arith` | `field` | `call` |
+| ------------------------------------------------------- | ------: | ------: | -----: |
+| the block instruction counter                            |   +0.7% |   +1.4% |  +0.2% |
+| fuel accumulation and its interval compare               |   +4.7% |   +2.8% |  −2.1% |
+| both of those — configuration 3                          |   +4.6% |   +4.2% |  −2.6% |
+| the back edge's whole check                              |  +11.4% |   +7.0% |  +1.4% |
+| the safepoint at every call and every return             |   −0.9% |   +0.9% | +38.7% |
+| the budget's lock and accounting inside every safepoint  |   +7.1% |   +5.8% | +40.3% |
+| the two stop flags a safepoint reads                     |   −9.1% |   −0.5% |  +2.5% |
+| the collection a safepoint asks about                    |   −8.5% |   −1.7% |  −6.0% |
+
+Four readings, and the fourth is the one worth the section.
+
+**The instruction counter is nearly free and its three measurements do not
+agree.** It is 1.9% on `arith` in issue #126's ablation, 2.9% in a round of
+this study taken before the change below landed, and 0.7% here; on `field`,
+which this document has established as the benchmark to trust for a small
+effect, it is 1.4%. The honest statement is that it is worth something under
+two percent and that no single measurement of it is separable from code
+layout. It is not what makes `--stats` cost anything.
+
+**Two removals made things slower, and both are pure deletions.** Removing the
+stop-flag read from `Vm::safepoint` costs `arith` 9.1%, and removing the
+collection question costs it 8.5% and `call` 6.0%. Neither can be a real cost
+of the code that was deleted. This is the same layout sensitivity the
+dispatch-loop study found and the same size, and it is kept here rather than
+tidied away because a reader who sees only the positive rows will believe the
+study is more precise than it is. What follows from it is that `stopped_here`
+and `Heap::should_collect` are free within anything measurable here, which is
+the useful half of a result that looks like nonsense.
+
+**Configuration 3 is not the floor and does not sum.** Removing the charge
+entirely also stops the back edge from ever firing, because what a back edge
+reads is the fuel the charge accumulates — so the third row should be at least
+the fourth and it is less than half of it. `arith` is superadditive in the
+other direction too, which this document has recorded before. No subset of
+these rows adds up to another one, and the table should be read as eight
+separate statements rather than as a decomposition.
+
+**What dominates is none of the above.** It is the mutex a safepoint takes to
+reach the run's `Budget`, and it does not show on `arith` because `arith`'s
+loop calls nothing. On `benches/call`, which calls one function per turn, the
+whole of the budget's lock and accounting is 40.3% of the run. The profile
+says the same thing in different words — `samply` at 5 kHz, self time, on the
+symbol-bearing build:
+
+```text
+benches/arith                             benches/call
+ 74.66%  Vm::execute                       45.99%  Vm::execute
+  7.53%  HostRegistry::with_budget         16.02%  HostRegistry::with_budget
+  4.79%  pthread_mutex_lock                10.34%  pthread_mutex_lock
+  4.11%  pthread_mutex_unlock              10.08%  pthread_mutex_unlock
+  2.05%  interp::stopped_here               5.43%  Vm::leave
+```
+
+A `Budget` lives behind `Mutex<Option<Budget>>` on the `HostRegistry`, because
+every task of a run shares one and a task runs on a thread of its own. A call
+is an unconditional safepoint and so is a return, so a loop that calls one
+function pays for two acquisitions a turn, and the two of them together cost
+more than the dispatch of the whole loop body.
+
+### One acquisition of three was buying nothing, and is gone
+
+`Vm::enter` took the lock twice. Once to read `Limits::max_call_depth`, and
+once again inside the safepoint that follows. The first of the two is what
+this change removes, and what makes it removable is that the answer cannot
+have changed: a `Budget` is installed with `HostRegistry::set_budget`, which
+needs `&mut HostRegistry`, and a `Vm` holds the registry by shared reference
+for as long as it exists — so no budget can be installed or replaced while a
+run is in progress, and the limit a call reads is the limit the previous call
+read. `Vm::host_call_depth_limit` asks once, through the lock, and answers
+from a field afterwards. It asks on the first call rather than in `Vm::new`
+because `Vm` is public and nothing about constructing one promises that a
+budget has been installed yet.
+
+Nothing else moves. The order the three checks are made in is the order
+`Interpreter::invoke` makes them and is unchanged, the lock is still taken to
+build the error when the limit is exceeded, and a `Vm` with no budget behind
+its registry still has no limit, which is what `with_budget` answering `None`
+has always meant.
+
+| bench    | before   | after    |          |
+| -------- | -------: | -------: | -------- |
+| `call`   | 279.0 ms | 232.6 ms | **16.6% faster** |
+| `method` | 911.8 ms | 822.9 ms | 9.8% faster |
+| `pure`   |  2.82 ms |  2.33 ms | 17.2% faster |
+| `arith`  |  88.4 ms |  85.2 ms | 3.7% faster |
+| `field`  | 442.2 ms | 445.7 ms | 0.8% slower |
+
+Medians of fifteen, with the parent measured on both sides. The last two rows
+are the control and should be read as one: neither loop calls a Cove function,
+so neither can respond to this, and both are inside the band `arith` is known
+to move in for layout alone. An ablation that removed the read entirely,
+rather than remembering it, measured 16.7% and 9.4% on the first two — so the
+change recovers the whole of what was there to recover, which is what says
+nothing was left behind.
+
+The interpreter does the same thing at the same point and was not changed.
+Nothing here measures the oracle, and a change to it would have to be measured
+before it could be claimed; the site is `Interpreter::invoke`'s own
+`max_call_depth` read, for whoever asks the question next.
+
+What is left on the call path is two acquisitions a turn, one at the call and
+one at the return, and they are still the largest single cost `benches/call`
+has. That is a target rather than a finding, and "The cliffs" below says what
+it would take.
+
+### The profiler, the trace, and `--stats` itself
+
+`CARGO_PROFILE_RELEASE_DEBUG=1` is a configuration change and it is named
+here because it is one, but it is not a measurable one: the symbol-bearing
+build read 86.1 ms against 85.4 ms on `arith`, 440.0 ms against 444.1 ms on
+`field`, and 231.8 ms against 233.1 ms on `call` — under a percent in both
+directions and not separable from layout. So a profiled run and a production
+run are the same program, which is what makes the profiles above readable
+beside the times.
+
+Attaching `samply` is a different matter, and it has to be read in the right
+units. The section the profiler is watching gets 6.3% slower at its default
+1 kHz and 6.8% at 10 kHz, which is small; the *process* goes from 93.9 ms to
+1,359 ms, which is fourteen times longer and is almost entirely samply's own
+setup and symbolication rather than anything the program did. A reader who
+times the wrapper will conclude the profiler costs 1,265 ms per run and will
+be wrong by two orders of magnitude.
+
+| configuration        | `arith`, `execute=` |
+| -------------------- | ------------------: |
+| no profiler          |             86.0 ms |
+| `samply -r 1000`     |             91.4 ms |
+| `samply -r 10000`    |             91.8 ms |
+
+The trace is the configuration with the largest spread between two programs,
+and the reason is that **the VM has no trace-disabled branch in its dispatch
+loop at all**. Instructions are not traced — ADR 0019 does not propose an
+instruction-level trace and this backend does not record one — so what a trace
+costs is paid per Host call and nowhere else. Process wall time, medians of
+fifteen:
+
+| configuration                | `arith` | `hostheavy` |
+| ---------------------------- | ------: | ----------: |
+| neither `--stats` nor a trace | 93.1 ms |     14.2 ms |
+| `--stats`                     | 93.3 ms |     16.5 ms |
+| `--stats --trace`             | 93.4 ms |     52.8 ms |
+
+That has a consequence for this whole document, and it is worth stating
+plainly. **Every `execute=` figure recorded anywhere above comes from a run
+with `--stats`, and `--stats` is not the production configuration.** A run
+that asks for neither a trace nor statistics installs a `NullSink` and the
+registry then knows that nothing will read a description of a call's values;
+`--stats` installs a composite sink instead, and describing every Host call's
+arguments and result for a sink that discards them costs `hostheavy` 16.8%.
+On the benchmarks the tables above are made of it costs nothing measurable,
+because `arith`, `field`, `call`, `method`, `pure`, `chars` and `arrayget`
+make no Host call between them. `hostheavy` is the one benchmark whose
+`--stats` time should not be read as its production time, and the figure that
+should be is the 14.2 ms above.
+
+## The calling-convention matrix
+
+Issue #123's second half asks what the typed three-stack convention costs at
+each of its boundaries: a settled scalar local, the same local rooted for a
+`var` argument, a static declared call, a declared function used as a value, a
+closure call, a captured scalar, a scalar crossing to generic `Value`, and a
+Host callback. `benches/convention/main.cove` is those eight, and
+`cove-bench --matrix` runs them.
+
+### What is held constant, and how that was checked
+
+Every row is `benches/arith`'s loop: two million turns, `% 7`, the same
+285,715, which every row asserts and which is the check that they did the same
+arithmetic. What differs between two rows is one thing — how the turn's `i`
+reaches the `%` that consumes it — and the rows are written out in full beside
+each other rather than parameterized, so the difference is visible by reading
+them.
+
+What is *not* held constant is the instruction count, and it must not be: a
+call is more instructions than no call, and a boundary is an instruction. So
+the count is not a control on the matrix. It is the decomposition of it, and
+`--matrix` prints it beside each row's time for that reason. A row that cost
+more without running more instructions, or that ran more instructions than its
+route explains, is the row to look at.
+
+There are nine rows for eight questions. `conv_fresh` is a control rather than
+one of the eight: `conv_host`'s callback has to be written at its call site,
+because it reads the turn's `i` and a lambda captures a snapshot, so that row
+builds a closure every turn as well as crossing the Host boundary.
+`conv_fresh` is everything `conv_host` does except leave the VM.
+
+### The matrix
+
+`cove-bench --matrix --iterations 9`, VM backend, on the machine and build the
+tables above were measured on. `ns/turn` is the median divided by the two
+million turns.
+
+| row            |   median |    min |    max | vs base | instructions | per turn | ns/turn |
+| -------------- | -------: | -----: | -----: | ------: | -----------: | -------: | ------: |
+| `conv_local`   |  93.7 ms |  93.1  |  94.3  |   1.00× |   35,142,879 |     17.6 |    46.8 |
+| `conv_var`     | 121.3 ms | 120.4  | 123.1  |   1.30× |   39,142,890 |     19.6 |    60.7 |
+| `conv_static`  | 237.3 ms | 232.8  | 244.1  |   2.53× |   37,142,877 |     18.6 |   118.6 |
+| `conv_generic` | 279.9 ms | 270.5  | 281.9  |   2.99× |   41,142,877 |     20.6 |   140.0 |
+| `conv_closure` | 312.6 ms | 307.0  | 317.7  |   3.34× |   43,142,879 |     21.6 |   156.3 |
+| `conv_fnvalue` | 313.6 ms | 305.4  | 316.0  |   3.35× |   43,142,879 |     21.6 |   156.8 |
+| `conv_capture` | 362.7 ms | 357.7  | 372.2  |   3.87× |   53,142,883 |     26.6 |   181.4 |
+| `conv_fresh`   | 799.3 ms | 784.3  | 804.7  |   8.53× |   47,142,877 |     23.6 |   399.6 |
+| `conv_host`    | 2553  ms | 2508   | 2562   |  27.25× |   51,142,877 |     25.6 |  1276.6 |
+
+Ordered by cost rather than by the order the issue names them, because what
+the table is for is the distance between two neighbours.
+
+### What each row runs, rather than what it costs
+
+The counts below come from a scratch build and their wall times must not be
+read beside them: the instrument keeps a histogram keyed by the instruction's
+discriminant and updates four high-water marks on every dispatch, which makes
+the same programs six times slower. `scripts/ablate/instrument.patch` is that
+build, and issue #123 is explicit that the two must not be mixed. Everything
+per turn, over two million turns; the allocations are the process's own,
+counted by a `GlobalAlloc` wrapper the same patch installs, and are the run's
+alone rather than the process's.
+
+| row            | `scalar-to-value` | `value-to-scalar` | allocations | bytes | peak value / scalar / place stack | peak frames |
+| -------------- | ----------------: | ----------------: | ----------: | ----: | --------------------------------: | ----------: |
+| `conv_local`   |                 0 |                 0 |           0 |     0 |                         2 / 5 / 0 |           1 |
+| `conv_var`     |                 1 |                 1 |           0 |     0 |                         3 / 4 / 2 |           2 |
+| `conv_static`  |                 0 |                 0 |           0 |     0 |                         2 / 4 / 0 |           2 |
+| `conv_generic` |                 1 |                 1 |           0 |     0 |                         2 / 4 / 0 |           2 |
+| `conv_closure` |                 1 |                 1 |           0 |     0 |                         3 / 4 / 0 |           2 |
+| `conv_fnvalue` |                 1 |                 1 |           0 |     0 |                         3 / 4 / 0 |           2 |
+| `conv_capture` |                 2 |                 3 |           0 |     0 |                         4 / 5 / 0 |           2 |
+| `conv_fresh`   |                 1 |                 1 |           4 |   208 |                         3 / 4 / 0 |           2 |
+| `conv_host`    |                 1 |                 1 |          14 |   469 |                         3 / 4 / 0 |           2 |
+
+Two of the five things #123 asked to have recorded turn out to be non-answers,
+and both are worth recording as such.
+
+**Nothing but the last two rows allocates at all.** Not one allocation in two
+million turns for the seven rows above them, over the whole run and not per
+turn. A boundary instruction converts between an `i64` and a `Value::Int`,
+which owns nothing, so crossing costs instructions and never the heap. The
+allocation question the matrix was expected to answer is answered by the two
+rows that build a closure, and by nothing else.
+
+**Nothing grows.** The value stack never exceeds four slots, the scalar stack
+five, the place stack two, and the frame stack two, on any row. There is no
+frame allocation to measure because a frame is five words pushed onto a `Vec`
+that reached its size in the first turn, and there is no stack growth to
+measure because a loop that calls one function of fixed arity has a fixed high
+water mark. "Frame and stack growth" is a real question about a recursive
+program and is not a question about any of these.
+
+**Clone and drop activity is not separately instrumented and was read from the
+profiles instead.** A counter on `Value::clone` would mean hand-writing a
+twenty-two-variant `Clone`, and what it would count is dominated by clones
+that own nothing and cost a move. What the profiles say is that
+`drop_in_place<Value>` and `Value::clone` together are 0.0% of `conv_local`,
+1.1% of `conv_static`, 3.2% of `conv_var`, and 10.5% of `conv_capture` —
+which tracks the `value-to-scalar` column and not the wall-time column, and
+is the reason the next section separates the two.
+
+## The cliffs
+
+A cliff here is a row that costs disproportionately more than its neighbour
+for a reason about representation rather than about work. Four of the eight
+gaps qualify, and the largest of them is not about representation at all,
+which is the result this whole exercise turns on.
+
+**A call costs 2.53× a loop turn, for one more instruction, and the reason is
+the budget's lock.** `conv_static` runs 18.6 instructions a turn against
+`conv_local`'s 17.6 and takes 71.8 ns longer. Nothing about representation
+changed between the two rows: the argument is a scalar slot, the answer comes
+back on the scalar stack, and the count says so by not moving. What happens is
+two safepoints, and each is an acquisition of the mutex the run's `Budget`
+lives behind. The ablation above puts 40.3% of `benches/call` there and the
+profile puts 36% there, and one of the three acquisitions has since been
+removed, which is where `call`'s 16.6% came from.
+
+This is the largest cliff in the matrix that anything could be done about, and
+what it would take is written down rather than done. `Budget::safepoint`
+needs, per safepoint, to add to `fuel_spent`, to read the run's cancellation,
+to compare against a fuel limit, and — every `DEADLINE_CHECK_INTERVAL`th time,
+or every time when no fuel limit is set — to read the clock. Of those, the
+cancellation is already an atomic flag a `Vm` could hold a clone of, `limits`
+and `started_at` are immutable for the run, and `fuel_spent` and
+`safepoints_since_deadline_check` are counters that could be `AtomicU64`. So
+the lock is not protecting anything that needs a lock; it is protecting a
+struct that happens to be `&mut`. Making `Budget::safepoint` take `&self` over
+atomics would remove the acquisition without changing the schedule, which is
+the property that matters — the schedule is what ADR 0024 and
+`crates/cove-runtime/tests/responsiveness.rs` fix, and a change that moved it
+would be a different proposal needing a different ADR. The ceiling is the
+ablation's 40.3% on `call` and 5.8% on `field`. **This belongs to
+[#116](https://github.com/myuon/cove/issues/116)**, whose calling convention
+is required to cover "fuel, cancellation, trace" and which is where a call's
+per-call cost is decided.
+
+**A local rooted for a `var` argument costs 1.30×, and the whole of it is
+representation.** `conv_var` is `conv_local` with one line added *outside* the
+loop — `root(var v)`, once, after it has finished — and the loop body is
+identical text. It runs two more instructions a turn and takes 13.9 ns longer,
+and the two extra instructions are a `scalar-to-value` and a `value-to-scalar`
+per turn: the binding is on the value stack for the whole body, because a
+place cannot address the scalar stack, so every read and write of it crosses.
+The profile shows `drop_in_place<Value>` and `Value::clone` appearing at 3.2%
+where `conv_local` has neither.
+
+The lowering's over-approximation is not the cause and narrowing it would not
+help. It collects the *names* used as the root of a `var` argument before it
+emits anything, so `root(var v)` written anywhere in a body demotes every `v`
+the body declares; but here there is one `v` and it really is the one that is
+rooted. What would fix this is a place that can name a scalar slot, which is a
+change to what a place is. **This belongs to
+[#116](https://github.com/myuon/cove/issues/116)**, under the calling
+convention and the typed frame layout, and the size of the prize is the 30% in
+this row.
+
+**Reaching a function through a value costs 1.32× reaching it directly, and a
+lambda costs nothing over a declaration.** `conv_fnvalue` and `conv_closure`
+are 313.6 ms and 312.6 ms, which is the same number: one is
+`let f: fn(Int) -> Int = identity` and the other is
+`let f: fn(Int) -> Int = fn(n) { n }`, they lower to the same 21.6
+instructions a turn, and they run in the same time. That is a negative result
+and it is a good one — it says the second specialisation a declaration gets
+when it is reached through a value is not costing anything a lambda does not
+also pay.
+
+What the 1.32× over `conv_static` is, is the general convention: nothing at a
+`call-value` knows which function it will enter, so the argument travels on the
+value stack and the answer comes back on it, which is one `scalar-to-value`
+and one `value-to-scalar` a turn plus the indirection. `conv_generic` isolates
+the first part of that from the second. It is a *static* call to
+`fn generic<T>(value: T) -> T`, so it has the same two boundary instructions
+and none of the indirection, and it costs 140.0 ns a turn against
+`conv_static`'s 118.6 and `conv_closure`'s 156.3. **So two boundary crossings
+are 21.4 ns a turn and the indirection at a `call-value` is another 16.3.**
+Neither is a cliff. They are what the convention costs where it does not know
+the callee, which is the case it exists for, and they are smaller than the
+lock at the same call.
+
+**A captured scalar costs 1.16× the closure that reads no capture, and it is
+the largest thing in the matrix that a typed capture area would fix.**
+`conv_capture` adds one `load-capture` and the addition that consumes it, and
+runs five boundary instructions a turn against `conv_closure`'s two: two
+`scalar-to-value` and three `value-to-scalar`, because the parameter, the
+capture and the answer all cross. `drop_in_place<Value>` and `Value::clone`
+are 10.5% of the run. A closure's captures are value slots by construction —
+the call copies them out of the closure into the frame's value window — so a
+captured `Int` has no scalar representation available to it at all. **This
+belongs to [#116](https://github.com/myuon/cove/issues/116)** as well, beside
+the typed frame layout: a capture area numbered like the two stacks it sits
+between would remove the crossing, and the prize is the 16%.
+
+**A Host callback costs 27×, and two thirds of it is allocation.** This is the
+cliff by an order of magnitude and it is the only row in the matrix that
+allocates: fourteen allocations and 469 bytes a turn. `conv_fresh` splits it.
+Building a closure per turn and calling it in the VM is four allocations and
+208 bytes, and costs 399.6 ns a turn against `conv_closure`'s 156.3 — so a
+`Value::Closure` is four allocations, and 243 ns a turn is what building and
+dropping one costs. The remaining 877 ns and ten allocations a turn are the
+Host boundary itself: the argument vector `Vm::take` drains for the call, the
+`Result` the operation answers with, the reentry that enters `Vm::execute`
+again to run the body, and the clock the boundary reads on every call. The
+profile agrees about where it is rather than about what it is —
+`nanov2_malloc_type` and `_nanov2_free` are 32.8% of the row between them,
+`Vm::execute` is 8.6%, `HostRegistry::call_with` 4.5%, the two clock reads
+6.7%, and `Vec::from_iter` 3.0%.
+
+**This belongs to [#109](https://github.com/myuon/cove/issues/109)** and it is
+the same two allocation sites that document already names as the next
+measurement: the argument vector allocated per builtin and Host call, and the
+enum payload that makes a two-word `Ok(x)` cost a `Box` and a `Vec`. This row
+is the third witness for both, and the first one that puts a number on what
+they cost *together* on a program shaped to pay them. It also adds a site the
+earlier list did not have, which is the closure value itself at four
+allocations; that one is #109's too, since what it is is a representation.
+
+Nothing here is fixed, and one thing is worth saying about why. Each of the
+four is a change to what a slot, a capture, a closure or a payload *is*, and
+this document's own history says what happens when those are changed one at a
+time against their immediate parent. #116 and #109 are where they are decided
+together, and both now have a measured ceiling to decide against.
+
 ## What is settled and what is open
 
 **Settled by measurement.** Typed scalar slots, the calling convention,
@@ -1670,6 +2126,17 @@ fused typed field read, and `Value` at 24 bytes. Every
 one of those was taken because a number said to, and two of them — the fused
 field read and the 24-byte `Value` — were named as open in an earlier section
 of this document before they were.
+
+Three more since, all from issue #123. That the instrumentation the dispatch
+path carries is nearly free and that a switch to turn it off would not be:
+the counter is worth under two percent on the benchmark most sensitive to it,
+and a runtime flag around it recovers none of that, because the branch costs
+what the increment costs. That the largest cost on a call path is not the
+frame, the arguments or the representation but the mutex the run's `Budget`
+lives behind — 40.3% of `benches/call`, of which one acquisition in three has
+been removed for 16.6%. And that a boundary instruction is cheap: two
+crossings are 21.4 ns a turn and allocate nothing at all, which is the answer
+to a question this document had been asking in the other direction.
 
 **Settled by evidence that was missing.** What a trace says. It was the last
 of issue #111's three blockers and it was a gap rather than a suspicion: the
@@ -1700,13 +2167,27 @@ measurement can move that either.
 
 **Open, and what would settle each.** The inline representation of `Option`,
 `Result`, and small enum payloads — settled by building one and measuring
-`arrayget` and `chars`. The argument vector allocated per builtin call — the
-same two benchmarks, the same way. The heap layout the VM owns — settled by
-what is still allocating once those two are gone, which is exactly the evidence
-it does not have yet. A moving collector — not yet asked for by anything
-measured here, and what it would owe is now written down rather than assumed,
-under "Collection is non-moving" above.
+`arrayget` and `chars`, and now `benches/convention`'s `conv_host` too, which
+pays for the `Result` a Host operation answers with two million times. The
+argument vector allocated per builtin call — the same benchmarks, the same
+way. The closure value at four allocations, which the matrix added to that
+list. The heap layout the VM owns — settled by what is still allocating once
+those are gone, which is exactly the evidence it does not have yet. A moving
+collector — not yet asked for by anything measured here, and what it would owe
+is now written down rather than assumed, under "Collection is non-moving"
+above.
 
-Everything on that open list is downstream of the same two allocation sites.
-That makes them the next measurement whether or not a VM-owned heap is ever
-built.
+Everything on that list is downstream of the same allocation sites. That
+makes them the next measurement whether or not a VM-owned heap is ever built.
+
+Beside them, and separately, four cliffs the calling-convention matrix
+measured: the two mutex acquisitions still on every call, a `var`-rooted
+local that cannot live on the scalar stack, a closure's captures that cannot
+either, and the Host boundary at twenty-seven times a loop turn. "The cliffs"
+above says what each would take and which of
+[#109](https://github.com/myuon/cove/issues/109) and
+[#116](https://github.com/myuon/cove/issues/116) it belongs to. None is
+fixed, and the reason is this document's own history: each is a change to
+what a slot, a capture, a closure or a payload *is*, and changing those one
+at a time against their immediate parent is what
+[#126](https://github.com/myuon/cove/issues/126) is.

@@ -163,6 +163,10 @@ fn bench() -> ExitCode {
     let sources = Arc::new(sources);
     let program = Arc::new(program);
 
+    if std::env::args().any(|argument| argument == "--matrix") {
+        return matrix(&package, &program, &sources, iterations);
+    }
+
     let mut ok = true;
 
     // One lowering of the whole package, timed on its own, because that is
@@ -386,6 +390,166 @@ fn parse_iterations() -> u32 {
     DEFAULT_ITERATIONS
 }
 
+// ------------------------------------------------ the calling-convention matrix
+
+/// The rows of the calling-convention matrix, and what each one is.
+///
+/// [Issue #123](https://github.com/myuon/cove/issues/123) asks what the typed
+/// three-stack convention costs at each of its boundaries, so
+/// `benches/convention/main.cove` writes `benches/arith`'s loop out again for
+/// each of them and changes exactly one thing between two rows: how the
+/// turn's `i` reaches the arithmetic that consumes it. The first row is the
+/// baseline the rest are read against.
+///
+/// Eight of the nine are the shapes #123 names. `conv_fresh` is a control
+/// rather than one of them: `conv_host`'s callback has to be written at its
+/// call site, because it reads the turn's `i` and a capture is a snapshot,
+/// so that row builds a closure per turn as well as crossing the Host
+/// boundary. This is the row that tells the two apart.
+const MATRIX: [(&str, &str); 9] = [
+    ("conv_local", "a settled scalar local"),
+    ("conv_var", "the same local, rooted for a `var` argument"),
+    ("conv_static", "a static declared call"),
+    ("conv_fnvalue", "a declared function used as a value"),
+    ("conv_closure", "a closure call"),
+    ("conv_capture", "a captured scalar"),
+    ("conv_generic", "a scalar crossing to generic `Value`"),
+    ("conv_fresh", "a closure built per turn, called here"),
+    ("conv_host", "a Host callback, and the reentry that runs it"),
+];
+
+/// How many turns each row of the matrix takes. Every entry writes the same
+/// literal, and the table below divides by it to report a cost per turn.
+const MATRIX_TURNS: u64 = 2_000_000;
+
+/// Runs the matrix and prints it as a table.
+///
+/// A table rather than the JSON the rest of this harness emits, because this
+/// is a diagnostic somebody reads rather than a gate something compares. It
+/// runs on the VM alone for the same reason: what it measures is a calling
+/// convention, and the interpreter does not have one -- it has an
+/// environment chain, which is a different thing and not the question.
+///
+/// This does not run under `cove-bench` with no arguments, and that is
+/// deliberate: eight two-million-turn loops on top of the suite would double
+/// what every push waits for, to answer a question nobody asked on that push.
+fn matrix(
+    package: &Package,
+    program: &Arc<Program>,
+    sources: &Arc<SourceMap>,
+    iterations: u32,
+) -> ExitCode {
+    let lowered = match cove_ir::lower::lower(program) {
+        Ok(lowered) => Arc::new(lowered),
+        Err(why) => {
+            eprintln!("cove-bench: the VM cannot run `benches/`: {}", why.what);
+            return ExitCode::FAILURE;
+        }
+    };
+
+    println!(
+        "the calling-convention matrix, VM backend, {iterations} iteration(s) \
+of {MATRIX_TURNS} turns each"
+    );
+    println!(
+        "row                 median       min       max  spread vs base   \
+instructions per turn   ns/turn  what"
+    );
+
+    // A row name after `--matrix` runs that row alone, which is what a
+    // profiler wants: `samply record -- cove-bench --matrix conv_host`
+    // records one row rather than eight.
+    let only: Option<String> = std::env::args()
+        .skip_while(|argument| argument != "--matrix")
+        .nth(1)
+        .filter(|argument| !argument.starts_with("--"));
+
+    let mut ok = true;
+    let mut baseline = 0.0f64;
+    for (index, (name, what)) in MATRIX.iter().enumerate() {
+        if only.as_deref().is_some_and(|wanted| wanted != *name) {
+            continue;
+        }
+        let (module, entry, allow) = match entry_for(package, program, name) {
+            Ok(found) => found,
+            Err(message) => {
+                eprintln!("cove-bench: {message}");
+                return ExitCode::FAILURE;
+            }
+        };
+
+        let mut samples = Vec::with_capacity(iterations as usize);
+        let mut instructions = 0;
+        for _ in 0..iterations {
+            let measurement = run_once(
+                program,
+                sources,
+                module,
+                entry,
+                &allow,
+                Arc::new(NullSink),
+                Some(&lowered),
+            );
+            samples.push(measurement.wall.as_nanos() as u64);
+            instructions = measurement.instructions.unwrap_or(0);
+            if let Some(message) = measurement.failure {
+                eprintln!("cove-bench: matrix row `{name}` did not pass: {message}");
+                ok = false;
+            }
+        }
+        samples.sort_unstable();
+
+        let median = median_ns(&samples) / 1e6;
+        let min = samples[0] as f64 / 1e6;
+        let max = samples[samples.len() - 1] as f64 / 1e6;
+        if index == 0 {
+            baseline = median;
+        }
+        // A single row asked for by name has no baseline beside it, and a
+        // ratio against a row that did not run would be a number made up.
+        let against = if baseline > 0.0 {
+            format!("{:.2}x", median / baseline)
+        } else {
+            "-".to_string()
+        };
+        println!(
+            "{:<14} {:>8.2}ms {:>8.2}ms {:>8.2}ms {:>6.1}% {:>7} {:>14} {:>8.1} {:>8.1}  {}",
+            name,
+            median,
+            min,
+            max,
+            100.0 * (max - min) / median,
+            against,
+            instructions,
+            instructions as f64 / MATRIX_TURNS as f64,
+            median * 1e6 / MATRIX_TURNS as f64,
+            what
+        );
+    }
+
+    if ok {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::FAILURE
+    }
+}
+
+/// The median of a sorted series, in nanoseconds.
+///
+/// The median rather than the mean, because a wall-time series has a floor
+/// and no ceiling: one descheduled run moves a mean and does not move this.
+/// The minimum and maximum are printed beside it so the shape of the series
+/// is visible rather than summarized away -- issue #123 asks for a
+/// distribution and this is the smallest honest one.
+fn median_ns(sorted: &[u64]) -> f64 {
+    let n = sorted.len();
+    if n % 2 == 1 {
+        sorted[n / 2] as f64
+    } else {
+        (sorted[n / 2 - 1] as f64 + sorted[n / 2] as f64) / 2.0
+    }
+}
+
 /// The `benches/` package, rooted next to this crate.
 fn benches_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../../benches")
@@ -476,6 +640,10 @@ struct RunMeasurement {
     host_calls: u64,
     irreversible_writes: u64,
     heap: HeapStats,
+    /// How many instructions the run executed, on the VM. `None` on the
+    /// interpreter, which has none -- the same distinction `cove run
+    /// --stats` makes, and for the same reason.
+    instructions: Option<u64>,
     /// `Some(message)` when the entry returned `Err` or the interpreter
     /// itself failed; `None` when it passed.
     failure: Option<String>,
@@ -510,16 +678,16 @@ fn run_once(
         Runtime::new(Arc::clone(program), Arc::clone(sources), hosts.clone()).with_trace(trace);
 
     let started = Instant::now();
-    let (outcome, heap) = match ir {
+    let (outcome, heap, instructions) = match ir {
         Some(ir) => {
             let mut vm = Vm::new(&runtime, &hosts, ir);
             let outcome = vm.run_entry(module, entry, Vec::<Rc<str>>::new());
-            (outcome, vm.heap_stats())
+            (outcome, vm.heap_stats(), Some(vm.instructions()))
         }
         None => {
             let mut interpreter = Interpreter::new(&runtime);
             let outcome = interpreter.run_entry(module, entry, Vec::<Rc<str>>::new());
-            (outcome, interpreter.heap_stats())
+            (outcome, interpreter.heap_stats(), None)
         }
     };
     let wall = started.elapsed();
@@ -541,6 +709,7 @@ fn run_once(
         host_calls,
         irreversible_writes,
         heap,
+        instructions,
         failure,
     }
 }

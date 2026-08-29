@@ -1,0 +1,223 @@
+use clock.timeout
+
+// The calling-convention matrix: one loop, eight ways for a value to reach
+// the arithmetic that consumes it.
+//
+// [Issue #123](https://github.com/myuon/cove/issues/123) asks what each
+// boundary of the typed three-stack convention costs. Every entry below is
+// the same loop `benches/arith` runs — two million turns, `% 7`, the same
+// 285,715 — and differs from it in exactly one thing: how the turn's `i`
+// gets to the `%`. So the difference between two rows is what the second
+// row's route costs, in the same sense that the difference between two of
+// the mechanism benchmarks is what the second one's mechanism costs.
+//
+// What is held constant is the Cove-level work: the trip count, the
+// arithmetic, and the answer, which every entry asserts. What is *not* held
+// constant is the instruction count, and it must not be — a call is more
+// instructions than no call, and a boundary is an instruction. The
+// instruction count is the decomposition of each row's wall time rather
+// than a control on it, and `cove-bench --matrix` reports both together for
+// that reason.
+
+/// Answers its argument, under the convention its own signature names: an
+/// `Int` parameter is a scalar slot and an `Int` answer comes back on the
+/// scalar stack, so a call to this crosses no boundary.
+fn identity(value: Int) -> Int {
+  value
+}
+
+/// Answers its argument, with nothing proven about its type.
+///
+/// A type parameter is not `Int`, so this takes its argument on the value
+/// stack and answers there, whatever the caller settled the argument as.
+fn generic<T>(value: T) -> T {
+  value
+}
+
+/// Roots its argument's storage, and leaves it as it found it.
+///
+/// Nothing here is measured. It exists so that a name is used as the root of
+/// a `var` argument somewhere in a body, which is what moves that binding
+/// off the scalar stack and onto the value stack.
+fn root(var slot: Int) -> Int {
+  slot
+}
+
+/// The baseline: a settled scalar local, read once a turn.
+export fn scalarLocal() -> Result<Unit, Error> {
+  var total = 0
+  var i = 0
+  var v = 0
+  while i < 2000000 {
+    v = i
+    if v % 7 == 0 {
+      total += 1
+    }
+    i += 1
+  }
+  assertEqual(total, 285715)?
+  Ok(())
+}
+
+/// The same local, rooted for a `var` argument.
+///
+/// The loop is `scalarLocal`'s, character for character. The one line that
+/// differs is outside it and runs once: `root(var v)` puts the name `v` in
+/// the set the lowering collects before it emits anything, so `v` is a value
+/// slot for the whole body. The difference between this and `scalarLocal` is
+/// therefore the representation of one local and nothing else.
+export fn varRooted() -> Result<Unit, Error> {
+  var total = 0
+  var i = 0
+  var v = 0
+  while i < 2000000 {
+    v = i
+    if v % 7 == 0 {
+      total += 1
+    }
+    i += 1
+  }
+  assertEqual(root(var v), 1999999)?
+  assertEqual(total, 285715)?
+  Ok(())
+}
+
+/// A call to a statically known declaration, under its own convention.
+export fn staticCall() -> Result<Unit, Error> {
+  var total = 0
+  var i = 0
+  while i < 2000000 {
+    if identity(i) % 7 == 0 {
+      total += 1
+    }
+    i += 1
+  }
+  assertEqual(total, 285715)?
+  Ok(())
+}
+
+/// The same declaration, reached through a value.
+///
+/// Nothing at the call site knows which function it will enter, so this goes
+/// through the general convention: the argument travels on the value stack
+/// and the answer comes back on it.
+export fn fnValue() -> Result<Unit, Error> {
+  var total = 0
+  var i = 0
+  let f: fn(Int) -> Int = identity
+  while i < 2000000 {
+    if f(i) % 7 == 0 {
+      total += 1
+    }
+    i += 1
+  }
+  assertEqual(total, 285715)?
+  Ok(())
+}
+
+/// A closure with no captures, called through the same value convention.
+///
+/// The difference from `fnValue` is what a lambda costs over a declaration
+/// reached the same way, which should be nothing: both are one lowered
+/// function behind one `call-value`.
+export fn closureCall() -> Result<Unit, Error> {
+  var total = 0
+  var i = 0
+  let f: fn(Int) -> Int = fn(n) {
+    n
+  }
+  while i < 2000000 {
+    if f(i) % 7 == 0 {
+      total += 1
+    }
+    i += 1
+  }
+  assertEqual(total, 285715)?
+  Ok(())
+}
+
+/// The same closure, reading one captured `Int`.
+///
+/// `zero` is captured by value and is zero, so the arithmetic and the answer
+/// are unchanged. What the turn gains over `closureCall` is a capture read
+/// and the addition that consumes it.
+export fn capturedScalar() -> Result<Unit, Error> {
+  var total = 0
+  var i = 0
+  let zero = 0
+  let f: fn(Int) -> Int = fn(n) {
+    n + zero
+  }
+  while i < 2000000 {
+    if f(i) % 7 == 0 {
+      total += 1
+    }
+    i += 1
+  }
+  assertEqual(total, 285715)?
+  Ok(())
+}
+
+/// A scalar crossing to the general representation and back.
+///
+/// `generic` is `identity` with its type unproven, so this is `staticCall`
+/// with two boundary instructions and a value-stack argument in place of a
+/// scalar one. Nothing else about the two differs.
+export fn genericCall() -> Result<Unit, Error> {
+  var total = 0
+  var i = 0
+  while i < 2000000 {
+    if generic(i) % 7 == 0 {
+      total += 1
+    }
+    i += 1
+  }
+  assertEqual(total, 285715)?
+  Ok(())
+}
+
+/// The control for the row below: a closure built per turn, called here.
+///
+/// `hostReentry` has to write its body at the call, because the body reads
+/// the turn's `i` and a capture is a snapshot. So that row carries a
+/// `make-closure` per turn as well as the Host boundary it is about, and
+/// this is the row that separates the two: everything `hostReentry` does
+/// except leave the VM.
+export fn freshClosure() -> Result<Unit, Error> {
+  var total = 0
+  var i = 0
+  while i < 2000000 {
+    let f: fn() -> Int = fn() {
+      i
+    }
+    if f() % 7 == 0 {
+      total += 1
+    }
+    i += 1
+  }
+  assertEqual(total, 285715)?
+  Ok(())
+}
+
+/// A Host callback, and the dispatch loop entered again to run it.
+///
+/// `clock.timeout` is the Host operation that runs a Cove closure it was
+/// handed. The body has to be written at the call because it reads the
+/// turn's `i` and a capture is a snapshot, so this row carries a closure
+/// built per turn and the `Result` the operation answers with, as well as
+/// the reentry itself. `cove-bench --matrix` separates the three.
+export fn hostReentry() -> Result<Unit, Error> {
+  var total = 0
+  var i = 0
+  while i < 2000000 {
+    let v = timeout(1s, fn() {
+      i
+    })?
+    if v % 7 == 0 {
+      total += 1
+    }
+    i += 1
+  }
+  assertEqual(total, 285715)?
+  Ok(())
+}
