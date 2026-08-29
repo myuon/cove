@@ -113,6 +113,17 @@ jobs:
         working-directory: examples
         run: ../target/debug/cove test
 
+      # The two steps above run on the VM, because ADR 0022 makes that what
+      # a command that runs a program runs it on. The interpreter is still
+      # the oracle, and these are the project's own sources — the first real
+      # programs to feel a divergence — so they are run on it too. Both
+      # together cost under a second.
+      - name: cove generate --check and cove test on the interpreter (examples)
+        working-directory: examples
+        run: |
+          ../target/debug/cove generate --check --backend ast
+          ../target/debug/cove test --backend ast
+
       # ADR 0012's performance-gate harness. Wall-clock numbers are too
       # noisy on a shared runner for a threshold to mean anything, so this
       # runs the harness for correctness only: every benchmark executes,

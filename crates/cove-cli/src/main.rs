@@ -136,7 +136,10 @@ replaced by one that answers from `<file>`, in the recorded order. The
 program's own computation runs for real; only the Host API boundary is canned,
 so no host is called and nothing outside the process changes. A replay exits
 non-zero when it diverges: the program asked for a call the trace does not
-have, asked for a different one, or stopped before using them all.
+have, asked for a different one, or stopped before using them all. A replay
+runs on the tree-walking interpreter and takes no `--backend`, so an ordinary
+recording — made on the VM, since that is what `cove run` runs — is replayed
+on the other backend; issue #140 is where that is tracked.
 
 `cove run` flags (may appear in any position after <name>; everything after a
 literal `--` is a program argument, even if it looks like a flag):

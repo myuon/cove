@@ -28,10 +28,13 @@ design is recorded in [ADR 0001](docs/adr/0001-mvp-language-design.md).
 
 ## Status
 
-An MVP compiler front end and interpreter exist. `cove check`, `cove outline`,
-and `cove run` all cover every representative program; what a run does depends
-on which host implementations it was given, and one of them still has no real
-implementation to give.
+An MVP compiler front end and two backends exist: a dedicated VM, which is
+what runs a program, and the tree-walking interpreter, which is the semantic
+oracle the VM is checked against and is still selectable with `--backend ast`
+([ADR 0022](docs/adr/0022-the-vm-is-the-default-backend.md)). `cove check`,
+`cove outline`, and `cove run` all cover every representative program; what a
+run does depends on which host implementations it was given, and one of them
+still has no real implementation to give.
 
 ```console
 $ cd examples
@@ -58,16 +61,18 @@ $ cove fmt --check
 $ cove generate --check
 $ cove build hello
 built `hello` from 29 file(s) into `target/hello`
-  entry:  hello.main
-  grants: console
-  limits: (none)
+  entry:   hello.main
+  backend: vm
+  grants:  console
+  limits:  (none)
 $ cp target/hello /tmp && cd /tmp && ./hello
 Hello, world!
 ```
 
 Implemented: lexer, parser, directory modules, `export` visibility, derived
 outlines and capability requirements, a deterministic formatter, a tree-walking
-interpreter, Host API dispatch with grant enforcement, task scopes with a
+interpreter and a VM over an executable IR, Host API dispatch with grant
+enforcement, task scopes with a
 thread per task, a per-task mark-and-sweep collector whose allocation and heap
 size stay observable through `--stats` and traces rather than an enforced
 limit, and runtime budgets for fuel, deadlines, host calls, and concurrency
@@ -158,8 +163,9 @@ collection, which is what the streaming file resources
 ([ADR 0018](docs/adr/0018-streaming-file-io.md)) were added for. That number is
 the managed heap rather than the process's memory, and `examples/cq/README.md`
 says what it does and does not cover. It also takes
-112 seconds. Reading the file is 0.59 s of that and the interpreted
-per-character loop is the rest, which
+112 seconds on the interpreter, which is what measured it and is no longer
+what `cove run` reaches by default. Reading the file is 0.59 s of that and the
+interpreted per-character loop is the rest, which
 [issue #99](https://github.com/myuon/cove/issues/99) records with its
 measurements: reaching one character costs about 1.4 µs, and calling a method
 on a struct receiver doubles the cost of the loop it is in. That is the first
@@ -167,9 +173,11 @@ number this project has for Cove doing a real job rather than a benchmark, and
 `examples/cq/README.md` is where it is read.
 
 `cove build` is not a code generator. The executable it writes embeds the
-program's sources and the interpreter, so it delivers a program without
-compiling one: startup and throughput are the interpreter's, and only the
-packaging changed. Its entry, its granted capabilities, and its limits are
+program's sources and a backend, so it delivers a program without compiling
+one: it checks and lowers its own sources when it starts, and only the
+packaging changed. `--backend ast` builds one that interprets instead, and a
+program the VM cannot run is refused when the binary is built rather than
+when somebody starts it. Its entry, its granted capabilities, and its limits are
 the ones `[run.<name>]` recorded when it was built, and it reads no
 `cove.toml` afterwards — a file placed beside it grants it nothing, which
 makes a built binary a stricter boundary than `cove run`. Building one needs

@@ -13,6 +13,25 @@
 //! saying it would behave differently than it did. [`Divergence::report`] is
 //! the part of this module that matters most.
 //!
+//! # Which backend a replay runs on
+//!
+//! The interpreter, always, and `cove replay` takes no `--backend`. That was
+//! unremarkable while the interpreter was also what `cove run` ran; since
+//! ADR 0022 it is not, so an ordinary recording is the VM's and an ordinary
+//! replay reads it on the other backend. Nothing is known to diverge —
+//! `tests/differential.rs` compares the same tape, every host call's module,
+//! operation, arguments and outcome, over every case that lowers — but a
+//! divergence this command reported could be about the two backends rather
+//! than about the program, and a reader deserves to know that before
+//! believing it.
+//!
+//! [Issue #140](https://github.com/myuon/cove/issues/140) is where the
+//! missing flag is tracked. It is left missing here on purpose: what a
+//! replay on the VM does when the tape runs out is a decision rather than a
+//! parameter, ADR 0019's no-silent-fallback rule applies to it, and making
+//! it inside a change that moves four other commands would be deciding it
+//! quietly.
+//!
 //! One order is not the program's to choose. ADR 0008 runs each spawned task
 //! on a thread of its own, so the order in which two concurrent tasks reach
 //! the host is the scheduler's, and a trace records the order one run

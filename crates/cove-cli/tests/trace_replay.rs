@@ -78,7 +78,12 @@ fn stderr(output: &Output) -> String {
     String::from_utf8_lossy(&output.stderr).into_owned()
 }
 
-/// Records a trace of `cove run restricted` into `path`.
+/// Records a trace of `cove run restricted` into `path`, on whatever
+/// backend `cove run` runs a program on — the VM, since ADR 0022.
+///
+/// Deliberately not pinned to a backend. Almost every test below is about
+/// what a trace holds and what a replay makes of it, and the recording it
+/// reads should be the one a person gets by typing `cove run --trace`.
 fn record(path: &Path) -> String {
     let run = cove(&["run", "restricted", "--trace", &path.display().to_string()]);
     assert!(run.status.success(), "the run failed: {}", stderr(&run));
@@ -114,16 +119,18 @@ fn record_tasks_host_order(path: &Path) -> String {
     std::fs::read_to_string(path).expect("the trace was written")
 }
 
-/// Records a trace of `cove run restricted --backend vm` into `path`.
+/// Records a trace of `cove run restricted --backend ast` into `path`.
 ///
 /// The same program and the same fakes as [`record`], differing only in which
-/// backend ran it, so the two files can be compared line for line.
-fn record_on_the_vm(path: &Path) -> String {
+/// backend ran it, so the two files can be compared line for line. This is
+/// the half that has to name a backend now: the default is the VM, so the
+/// oracle is what has to be asked for.
+fn record_on_the_interpreter(path: &Path) -> String {
     let run = cove(&[
         "run",
         "restricted",
         "--backend",
-        "vm",
+        "ast",
         "--trace",
         &path.display().to_string(),
     ]);
@@ -145,6 +152,12 @@ fn record_on_the_vm(path: &Path) -> String {
 /// does not say it should, and the replay reports it as a divergence with
 /// both calls shown.
 ///
+/// Since ADR 0022 this is no longer the exotic direction — it is what an
+/// ordinary `cove run --trace` followed by an ordinary `cove replay` does,
+/// because the recording is the VM's and the replay is the interpreter's.
+/// [Issue #140](https://github.com/myuon/cove/issues/140) is where the
+/// missing direction is tracked, and it matters more than it did.
+///
 /// The direction that does not exist would catch the converse — a VM that
 /// asked for a call the interpreter's recording does not hold. What stands in
 /// for it is `tests/differential.rs`, which compares every host call's
@@ -158,8 +171,8 @@ fn a_run_recorded_on_the_vm_replays_on_the_interpreter() {
     let dir = TempDir::new("cross-backend");
     let on_the_vm = dir.join("vm.jsonl");
     let on_the_interpreter = dir.join("ast.jsonl");
-    let recorded = record_on_the_vm(&on_the_vm);
-    let oracle = record(&on_the_interpreter);
+    let recorded = record(&on_the_vm);
+    let oracle = record_on_the_interpreter(&on_the_interpreter);
 
     // The two recordings are one recording once the wall-clock figures are
     // taken out of them, which is the claim `cove replay` is about to rest
