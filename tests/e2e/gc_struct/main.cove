@@ -61,7 +61,10 @@ fn madeAfterChurn(n: Int) -> Vector<Int> {
 /// collector can read — nowhere but the abandoned node, which the abandoned
 /// cycle names twice.
 export fn main() -> Result<Unit, Error> {
-  let both: Vector<Vector<Int>> = Vector.of(sharedByGarbage(3), madeAfterChurn(4))
+  let both: Vector<Vector<Int>> = Vector.of(
+    sharedByGarbage(3),
+    madeAfterChurn(4),
+  )
   println("the vector the garbage shared twice is {both.get(0)}")?
   println("the one built after the collection is {both.get(1)}")?
   Ok(())
