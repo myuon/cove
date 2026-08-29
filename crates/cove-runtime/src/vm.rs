@@ -3455,9 +3455,25 @@ impl Reentry for Callback<'_, '_> {
     }
 
     /// Everything [`Vm::safepoint`] would stop on, asked from outside the
-    /// loop: every bounded call this thread is inside, and the run's own
-    /// cancellation.
+    /// loop: this task's own cancellation, every bounded call this thread is
+    /// inside, and the run's own cancellation.
+    ///
+    /// The task's flag is read here because a host that polls between rounds
+    /// is asking the question a safepoint asks, and a spawned task's
+    /// cancellation is one of the answers: `clock.every` in a cancelled task
+    /// ends its timer rather than raising out of it, and it can only do that
+    /// if this says so. It was missing, so the VM answered `false` where
+    /// `Interpreter`'s answer was `true` — the one place the two backends
+    /// gave a host different accounts of the same run.
     fn is_cancelled(&self) -> bool {
+        if self
+            .vm
+            .cancellation
+            .as_ref()
+            .is_some_and(Cancellation::is_cancelled)
+        {
+            return true;
+        }
         if self.vm.stops.iter().any(Cancellation::is_cancelled) {
             return true;
         }
