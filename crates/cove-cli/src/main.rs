@@ -136,10 +136,12 @@ replaced by one that answers from `<file>`, in the recorded order. The
 program's own computation runs for real; only the Host API boundary is canned,
 so no host is called and nothing outside the process changes. A replay exits
 non-zero when it diverges: the program asked for a call the trace does not
-have, asked for a different one, or stopped before using them all. A replay
-runs on the tree-walking interpreter and takes no `--backend`, so an ordinary
-recording — made on the VM, since that is what `cove run` runs — is replayed
-on the other backend; issue #140 is where that is tracked.
+have, asked for a different one, or stopped before using them all.
+`--backend <ast|vm>` chooses which backend replays it, defaulting to the VM as
+`cove run` does, so an ordinary recording is replayed on the backend that made
+it. A trace does not record which backend recorded it, so the summary and
+every divergence report name the backend the replay ran on and say that the
+file does not name the other; ADR 0023 is why.
 
 `cove run` flags (may appear in any position after <name>; everything after a
 literal `--` is a program argument, even if it looks like a flag):
@@ -1403,12 +1405,13 @@ impl Backend {
     /// one.
     ///
     /// One function rather than a literal at each command, because "the
-    /// default backend" is one decision and four commands make it: `cove
-    /// run`, `cove generate`, `cove test`, and `cove build`. Written out
-    /// four times it could be changed in three places, and a toolchain whose
-    /// commands disagreed about which backend runs a program would be the
-    /// mixture ADR 0019's no-silent-fallback rule exists to prevent, arrived
-    /// at by a different road.
+    /// default backend" is one decision and five commands make it: `cove
+    /// run`, `cove generate`, `cove test`, `cove build`, and — since ADR
+    /// 0023 — `cove replay`. Written out five times it could be changed in
+    /// four places, and a toolchain whose commands disagreed about which
+    /// backend runs a program would be the mixture ADR 0019's
+    /// no-silent-fallback rule exists to prevent, arrived at by a different
+    /// road.
     pub(crate) fn default_for_a_run() -> Backend {
         Backend::Vm
     }
@@ -1420,6 +1423,38 @@ impl Backend {
             _ => None,
         }
     }
+}
+
+/// Splits `--backend <ast|vm>` out of a command's arguments, leaving the rest
+/// in the order they were written.
+///
+/// It may appear anywhere, exactly as it may on `cove run`: one flag spelled
+/// two ways depending on which command it is passed to would be a flag with
+/// two meanings. `cove generate` and `cove replay` both reach it through here
+/// rather than each parsing it, so the value it accepts and the sentence an
+/// unknown one is refused with are one thing rather than several that could
+/// drift.
+pub(crate) fn split_backend(args: &[String]) -> Result<(Backend, Vec<String>), CliError> {
+    let mut backend = Backend::default_for_a_run();
+    let mut rest = Vec::new();
+    let mut i = 0;
+    while i < args.len() {
+        if args[i] == "--backend" {
+            let value = args.get(i + 1).ok_or_else(|| {
+                CliError::Message("`--backend` needs a value: `ast` or `vm`".to_string())
+            })?;
+            backend = Backend::parse(value).ok_or_else(|| {
+                CliError::Message(format!(
+                    "`--backend` must be `ast` or `vm`, found `{value}`"
+                ))
+            })?;
+            i += 2;
+            continue;
+        }
+        rest.push(args[i].clone());
+        i += 1;
+    }
+    Ok((backend, rest))
 }
 
 impl std::fmt::Display for Backend {
@@ -2189,6 +2224,48 @@ module auth
                 assert_eq!(message, "`--backend` must be `ast` or `vm`, found `jit`")
             }
             _ => panic!("expected a message"),
+        }
+    }
+
+    /// The commands that parse `--backend` themselves rather than through
+    /// `RunFlags` share one function, so the value they accept and the
+    /// sentence they refuse an unknown one with cannot drift apart. It takes
+    /// the flag from anywhere, exactly as `cove run` does, and hands back
+    /// everything else in the order it was written -- which is what lets
+    /// `cove replay` go on calling every remaining `--` argument a flag it
+    /// does not have.
+    #[test]
+    fn the_shared_backend_flag_is_taken_from_anywhere_and_leaves_the_rest_alone() {
+        let args =
+            |args: &[&str]| -> Vec<String> { args.iter().map(|arg| (*arg).to_string()).collect() };
+        let Ok((backend, rest)) =
+            split_backend(&args(&["t.jsonl", "--backend", "ast", "restricted"]))
+        else {
+            panic!("the flag parses");
+        };
+        assert_eq!(backend, Backend::Ast);
+        assert_eq!(rest, ["t.jsonl", "restricted"]);
+
+        let Ok((backend, rest)) = split_backend(&args(&["t.jsonl", "restricted", "--jit"])) else {
+            panic!("an unrelated flag is left where it was");
+        };
+        assert_eq!(backend, Backend::default_for_a_run());
+        assert_eq!(rest, ["t.jsonl", "restricted", "--jit"]);
+
+        for (given, expected) in [
+            (
+                vec!["--backend", "jit"],
+                "`--backend` must be `ast` or `vm`, found `jit`",
+            ),
+            (
+                vec!["--backend"],
+                "`--backend` needs a value: `ast` or `vm`",
+            ),
+        ] {
+            let Err(CliError::Message(message)) = split_backend(&args(&given)) else {
+                panic!("an unknown backend should be refused with a message");
+            };
+            assert_eq!(message, expected);
         }
     }
 

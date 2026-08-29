@@ -15,22 +15,49 @@
 //!
 //! # Which backend a replay runs on
 //!
-//! The interpreter, always, and `cove replay` takes no `--backend`. That was
-//! unremarkable while the interpreter was also what `cove run` ran; since
-//! ADR 0022 it is not, so an ordinary recording is the VM's and an ordinary
-//! replay reads it on the other backend. Nothing is known to diverge —
-//! `tests/differential.rs` compares the same tape, every host call's module,
-//! operation, arguments and outcome, over every case that lowers — but a
-//! divergence this command reported could be about the two backends rather
-//! than about the program, and a reader deserves to know that before
-//! believing it.
+//! Whichever `--backend <ast|vm>` names, defaulting to the VM as every other
+//! command that runs a program does since ADR 0022. ADR 0023 is the decision
+//! and its reasoning; what follows is what it means at this command.
 //!
-//! [Issue #140](https://github.com/myuon/cove/issues/140) is where the
-//! missing flag is tracked. It is left missing here on purpose: what a
-//! replay on the VM does when the tape runs out is a decision rather than a
-//! parameter, ADR 0019's no-silent-fallback rule applies to it, and making
-//! it inside a change that moves four other commands would be deciding it
-//! quietly.
+//! The default is the VM because an ordinary recording is the VM's: it came
+//! out of an ordinary `cove run --trace`, and a replay of it wants the
+//! backend that made it. But that is an inference about how the file was
+//! probably produced rather than a fact read out of it. **A trace does not
+//! record which backend recorded it** — [`cove_runtime::TraceHeader`] carries
+//! the value capture, the entry and the entry's arguments, and nothing about
+//! a backend — so this command cannot check its flag against the file, and
+//! neither can the person running it. What a user can know is what they
+//! typed, on both sides; what nobody can know from the file alone is whether
+//! a replay crossed backends. Both the summary and a divergence report
+//! therefore name the backend the replay ran on, and say that the file does
+//! not name the other one.
+//!
+//! Nothing is known to diverge across the two: `tests/differential.rs`
+//! compares the same tape, every host call's module, operation, arguments and
+//! outcome, over every case that lowers. But a replay that crossed backends
+//! could report a divergence that is about the two backends rather than about
+//! the program, which is the whole reason the flag exists — it is what lets a
+//! recording and a replay be made to match.
+//!
+//! What the tape does when it runs out did not need deciding: it was decided
+//! already, and by the tape. [`Divergence`] is a property of this module
+//! rather than of an evaluator — `Unexpected` is "the program made a call
+//! after the trace ran out of them", and `Tape::answer` produces it from what
+//! the trace holds and what it was asked for, with no evaluator involved.
+//! Both backends reach the tape through the one [`HostApi`] boundary they
+//! share, so a VM replay that runs off the end of the tape gets the answer an
+//! interpreter replay already got.
+//!
+//! ADR 0019's rule that a VM run either finishes on the VM or fails before
+//! any side effect applies here in the only form it can. A replay makes no
+//! host call at all, so it has no side effect for a refusal to come before;
+//! what it has instead is a verdict, and the verdict is the whole output. A
+//! replay that quietly finished on the interpreter would be reporting
+//! "replayed", or a divergence, about a backend nobody asked for — which is
+//! the mixture the rule exists to prevent, arrived at by a different road. So
+//! `--backend vm` lowers the entry before the tape is built, and a construct
+//! the lowering does not cover refuses the command, by name, pointing at
+//! `--backend ast`.
 //!
 //! One order is not the program's to choose. ADR 0008 runs each spawned task
 //! on a thread of its own, so the order in which two concurrent tasks reach
@@ -48,6 +75,7 @@ use cove_runtime::host::{HostApi, HostRegistry};
 use cove_runtime::interp::Interpreter;
 use cove_runtime::runtime::Runtime;
 use cove_runtime::schema::ModuleSchema;
+use cove_runtime::vm::Vm;
 use cove_runtime::Transfer;
 use cove_runtime::{
     value_to_json, Budget, Cancellation, Grants, Limits, ResourceHandle, RunOutcome, RuntimeError,
@@ -55,7 +83,7 @@ use cove_runtime::{
 };
 
 use crate::trace::{self, Outcome, Trace};
-use crate::CliError;
+use crate::{Backend, CliError};
 
 /// One recorded call a replay can answer.
 struct Step {
@@ -339,6 +367,24 @@ impl Divergence {
     }
 }
 
+/// The line a divergence report ends with: which backend read the tape, and
+/// that the trace does not say which backend wrote it.
+///
+/// Kept out of [`Divergence`] on purpose. A divergence is a fact about a
+/// program and a file — the program asked for something the file has not got,
+/// or asked in another order — and every one of them is produced by [`Tape`]
+/// from those two things alone, with no evaluator involved. Giving the report
+/// a backend would make a backend-independent judgement look like a
+/// backend-specific one. What is backend-specific is the caveat, so the
+/// caveat is what carries the backend.
+fn crossed_backends(backend: Backend) -> String {
+    format!(
+        "  note               this replay ran on `{backend}`; a trace does not record which\n\
+         \x20                    backend recorded it, so whether a divergence is the program's or\n\
+         \x20                    the two backends' is not something this file can settle\n"
+    )
+}
+
 /// The one thing a replay keeps from its own trace: how the run it just made
 /// ended.
 ///
@@ -432,10 +478,15 @@ impl HostApi for ReplayHost {
     }
 }
 
-/// `cove replay <trace> <run-name>`.
+/// `cove replay <trace> <run-name> [--backend <ast|vm>]`.
 pub(crate) fn cmd_replay(args: &[String]) -> Result<(), CliError> {
-    let positional: Vec<&String> = args.iter().filter(|arg| !arg.starts_with("--")).collect();
-    if let Some(flag) = args.iter().find(|arg| arg.starts_with("--")) {
+    // `--backend` comes out first, by the one function `cove generate` reads
+    // it with, so the flag means the same thing and refuses an unknown value
+    // with the same sentence wherever it is written. Everything still
+    // beginning with `--` afterwards is a flag this command does not have,
+    // which is what it has always said about one.
+    let (backend, positional) = crate::split_backend(args)?;
+    if let Some(flag) = positional.iter().find(|arg| arg.starts_with("--")) {
         return Err(CliError::Message(format!(
             "unknown `cove replay` flag `{flag}`"
         )));
@@ -491,6 +542,34 @@ pub(crate) fn cmd_replay(args: &[String]) -> Result<(), CliError> {
         )));
     }
 
+    let sources = Arc::new(sources);
+    let program = Arc::new(program);
+
+    // `--backend vm` lowers here, before the tape exists and before a host is
+    // registered — the same place `crate::execute_entry` lowers, for the same
+    // reason read across to a command that calls no host: a refusal must be
+    // the command's whole answer, not a footnote under a verdict about the
+    // other backend. A construct the lowering does not cover stops the replay
+    // with the construct named and `--backend ast` offered, and this command
+    // never quietly reads the tape on the interpreter instead.
+    let lowered = match backend {
+        Backend::Ast => None,
+        Backend::Vm => {
+            let ir = cove_ir::lower::lower_entry(&program, module, entry)
+                .map_err(|why| CliError::Diagnostics {
+                    items: vec![crate::unsupported_by_backend(&why)],
+                    sources: Arc::clone(&sources),
+                })?
+                .program;
+            // The VM trusts what it is handed, so what hands it anything
+            // checks first, exactly as a run does.
+            cove_ir::lower::validate(&ir).map_err(|why| {
+                CliError::Message(format!("the lowering of this program is not valid: {why}"))
+            })?;
+            Some(Arc::new(ir))
+        }
+    };
+
     let steps: Vec<Step> = trace.dispatched_calls().into_iter().map(Step::of).collect();
     let recorded_calls = steps.len();
     let tape = Arc::new(Mutex::new(Tape::new(steps)));
@@ -521,11 +600,18 @@ pub(crate) fn cmd_replay(args: &[String]) -> Result<(), CliError> {
         .iter()
         .map(|arg| arg.as_str().into())
         .collect();
-    let sources = Arc::new(sources);
     let ending = Arc::new(EndingSink::default());
-    let runtime = Runtime::new(Arc::new(program), sources.clone(), Arc::new(hosts))
+    let runtime = Runtime::new(Arc::clone(&program), sources.clone(), Arc::new(hosts))
         .with_trace(ending.clone());
-    let outcome = Interpreter::new(&runtime).run_entry(module, entry, program_args);
+    // One entry, one of two backends, and the same three arguments either
+    // way: `run_entry` is the seam ADR 0019 puts them behind, and a replay
+    // reaches it exactly as a run does. What differs between the two replays
+    // is which evaluator is built; the tape they read is the same object,
+    // reached through the one `HostApi` boundary both backends share.
+    let outcome = match &lowered {
+        Some(ir) => Vm::new(&runtime, runtime.hosts(), ir).run_entry(module, entry, program_args),
+        None => Interpreter::new(&runtime).run_entry(module, entry, program_args),
+    };
 
     let (used, unchecked, divergence) = {
         let mut tape = tape
@@ -568,6 +654,11 @@ pub(crate) fn cmd_replay(args: &[String]) -> Result<(), CliError> {
 
     if let Some(divergence) = divergence {
         eprint!("{}", divergence.report());
+        // Which backend read the tape, said where it is most worth knowing: a
+        // divergence is the program saying it would behave differently only
+        // if the two runs were the same run in every other way, and whether
+        // they were is not something the file can settle.
+        eprint!("{}", crossed_backends(backend));
         return Err(CliError::Diverged);
     }
 
@@ -582,6 +673,9 @@ pub(crate) fn cmd_replay(args: &[String]) -> Result<(), CliError> {
     };
 
     println!("replayed {} from {}", run.entry, trace_path.display());
+    println!(
+        "  backend     {backend}; a trace does not record which backend recorded it, so\n              whether this replay crossed backends is not in the file"
+    );
     println!("  host calls  {used} of {recorded_calls} recorded call(s), answered from the trace");
     if unchecked > 0 {
         println!("  unchecked   {unchecked} argument(s) the trace does not carry, so not compared");
