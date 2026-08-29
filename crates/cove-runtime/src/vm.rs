@@ -246,7 +246,7 @@ const INSTRUCTION_FUEL: u64 = 1;
 /// between two safepoints is this much plus one block — bounded by the
 /// length of the function's code, which is finite and known before the run —
 /// plus whatever the proportional charges of that block added.
-const SAFEPOINT_INTERVAL: u64 = 1024;
+pub const SAFEPOINT_INTERVAL: u64 = 1024;
 
 /// How much fuel may accumulate across back edges before the shared budget is
 /// spent against.
@@ -265,7 +265,7 @@ const SAFEPOINT_INTERVAL: u64 = 1024;
 /// the difference is not one a program can be written to observe, and
 /// [`SAFEPOINT_INTERVAL`] still bounds a straight line that has no back edge
 /// at all.
-const BACK_EDGE_FUEL: u64 = 64;
+pub const BACK_EDGE_FUEL: u64 = 64;
 
 /// One call in progress.
 ///

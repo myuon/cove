@@ -30,7 +30,7 @@ const RULE: &str =
 /// small, fixed number of safepoints without paying the clock's cost on every
 /// one. When no fuel limit is set, nothing else bounds the run, so the clock
 /// is consulted on every call regardless of this constant.
-const DEADLINE_CHECK_INTERVAL: u64 = 64;
+pub const DEADLINE_CHECK_INTERVAL: u64 = 64;
 
 /// Limits a host imposes on one run.
 ///

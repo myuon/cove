@@ -245,7 +245,7 @@ const MAX_REENTRY_DEPTH: usize = 8;
 /// safepoints a run passed through, which is exactly what bounds a
 /// non-terminating loop or an unbounded recursion, and nothing more precise
 /// than that is claimed.
-const SAFEPOINT_FUEL: u64 = 10;
+pub const SAFEPOINT_FUEL: u64 = 10;
 
 /// Non-local control flow raised while evaluating an expression.
 enum Control {
