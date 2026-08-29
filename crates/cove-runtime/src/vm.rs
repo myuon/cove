@@ -92,12 +92,17 @@
 //! value window, `stack[base .. base + value_frame_size]`, is its root set
 //! with nothing inside it to skip. A place holds an index into that same
 //! window, so whatever it reaches is reachable from what is already scanned.
-//! There is no collection in this VM yet — nothing the lowering covers
-//! allocates growable storage — so this is a statement about where the roots
-//! are rather than code that reads them, said here so that whoever writes
-//! that collection does not have to infer it. A *moving* collector would need
-//! one thing more, which is that a place is an index into the storage it is
-//! moving.
+//! **There is no collection in this VM.** That sentence once ended "yet —
+//! nothing the lowering covers allocates growable storage", and it was true
+//! of the first subset and is not true now: the lowering reaches `Vector`,
+//! the collections, closures, and tasks, so a VM run allocates growable
+//! storage and reclaims none of it. What is written above is therefore a
+//! statement about where the roots *are* rather than code that reads them,
+//! and [issue #119](https://github.com/myuon/cove/issues/119) is the blocker
+//! that has to be cleared before this backend can be the default one, since
+//! the AST backend collects and this one does not. A *moving* collector
+//! would need one thing more, which is that a place is an index into the
+//! storage it is moving.
 //!
 //! # Fuel is charged by the block, not by the instruction
 //!
@@ -508,6 +513,10 @@ pub struct Vm<'a> {
     /// what a heap it owns can report is what it allocated; a cycle a lowered
     /// program builds is not reclaimed, which is a gap in this backend rather
     /// than a property of the subset it covers.
+    /// [Issue #119](https://github.com/myuon/cove/issues/119) is that gap,
+    /// and it blocks [#111](https://github.com/myuon/cove/issues/111): the
+    /// AST backend collects, so a program that runs in bounded memory there
+    /// need not here.
     heap: Heap,
     /// Fuel charged since the last safepoint, spent at the next one.
     fuel: u64,

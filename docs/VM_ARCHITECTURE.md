@@ -729,21 +729,29 @@ on the same machine:
 
 | bench       | AST       | VM       | ratio |
 | ----------- | --------: | -------: | ----: |
-| `pure`      |   15.7 ms |   2.6 ms | **5.93×** |
-| `call`      | 1534.1 ms | 260.3 ms | 5.89× |
-| `arith`     |  424.7 ms |  82.4 ms | 5.15× |
-| `method`    | 2860.0 ms | 861.7 ms | 3.32× |
-| `chars`     | 1841.8 ms | 810.0 ms | 2.27× |
-| `arrayget`  | 1411.8 ms | 658.2 ms | 2.14× |
-| `field`     |  857.6 ms | 436.8 ms | 1.96× |
-| `hostheavy` |    5.0 ms |   3.7 ms | 1.36× |
+| `call`      | 1531.2 ms | 298.1 ms | **5.14×** |
+| `pure`      |   15.7 ms |   3.1 ms | 5.07× |
+| `arith`     |  436.3 ms |  96.0 ms | 4.55× |
+| `method`    | 2821.4 ms | 963.6 ms | 2.93× |
+| `chars`     | 1809.6 ms | 841.4 ms | 2.15× |
+| `arrayget`  | 1402.9 ms | 680.9 ms | 2.06× |
+| `field`     |  874.5 ms | 464.2 ms | 1.88× |
+| `hostheavy` |    5.1 ms |   4.1 ms | 1.24× |
 
-Three of those ratios fell while both columns got faster, which is worth
-saying because a ratio alone would read as a regression. `Value` at 24 bytes
-is shared by the two backends, so the AST column moved with the VM column and
-`arith`'s ratio went from 5.49 to 5.15 on a VM run that got *faster*. The
-ratio is what the two backends cost each other; the milliseconds are what
-Cove costs.
+Those numbers are worse than the ones this table held before closures,
+dynamic dispatch, and tasks were lowered, and the difference is real rather
+than drift. Against that earlier measurement the VM is 3.5% to 19% slower —
+`pure` 19%, `arith` 16.5%, `call` 14.5%, and the collection-shaped ones least
+— while the AST column moved between −1.7% and +2.7%, which is the control
+that says the machine did not change under them. And the instruction counts
+did not move at all: `arith` runs the same 31,142,877 instructions it ran
+before, `field` 47,428,595, `method` 59,428,598. **The same instructions ran
+and they got slower**, which is the signature of a dispatch loop carrying
+more than it uses. That is the cost the place model paid once, measured and
+brought back down; three further capabilities each measured within their own
+noise and together they did not. It is recorded in
+[issue #126](https://github.com/myuon/cove/issues/126) rather than chased
+here.
 
 `hostheavy` is the floor and should be: it is host dispatch, which both
 backends reach through the same registry, so there is nothing there for an
