@@ -35,24 +35,50 @@
 //! # Roots, and why reference counts are part of them
 //!
 //! ADR 0011 is explicit that the roots are the interpreter's own structures
-//! rather than a machine stack, so there are no stack maps here. Every binding
-//! the interpreter creates is a [`crate::interp`] `Place`, whose slot is
-//! registered in a [`Roots`] list with the same push-and-truncate discipline
-//! the environment chain already has.
+//! rather than a machine stack, so there are no stack maps here. What those
+//! structures are is not the same on both backends, so [`Roots`] is a trait
+//! rather than a list: it names something that can *drive* a walk of one
+//! task's roots, and each backend describes its own.
 //!
-//! That covers named bindings. It does not cover a value the evaluator is
-//! holding in a Rust local — the left operand of a `+` whose right operand is
-//! still being evaluated, an argument evaluated before the call it belongs to.
-//! Those are the values ADR 0011 calls "values being evaluated," and a tree
-//! walker has no list of them.
+//! The two descriptions have nothing in common but the values they yield.
+//! Every binding the interpreter creates is a [`crate::interp`] `Place`,
+//! whose slot is an `Rc<RefCell<Value>>` registered in a [`SlotRoots`] list
+//! with the same push-and-truncate discipline the environment chain already
+//! has; the collector borrows each cell as it walks, so what it sees is what
+//! the slot holds now rather than what it held when the binding was made. The
+//! VM has no such cells — it put every binding into one contiguous
+//! `Vec<Value>` precisely so a call would allocate nothing — so its roots are
+//! that vector up to its current length, and walking them is iterating it.
+//! Neither backend can be made to build the other's representation without
+//! giving back what the representation was for, which is why the collector
+//! takes a walk instead of a structure.
+//!
+//! A walk is asked for twice, once to count and once to mark, so an
+//! implementation must be re-walkable and must yield the same values both
+//! times. Nothing here consumes it.
+//!
+//! Either description covers what the program has named. Neither covers a
+//! value the backend is holding in a Rust local — the left operand of a `+`
+//! whose right operand is still being evaluated, an argument the VM has taken
+//! off its stack into the vector a host call is about to be handed. Those are
+//! the values ADR 0011 calls "values being evaluated," and neither a tree
+//! walker nor a dispatch loop has a list of them.
 //!
 //! The collector finds them exactly, without scanning anything: it counts the
 //! references it *can* see. For every shared allocation it walks — a vector, an
 //! array, a map, a closure, a trait object, a task, a task scope — it sums the
-//! references reachable from the registered roots and from the objects it
+//! references reachable from the walked roots and from the objects it
 //! manages, and compares that with `Rc::strong_count`. A shortfall is a
-//! reference held somewhere the collector cannot read — an evaluator temporary
-//! — so that allocation, and everything it holds, is a root.
+//! reference held somewhere the collector cannot read — a backend's own
+//! temporary — so that allocation, and everything it holds, is a root.
+//!
+//! This is the rule that makes a safepoint safe rather than merely
+//! well-chosen, and it is the same rule on both backends. A value in a Rust
+//! local is itself a reference, so a value the collector cannot see is a value
+//! whose count does not add up; there is no arrangement of locals a backend
+//! can reach a safepoint in that hides one. What a backend has to get right is
+//! therefore narrower than "have everything on a stack": it has to not walk
+//! anything twice, because a reference counted twice is a shortfall concealed.
 //!
 //! Counting the containers as well as the objects is what makes this sound
 //! rather than merely plausible. An array can hold the only reference to a
@@ -125,6 +151,51 @@ const MIN_ALLOCATIONS_BETWEEN_COLLECTIONS: u64 = 64;
 /// reason to size the next collection from the last one's survivors.
 const GROWTH_FACTOR: u64 = 2;
 
+/// One task's roots, as something the collector can walk.
+///
+/// # Why a walk and not a list
+///
+/// The two backends keep a task's bindings in shapes that have nothing in
+/// common. The interpreter gives every binding an `Rc<RefCell<Value>>` of its
+/// own and hands the collector the cells, so a collection reads what a
+/// binding holds *now*; the VM gives every binding a slot of one contiguous
+/// `Vec<Value>`, which is the whole reason a call on that backend allocates
+/// nothing. A collector that demanded the interpreter's shape would make the
+/// VM build a cell per binding and give back what the arrangement bought; one
+/// that demanded the VM's would make the interpreter snapshot its bindings
+/// into a vector, which is both a copy and a lie, since the snapshot would be
+/// of the values as they were rather than as they are.
+///
+/// So neither shape is asked for. What is asked for is a walk: an
+/// implementation calls `visit` once per reference it holds, and how it finds
+/// them is its own business. An enum of the two shapes was the alternative
+/// and it was not taken, because it would put every backend's root
+/// representation in this module and make adding a third an edit here rather
+/// than there.
+///
+/// # What an implementation owes
+///
+/// [`Heap::collect`] walks the roots **twice** — once to count the references
+/// it can see, once to mark from them — so a walk must be repeatable and must
+/// yield the same references both times. Nothing consumes it.
+///
+/// It must also yield each reference **exactly once**. Yielding one twice is
+/// not conservative: the collector's soundness rests on comparing the
+/// references it can see against `Rc::strong_count`, so a reference counted
+/// twice makes a live allocation's count add up when it does not, and the
+/// sweep then empties something a backend temporary can still reach. Both
+/// implementations here therefore de-duplicate what they know can alias:
+/// [`SlotRoots`] by slot address, because a `var` parameter binds the
+/// caller's slot and one cell can be registered by two environments.
+///
+/// Yielding *too few* is safe in the same accounting, and is the reason the
+/// VM need not walk its constant pool: an unseen reference is a shortfall,
+/// and a shortfall is a root.
+pub trait Roots {
+    /// Calls `visit` once for every value this task holds directly.
+    fn walk(&self, visit: &mut dyn FnMut(&Value));
+}
+
 /// A slot the collector starts from: one binding's storage.
 ///
 /// This is [`crate::interp`]'s `Place` slot, registered here so a collection
@@ -140,18 +211,18 @@ type Slot = Rc<RefCell<Value>>;
 /// exactly. There is one list per interpreter and one interpreter per task, so
 /// this *is* a task's roots — nothing has to be sliced out of a larger set.
 #[derive(Default)]
-pub struct Roots {
+pub struct SlotRoots {
     slots: Vec<Slot>,
 }
 
-impl Roots {
+impl SlotRoots {
     /// An empty root set.
-    pub fn new() -> Roots {
-        Roots::default()
+    pub fn new() -> SlotRoots {
+        SlotRoots::default()
     }
 
     /// How many slots are registered. A caller records this before entering a
-    /// scope and hands it back to [`Roots::truncate`] on the way out.
+    /// scope and hands it back to [`SlotRoots::truncate`] on the way out.
     pub fn len(&self) -> usize {
         self.slots.len()
     }
@@ -171,10 +242,30 @@ impl Roots {
     pub fn truncate(&mut self, len: usize) {
         self.slots.truncate(len);
     }
+}
 
-    /// Every registered slot, which is this task's bindings and no others'.
-    fn slots(&self) -> &[Slot] {
-        &self.slots
+impl Roots for SlotRoots {
+    /// Borrows each registered slot and yields what it holds.
+    ///
+    /// One cell may be registered twice — a `var` parameter binds the caller's
+    /// slot, so the caller's environment and the callee's both name it — and
+    /// yielding it twice would count one reference as two. The addresses
+    /// already seen are what stops that.
+    ///
+    /// A slot that cannot be borrowed is one the interpreter is writing
+    /// through. It is skipped rather than waited for, which is not a hole:
+    /// its references go uncounted, so whatever it holds is short by one and
+    /// is a root under the rule this module's documentation gives.
+    fn walk(&self, visit: &mut dyn FnMut(&Value)) {
+        let mut walked: HashSet<usize> = HashSet::new();
+        for slot in &self.slots {
+            if !walked.insert(Rc::as_ptr(slot) as usize) {
+                continue;
+            }
+            if let Ok(value) = slot.try_borrow() {
+                visit(&value);
+            }
+        }
     }
 }
 
@@ -333,7 +424,10 @@ impl Heap {
     }
 
     /// Marks from the roots and sweeps what is not marked.
-    pub fn collect(&mut self, roots: &Roots) -> Collection {
+    ///
+    /// `roots` is walked twice and never consumed: see [`Roots`] for what a
+    /// walk owes, and for why the two backends describe theirs differently.
+    pub fn collect(&mut self, roots: &dyn Roots) -> Collection {
         let started = Instant::now();
 
         // An object `Rc` already reclaimed leaves a dead `Weak` behind. Drop
@@ -391,19 +485,11 @@ impl Heap {
     /// Each allocation's contents are walked exactly once, so each physical
     /// reference is counted exactly once and a shortfall is exactly the set of
     /// references the collector cannot read.
-    fn count_visible_references(&self, roots: &Roots) -> Scan {
+    fn count_visible_references(&self, roots: &dyn Roots) -> Scan {
         let mut scan = Scan {
             seen: HashMap::new(),
-            slots: HashSet::new(),
         };
-        for slot in roots.slots() {
-            if !scan.slots.insert(Rc::as_ptr(slot) as usize) {
-                continue;
-            }
-            if let Ok(value) = slot.try_borrow() {
-                scan.count(&value);
-            };
-        }
+        roots.walk(&mut |value| scan.count(value));
         for weak in self.objects.values() {
             let Some(object) = weak.upgrade() else {
                 continue;
@@ -420,9 +506,9 @@ impl Heap {
         scan
     }
 
-    /// Marks everything reachable from this task's bindings and from every
-    /// object some evaluator temporary still holds.
-    fn mark(&self, roots: &Roots, scan: &Scan, strong: &HashMap<usize, usize>) -> LiveSet {
+    /// Marks everything reachable from this task's roots and from every
+    /// object some backend temporary still holds.
+    fn mark(&self, roots: &dyn Roots, scan: &Scan, strong: &HashMap<usize, usize>) -> LiveSet {
         let mut marker = Marker {
             managed: &self.objects,
             excluded: None,
@@ -431,17 +517,7 @@ impl Heap {
             bytes: 0,
             work: Vec::new(),
         };
-        for slot in roots.slots() {
-            if !marker.walked.insert(Rc::as_ptr(slot) as usize) {
-                continue;
-            }
-            // A slot that cannot be read is one the interpreter is writing
-            // through. Its references went uncounted above, so whatever it
-            // holds is already a root by the rule below.
-            if let Ok(value) = slot.try_borrow() {
-                marker.visit(&value);
-            }
-        }
+        roots.walk(&mut |value| marker.visit(value));
         // Anything whose references do not add up is held from somewhere the
         // collector cannot read — an evaluator temporary — so it is a root.
         for (at, sighting) in &scan.seen {
@@ -551,9 +627,6 @@ struct Sighting {
 /// Counts the references to every shared allocation the collector can reach.
 struct Scan {
     seen: HashMap<usize, Sighting>,
-    /// Root slots already read, since one `Place` can be registered by more
-    /// than one environment: a `var` parameter binds the caller's slot.
-    slots: HashSet<usize>,
 }
 
 impl Scan {
@@ -905,7 +978,7 @@ mod tests {
 
     /// Registers `value` as a binding and returns the slot, so a test can drop
     /// the root later.
-    fn root(roots: &mut Roots, value: Value) -> Slot {
+    fn root(roots: &mut SlotRoots, value: Value) -> Slot {
         let slot = Rc::new(RefCell::new(value));
         roots.push(slot.clone());
         slot
@@ -913,7 +986,7 @@ mod tests {
 
     #[test]
     fn an_unreachable_object_is_reclaimed() {
-        let roots = Roots::new();
+        let roots = SlotRoots::new();
         let mut heap = Heap::new();
         let storage = heap.allocate(vec![Value::Int(1)]);
         drop(storage);
@@ -925,7 +998,7 @@ mod tests {
 
     #[test]
     fn a_reachable_object_survives() {
-        let mut roots = Roots::new();
+        let mut roots = SlotRoots::new();
         let mut heap = Heap::new();
         let storage = heap.allocate(vec![Value::Int(1)]);
         let _slot = root(&mut roots, Value::Vector(storage));
@@ -938,7 +1011,7 @@ mod tests {
     /// other keep each other's reference count above zero forever.
     #[test]
     fn a_cycle_is_reclaimed() {
-        let roots = Roots::new();
+        let roots = SlotRoots::new();
         let mut heap = Heap::new();
         let a = heap.allocate(Vec::new());
         let b = heap.allocate(Vec::new());
@@ -957,7 +1030,7 @@ mod tests {
 
     #[test]
     fn a_reachable_cycle_survives() {
-        let mut roots = Roots::new();
+        let mut roots = SlotRoots::new();
         let mut heap = Heap::new();
         let a = heap.allocate(Vec::new());
         a.elements.borrow_mut().push(Value::Vector(a.clone()));
@@ -971,7 +1044,7 @@ mod tests {
     /// A cycle whose back edge runs through a struct field is still a cycle.
     #[test]
     fn a_cycle_through_a_struct_field_is_reclaimed() {
-        let roots = Roots::new();
+        let roots = SlotRoots::new();
         let mut heap = Heap::new();
         let object = heap.allocate(Vec::new());
         object
@@ -995,7 +1068,7 @@ mod tests {
     /// reference count.
     #[test]
     fn an_object_held_only_by_a_temporary_is_a_root() {
-        let roots = Roots::new();
+        let roots = SlotRoots::new();
         let mut heap = Heap::new();
         let held = heap.allocate(vec![Value::Int(1)]);
         let collected = heap.collect(&roots);
@@ -1008,7 +1081,7 @@ mod tests {
     /// the object is inside it.
     #[test]
     fn an_object_inside_a_temporary_container_is_a_root() {
-        let roots = Roots::new();
+        let roots = SlotRoots::new();
         let mut heap = Heap::new();
         let inner = heap.allocate(vec![Value::Int(7)]);
         let weak = Rc::downgrade(&inner);
@@ -1026,7 +1099,7 @@ mod tests {
     /// the garbage — and free the one thing the temporary can still reach.
     #[test]
     fn an_object_reached_through_a_container_a_temporary_shares_with_garbage_survives() {
-        let roots = Roots::new();
+        let roots = SlotRoots::new();
         let mut heap = Heap::new();
         let inner = heap.allocate(vec![Value::Int(7)]);
         let alive = Rc::downgrade(&inner);
@@ -1066,7 +1139,7 @@ mod tests {
 
     #[test]
     fn a_binding_dropped_from_the_roots_is_reclaimed() {
-        let mut roots = Roots::new();
+        let mut roots = SlotRoots::new();
         let mut heap = Heap::new();
         let object = heap.allocate(Vec::new());
         let cycle = Value::Vector(object.clone());
@@ -1082,7 +1155,7 @@ mod tests {
 
     #[test]
     fn live_bytes_falls_when_a_cycle_is_reclaimed() {
-        let roots = Roots::new();
+        let roots = SlotRoots::new();
         let mut heap = Heap::new();
         let a = heap.allocate(vec![Value::Str("a fairly long string".into())]);
         let b = heap.allocate(Vec::new());
@@ -1112,7 +1185,7 @@ mod tests {
 
     #[test]
     fn stats_accumulate_over_collections() {
-        let roots = Roots::new();
+        let roots = SlotRoots::new();
         let mut heap = Heap::new();
         let object = heap.allocate(Vec::new());
         let cycle = Value::Vector(object.clone());

@@ -33,7 +33,7 @@ use cove_syntax::ast::{
 use crate::budget::{Cancellation, Stopped};
 use crate::builtins::{self, Callable};
 use crate::error::RuntimeError;
-use crate::heap::{Collection, Heap, HeapStats, Roots};
+use crate::heap::{Collection, Heap, HeapStats, SlotRoots};
 use crate::host::{HostRegistry, Reentry, ResourceHandle};
 use crate::runtime::{Runtime, ENTRY_TASK};
 use crate::schema::TypeSchema;
@@ -363,7 +363,7 @@ impl Place {
 /// the body received, and the bindings it has declared.
 ///
 /// Every binding an environment declares is registered in its interpreter's
-/// [`Roots`], and leaving a block — or dropping the whole environment when a
+/// [`SlotRoots`], and leaving a block — or dropping the whole environment when a
 /// call returns — truncates that list back to where the scope began. The
 /// collector's roots are therefore the environment chain itself, which is what
 /// ADR 0011 means by "the roots are the interpreter's own structures": there is
@@ -406,13 +406,13 @@ struct Env {
     /// One entry per open block scope: where it begins in `frame`, and where
     /// it begins in `roots`.
     marks: Vec<(usize, usize)>,
-    roots: Rc<RefCell<Roots>>,
+    roots: Rc<RefCell<SlotRoots>>,
     /// Where this environment's own bindings begin in `roots`.
     base: usize,
 }
 
 impl Env {
-    fn new(module: Rc<str>, roots: Rc<RefCell<Roots>>) -> Env {
+    fn new(module: Rc<str>, roots: Rc<RefCell<SlotRoots>>) -> Env {
         let base = roots.borrow().len();
         Env {
             module,
@@ -611,7 +611,7 @@ pub struct Interpreter<'a> {
     /// Every binding every live environment on this thread has declared, in
     /// declaration order. This is the list a collection walks; see [`Env`] for
     /// how it stays in step with the environment chain.
-    roots: Rc<RefCell<Roots>>,
+    roots: Rc<RefCell<SlotRoots>>,
     /// This task's heap.
     ///
     /// ADR 0011: a value belongs to one task or is immutable and shared, so a
@@ -655,7 +655,7 @@ impl<'a> Interpreter<'a> {
             reentry_depth: 0,
             task_stack: Vec::new(),
             timings: Vec::new(),
-            roots: Rc::new(RefCell::new(Roots::new())),
+            roots: Rc::new(RefCell::new(SlotRoots::new())),
             heap: Heap::new(),
             method_key: std::cell::Cell::new((String::new(), String::new())),
             assertion_failure: None,
@@ -703,7 +703,7 @@ impl<'a> Interpreter<'a> {
         let roots = Rc::clone(&self.roots);
         let collected = {
             let roots = roots.borrow();
-            self.heap.collect(&roots)
+            self.heap.collect(&*roots)
         };
         let task = self.task_id();
         self.runtime.trace(TraceEvent::HeapCollected {
