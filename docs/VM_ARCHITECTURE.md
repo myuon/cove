@@ -894,29 +894,38 @@ on the same machine:
 
 | bench       | AST       | VM       | ratio |
 | ----------- | --------: | -------: | ----: |
-| `call`      | 1531.2 ms | 298.1 ms | **5.14×** |
-| `pure`      |   15.7 ms |   3.1 ms | 5.07× |
-| `arith`     |  436.3 ms |  96.0 ms | 4.55× |
-| `method`    | 2821.4 ms | 963.6 ms | 2.93× |
-| `chars`     | 1809.6 ms | 841.4 ms | 2.15× |
-| `arrayget`  | 1402.9 ms | 680.9 ms | 2.06× |
-| `field`     |  874.5 ms | 464.2 ms | 1.88× |
-| `hostheavy` |    5.1 ms |   4.1 ms | 1.24× |
+| `pure`      |   16.8 ms |   2.8 ms | **6.00×** |
+| `call`      | 1570.4 ms | 279.4 ms | 5.62× |
+| `arith`     |  439.1 ms |  84.3 ms | 5.21× |
+| `method`    | 2841.5 ms | 912.9 ms | 3.11× |
+| `chars`     | 1871.6 ms | 825.6 ms | 2.27× |
+| `arrayget`  | 1421.9 ms | 671.7 ms | 2.12× |
+| `field`     |  860.0 ms | 443.4 ms | 1.94× |
+| `hostheavy` |    5.3 ms |   4.1 ms | 1.30× |
 
-Those numbers are worse than the ones this table held before closures,
-dynamic dispatch, and tasks were lowered, and the difference is real rather
-than drift. Against that earlier measurement the VM is 3.5% to 19% slower —
-`pure` 19%, `arith` 16.5%, `call` 14.5%, and the collection-shaped ones least
-— while the AST column moved between −1.7% and +2.7%, which is the control
-that says the machine did not change under them. And the instruction counts
-did not move at all: `arith` runs the same 31,142,877 instructions it ran
-before, `field` 47,428,595, `method` 59,428,598. **The same instructions ran
-and they got slower**, which is the signature of a dispatch loop carrying
-more than it uses. That is the cost the place model paid once, measured and
-brought back down; three further capabilities each measured within their own
-noise and together they did not. It is recorded in
-[issue #126](https://github.com/myuon/cove/issues/126) rather than chased
-here.
+This table held worse numbers for a while, and the difference was real
+rather than drift. When closures, dynamic dispatch and tasks had been lowered
+the VM was 3.5% to 19% slower than at `c8450e7` — `pure` 19%, `arith` 16.5%,
+`call` 14.5%, and the collection-shaped ones least — while the AST column
+moved between −1.7% and +2.7%, which is the control that says the machine did
+not change under them. And the instruction counts did not move at all:
+`arith` runs the same 31,142,877 instructions it ran before, `field`
+47,428,595, `method` 59,428,598. **The same instructions ran and they got
+slower**, which is the signature of a dispatch loop carrying more than it
+uses. That is the cost the place model paid once, measured and brought back
+down; three further capabilities each measured within their own noise and
+together they did not, which is
+[issue #126](https://github.com/myuon/cove/issues/126) and the process gap it
+also names — a per-change gate against the immediate parent cannot see an
+accumulation.
+
+Most of it has since been given back, and where it was is not where it was
+looked for: the dispatch body's size was the minority of it and an `Inst`
+kept alive across the dispatch was the majority. "What the three capabilities
+after it cost, and where the cost actually was", below, has the attribution
+and the two variants that did not work. What is left against `c8450e7` is
+`call` at about +5%, which is not attributed to anything, and everything else
+at or under the ±6% band `arith` is known to move in for layout alone.
 
 `hostheavy` is the floor and should be: it is host dispatch, which both
 backends reach through the same registry, so there is nothing there for an
@@ -1145,6 +1154,90 @@ measured through the `cove` binary rather than through `cove-bench` shows
 +4.5% rather than +6.7%, which is what says the remaining cost is layout. It
 is at the edge of the ±6% band this section already established for `arith`
 and is not separable from it by anything measured here.
+
+### What the three capabilities after it cost, and where the cost actually was
+
+[Issue #126](https://github.com/myuon/cove/issues/126) is the same shape one
+step later. Closures, dynamic dispatch and tasks each measured within their
+own threshold against their own parent, and against `c8450e7` the three
+together cost 3.5% to 19% on programs that execute none of their
+instructions. The three things the place model had gone wrong on were checked
+first and none of them had: `size_of::<Inst>()` is 16 at both commits,
+`Frame` is 32 bytes at both, and `benches/arith`'s own arms — `load-scalar`,
+`store-scalar`, `int-binary`, `jump-if-false-scalar`, and `charge` — are
+byte-for-byte the same code. What changed was that `Vm::execute`'s `match`
+went from 39 arms to 48.
+
+Two things were found, and the larger of them was not the one that was
+expected.
+
+**The five new arms written inline were worth about three points.**
+`call-resource`, `snapshot`, `spread-argument`, `make-range` and
+`make-host-enum` were about ninety-five lines inside the `match`; the other
+four of the nine already delegated to an `#[inline(never)]` helper. Putting
+those five behind one helper too — `Vm::cold_inst`, which is grouped by what
+the loop pays to carry them rather than by what they do — took `arith` from
+96.3 ms to 93.2 ms.
+
+**The four that already delegated were worth about nine, and not for
+existing.** Each was handed the `Inst` the `match` had just dispatched on.
+An `Inst` is two words, and one that has to survive the dispatch is one the
+register allocator has to keep somewhere; with five callers wanting it, it
+went to the stack. The disassembly says so plainly. At `c8450e7` the loop
+loads the fields it wants straight out of the code array into registers —
+tag, byte, `u32`, `u64`, four loads and no stores — and keeps `pc` in `%r15`.
+At the regressed commit it loads both words, *stores both to the stack*, and
+spills `pc` beside them, on every instruction dispatched; each arm then
+reloads what it wanted. Changing the five helpers to take `running` and `pc`
+— both already live — and read `running.code[pc]` for themselves lets the
+instruction die at the `match`, and the loop goes back to loading only the
+tag byte and letting each arm fetch its own payload. That alone took `arith`
+from 96.3 ms to 87.1 ms; with the five inline arms collapsed as well, to
+84.8 ms against 82.7 ms for `c8450e7`.
+
+Medians of fifteen `execute=` times through the `cove` binary rather than
+`cove-bench`, which reproduces the regression to under a percent and takes
+seconds; `c8450e7` was re-measured between every variant and read 82.4 ms to
+83.5 ms throughout, so the machine did not drift under them.
+
+| variant                                     | `arith` | `call` |
+| ------------------------------------------- | ------: | -----: |
+| `c8450e7`                                   | 82.7 ms | 262 ms |
+| the regression, as found                    | 96.3 ms | 291 ms |
+| five inline arms behind one helper          | 93.2 ms | 288 ms |
+| helpers take `running` and `pc`, not `Inst` | 87.1 ms | 283 ms |
+| both                                        | 84.8 ms | 274 ms |
+
+**The function did not get bigger, which is the negative result worth
+keeping.** `Vm::execute` disassembles to 5,684 instructions at the regressed
+commit against 5,957 at `c8450e7` — *smaller*, while running 16% slower on
+`arith`. So "a bigger dispatch body costs every program" is not what happened
+here, however well it described the place model. Body size did cost something
+— the three points the five inline arms gave back are exactly that, and the
+function is 4,532 instructions now — but it was the minority of it. What cost
+more was a value the loop had to keep alive across the dispatch, which is
+invisible in an arm count and invisible in a line count, and which two of the
+four delegating arms introduced while doing the thing that was supposed to be
+the remedy. Delegating an instruction is not free by construction; it is free
+only if the call takes nothing the loop would not otherwise be holding.
+
+Two variants were tried and discarded. Dropping the `blocks` local from the
+loop and reading `running.block_fuel` at each jump — two fewer live registers
+in exchange for a load — moved `arith` from 84.6 ms to 84.4 ms and `call`
+from 274.0 ms to 276.3 ms, which is nothing and slightly the wrong way.
+Stripping the per-call work places and tasks added, as an unsound ablation
+rather than a proposal — the `async_frames` check, the place window's base
+and its `resize` — made `call` *worse*, 278.6 ms against 274.0 ms. So the
+`call` residual is not the instructions the `Call` arm gained, and it is not
+attributed here at all.
+
+What is left, `cove-bench --iterations 5` averaged over two rounds against
+`c8450e7` measured in the same session: `arith` +2.3%, `field` +0.9%,
+`method` +1.7%, `chars` −0.5%, `arrayget` −1.8%, `call` +5.6%. Everything but
+`call` is inside the ±6% band this section established for `arith` or below
+its own noise; `call` is not, and 61% of what it lost is still lost. `pure`
+and `hostheavy` are 2.6 ms and 3.8 ms and say nothing at that size either
+way.
 
 ## The value representation, audited
 

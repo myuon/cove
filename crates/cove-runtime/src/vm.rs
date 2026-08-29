@@ -998,6 +998,20 @@ impl<'a> Vm<'a> {
     /// them anywhere else is the re-derivation this backend exists to stop
     /// doing.
     ///
+    /// Nothing reads the dispatched instruction as a whole. Every helper
+    /// an arm calls takes `running` and `pc` — both already live here — and
+    /// reads `running.code[pc]` for itself, rather than being handed the
+    /// `Inst` the `match` was on. That is not tidiness. An `Inst` is two
+    /// words, and one that has to survive the dispatch is one the register
+    /// allocator has to put somewhere: handed to five out-of-line helpers it
+    /// went to the stack, so every instruction dispatched stored both words
+    /// and each arm reloaded the field it wanted from there, and `pc` was
+    /// spilled beside it. Letting it die at the `match` gives back the
+    /// per-arm field loads the loop had before the helpers existed, and was
+    /// worth about nine percent of `benches/arith` — measured, and recorded
+    /// in `docs/VM_ARCHITECTURE.md`. Anything added here that wants the
+    /// instruction after the dispatch should read it again.
+    ///
     /// `floor` is how many frames stood below the one this is to run, and it
     /// is what makes the loop re-entrant. A whole run is `floor = 0` and
     /// ends when the entry's frame is popped; a callback a host runs while
@@ -1024,8 +1038,7 @@ impl<'a> Vm<'a> {
         self.charge(blocks[0], || running.span_at(0))?;
 
         loop {
-            let inst = code[pc];
-            match inst {
+            match code[pc] {
                 Inst::Const(id) => self.stack.push(self.constants[id.0 as usize].clone()),
                 Inst::LoadLocal(slot) => {
                     let value = self.stack[frame.base + slot as usize].clone();
@@ -1146,7 +1159,11 @@ impl<'a> Vm<'a> {
                     continue;
                 }
                 Inst::JumpIfFalse(to) | Inst::JumpIfTrue(to) => {
-                    let taken_on = matches!(inst, Inst::JumpIfTrue(_));
+                    // Read again rather than kept from the `match`, which
+                    // is the loop's own rule: see the note on `Vm::execute`.
+                    // This arm is the one place a payload alone does not say
+                    // which of two instructions is running.
+                    let taken_on = matches!(code[pc], Inst::JumpIfTrue(_));
                     let to = to as usize;
                     let test = self.pop();
                     let Value::Bool(test) = test else {
@@ -1224,7 +1241,7 @@ impl<'a> Vm<'a> {
                 // one, and that is the only thing this arm can do that the
                 // function cannot.
                 Inst::MakeClosure { .. } | Inst::CallValue { .. } => {
-                    if let Some(entered) = self.closure_inst(inst, pc, running.span_at(pc))? {
+                    if let Some(entered) = self.closure_inst(running, pc)? {
                         frame = entered;
                         running = program.function(frame.function);
                         code = &running.code;
@@ -1239,7 +1256,7 @@ impl<'a> Vm<'a> {
                 // benchmark's path, and this `match` is on all of them. Only
                 // a dispatch that opened a frame comes back with one.
                 Inst::MakeDyn { .. } | Inst::CallDyn { .. } => {
-                    if let Some(entered) = self.dyn_inst(inst, pc, running.span_at(pc))? {
+                    if let Some(entered) = self.dyn_inst(running, pc)? {
                         frame = entered;
                         running = program.function(frame.function);
                         code = &running.code;
@@ -1257,41 +1274,14 @@ impl<'a> Vm<'a> {
                     let value = self.call_host(module, op, values, span)?;
                     self.stack.push(value);
                 }
-                Inst::CallResource { op, argc } => {
-                    let span = running.span_at(pc);
-                    let op = name(program, op);
-                    let values = self.take(argc as usize);
-                    let receiver = self.pop();
-                    // The receiver is not asked what it is: the lowering
-                    // emitted this only where the checker settled the
-                    // receiver as a host resource, so a handle standing here
-                    // is an invariant of this backend rather than a fact to
-                    // confirm.
-                    let Value::Resource(handle) = &receiver else {
-                        unreachable!(
-                            "`call-resource` was emitted for a resource handle, and was handed a `{}`",
-                            receiver.type_name()
-                        );
-                    };
-                    let value = self.call_resource(handle, op, values, span)?;
-                    // No `size_of_value`, unlike the builtin call below and
-                    // like `Inst::CallHost` above: what a host call costs is
-                    // charged inside `HostRegistry`, from the operation's own
-                    // declaration, so pricing the answer again here would hold
-                    // a VM run to more than an interpreted one is held to.
-                    self.stack.push(value);
-                }
-                Inst::Snapshot => {
-                    let span = running.span_at(pc);
-                    let value = self.pop();
-                    let copied = builtins::snapshot(self, &value, span)?;
-                    // Priced like a builtin's answer, by `Inst::CallBuiltin`'s
-                    // own rule and for its own reason: this is a call to
-                    // `snapshot` written as an instruction rather than
-                    // dispatched by name, so it costs what that call costs.
-                    self.fuel += size_of_value(&copied);
-                    self.stack.push(copied);
-                }
+                // Five instructions in one arm, calling an `#[inline(never)]`
+                // helper, for the reason the place, closure, `dyn` and task
+                // instructions have one: see `Vm::cold_inst`.
+                Inst::CallResource { .. }
+                | Inst::Snapshot
+                | Inst::SpreadArgument
+                | Inst::MakeRange { .. }
+                | Inst::MakeHostEnum { .. } => self.cold_inst(running, pc)?,
                 Inst::CallBuiltin { name: method, argc } => {
                     let span = running.span_at(pc);
                     let method = name(program, method);
@@ -1309,45 +1299,6 @@ impl<'a> Vm<'a> {
                     let items: Rc<[Value]> = self.stack.drain(at..).collect();
                     self.fuel += u64::from(len);
                     self.stack.push(Value::Array(items));
-                }
-                Inst::SpreadArgument => {
-                    let span = running.span_at(pc);
-                    let spread = self.pop();
-                    let mut items: Vec<Value> = match self.pop() {
-                        Value::Array(built) => built.to_vec(),
-                        other => unreachable!(
-                            "`spread-argument` appends to the array below it, and was handed a `{}`",
-                            other.type_name()
-                        ),
-                    };
-                    // The two `bind_params` reads and nothing else. A
-                    // `Vector`'s elements are taken as it holds them now,
-                    // which is the borrow the interpreter takes at the same
-                    // moment.
-                    match &spread {
-                        Value::Array(values) => items.extend(values.iter().cloned()),
-                        Value::Vector(storage) => {
-                            items.extend(storage.elements.borrow().iter().cloned());
-                        }
-                        _ => return Err(builtins::spread_needs_a_sequence(span)),
-                    }
-                    self.fuel += items.len() as u64;
-                    self.stack.push(Value::Array(items.into()));
-                }
-                Inst::MakeRange { inclusive_end } => {
-                    // The end is above the start, because that is the order
-                    // the lowering pushed them in and the order the source
-                    // writes them in. `inclusive_end` is carried through
-                    // rather than folded into the bounds: `0..<3` and `0..2`
-                    // yield the same integers and are different values, and
-                    // `Value::eq_value` and `Display` both read this flag.
-                    let end = self.pop_scalar();
-                    let start = self.pop_scalar();
-                    self.stack.push(Value::Range {
-                        start,
-                        end,
-                        inclusive_end,
-                    });
                 }
                 Inst::Concat(parts) => {
                     let at = self.stack.len() - parts as usize;
@@ -1469,27 +1420,6 @@ impl<'a> Vm<'a> {
                     let value = self.make_builtin(which, values, running.arg_spans_at(pc), span)?;
                     self.stack.push(value);
                 }
-                Inst::MakeHostEnum { ty, case } => {
-                    // The registry rather than the static schema, because
-                    // that is what `Interpreter::eval_field` asks: an
-                    // embedder's own host declares its types there, and a
-                    // module the lowering saw a schema for may be one the
-                    // run was never given.
-                    let span = running.span_at(pc);
-                    let qualified = name(program, ty);
-                    let case = name(program, case);
-                    let (module, short) = qualified
-                        .rsplit_once('.')
-                        .expect("`make-host-enum` names a type as `module.Name`");
-                    let Some(declared) = self.hosts.host_type(module, short) else {
-                        return Err(RuntimeError::new(format!(
-                            "no host module `{module}` declares `{short}`"
-                        ))
-                        .at(span));
-                    };
-                    let value = crate::interp::host_enum_case(module, &declared, case, span)?;
-                    self.stack.push(value);
-                }
                 Inst::MakeEnum { ty, case, argc } => {
                     let span = running.span_at(pc);
                     let case = name(program, case);
@@ -1537,7 +1467,7 @@ impl<'a> Vm<'a> {
                 | Inst::PlacePop
                 | Inst::PlaceRead
                 | Inst::PlaceWrite
-                | Inst::Freeze => self.place_inst(inst, frame, running.span_at(pc))?,
+                | Inst::Freeze => self.place_inst(running, pc, frame)?,
                 Inst::TestCase(case) => {
                     let case = name(program, case);
                     let subject = self.stack.last().expect("`test-case` has a value to test");
@@ -1582,7 +1512,7 @@ impl<'a> Vm<'a> {
                 | Inst::Spawn
                 | Inst::Await
                 | Inst::Cancel
-                | Inst::Lock => self.task_inst(inst, running.span_at(pc))?,
+                | Inst::Lock => self.task_inst(running, pc)?,
                 Inst::NoMatch => {
                     let span = running.span_at(pc);
                     let value = self.pop();
@@ -1702,8 +1632,14 @@ impl<'a> Vm<'a> {
     /// benchmark executes a single one of these, so nothing is paid for the
     /// call that is not paid by a program that uses places at all.
     #[inline(never)]
-    fn place_inst(&mut self, inst: Inst, frame: Frame, span: Span) -> Result<(), RuntimeError> {
-        match inst {
+    fn place_inst(
+        &mut self,
+        running: &Function,
+        pc: usize,
+        frame: Frame,
+    ) -> Result<(), RuntimeError> {
+        let span = running.span_at(pc);
+        match running.code[pc] {
             Inst::PlaceLocal(slot) => {
                 // Absolute, because a place travels into a call and the
                 // callee's `base` is a different number — see `Place`.
@@ -1857,6 +1793,118 @@ impl<'a> Vm<'a> {
         self.stack.drain(at..).collect()
     }
 
+    /// The five instructions that call a host resource, copy a value, spread
+    /// an argument, build a range, or name a host enum's case.
+    ///
+    /// Out of line for the reason the place, closure, `dyn` and task
+    /// instructions are: the dispatch body's footprint is a cost every
+    /// program pays, and no benchmark executes a single one of these. They
+    /// have nothing else in common — the grouping is by what the loop pays
+    /// to carry them, not by what they do, which is why this is not named
+    /// after a capability the way the other four are. Together they were
+    /// about ninety-five lines inside the `match`, and taking them out was
+    /// worth about three percent of `benches/arith`.
+    #[inline(never)]
+    fn cold_inst(&mut self, running: &Function, pc: usize) -> Result<(), RuntimeError> {
+        let program: &Program = self.program;
+        let span = running.span_at(pc);
+        match running.code[pc] {
+            Inst::CallResource { op, argc } => {
+                let op = name(program, op);
+                let values = self.take(argc as usize);
+                let receiver = self.pop();
+                // The receiver is not asked what it is: the lowering
+                // emitted this only where the checker settled the
+                // receiver as a host resource, so a handle standing here
+                // is an invariant of this backend rather than a fact to
+                // confirm.
+                let Value::Resource(handle) = &receiver else {
+                    unreachable!(
+                        "`call-resource` was emitted for a resource handle, and was handed a `{}`",
+                        receiver.type_name()
+                    );
+                };
+                let value = self.call_resource(handle, op, values, span)?;
+                // No `size_of_value`, unlike the builtin call below and
+                // like `Inst::CallHost` above: what a host call costs is
+                // charged inside `HostRegistry`, from the operation's own
+                // declaration, so pricing the answer again here would hold
+                // a VM run to more than an interpreted one is held to.
+                self.stack.push(value);
+            }
+            Inst::Snapshot => {
+                let value = self.pop();
+                let copied = builtins::snapshot(self, &value, span)?;
+                // Priced like a builtin's answer, by `Inst::CallBuiltin`'s
+                // own rule and for its own reason: this is a call to
+                // `snapshot` written as an instruction rather than
+                // dispatched by name, so it costs what that call costs.
+                self.fuel += size_of_value(&copied);
+                self.stack.push(copied);
+            }
+            Inst::SpreadArgument => {
+                let spread = self.pop();
+                let mut items: Vec<Value> = match self.pop() {
+                    Value::Array(built) => built.to_vec(),
+                    other => unreachable!(
+                        "`spread-argument` appends to the array below it, and was handed a `{}`",
+                        other.type_name()
+                    ),
+                };
+                // The two `bind_params` reads and nothing else. A
+                // `Vector`'s elements are taken as it holds them now,
+                // which is the borrow the interpreter takes at the same
+                // moment.
+                match &spread {
+                    Value::Array(values) => items.extend(values.iter().cloned()),
+                    Value::Vector(storage) => {
+                        items.extend(storage.elements.borrow().iter().cloned());
+                    }
+                    _ => return Err(builtins::spread_needs_a_sequence(span)),
+                }
+                self.fuel += items.len() as u64;
+                self.stack.push(Value::Array(items.into()));
+            }
+            Inst::MakeRange { inclusive_end } => {
+                // The end is above the start, because that is the order
+                // the lowering pushed them in and the order the source
+                // writes them in. `inclusive_end` is carried through
+                // rather than folded into the bounds: `0..<3` and `0..2`
+                // yield the same integers and are different values, and
+                // `Value::eq_value` and `Display` both read this flag.
+                let end = self.pop_scalar();
+                let start = self.pop_scalar();
+                self.stack.push(Value::Range {
+                    start,
+                    end,
+                    inclusive_end,
+                });
+            }
+            Inst::MakeHostEnum { ty, case } => {
+                // The registry rather than the static schema, because
+                // that is what `Interpreter::eval_field` asks: an
+                // embedder's own host declares its types there, and a
+                // module the lowering saw a schema for may be one the
+                // run was never given.
+                let qualified = name(program, ty);
+                let case = name(program, case);
+                let (module, short) = qualified
+                    .rsplit_once('.')
+                    .expect("`make-host-enum` names a type as `module.Name`");
+                let Some(declared) = self.hosts.host_type(module, short) else {
+                    return Err(RuntimeError::new(format!(
+                        "no host module `{module}` declares `{short}`"
+                    ))
+                    .at(span));
+                };
+                let value = crate::interp::host_enum_case(module, &declared, case, span)?;
+                self.stack.push(value);
+            }
+            _ => unreachable!("`cold_inst` is called for the five instructions it names"),
+        }
+        Ok(())
+    }
+
     // ----------------------------------------------------------- closures
 
     /// The two instructions that build a closure and enter one.
@@ -1876,11 +1924,11 @@ impl<'a> Vm<'a> {
     #[inline(never)]
     fn closure_inst(
         &mut self,
-        inst: Inst,
+        running: &Function,
         pc: usize,
-        span: Span,
     ) -> Result<Option<Frame>, RuntimeError> {
-        match inst {
+        let span = running.span_at(pc);
+        match running.code[pc] {
             Inst::MakeClosure { function, captures } => {
                 let value = self.close_over(function, captures);
                 self.stack.push(value);
@@ -2045,13 +2093,9 @@ impl<'a> Vm<'a> {
     /// caller has to do that this cannot: the running function, its code and
     /// its block table are locals of the loop.
     #[inline(never)]
-    fn dyn_inst(
-        &mut self,
-        inst: Inst,
-        pc: usize,
-        span: Span,
-    ) -> Result<Option<Frame>, RuntimeError> {
-        match inst {
+    fn dyn_inst(&mut self, running: &Function, pc: usize) -> Result<Option<Frame>, RuntimeError> {
+        let span = running.span_at(pc);
+        match running.code[pc] {
             Inst::MakeDyn { trait_name, depth } => {
                 let trait_name = self.shared_name(trait_name);
                 let value = self.pop();
@@ -2081,8 +2125,9 @@ impl<'a> Vm<'a> {
     /// returns it — `?` already means "return this failure from this call",
     /// and that is exactly what `Interpreter::leave_scope` does with one.
     #[inline(never)]
-    fn task_inst(&mut self, inst: Inst, span: Span) -> Result<(), RuntimeError> {
-        match inst {
+    fn task_inst(&mut self, running: &Function, pc: usize) -> Result<(), RuntimeError> {
+        let span = running.span_at(pc);
+        match running.code[pc] {
             Inst::EnterScope(named) => {
                 let scope = TaskScope::new(self.shared_name(named));
                 self.scopes.push(OpenScope {
