@@ -350,6 +350,54 @@ pub fn call_associated(
                 Err(_) => Value::err(Value::error(format!("`{text}` is not an Int"))),
             })
         }
+        // `Int.parse` in a base other than ten. A `radix` outside `2..=36`
+        // names no notation, so it stops the run the way an empty
+        // `String.split` separator does; text that is not a number in a
+        // radix that does exist is the data's failure and answers `Err`,
+        // which is the same line `Int.parse` draws. Rust's
+        // `i64::from_str_radix` reads a leading `+` or `-` and no digit
+        // separators, exactly as `parse::<i64>` above does.
+        ("Int", "parseRadix") => {
+            let args = expect_args("Int.parseRadix", args, 2, span)?;
+            let Value::Str(text) = &args[0] else {
+                return Err(type_error(
+                    "Int.parseRadix",
+                    "text",
+                    "String",
+                    &args[0],
+                    span,
+                ));
+            };
+            let Value::Int(radix) = &args[1] else {
+                return Err(type_error("Int.parseRadix", "radix", "Int", &args[1], span));
+            };
+            let Some(radix) = (2..=36).contains(radix).then_some(*radix as u32) else {
+                return Err(radix_error(*radix, span));
+            };
+            Ok(match i64::from_str_radix(text, radix) {
+                Ok(value) => Value::ok(Value::Int(value)),
+                Err(_) => Value::err(Value::error(format!(
+                    "`{text}` is not an Int in radix {radix}"
+                ))),
+            })
+        }
+        // The one-character `String` a Unicode code point names. A character
+        // in Cove is a `String` of length 1 — `chars()` answers an array of
+        // them — so this is that decomposition run backwards, and there is
+        // no `Character` type for it to answer instead.
+        ("String", "fromCodePoint") => {
+            let args = expect_args("String.fromCodePoint", args, 1, span)?;
+            let Value::Int(code_point) = &args[0] else {
+                return Err(type_error(
+                    "String.fromCodePoint",
+                    "codePoint",
+                    "Int",
+                    &args[0],
+                    span,
+                ));
+            };
+            Ok(from_code_point(*code_point))
+        }
         // Mirrors `Int.parse` exactly in shape. Rust's `f64::from_str`
         // accepts `inf`, `-inf`, and `NaN`, which is why this does too, and
         // it rejects the `_` digit separators a `Float` literal may be
@@ -928,6 +976,49 @@ fn float_to_int(x: f64) -> Value {
         )));
     }
     Value::ok(Value::Int(truncated as i64))
+}
+
+/// `String.fromCodePoint`: the one-character `String` a code point names, and
+/// otherwise which of the two ways the number names no character.
+///
+/// The surrogates get a sentence of their own because they are the failure a
+/// caller is most likely to be able to do something about. A format that
+/// writes a code point in sixteen bits — JSON's `\u`, and UTF-16 generally —
+/// writes anything past `0xFFFF` as a pair of them, so a program that reached
+/// here with a `0xD800` has half of a character rather than a bad one, and
+/// what it needs to hear is that the other half is still to come. Combining
+/// the pair is arithmetic the program does before it calls this: there is no
+/// half-formed value to hand back, because a Cove `String` is UTF-8 and holds
+/// no such thing.
+fn from_code_point(code_point: i64) -> Value {
+    if (0xD800..=0xDFFF).contains(&code_point) {
+        return Value::err(Value::error(format!(
+            "`{code_point}` is a surrogate half, which is not a character on its own"
+        )));
+    }
+    match u32::try_from(code_point).ok().and_then(char::from_u32) {
+        Some(character) => Value::ok(Value::Str(one_character(character))),
+        None => Value::err(Value::error(format!(
+            "`{code_point}` is not a Unicode code point"
+        ))),
+    }
+}
+
+/// `Int.parseRadix` refused a `radix` outside `2..=36`.
+///
+/// A radix of 1 has no place value and a radix of 0 has no digits, and past
+/// 36 there are no more letters to spell one with. None of those is text the
+/// data got wrong, so none of them is an `Err`: it is the call that is wrong,
+/// and the run stops the way it stops for an empty `String.split` separator.
+fn radix_error(radix: i64, span: Span) -> RuntimeError {
+    RuntimeError::new(format!(
+        "`Int.parseRadix` cannot read a number in radix `{radix}`"
+    ))
+    .at(span)
+    .with_rule(
+        "A radix is 2 through 36, which is as many digits as the ten numerals and the twenty-six letters afford.",
+    )
+    .with_help("pass a `radix` between 2 and 36, such as 16 for hexadecimal")
 }
 
 /// `Float.format` refused a `digits` outside `0..=17`.

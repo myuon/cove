@@ -104,6 +104,14 @@ Assignment and ordinary argument passing perform field-wise shallow copies.
 - `Array<T>` is fixed-length and immutable; `[1, 2]` is an array.
 - `Vector<T>` is growable and mutable; `Vector.of(1, 2)` constructs one.
 - `Array`, `Vector`, `String`, and ranges all answer `length()`.
+- A character is a `String` of length 1: `text.chars()` takes a string apart
+  into them, and `String.fromCodePoint(codePoint)` builds one from the number
+  that names it, or an `Err` for a number that names none — one out of range,
+  or a surrogate half. There is no `Character` type.
+- `Int.parse(text)` reads a decimal number and `Int.parseRadix(text, radix)`
+  reads one in a radix from 2 to 36. Text that is not a number answers `Err`;
+  a radix outside 2 to 36 stops the run, because it is the call that is wrong
+  and not the text.
 - Vector assignment is O(1), and aliases share elements and length.
 - `Map` and `Set` are immutable in the MVP.
 - Cove never performs an implicit deep copy.

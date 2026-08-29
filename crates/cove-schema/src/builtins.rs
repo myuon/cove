@@ -1248,7 +1248,30 @@ pub const STRING: BuiltinSchema = BuiltinSchema {
         },
         SNAPSHOT,
     ],
-    associated: &[],
+    // `String`'s first associated function, and the answer to the question
+    // `chars()` leaves open in the other direction: `chars()` takes a string
+    // apart into one-character strings, and this builds one of those from
+    // the number that names it. There is no `Character` type to build
+    // instead — a character in Cove is a `String` of length 1, which is what
+    // `chars()` already answers an array of.
+    //
+    // It answers a `Result` for `Float.toInt`'s reason rather than
+    // `Array.get`'s: this is a conversion between two domains where the
+    // source has values the target has no room for, and a code point past
+    // `0x10FFFF`, a negative one, and a surrogate half are three ways a
+    // number can name no character. A program that read the number out of a
+    // file is the program that should be told which.
+    associated: &[MethodSchema {
+        name: "fromCodePoint",
+        generics: &[],
+        params: &[ParamSchema {
+            name: "codePoint",
+            ty: BuiltinType::Int,
+        }],
+        variadic: false,
+        result: BuiltinType::Result(&BuiltinType::String, &BuiltinType::Error),
+        mutating: false,
+    }],
 };
 
 // ------------------------------------------------------------------- Range
@@ -1454,17 +1477,50 @@ pub const INT: BuiltinSchema = BuiltinSchema {
         },
         SNAPSHOT,
     ],
-    associated: &[MethodSchema {
-        name: "parse",
-        generics: &[],
-        params: &[ParamSchema {
-            name: "text",
-            ty: BuiltinType::String,
-        }],
-        variadic: false,
-        result: BuiltinType::Result(&BuiltinType::Int, &BuiltinType::Error),
-        mutating: false,
-    }],
+    associated: &[
+        MethodSchema {
+            name: "parse",
+            generics: &[],
+            params: &[ParamSchema {
+                name: "text",
+                ty: BuiltinType::String,
+            }],
+            variadic: false,
+            result: BuiltinType::Result(&BuiltinType::Int, &BuiltinType::Error),
+            mutating: false,
+        },
+        // The same reading in a base other than ten, and a second function
+        // rather than a second parameter on `parse`. A builtin's parameters
+        // are a name and a type and nothing else — there is nowhere in this
+        // vocabulary to write a default, and every `ParamSig` the checker
+        // builds from one says `has_default: false` — so a radix on `parse`
+        // would have to be an argument every caller supplies, which would
+        // change what `Int.parse(text)` means. It does not change: `parse`
+        // is decimal, and this is the one that asks.
+        //
+        // `radix` is 2 through 36, which is as many digits as the letters
+        // afford. A radix outside that names no notation, so it stops the
+        // run rather than answering `Err` — the same line `String.split`
+        // draws at an empty separator, and the line is between an argument
+        // the program got wrong and text the data got wrong.
+        MethodSchema {
+            name: "parseRadix",
+            generics: &[],
+            params: &[
+                ParamSchema {
+                    name: "text",
+                    ty: BuiltinType::String,
+                },
+                ParamSchema {
+                    name: "radix",
+                    ty: BuiltinType::Int,
+                },
+            ],
+            variadic: false,
+            result: BuiltinType::Result(&BuiltinType::Int, &BuiltinType::Error),
+            mutating: false,
+        },
+    ],
 };
 
 // ------------------------------------------------------------------- Float

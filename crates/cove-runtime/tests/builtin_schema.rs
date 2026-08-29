@@ -231,6 +231,11 @@ static EXERCISES: &[Exercise] = &[
     },
     Exercise {
         ty: "String",
+        name: "fromCodePoint",
+        body: "  String.fromCodePoint(65).unwrapOr(\"\").length()",
+    },
+    Exercise {
+        ty: "String",
         name: "split",
         body: "  let text = \"a,b\"\n  text.split(\",\").length()",
     },
@@ -356,6 +361,11 @@ static EXERCISES: &[Exercise] = &[
         ty: "Int",
         name: "parse",
         body: "  let parsed = Int.parse(\"7\")\n  let fine = parsed.isOk()\n  0",
+    },
+    Exercise {
+        ty: "Int",
+        name: "parseRadix",
+        body: "  Int.parseRadix(\"ff\", 16).unwrapOr(0)",
     },
     Exercise {
         ty: "Int",

@@ -12,3 +12,6 @@ equality true false
 toFloat 7.0 -3.0
 abs 7 7
 min 3 max 5
+parse Ok(12) Err(`x` is not an Int)
+parseRadix Ok(255) Err(`ff` is not an Int in radix 10)
+parseRadix Ok(10) Ok(-35)

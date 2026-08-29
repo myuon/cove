@@ -1,6 +1,6 @@
 use console.println
 
-/// Prints how `Int` literals, arithmetic, and precedence evaluate.
+/// Prints how `Int` literals, arithmetic, precedence, and parsing evaluate.
 export fn main() -> Result<Unit, Error> {
   println("decimal {1000000}")?
   println("separators {1_000_000}")?
@@ -16,5 +16,10 @@ export fn main() -> Result<Unit, Error> {
   println("toFloat {7.toFloat()} {(-3).toFloat()}")?
   println("abs {(-7).abs()} {7.abs()}")?
   println("min {3.min(5)} max {3.max(5)}")?
+  println("parse {Int.parse("12")} {Int.parse("x")}")?
+  // `parse` is decimal; `parseRadix` is the one that asks, so `ff` is a
+  // number in one of these calls and not in the other.
+  println("parseRadix {Int.parseRadix("ff", 16)} {Int.parseRadix("ff", 10)}")?
+  println("parseRadix {Int.parseRadix("1010", 2)} {Int.parseRadix("-z", 36)}")?
   Ok(())
 }

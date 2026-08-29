@@ -7802,6 +7802,44 @@ fn build() -> Array<Int> {
         );
     }
 
+    /// `Int.parse` is one argument and decimal, and `Int.parseRadix` is two
+    /// and is not. That `parse` keeps its arity is the point of their being
+    /// two functions, so it is what this checks first.
+    #[test]
+    fn int_parse_and_parse_radix_are_two_signatures() {
+        accepts_body(
+            "  let decimal: Result<Int, Error> = Int.parse(\"12\")\n\
+             \x20 let hex: Result<Int, Error> = Int.parseRadix(\"ff\", 16)",
+        );
+        let error = rejects_body("  Int.parse(\"ff\", 16)");
+        assert_eq!(error.code, ARITY);
+        let error = rejects_body("  Int.parseRadix(\"ff\")");
+        assert_eq!(error.code, MISSING_ARGUMENT);
+        let error = rejects_body("  Int.parseRadix(\"ff\", \"16\")");
+        assert_eq!(error.code, MISMATCH);
+        assert_eq!(error.message, "expected `Int`, found `String`");
+    }
+
+    /// A character is a `String` of length 1, so this answers a `String` and
+    /// not some type of its own — and a `Result`, because a number that names
+    /// no character is a failure the caller handles.
+    #[test]
+    fn from_code_point_answers_a_result_of_string() {
+        accepts_body(
+            "  let character: Result<String, Error> = String.fromCodePoint(65)\n\
+             \x20 let letter: String = String.fromCodePoint(65).unwrapOr(\"?\")",
+        );
+        let error = rejects_body("  String.fromCodePoint(\"A\")");
+        assert_eq!(error.code, MISMATCH);
+        assert_eq!(error.message, "expected `Int`, found `String`");
+        let error = rejects_body("  let letter: String = String.fromCodePoint(65)");
+        assert_eq!(error.code, MISMATCH);
+        assert_eq!(
+            error.message,
+            "expected `String`, found `Result<String, Error>`"
+        );
+    }
+
     #[test]
     fn checks_every_map_operation() {
         accepts_body(
@@ -8376,7 +8414,7 @@ fn run() -> Counter {
         assert_eq!(error.message, "`Array` has no associated function `of`");
         assert_eq!(
             error.rule.unwrap(),
-            "A builtin type's associated functions are `Vector.of`, `Map.of`, `Set.of`, `Int.parse`, and `Float.parse`."
+            "A builtin type's associated functions are `Vector.of`, `Map.of`, `Set.of`, `String.fromCodePoint`, `Int.parse`, `Int.parseRadix`, and `Float.parse`."
         );
     }
 
