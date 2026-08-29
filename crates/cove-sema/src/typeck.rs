@@ -8359,6 +8359,107 @@ fn run() -> Counter {
         }
     }
 
+    // ------------------------------ walking a sequence with a closure
+
+    /// A callback's own parameters come from the receiver's element type,
+    /// with nothing written, and its body is checked in them.
+    ///
+    /// This is the signature a higher-order builtin is most easily got
+    /// wrong: the closure is written at the call site with no types on it,
+    /// so everything it is held to comes from the shared table by way of the
+    /// receiver.
+    #[test]
+    fn a_callbacks_parameters_come_from_the_element_type() {
+        accepts_body(
+            "  let words = [\"a\", \"bb\"]\n  \
+             let lengths = words.map(fn(w) { w.length() })\n  \
+             let long = words.filter(fn(w) { w.length() > 1 })\n  \
+             let total = words.fold(0, fn(t, w) { t + w.length() })\n  \
+             let ordered = words.sorted(by: fn(a, b) { a < b })",
+        );
+        let error = rejects_body("  let words = [\"a\"]\n  let n = words.map(fn(w) { w + 1 })");
+        assert_eq!(error.code, OPERATOR);
+        assert_eq!(error.message, "`+` is not defined for `String` and `Int`");
+    }
+
+    /// What a walk answers is read off the callback, and it is an `Array`
+    /// whichever sequence the walk started from.
+    #[test]
+    fn a_walk_answers_an_array_of_what_its_callback_produced() {
+        for (receiver, answer) in [
+            ("let items = [1, 2]", "Array<String>"),
+            ("var items = Vector.of(1, 2)", "Array<String>"),
+        ] {
+            let error = rejects_body(&format!(
+                "  {receiver}\n  let n: Int = items.map(fn(v) {{ \"{{v}}\" }})"
+            ));
+            assert_eq!(error.code, MISMATCH);
+            assert_eq!(error.message, format!("expected `Int`, found `{answer}`"));
+        }
+        let error = rejects_body(
+            "  let items = [1, 2]\n  let n: Int = items.sorted(by: fn(a, b) { a < b })",
+        );
+        assert_eq!(error.message, "expected `Int`, found `Array<Int>`");
+        let error = rejects_body(
+            "  var items = Vector.of(1, 2)\n  let n: Int = items.filter(fn(v) { v > 1 })",
+        );
+        assert_eq!(error.message, "expected `Int`, found `Array<Int>`");
+    }
+
+    /// `fold`'s accumulator is settled by `initial`, so a `step` that answers
+    /// something else is a mismatch and not a second accumulator type.
+    #[test]
+    fn folds_accumulator_is_the_type_its_initial_value_has() {
+        accepts_body(
+            "  let items = [1, 2]\n  let text = items.fold(\"\", fn(t, n) { \"{t}{n}\" })",
+        );
+        let error =
+            rejects_body("  let items = [1, 2]\n  let n = items.fold(0, fn(t, v) { \"{t}\" })");
+        assert_eq!(error.code, MISMATCH);
+        assert_eq!(error.message, "expected `Int`, found `String`");
+    }
+
+    /// A callback of the wrong arity is reported against the shape the
+    /// signature declares, at the closure rather than at the call.
+    #[test]
+    fn a_callback_takes_the_parameters_its_builtin_declares() {
+        let error =
+            rejects_body("  let items = [2, 1]\n  let n = items.sorted(by: fn(a) { true })");
+        assert_eq!(error.code, ARITY);
+        assert_eq!(
+            error.message,
+            "this function takes 1 parameter(s), but 2 were expected here"
+        );
+        let error = rejects_body("  let items = [2, 1]\n  let n = items.map(fn(a, b) { a })");
+        assert_eq!(error.code, ARITY);
+        assert_eq!(
+            error.message,
+            "this function takes 2 parameter(s), but 1 were expected here"
+        );
+    }
+
+    /// `filter` and `sorted` declare a `Bool` result, so a callback that
+    /// answers anything else is refused — which is also what makes a `?`
+    /// inside one a check-time mismatch rather than a runtime surprise.
+    #[test]
+    fn a_predicate_callback_must_answer_a_bool() {
+        let error = rejects_body("  let items = [1, 2]\n  let n = items.filter(fn(v) { v })");
+        assert_eq!(error.code, MISMATCH);
+        assert_eq!(error.message, "expected `Bool`, found `Int`");
+        let error =
+            rejects_body("  let items = [2, 1]\n  let n = items.sorted(by: fn(a, b) { a - b })");
+        assert_eq!(error.code, MISMATCH);
+        assert_eq!(error.message, "expected `Bool`, found `Int`");
+    }
+
+    /// A receiver that is not a sequence has none of the four.
+    #[test]
+    fn only_a_sequence_walks_with_a_closure() {
+        let error = rejects_body("  let ages = Set.of(1, 2)\n  let n = ages.map(fn(v) { v })");
+        assert_eq!(error.code, UNKNOWN_METHOD);
+        assert_eq!(error.message, "`Set` has no method `map`");
+    }
+
     /// A receiver that reports no element count is told what it does have
     /// instead, because `count()` teaches nothing about an `Option`.
     #[test]

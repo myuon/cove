@@ -452,6 +452,9 @@ pub fn call_method(
                 expect_args(name, args, 0, span)?;
                 Ok(Value::Bool(items.is_empty()))
             }
+            "map" | "filter" | "fold" | "sorted" => {
+                walk_with(host, "Array", items.to_vec(), name, args, span)
+            }
             _ => Err(no_method("Array", name, span)),
         },
         Value::Vector(storage) => {
@@ -483,6 +486,15 @@ pub fn call_method(
                     Ok(Value::Array(
                         storage.elements.borrow().iter().cloned().collect(),
                     ))
+                }
+                "map" | "filter" | "fold" | "sorted" => {
+                    // The elements come out here, before the first callback,
+                    // and the borrow ends with this statement. Both matter:
+                    // a callback can reach this very vector and push onto it
+                    // or `freeze` it, and it must find neither a live borrow
+                    // nor a walk that changes under it.
+                    let elements = storage.elements.borrow().clone();
+                    walk_with(host, "Vector", elements, name, args, span)
                 }
                 _ => Err(no_method("Vector", name, span)),
             }
@@ -863,6 +875,208 @@ pub fn call_method(
             _ => Err(no_method("Float", name, span)),
         },
         other => Err(no_method(&other.type_name(), name, span)),
+    }
+}
+
+/// `map`, `filter`, `fold`, and `sorted`, which are the same four operations
+/// on an `Array` and on a `Vector`.
+///
+/// `elements` is already the caller's own copy — the `Array`'s elements, or
+/// the `Vector`'s taken out from under its `RefCell` before this was
+/// called — which is what makes the walk a walk over a snapshot. A callback
+/// that reaches the vector it was handed an element of may push onto it,
+/// `freeze` it, or drop the last other handle to it, and none of the three
+/// changes what is being walked or what comes back. `cove_ir::Inst::IterItems`
+/// makes a `for` ask once and walk what it was given; this is the same
+/// decision, in the place where a closure rather than a loop body is what
+/// could do the mutating.
+///
+/// Everything a callback costs is accounted where any other call is:
+/// [`Callable::call_value`] is the evaluator re-entered, so fuel, the depth
+/// limit, the host's `max_call_depth`, cancellation, and the trace are the
+/// running task's exactly as they are outside a builtin. There is nothing
+/// here that steps around a safepoint, because there is nothing here that
+/// runs Cove code by any other route.
+///
+/// A callback that fails takes the whole call with it. The answer is built
+/// to the side and returned only on success, so no half-built array and no
+/// half-sorted sequence is ever reachable, and no receiver is written
+/// through on any path.
+fn walk_with(
+    host: &mut dyn Callable,
+    type_name: &str,
+    elements: Vec<Value>,
+    name: &str,
+    args: Vec<Value>,
+    span: Span,
+) -> Result<Value, RuntimeError> {
+    let method = format!("{type_name}.{name}");
+    match name {
+        "map" => {
+            let mut args = expect_args(&method, args, 1, span)?;
+            let transform = args.remove(0);
+            expect_callback(
+                host,
+                &method,
+                "transform",
+                "fn(T) -> R",
+                1,
+                &transform,
+                span,
+            )?;
+            let mut mapped = Vec::with_capacity(elements.len());
+            for item in elements {
+                mapped.push(host.call_value(&transform, vec![item], span)?);
+            }
+            Ok(Value::Array(mapped.into()))
+        }
+        "filter" => {
+            let mut args = expect_args(&method, args, 1, span)?;
+            let keep = args.remove(0);
+            expect_callback(host, &method, "keep", "fn(T) -> Bool", 1, &keep, span)?;
+            let mut kept = Vec::new();
+            for item in elements {
+                let verdict = host.call_value(&keep, vec![item.clone()], span)?;
+                if callback_bool(&method, "keep", &verdict, span)? {
+                    kept.push(item);
+                }
+            }
+            Ok(Value::Array(kept.into()))
+        }
+        "fold" => {
+            let mut args = expect_args(&method, args, 2, span)?;
+            let step = args.remove(1);
+            let mut total = args.remove(0);
+            expect_callback(host, &method, "step", "fn(R, T) -> R", 2, &step, span)?;
+            for item in elements {
+                total = host.call_value(&step, vec![total, item], span)?;
+            }
+            Ok(total)
+        }
+        "sorted" => {
+            let mut args = expect_args(&method, args, 1, span)?;
+            let by = args.remove(0);
+            expect_callback(host, &method, "by", "fn(T, T) -> Bool", 2, &by, span)?;
+            Ok(Value::Array(
+                merge_sort(host, &method, elements, &by, span)?.into(),
+            ))
+        }
+        // Only the four names above are routed here, and the shared table is
+        // what says which four. Answering the way an unknown method is
+        // answered keeps that a fact rather than a `panic!` nobody can reach.
+        _ => Err(no_method(type_name, name, span)),
+    }
+}
+
+/// A stable merge sort under a Cove callback.
+///
+/// Written out rather than handed to `slice::sort_by`, for two reasons
+/// either of which would be enough on its own.
+///
+/// `by` can fail — it is a Cove closure, and a closure can raise or be
+/// cancelled — and a `FnMut(&T, &T) -> Ordering` has nowhere to put a
+/// failure. Smuggling one out through a cell and re-raising it afterwards
+/// would mean the sort kept comparing after the run should have stopped.
+///
+/// And `by` can contradict itself. `slice::sort_by` panics when its
+/// comparison function does not order the elements, and a panic in this
+/// runtime means a broken invariant of the runtime; a program that wrote an
+/// inconsistent comparison has broken nothing but its own ordering. A merge
+/// answers some permutation instead, which is exactly what "no promise about
+/// which" means, and it is the schema's stated behaviour rather than a
+/// consequence of the algorithm that was to hand.
+///
+/// Bottom up: runs of one merged into runs of two, then four. The right
+/// run's element is taken only when `by` says it comes *strictly* before the
+/// left run's, which is what makes the sort stable — equal elements meet
+/// with the earlier one on the left and the earlier one is kept.
+fn merge_sort(
+    host: &mut dyn Callable,
+    method: &str,
+    elements: Vec<Value>,
+    by: &Value,
+    span: Span,
+) -> Result<Vec<Value>, RuntimeError> {
+    let len = elements.len();
+    let mut source = elements;
+    let mut merged: Vec<Value> = Vec::with_capacity(len);
+    let mut width = 1usize;
+    while width < len {
+        merged.clear();
+        let mut start = 0usize;
+        while start < len {
+            let middle = (start + width).min(len);
+            let end = (start + width * 2).min(len);
+            let (mut left, mut right) = (start, middle);
+            while left < middle && right < end {
+                let verdict =
+                    host.call_value(by, vec![source[right].clone(), source[left].clone()], span)?;
+                if callback_bool(method, "by", &verdict, span)? {
+                    merged.push(source[right].clone());
+                    right += 1;
+                } else {
+                    merged.push(source[left].clone());
+                    left += 1;
+                }
+            }
+            merged.extend_from_slice(&source[left..middle]);
+            merged.extend_from_slice(&source[right..end]);
+            start = end;
+        }
+        std::mem::swap(&mut source, &mut merged);
+        width *= 2;
+    }
+    Ok(source)
+}
+
+/// Holds a higher-order builtin's callback to the shape its signature
+/// declares, before it is called rather than while it is being called.
+///
+/// The checker settles this for every program it accepts, so nothing a
+/// checked program does reaches either failure. It is still asked here, and
+/// asked once for the whole walk, because the two backends enter a closure
+/// through different code — `Interpreter::call_value_slots` and
+/// `Vm::call_from_host` — and a callback of the wrong arity would otherwise
+/// be refused by whichever of those the run happened to be on, in that one's
+/// words. One question asked in the one implementation both backends share
+/// is one answer.
+fn expect_callback(
+    host: &dyn Callable,
+    method: &str,
+    parameter: &str,
+    expected: &str,
+    parameters: usize,
+    value: &Value,
+    span: Span,
+) -> Result<(), RuntimeError> {
+    match host.arity(value) {
+        Some(found) if found == parameters => Ok(()),
+        Some(found) => Err(RuntimeError::new(format!(
+            "`{method}` expects `{expected}` for `{parameter}`, but found a function of {found} parameter(s)"
+        ))
+        .at(span)),
+        None => Err(type_error(method, parameter, expected, value, span)),
+    }
+}
+
+/// Reads a callback's answer as the `Bool` its signature declares.
+///
+/// Unreachable from a checked program for the same reason [`expect_callback`]
+/// is, and stated for the same reason: the alternative is a `Bool` taken on
+/// trust in the middle of a sort.
+fn callback_bool(
+    method: &str,
+    parameter: &str,
+    value: &Value,
+    span: Span,
+) -> Result<bool, RuntimeError> {
+    match value {
+        Value::Bool(answer) => Ok(*answer),
+        other => Err(RuntimeError::new(format!(
+            "`{method}` expects `{parameter}` to answer a `Bool`, but found `{}`",
+            other.type_name()
+        ))
+        .at(span)),
     }
 }
 

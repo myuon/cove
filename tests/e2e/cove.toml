@@ -18,6 +18,14 @@ allow = ["console"]
 entry = "coll_set.main"
 allow = ["console"]
 
+[run.coll_sorted]
+entry = "coll_sorted.main"
+allow = ["console"]
+
+[run.coll_transform]
+entry = "coll_transform.main"
+allow = ["console"]
+
 [run.coll_vector]
 entry = "coll_vector.main"
 allow = ["console"]
@@ -41,6 +49,11 @@ allow = ["console"]
 [run.fail_entry_error]
 entry = "fail_entry_error.main"
 allow = ["console"]
+
+[run.fail_map_host_calls]
+entry = "fail_map_host_calls.main"
+allow = ["console"]
+max_host_calls = 3
 
 [run.fail_max_tasks]
 entry = "fail_max_tasks.main"
@@ -73,6 +86,10 @@ allow = []
 
 [run.fail_no_clock_capability]
 entry = "fail_no_clock_capability.main"
+allow = ["console"]
+
+[run.fail_sort_callback]
+entry = "fail_sort_callback.main"
 allow = ["console"]
 
 [run.fail_shared_cycle]
