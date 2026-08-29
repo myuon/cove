@@ -25,7 +25,7 @@ pub use clock::{Clock, VirtualTime};
 pub use database::Database;
 pub use error::RuntimeError;
 pub use files::Files;
-pub use heap::{Collection, Heap, HeapStats, Roots};
+pub use heap::{Collection, Heap, HeapStats, Roots, SlotRoots};
 pub use host::{
     shipped_schema, Console, Documents, Env, GrantSource, Grants, HostApi, HostRegistry, NoReentry,
     Reentry, ResourceHandle,

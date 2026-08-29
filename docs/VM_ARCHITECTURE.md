@@ -626,6 +626,171 @@ a root set nor a hole in one. What a *moving* collector would have to know is
 that a place is an index into the storage it is moving, which is a different
 statement and belongs with the collector that makes it.
 
+### The root set, now that something reads it
+
+Everything above used to be a statement about where the roots *are* rather
+than code that reads them, because nothing read them: this backend allocated
+and collected nothing, which issue #119 recorded as the hard blocker on making
+it the default. `cove_runtime::vm::StackRoots` is now that code, and what it
+reads is what the paragraphs above said it would.
+
+It walks two things. The value stack up to its current length, which is every
+frame's slots and every frame's operands at once — they share one vector, so
+there is nothing to slice per frame and nothing to skip inside one, and a
+closure's captures are value slots that the call copied into the window and so
+are in it already. And the task scopes the VM has entered and not left, which
+is the one thing a `Vm` holds that need not be reachable from a slot; a
+scope's value *is* also an ordinary slot of the frame that opened it, so
+walking the list is very nearly redundant, but "very nearly" is not an
+invariant anything enforces and the list is empty in every program that writes
+no `scope`.
+
+Nothing else the struct holds is a `Value` or contains one, and the type's own
+documentation goes through the fields one at a time rather than asserting it,
+because a root missed there is a use-after-sweep of a Cove value and the next
+reader needs to see that the list was checked rather than guessed. The scalar
+stack is `i64`s. The place stack is indices. The constant pool holds values,
+and is deliberately *not* walked: `constant` builds a unit, a boolean, an
+integer, a float, a duration or a string and nothing else, so no entry can
+reach a `Vector`; walking it would be safe but would put every constant string
+into this backend's live-bytes figure and not the other's, which is exactly
+the kind of difference #119 exists to remove.
+
+### Collection is non-moving
+
+Nothing is relocated. That is what the Language Card says — "a precise,
+non-moving mark-and-sweep collector" — and what ADR 0011 narrows to a heap per
+task; this backend does not change it, and the collector it calls is the same
+`cove_runtime::heap` the interpreter calls, so there was never a second answer
+to give.
+
+It is worth saying what a moving collector would owe, because the place model
+already half-states it and half is not enough. Moving what a *slot* holds
+would cost a place nothing: a place names the slot, not the value, so a slot
+rewritten in place is a slot the index still finds. Moving the *stack* would
+be another matter, and it is the one this backend would have to pay for.
+Every place standing in the place stack is an absolute index into the value
+stack, and every place a frame handed a callee is one too, so a collector that
+compacted or relocated the value stack would have to rewrite each of them, and
+would have to be able to find them — which the place stack makes possible and
+which nothing else about the arrangement guarantees. The paths would survive
+untouched, since a field position is a position in a struct rather than an
+address. This is written down here because it is a bill that has not been
+paid rather than a problem that has been solved.
+
+### Where a collection happens, and why it is safe there
+
+At safepoints, and nowhere else. The list is unchanged — entering the entry,
+every call, every return, every back edge with enough fuel gathered, the
+per-block charge past `SAFEPOINT_INTERVAL`, an `await`, and a `?` that failed
+— with the heap asked last, after the stops, because a run that is ending has
+no use for a collection.
+
+The rule that makes those points safe is not "every live value is on a stack",
+and it is worth being exact about that, because the obvious reading of the
+frame convention suggests it and the obvious reading is wrong. During an
+instruction the dispatch loop holds `Value`s in Rust locals — a popped
+receiver, the `Vec<Value>` `Vm::take` drained for a host call, the failure a
+`?` is about to leave a frame with — and none of those is on a stack any walk
+reaches. They are safe because the collector counts references: for every
+shared allocation it can see, it compares the references it can reach against
+`Rc::strong_count`, and a shortfall means a reference is held somewhere it
+cannot read, which makes that allocation and everything it holds a root. A
+Rust local *is* a reference. So a value the loop has taken off the stack is a
+value whose count does not add up, and is rooted for that reason.
+
+This is the same rule that roots the interpreter's evaluator temporaries;
+ADR 0011 calls them "values being evaluated" and neither backend would be
+sound without it. What it changes is which question a safepoint has to answer.
+Not "is everything on the stack" — it need not be — but "is anything walked
+twice", since a reference counted twice conceals exactly the shortfall the
+rule depends on. `Vm::collect_if_due` goes through the safepoints one at a
+time and says what each holds; the two that are worth naming here are the
+return, which takes its safepoint *before* popping the answer so the answer is
+still an operand, and the host call, where the arguments and the receiver are
+in Rust locals below whatever frames a re-entrant callback pushes above them.
+
+### What the heap figures mean, on both backends
+
+The same thing, which they did not before. A VM heap was never swept, so what
+it reported was everything the run had ever allocated; and the entry's heap
+was never retired at all, so the totals a `Vm` answered with came only from
+spawned tasks — `cove run --backend vm --stats` reported no allocation for a
+program with no `spawn`, and `cove-bench`'s `heap_peak_bytes` was zero for
+every VM row because it is only written inside a collection. All three are
+gone: a safepoint collects, `Vm::retire_heap` sweeps once more before folding
+the counters, and `Vm::run` retires the entry's heap and emits the
+`heap_summary` event that `Interpreter::enter` has always emitted.
+
+One of those three is fixed without being visible where it was named, and
+that is worth recording rather than claiming more than was measured.
+`heap_peak_bytes` is still zero on every `cove-bench` row — but it is zero on
+the *interpreter's* rows too, and was before this change, because no program
+under `benches/` builds a `Vector` at all. The suite measures dispatch,
+arithmetic, field reads and host calls, and allocates nothing the collector
+manages. So the figure is verified on the corpus instead: `cove run --stats`
+over `tests/e2e:gc_*` reports the same allocation, the same bytes, and the
+same live set on both backends, where before the VM reported the totals of a
+heap nobody had swept.
+
+Two figures still differ between the backends, and they differ for reasons
+that are worth keeping rather than papering over.
+
+**How many collections a run took.** A collection happens at a safepoint where
+enough has been allocated since the last one, and the two backends put
+safepoints in different places: the interpreter takes one at every loop turn,
+this one at the first back edge with `BACK_EDGE_FUEL` gathered. So the VM asks
+the question less often and can overshoot the threshold further before it
+asks, and a run that allocates identically can collect five times here and six
+times there. That is a schedule, not a semantics, and the differential tests
+compare what a run allocated and what it was left holding rather than how many
+sweeps it took to get there.
+
+**The peak live set.** This one differs by more than a margin, and in a
+direction that is easy to misread as a leak. A `var v` declared inside a loop
+body is out of the interpreter's environment chain by the time that turn's
+safepoint is reached, and is still the VM frame's slot until something writes
+the slot again — a frame's window is sized once, per function, rather than
+opened and closed per block. So a churn loop reports a peak of zero on the
+oracle and of one vector here. Both are true statements about what was live
+when the collection ran; what they are not is the same statement.
+
+### What the collector costs
+
+A collector that runs costs something, and the suite above cannot say what,
+for the reason just given: nothing under `benches/` allocates. Every row moved
+by less than 1.7% against `92e4569`, measured interleaved, three iterations
+per round and three rounds; the only figure outside that is `startup` at 4.0%
+on the AST backend and 3.2% here, which is process exec time and moves by that
+much between two runs of the same binary. `size_of::<Inst>()` is still 16, a
+`Frame` is still 32 bytes, and `Vm::execute`'s `match` has the same arms it
+had — nothing in the dispatch loop changed, which is why nothing in the
+dispatch loop moved.
+
+So the cost was measured on a program written to pay it: three hundred
+thousand cycles built and abandoned, and nothing else. Median of five,
+interleaved, release, same machine.
+
+```text
+                        execute      peak RSS   collections   reclaimed
+VM at 92e4569           140.8 ms      103 MB             0           0
+VM here                 177.6 ms      3.3 MB         4,688     300,000
+interpreter (before)      494 ms                   unchanged
+interpreter (here)        502 ms                   unchanged
+```
+
+Twenty-six percent, and 90.6 ms of the 177.6 is pause time the heap reports
+itself, which is the honest way to read it: over half the added cost is the
+mark and the sweep and the rest is the safepoint asking. The comparison is not
+like for like and should not be read as one — the faster of the two numbers
+belongs to a run that ended holding three hundred thousand objects it could
+not reach, which is a thirty-one-fold difference in peak memory and is the
+whole reason for the change. The interpreter's 1.6% is noise; nothing on its
+path moved.
+
+The VM with a collector is still 2.8x faster than the interpreter on that
+program.
+
 ### A VM-owned heap
 
 Today a heap value is a Rust object graph reached through `Rc`, and the target
@@ -1117,16 +1282,19 @@ of this document before they were.
 
 **Settled by semantics.** The 16-byte floor. It follows from `Int` being a full
 64 bits with overflow a broken invariant, and no measurement can move it,
-because it was never a question about speed.
+because it was never a question about speed. And the root set: it is the value
+stack up to its length and the open task scopes, which follows from the two
+stacks being numbered separately and from a place being an index, and no
+measurement can move that either.
 
 **Open, and what would settle each.** The inline representation of `Option`,
 `Result`, and small enum payloads — settled by building one and measuring
 `arrayget` and `chars`. The argument vector allocated per builtin call — the
 same two benchmarks, the same way. The heap layout the VM owns — settled by
 what is still allocating once those two are gone, which is exactly the evidence
-it does not have yet. A moving collector and precise roots — not yet asked for
-by anything measured here, and the frame metadata it would need already exists,
-for the reason given under "Frame metadata" above.
+it does not have yet. A moving collector — not yet asked for by anything
+measured here, and what it would owe is now written down rather than assumed,
+under "Collection is non-moving" above.
 
 Everything on that open list is downstream of the same two allocation sites.
 That makes them the next measurement whether or not a VM-owned heap is ever

@@ -92,17 +92,29 @@
 //! value window, `stack[base .. base + value_frame_size]`, is its root set
 //! with nothing inside it to skip. A place holds an index into that same
 //! window, so whatever it reaches is reachable from what is already scanned.
-//! **There is no collection in this VM.** That sentence once ended "yet —
-//! nothing the lowering covers allocates growable storage", and it was true
-//! of the first subset and is not true now: the lowering reaches `Vector`,
-//! the collections, closures, and tasks, so a VM run allocates growable
-//! storage and reclaims none of it. What is written above is therefore a
-//! statement about where the roots *are* rather than code that reads them,
-//! and [issue #119](https://github.com/myuon/cove/issues/119) is the blocker
-//! that has to be cleared before this backend can be the default one, since
-//! the AST backend collects and this one does not. A *moving* collector
-//! would need one thing more, which is that a place is an index into the
-//! storage it is moving.
+//!
+//! **This VM collects.** What is written above used to be a statement about
+//! where the roots are rather than code that reads them; `StackRoots` is
+//! now the code, and it reads exactly that. Every frame's slots and every
+//! frame's operands are in one `Vec<Value>`, so `self.stack` up to its
+//! length is all of them at once and there is nothing to slice per frame;
+//! the open task scopes are the one thing a `Vm` holds that the stack need
+//! not reach, so they are walked beside it. Collection is non-moving, as ADR
+//! 0011 and the Language Card say: nothing is relocated, so a place's index
+//! stays valid across one, and a moving collector would need the one thing
+//! more that this backend states and does not use — that a place is an index
+//! into the storage being moved, so moving would have to rewrite it.
+//!
+//! Collection happens at safepoints and nowhere else, and it is safe there
+//! for a reason that is worth stating rather than assuming: a `Value` the
+//! dispatch loop has taken off the stack into a Rust local — a popped
+//! receiver, the vector of arguments a host call is about to be given — is
+//! invisible to a walk of the stack, and is therefore a *shortfall* in the
+//! reference counting `crate::heap` does, and therefore a root. That is the
+//! same rule that roots the interpreter's evaluator temporaries, and it is
+//! what makes "collect at any safepoint" true rather than a list of
+//! safepoints that happen to be tidy. `Vm::collect_if_due` is where the
+//! whole of the argument is written out, site by site.
 //!
 //! # Fuel is charged by the block, not by the instruction
 //!
@@ -191,7 +203,7 @@ use cove_syntax::ast::{BinaryOp, EnumDecl, UnaryOp};
 use crate::budget::{Cancellation, Stopped};
 use crate::builtins::{self, Callable};
 use crate::error::RuntimeError;
-use crate::heap::{Heap, HeapStats};
+use crate::heap::{Collection, Heap, HeapStats, Roots};
 use crate::host::{HostRegistry, Reentry, ResourceHandle};
 use crate::interp::{
     as_dyn, binary, coerce_inside, divide_by_zero, dyn_receiver, no_field, not_a_struct, overflow,
@@ -441,6 +453,90 @@ struct OpenScope {
     scope: Rc<TaskScope>,
 }
 
+/// This VM's root set: its value stack, and the task scopes it has open.
+///
+/// # How this list was derived
+///
+/// By going through every field of [`Vm`] and asking whether it is a
+/// [`Value`] or holds one, because a root missed here is a use-after-sweep of
+/// a Cove value and the next person needs to see that the list was checked
+/// rather than guessed.
+///
+/// - `stack` — **a root**, and the whole of the frame convention's
+///   contribution. Every frame's slots and every frame's operands are in this
+///   one vector, so `stack[..stack.len()]` is all of them at once: there is
+///   nothing to slice per frame and nothing to skip inside a frame. A
+///   closure's captures are value slots, copied into the frame's window by
+///   the call that entered the body, so they are in it already.
+/// - `scopes` — **a root**. An `OpenScope` holds an `Rc<TaskScope>`, and a
+///   scope owns the tasks spawned into it, whose settled values are Cove
+///   values of this task's heap. A scope's *value* is also an ordinary slot
+///   of the frame that opened it, so walking this is very nearly redundant —
+///   but "very nearly" is not an invariant anything enforces, and the cost is
+///   one iteration over a vector that is empty in every program that writes
+///   no `scope`.
+/// - `scalars` — not a root. The two stacks are numbered separately, so a
+///   scalar slot is not a number in the value stack's space at all; an `i64`
+///   holds no reference.
+/// - `places` — not a root. A place is an index into the value stack, so what
+///   it reaches is reachable from what is already walked. See [`Vm::places`]
+///   for what that rests on and for what a moving collector would owe.
+/// - `frames` — not a root. A `Frame` is four indices and a `FunctionId`.
+/// - `constants` — not walked, and safe not to be. See [`Vm::constants`]: no
+///   entry can reach a `Vector`, and walking one would put every constant
+///   string into this backend's live-bytes figure and not the other's.
+/// - `shapes`, `enums` — not roots. A `StructShape` is a name, a list of
+///   field names, and a flag; an `EnumShape` is a name and an `Arc<EnumDecl>`
+///   of the checker's. Neither holds a `Value`.
+/// - `async_frames`, `stops`, `timings`, `fuel`, `instructions`,
+///   `cancellation`, `task`, `wait` — not roots. Depths, flags, counters and
+///   durations.
+/// - `assertion_failure` — not a root. A `Span` and a `String`, which is
+///   Rust's own and not a Cove value.
+/// - `runtime`, `hosts`, `program`, `sources` — not roots, and not this
+///   task's to walk. They are shared, immutable, and `Arc`-based for that
+///   reason; a `cove_ir::Program` holds `Arc<str>` and no `Value` at all.
+/// - `heap` — the heap doing the walking.
+///
+/// # What is deliberately not here
+///
+/// A `Value` the dispatch loop is holding in a Rust local at the moment a
+/// safepoint is reached: a popped receiver, the `Vec<Value>` a host call was
+/// handed, the failure a `?` is about to leave a frame with. None of those is
+/// on a stack, and none of them needs to be. A Rust local *is* a reference,
+/// so what it holds is short of the count the collector can see, and
+/// `crate::heap` roots exactly that. [`Vm::collect_if_due`] goes through the
+/// safepoints one at a time.
+struct StackRoots<'v> {
+    stack: &'v [Value],
+    scopes: &'v [OpenScope],
+}
+
+impl Roots for StackRoots<'_> {
+    /// Yields every value slot and operand, and then every open scope.
+    ///
+    /// Each reference is yielded once, which is what [`Roots`] asks for: the
+    /// stack is a vector of distinct slots, and `scopes` holds one entry per
+    /// `enter-scope` that has not been left. A scope's value is reachable
+    /// twice — from its slot and from here — but those are two references and
+    /// not one seen twice, so counting both is counting what is there.
+    ///
+    /// The `Value::TaskScope` a scope is yielded as is built here, which
+    /// takes a reference of the collector's own and so makes the scope's
+    /// count one higher than the program's. The effect is that a scope is
+    /// rooted by the shortfall rule rather than directly, which reaches the
+    /// same conclusion: an open scope is a root either way, and nothing else
+    /// reads that count.
+    fn walk(&self, visit: &mut dyn FnMut(&Value)) {
+        for value in self.stack {
+            visit(value);
+        }
+        for open in self.scopes {
+            visit(&Value::TaskScope(Rc::clone(&open.scope)));
+        }
+    }
+}
+
 /// Runs a lowered program.
 ///
 /// One VM runs one body on one thread: the entry, or the body of a spawned
@@ -484,6 +580,14 @@ pub struct Vm<'a> {
     /// Nothing in here is a GC root either, and for a related reason: a
     /// place holds an index into the value stack, so whatever it reaches is
     /// already reachable from the value stack's own window.
+    ///
+    /// That rests on a place never outliving the window it indexes, which is
+    /// the property [`Place`] argues at length and which the collector does
+    /// not re-derive. A *moving* collector is where it would stop being
+    /// enough: relocating what a slot holds would leave the index naming the
+    /// slot, which is right, but relocating the *stack* would not, and a
+    /// collector that compacted the value stack would have to rewrite every
+    /// place standing in this vector. This one moves nothing.
     places: Vec<Place>,
     frames: Vec<Frame>,
     /// One entry per constant, filled for the constants a `MakeStruct` names
@@ -499,6 +603,14 @@ pub struct Vm<'a> {
     /// one into the other is an allocation, and a constant is loaded as
     /// often as its instruction runs — so it is done once per VM, here,
     /// and every load after that is the `Rc` clone it always was.
+    ///
+    /// Not walked as a root, and it does not have to be. `constant` builds a
+    /// `Value::Unit`, `Bool`, `Int`, `Float`, `Duration`, or `Str` and
+    /// nothing else, so no entry here reaches a `Vector` and none is a
+    /// reference the collector's counting could be short of. Walking it
+    /// anyway would be safe but would add every constant string to the live
+    /// bytes this VM reports, which the interpreter has no equivalent of and
+    /// would make the two backends' memory figures mean different things.
     constants: Vec<Value>,
     /// This task's heap.
     ///
@@ -509,14 +621,10 @@ pub struct Vm<'a> {
     /// [`Vm::retire_heap`] folds what it did into the run's totals when the
     /// thread ends.
     ///
-    /// There is still no collection here. This backend has no collector, so
-    /// what a heap it owns can report is what it allocated; a cycle a lowered
-    /// program builds is not reclaimed, which is a gap in this backend rather
-    /// than a property of the subset it covers.
-    /// [Issue #119](https://github.com/myuon/cove/issues/119) is that gap,
-    /// and it blocks [#111](https://github.com/myuon/cove/issues/111): the
-    /// AST backend collects, so a program that runs in bounded memory there
-    /// need not here.
+    /// It is collected at safepoints, from [`StackRoots`], and swept once
+    /// more when it is retired. What it reports therefore means what the
+    /// interpreter's heap reports: live storage rather than everything ever
+    /// allocated.
     heap: Heap,
     /// Fuel charged since the last safepoint, spent at the next one.
     fuel: u64,
@@ -746,6 +854,23 @@ impl<'a> Vm<'a> {
             function: entry.name.to_string(),
             cpu: timing.cpu(),
             wait: timing.wait(),
+        });
+        // Every task's thread has been joined by now — leaving a scope waits
+        // for or cancels its children — so every heap but this one has been
+        // retired and the totals are complete. `Interpreter::enter` ends the
+        // same way and for the same reason, and the summary is what makes
+        // `cove run --stats` and the trace's `heap_summary` say the same
+        // thing on the two backends: what a run allocated, how often it
+        // collected, and what it was still holding.
+        self.retire_heap();
+        let heap = self.heap_stats();
+        self.runtime.trace(TraceEvent::HeapSummary {
+            allocated: heap.allocated_objects,
+            allocated_bytes: heap.allocated_bytes,
+            collections: heap.collections,
+            live_bytes: heap.live_bytes,
+            peak_bytes: heap.peak_bytes,
+            pause: heap.pause,
         });
         outcome
     }
@@ -2488,13 +2613,127 @@ impl<'a> Vm<'a> {
 
     /// Ends this task's heap and folds what it did into the run's totals.
     ///
-    /// `Interpreter::retire_heap` collects once first, because a `Weak` table
-    /// dropped without a sweep takes nothing with it. There is nothing to
-    /// collect here: this backend has no collector, so a heap it owns has
-    /// never been swept and the counters are the whole of what it can report.
+    /// One last collection runs first, for the reason
+    /// `Interpreter::retire_heap` gives and which applies here word for word:
+    /// a heap dies with the thread that owns it, and a table of `Weak`s
+    /// dropped without a sweep takes nothing with it — so a task that ends
+    /// while a cycle it built is still reachable would leave that cycle
+    /// behind, which is the one thing this collector exists to prevent.
+    ///
+    /// By the time this runs the stacks are empty: a return truncates to the
+    /// frame's base, the entry's base is zero, and `Vm::close_scopes_above(0)`
+    /// has left every scope. What is left to survive is what the value the
+    /// task produced still holds, which is a Rust local of the caller and so
+    /// is found by the reference counts, exactly as any other value the
+    /// collector cannot read is.
     fn retire_heap(&mut self) {
+        if !self.heap.is_empty() {
+            self.collect();
+        }
         let stats = self.heap.take_stats();
         self.runtime.retire_heap(&stats);
+    }
+
+    // --------------------------------------------------------- collection
+
+    /// Marks and sweeps this task's heap from [`StackRoots`], and records
+    /// what it did.
+    ///
+    /// The event is `Interpreter::collect`'s, with the same fields written
+    /// from the same task id, so `cove trace` reads a collection on this
+    /// backend exactly as it reads one on the other.
+    #[inline(never)]
+    fn collect(&mut self) -> Collection {
+        let collected = {
+            let roots = StackRoots {
+                stack: &self.stack,
+                scopes: &self.scopes,
+            };
+            self.heap.collect(&roots)
+        };
+        self.runtime.trace(TraceEvent::HeapCollected {
+            task: self.task,
+            allocated: collected.allocated,
+            freed: collected.freed_objects,
+            live_objects: collected.live_objects,
+            live_bytes: collected.live_bytes,
+            pause: collected.pause,
+        });
+        collected
+    }
+
+    /// Collects when enough has been allocated since the last collection to
+    /// be worth another one.
+    ///
+    /// # Why every safepoint is a safe one
+    ///
+    /// A collection is correct at a point where every live value is either
+    /// walked by [`StackRoots`] or invisible to it. The second half is the
+    /// one that does the work, and it is not a loophole: `crate::heap`
+    /// compares the references it can see against `Rc::strong_count`, and a
+    /// `Value` in a Rust local is a reference it cannot see, so a value the
+    /// dispatch loop has taken off the stack is short by one and is a root.
+    /// That is the same rule that roots the interpreter's evaluator
+    /// temporaries, and neither backend would be sound without it.
+    ///
+    /// So what has to be checked at a safepoint is not "is everything on the
+    /// stack" — it need not be — but that nothing is walked twice, since a
+    /// reference counted twice is a shortfall concealed. Every site was
+    /// checked, and this is what each holds:
+    ///
+    /// - **Entering the entry**, in [`Vm::execute`]. The frame is pushed and
+    ///   its window resized before the loop starts, so the arguments are
+    ///   slots and nothing is off the stack.
+    /// - **A call**, in [`Vm::enter`]. The caller pushed the arguments as its
+    ///   own operands and the callee's window opens on them, so they are on
+    ///   the stack before and after; nothing is in a local. The same is true
+    ///   of the second safepoint the `Call` arm takes through [`Vm::charge`],
+    ///   which happens before the window is resized and so sees the arguments
+    ///   as operands rather than as slots — the same values either way.
+    /// - **A return**, at `Inst::Return` and `Inst::ReturnScalar`. The
+    ///   safepoint is taken *before* the answer is popped, so the answer is
+    ///   still an operand. This was already so and is worth keeping so.
+    /// - **A `?` that failed**, at `Inst::Try`. Here the failure *is* in a
+    ///   local: it was popped, opened, and found to be an `Err` before the
+    ///   safepoint. It is rooted by its own reference, and it is reached from
+    ///   nowhere the walk goes, so it is counted once and not at all.
+    /// - **A back edge**, in [`Vm::back_edge`]. The condition was already
+    ///   consumed by the jump that took it; the stack holds the frame's slots
+    ///   and whatever operands the block left standing.
+    /// - **The per-block charge**, in [`Vm::charge`]. A block head is a point
+    ///   control arrives at, and the operands standing there are whatever the
+    ///   previous line left — all of them on the stack, since an instruction
+    ///   that has not run has taken nothing off it.
+    /// - **A host call**, at `Inst::CallHost` and `Inst::CallResource`, and
+    ///   any Cove callback the host re-enters with. [`Vm::take`] drains the
+    ///   arguments into a `Vec<Value>` and `Inst::CallResource` pops the
+    ///   receiver besides, so at every safepoint the callback reaches, those
+    ///   values are in Rust locals below the re-entrant frames. Each is
+    ///   rooted by its own reference. The re-entrant call's own frames are
+    ///   pushed above the standing ones, so the walk sees the interrupted
+    ///   frames and the callback's together, once each.
+    /// - **An `await`**, at `Inst::Await`. The safepoint is taken before the
+    ///   handle is popped, so the task is an operand.
+    /// - **Inside a `lock`**, at `Inst::Lock`. The closure runs on frames
+    ///   above, and the cell's contents stand in a slot of this frame; the
+    ///   closure value itself is a local, rooted by its reference. The
+    ///   collector never takes the cell's lock, which is what stops a
+    ///   collection under one from deadlocking; `crate::heap` says why a
+    ///   `Shared` is a leaf.
+    /// - **Leaving or cancelling a scope**, at `Inst::LeaveScope` and
+    ///   `Inst::CancelScope`. The scope is popped out of [`Vm::scopes`]
+    ///   before its children are waited for, so during that wait it is a
+    ///   local rather than a walked root — and is rooted by its reference,
+    ///   like anything else the collector cannot read.
+    ///
+    /// There is no site at which a live value is neither walked nor held by
+    /// an invisible reference, which is the property that makes the list
+    /// above a check rather than a hope.
+    #[inline]
+    fn collect_if_due(&mut self) {
+        if self.heap.should_collect() {
+            self.collect();
+        }
     }
 
     // ------------------------------------------------------------- budget
@@ -2548,6 +2787,11 @@ impl<'a> Vm<'a> {
     /// cancelled before it began stops before its first instruction; and any
     /// block entered with [`SAFEPOINT_INTERVAL`] fuel already standing, so a
     /// long straight line is bounded too.
+    ///
+    /// A safepoint is also where this task's heap is collected, when enough
+    /// has been allocated to be worth it. It is asked last, after the stops,
+    /// because a run that is ending has no use for a collection — and
+    /// `Interpreter::charge_safepoint` asks in that order too.
     /// A safepoint at a loop's back edge, taken once [`BACK_EDGE_FUEL`] has
     /// gathered.
     ///
@@ -2591,6 +2835,7 @@ impl<'a> Vm<'a> {
         }) {
             return Err(error.at(span));
         }
+        self.collect_if_due();
         Ok(())
     }
 
@@ -3304,7 +3549,7 @@ impl Callable for Vm<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::BTreeMap;
+    use std::collections::{BTreeMap, BTreeSet};
     use std::io::Write;
     use std::path::PathBuf;
     use std::sync::{Arc, Mutex};
@@ -5919,4 +6164,447 @@ mod tests {
     // What stays here is what is about the VM itself rather than about the two
     // backends agreeing: one instruction, one construct, one refusal at a
     // time.
+
+    // ------------------------------------------------- garbage collection
+    //
+    // What a collection *does* is not something a program can print, so these
+    // read the heap rather than the console. The programs themselves — a
+    // cycle built and discarded, a graph one member of which stays rooted, a
+    // capture that is the only root left, a place written through across a
+    // collection, a body the host runs re-entrantly — are in the differential
+    // corpus as `tests/e2e:gc_*`, where both backends run them and their
+    // answers are compared. These are the other half: the same shapes, asked
+    // what the heap made of them.
+
+    /// A sink that keeps every event, so a test can assert on what a run
+    /// recorded rather than on how it was formatted.
+    ///
+    /// Task threads record through the same sink as the entry, so this is
+    /// shared and locked exactly as the real ones are.
+    #[derive(Clone, Default)]
+    struct Recorder(Arc<Mutex<Vec<TraceEvent>>>);
+
+    impl crate::trace::TraceSink for Recorder {
+        fn record(&self, event: TraceEvent) {
+            self.0
+                .lock()
+                .expect("no test panics while tracing")
+                .push(event);
+        }
+    }
+
+    impl Recorder {
+        fn events(&self) -> Vec<TraceEvent> {
+            self.0.lock().expect("no test panics while tracing").clone()
+        }
+    }
+
+    /// One backend's run, together with what its heaps did.
+    struct HeapRun {
+        answer: Result<String, RuntimeError>,
+        output: String,
+        events: Vec<TraceEvent>,
+    }
+
+    impl HeapRun {
+        /// Every collection the run recorded, as `(task, allocated, freed)`.
+        fn collections(&self) -> Vec<(u64, u64, u64)> {
+            self.events
+                .iter()
+                .filter_map(|event| match event {
+                    TraceEvent::HeapCollected {
+                        task,
+                        allocated,
+                        freed,
+                        ..
+                    } => Some((*task, *allocated, *freed)),
+                    _ => None,
+                })
+                .collect()
+        }
+
+        /// Objects every collection of the run reclaimed between them.
+        fn freed(&self) -> u64 {
+            self.collections().iter().map(|(_, _, freed)| freed).sum()
+        }
+
+        /// The run's `heap_summary`, which is always its last heap event.
+        fn summary(&self) -> HeapStats {
+            self.events
+                .iter()
+                .rev()
+                .find_map(|event| match event {
+                    TraceEvent::HeapSummary {
+                        allocated,
+                        allocated_bytes,
+                        collections,
+                        live_bytes,
+                        peak_bytes,
+                        pause,
+                    } => Some(HeapStats {
+                        allocated_objects: *allocated,
+                        allocated_bytes: *allocated_bytes,
+                        collections: *collections,
+                        freed_objects: 0,
+                        live_bytes: *live_bytes,
+                        live_objects: 0,
+                        peak_bytes: *peak_bytes,
+                        pause: *pause,
+                    }),
+                    _ => None,
+                })
+                .expect("a run ends with a heap summary")
+        }
+
+        fn value(&self) -> &str {
+            match &self.answer {
+                Ok(rendered) => rendered,
+                Err(error) => panic!("the program ran without a runtime error: {error:?}"),
+            }
+        }
+    }
+
+    /// Runs `m.main` on the oracle, watching every heap.
+    fn interpreted_heap(checked: &Arc<Checked>, sources: &Arc<SourceMap>) -> HeapRun {
+        let buffer = Buffer::default();
+        let recorder = Recorder::default();
+        let runtime = Runtime::new(checked.clone(), sources.clone(), hosts(&buffer, None))
+            .with_trace(Arc::new(recorder.clone()));
+        let answer = Interpreter::new(&runtime).run_entry("m", "main", Vec::new());
+        HeapRun {
+            answer: described(answer),
+            output: buffer.text(),
+            events: recorder.events(),
+        }
+    }
+
+    /// Lowers the program and runs `m.main` on the VM, watching every heap.
+    fn lowered_heap(checked: &Arc<Checked>, sources: &Arc<SourceMap>) -> HeapRun {
+        let program = match cove_ir::lower::lower(checked) {
+            Ok(program) => program,
+            Err(why) => panic!("the program lowers, but stopped at {why}"),
+        };
+        let entry = program
+            .function_named("m", "main")
+            .expect("`m.main` was lowered");
+        let buffer = Buffer::default();
+        let recorder = Recorder::default();
+        let hosts = hosts(&buffer, None);
+        let runtime = Runtime::new(checked.clone(), sources.clone(), hosts.clone())
+            .with_trace(Arc::new(recorder.clone()));
+        let answer = Vm::new(&runtime, &hosts, &Arc::new(program)).run(entry, Vec::new());
+        HeapRun {
+            answer: described(answer),
+            output: buffer.text(),
+            events: recorder.events(),
+        }
+    }
+
+    /// Runs one program on both backends, watching every heap on each.
+    ///
+    /// Two runs rather than one, because the question these tests ask is
+    /// whether the two backends' heaps behave the same, and a figure is only
+    /// evidence of that beside the other backend's.
+    fn heaps_of(source: &str) -> (HeapRun, HeapRun) {
+        let (sources, checked) = checked_module(source);
+        crate::on_cove_stack(|| {
+            (
+                interpreted_heap(&checked, &sources),
+                lowered_heap(&checked, &sources),
+            )
+        })
+        .expect("a thread to run Cove on")
+    }
+
+    /// Enough abandoned objects for a heap to have collected several times.
+    const CHURN: usize = 200;
+
+    /// A loop that builds one cycle per turn and abandons it.
+    fn churn(count: usize) -> String {
+        format!(
+            "  var i = 0\n  while i < {count} {{\n    var v = Vector.of()\n    v.push(v)\n    i += 1\n  }}\n"
+        )
+    }
+
+    /// `m.main`, returning `Result<Unit, Error>`, around `body`.
+    fn collecting(body: &str) -> String {
+        format!(
+            "use console.println\n\nexport fn main() -> Result<Unit, Error> {{\n{body}  Ok(())\n}}\n"
+        )
+    }
+
+    /// Asserts that two heaps mean the same thing by what they report.
+    ///
+    /// # What is equal, and what is not allowed to be
+    ///
+    /// A program allocates the objects it allocates on either backend, and
+    /// ends holding what it ends holding, so `allocated_objects`,
+    /// `allocated_bytes` and `live_bytes` are compared exactly. Those are the
+    /// figures issue #119 is about: a run that reports cumulative allocation
+    /// where the other reports live memory is the thing that was wrong.
+    ///
+    /// How many collections it took to get there is *not* compared, and it is
+    /// worth saying why rather than leaving the omission to be read as
+    /// laxity. A collection happens at a safepoint where enough has been
+    /// allocated since the last one, and the two backends put safepoints in
+    /// different places — the interpreter takes one at every loop turn, the
+    /// VM at the first back edge with `BACK_EDGE_FUEL` gathered — so the VM
+    /// asks the question less often and can overshoot the threshold further
+    /// before it asks. Fewer collections over the same allocation is what
+    /// that looks like, and it is a schedule and not a semantics. The same
+    /// goes for how much each collection reclaimed: an acyclic vector that
+    /// `Rc` frees before any collection sees it is never counted as swept, so
+    /// what the sweeps add up to depends on when they ran.
+    ///
+    /// The peak is not compared either, and it differs by more than a
+    /// margin. It is the largest live set some collection measured, and the
+    /// two backends stand in different places when one runs: a `var v`
+    /// declared inside a loop body is out of the interpreter's environment
+    /// chain by the time the turn's safepoint is reached, and is still the
+    /// VM frame's slot until the slot is written again. So a churn loop can
+    /// report a peak of zero on the oracle and of one vector here, and
+    /// neither is wrong. Callers that care bound it rather than equate it.
+    ///
+    /// What *is* required of the schedule is that both backends collect where
+    /// the other does and reclaim where the other does. A backend that
+    /// collected only once, or that never freed anything, would pass every
+    /// exact comparison above and be the bug this whole change is about.
+    fn same_heap(ast: &HeapRun, vm: &HeapRun) {
+        let (a, v) = (ast.summary(), vm.summary());
+        assert_eq!(
+            a.allocated_objects, v.allocated_objects,
+            "allocation differs:\n  ast {a:?}\n  vm  {v:?}"
+        );
+        assert_eq!(
+            a.allocated_bytes, v.allocated_bytes,
+            "allocated bytes differ:\n  ast {a:?}\n  vm  {v:?}"
+        );
+        assert_eq!(
+            a.live_bytes, v.live_bytes,
+            "live bytes differ:\n  ast {a:?}\n  vm  {v:?}"
+        );
+        assert_eq!(
+            a.collections > 0,
+            v.collections > 0,
+            "one backend collected and the other did not:\n  ast {a:?}\n  vm  {v:?}"
+        );
+        assert_eq!(
+            ast.freed() > 0,
+            vm.freed() > 0,
+            "one backend reclaimed and the other did not:\n  ast {:?}\n  vm  {:?}",
+            ast.collections(),
+            vm.collections()
+        );
+    }
+
+    /// The whole reason for a collector, on this backend for the first time.
+    /// `Rc` cannot free a vector that holds itself, so without a mark and a
+    /// sweep every one of these would still be live when the run ended.
+    #[test]
+    fn a_cycle_a_lowered_program_built_is_reclaimed() {
+        let (ast, vm) = heaps_of(&collecting(&churn(CHURN)));
+        assert_eq!(vm.value(), ast.value());
+        assert!(
+            vm.freed() > 0,
+            "the VM reclaimed nothing: {:?}",
+            vm.collections()
+        );
+        assert_eq!(
+            vm.summary().live_bytes,
+            0,
+            "the run ended holding something: {:?}",
+            vm.summary()
+        );
+        same_heap(&ast, &vm);
+    }
+
+    /// Allocation that is discarded as fast as it is made leaves a live set
+    /// that does not grow. Cove has no memory limit for a run to be stopped
+    /// by, so "bounded" is read off the peak the collections measured rather
+    /// than off a budget: the peak is a handful of objects where the total
+    /// allocated is hundreds.
+    #[test]
+    fn repeated_allocation_and_discard_leaves_a_bounded_live_set() {
+        let (ast, vm) = heaps_of(&collecting(
+            "  var total = 0\n  var i = 0\n  while i < 400 {\n    var v = Vector.of()\n    v.push(i)\n    total += v.length()\n    i += 1\n  }\n  println(\"{total}\")?\n",
+        ));
+        assert_eq!(vm.output, "400\n");
+        assert_eq!(ast.output, vm.output);
+        let summary = vm.summary();
+        assert_eq!(summary.allocated_objects, 400);
+        assert!(summary.collections > 0, "{summary:?}");
+        assert!(
+            summary.peak_bytes < summary.allocated_bytes / 10,
+            "the live set grew with the loop: {summary:?}"
+        );
+        same_heap(&ast, &vm);
+    }
+
+    /// A frame's value window is the root set, so a slot the running frame
+    /// still holds survives however many collections run beside it.
+    #[test]
+    fn a_slot_a_standing_frame_holds_survives_every_collection() {
+        let (ast, vm) = heaps_of(&collecting(&format!(
+            "  var kept = Vector.of(1, 2, 3)\n{}  println(\"kept {{kept.length()}} {{kept}}\")?\n",
+            churn(CHURN)
+        )));
+        assert_eq!(vm.output, "kept 3 [1, 2, 3]\n");
+        assert_eq!(ast.output, vm.output);
+        assert!(vm.freed() > 0, "{:?}", vm.collections());
+        same_heap(&ast, &vm);
+    }
+
+    /// A capture is a value slot, copied into the frame's window by the call
+    /// that entered the body — so a vector reachable only through a returned
+    /// closure's capture is reachable from the value stack, and survives.
+    #[test]
+    fn a_closure_capture_is_the_only_root_and_is_enough() {
+        let (ast, vm) = heaps_of(&format!(
+            "use console.println\n\nfn hidden() -> fn() -> Int {{\n  var counted = Vector.of(1, 2, 3, 4, 5)\n  fn() {{\n    counted.length()\n  }}\n}}\n\nexport fn main() -> Result<Unit, Error> {{\n  let count = hidden()\n{}  println(\"{{count()}}\")?\n  Ok(())\n}}\n",
+            churn(CHURN)
+        ));
+        assert_eq!(vm.output, "5\n");
+        assert_eq!(ast.output, vm.output);
+        assert!(vm.freed() > 0, "{:?}", vm.collections());
+        same_heap(&ast, &vm);
+    }
+
+    /// Frames standing above frames, with a value operand of the outermost
+    /// still on the stack when the innermost collects.
+    ///
+    /// `Vector.of` evaluates its first argument, leaves it standing as an
+    /// operand, and only then makes the call that churns — so the collection
+    /// happens with a vector that is an operand rather than a slot. A root
+    /// set that walked frame windows and stopped at `value_frame_size` would
+    /// miss it, which is why the whole of `stack[..len]` is the root set.
+    #[test]
+    fn a_live_operand_above_nested_frames_survives_a_collection() {
+        let (ast, vm) = heaps_of(&format!(
+            "use console.println\n\nfn made(n: Int) -> Vector<Int> {{\n  var v = Vector.of()\n  var i = 0\n  while i < n {{\n    v.push(i)\n    i += 1\n  }}\n  v\n}}\n\nfn afterChurn(n: Int) -> Vector<Int> {{\n{}  made(n)\n}}\n\nexport fn main() -> Result<Unit, Error> {{\n  let both: Vector<Vector<Int>> = Vector.of(made(3), afterChurn(4))\n  println(\"{{both}}\")?\n  Ok(())\n}}\n",
+            churn(CHURN)
+        ));
+        assert_eq!(vm.output, "[[0, 1, 2], [0, 1, 2, 3]]\n");
+        assert_eq!(ast.output, vm.output);
+        assert!(vm.freed() > 0, "{:?}", vm.collections());
+        same_heap(&ast, &vm);
+    }
+
+    /// A place is an index into the value stack rather than an independent
+    /// root, so what it names has to stay rooted by that stack for the whole
+    /// of the place's life. A callee collecting between two writes through
+    /// one is where that is either true or not.
+    #[test]
+    fn a_var_place_is_written_through_across_a_collection() {
+        let (ast, vm) = heaps_of(&format!(
+            "use console.println\n\nfn fill(var output: Vector<Int>, upTo: Int) {{\n  var n = 0\n  while n < upTo {{\n    output.push(n)\n{}    n += 1\n  }}\n}}\n\nexport fn main() -> Result<Unit, Error> {{\n  var output = Vector.of()\n  fill(var output, upTo: 4)\n  println(\"{{output}}\")?\n  Ok(())\n}}\n",
+            churn(80)
+        ));
+        assert_eq!(vm.output, "[0, 1, 2, 3]\n");
+        assert_eq!(ast.output, vm.output);
+        assert!(vm.freed() > 0, "{:?}", vm.collections());
+        same_heap(&ast, &vm);
+    }
+
+    /// A host running a Cove body re-entrantly takes the closure off the
+    /// stack into a vector of its own, so while the body runs the closure and
+    /// everything it captured are held only by the host — where no root set
+    /// can read them. What keeps them is that a reference nothing can read is
+    /// a reference the collector's counting is short of.
+    #[test]
+    fn a_collection_inside_host_reentry_keeps_what_the_host_is_holding() {
+        let (ast, vm) = heaps_of(&format!(
+            "use clock.timeout\nuse console.println\n\nexport fn main() -> Result<Unit, Error> {{\n  var kept = Vector.of(1, 2, 3)\n  let answered = timeout(60s) {{\n{}    kept.length()\n  }}?\n  println(\"{{answered}} {{kept}}\")?\n  Ok(())\n}}\n",
+            churn(CHURN)
+        ));
+        assert_eq!(vm.output, "3 [1, 2, 3]\n");
+        assert_eq!(ast.output, vm.output);
+        assert!(vm.freed() > 0, "{:?}", vm.collections());
+        same_heap(&ast, &vm);
+    }
+
+    /// Each spawned task has a VM and a heap of its own, so each collects on
+    /// its own thread, and the event says whose heap it was. A collection
+    /// that reached across the boundary would empty a vector another task is
+    /// still holding.
+    #[test]
+    fn each_spawned_task_collects_its_own_heap() {
+        let (ast, vm) = heaps_of(&format!(
+            "use console.println\n\nfn work(mark: Int) -> Int {{\n  var kept = Vector.of(mark, mark, mark)\n{}  kept.length() * 100 + mark\n}}\n\nexport fn main() -> Result<Unit, Error> {{\n  scope tasks {{\n    let one = tasks.spawn {{ work(1) }}\n    let two = tasks.spawn {{ work(2) }}\n    println(\"{{one.await()}} {{two.await()}}\")?\n  }}\n  Ok(())\n}}\n",
+            churn(CHURN)
+        ));
+        assert_eq!(vm.output, "301 302\n");
+        assert_eq!(ast.output, vm.output);
+        let collected: BTreeSet<u64> = vm
+            .collections()
+            .into_iter()
+            .filter(|(_, _, freed)| *freed > 0)
+            .map(|(task, _, _)| task)
+            .collect();
+        assert!(
+            collected.contains(&1) && collected.contains(&2),
+            "both tasks should have collected: {collected:?}"
+        );
+        same_heap(&ast, &vm);
+    }
+
+    /// A heap dies with the thread that owns it, and a table of `Weak`s
+    /// dropped without a sweep takes nothing with it — so a task that ends
+    /// while a cycle it built is still reachable would leave that cycle
+    /// behind. `Vm::retire_heap` sweeps once more, which is what makes a
+    /// task's memory a task's to give back.
+    #[test]
+    fn a_task_that_ends_still_naming_a_cycle_leaves_nothing_behind() {
+        let (ast, vm) = heaps_of(
+            "use console.println\n\nstruct Node {\n  next: Vector<Node>\n}\n\nfn holds() -> Int {\n  var kept: Vector<Node> = Vector.of()\n  kept.push(Node(next: kept))\n  kept.length()\n}\n\nexport fn main() -> Result<Unit, Error> {\n  scope tasks {\n    let one = tasks.spawn { holds() }\n    println(\"{one.await()}\")?\n  }\n  Ok(())\n}\n",
+        );
+        assert_eq!(vm.output, "1\n");
+        let summary = vm.summary();
+        assert_eq!(
+            vm.freed(),
+            summary.allocated_objects,
+            "a cycle outlived the task that built it: {summary:?}"
+        );
+        same_heap(&ast, &vm);
+    }
+
+    /// ADR 0011 asks allocation, live heap size, collection count, and pause
+    /// time to be trace events, and #119 asks the two backends to mean one
+    /// thing by them. This is the run that produces all four on this one.
+    #[test]
+    fn the_trace_carries_allocation_the_live_heap_collections_and_pause() {
+        let (ast, vm) = heaps_of(&collecting(&format!(
+            "  var kept = Vector.of(1)\n{}",
+            churn(CHURN)
+        )));
+        let collections = vm.collections();
+        assert!(!collections.is_empty(), "no collection was recorded");
+        for (_, allocated, _) in &collections {
+            assert!(*allocated > 0, "a collection recorded no allocation");
+        }
+        let summary = vm.summary();
+        assert_eq!(summary.allocated_objects, CHURN as u64 + 1);
+        assert!(summary.allocated_bytes > 0);
+        assert_eq!(summary.collections, collections.len() as u64);
+        // What the run ended holding is nothing: the entry's frame went with
+        // it, and retiring its heap swept what the frame had been holding.
+        assert_eq!(summary.live_bytes, 0);
+        assert!(summary.peak_bytes > 0, "the kept vector was live");
+        assert!(
+            summary.pause > Duration::ZERO,
+            "a collection took no time at all"
+        );
+        same_heap(&ast, &vm);
+    }
+
+    /// A program that allocates nothing collectable pays for no collection at
+    /// all, and says so in the same figures the other backend says it in.
+    #[test]
+    fn a_program_that_allocates_nothing_is_never_collected() {
+        let (ast, vm) = heaps_of(&collecting("  println(\"{1 + 1}\")?\n"));
+        assert_eq!(vm.output, "2\n");
+        assert_eq!(vm.summary().collections, 0);
+        assert_eq!(vm.summary().allocated_objects, 0);
+        assert!(vm.collections().is_empty());
+        same_heap(&ast, &vm);
+    }
 }

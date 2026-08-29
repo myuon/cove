@@ -349,7 +349,17 @@ use cove_sema::resolve::Program as Checked;
 /// and nothing stopped agreeing. A floor that falls for any other reason is
 /// the regression this constant exists to catch, and lowering it should
 /// always cost a paragraph saying which.
-const LOWERED_FLOOR: usize = 81;
+///
+/// 81 to 87: six cases, and none of them a construct. `tests/e2e:gc_capture`,
+/// `gc_churn`, `gc_frames`, `gc_graph`, `gc_place` and `gc_reentry` are the
+/// programs issue #119 asks for — a graph one member of which stays rooted, a
+/// collection with frames standing above frames and a value operand of the
+/// outermost still on the stack, a capture that is the only root left, a
+/// place written through across a collection, and a collection inside a body
+/// the host is running re-entrantly. Every one of them lowered on the day it
+/// was written, which is the measurement: what they exercise is collection,
+/// and collection is not something a lowering has to reach.
+const LOWERED_FLOOR: usize = 87;
 
 // ------------------------------------------------------------------ the test
 

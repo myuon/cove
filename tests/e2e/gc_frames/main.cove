@@ -1,0 +1,56 @@
+use console.println
+
+/// Builds and abandons `count` cycles, which is what makes a collection run.
+fn churn(count: Int) {
+  var i = 0
+  while i < count {
+    var v = Vector.of()
+    v.push(v)
+    i += 1
+  }
+}
+
+/// A vector of `n` numbers that nothing else names.
+fn made(n: Int) -> Vector<Int> {
+  var v = Vector.of()
+  var i = 0
+  while i < n {
+    v.push(i)
+    i += 1
+  }
+  v
+}
+
+/// The same, after enough abandoned cycles for a collection to have run.
+fn madeAfterChurn(n: Int) -> Vector<Int> {
+  churn(400)
+  made(n)
+}
+
+/// Frames nested `depth` deep, each holding a vector of its own across the
+/// call it makes, with the innermost one collecting.
+fn deep(depth: Int) -> Int {
+  var mine = Vector.of(depth)
+  if depth > 0 {
+    mine.length() + deep(depth - 1)
+  } else {
+    churn(400)
+    mine.length()
+  }
+}
+
+/// Collects with frames standing above frames, and with a value operand of
+/// the outermost one still on the stack.
+///
+/// The first argument to `Vector.of` is evaluated, left standing as an
+/// operand, and only then is the second argument's call made — so the
+/// collection that call runs happens while a vector is an operand rather than
+/// a slot. A root set that scanned frame windows and stopped at
+/// `value_frame_size` would miss it.
+export fn main() -> Result<Unit, Error> {
+  let both: Vector<Vector<Int>> = Vector.of(made(3), madeAfterChurn(4))
+  println("the operand that stood across a collection is {both.get(0)}")?
+  println("the one built after it is {both.get(1)}")?
+  println("five nested frames each kept their own: {deep(4)}")?
+  Ok(())
+}
