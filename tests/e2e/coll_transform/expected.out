@@ -1,0 +1,14 @@
+map [10, 20, 30, 40]
+map to another type [#1, #2, #3, #4]
+filter [2, 4]
+filter nothing []
+filter everything [1, 2, 3, 4]
+fold 10
+fold into a String 1234
+empty [] [] 7
+in order 1,2,3,4,
+a declared function [2, 4, 6, 8]
+chained 50
+vector [2, 3, 4] [2, 3] 6
+still [1, 2, 3]
+captured [100, 200, 300, 400]

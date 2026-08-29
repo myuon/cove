@@ -1,0 +1,18 @@
+use console.println
+
+/// Runs out of the host-call budget inside a `map` transform.
+///
+/// A runtime control is accounted the same inside a callback as outside one:
+/// the transform's own `println` is charged where any other host call is, so
+/// the third one stops the run in the middle of the walk, and no array comes
+/// back.
+export fn main() -> Result<Unit, Error> {
+  let items = [1, 2, 3, 4]
+  println("mapping {items.length()} items")?
+  let doubled = items.map(fn(n) {
+    let reported = println("visiting {n}")
+    n * 2
+  })
+  println("never printed {doubled}")?
+  Ok(())
+}

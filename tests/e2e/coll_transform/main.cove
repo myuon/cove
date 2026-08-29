@@ -1,0 +1,56 @@
+use console.println
+
+/// One booking, as a report groups them.
+struct Booking {
+  city: String
+  revenue: Int
+}
+
+/// Doubles `n`, as a declared function passed where a lambda would go.
+fn double(n: Int) -> Int {
+  n * 2
+}
+
+/// Prints `map`, `filter`, and `fold` on both sequences.
+export fn main() -> Result<Unit, Error> {
+  let items = [1, 2, 3, 4]
+  println("map {items.map(fn(n) { n * 10 })}")?
+  println("map to another type {items.map(fn(n) { "#{n}" })}")?
+  println("filter {items.filter(fn(n) { n % 2 == 0 })}")?
+  println("filter nothing {items.filter(fn(n) { false })}")?
+  println("filter everything {items.filter(fn(n) { true })}")?
+  println("fold {items.fold(0, fn(total, n) { total + n })}")?
+  println("fold into a String {items.fold("", fn(text, n) { "{text}{n}" })}")?
+
+  let empty: Array<Int> = []
+  println("empty {empty.map(fn(n) { n })} {empty.filter(fn(n) { true })} {empty.fold(7, fn(t, n) { t + n })}")?
+
+  // The order is front to back, and every element is visited exactly once.
+  println("in order {items.fold("", fn(text, n) { "{text}{n}," })}")?
+
+  // A declared function is a value, so it goes where a lambda goes.
+  println("a declared function {items.map(double)}")?
+
+  // Chained: filter, then map, then fold, each answering an `Array`.
+  let bookings = [
+    Booking(city: "kyoto", revenue: 30),
+    Booking(city: "osaka", revenue: 10),
+    Booking(city: "kyoto", revenue: 20),
+  ]
+  let kyoto = bookings.filter(fn(b) {
+    b.city == "kyoto"
+  })
+  println(
+    "chained {kyoto.map(fn(b) { b.revenue }).fold(0, fn(t, r) { t + r })}",
+  )?
+
+  // A `Vector` answers an `Array` and is left as it was.
+  var pending = Vector.of(1, 2, 3)
+  println("vector {pending.map(fn(n) { n + 1 })} {pending.filter(fn(n) { n > 1 })} {pending.fold(0, fn(t, n) { t + n })}")?
+  println("still {pending}")?
+
+  // A closure captures what it reads, so a transform can close over a value.
+  let scale = 100
+  println("captured {items.map(fn(n) { n * scale })}")?
+  Ok(())
+}

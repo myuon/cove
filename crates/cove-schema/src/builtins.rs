@@ -755,12 +755,155 @@ const IS_EMPTY: MethodSchema = MethodSchema {
     mutating: false,
 };
 
+// ------------------------------- the higher-order methods a sequence shares
+//
+// `Array<T>` and `Vector<T>` both bind one parameter and both call it `T`,
+// so one declaration serves both receivers the way [`LENGTH`] and
+// [`IS_EMPTY`] already do. That is the point rather than a saving: an
+// operation that walks a sequence with a closure is the same operation on
+// either, and a shared constant is what stops the two from drifting into two
+// signatures with one name.
+//
+// # What all four promise
+//
+// Each **answers an `Array`**, whichever receiver it was called on. What a
+// walk produces is a finished sequence rather than a handle to go on
+// appending to, and answering a `Vector` from a `Vector` would hand back a
+// second mutable graph that nothing asked for. `Vector.toArray` already
+// draws that line and these stand on the same side of it.
+//
+// Each **takes the elements once, before it calls anything**. A `Vector`
+// shares its storage, so a callback can reach the very vector being walked
+// and push onto it; the elements are copied out first, so what is walked and
+// what comes back are both settled before the first call. That is
+// `cove_ir::Inst::IterItems`' rule — a `for` asks once and walks a snapshot —
+// applied where the same question arises, and not a second answer to it.
+//
+// Each **visits every element exactly once, front to back**, in the
+// receiver's own order.
+//
+// Each **answers nothing at all when its callback fails**. The result is
+// built to the side and returned only on success, so a walk that stops
+// leaves no half-built array and no half-sorted sequence for anything to
+// observe, and the receiver is never written through. A `?` inside a
+// callback returns from the callback, and the callback's result type is what
+// the signature declares — a `Bool` for `filter` and `sorted` — so a `?` in
+// one of those is a check-time mismatch rather than a runtime surprise.
+//
+// And each is **empty-safe by construction**: an empty receiver answers an
+// empty `Array` — or, for `fold`, `initial` — and calls the callback zero
+// times.
+
+/// `map(transform: fn(T) -> R) -> Array<R>`.
+///
+/// The constant is not called `MAP` because the `Map<K, V>` type table
+/// already is, the way [`ERROR_OF`] is not called `ERROR`.
+const MAP_EACH: MethodSchema = MethodSchema {
+    name: "map",
+    generics: &["R"],
+    params: &[ParamSchema {
+        name: "transform",
+        ty: BuiltinType::Fn(&[BuiltinType::Param("T")], &BuiltinType::Param("R")),
+    }],
+    variadic: false,
+    result: BuiltinType::Array(&BuiltinType::Param("R")),
+    mutating: false,
+};
+
+/// `filter(keep: fn(T) -> Bool) -> Array<T>`.
+///
+/// `keep` says whether an element belongs in the answer, so the elements it
+/// answered `true` for come back in the order they were in.
+const FILTER: MethodSchema = MethodSchema {
+    name: "filter",
+    generics: &[],
+    params: &[ParamSchema {
+        name: "keep",
+        ty: BuiltinType::Fn(&[BuiltinType::Param("T")], &BuiltinType::Bool),
+    }],
+    variadic: false,
+    result: BuiltinType::Array(&BuiltinType::Param("T")),
+    mutating: false,
+};
+
+/// `fold(initial: R, step: fn(R, T) -> R) -> R`.
+///
+/// The total is the left argument and the element the right, so
+/// `fold(0, fn(total, item) { total + item })` sums. It is `fold` and not
+/// `reduce` because the initial value is what makes an empty sequence answer
+/// something: a `reduce` with no initial value has to answer an `Option`,
+/// which is this with one extra case for the caller to open, and both would
+/// be one operation written twice.
+const FOLD: MethodSchema = MethodSchema {
+    name: "fold",
+    generics: &["R"],
+    params: &[
+        ParamSchema {
+            name: "initial",
+            ty: BuiltinType::Param("R"),
+        },
+        ParamSchema {
+            name: "step",
+            ty: BuiltinType::Fn(
+                &[BuiltinType::Param("R"), BuiltinType::Param("T")],
+                &BuiltinType::Param("R"),
+            ),
+        },
+    ],
+    variadic: false,
+    result: BuiltinType::Param("R"),
+    mutating: false,
+};
+
+/// `sorted(by: fn(T, T) -> Bool) -> Array<T>`, a **stable** sort under the
+/// caller's own ordering.
+///
+/// `by` is a strict less-than: `by(a, b)` answers whether `a` must come
+/// before `b`, and answers `false` when they are equivalent. Two elements
+/// neither of which comes before the other keep the order they were in,
+/// which is what stable means and is what makes a sort by one field of a
+/// record leave the rest of the ordering alone.
+///
+/// A three-way comparison was the alternative and would need an ordering
+/// type to answer in, which the language does not have; a `Bool` needs
+/// nothing new and is the shape `<` already has.
+///
+/// An ordering that contradicts itself — one where `by(a, b)` and `by(b, a)`
+/// are both true, or one that answers differently on the same pair twice —
+/// gets *some* permutation of the elements and no promise about which. It is
+/// not a stopped run: the comparison is the program's to get right, and the
+/// merge that implements this has no invariant of its own to break.
+///
+/// There is no natural-order `sorted()` beside this one. Ascending order is
+/// `sorted(by: fn(a, b) { a < b })`, written in the operator the language
+/// already defines for `Int`, `Float`, `Duration`, and `String`; a bare
+/// `sorted()` would have to say which element types it accepts, and saying
+/// so needs bounds, which the MVP does not have. `Map`'s own table already
+/// declines that for the same reason.
+const SORTED: MethodSchema = MethodSchema {
+    name: "sorted",
+    generics: &[],
+    params: &[ParamSchema {
+        name: "by",
+        ty: BuiltinType::Fn(
+            &[BuiltinType::Param("T"), BuiltinType::Param("T")],
+            &BuiltinType::Bool,
+        ),
+    }],
+    variadic: false,
+    result: BuiltinType::Array(&BuiltinType::Param("T")),
+    mutating: false,
+};
+
 // ------------------------------------------------------------------- Array
 
 /// `Array<T>`: the fixed-length immutable sequence.
 ///
 /// `get` answers an `Option` rather than trapping, so an index outside the
 /// array is a value the caller has to open rather than a stopped program.
+///
+/// `map`, `filter`, `fold`, and `sorted` are the four it walks with a
+/// closure, declared once above because a `Vector` has the same four.
 pub const ARRAY: BuiltinSchema = BuiltinSchema {
     name: "Array",
     parameters: &["T"],
@@ -781,6 +924,10 @@ pub const ARRAY: BuiltinSchema = BuiltinSchema {
         },
         LENGTH,
         IS_EMPTY,
+        MAP_EACH,
+        FILTER,
+        FOLD,
+        SORTED,
         SNAPSHOT,
     ],
     associated: &[],
@@ -795,6 +942,11 @@ pub const ARRAY: BuiltinSchema = BuiltinSchema {
 /// appends, and the other consumes locally unique storage and hands back an
 /// `Array` in O(1). `toArray` is the copying alternative, for a caller that
 /// cannot give the storage up.
+///
+/// `map`, `filter`, `fold`, and `sorted` are the same four an `Array` has,
+/// and each answers an `Array` here too: `v.sorted(by:)` is
+/// `v.toArray().sorted(by:)` and writes nothing through the handle, so an
+/// alias sees no change and a callback that pushes cannot disturb the walk.
 pub const VECTOR: BuiltinSchema = BuiltinSchema {
     name: "Vector",
     parameters: &["T"],
@@ -815,6 +967,10 @@ pub const VECTOR: BuiltinSchema = BuiltinSchema {
         },
         LENGTH,
         IS_EMPTY,
+        MAP_EACH,
+        FILTER,
+        FOLD,
+        SORTED,
         MethodSchema {
             name: "push",
             generics: &[],
@@ -1831,6 +1987,37 @@ mod tests {
         assert_eq!(
             ARRAY.method("snapshot").unwrap().signature(),
             "snapshot() -> Self"
+        );
+    }
+
+    /// The four higher-order methods are one declaration each, reached
+    /// through either sequence.
+    ///
+    /// A `Vector` that walked with a different signature than an `Array` is
+    /// the drift this shares a constant to prevent, and comparing the two
+    /// tables is what makes the sharing a fact rather than an intention.
+    #[test]
+    fn a_sequence_walks_with_the_same_four_signatures_whichever_it_is() {
+        for name in ["map", "filter", "fold", "sorted"] {
+            let array = ARRAY.method(name).expect("`Array` walks");
+            let vector = VECTOR.method(name).expect("`Vector` walks");
+            assert_eq!(array, vector, "`{name}`");
+        }
+        assert_eq!(
+            ARRAY.method("sorted").unwrap().signature(),
+            "sorted(by: fn(T, T) -> Bool) -> Array<T>"
+        );
+        assert_eq!(
+            ARRAY.method("map").unwrap().signature(),
+            "map(transform: fn(T) -> R) -> Array<R>"
+        );
+        assert_eq!(
+            ARRAY.method("filter").unwrap().signature(),
+            "filter(keep: fn(T) -> Bool) -> Array<T>"
+        );
+        assert_eq!(
+            VECTOR.method("fold").unwrap().signature(),
+            "fold(initial: R, step: fn(R, T) -> R) -> R"
         );
     }
 

@@ -4946,6 +4946,70 @@ mod tests {
         assert_eq!(lowered.error().span, interpreted.error().span);
     }
 
+    /// The four higher-order sequence methods, on both sequences, on both
+    /// backends.
+    ///
+    /// `mapError` above enters the loop again once per value; these enter it
+    /// once per element and once per comparison, which is the first thing in
+    /// the language that re-enters an evaluator in a loop from inside one
+    /// instruction. Both `Callable` implementations answer the same walk.
+    #[test]
+    fn a_sequence_walks_the_way_the_interpreter_walks() {
+        let outcome = agree_main(
+            "Result<Unit, Error>",
+            "  let fixed = [3, 1, 2]\n  \
+             var growable = Vector.of(3, 1, 2)\n  \
+             println(\"{fixed.map(fn(n) { n * 2 })} {growable.map(fn(n) { n * 2 })}\")?\n  \
+             println(\"{fixed.filter(fn(n) { n > 1 })} {growable.filter(fn(n) { n > 1 })}\")?\n  \
+             println(\"{fixed.fold(0, fn(t, n) { t + n })} {growable.fold(0, fn(t, n) { t + n })}\")?\n  \
+             println(\"{fixed.sorted(by: fn(a, b) { a < b })} {growable.sorted(by: fn(a, b) { a < b })}\")?\n  \
+             println(\"{fixed} {growable}\")?\n  Ok(())",
+        );
+        assert_eq!(
+            outcome.output,
+            "[6, 2, 4] [6, 2, 4]\n[3, 2] [3, 2]\n6 6\n[1, 2, 3] [1, 2, 3]\n[3, 1, 2] [3, 1, 2]\n"
+        );
+    }
+
+    /// A sort long enough that the merge runs more than one pass, so the
+    /// order the comparisons are made in is what the two backends have to
+    /// agree about and not only the answer.
+    ///
+    /// The comparison prints, which is what makes the order observable: a
+    /// merge that took its runs in a different order on one backend would
+    /// print a different sequence of pairs even where the sorted array came
+    /// out the same.
+    #[test]
+    fn a_sort_makes_the_same_comparisons_in_the_same_order_on_both() {
+        let outcome = agree_main(
+            "Result<Unit, Error>",
+            "  let items = [5, 3, 8, 1, 9, 2, 7, 4]\n  \
+             let sorted = items.sorted(by: fn(a, b) {\n    \
+             let said = println(\"{a}?{b}\")\n    a < b\n  })\n  \
+             println(\"{sorted}\")?\n  Ok(())",
+        );
+        assert!(
+            outcome.output.ends_with("[1, 2, 3, 4, 5, 7, 8, 9]\n"),
+            "{}",
+            outcome.output
+        );
+        assert_eq!(outcome.output.lines().count(), 18);
+    }
+
+    /// A comparison that fails stops both backends at the same byte, with
+    /// nothing half-sorted answered.
+    #[test]
+    fn a_comparison_that_fails_stops_both_backends_alike() {
+        let (sources, checked) = checked_module(
+            "use console.println\n\nexport fn main() -> Result<Array<Int>, Error> {\n  \
+             let zero = 0\n  Ok([3, 1, 2].sorted(by: fn(a, b) { a / zero < b }))\n}\n",
+        );
+        let (interpreted, lowered) = on_both(&checked, &sources, "m", None);
+        assert_eq!(interpreted.error().message, "`Int` division by zero");
+        assert_eq!(lowered.error().message, interpreted.error().message);
+        assert_eq!(lowered.error().span, interpreted.error().span);
+    }
+
     // ----------------------------------------------------------- tasks
 
     /// Two tasks in one scope, awaited, on a VM each.

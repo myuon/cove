@@ -387,12 +387,46 @@ use cove_sema::resolve::Program as Checked;
 /// floor is 89 rather than 90 because that case is gone and for no other
 /// reason — nothing stopped lowering.
 ///
-/// It stayed at 89 when three of the four refusals went, and that is worth
-/// recording rather than leaving as a number that did not move. ADR 0021
+/// 89 to 93: four cases, and no construct again — but for the first time the
+/// four are what this harness is *for*. `Array` and `Vector` gained `map`,
+/// `filter`, `fold`, and `sorted(by:)`, which are the language's first
+/// higher-order builtins on a collection, and a higher-order builtin is the
+/// first thing to drive the two `cove_runtime::builtins::Callable`
+/// implementations against each other over whole programs rather than over
+/// one `mapError` callback. `Result.mapError` was that one callback and it
+/// runs at most once per value; a `sorted` over eight elements re-enters the
+/// evaluator seventeen times from inside a single instruction, on the VM
+/// through `Vm::call_from_host` — the re-entrant loop that leaves the
+/// interrupted instruction's operands standing — and on the interpreter
+/// through an ordinary recursive call. `tests/e2e:coll_sorted`,
+/// `tests/e2e:coll_transform`, `tests/e2e:fail_sort_callback` and
+/// `tests/e2e:fail_map_host_calls` are the cases that gained a lowering, and
+/// all four lowered on the day they were written: the lowering already
+/// emitted `cove_ir::Inst::CallBuiltin` for any name the shared table
+/// declares, and a callback is an ordinary `make-closure`, so there was no
+/// instruction to add.
+///
+/// The last two are the ones worth having. `fail_sort_callback` is a
+/// comparison that divides by zero partway through a merge, and both
+/// backends stop at the same byte of the same closure with nothing
+/// half-sorted printed. `fail_map_host_calls` is a `map` whose transform
+/// prints, under a `max_host_calls` this file passes through from
+/// `[run.<name>]`: the budget stops the run from *inside* a callback, on the
+/// same element on both backends, which is the evidence that a runtime
+/// control is accounted the same on either side of a re-entry. A run
+/// cancelled inside a callback has no case here, because cancellation is
+/// reachable only through a task and a task's cancellation is a race no
+/// golden file can pin; the budget stop is the deterministic member of the
+/// same family, and it is what this records instead.
+///
+/// It then did not move at all when three of the four refusals went, and
+/// that is worth recording rather than leaving as a number that stood
+/// still. ADR 0021
 /// made assignment to a read-only place and a labelled argument out of
 /// declaration order `cove check` errors, so `tests/e2e:fail_assign_let`,
 /// `tests/e2e:fn_labels` and `tests/e2e:type_struct` moved from *refused* to
-/// *does not check* — 4 refused and 25 not checking became 1 and 28 — and
+/// *does not check* — 4 refused and 25 not checking became 1 and 28, over a
+/// corpus the four cases above had meanwhile grown to 122 — and
 /// each is now a package of its own, so their case names gained a directory.
 /// Nothing gained a lowering and nothing lost one. The refusals went because
 /// the checker catches them, not because the VM learned anything.
@@ -404,7 +438,7 @@ use cove_sema::resolve::Program as Checked;
 /// pin what a backend does with one. It names a function declared inside a
 /// function body now, which is unsupported in the plain sense — the
 /// interpreter runs it and the lowering has no instruction for it.
-const LOWERED_FLOOR: usize = 89;
+const LOWERED_FLOOR: usize = 93;
 
 // ------------------------------------------------------------------ the test
 

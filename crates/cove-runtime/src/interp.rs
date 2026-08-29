@@ -6037,6 +6037,102 @@ export fn main() -> Result<Unit, Error> {
         assert_eq!(error.message, "`Array` has no method `pop`");
     }
 
+    // ------------------------------------ walking a sequence with a closure
+
+    /// The four higher-order methods answer an `Array` whichever sequence
+    /// they were called on, and neither writes through the receiver.
+    #[test]
+    fn a_sequence_walks_the_same_whichever_sequence_it_is() {
+        let output = output_of(
+            r#"  let fixed = [3, 1, 2]
+  var growable = Vector.of(3, 1, 2)
+  console.println("{fixed.map(fn(n) { n * 2 })} {growable.map(fn(n) { n * 2 })}")?
+  console.println("{fixed.filter(fn(n) { n > 1 })} {growable.filter(fn(n) { n > 1 })}")?
+  console.println("{fixed.fold(0, fn(t, n) { t + n })} {growable.fold(0, fn(t, n) { t + n })}")?
+  console.println("{fixed.sorted(by: fn(a, b) { a < b })} {growable.sorted(by: fn(a, b) { a < b })}")?
+  console.println("{fixed} {growable}")?"#,
+        );
+        assert_eq!(
+            output,
+            "[6, 2, 4] [6, 2, 4]\n[3, 2] [3, 2]\n6 6\n[1, 2, 3] [1, 2, 3]\n[3, 1, 2] [3, 1, 2]\n"
+        );
+    }
+
+    /// An empty sequence answers without calling anything, and `fold` answers
+    /// the initial value it was handed.
+    #[test]
+    fn an_empty_sequence_answers_without_calling_its_callback() {
+        let output = output_of(
+            r#"  let empty: Array<Int> = []
+  console.println("{empty.map(fn(n) { n / 0 })}")?
+  console.println("{empty.filter(fn(n) { n / 0 > 0 })}")?
+  console.println("{empty.sorted(by: fn(a, b) { a / 0 < b })}")?
+  console.println("{empty.fold(7, fn(t, n) { t / 0 })}")?"#,
+        );
+        assert_eq!(output, "[]\n[]\n[]\n7\n");
+    }
+
+    /// `sorted` is stable: two elements neither of which comes before the
+    /// other keep the order they were written in.
+    ///
+    /// The comparison answers `false` for every pair, so every element ties
+    /// with every other and only stability decides the answer.
+    #[test]
+    fn sorted_is_stable() {
+        let output = output_of(
+            r#"  let items = [5, 4, 3, 2, 1, 0]
+  console.println("{items.sorted(by: fn(a, b) { false })}")?"#,
+        );
+        assert_eq!(output, "[5, 4, 3, 2, 1, 0]\n");
+    }
+
+    /// An ordering that contradicts itself gets a permutation and not a
+    /// stopped run: the comparison is the program's to get right, and the
+    /// merge has no invariant of its own to break.
+    #[test]
+    fn an_inconsistent_ordering_answers_a_permutation() {
+        let output = output_of(
+            r#"  let items = [1, 2, 3, 4]
+  let sorted = items.sorted(by: fn(a, b) { true })
+  console.println("{sorted.length()} {sorted.fold(0, fn(t, n) { t + n })}")?"#,
+        );
+        assert_eq!(output, "4 10\n");
+    }
+
+    /// A callback that fails takes the whole call with it, so no half-built
+    /// answer is ever reachable.
+    #[test]
+    fn a_failing_callback_answers_nothing() {
+        for body in [
+            "  let x = [1, 2].map(fn(n) { n / 0 })",
+            "  let x = [1, 2].filter(fn(n) { n / 0 > 1 })",
+            "  let x = [1, 2].fold(0, fn(t, n) { n / 0 })",
+            "  let x = [2, 1].sorted(by: fn(a, b) { a / 0 < b })",
+        ] {
+            assert_eq!(
+                error_of(body).message,
+                "`Int` division by zero",
+                "for `{body}`"
+            );
+        }
+    }
+
+    /// The elements come out of a `Vector` before the first callback, so a
+    /// callback may reach the very vector being walked.
+    ///
+    /// Reading it is as far as a callback can go — a capture is a read-only
+    /// place, so nothing it can write to is the receiver — but the walk holds
+    /// no borrow on the storage either way, which is what this pins.
+    #[test]
+    fn a_callback_may_read_the_vector_it_is_walking() {
+        let output = output_of(
+            r#"  var items = Vector.of(2, 1, 3)
+  console.println("{items.map(fn(n) { n + items.length() })}")?
+  console.println("{items.sorted(by: fn(a, b) { a + items.length() < b + items.length() })}")?"#,
+        );
+        assert_eq!(output, "[5, 4, 6]\n[1, 2, 3]\n");
+    }
+
     // -------------------------------------------------------- ranges
 
     #[test]
