@@ -15,7 +15,10 @@
   the sequence
 - Superseded in part by [ADR 0016](0016-four-kinds-of-unknown.md), which
   replaces "Two types no program can write"'s account of `Unknown` — one kind
-  of not-knowing, and a capitalized name no module declares among them
+  of not-knowing, and a capitalized name no module declares among them, and
+  by [ADR 0021](0021-places-are-a-static-fact.md), which replaces the
+  Consequences' "The interpreter's dynamic checks stay" for the checks that
+  state a language rule rather than a runtime invariant
 - Amends: [ADR 0001](0001-mvp-language-design.md)'s account of the builtin
   `Error`, which the third amendment settles as a struct carrying a `message`
   a program may read
