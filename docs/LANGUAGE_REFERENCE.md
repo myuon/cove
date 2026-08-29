@@ -618,6 +618,16 @@ compiler counted, and the boundary is what decides either way. `cove outline`,
 breaking change in `cove api diff`
 ([ADR 0015](adr/0015-capability-analysis-for-higher-order-calls.md)).
 
+The capability a host call requires is the one the *operation's* schema
+declares, and the module's only when the operation declares none. Two
+operations of one module may therefore require different capabilities, and two
+of `console`'s do: `console.println` and `console.print` write to the
+program's output stream and require `console`, while `console.eprintln` and
+`console.eprint` write to its diagnostic stream and require `console.error`
+([ADR 0020](adr/0020-a-diagnostic-stream-for-console.md)). Both passes read
+the same field, so `cove check` derives the requirement the boundary will
+enforce; what a run granted is still the boundary's alone to decide.
+
 Two more are the language's own limits rather than gaps: exhaustiveness over
 `Int` and `String` needs a catch-all arm, and a bare case name two enums share
 is one resolution cannot place.

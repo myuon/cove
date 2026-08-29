@@ -199,12 +199,28 @@ impl FromIterator<ModuleSchema> for HostSchemas {
 
 // ------------------------------------------------------------------ console
 
-/// `console`: line-oriented output.
+/// `console`: line-oriented output on two streams.
 ///
-/// Both operations take a variadic `String`, which is why
+/// `println` and `print` write what the program produces; `eprintln` and
+/// `eprint` write what it has to say *about* what it produces — a warning, a
+/// progress line, a summary. With one stream the second kind has to go inside
+/// the first, which is what puts a complaint about a malformed record in the
+/// middle of the records.
+///
+/// Every operation takes a variadic `String`, which is why
 /// `console.println("a", "b")` prints one line of two space-separated parts.
-/// Bytes already handed to the terminal cannot be taken back, so both are
+/// Bytes already handed to the terminal cannot be taken back, so all four are
 /// irreversible writes.
+///
+/// The two streams are two capabilities. `console` is the output stream and
+/// nothing else, so a grant written before `eprintln` existed still means
+/// exactly what it meant then; `console.error` is the diagnostic stream, and
+/// a host that captures a program's output while letting its complaints reach
+/// the terminal grants the one and not the other. This is the first shipped
+/// module whose operations do not all answer to the module's own capability —
+/// something both ends of the boundary have read since ADR 0013's second
+/// amendment, since a call requires `OperationSchema::capability` and the
+/// module's own stands in only for an operation no schema declares.
 pub const CONSOLE: ModuleSchema = ModuleSchema {
     name: "console",
     capability: "console",
@@ -226,6 +242,28 @@ pub const CONSOLE: ModuleSchema = ModuleSchema {
             variadic: true,
             result: HostType::Result(&HostType::Unit, &HostType::Error),
             capability: "console",
+            effect: Effect::IrreversibleWrite,
+            cancellable: false,
+            recordable: true,
+            result_is_task_safe: true,
+        },
+        OperationSchema {
+            name: "eprintln",
+            params: &[HostType::String],
+            variadic: true,
+            result: HostType::Result(&HostType::Unit, &HostType::Error),
+            capability: "console.error",
+            effect: Effect::IrreversibleWrite,
+            cancellable: false,
+            recordable: true,
+            result_is_task_safe: true,
+        },
+        OperationSchema {
+            name: "eprint",
+            params: &[HostType::String],
+            variadic: true,
+            result: HostType::Result(&HostType::Unit, &HostType::Error),
+            capability: "console.error",
             effect: Effect::IrreversibleWrite,
             cancellable: false,
             recordable: true,
@@ -845,22 +883,56 @@ pub const HTTP: ModuleSchema = ModuleSchema {
 mod tests {
     use super::*;
 
-    /// The registry gates on the module's capability, and each operation
-    /// declares the capability it needs. Nothing today mixes capabilities
-    /// inside one module, and a module whose operations disagreed with it
-    /// would make the grant check and the schema tell different stories.
+    /// A capability names the module it belongs to.
+    ///
+    /// An operation's capability is either the module's own — which is the
+    /// usual case, and was every case until `console` gained a second
+    /// stream — or the module's with a suffix, as `console.error` is.
+    /// Nothing else. Both ends of the boundary read
+    /// `OperationSchema::capability` and fall back to the module's, so a
+    /// module *may* mix capabilities and this does not forbid it; what it
+    /// forbids is a capability whose name does not say which module it opens,
+    /// because `allow = [...]` is read by whoever decides what a run may do
+    /// and a name that named nothing would tell them nothing.
     #[test]
-    fn every_operation_declares_its_module_capability() {
+    fn every_operation_s_capability_belongs_to_its_module() {
         for module in SHIPPED {
-            for entry in module.operations {
-                assert_eq!(entry.capability, module.capability, "`{}`", module.name);
-            }
-            for resource in module.resources {
-                for entry in resource.operations {
-                    assert_eq!(entry.capability, module.capability, "`{}`", module.name);
-                }
+            let operations = module
+                .operations
+                .iter()
+                .chain(module.resources.iter().flat_map(|r| r.operations));
+            for entry in operations {
+                let qualified = format!("{}.", module.capability);
+                assert!(
+                    entry.capability == module.capability
+                        || entry.capability.starts_with(&qualified),
+                    "`{}.{}` requires `{}`, which is neither `{}` nor a capability of it",
+                    module.name,
+                    entry.name,
+                    entry.capability,
+                    module.capability
+                );
             }
         }
+    }
+
+    /// The console's two streams are two capabilities, and which operation
+    /// belongs to which is the whole of the distinction: a host that captures
+    /// a program's output and lets its diagnostics through grants `console`
+    /// and not `console.error`, or the other way about, and it is this table
+    /// that decides what each of those two grants reaches.
+    #[test]
+    fn the_console_s_two_streams_are_two_capabilities() {
+        let capability = |name: &str| {
+            CONSOLE
+                .operation(name)
+                .unwrap_or_else(|| panic!("`console.{name}` is declared"))
+                .capability
+        };
+        assert_eq!(capability("println"), "console");
+        assert_eq!(capability("print"), "console");
+        assert_eq!(capability("eprintln"), "console.error");
+        assert_eq!(capability("eprint"), "console.error");
     }
 
     /// Every `Named` type a shipped operation mentions is one a shipped

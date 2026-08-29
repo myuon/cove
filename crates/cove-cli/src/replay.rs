@@ -631,7 +631,7 @@ mod tests {
             .is_none());
         // The real `Console` would have written to its output; this one has
         // no output to write to, which is the point.
-        assert!(Console::new(Vec::new())
+        assert!(Console::new(Vec::new(), Vec::new())
             .module_schema()
             .operations
             .iter()

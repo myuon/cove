@@ -4326,7 +4326,7 @@ mod tests {
     ) -> Run {
         let buffer = Buffer::default();
         let mut hosts = HostRegistry::new(Grants::new(grants.to_vec()));
-        hosts.register(Box::new(Console::new(buffer.clone())));
+        hosts.register(Box::new(Console::new(buffer.clone(), Buffer::default())));
         hosts.register(Box::new(EnvHost::new(env)));
         let runtime = Runtime::new(program.clone(), sources.clone(), Arc::new(hosts));
         let value = Interpreter::new(&runtime).run_entry(
@@ -7161,7 +7161,7 @@ export fn main() -> Result<Unit, Error> {
         let (sources, program) = program_of(source);
         let buffer = Buffer::default();
         let mut hosts = HostRegistry::new(Grants::new(["console", "clock"]));
-        hosts.register(Box::new(Console::new(buffer.clone())));
+        hosts.register(Box::new(Console::new(buffer.clone(), Buffer::default())));
         hosts.register(Box::new(crate::clock::Clock::real()));
         let runtime = Runtime::new(program, sources, Arc::new(hosts));
         let started = Instant::now();
@@ -7208,7 +7208,7 @@ export fn main() -> Result<Unit, Error> {
         let buffer = Buffer::default();
         let sink = RecordingSink::default();
         let mut hosts = HostRegistry::new(Grants::new(["console", "clock"]));
-        hosts.register(Box::new(Console::new(buffer.clone())));
+        hosts.register(Box::new(Console::new(buffer.clone(), Buffer::default())));
         hosts.register(Box::new(crate::clock::Clock::real()));
         hosts.set_budget(Budget::new(limits));
         hosts.set_trace(Arc::new(sink.clone()));
@@ -7243,7 +7243,7 @@ export fn main() -> Result<Unit, Error> {
         let (sources, program) = program_of(source);
         let sink = RecordingSink::default();
         let mut hosts = HostRegistry::new(Grants::new(grants.iter().copied()));
-        hosts.register(Box::new(Console::new(Buffer::default())));
+        hosts.register(Box::new(Console::new(Buffer::default(), Buffer::default())));
         hosts.set_budget(Budget::with_cancellation(limits, cancellation));
         hosts.set_trace(Arc::new(sink.clone()));
         let runtime =
@@ -7687,7 +7687,7 @@ export fn main() -> Result<Unit, Error> {
 "#;
         let (sources, program) = program_of(source);
         let mut hosts = HostRegistry::new(Grants::new(["console"]));
-        hosts.register(Box::new(Console::new(Buffer::default())));
+        hosts.register(Box::new(Console::new(Buffer::default(), Buffer::default())));
         hosts.set_budget(Budget::new(Limits {
             fuel: Some(10_000),
             ..Limits::default()
@@ -9020,7 +9020,7 @@ export fn main() -> Result<Unit, Error> {
 
         let buffer = Buffer::default();
         let mut hosts = HostRegistry::new(Grants::new(["documents", "console"]));
-        hosts.register(Box::new(Console::new(buffer.clone())));
+        hosts.register(Box::new(Console::new(buffer.clone(), Buffer::default())));
         hosts.register(Box::new(Documents::rooted(
             examples_root().join("documents"),
         )));
@@ -9117,7 +9117,7 @@ export fn main() -> Result<Unit, Error> {
         let (sources, program) = program_of(source);
         let buffer = Buffer::default();
         let mut hosts = HostRegistry::new(Grants::new(["console"]));
-        hosts.register(Box::new(Console::new(buffer.clone())));
+        hosts.register(Box::new(Console::new(buffer.clone(), Buffer::default())));
         hosts.set_budget(crate::budget::Budget::new(limits));
         let recorder = Recorder::default();
         let runtime =

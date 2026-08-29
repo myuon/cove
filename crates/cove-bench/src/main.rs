@@ -455,7 +455,7 @@ fn entry_for<'a>(
 /// them, never real I/O latency and never the network.
 fn fake_hosts(allow: Vec<String>) -> HostRegistry {
     let mut hosts = HostRegistry::new(Grants::new(allow));
-    hosts.register(Box::new(Console::new(std::io::sink())));
+    hosts.register(Box::new(Console::new(std::io::sink(), std::io::sink())));
     hosts.register(Box::new(Env::new(Default::default())));
     hosts.register(Box::new(Documents::in_memory(Default::default())));
     hosts.register(Box::new(Clock::virtual_clock(VirtualTime::new())));

@@ -35,6 +35,7 @@
 //! error, and exits non-zero when any test failed.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::io::Write;
 use std::path::Path;
 use std::sync::Arc;
 
@@ -269,12 +270,21 @@ fn register_hosts(hosts: &mut HostRegistry, root: &Path, allow_real: &BTreeSet<&
 
     // `Console` is a fake by where it writes: the real one writes to the
     // process's stdout, and a test's writes into a sink, so a test that
-    // prints cannot interleave with the runner's own report.
-    if real("console") {
-        hosts.register(Box::new(Console::new(std::io::stdout())));
+    // prints cannot interleave with the runner's own report. Its two streams
+    // are two capabilities and are faked one at a time, because
+    // `allow_real = ["console"]` was written when `console` was the whole
+    // module and must not start handing a test the runner's stderr as well.
+    let output: Box<dyn Write + Send> = if real("console") {
+        Box::new(std::io::stdout())
     } else {
-        hosts.register(Box::new(Console::new(std::io::sink())));
-    }
+        Box::new(std::io::sink())
+    };
+    let diagnostics: Box<dyn Write + Send> = if real("console.error") {
+        Box::new(std::io::stderr())
+    } else {
+        Box::new(std::io::sink())
+    };
+    hosts.register(Box::new(Console::new(output, diagnostics)));
     // A fake environment exposes nothing: a test that depends on a variable
     // the developer's shell happens to set is not a test.
     if real("env") {

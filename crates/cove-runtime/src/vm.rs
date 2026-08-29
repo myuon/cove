@@ -3649,7 +3649,7 @@ mod tests {
     /// program.
     fn hosts(buffer: &Buffer, budget: Option<Budget>) -> Arc<HostRegistry> {
         let mut hosts = HostRegistry::new(Grants::new(GRANTS.to_vec()));
-        hosts.register(Box::new(Console::new(buffer.clone())));
+        hosts.register(Box::new(Console::new(buffer.clone(), Buffer::default())));
         hosts.register(Box::new(EnvHost::new(BTreeMap::new())));
         hosts.register(Box::new(Clock::virtual_clock(VirtualTime::new())));
         hosts.register(Box::new(Files::in_memory(BTreeMap::new())));
@@ -5234,7 +5234,7 @@ mod tests {
         let (interpreted, lowered) = crate::on_cove_stack(|| {
             let ungranted = || {
                 let mut hosts = HostRegistry::new(Grants::new(Vec::<&str>::new()));
-                hosts.register(Box::new(Console::new(Buffer::default())));
+                hosts.register(Box::new(Console::new(Buffer::default(), Buffer::default())));
                 Arc::new(hosts)
             };
             let interpreted = {

@@ -206,6 +206,15 @@ entry = "server.main"
 allow = ["http", "clock"]
 ```
 
+A capability belongs to an *operation*, not to a module. An operation usually
+requires the capability its module is named for, and one that requires a
+narrower one says so in the schema: `console.println` requires `console` and
+`console.eprintln`, which writes to the program's diagnostic stream rather
+than to its output, requires `console.error`. So a host may grant a program
+the right to print its records and refuse it the right to comment on them, or
+the other way about, and a grant written before an operation existed never
+comes to cover it. A capability's name says which module it opens.
+
 A host may provide real, fake, filtered, remote, or denied implementations.
 The runtime rejects Host API calls that were not granted. An operation's
 argument, result, and error types come from its schema, and both ends check

@@ -219,6 +219,14 @@ pub struct OperationSchema {
     /// goes.
     pub result: HostType,
     /// The capability a host must grant before this operation may be called.
+    ///
+    /// Usually the module's own, and it does not have to be: `console`
+    /// declares `println` under `console` and `eprintln` under
+    /// `console.error`, so a host can grant a program the output stream
+    /// without the diagnostic one. Both ends of the boundary read this field
+    /// and fall back to [`ModuleSchema::capability`] only for an operation no
+    /// schema declares, so an operation that names a narrower capability is
+    /// checked and refused under that one everywhere.
     pub capability: &'static str,
     /// Whether the operation reads, writes reversibly, or writes
     /// irreversibly.
@@ -435,7 +443,9 @@ impl ResourceSchema {
 pub struct ModuleSchema {
     /// The name Cove source uses, such as `console`.
     pub name: &'static str,
-    /// The capability a host must grant for this module.
+    /// The capability a host must grant for this module: the one an operation
+    /// that declares none of its own is called under, and the name every
+    /// capability in the module is a name of.
     ///
     /// A capability is a plain name here rather than `cove_sema::Capability`,
     /// because that type belongs to the crate that reads `cove.toml` and this

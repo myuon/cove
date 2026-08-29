@@ -30,7 +30,11 @@
 //!   <case>/cove.toml          present only when <case> is its own package
 //!   <case>/main/main.cove     the program, for an own-package case
 //!   <case>/expected.out       exact expected stdout
-//!   <case>/expected.err       present only when the case must fail
+//!   <case>/expected.err       exact expected stderr, present when there is
+//!                             any: a failing case's diagnostic, or a
+//!                             successful case's own `console.eprintln`
+//!   <case>/expected.status    optional: the exit status the run must exit
+//!                             with, for a case whose stderr is not a failure
 //!   <case>/args               optional: one program argument per line
 //!   <case>/command            optional: the `cove` subcommand and flags to
 //!                             run instead of `run <case>`, one per line
@@ -44,11 +48,21 @@
 //!
 //! The rules this harness enforces:
 //!
-//! - the exit status is zero when there is no `expected.err`, and non-zero
-//!   when there is one;
+//! - the exit status is the one `expected.status` names, for a case that has
+//!   one; for a case that does not, it is zero when there is no
+//!   `expected.err` and non-zero when there is one;
 //! - stdout equals `expected.out` byte for byte;
 //! - stderr equals `expected.err` when it exists, and is empty when it does
 //!   not.
+//!
+//! `expected.status` exists because stderr stopped being evidence of failure.
+//! It was, for as long as `console` had one stream and the only thing that
+//! wrote to stderr was `cove` reporting a diagnostic; a program that writes
+//! its own diagnostics through `console.eprintln` and then exits successfully
+//! is neither a failing case nor a case with empty stderr, and it is what
+//! `host_console_streams` is. Such a case states the status it must exit with
+//! rather than leaving it to be inferred from a file that now means something
+//! else.
 //!
 //! Diagnostics contain absolute paths, so stderr is normalised before it is
 //! compared: the absolute path of the `tests/e2e` directory becomes the
@@ -63,7 +77,11 @@
 //!
 //! That rewrites every golden file from the actual output: `expected.out` is
 //! always written, `expected.err` is created when a case newly fails, and
-//! deleted when a case newly succeeds. A regression can therefore never hide
+//! deleted when a case newly succeeds — or, for a case with an
+//! `expected.status`, created when it wrote anything to stderr and deleted
+//! when it did not. `expected.status` itself is never written: it is what the
+//! case demands, and deriving it from a run would make it agree with whatever
+//! happened. A regression can therefore never hide
 //! behind a stale file. Always read the resulting `git diff` before committing
 //! it: a golden file is the specification of the current behaviour.
 //!
@@ -111,6 +129,9 @@ struct Case {
 /// What one run of the `cove` binary produced.
 struct Actual {
     success: bool,
+    /// The exit status, when the process exited rather than being signalled.
+    /// Only a case with an `expected.status` reads it.
+    code: Option<i32>,
     stdout: String,
     /// Already normalised.
     stderr: String,
@@ -254,6 +275,7 @@ impl Case {
             .unwrap_or_else(|e| panic!("case `{}`: cannot run the `cove` binary: {e}", self.name));
         Actual {
             success: output.status.success(),
+            code: output.status.code(),
             stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
             stderr: normalize(&String::from_utf8_lossy(&output.stderr), root),
         }
@@ -264,17 +286,45 @@ impl Case {
     /// `expected.err` is created when the run failed and removed when it
     /// succeeded, so a case that stops failing cannot leave a stale file
     /// behind.
+    ///
+    /// A case with an `expected.status` is the exception, because for that
+    /// case stderr is not evidence of failure: it may be what the program
+    /// wrote there through `console.eprintln` while exiting successfully. Its
+    /// `expected.err` follows what was written rather than how the run ended,
+    /// and its `expected.status` is never rewritten — it is the case's own
+    /// statement about what must happen, not a record of what did.
     fn write_goldens(&self, actual: &Actual) {
         write(&self.dir.join("expected.out"), &actual.stdout);
         let err = self.dir.join("expected.err");
-        if actual.success {
-            if err.exists() {
-                fs::remove_file(&err)
-                    .unwrap_or_else(|e| panic!("cannot remove `{}`: {e}", err.display()));
-            }
+        let keep = if self.states_its_status() {
+            !actual.stderr.is_empty()
         } else {
+            !actual.success
+        };
+        if keep {
             write(&err, &actual.stderr);
+        } else if err.exists() {
+            fs::remove_file(&err)
+                .unwrap_or_else(|e| panic!("cannot remove `{}`: {e}", err.display()));
         }
+    }
+
+    /// The exit status this case says it must exit with, if it says.
+    fn expected_status(&self) -> Option<i32> {
+        let text = read_optional(&self.dir.join("expected.status"))?;
+        Some(text.trim().parse().unwrap_or_else(|_| {
+            panic!(
+                "case `{}`: `expected.status` holds an exit status, found `{}`",
+                self.name,
+                text.trim()
+            )
+        }))
+    }
+
+    /// Whether this case states its own exit status, which is what decouples
+    /// its stderr from how the run ended.
+    fn states_its_status(&self) -> bool {
+        self.dir.join("expected.status").exists()
     }
 
     /// Compares `actual` against the golden files, collecting every mismatch.
@@ -282,17 +332,32 @@ impl Case {
         let name = &self.name;
         let expected_err = read_optional(&self.dir.join("expected.err"));
 
-        match (&expected_err, actual.success) {
-            (None, false) => failures.push(format!(
-                "case `{name}`: the run failed, but there is no `{name}/expected.err`\n\
-                 {}",
-                indent(&actual.stderr)
+        match self.expected_status() {
+            // A case that names its exit status is checked against that and
+            // nothing else, because what it wrote to stderr says nothing
+            // about how it ended: a program's own diagnostics go there now.
+            Some(expected) if actual.code != Some(expected) => failures.push(format!(
+                "case `{name}`: `{name}/expected.status` says the run must exit with \
+                 {expected}, and it exited with {}",
+                match actual.code {
+                    Some(code) => code.to_string(),
+                    None => "no status at all".to_string(),
+                }
             )),
-            (Some(_), true) => failures.push(format!(
-                "case `{name}`: `{name}/expected.err` exists, so the run must fail, \
-                 but it exited successfully"
-            )),
-            _ => {}
+            Some(_) => {}
+            None => match (&expected_err, actual.success) {
+                (None, false) => failures.push(format!(
+                    "case `{name}`: the run failed, but there is no `{name}/expected.err`\n\
+                     {}",
+                    indent(&actual.stderr)
+                )),
+                (Some(_), true) => failures.push(format!(
+                    "case `{name}`: `{name}/expected.err` exists, so the run must fail, \
+                     but it exited successfully — a case whose program writes its own \
+                     diagnostics and succeeds says so with an `{name}/expected.status`"
+                )),
+                _ => {}
+            },
         }
 
         match read_optional(&self.dir.join("expected.out")) {

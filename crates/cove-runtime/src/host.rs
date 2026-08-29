@@ -1171,22 +1171,55 @@ pub fn shipped_schema() -> &'static [ModuleSchema] {
 /// are the same bytes.
 const CONSOLE_SCHEMA: ModuleSchema = cove_schema::hosts::CONSOLE;
 
-/// `console`: line-oriented output.
-pub struct Console<W: Write + Send> {
+/// `console`: line-oriented output on two streams.
+///
+/// The two writers are the whole of the difference between the streams. What
+/// a program produces goes to `out` through `println` and `print`; what it
+/// says about what it produces goes to `err` through `eprintln` and `eprint`,
+/// and a host that wants the two apart is a host that hands over two
+/// different writers. `cove run` gives the process's stdout and stderr, which
+/// is why a program's records can now be piped somewhere while its complaints
+/// stay on the terminal.
+///
+/// The streams are separately grantable, because they are separate
+/// capabilities in the schema: a run granted `console` and not `console.error`
+/// reaches `println` and is refused `eprintln`, and the refusal happens at the
+/// boundary before this host is asked. Nothing here consults the grants — the
+/// only thing this type decides is where the bytes go.
+///
+/// # Migrating from the one-writer form
+///
+/// `Console::new` took one writer and now takes two. The second is where
+/// diagnostics go, and there is deliberately no default: a host that captured
+/// a program's output before this existed would silently start capturing its
+/// diagnostics too, which is exactly the mixing the second stream is for
+/// undoing. `Console::new(w)` therefore fails to compile rather than changing
+/// meaning. An embedding that genuinely wants one stream says so —
+/// `Console::new(w.clone(), w)` for a shared writer, `Console::new(w,
+/// std::io::sink())` to drop diagnostics — and one that wants the process's
+/// streams writes `Console::new(std::io::stdout(), std::io::stderr())`.
+pub struct Console<O: Write + Send, E: Write + Send> {
     /// Held under a lock so that one task's line is written whole: two tasks
     /// printing at once must interleave lines, never halves of a line.
-    out: Mutex<W>,
+    out: Mutex<O>,
+    /// The diagnostic stream, under a lock of its own: a task writing a
+    /// warning must not queue behind a task writing a record, since the two
+    /// streams are usually two different files.
+    err: Mutex<E>,
 }
 
-impl<W: Write + Send> Console<W> {
-    pub fn new(out: W) -> Self {
+impl<O: Write + Send, E: Write + Send> Console<O, E> {
+    /// A console whose output goes to `out` and whose diagnostics go to
+    /// `err`.
+    pub fn new(out: O, err: E) -> Self {
         Console {
             out: Mutex::new(out),
+            err: Mutex::new(err),
         }
     }
 }
 
-impl<W: Write + Send> HostApi for Console<W> {
+impl<O: Write + Send, E: Write + Send> HostApi for Console<O, E> {
     fn module_schema(&self) -> ModuleSchema {
         CONSOLE_SCHEMA
     }
@@ -1197,20 +1230,43 @@ impl<W: Write + Send> HostApi for Console<W> {
             .map(|v| v.to_string())
             .collect::<Vec<_>>()
             .join(" ");
-        let mut out = self
-            .out
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        // Each arm holds one stream's lock for the whole of one write, and
+        // neither arm takes the other's: the two streams are independent, so
+        // a diagnostic never waits on a record.
         let result = match op {
-            "println" => writeln!(out, "{text}"),
-            "print" => write!(out, "{text}"),
+            "println" => write_line(&self.out, &text, true),
+            "print" => write_line(&self.out, &text, false),
+            "eprintln" => write_line(&self.err, &text, true),
+            "eprint" => write_line(&self.err, &text, false),
             _ => unreachable!("checked by HostRegistry::call"),
         };
-        match result.and_then(|_| out.flush()) {
+        match result {
             Ok(()) => Ok(Value::ok(Value::Unit)),
             Err(e) => Ok(Value::err(Value::error(format!("console: {e}")))),
         }
     }
+}
+
+/// Writes `text` to one of a console's streams, with a newline after it when
+/// `newline`, and flushes.
+///
+/// Both streams write the same way, and a stream that is written differently
+/// from the other is a stream a program can tell apart by something other
+/// than where it goes.
+fn write_line<W: Write + Send>(
+    stream: &Mutex<W>,
+    text: &str,
+    newline: bool,
+) -> std::io::Result<()> {
+    let mut stream = stream
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if newline {
+        writeln!(stream, "{text}")?;
+    } else {
+        write!(stream, "{text}")?;
+    }
+    stream.flush()
 }
 
 /// What `env` declares about itself.
@@ -1784,13 +1840,151 @@ mod tests {
     #[test]
     fn a_variadic_operation_accepts_any_number_of_arguments() {
         let mut hosts = HostRegistry::new(Grants::new(["console"]));
-        hosts.register(Box::new(Console::new(Vec::new())));
+        hosts.register(Box::new(Console::new(Vec::new(), Vec::new())));
 
         for arity in 0..3 {
             hosts
                 .call("console", "println", vec![Value::Str("part".into()); arity])
                 .unwrap_or_else(|e| panic!("arity {arity} should be accepted: {}", e.message));
         }
+    }
+
+    /// A writer two owners can share: one of them is inside a [`Console`] and
+    /// the other is the assertion.
+    #[derive(Clone, Default)]
+    struct Shared(Arc<Mutex<Vec<u8>>>);
+
+    impl Shared {
+        fn written(&self) -> String {
+            String::from_utf8(
+                self.0
+                    .lock()
+                    .expect("nothing panicked while writing")
+                    .clone(),
+            )
+            .expect("a console writes what it was given, which was text")
+        }
+    }
+
+    impl Write for Shared {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0
+                .lock()
+                .expect("nothing panicked while writing")
+                .extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// A registry holding one [`Console`] over the two writers given, granted
+    /// both of the console's capabilities.
+    fn registry_with_console(out: Shared, err: Shared) -> HostRegistry {
+        let mut hosts = HostRegistry::new(Grants::new(["console", "console.error"]));
+        hosts.register(Box::new(Console::new(out, err)));
+        hosts
+    }
+
+    /// The whole of what the second stream is for: what a program says about
+    /// its output is not in its output.
+    #[test]
+    fn what_the_diagnostic_stream_is_given_stays_out_of_the_output_stream() {
+        let out = Shared::default();
+        let err = Shared::default();
+        let hosts = registry_with_console(out.clone(), err.clone());
+
+        for (op, text) in [
+            ("println", "id,name"),
+            ("eprintln", "line 2 is malformed, skipping"),
+            ("println", "1,ada"),
+        ] {
+            hosts
+                .call("console", op, vec![Value::Str(text.into())])
+                .unwrap_or_else(|e| panic!("`console.{op}` should be allowed: {}", e.message));
+        }
+
+        assert_eq!(out.written(), "id,name\n1,ada\n");
+        assert_eq!(err.written(), "line 2 is malformed, skipping\n");
+    }
+
+    /// `print` and `eprint` differ from `println` and `eprintln` in the same
+    /// way on both streams: the newline, and nothing else.
+    #[test]
+    fn the_unterminated_form_writes_the_same_way_on_either_stream() {
+        let out = Shared::default();
+        let err = Shared::default();
+        let hosts = registry_with_console(out.clone(), err.clone());
+
+        for op in ["print", "eprint"] {
+            hosts
+                .call(
+                    "console",
+                    op,
+                    vec![Value::Str("two".into()), Value::Str("parts".into())],
+                )
+                .unwrap_or_else(|e| panic!("`console.{op}` should be allowed: {}", e.message));
+        }
+
+        assert_eq!(out.written(), "two parts");
+        assert_eq!(err.written(), "two parts");
+    }
+
+    /// The two streams are two capabilities, so a host can grant one and
+    /// refuse the other. Granting `console` alone is what every run written
+    /// before the diagnostic stream existed asked for, and it still reaches
+    /// exactly the operations it reached then.
+    #[test]
+    fn the_diagnostic_stream_is_granted_apart_from_the_output_stream() {
+        let out = Shared::default();
+        let err = Shared::default();
+        let mut hosts = HostRegistry::new(Grants::new(["console"]));
+        hosts.register(Box::new(Console::new(out.clone(), err.clone())));
+
+        hosts
+            .call("console", "println", vec![Value::Str("record".into())])
+            .expect("`console` grants the output stream");
+        let refused = hosts
+            .call("console", "eprintln", vec![Value::Str("warning".into())])
+            .expect_err("`console` does not grant the diagnostic stream");
+
+        assert_eq!(
+            refused.denied_capability.as_deref(),
+            Some("console.error"),
+            "{}",
+            refused.message
+        );
+        assert_eq!(out.written(), "record\n");
+        assert_eq!(err.written(), "");
+    }
+
+    /// And the other way round, which is the configuration issue #102 asks
+    /// for: a host capturing a program's output while its complaints reach
+    /// the terminal grants the diagnostic stream and not the output one.
+    #[test]
+    fn the_output_stream_is_granted_apart_from_the_diagnostic_stream() {
+        let out = Shared::default();
+        let err = Shared::default();
+        let mut hosts = HostRegistry::new(Grants::new(["console.error"]));
+        hosts.register(Box::new(Console::new(out.clone(), err.clone())));
+
+        let refused = hosts
+            .call("console", "println", vec![Value::Str("record".into())])
+            .expect_err("`console.error` does not grant the output stream");
+        hosts
+            .call("console", "eprintln", vec![Value::Str("warning".into())])
+            .expect("`console.error` grants the diagnostic stream");
+
+        assert_eq!(
+            refused.denied_capability.as_deref(),
+            Some("console"),
+            "{}",
+            refused.message
+        );
+        assert_eq!(out.written(), "");
+        assert_eq!(err.written(), "warning\n");
     }
 
     #[test]
@@ -1912,7 +2106,7 @@ mod tests {
     #[test]
     fn every_module_a_run_registers_declares_itself_out_of_the_shared_schema() {
         let modules: Vec<Box<dyn HostApi>> = vec![
-            Box::new(Console::new(std::io::sink())),
+            Box::new(Console::new(std::io::sink(), std::io::sink())),
             Box::new(Env::new(BTreeMap::new())),
             Box::new(Documents::in_memory(BTreeMap::new())),
             Box::new(crate::clock::Clock::real()),
@@ -1963,7 +2157,7 @@ mod tests {
     #[test]
     fn only_the_calls_the_schema_calls_irreversible_are_counted() {
         let mut hosts = HostRegistry::new(Grants::new(["console", "files"]));
-        hosts.register(Box::new(Console::new(Vec::new())));
+        hosts.register(Box::new(Console::new(Vec::new(), Vec::new())));
         hosts.register(Box::new(crate::files::Files::in_memory(BTreeMap::new())));
         assert_eq!(hosts.irreversible_writes(), 0);
 

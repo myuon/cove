@@ -58,7 +58,11 @@ pub struct HostSetup {
 /// reported refusal rather than an unknown module.
 pub fn register_hosts(setup: HostSetup) -> HostRegistry {
     let mut hosts = HostRegistry::new(Grants::new(setup.grants));
-    hosts.register(Box::new(Console::new(std::io::stdout())));
+    // The program's output goes where the process's output goes and its
+    // diagnostics go where the process's diagnostics go, so `cove run`'s own
+    // errors and a program's complaints arrive on the same stream and a
+    // pipe on stdout carries the records alone.
+    hosts.register(Box::new(Console::new(std::io::stdout(), std::io::stderr())));
     hosts.register(Box::new(Env::from_process()));
     hosts.register(Box::new(Documents::rooted(setup.documents_root)));
     hosts.register(Box::new(Clock::real()));
