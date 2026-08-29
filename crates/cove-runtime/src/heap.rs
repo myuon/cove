@@ -878,13 +878,24 @@ impl Marker<'_> {
                     }
                 }
             }
+            // A `Struct` is an `Rc`, so two paths can reach the same one;
+            // walk its fields on the first sighting only, exactly as every
+            // other `Rc` container above does. Without the guard, a struct
+            // reached twice has its header and its field names added to
+            // `live_bytes` twice, and a chain of structs each holding two
+            // references to the one below is walked in time exponential in
+            // the chain's length.
             Value::Struct(structure) => {
-                self.bytes += size_of::<crate::value::StructValue>() as u64;
-                for (name, field) in &structure.fields {
-                    self.bytes += (name.len() + size_of::<Value>()) as u64;
-                    self.visit(field);
+                if self.walked.insert(Rc::as_ptr(structure) as usize) {
+                    self.bytes += size_of::<crate::value::StructValue>() as u64;
+                    for (name, field) in &structure.fields {
+                        self.bytes += (name.len() + size_of::<Value>()) as u64;
+                        self.visit(field);
+                    }
                 }
             }
+            // An `Enum` is `Box`ed, so it is owned by exactly one value and
+            // no two paths reach the same one.
             Value::Enum(enumeration) => {
                 self.bytes += size_of::<crate::value::EnumValue>() as u64;
                 for item in &enumeration.payload {
