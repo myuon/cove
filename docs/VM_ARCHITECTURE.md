@@ -722,6 +722,17 @@ gone: a safepoint collects, `Vm::retire_heap` sweeps once more before folding
 the counters, and `Vm::run` retires the entry's heap and emits the
 `heap_summary` event that `Interpreter::enter` has always emitted.
 
+One of those three is fixed without being visible where it was named, and
+that is worth recording rather than claiming more than was measured.
+`heap_peak_bytes` is still zero on every `cove-bench` row — but it is zero on
+the *interpreter's* rows too, and was before this change, because no program
+under `benches/` builds a `Vector` at all. The suite measures dispatch,
+arithmetic, field reads and host calls, and allocates nothing the collector
+manages. So the figure is verified on the corpus instead: `cove run --stats`
+over `tests/e2e:gc_*` reports the same allocation, the same bytes, and the
+same live set on both backends, where before the VM reported the totals of a
+heap nobody had swept.
+
 Two figures still differ between the backends, and they differ for reasons
 that are worth keeping rather than papering over.
 
@@ -743,6 +754,42 @@ the slot again — a frame's window is sized once, per function, rather than
 opened and closed per block. So a churn loop reports a peak of zero on the
 oracle and of one vector here. Both are true statements about what was live
 when the collection ran; what they are not is the same statement.
+
+### What the collector costs
+
+A collector that runs costs something, and the suite above cannot say what,
+for the reason just given: nothing under `benches/` allocates. Every row moved
+by less than 1.7% against `92e4569`, measured interleaved, three iterations
+per round and three rounds; the only figure outside that is `startup` at 4.0%
+on the AST backend and 3.2% here, which is process exec time and moves by that
+much between two runs of the same binary. `size_of::<Inst>()` is still 16, a
+`Frame` is still 32 bytes, and `Vm::execute`'s `match` has the same arms it
+had — nothing in the dispatch loop changed, which is why nothing in the
+dispatch loop moved.
+
+So the cost was measured on a program written to pay it: three hundred
+thousand cycles built and abandoned, and nothing else. Median of five,
+interleaved, release, same machine.
+
+```text
+                        execute      peak RSS   collections   reclaimed
+VM at 92e4569           140.8 ms      103 MB             0           0
+VM here                 177.6 ms      3.3 MB         4,688     300,000
+interpreter (before)      494 ms                   unchanged
+interpreter (here)        502 ms                   unchanged
+```
+
+Twenty-six percent, and 90.6 ms of the 177.6 is pause time the heap reports
+itself, which is the honest way to read it: over half the added cost is the
+mark and the sweep and the rest is the safepoint asking. The comparison is not
+like for like and should not be read as one — the faster of the two numbers
+belongs to a run that ended holding three hundred thousand objects it could
+not reach, which is a thirty-one-fold difference in peak memory and is the
+whole reason for the change. The interpreter's 1.6% is noise; nothing on its
+path moved.
+
+The VM with a collector is still 2.8x faster than the interpreter on that
+program.
 
 ### A VM-owned heap
 
