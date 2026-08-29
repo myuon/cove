@@ -2,6 +2,11 @@
 
 - Status: Accepted, superseded in part by
   [ADR 0008](0008-concurrent-task-execution.md)
+- Superseded in part by
+  [ADR 0024](0024-a-stop-is-a-bound-not-a-point.md), which replaces the
+  Decision's naming of the safepoints the runtime controls are checked at —
+  "loop back edges, calls, and `await`" — with a bound on how much may happen
+  between two checks
 - Date: 2026-08-25
 - Superseded by: [ADR 0008](0008-concurrent-task-execution.md), which took over
   phase 2 of the Decision below and, with it, the whole of "What Phase 1 does

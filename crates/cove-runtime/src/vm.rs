@@ -207,7 +207,7 @@ use crate::heap::{Collection, Heap, HeapStats, Roots};
 use crate::host::{HostRegistry, Reentry, ResourceHandle};
 use crate::interp::{
     as_dyn, binary, coerce_inside, divide_by_zero, dyn_receiver, no_field, not_a_struct, overflow,
-    returned_error_message, source_text, unary, work_stopped, MAX_CALL_DEPTH,
+    returned_error_message, source_text, stopped_here, unary, MAX_CALL_DEPTH,
 };
 use crate::runtime::{Runtime, ENTRY_TASK};
 use crate::task::{self, ChildFailure, Task, TaskOutcome, TaskScope, Transfer};
@@ -246,7 +246,7 @@ const INSTRUCTION_FUEL: u64 = 1;
 /// between two safepoints is this much plus one block — bounded by the
 /// length of the function's code, which is finite and known before the run —
 /// plus whatever the proportional charges of that block added.
-const SAFEPOINT_INTERVAL: u64 = 1024;
+pub const SAFEPOINT_INTERVAL: u64 = 1024;
 
 /// How much fuel may accumulate across back edges before the shared budget is
 /// spent against.
@@ -265,7 +265,7 @@ const SAFEPOINT_INTERVAL: u64 = 1024;
 /// the difference is not one a program can be written to observe, and
 /// [`SAFEPOINT_INTERVAL`] still bounds a straight line that has no back edge
 /// at all.
-const BACK_EDGE_FUEL: u64 = 64;
+pub const BACK_EDGE_FUEL: u64 = 64;
 
 /// One call in progress.
 ///
@@ -855,6 +855,9 @@ impl<'a> Vm<'a> {
             cpu: timing.cpu(),
             wait: timing.wait(),
         });
+        // Whatever this run charged and had not yet handed over is handed
+        // over now, however the run ended. See `Vm::spend_pending_fuel`.
+        self.spend_pending_fuel();
         // Every task's thread has been joined by now — leaving a scope waits
         // for or cancels its children — so every heap but this one has been
         // retired and the totals are complete. `Interpreter::enter` ends the
@@ -2860,18 +2863,31 @@ impl<'a> Vm<'a> {
         Ok(())
     }
 
+    /// Spends whatever this VM has charged and not yet handed to the run's
+    /// budget, at the end of a run or of a task's thread.
+    ///
+    /// Every ordinary way out of a body already flushes: a `return` and a
+    /// `?` that failed take a safepoint before they leave the frame, and a
+    /// safepoint is what spends. What does not flush is every other way a
+    /// run can end — a raised error, an exhausted budget, a cancelled task,
+    /// a bounded call abandoned by the host that bounded it — because each
+    /// of those leaves through `?` in Rust rather than through an
+    /// instruction. The fuel charged since the last safepoint was work the
+    /// run really did, so it is spent here rather than dropped with the
+    /// stacks.
+    ///
+    /// [`crate::budget::Budget::spend`] rather than [`Vm::safepoint`],
+    /// because this runs after the answer is settled: a stop raised here
+    /// would replace the reason the run actually ended.
+    fn spend_pending_fuel(&mut self) {
+        let fuel = std::mem::take(&mut self.fuel);
+        if fuel != 0 {
+            self.hosts.with_budget(|budget| budget.spend(fuel));
+        }
+    }
+
     fn safepoint(&mut self, span: Span) -> Result<(), RuntimeError> {
-        if let Some(cancellation) = &self.cancellation {
-            if cancellation.is_cancelled() {
-                return Err(crate::interp::task_cancelled(span));
-            }
-        }
-        // A bounded call's flag stops only the body it bounds. The host that
-        // raised it turns the stop into the answer it promised, so this need
-        // only say that the body is not to continue.
-        if self.stops.iter().any(Cancellation::is_cancelled) {
-            return Err(work_stopped(span));
-        }
+        stopped_here(self.cancellation.as_ref(), &self.stops, span)?;
         let fuel = std::mem::take(&mut self.fuel);
         if let Some(Err(error)) = self.hosts.with_budget(|budget| {
             budget
@@ -2900,8 +2916,10 @@ impl<'a> Vm<'a> {
     ///
     /// The grant check, the schema check on both sides, the budget charge,
     /// and the trace all live in [`HostRegistry`], so a VM run is held to
-    /// exactly what an interpreted run is held to — this adds the timing and
-    /// the span and nothing else.
+    /// exactly what an interpreted run is held to — this adds the timing,
+    /// the span, and the two stop flags a `Budget` shared by every task
+    /// cannot ask about. [`stopped_here`] is the whole of that last part,
+    /// and the interpreter calls it here too.
     fn call_host(
         &mut self,
         module: &str,
@@ -2909,6 +2927,7 @@ impl<'a> Vm<'a> {
         values: Vec<Value>,
         span: Span,
     ) -> Result<Value, RuntimeError> {
+        stopped_here(self.cancellation.as_ref(), &self.stops, span)?;
         let hosts = self.hosts;
         let started = Instant::now();
         let result = hosts.call_with(module, op, values, &mut Callback { vm: self, span });
@@ -2933,6 +2952,7 @@ impl<'a> Vm<'a> {
         values: Vec<Value>,
         span: Span,
     ) -> Result<Value, RuntimeError> {
+        stopped_here(self.cancellation.as_ref(), &self.stops, span)?;
         let hosts = self.hosts;
         let started = Instant::now();
         let result = hosts.call_resource(handle, op, values, &mut Callback { vm: self, span });
@@ -3455,9 +3475,25 @@ impl Reentry for Callback<'_, '_> {
     }
 
     /// Everything [`Vm::safepoint`] would stop on, asked from outside the
-    /// loop: every bounded call this thread is inside, and the run's own
-    /// cancellation.
+    /// loop: this task's own cancellation, every bounded call this thread is
+    /// inside, and the run's own cancellation.
+    ///
+    /// The task's flag is read here because a host that polls between rounds
+    /// is asking the question a safepoint asks, and a spawned task's
+    /// cancellation is one of the answers: `clock.every` in a cancelled task
+    /// ends its timer rather than raising out of it, and it can only do that
+    /// if this says so. It was missing, so the VM answered `false` where
+    /// `Interpreter`'s answer was `true` — the one place the two backends
+    /// gave a host different accounts of the same run.
     fn is_cancelled(&self) -> bool {
+        if self
+            .vm
+            .cancellation
+            .as_ref()
+            .is_some_and(Cancellation::is_cancelled)
+        {
+            return true;
+        }
         if self.vm.stops.iter().any(Cancellation::is_cancelled) {
             return true;
         }
@@ -3538,6 +3574,10 @@ fn run_task(
         .timings
         .pop()
         .expect("a task pushes exactly the one timing it pops");
+    // What this task charged and had not yet spent is the run's fuel as much
+    // as the entry's is, and a task that raised or was cancelled reached no
+    // safepoint to spend it at. See `Vm::spend_pending_fuel`.
+    vm.spend_pending_fuel();
     // This task's heap ends with this thread. What it did joins the run's
     // totals before the value it produced crosses back.
     vm.retire_heap();

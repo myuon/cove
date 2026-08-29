@@ -30,7 +30,7 @@ const RULE: &str =
 /// small, fixed number of safepoints without paying the clock's cost on every
 /// one. When no fuel limit is set, nothing else bounds the run, so the clock
 /// is consulted on every call regardless of this constant.
-const DEADLINE_CHECK_INTERVAL: u64 = 64;
+pub const DEADLINE_CHECK_INTERVAL: u64 = 64;
 
 /// Limits a host imposes on one run.
 ///
@@ -186,11 +186,19 @@ impl Budget {
     /// `await`. `fuel` is the cost of the work performed since the last
     /// safepoint.
     pub fn safepoint(&mut self, fuel: u64) -> Result<(), Stopped> {
+        // Counted before anything can refuse, because `fuel` is work the run
+        // has already done and a stop does not un-do it. Reading the
+        // cancellation flag first and returning would have thrown away
+        // whatever the caller had gathered since its last safepoint, which
+        // on a backend that charges in batches is most of what it did.
+        // Nothing about *which* stop is reported moves: the limit is still
+        // checked after the flag, so a cancelled run is still cancelled and
+        // not out of fuel.
+        self.fuel_spent = self.fuel_spent.saturating_add(fuel);
         if self.cancellation.is_cancelled() {
             return Err(Stopped::Cancelled);
         }
 
-        self.fuel_spent = self.fuel_spent.saturating_add(fuel);
         if let Some(limit) = self.limits.fuel {
             if self.fuel_spent >= limit {
                 return Err(Stopped::Fuel);
@@ -210,6 +218,21 @@ impl Budget {
         }
 
         Ok(())
+    }
+
+    /// Adds `fuel` to the run's total without asking whether the run may
+    /// continue.
+    ///
+    /// A backend that charges fuel in batches holds some between two
+    /// safepoints, and the safepoint is where that holding is spent. A run
+    /// that ends anywhere else — by raising, by being stopped, by a task
+    /// thread finishing — reaches no further safepoint, so what it had
+    /// gathered would simply not be counted, and `fuel_spent` would report
+    /// less work than the run did. This is where the last of it is put back,
+    /// and it decides nothing: the run is already over, and a second stop
+    /// raised here would be answering a question nobody asked.
+    pub fn spend(&mut self, fuel: u64) {
+        self.fuel_spent = self.fuel_spent.saturating_add(fuel);
     }
 
     /// Charges one host call against the budget, failing before the call is
