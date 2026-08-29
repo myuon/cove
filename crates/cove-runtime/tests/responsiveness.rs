@@ -476,6 +476,24 @@ export fn main() -> Result<Int, Error> {
 }
 ";
 
+/// [`SPINNER`] with nothing armed and no Host call at all.
+///
+/// The deadline and `max_host_calls` are read at every Host call as well as
+/// at a safepoint, so a program with a `probe` call in it would be stopped
+/// there rather than on the schedule under test. This is the loop the two
+/// deadline cases and the fuel case measure, for that reason.
+const PURE_SPINNER: &str = "\
+export fn main() -> Result<Int, Error> {
+  var i = 0
+  var t = 0
+  while i < {turns} {
+    t = t + i
+    i = i + 1
+  }
+  Ok(t)
+}
+";
+
 /// The same loop inside a bounded call, so that `probe.raise` stops the body
 /// and the caller survives to be asked what happened.
 const BOUNDED_SPINNER: &str = "\
@@ -617,9 +635,7 @@ export fn main() -> Result<Int, Error> {
 /// first one — before its first instruction, on the VM.
 #[test]
 fn an_expired_deadline_with_no_fuel_limit_stops_at_the_first_safepoint() {
-    let source = SPINNER
-        .replace("{arm}", "noop")
-        .replace("{turns}", "100000000");
+    let source = PURE_SPINNER.replace("{turns}", "100000000");
     for run in on_both(
         &source,
         Limits {
@@ -655,7 +671,7 @@ fn an_expired_deadline_with_no_fuel_limit_stops_at_the_first_safepoint() {
 /// safepoints' work rather than one.
 #[test]
 fn an_expired_deadline_beside_a_fuel_limit_stops_within_the_clock_check_interval() {
-    let control = SPINNER.replace("{arm}", "noop");
+    let control = PURE_SPINNER.to_string();
     let source = control.replace("{turns}", "100000000");
     for backend in [Backend::Ast, Backend::Vm] {
         let turn = fuel_per_turn(&control, backend);
@@ -691,7 +707,7 @@ fn an_expired_deadline_beside_a_fuel_limit_stops_within_the_clock_check_interval
 /// safepoint's fixed charge.
 #[test]
 fn an_exhausted_fuel_budget_is_overspent_by_less_than_one_gathering() {
-    let control = SPINNER.replace("{arm}", "noop");
+    let control = PURE_SPINNER.to_string();
     let source = control.replace("{turns}", "100000000");
     for backend in [Backend::Ast, Backend::Vm] {
         let turn = fuel_per_turn(&control, backend);
@@ -1040,11 +1056,12 @@ export fn main() -> Result<Int, Error> {
             .trim_end_matches(')')
             .parse()
             .unwrap_or_else(|_| panic!("{backend:?}: {}", run.answer));
-        // Four turns were completed before the flag went up, and the body
-        // stops at a safepoint after that — never in the middle of one of
-        // them. A loop whose body calls a function reaches a safepoint every
-        // turn, because a call is one unconditionally, so what is left over
-        // here is small on both backends.
+        // Four turns were completed before the flag went up, and both
+        // backends stop at the very next `lock` — a call is an unconditional
+        // safepoint, so a loop whose body calls anything is asked every turn
+        // and the gathered back-edge schedule never comes into it. Four is
+        // what both measure; the range is what is asserted, because a
+        // maximum is the shape that survives a constant being changed.
         assert!(
             (4..=6).contains(&turns),
             "{backend:?}: {turns} turns survived the stop"
@@ -1202,9 +1219,7 @@ export fn main() -> Result<Int, Error> {
 /// than a nicety.
 #[test]
 fn every_stop_mode_is_reported_as_itself_on_both_backends() {
-    let spinner = SPINNER
-        .replace("{arm}", "noop")
-        .replace("{turns}", "100000000");
+    let spinner = PURE_SPINNER.replace("{turns}", "100000000");
     let cancelled = SPINNER
         .replace("{arm}", "cancelRun")
         .replace("{turns}", "100000000");

@@ -387,8 +387,9 @@ A run that passes its limit stops at the safepoint that discovers it and never
 later; that much holds on both backends and is what ADR 0019 said fuel exists
 for. What does not hold is that the limit bounds the work, in two different
 directions at once. A run may overspend its limit — by one gathering plus one
-turn, measured at 5 fuel for `benches/arith`'s loop shape — because fuel is
-counted where it is charged and compared where it is spent. And a run may be
+turn, which for a loop charging 13 fuel a turn is a bound of 77 and measures 9
+to 44 over three limits — because fuel is counted where it is charged and
+compared where it is spent. And a run may be
 charged for work it did not do, which is the other question:
 
 **A block is refused entire, and a prefix that would have fitted does not
@@ -426,8 +427,10 @@ The deadline's two rows are the same code reading two schedules.
 `Budget::safepoint` reads the clock at every safepoint when no fuel limit is
 set, because then nothing else bounds the run; with one set it reads every
 `DEADLINE_CHECK_INTERVAL`th, because `Instant::now` is a system call and fuel
-is already bounding the loop. Measured, that is 0 fuel and 4,529 fuel for the
-same program on the VM, and 10 and 640 on the tree walk.
+is already bounding the loop. Measured on a loop with no Host call in it — a Host call would be
+stopped by the clock the boundary reads, rather than on the schedule under
+test — that is 0 and 4,099 fuel on the VM, against a bound of 4,928, and 10
+and 640 on the tree walk against 1,280.
 
 **A Host call is not a safepoint, and it is not meant to become one.** What
 stands in front of it is `Budget::charge_host_call`, which refuses a call from
@@ -445,10 +448,13 @@ be.
 
 That has a consequence worth stating plainly rather than leaving to be
 discovered. Every Host call in one straight line is made before the charge
-that line incurred is measured. Forty `console.println` calls with no branch
-between them all happen under a fuel limit of one, on both backends, and the
-run stops at the return. The bound is `SAFEPOINT_INTERVAL` of standing fuel
-plus one extent — finite, known before the run, and much larger than zero.
+that line incurred is measured. Forty Host calls with no branch between them all
+happen under a fuel limit of one on the VM, which then stops at the return
+having charged 286 for a budget of 1. The tree walk reaches no safepoint
+between the entry and the return either, so any limit that lets it in at all
+lets all forty through and it answers. The bound is `SAFEPOINT_INTERVAL` of
+standing fuel plus one extent — finite, known before the run, and much larger
+than zero.
 
 **What a stop may leave behind.** Three things, and the third is the one a
 program can be written around.
@@ -466,8 +472,9 @@ its own locals go with its frame, and what a surviving caller sees is only
 writes to storage they share — a `Shared` cell, a `Vector` the caller also
 holds, a file. Those are whole turns of a loop. A counter in a `Shared` cell,
 incremented once a turn in a body stopped from turn three, comes back holding
-four to six on both backends: some turns after the flag, never a fraction of
-one.
+exactly four on both backends. Four rather than more because `lock` is a call
+and a call is an unconditional safepoint, so that loop is asked every turn and
+the gathered back-edge schedule never comes into it.
 
 *A stop is at an expression, not at a statement.* A call is a safepoint, so
 `f(a) + g(b)` can stop between the two calls, with `f`'s effects made, `g`'s
