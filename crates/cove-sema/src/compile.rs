@@ -127,6 +127,10 @@ impl Compiler {
 
     /// Resolves and type-checks `package`, which is what `cove check` does.
     ///
+    /// The returned program carries [`Program::facts`]: the type the checker
+    /// settled for every expression, and the declaration each resolved
+    /// method call reaches.
+    ///
     /// Warnings and notes from both halves are carried on the returned
     /// program's [`Program::notices`] rather than mixed into its errors, so
     /// a caller can report them without having to decide which of them
@@ -135,8 +139,8 @@ impl Compiler {
     /// to read past what merely could.
     pub fn compile(&self, package: &Package) -> Result<Program, Vec<Diagnostic>> {
         let mut program = self.resolve(package)?;
-        let (errors, warnings): (Vec<Diagnostic>, Vec<Diagnostic>) = self
-            .check(package, &program)
+        let (diagnostics, facts) = typeck::check_facts(package, &program, &self.schemas);
+        let (errors, warnings): (Vec<Diagnostic>, Vec<Diagnostic>) = diagnostics
             .into_iter()
             .partition(|d| d.severity == cove_diag::Severity::Error);
         if !errors.is_empty() {
@@ -145,6 +149,11 @@ impl Compiler {
             return Err(items);
         }
         program.notices.extend(warnings);
+        // A program that checked carries what the check worked out. Nothing
+        // downstream has to walk the tree again to learn a type, which ADR
+        // 0019 makes the rule for the lowering and which holds for anything
+        // else reading a checked package.
+        program.facts = facts;
         Ok(program)
     }
 }

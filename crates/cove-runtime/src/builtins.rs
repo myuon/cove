@@ -66,6 +66,91 @@ pub trait Callable {
 
     /// The number of parameters `callee` declares, when it is a closure.
     fn arity(&self, callee: &Value) -> Option<usize>;
+
+    /// The independent copy `Snapshot` makes of one value.
+    ///
+    /// A hook rather than a function because a struct and an enum answer it
+    /// through their own `impl Snapshot for Type`, which is a declaration
+    /// only a backend can reach: the interpreter invokes the conformance,
+    /// and the VM has no way to call one from inside an instruction and
+    /// reports it instead. [`snapshot`] is the half that is the same for
+    /// both, and it recurses through here so that a `Vector` of structs
+    /// reaches whichever answer its backend has.
+    fn snapshot(&mut self, value: &Value, span: Span) -> Result<Value, RuntimeError>;
+}
+
+/// The independent copy `Snapshot` makes of a value that no declared
+/// conformance answers for.
+///
+/// The Language Reference makes an independent copy an explicit `impl
+/// Snapshot for Type`, and this is everything that decision leaves over: a
+/// value with nothing mutable inside it returns itself, because a copy of it
+/// is not observable, and a `Vector` — the one thing a copy is observable of
+/// — allocates storage of its own and snapshots what it held.
+///
+/// An `Array`, a `Map` and a `Set` are cloned rather than walked, which is
+/// `Interpreter::snapshot`'s own answer and not a shortcut taken here: each
+/// is immutable, so an element that shares storage with something else went
+/// on sharing it before this was called and there is nothing for a copy to
+/// separate.
+///
+/// A struct, an enum and a `dyn` are not here. They are what the caller
+/// answers, through [`Callable::snapshot`].
+pub fn snapshot(
+    callable: &mut dyn Callable,
+    value: &Value,
+    span: Span,
+) -> Result<Value, RuntimeError> {
+    match value {
+        Value::Unit
+        | Value::Bool(_)
+        | Value::Int(_)
+        | Value::Float(_)
+        | Value::Duration(_)
+        | Value::Str(_)
+        | Value::Array(_)
+        | Value::Map(_)
+        | Value::Set(_)
+        | Value::Range { .. } => Ok(value.clone()),
+        Value::Vector(storage) => {
+            check_live(storage, "snapshot", span)?;
+            let elements = storage.elements.borrow().clone();
+            let mut snapshotted = Vec::with_capacity(elements.len());
+            for item in &elements {
+                snapshotted.push(callable.snapshot(item, span)?);
+            }
+            Ok(callable.allocate_vector(snapshotted))
+        }
+        other => Err(no_snapshot_conformance(other, span)),
+    }
+}
+
+/// What a `...` argument that is neither an `Array` nor a `Vector` is
+/// refused with.
+///
+/// A spread passes an existing sequence where a variadic parameter's
+/// elements would go, so the two sequences are what it reads; `bind_params`
+/// reports anything else, and the VM reports it from the instruction that
+/// does the appending. One wording, because it is one failure.
+pub fn spread_needs_a_sequence(span: Span) -> RuntimeError {
+    RuntimeError::new("`...` spreads an `Array` or a `Vector`").at(span)
+}
+
+/// What a value that implements no `Snapshot` conformance is refused with.
+///
+/// Both backends reach it: the interpreter for a struct or an enum whose
+/// type wrote none, and the VM for one it reached inside a `Vector` — where
+/// it cannot call the conformance even if there is one, because an
+/// instruction has no way to run a whole function in the middle of itself.
+pub fn no_snapshot_conformance(value: &Value, span: Span) -> RuntimeError {
+    RuntimeError::new(format!(
+        "`{}` does not implement `Snapshot`",
+        value.type_name()
+    ))
+    .at(span)
+    .with_rule(
+        "Closures, synchronized values, and Host resources do not implement `Snapshot` by default; a struct or enum conforms explicitly with `impl Snapshot for Type`.",
+    )
 }
 
 /// The builtins that are called on nothing: the constructors `Ok`, `Err`,

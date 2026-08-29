@@ -2,7 +2,7 @@
 
 - Status: Accepted
 - Date: 2026-08-26
-- Implemented by: PR #PLACEHOLDER
+- Implemented by: [PR #98](https://github.com/myuon/cove/pull/98)
 - Implementation status: complete — `files.open`, `files.create`,
   `files.Reader`, and `files.Writer` all exist in the schema, in the real
   host, and in the in-memory fake, and `tests/e2e/host_files_streaming`

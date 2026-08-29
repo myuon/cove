@@ -1,0 +1,28 @@
+use console.println
+
+/// Names two arguments in the other order than the declaration writes them.
+fn describe(width: Int, height: Int) -> String {
+  "{width}x{height}"
+}
+
+/// A program the VM cannot run, asked for on the VM.
+///
+/// ADR 0019's no-silent-fallback rule is what this case pins: a run that
+/// names a construct the lowering does not cover fails before anything
+/// happens, naming the construct and pointing at it, rather than quietly
+/// finishing on the interpreter. The `println` below never runs, and the
+/// empty `expected.out` beside this file is how the case says so.
+///
+/// The construct is a call whose labelled arguments stand out of declaration
+/// order. It was a closure until closures lowered and a task scope until
+/// task scopes did; this one is refused deliberately rather than for want of
+/// work, because the interpreter answers such a call by evaluating the
+/// arguments in the order they were written and issue #112 is about moving
+/// the decision into the checker. Whichever construct stands here, the point
+/// of the case is the rule and not the construct.
+export fn main() -> Result<Unit, Error> {
+  println("this line never runs")?
+  let size = describe(height: 3, width: 4)
+  println("size {size}")?
+  Ok(())
+}

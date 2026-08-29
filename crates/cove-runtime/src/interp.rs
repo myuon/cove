@@ -37,9 +37,11 @@ use crate::heap::{Collection, Heap, HeapStats, Roots};
 use crate::host::{HostRegistry, Reentry, ResourceHandle};
 use crate::runtime::{Runtime, ENTRY_TASK};
 use crate::schema::TypeSchema;
-use crate::task::{Task, TaskOutcome, TaskScope, TaskState, Transfer};
+use crate::task::{self, ChildFailure, Task, TaskOutcome, TaskScope, Tasking, Transfer};
 use crate::trace::{RunOutcome, Timing, TraceEvent};
-use crate::value::{Closure, DynValue, EnumValue, RangeBounds, StructValue, Value};
+use crate::value::{
+    Closure, ClosureBody, DynValue, EnumValue, HostFnValue, RangeBounds, StructValue, Value,
+};
 
 /// How deep Cove calls may nest before the runtime reports a limit instead of
 /// exhausting the host stack.
@@ -57,7 +59,7 @@ use crate::value::{Closure, DynValue, EnumValue, RangeBounds, StructValue, Value
 /// frames, the number there bounds bytes, and neither may be changed without
 /// reading the other. See [`STACK_SIZE`] for the measured per-frame cost the
 /// two are derived from.
-const MAX_CALL_DEPTH: usize = 256;
+pub(crate) const MAX_CALL_DEPTH: usize = 256;
 
 /// The native stack one Cove frame costs, so that [`STACK_SIZE`] can be
 /// derived from [`MAX_CALL_DEPTH`] instead of chosen beside it.
@@ -253,14 +255,6 @@ enum Control {
 impl From<RuntimeError> for Control {
     fn from(error: RuntimeError) -> Self {
         Control::Error(error)
-    }
-}
-
-impl Control {
-    /// Returns `Err(error)` from the enclosing function, which is what a task
-    /// whose value is a failed `Result` does to the scope that waited for it.
-    fn error_value(error: Value) -> Control {
-        Control::Return(Value::err(error))
     }
 }
 
@@ -534,6 +528,31 @@ struct Target<'t> {
     return_type: Option<&'t Type>,
 }
 
+/// The interpreter's half of what a task needs, which is what makes `spawn`,
+/// `await`, and leaving a scope one implementation rather than two.
+///
+/// Each of the four is a field this evaluator already had for its own
+/// reasons, exposed rather than duplicated: ADR 0008 gives every task an
+/// evaluator of its own, so "the run this belongs to" and "the task this is
+/// running" are questions any evaluator can answer.
+impl Tasking for Interpreter<'_> {
+    fn runtime(&self) -> &Runtime {
+        self.runtime
+    }
+
+    fn hosts(&self) -> &HostRegistry {
+        self.hosts
+    }
+
+    fn charge_wait(&mut self, wait: Duration) {
+        Interpreter::charge_wait(self, wait);
+    }
+
+    fn running_task(&self) -> Option<u64> {
+        self.task_stack.last().copied()
+    }
+}
+
 /// Executes a resolved program.
 ///
 /// One interpreter runs one body on one thread: the entry, or the body of a
@@ -738,10 +757,7 @@ impl<'a> Interpreter<'a> {
     /// The source text `span` covers, for a diagnostic that quotes the code
     /// it is about.
     fn source_text(&self, span: Span) -> &str {
-        let file = self.sources.get(span.file);
-        file.text
-            .get(span.start as usize..span.end as usize)
-            .unwrap_or("?")
+        source_text(self.sources, span)
     }
 
     /// An interpreter for the body of the spawned task `id`, which stops when
@@ -1078,7 +1094,7 @@ impl<'a> Interpreter<'a> {
             return Ok(Value::Closure(Rc::new(Closure {
                 is_async: decl.is_async,
                 params: decl.params.clone(),
-                body: Arc::new(decl.body.clone()),
+                body: ClosureBody::Tree(Arc::new(decl.body.clone())),
                 decl: Some(decl),
                 module: owner.into(),
                 captures: Vec::new(),
@@ -1287,6 +1303,25 @@ impl<'a> Interpreter<'a> {
         case: &str,
         span: Span,
     ) -> Result<Value, RuntimeError> {
+        host_enum_case(module, declared, case, span)
+    }
+}
+
+/// `http.Method.Get`: a case of an enum a host declares.
+///
+/// A host's enum has a [`TypeSchema`] rather than an `EnumDecl`, so
+/// [`enum_case`] cannot serve it: there is no declaration to read a case's
+/// payload arity from, and a host's cases carry none. Both backends reach
+/// this one function for the same reason they reach [`enum_case`] — a case
+/// the schema does not name has to fail in the same words whichever backend
+/// asked.
+pub(crate) fn host_enum_case(
+    module: &str,
+    declared: &TypeSchema,
+    case: &str,
+    span: Span,
+) -> Result<Value, RuntimeError> {
+    {
         if !declared.cases.contains(&case) {
             return Err(RuntimeError::new(format!(
                 "host type `{module}.{}` has no case `{case}`",
@@ -1301,7 +1336,9 @@ impl<'a> Interpreter<'a> {
             payload: Vec::new(),
         })))
     }
+}
 
+impl<'a> Interpreter<'a> {
     // ---------------------------------------------------------------- calls
 
     fn invoke(
@@ -1414,9 +1451,6 @@ impl<'a> Interpreter<'a> {
     fn coerce(&self, module: &str, value: Value, ty: &Type) -> Value {
         match &ty.kind {
             TypeKind::Dyn(trait_name) => {
-                if matches!(value, Value::Dyn(_)) {
-                    return value;
-                }
                 // A trait belongs to the module that declares it, which may
                 // be one this module imported the trait from: a `dyn` value
                 // built here must carry the same name a value built there
@@ -1425,29 +1459,17 @@ impl<'a> Interpreter<'a> {
                     Some(owner) => format!("{owner}.{}", trait_name.node).into(),
                     None => trait_name.node.as_str().into(),
                 };
-                Value::Dyn(Rc::new(DynValue {
-                    trait_name: qualified,
-                    value,
-                }))
+                as_dyn(value, &qualified)
             }
             TypeKind::Named { path, args } if args.len() == 1 => {
                 let Some(head) = path.last() else {
                     return value;
                 };
-                match (head.node.as_str(), value) {
-                    ("Array", Value::Array(items)) => Value::Array(
-                        items
-                            .iter()
-                            .map(|item| self.coerce(module, item.clone(), &args[0]))
-                            .collect(),
-                    ),
-                    ("Option", Value::Enum(mut option)) if &*option.type_name == "Option" => {
-                        for item in &mut option.payload {
-                            *item = self.coerce(module, item.clone(), &args[0]);
-                        }
-                        Value::Enum(option)
+                match head.node.as_str() {
+                    "Array" | "Option" => {
+                        coerce_inside(value, |item| self.coerce(module, item, &args[0]))
                     }
-                    (_, value) => value,
+                    _ => value,
                 }
             }
             _ => value,
@@ -1482,10 +1504,7 @@ impl<'a> Interpreter<'a> {
                             items.extend(storage.elements.borrow().iter().cloned());
                         }
                         ArgSlot::Value(_) if arg.spread => {
-                            return Err(RuntimeError::new(
-                                "`...` spreads an `Array` or a `Vector`",
-                            )
-                            .at(arg.span));
+                            return Err(builtins::spread_needs_a_sequence(arg.span));
                         }
                         _ => items.push(value_of(arg, &param.name.node, arg.span)?),
                     }
@@ -1567,11 +1586,26 @@ impl<'a> Interpreter<'a> {
         match callee {
             Value::Closure(closure) => {
                 let module = closure.module.clone();
+                // The oracle walks syntax, so a closure whose body is a
+                // lowered function is one it cannot run. Nothing produces
+                // that pairing today — a run has one backend, and the VM is
+                // the only party that builds a lowered body — so this is
+                // said rather than approximated, exactly as the VM says the
+                // reverse.
+                let ClosureBody::Tree(body) = &closure.body else {
+                    return Err(RuntimeError::new(
+                        "this closure was built by the VM, and the interpreter runs syntax",
+                    )
+                    .at(span)
+                    .with_rule(
+                        "A run has one backend, and a closure belongs to the run that made it.",
+                    ));
+                };
                 self.invoke(
                     &Target {
                         name: "this closure",
                         params: &closure.params,
-                        body: &closure.body,
+                        body,
                         module,
                         receiver: None,
                         is_async: closure.is_async,
@@ -1586,9 +1620,9 @@ impl<'a> Interpreter<'a> {
                     span,
                 )
             }
-            Value::HostFn { module, op } => {
-                let values = plain_values(args, &format!("{module}.{op}"))?;
-                self.call_host(&module, &op, values, span)
+            Value::HostFn(host) => {
+                let values = plain_values(args, &format!("{}.{}", host.module, host.op))?;
+                self.call_host(&host.module, &host.op, values, span)
             }
             other => {
                 Err(RuntimeError::new(format!("`{}` is not callable", other.type_name())).at(span))
@@ -1830,16 +1864,7 @@ impl<'a> Interpreter<'a> {
                         }
                     }
                 }
-                // Static exhaustiveness checking is future work; until then a
-                // `match` that covers no case fails here instead of silently
-                // producing a value.
-                Err(
-                    RuntimeError::new(format!("no `match` arm covers `{value}`"))
-                        .at(span)
-                        .with_rule("`match` must cover every enum case.")
-                        .with_help("add an arm for this case, or a `_` arm")
-                        .into(),
-                )
+                Err(no_match(&value, span).into())
             }
             ExprKind::For {
                 binding,
@@ -1958,7 +1983,7 @@ impl<'a> Interpreter<'a> {
             is_async,
             params,
             decl: None,
-            body: Arc::new(body),
+            body: ClosureBody::Tree(Arc::new(body)),
             module: env.module.clone(),
             captures,
         })))
@@ -1987,20 +2012,14 @@ impl<'a> Interpreter<'a> {
 
     /// Waits for or cancels the children of a scope that is being left.
     ///
-    /// A normal exit waits for every task the body did not await, in spawn
-    /// order, and discards its value: a scope waits for its children, it does
-    /// not collect them. A task that fails is not swallowed — a `RuntimeError`
-    /// propagates as itself, and a task whose value is `Err(error)` returns
-    /// that error from the enclosing function, exactly as `?` would. A task
-    /// the program itself cancelled is neither: the program asked for that
-    /// stop, so leaving the scope is not the place to complain about it.
-    /// Either way the tasks still running are cancelled and waited for, as
-    /// they are when the body itself leaves early through `return`, `?`, or
-    /// an error.
-    ///
-    /// Waiting happens in spawn order, which is an order of *observation*
-    /// only: the tasks ran at the same time on threads of their own, so only
-    /// the set of effects a scope produces is defined, never their sequence.
+    /// The waiting, the order it happens in, and what a failed child does are
+    /// [`crate::task::wait_for_children`]'s, which is the same code the VM
+    /// leaves a scope through. What is here is the translation into this
+    /// evaluator's own control flow: a child that answered `Err(error)`
+    /// returns that error from the enclosing function, exactly as `?` would,
+    /// and a child that raised propagates as itself. Either way the tasks
+    /// still running are cancelled and waited for, as they are when the body
+    /// itself leaves early through `return`, `?`, or an error.
     fn leave_scope(&mut self, scope: &Rc<TaskScope>, result: Eval) -> Eval {
         let value = match result {
             Ok(value) => value,
@@ -2009,95 +2028,26 @@ impl<'a> Interpreter<'a> {
                 return early;
             }
         };
-
-        // Waiting reads the scope's children by index rather than from a
-        // snapshot, so a scope that grew while it was being left is still
-        // waited for to the end.
-        let mut index = 0;
-        while let Some(task) = scope.task_at(index) {
-            index += 1;
-            if !task.is_running() {
-                continue;
-            }
-            self.join_task(&task);
-            // The state is read and released before anything else runs, so
-            // cancelling the rest of the scope can borrow these same tasks.
-            let outcome = match &*task.state.borrow() {
-                TaskState::Settled(value) => failure_of(value).map(Control::error_value),
-                TaskState::Failed(error) => Some(Control::Error(error.clone())),
-                TaskState::Cancelled | TaskState::Running => None,
-            };
-            if let Some(control) = outcome {
+        match task::wait_for_children(self, scope) {
+            None => Ok(value),
+            Some(failure) => {
                 self.cancel_scope(scope);
-                return Err(control);
+                Err(match failure {
+                    ChildFailure::Returned(value) => Control::Return(value),
+                    ChildFailure::Raised(error) => Control::Error(error),
+                })
             }
         }
-        Ok(value)
     }
 
     /// Cancels every running child of `scope` and waits for it to stop.
-    ///
-    /// Every child is asked first and waited for afterwards, so they stop at
-    /// the same time rather than one after another. Leaving a scope waits for
-    /// or cancels its children, so this does both: a scope never outlives a
-    /// thread it started.
     fn cancel_scope(&mut self, scope: &Rc<TaskScope>) {
-        scope.cancel_running();
-        let mut index = 0;
-        while let Some(task) = scope.task_at(index) {
-            index += 1;
-            self.join_task(&task);
-        }
-    }
-
-    /// Waits for a task's thread, charging the time against this body's
-    /// [`Timing`] as wait rather than as work.
-    ///
-    /// A body blocked on `await` is doing nothing, exactly as a body blocked
-    /// on a host call is. Counting it as CPU would report a scope that waits
-    /// for two tasks as having computed for as long as they ran, which is the
-    /// attribution ADR 0001 asks a trace to get right.
-    ///
-    /// This is also the one place that learns whether a cancellation actually
-    /// stopped a task, so it is where `TaskCancelled` is traced. A task is
-    /// waited for once, so the event is recorded once; a task that had
-    /// already finished is unaffected by cancellation, and tracing it as
-    /// cancelled would say work was stopped that in fact happened.
-    fn join_task(&mut self, task: &Rc<Task>) {
-        if !task.is_running() {
-            return;
-        }
-        let started = Instant::now();
-        task.join();
-        // A task ends by finishing, by failing, by being cancelled, or by
-        // breaking an invariant in its own thread, and a join is where all
-        // four are observed — so this is where the place it held under the
-        // concurrency limit goes back. Releasing it on the task's own thread
-        // instead would make what a `spawn` is refused for depend on how
-        // quickly a sibling happened to finish.
-        self.hosts.with_budget(|budget| budget.release_task());
-        self.charge_wait(started.elapsed());
-        if matches!(&*task.state.borrow(), TaskState::Cancelled) {
-            self.runtime
-                .trace(TraceEvent::TaskCancelled { id: task.id });
-        }
+        task::cancel_children(self, scope);
     }
 
     /// Waits for a task's thread and returns the value its body produced.
-    ///
-    /// A task's body runs at most once and is waited for at most once, so
-    /// awaiting the same handle twice returns the same value and repeats no
-    /// effect.
     fn settle(&mut self, task: &Rc<Task>, span: Span) -> Result<Value, RuntimeError> {
-        self.join_task(task);
-        match &*task.state.borrow() {
-            TaskState::Settled(value) => Ok(value.clone()),
-            TaskState::Failed(error) => Err(error.clone()),
-            TaskState::Cancelled => Err(awaiting_a_cancelled_task(task, span)),
-            TaskState::Running => {
-                unreachable!("joining a task leaves it settled, failed, or cancelled")
-            }
-        }
+        task::settle(self, task, span)
     }
 
     /// `await expr`, and the postfix `expr.await()` that means the same thing.
@@ -2118,99 +2068,19 @@ impl<'a> Interpreter<'a> {
 
     /// `scope.spawn { ... }`, which starts a thread for the body.
     ///
-    /// Converting the closure for the new thread *is* the task-safety check:
-    /// what may cross a task boundary is exactly what a thread can own, so a
-    /// capture that may not cross is reported at the `spawn` that would have
-    /// carried it, before any thread exists.
-    ///
-    /// This returns once the thread exists and orders nothing else: whether
-    /// the child has run an instruction by the time the parent's next
-    /// statement runs is the operating system's answer, not this runtime's. A
-    /// rendezvous here would be a scheduling policy, which ADR 0008's
-    /// amendment refuses for the same reason the concurrency limit below
-    /// refuses to wait.
+    /// Everything a `spawn` decides — that the scope is still open, that the
+    /// body is a closure, that every capture may cross, what the concurrency
+    /// limit says, and what a trace records — is
+    /// [`crate::task::spawn_into`]'s, and is therefore the same decision the
+    /// VM's `spawn` reaches. What this contributes is the one thing that
+    /// differs: the new thread runs an [`Interpreter`] of its own.
     fn spawn(
         &mut self,
         scope: &Rc<TaskScope>,
         body: Value,
         span: Span,
     ) -> Result<Value, RuntimeError> {
-        if scope.is_closed() {
-            return Err(RuntimeError::new(format!(
-                "scope `{}` has already been left, so it can take no more tasks",
-                scope.name
-            ))
-            .at(span)
-            .with_rule("Leaving a task scope waits for or cancels its child tasks."));
-        }
-        if !matches!(body, Value::Closure(_)) {
-            return Err(RuntimeError::new(format!(
-                "`spawn` takes the work to run as a trailing closure, but found `{}`",
-                body.type_name()
-            ))
-            .at(span)
-            .with_help(format!("write `{}.spawn {{ ... }}`", scope.name)));
-        }
-        let body = Transfer::of(&body).map_err(|found| {
-            RuntimeError::new(format!(
-                "`spawn` cannot capture `{}`, which is a `{}`",
-                found.path, found.type_name
-            ))
-            .at(span)
-            .with_rule(crate::task::TASK_SAFETY_RULE)
-            .with_help(found.help("spawning"))
-        })?;
-
-        // Charged before this task is given an id, an event, or a thread: a
-        // thread that has started is a resource already taken, which no later
-        // safepoint could refuse. A run past its concurrency limit is stopped
-        // here the way an exhausted fuel budget stops one, rather than made
-        // to wait for a sibling to end, because waiting would be a scheduling
-        // policy and ADR 0008 has none.
-        if let Some(Err(error)) = self.hosts.with_budget(|budget| {
-            budget
-                .charge_task()
-                .map_err(|stopped| budget.to_runtime_error(stopped))
-        }) {
-            return Err(error.at(span));
-        }
-
-        let id = self.runtime.next_task_id();
-        // Traced before the thread starts, so a task is never seen completing
-        // before it was seen spawning.
-        self.runtime.trace(TraceEvent::TaskSpawned {
-            id,
-            parent: self.task_stack.last().copied(),
-            scope: scope.name.to_string(),
-        });
-
-        let cancellation = Cancellation::new();
-        let runtime = self.runtime.clone();
-        let flag = cancellation.clone();
-        let thread = std::thread::Builder::new()
-            .name(format!("cove task {id}"))
-            // A task evaluates Cove, so it gets the stack the depth limit is
-            // calibrated against rather than whatever the platform hands a
-            // thread by default. Without this a task overflows its stack long
-            // before `MAX_CALL_DEPTH` stops it, which ends the process and
-            // takes every sibling task with it.
-            .stack_size(STACK_SIZE)
-            .spawn(move || run_task(&runtime, id, flag, body, span))
-            .map_err(|e| {
-                // A task the machine refused is not a task the run holds, so
-                // the place charged for it above goes back.
-                self.hosts.with_budget(|budget| budget.release_task());
-                RuntimeError::new(format!("this task could not be given a thread: {e}")).at(span)
-            })?;
-
-        let task = Task::running(
-            id,
-            scope.name.clone(),
-            scope.next_position(),
-            cancellation,
-            thread,
-        );
-        Ok(Value::Task(scope.adopt(task)))
+        task::spawn_into(self, scope, body, span, run_task)
     }
 
     /// Dispatches the operations of a task scope and of a task handle.
@@ -2347,40 +2217,8 @@ impl<'a> Interpreter<'a> {
     }
 
     fn iterable_items(&mut self, env: &mut Env, expr: &Expr) -> Result<Vec<Value>, Control> {
-        // Iteration reads a snapshot of the elements; rejecting structural
-        // mutation during iteration is future work.
-        match self.eval(env, expr)? {
-            Value::Array(items) => Ok(items.iter().cloned().collect()),
-            Value::Vector(storage) => Ok(storage.elements.borrow().clone()),
-            // An empty or reversed range such as `3..<0` iterates zero times.
-            Value::Range {
-                start,
-                end,
-                inclusive_end,
-            } => Ok(RangeBounds::of(start, end, inclusive_end).items()),
-            // A `Set` is `BTreeSet<MapKey>`-backed, so it iterates its
-            // elements in ascending order, the same order `Display` shows.
-            Value::Set(items) => Ok(items.iter().map(|key| key.to_value()).collect()),
-            // A `Map` iterates in ascending key order, matching its
-            // `BTreeMap` storage. Each binding is a `MapEntry` carrying that
-            // iteration's `key` and `value`, the same shape `Map.of` accepts.
-            Value::Map(entries) => Ok(entries
-                .iter()
-                .map(|(key, value)| {
-                    Value::Struct(Rc::new(StructValue {
-                        type_name: MAP_ENTRY.name.into(),
-                        fields: vec![("key".into(), key.to_value()), ("value".into(), value.clone())],
-                        opaque: false,
-                    }))
-                })
-                .collect()),
-            other => Err(RuntimeError::new(format!(
-                "`for` iterates an `Array`, a `Vector`, a `Range`, a `Set`, or a `Map`, but found `{}`",
-                other.type_name()
-            ))
-            .at(expr.span)
-            .into()),
-        }
+        let value = self.eval(env, expr)?;
+        Ok(items_of(value, expr.span)?)
     }
 
     fn eval_ident(&mut self, env: &mut Env, name: &str, span: Span) -> Eval {
@@ -2395,7 +2233,7 @@ impl<'a> Interpreter<'a> {
             return Ok(Value::Closure(Rc::new(Closure {
                 is_async: decl.is_async,
                 params: decl.params.clone(),
-                body: Arc::new(decl.body.clone()),
+                body: ClosureBody::Tree(Arc::new(decl.body.clone())),
                 decl: Some(decl),
                 module: owner,
                 captures: Vec::new(),
@@ -2428,10 +2266,10 @@ impl<'a> Interpreter<'a> {
             return Ok(Value::HostModule(name.into()));
         }
         if let Some(host) = self.host_item(&module, name) {
-            return Ok(Value::HostFn {
+            return Ok(Value::HostFn(Rc::new(HostFnValue {
                 module: host,
                 op: name.into(),
-            });
+            })));
         }
         Err(
             RuntimeError::new(format!("cannot find `{name}` in this scope"))
@@ -2454,10 +2292,10 @@ impl<'a> Interpreter<'a> {
                     if self.hosts.host_type(head, name).is_some() {
                         return Ok(Value::Type(format!("{head}.{name}").into()));
                     }
-                    return Ok(Value::HostFn {
+                    return Ok(Value::HostFn(Rc::new(HostFnValue {
                         module: head.as_str().into(),
                         op: name.into(),
-                    });
+                    })));
                 }
                 // `booking.create` and `booking.Status`: a module imported
                 // whole answers with the exported declaration it names.
@@ -2490,10 +2328,10 @@ impl<'a> Interpreter<'a> {
             },
             Value::HostModule(module) => match self.hosts.host_type(module, name) {
                 Some(_) => Ok(Value::Type(format!("{module}.{name}").into())),
-                None => Ok(Value::HostFn {
+                None => Ok(Value::HostFn(Rc::new(HostFnValue {
                     module: module.clone(),
                     op: name.into(),
-                }),
+                }))),
             },
             other => Err(RuntimeError::new(format!(
                 "`{}` has no field `{name}`",
@@ -2502,29 +2340,6 @@ impl<'a> Interpreter<'a> {
             .at(span)
             .into()),
         }
-    }
-
-    /// The cases and associated functions `Enum.name` could have meant.
-    fn known_members(&self, module: &str, decl: &Arc<EnumDecl>) -> String {
-        let cases: Vec<&str> = decl
-            .cases
-            .iter()
-            .map(|case| case.name.node.as_str())
-            .collect();
-        let mut help = format!("known cases: {}", cases.join(", "));
-        let functions: Vec<&str> = match self.resolved(module) {
-            Some(resolved) => resolved
-                .methods
-                .keys()
-                .filter(|(type_name, _)| *type_name == decl.name.node)
-                .map(|(_, name)| name.as_str())
-                .collect(),
-            None => Vec::new(),
-        };
-        if !functions.is_empty() {
-            help.push_str(&format!("; known functions: {}", functions.join(", ")));
-        }
-        help
     }
 
     /// Builds one case of an enum declared in `module`.
@@ -2536,31 +2351,7 @@ impl<'a> Interpreter<'a> {
         payload: Vec<Value>,
         span: Span,
     ) -> Result<Value, RuntimeError> {
-        let Some(found) = decl.cases.iter().find(|c| c.name.node == case) else {
-            return Err(RuntimeError::new(format!(
-                "enum `{}` has no case or associated function `{case}`",
-                decl.name.node
-            ))
-            .at(span)
-            .with_rule(
-                "`Enum.name` is a case when the enum declares one, and otherwise an associated function declared in an `impl` block.",
-            )
-            .with_help(self.known_members(module, decl)));
-        };
-        if found.payload.len() != payload.len() {
-            return Err(RuntimeError::new(format!(
-                "case `{}.{case}` carries {} value(s), but {} were given",
-                decl.name.node,
-                found.payload.len(),
-                payload.len()
-            ))
-            .at(span));
-        }
-        Ok(Value::Enum(Box::new(EnumValue {
-            type_name: format!("{module}.{}", decl.name.node).into(),
-            case: case.into(),
-            payload,
-        })))
+        enum_case(self.program, module, decl, case, payload, span)
     }
 
     // ---------------------------------------------------------------- calls
@@ -2838,15 +2629,12 @@ impl<'a> Interpreter<'a> {
         // *that* value's type. This is what makes the dispatch dynamic — the
         // static type says only which trait the method must come from.
         let mut place = place;
-        let dyn_receiver = match (&place, &temporary) {
-            (Some(place), _) => place.with_ref(span, |value| match value {
-                Value::Dyn(d) => Some(d.value.clone()),
-                _ => None,
-            })?,
-            (_, Some(Value::Dyn(d))) => Some(d.value.clone()),
+        let dispatch_from = match (&place, &temporary) {
+            (Some(place), _) => place.with_ref(span, dyn_receiver)?,
+            (_, Some(value)) => dyn_receiver(value),
             _ => None,
         };
-        if let Some(concrete) = dyn_receiver {
+        if let Some(concrete) = dispatch_from {
             place = None;
             temporary = Some(concrete);
         }
@@ -3260,32 +3048,16 @@ impl<'a> Interpreter<'a> {
     /// cycles" is not yet a case the MVP can exercise.
     fn snapshot(&mut self, value: &Value, span: Span) -> Result<Value, RuntimeError> {
         match value {
-            Value::Unit
-            | Value::Bool(_)
-            | Value::Int(_)
-            | Value::Float(_)
-            | Value::Duration(_)
-            | Value::Str(_)
-            | Value::Array(_)
-            | Value::Map(_)
-            | Value::Set(_)
-            | Value::Range { .. } => Ok(value.clone()),
-            Value::Vector(storage) => {
-                builtins::check_live(storage, "snapshot", span)?;
-                let elements = storage.elements.borrow().clone();
-                let mut snapshotted = Vec::with_capacity(elements.len());
-                for item in &elements {
-                    snapshotted.push(self.snapshot(item, span)?);
-                }
-                Ok(self.allocate_vector(snapshotted))
-            }
             Value::Dyn(wrapped) => Ok(Value::Dyn(Rc::new(DynValue {
                 trait_name: wrapped.trait_name.clone(),
                 value: self.snapshot(&wrapped.value, span)?,
             }))),
             Value::Struct(s) => self.dispatch_snapshot(&s.type_name, value.clone(), span),
             Value::Enum(e) => self.dispatch_snapshot(&e.type_name, value.clone(), span),
-            other => Err(no_snapshot_conformance(other, span)),
+            // Everything a conformance is not consulted about, which both
+            // backends answer the same way and therefore answer in one
+            // place.
+            other => builtins::snapshot(self, other, span),
         }
     }
 
@@ -3298,10 +3070,10 @@ impl<'a> Interpreter<'a> {
         span: Span,
     ) -> Result<Value, RuntimeError> {
         let Some((type_module, short)) = type_name.rsplit_once('.') else {
-            return Err(no_snapshot_conformance(&receiver, span));
+            return Err(builtins::no_snapshot_conformance(&receiver, span));
         };
         let Some((module, decl)) = self.find_method(type_module, short, "snapshot") else {
-            return Err(no_snapshot_conformance(&receiver, span));
+            return Err(builtins::no_snapshot_conformance(&receiver, span));
         };
         self.invoke(
             &Target {
@@ -3324,6 +3096,10 @@ impl<'a> Interpreter<'a> {
 impl Callable for Interpreter<'_> {
     fn allocate_vector(&mut self, elements: Vec<Value>) -> Value {
         Interpreter::allocate_vector(self, elements)
+    }
+
+    fn snapshot(&mut self, value: &Value, span: Span) -> Result<Value, RuntimeError> {
+        Interpreter::snapshot(self, value, span)
     }
 
     fn call_value(
@@ -3368,7 +3144,85 @@ fn conformable(value: &Value) -> bool {
     matches!(value, Value::Struct(_) | Value::Enum(_))
 }
 
-fn binary(op: BinaryOp, lhs: Value, rhs: Value, span: Span) -> Result<Value, RuntimeError> {
+/// Wraps a concrete value as the `dyn Trait` value a written type asks for.
+///
+/// The language's one implicit conversion, and the one place a Cove value's
+/// runtime representation depends on its static type. Both backends build a
+/// trait object here so that neither can build a different one: the
+/// interpreter reaches it from [`Interpreter::coerce`], which walks the
+/// written type at the moment of the conversion, and the VM from
+/// `cove_ir::Inst::MakeDyn`, whose walk happened when the type was lowered.
+///
+/// A value that is already a trait object is left alone rather than wrapped
+/// again, so `dyn Trait` does not nest. That is what makes the conversion
+/// idempotent — `f(x)` and `f(g(x))`, where `f` and `g` both take and
+/// answer a `dyn Display`, hand the body the same value — and it is why
+/// dispatch finds the concrete type exactly one step in.
+pub(crate) fn as_dyn(value: Value, trait_name: &Rc<str>) -> Value {
+    if matches!(value, Value::Dyn(_)) {
+        return value;
+    }
+    Value::Dyn(Rc::new(DynValue {
+        trait_name: Rc::clone(trait_name),
+        value,
+    }))
+}
+
+/// Applies `each` to what an `Array` holds and to what an `Option` holds,
+/// and answers everything else unchanged.
+///
+/// One step into a container whose elements a written type says are `dyn`
+/// too, taken by both backends here. `Array<dyn Display>` and
+/// `Option<dyn Display>` are the two forms of it, and nothing else is
+/// reached: a `Vector` is a shared handle whose elements cannot be rewritten
+/// behind its other aliases, and a `Map`'s and a `Set`'s elements are not
+/// what one argument of one head names.
+///
+/// The step does not ask which of the two it is taking, and neither does the
+/// lowering: `cove_ir::Inst::MakeDyn` carries a *depth* rather than a list of
+/// steps, because the value is what says whether a layer was an array or an
+/// option.
+pub(crate) fn coerce_inside(value: Value, mut each: impl FnMut(Value) -> Value) -> Value {
+    match value {
+        Value::Array(items) => Value::Array(items.iter().cloned().map(each).collect()),
+        Value::Enum(mut option) if &*option.type_name == "Option" => {
+            for item in &mut option.payload {
+                *item = each(item.clone());
+            }
+            Value::Enum(option)
+        }
+        other => other,
+    }
+}
+
+/// The value a method call dispatches from, when its receiver is a trait
+/// object, and nothing when it is not one.
+///
+/// A `dyn Trait` receiver is unwrapped to the concrete value it carries, and
+/// the implementation is found from *that* value's type. This is what makes
+/// the dispatch dynamic: the static type says only which trait the method
+/// must come from. Both backends ask it here — the interpreter of a place or
+/// of a temporary, the VM of the slot its receiver argument stands in — so
+/// neither can decide to dispatch from the wrapper instead.
+///
+/// `None` is not an error. The checker converts where a type is *written*
+/// and does not convert a lambda's inferred result, though it gives both the
+/// type `dyn Trait`, so a receiver whose static type is a trait object may
+/// hold the concrete value unwrapped — and it dispatches from itself, which
+/// is the same answer.
+pub(crate) fn dyn_receiver(value: &Value) -> Option<Value> {
+    match value {
+        Value::Dyn(object) => Some(object.value.clone()),
+        _ => None,
+    }
+}
+
+pub(crate) fn binary(
+    op: BinaryOp,
+    lhs: Value,
+    rhs: Value,
+    span: Span,
+) -> Result<Value, RuntimeError> {
     match op {
         BinaryOp::Eq | BinaryOp::Ne => {
             // Through the `dyn Trait` wrapper: a written `dyn Trait` is
@@ -3505,7 +3359,7 @@ fn binary(op: BinaryOp, lhs: Value, rhs: Value, span: Span) -> Result<Value, Run
     }
 }
 
-fn unary(op: UnaryOp, value: Value, span: Span) -> Result<Value, RuntimeError> {
+pub(crate) fn unary(op: UnaryOp, value: Value, span: Span) -> Result<Value, RuntimeError> {
     match (op, value) {
         (UnaryOp::Not, Value::Bool(value)) => Ok(Value::Bool(!value)),
         (UnaryOp::Neg, Value::Int(value)) => Ok(Value::Int(
@@ -3530,6 +3384,92 @@ fn unary(op: UnaryOp, value: Value, span: Span) -> Result<Value, RuntimeError> {
         .at(span)
         .with_rule("There are no implicit numeric, string, or boolean conversions.")),
     }
+}
+
+// ------------------------------------------------------------------ enums
+
+/// Builds one case of the enum `module` declares as `decl`.
+///
+/// A free function rather than a method because both backends build a
+/// declared enum's value and there is one answer to what that value is: ADR
+/// 0012 ranks the oracle above a backend, so the VM's `MakeEnum` calls this
+/// rather than restating it, and the two cannot report a missing case or a
+/// payload of the wrong length in different words.
+///
+/// Which errors those are is the whole of what this decides: a case the
+/// declaration does not write, and a payload whose length is not the one the
+/// case carries. `cove-sema` refuses both before either backend sees them,
+/// which is why neither message names a fix a checked program could need —
+/// they are the floor under a checker that stops proving it.
+pub(crate) fn enum_case(
+    program: &Program,
+    module: &str,
+    decl: &Arc<EnumDecl>,
+    case: &str,
+    payload: Vec<Value>,
+    span: Span,
+) -> Result<Value, RuntimeError> {
+    let Some(found) = decl.cases.iter().find(|c| c.name.node == case) else {
+        return Err(RuntimeError::new(format!(
+            "enum `{}` has no case or associated function `{case}`",
+            decl.name.node
+        ))
+        .at(span)
+        .with_rule(
+            "`Enum.name` is a case when the enum declares one, and otherwise an associated function declared in an `impl` block.",
+        )
+        .with_help(known_members(program, module, decl)));
+    };
+    if found.payload.len() != payload.len() {
+        return Err(RuntimeError::new(format!(
+            "case `{}.{case}` carries {} value(s), but {} were given",
+            decl.name.node,
+            found.payload.len(),
+            payload.len()
+        ))
+        .at(span));
+    }
+    Ok(Value::Enum(Box::new(EnumValue {
+        type_name: format!("{module}.{}", decl.name.node).into(),
+        case: case.into(),
+        payload,
+    })))
+}
+
+/// The cases and associated functions `Enum.name` could have meant.
+fn known_members(program: &Program, module: &str, decl: &Arc<EnumDecl>) -> String {
+    let cases: Vec<&str> = decl
+        .cases
+        .iter()
+        .map(|case| case.name.node.as_str())
+        .collect();
+    let mut help = format!("known cases: {}", cases.join(", "));
+    let functions: Vec<&str> = match program.modules.get(module) {
+        Some(resolved) => resolved
+            .methods
+            .keys()
+            .filter(|(type_name, _)| *type_name == decl.name.node)
+            .map(|(_, name)| name.as_str())
+            .collect(),
+        None => Vec::new(),
+    };
+    if !functions.is_empty() {
+        help.push_str(&format!("; known functions: {}", functions.join(", ")));
+    }
+    help
+}
+
+/// No arm of a `match` covered `value`.
+///
+/// Static exhaustiveness checking is future work; until then a `match` that
+/// covers no case fails rather than silently producing a value. Both backends
+/// say so in these words, because it is one rule and not two — the VM's
+/// `NoMatch` is this sentence given an instruction to be reached by.
+pub(crate) fn no_match(value: &Value, span: Span) -> RuntimeError {
+    RuntimeError::new(format!("no `match` arm covers `{value}`"))
+        .at(span)
+        .with_rule("`match` must cover every enum case.")
+        .with_help("add an arm for this case, or a `_` arm")
 }
 
 // -------------------------------------------------------------- arguments
@@ -3838,13 +3778,13 @@ fn mention_pattern(pattern: &Pattern, out: &mut BTreeSet<String>) {
 /// demands. A task that produces a value no boundary may carry is reported
 /// here rather than handing the value to a thread that cannot own it.
 fn run_task(
-    runtime: &Runtime,
+    runtime: Runtime,
     id: u64,
     cancellation: Cancellation,
     body: Transfer,
     span: Span,
 ) -> TaskOutcome {
-    let mut interpreter = Interpreter::for_task(runtime, id, cancellation.clone());
+    let mut interpreter = Interpreter::for_task(&runtime, id, cancellation.clone());
     interpreter.timings.push(Timing::start());
     let result = interpreter.call_value_slots(body.into_value(), Vec::new(), span);
     let timing = interpreter
@@ -3855,25 +3795,7 @@ fn run_task(
     // totals, and what it was holding stops counting against the run's memory
     // budget, before the value it produced crosses back.
     interpreter.retire_heap();
-    // A task stopped by its own cancellation did not run to completion, so it
-    // is traced as cancelled — by whoever waits for it, which is the only
-    // place that knows it stopped rather than finished — and not here.
-    if !(result.is_err() && cancellation.is_cancelled()) {
-        runtime.trace(TraceEvent::TaskCompleted {
-            id,
-            cpu: timing.cpu(),
-        });
-    }
-    let value = result?;
-    Transfer::of(&value).map_err(|found| {
-        RuntimeError::new(format!(
-            "this task produced {}, which cannot leave a task",
-            found.subject()
-        ))
-        .at(span)
-        .with_rule(crate::task::TASK_SAFETY_RULE)
-        .with_help(found.help("returning it from a task"))
-    })
+    task::finished(&runtime, id, &cancellation, span, result, timing.cpu())
 }
 
 /// What an entry that returned `Err(...)` said, for the run's terminal event.
@@ -3881,7 +3803,7 @@ fn run_task(
 /// The `Error` inside prints as its own message, which is the same text `cove
 /// run` reports and the same text the program would have printed, so a trace
 /// and a terminal say the same thing about the same failure.
-fn returned_error_message(value: &Value) -> Option<String> {
+pub(crate) fn returned_error_message(value: &Value) -> Option<String> {
     let Value::Enum(result) = value else {
         return None;
     };
@@ -4030,7 +3952,7 @@ impl Reentry for Callback<'_, '_> {
 ///
 /// The host that raised the flag reports what the bound was — `clock.timeout`
 /// says it timed out — so this message is only what the body itself can say.
-fn work_stopped(span: Span) -> RuntimeError {
+pub(crate) fn work_stopped(span: Span) -> RuntimeError {
     RuntimeError::new("this work was stopped before it finished")
         .at(span)
         .with_rule(
@@ -4039,17 +3961,13 @@ fn work_stopped(span: Span) -> RuntimeError {
 }
 
 /// A task that stopped because its own cancellation was requested.
-fn task_cancelled(span: Span) -> RuntimeError {
+///
+/// Both backends raise this one, at the same safepoint, so a task the
+/// program cancelled stops in the same words whichever ran it.
+pub(crate) fn task_cancelled(span: Span) -> RuntimeError {
     RuntimeError::new("this task was cancelled")
         .at(span)
         .with_rule("Leaving a task scope waits for or cancels its child tasks.")
-}
-
-/// The error a `Result` carries, when the value is one and it failed.
-fn failure_of(value: &Value) -> Option<Value> {
-    value
-        .err_payload()
-        .map(|payload| payload.first().cloned().unwrap_or(Value::Unit))
 }
 
 fn expect_no_arguments(what: &str, values: &[Value], span: Span) -> Result<(), RuntimeError> {
@@ -4061,16 +3979,6 @@ fn expect_no_arguments(what: &str, values: &[Value], span: Span) -> Result<(), R
         values.len()
     ))
     .at(span))
-}
-
-fn awaiting_a_cancelled_task(task: &Task, span: Span) -> RuntimeError {
-    RuntimeError::new(format!(
-        "{} was cancelled, so it has no value to await",
-        task.describe()
-    ))
-    .at(span)
-    .with_rule("Leaving a task scope waits for or cancels its child tasks, and a cancelled task never runs.")
-    .with_help("await the task before cancelling it, and before leaving its scope early")
 }
 
 // ------------------------------------------------------------ diagnostics
@@ -4088,13 +3996,64 @@ fn unsupported(what: &str, span: Span) -> RuntimeError {
 /// `crate::builtins` reports `Int.abs()` on the most negative `Int` through
 /// this too, rather than writing the same sentence out a second time: an
 /// overflow is one rule, so it is one message wherever it is reached from.
+/// The values `for` walks over `value`, in the order it walks them.
+///
+/// One function, so that both backends walk a collection the same way — which
+/// they did not. The VM lowered a sequence to a `length()`/`get(i)` index walk,
+/// and a `Map` answers neither: it walks as the `MapEntry` of each pair, and a
+/// `Set` in ascending order. A difference like that is not a difference of
+/// speed, so it is settled in one place rather than in each backend.
+pub(crate) fn items_of(value: Value, span: Span) -> Result<Vec<Value>, RuntimeError> {
+    // Iteration reads a snapshot of the elements; rejecting structural
+    // mutation during iteration is future work.
+    match value {
+        Value::Array(items) => Ok(items.iter().cloned().collect()),
+        Value::Vector(storage) => Ok(storage.elements.borrow().clone()),
+        // An empty or reversed range such as `3..<0` iterates zero times.
+        Value::Range {
+            start,
+            end,
+            inclusive_end,
+        } => Ok(RangeBounds::of(start, end, inclusive_end).items()),
+        // A `Set` is `BTreeSet<MapKey>`-backed, so it iterates its
+        // elements in ascending order, the same order `Display` shows.
+        Value::Set(items) => Ok(items.iter().map(|key| key.to_value()).collect()),
+        // A `Map` iterates in ascending key order, matching its
+        // `BTreeMap` storage. Each binding is a `MapEntry` carrying that
+        // iteration's `key` and `value`, the same shape `Map.of` accepts.
+        Value::Map(entries) => Ok(entries
+            .iter()
+            .map(|(key, value)| {
+                Value::Struct(Rc::new(StructValue {
+                    type_name: MAP_ENTRY.name.into(),
+                    fields: vec![
+                        ("key".into(), key.to_value()),
+                        ("value".into(), value.clone()),
+                    ],
+                    opaque: false,
+                }))
+            })
+            .collect()),
+        other => Err(RuntimeError::new(format!(
+            "`for` iterates an `Array`, a `Vector`, a `Range`, a `Set`, or a `Map`, but found `{}`",
+            other.type_name()
+        ))
+        .at(span)),
+    }
+}
+
 pub(crate) fn overflow(operation: &str, span: Span) -> RuntimeError {
     RuntimeError::new(format!("`Int` {operation} overflowed"))
         .at(span)
         .with_rule("Integer overflow is a broken invariant, not a wrapped result.")
 }
 
-fn divide_by_zero(operation: &str, span: Span) -> RuntimeError {
+/// `Int` division or remainder was asked for zero.
+///
+/// Reachable from outside for the reason [`overflow`] is: `crate::vm`'s typed
+/// integer operator raises what this operator raises, because dividing by
+/// zero is one rule of the language and not one rule per backend.
+pub(crate) fn divide_by_zero(operation: &str, span: Span) -> RuntimeError {
     RuntimeError::new(format!("`Int` {operation} by zero"))
         .at(span)
         .with_rule("Division and remainder by zero are broken invariants.")
@@ -4143,22 +4102,23 @@ fn identity_not_available(value: &Value, span: Span) -> RuntimeError {
 
 /// `value.snapshot()` where `value` is a closure, a task, a task scope, a
 /// host handle, or a struct or enum with no `impl Snapshot for Type`.
-fn no_snapshot_conformance(value: &Value, span: Span) -> RuntimeError {
-    RuntimeError::new(format!(
-        "`{}` does not implement `Snapshot`",
-        value.type_name()
-    ))
-    .at(span)
-    .with_rule(
-        "Closures, synchronized values, and Host resources do not implement `Snapshot` by default; a struct or enum conforms explicitly with `impl Snapshot for Type`.",
-    )
+/// The source text `span` covers, for a diagnostic that quotes the code it is
+/// about.
+///
+/// Both backends quote an assertion's condition, and both reach it through
+/// here, so neither can word it differently from the other.
+pub(crate) fn source_text(sources: &SourceMap, span: Span) -> &str {
+    let file = sources.get(span.file);
+    file.text
+        .get(span.start as usize..span.end as usize)
+        .unwrap_or("?")
 }
 
-fn no_field(type_name: &str, field: &str, span: Span) -> RuntimeError {
+pub(crate) fn no_field(type_name: &str, field: &str, span: Span) -> RuntimeError {
     RuntimeError::new(format!("`{type_name}` has no field `{field}`")).at(span)
 }
 
-fn not_a_struct(value: &Value, field: &str, span: Span) -> RuntimeError {
+pub(crate) fn not_a_struct(value: &Value, field: &str, span: Span) -> RuntimeError {
     RuntimeError::new(format!("`{}` has no field `{field}`", value.type_name()))
         .at(span)
         .with_rule("Only struct fields are places.")

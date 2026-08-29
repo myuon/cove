@@ -18,6 +18,7 @@ pub mod shared;
 pub mod task;
 pub mod trace;
 pub mod value;
+pub mod vm;
 
 pub use budget::{Budget, Cancellation, Limits, Stopped};
 pub use clock::{Clock, VirtualTime};
@@ -44,3 +45,4 @@ pub use trace::{
     TraceEvent, TraceHeader, TraceSink, ValueCapture, TRACE_FORMAT_VERSION,
 };
 pub use value::Value;
+pub use vm::Vm;

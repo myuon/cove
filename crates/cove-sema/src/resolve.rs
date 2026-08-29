@@ -55,6 +55,7 @@ use cove_syntax::ast::{
 };
 
 use crate::capability::{Capability, OpenCall};
+use crate::facts::Facts;
 use crate::package::Package;
 
 /// A declaration that belongs to a module, with the facts derived from it.
@@ -348,6 +349,16 @@ pub struct Program {
     /// between declarations is a derived fact in its own right: it is what
     /// answers which declarations a change can affect.
     pub call_graph: BTreeMap<Node, BTreeMap<Node, CallPrecision>>,
+    /// What the type checker worked out about each expression: its type, and
+    /// for a call to a declared method, which declaration it chose.
+    ///
+    /// Resolution settles no types, so this is filled by the check rather
+    /// than here: [`Compiler::compile`](crate::compile::Compiler::compile)
+    /// runs both halves and puts the second one's answers here, and a
+    /// program that was only resolved carries none. ADR 0019 is why it is
+    /// carried at all — a pass that re-derives a fact the checker already
+    /// settled is a pass that can disagree with it.
+    pub facts: Facts,
 }
 
 impl Program {

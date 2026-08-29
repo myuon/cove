@@ -76,6 +76,15 @@ fn generate_one(path: Option<&Path>, name: &str) -> Result<(), CliError> {
     ) {
         Ok(value) => expect_generated_source(&run.entry, value)?,
         Err(ExecuteError::Setup(message)) => return Err(CliError::Message(message)),
+        // `cove generate` runs under `RunFlags::none()`, which selects
+        // the interpreter, so nothing here is ever lowered and this arm
+        // is unreachable rather than merely unlikely.
+        Err(ExecuteError::Unsupported(why)) => {
+            return Err(CliError::Diagnostics {
+                items: vec![crate::unsupported_by_backend(&why)],
+                sources: sources.clone(),
+            })
+        }
         Err(ExecuteError::Runtime(error)) => {
             return Err(CliError::Diagnostics {
                 items: vec![runtime_failure(&program, module, entry, &error)],
@@ -124,6 +133,15 @@ fn generate_check(path: Option<&Path>) -> Result<(), CliError> {
         ) {
             Ok(value) => expect_generated_source(&run.entry, value)?,
             Err(ExecuteError::Setup(message)) => return Err(CliError::Message(message)),
+            // `cove generate` runs under `RunFlags::none()`, which selects
+            // the interpreter, so nothing here is ever lowered and this arm
+            // is unreachable rather than merely unlikely.
+            Err(ExecuteError::Unsupported(why)) => {
+                return Err(CliError::Diagnostics {
+                    items: vec![crate::unsupported_by_backend(&why)],
+                    sources: sources.clone(),
+                })
+            }
             Err(ExecuteError::Runtime(error)) => {
                 return Err(CliError::Diagnostics {
                     items: vec![runtime_failure(&program, module, entry, &error)],

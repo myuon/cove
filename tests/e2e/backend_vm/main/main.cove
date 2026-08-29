@@ -1,0 +1,20 @@
+use console.println
+
+/// A program the VM can run, run on the VM.
+///
+/// `--backend vm` is the flag ADR 0019 leaves the second backend behind until
+/// issue #111's gate is passed, and this is the case that says it works from
+/// the outside: the same source, the same host, and the same output as an
+/// interpreted run, reached through the dedicated VM instead of the tree
+/// walk. It is its own package because lowering covers a whole package at
+/// once, and the shared `tests/e2e` one holds constructs the VM cannot run.
+export fn main() -> Result<Unit, Error> {
+  var total = 0
+  var i = 1
+  while i <= 5 {
+    total += i * i
+    i += 1
+  }
+  println("the vm counted {total}")?
+  Ok(())
+}

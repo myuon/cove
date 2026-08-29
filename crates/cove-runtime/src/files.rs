@@ -102,9 +102,10 @@ struct WriterState {
 enum WriterForm {
     /// A buffered handle on the real file, which `close` flushes.
     Rooted(std::io::BufWriter<std::fs::File>),
-    /// The key the fake tree stores this file under, and the text written so
-    /// far.
-    InMemory { key: String, text: String },
+    /// The key the fake tree stores this file under. The text is the tree's
+    /// own entry and is appended to in place; a second copy here would have
+    /// to be written back on every line, which is quadratic in the file.
+    InMemory { key: String },
 }
 
 enum FileSource {
@@ -361,10 +362,7 @@ impl Files {
                 // is issued rather than when it is first written to, so the
                 // tree says what a freshly created real file says.
                 stored(files).insert(key.clone(), String::new());
-                WriterForm::InMemory {
-                    key,
-                    text: String::new(),
-                }
+                WriterForm::InMemory { key }
             }
         };
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
@@ -394,9 +392,26 @@ impl Files {
             (_, WriterForm::Rooted(file)) => file
                 .write_all(text.as_bytes())
                 .map_err(|e| format!("files: cannot write `{path}`: {e}")),
-            (FileSource::InMemory(files), WriterForm::InMemory { key, text: written }) => {
-                written.push_str(text);
-                stored(files).insert(key.clone(), written.clone());
+            (FileSource::InMemory(files), WriterForm::InMemory { key }) => {
+                // Appended to the tree's own entry rather than rewritten
+                // from a second copy the writer kept. Rewriting it was
+                // quadratic in what a program writes, and the fake is what
+                // every test and every embedding without a real filesystem
+                // writes through: `examples/cq`'s sample entry writes a
+                // hundred thousand lines into sixteen megabytes, so the
+                // copies came to some eight hundred gigabytes and the
+                // differential harness spent four minutes on that one case.
+                let mut tree = stored(files);
+                match tree.get_mut(key) {
+                    Some(file) => file.push_str(text),
+                    // The entry is gone, so something emptied the tree while
+                    // this writer was open. Writing it back is what the
+                    // rewrite did, and a writer that silently wrote nowhere
+                    // would be worse.
+                    None => {
+                        tree.insert(key.clone(), text.to_string());
+                    }
+                }
                 Ok(())
             }
             (FileSource::Rooted(_), WriterForm::InMemory { .. }) => {

@@ -96,10 +96,24 @@ pub enum Value {
     /// [`crate::host::ResourceHandle`].
     Resource(Arc<ResourceHandle>),
     /// A bound host operation such as `console.println`.
-    HostFn {
-        module: Rc<str>,
-        op: Rc<str>,
-    },
+    ///
+    /// The two names live behind one pointer, exactly as [`Value::Struct`]
+    /// and [`Value::Dyn`] hold their contents, and for the same kind of
+    /// reason: a variant is as wide as its widest member, and this one held
+    /// two fat pointers where every other variant holds at most one. Thirty-
+    /// two bytes for the pair set the width of every `Value` in the program,
+    /// including the `Int`s the two backends spend most of their time moving.
+    ///
+    /// The trade is an allocation for a value that is built when a host
+    /// operation is *used* as a value — `console.println` bound to a name or
+    /// passed as an argument — rather than called in place, which is rare,
+    /// against sixteen bytes off every value everywhere.
+    ///
+    /// An embedder constructing one writes `Value::HostFn(Rc::new(
+    /// HostFnValue { module, op }))` where it wrote `Value::HostFn { module,
+    /// op }`, and one matching on the variant binds an `&Rc<HostFnValue>`
+    /// whose fields have the names and the types they had.
+    HostFn(Rc<HostFnValue>),
     /// A type used as a value, such as `Vector` in `Vector.of(1, 2)`.
     Type(Rc<str>),
     /// An integer range. `..` includes `end` and `..<` excludes it.
@@ -247,6 +261,20 @@ pub struct DynValue {
     pub value: Value,
 }
 
+/// The two names a [`Value::HostFn`] is: the host module the operation
+/// belongs to, and the operation itself.
+///
+/// Neither is the operation's implementation. A bound host operation is a
+/// name the same way [`Value::HostModule`] is, and what it names is looked up
+/// through the registry at the call.
+#[derive(Clone, Debug)]
+pub struct HostFnValue {
+    /// The host module, such as `console`.
+    pub module: Rc<str>,
+    /// The operation's own name, such as `println`.
+    pub op: Rc<str>,
+}
+
 /// A closure captures its environment by value at creation time.
 #[derive(Debug)]
 pub struct Closure {
@@ -254,10 +282,42 @@ pub struct Closure {
     pub params: Vec<Param>,
     /// `None` for lambdas, which have no declaration of their own.
     pub decl: Option<Arc<FnDecl>>,
-    pub body: Arc<cove_syntax::ast::Block>,
+    pub body: ClosureBody,
     /// The module a closure body resolves names in.
     pub module: Rc<str>,
     pub captures: Vec<(Rc<str>, Value)>,
+}
+
+/// Where a closure's body is, which is the one thing about a closure the two
+/// backends do not agree on.
+///
+/// Everything else a closure is — what it captured, how many parameters it
+/// declares, which module it resolves names in, whether it is `async` — is
+/// the same fact whichever backend made it, and a host that receives one
+/// reads those the same way either way. The body is not: the interpreter
+/// walks a tree and the VM runs a lowered function, and neither can run the
+/// other's.
+///
+/// So this is an enum rather than a second `Value` variant. Issue #109 asks
+/// that the internal representation become *less* exposed to an embedder,
+/// not more, and a `Value::LoweredClosure` beside `Value::Closure` would make
+/// every host that already handles a callback handle two — while the
+/// difference between them is one field that no host reads. A host calls a
+/// closure back through [`crate::host::Reentry`], which hands it to the
+/// backend that made it, and that backend is the only party that has to know
+/// which of these it is.
+#[derive(Clone, Debug)]
+pub enum ClosureBody {
+    /// The syntax [`crate::interp::Interpreter`] walks.
+    Tree(Arc<cove_syntax::ast::Block>),
+    /// The lowered function [`crate::vm::Vm`] runs, addressed in the
+    /// [`cove_ir::Program`] that run was given.
+    ///
+    /// An id and nothing else, because the captures are beside it in
+    /// [`Closure::captures`] and the program is the VM's. A closure built by
+    /// one run cannot be called by another, which is true of the tree form
+    /// as well: both name something a particular run owns.
+    Lowered(cove_ir::FunctionId),
 }
 
 /// A value usable as a `Map` key or `Set` element.
@@ -656,8 +716,8 @@ impl Value {
                 left.module == right.module && left.type_name == right.type_name
             }
             (Value::HostModule(left), Value::HostModule(right)) => left == right,
-            (Value::HostFn { module: lm, op: lo }, Value::HostFn { module: rm, op: ro }) => {
-                lm == rm && lo == ro
+            (Value::HostFn(left), Value::HostFn(right)) => {
+                left.module == right.module && left.op == right.op
             }
             (Value::Type(left), Value::Type(right)) => left == right,
             // Everything else is one type per variant, so the discriminants
@@ -699,7 +759,9 @@ impl Value {
             Value::Dyn(d) => format!("dyn {}", d.trait_name),
             Value::HostModule(m) => format!("host module `{m}`"),
             Value::Resource(handle) => handle.qualified_type(),
-            Value::HostFn { module, op } => format!("host operation `{module}.{op}`"),
+            Value::HostFn(host) => {
+                format!("host operation `{}.{}`", host.module, host.op)
+            }
             Value::Type(t) => format!("type `{t}`"),
             Value::Range { .. } => "Range".into(),
             Value::TaskScope(_) => "TaskScope".into(),
@@ -894,7 +956,7 @@ impl fmt::Display for Value {
             // connections are told apart by the number the host issued and
             // by nothing else.
             Value::Resource(handle) => write!(f, "<{}>", handle),
-            Value::HostFn { module, op } => write!(f, "<host fn {module}.{op}>"),
+            Value::HostFn(host) => write!(f, "<host fn {}.{}>", host.module, host.op),
             Value::Type(t) => write!(f, "<type {t}>"),
             Value::Range {
                 start,

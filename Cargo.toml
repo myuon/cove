@@ -5,6 +5,7 @@ members = [
   "crates/cove-schema",
   "crates/cove-syntax",
   "crates/cove-sema",
+  "crates/cove-ir",
   "crates/cove-runtime",
   "crates/cove-cli",
   "crates/cove-bench",
@@ -21,4 +22,5 @@ cove-diag = { path = "crates/cove-diag" }
 cove-schema = { path = "crates/cove-schema" }
 cove-syntax = { path = "crates/cove-syntax" }
 cove-sema = { path = "crates/cove-sema" }
+cove-ir = { path = "crates/cove-ir" }
 cove-runtime = { path = "crates/cove-runtime" }
