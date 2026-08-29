@@ -352,10 +352,10 @@ code.
 A back edge asks one question on one schedule. A loop notices any stop — a
 bounded call's flag, the run's cancellation, its deadline, its fuel — at the
 first back edge at which `BACK_EDGE_FUEL` (64) of fuel has gathered since the
-last safepoint, so it stops within 63 fuel plus one turn rather than within one
-turn; a loop whose turn charges C fuel stops within ceil(64 / C) turns. One
-fact narrows what that gives up: the run's own cancellation was never on the
-eager schedule to begin with, because it is read inside `Budget::safepoint`,
+last safepoint, so it stops within 63 fuel plus one turn rather than within
+one turn; a loop whose turn charges C fuel stops within ceil(64 / C) turns.
+One fact narrows what that gives up: the run's own cancellation was never on
+the eager schedule to begin with, because it is read inside `Budget::safepoint`,
 which the gathered schedule already gated.
 
 The second fact that used to narrow it is gone. `self.stops` is pushed only by
@@ -366,11 +366,149 @@ there and the callback's own loops are what it has to stop — on this schedule,
 within 63 fuel plus one turn of noticing. That is the same bound the run's
 cancellation has always had, and it is now the bound a bounded call has too.
 
+**The 63 fuel applies to a loop that calls nothing.** A call is an
+unconditional safepoint, so a loop whose body reaches any Cove function — a
+method, a `lock`, an operator that lowered to a call — is asked at every turn
+and stops at the first one after the flag goes up. The gathered schedule is
+what a loop that computes and never calls gets, which is `benches/arith`'s
+shape and is why the constant exists at all.
+
+### What each stop mode may run past it, and what it may leave behind
+
+Everything above says where the checks are. What a program can be told is a
+different question, and it is [issue #120](https://github.com/myuon/cove/issues/120)'s:
+for each way a run can be stopped, how much work may still happen, and what a
+host or a surviving caller may see afterwards.
+`crates/cove-runtime/tests/responsiveness.rs` measures every figure below and
+asserts it as a maximum. Nothing here is a number a comment claims.
+
+**Fuel is a backend-specific work budget, and only its *effect* is strict.**
+A run that passes its limit stops at the safepoint that discovers it and never
+later; that much holds on both backends and is what ADR 0019 said fuel exists
+for. What does not hold is that the limit bounds the work, in two different
+directions at once. A run may overspend its limit — by one gathering plus one
+turn, measured at 5 fuel for `benches/arith`'s loop shape — because fuel is
+counted where it is charged and compared where it is spent. And a run may be
+charged for work it did not do, which is the other question:
+
+**A block is refused entire, and a prefix that would have fitted does not
+run.** The charge happens on arriving at a head, and the safepoint that may
+refuse happens after the charge, so a straight line whose whole extent exceeds
+what is left is stopped before its first instruction. Four hundred assignments
+in a row lower to one extent of 1,606 instructions; with a fuel limit of 803
+the VM stops, executes none of them, and reports `fuel_spent` of 1,606. The
+tree walk answers `Ok(400)` for the same program under the same limit, because
+its schedule is calls, back edges and `await`, and a straight line reaches none
+of the three — it charges nothing for that line at all. So neither backend
+stops in the middle of a straight line. One refuses the whole of it and the
+other never measures it, which is a difference in outcome and not only in
+`fuel_spent`. [ADR 0024](adr/0024-a-stop-is-a-bound-not-a-point.md) is where
+that is decided rather than discovered.
+
+**Every stop mode has a maximum, and they are not all the same maximum.**
+`G` below is one gathering — `BACK_EDGE_FUEL` on the VM, and one safepoint's
+`SAFEPOINT_FUEL` on the tree walk, which gathers nothing — and `T` is what one
+turn of the loop in question charges.
+
+| stop | measured at | maximum after it becomes true |
+| ---- | ----------- | ----------------------------- |
+| the run's cancellation | `Budget::safepoint`, and every Host call | `G + T` of Cove work; no Host effect |
+| a task's own cancellation | `Vm::safepoint`, and every Host call | `G + T` of Cove work; no Host effect |
+| a bounded call's flag | `Vm::safepoint`, and every Host call | `G + T` of Cove work; no Host effect |
+| the deadline, with no fuel limit | every safepoint, and every Host call | one safepoint; the VM stops before its first instruction |
+| the deadline, beside a fuel limit | every `DEADLINE_CHECK_INTERVAL`th safepoint | `64 × (G + T)` |
+| fuel | a safepoint, and nowhere else | `G + T` of overspend, and one refused extent |
+| `max_host_calls` | every Host call, before it | nothing: the call that would pass it does not happen |
+| `max_call_depth` | every call | nothing: the call that would pass it does not happen |
+| the concurrency limit | every `spawn`, before the thread | nothing: the thread is not taken |
+
+The deadline's two rows are the same code reading two schedules.
+`Budget::safepoint` reads the clock at every safepoint when no fuel limit is
+set, because then nothing else bounds the run; with one set it reads every
+`DEADLINE_CHECK_INTERVAL`th, because `Instant::now` is a system call and fuel
+is already bounding the loop. Measured, that is 0 fuel and 4,529 fuel for the
+same program on the VM, and 10 and 640 on the tree walk.
+
+**A Host call is not a safepoint, and it is not meant to become one.** What
+stands in front of it is `Budget::charge_host_call`, which refuses a call from
+a run that was cancelled, past its deadline, or over `max_host_calls`, and
+`crate::interp::stopped_here`, which refuses one from a cancelled task or from
+inside a bounded call that has been asked to stop. Between them that is every
+stop that is a *flag*. Fuel is not one, and is the one thing a Host call does
+not ask about, because a flag costs an atomic load and a budget has to be
+measured — measuring is exactly what charging by the block exists to stop
+doing, and putting it back at every Host call would put it back on
+`benches/hostheavy`'s path for a bound that `max_host_calls` already states
+exactly. So the honest sentence is: **`max_host_calls` bounds effects, fuel
+bounds work, and the deadline bounds time**, and each is checked where it can
+be.
+
+That has a consequence worth stating plainly rather than leaving to be
+discovered. Every Host call in one straight line is made before the charge
+that line incurred is measured. Forty `console.println` calls with no branch
+between them all happen under a fuel limit of one, on both backends, and the
+run stops at the return. The bound is `SAFEPOINT_INTERVAL` of standing fuel
+plus one extent — finite, known before the run, and much larger than zero.
+
+**What a stop may leave behind.** Three things, and the third is the one a
+program can be written around.
+
+*Host effects already performed stay performed.* Nothing is undone, and the
+Host API schema's `Effect::IrreversibleWrite` is the field that says which
+ones could not be. What the contract promises is only that no *further* effect
+follows a raised flag, which is measured at zero on both backends for a
+cancelled run, a cancelled task, and a stopped bounded call.
+
+*No value is half written.* A stop is taken at a safepoint, and a safepoint
+stands between two instructions, so there is no torn struct and no half-built
+array. Cove's value semantics then decide the rest: a stopped call's writes to
+its own locals go with its frame, and what a surviving caller sees is only
+writes to storage they share — a `Shared` cell, a `Vector` the caller also
+holds, a file. Those are whole turns of a loop. A counter in a `Shared` cell,
+incremented once a turn in a body stopped from turn three, comes back holding
+four to six on both backends: some turns after the flag, never a fraction of
+one.
+
+*A stop is at an expression, not at a statement.* A call is a safepoint, so
+`f(a) + g(b)` can stop between the two calls, with `f`'s effects made, `g`'s
+not made, and the addition never performed. There is no statement-level
+atomicity in either backend and none is claimed.
+
+**Pending fuel is never lost.** The VM charges a block at a time and spends
+what it has charged at a safepoint, so every exit that reaches no further
+safepoint is an exit its last charge could go out with. Two did.
+`Budget::safepoint` read the cancellation flag before adding the fuel it had
+been handed, and returned without it; and a run or a task that ended by
+raising, by being stopped, or by having its callback abandoned reached no
+safepoint at all, so `Vm::spend_pending_fuel` now runs where a run ends and
+where a task's thread ends. The invariant that catches both is that a VM run's
+`fuel_spent` is never below the instructions it charged for, and it is
+asserted over the return path, the `?` path, a raised error, a cancelled run,
+an exhausted budget, an abandoned re-entrant callback, and a cancelled task's
+own thread. Before the fix a run that divided by zero after fifty-six
+instructions reported nought.
+
+**Both backends are held to the same bound and not to the same point.** They
+stop at different source operations for the same program under the same
+limits, they spend different fuel for the same work, and under a fuel limit
+one can stop where the other answers. What they are held to is the shape of
+the table above: a maximum in each backend's own units, the same stop reported
+as the same `RunOutcome` in the same words, and no Host effect after a raised
+flag on either. ADR 0024 decides that, and
+`crates/cove-runtime/tests/responsiveness.rs` runs every case on both.
+
 ### Host calls and reentry
 
 A Host call goes through the same `HostRegistry` the interpreter uses, so the
 grant check, the budget charge, the trace event, and the wait accounting are
-the same code and cannot drift. Reentry — a host running a Cove closure, and
+the same code and cannot drift. One thing the registry cannot do is asked
+either side of it, in `crate::interp::stopped_here`, which both backends call
+at the same point: a `Budget` is shared by every task of a run, so it holds the
+run's cancellation and not this task's, and not the flag of a bounded call this
+thread is inside. Those two are read here, before the call is dispatched, so
+that a cancelled task and a stopped `clock.timeout` body perform no further
+effect. "What each stop mode may run past it" is where that bound is stated
+and why fuel is not on the same schedule. Reentry — a host running a Cove closure, and
 the same thing a higher-order builtin such as `Result.mapError` does — enters
 the dispatch loop again rather than jumping inside the one that is running,
 because the instruction that made the host call has not finished: its operands
@@ -1126,6 +1264,76 @@ instructions, and block charging removed bookkeeping that was never about the
 instruction it stood in front of. Each benchmark responded to the ones it was
 shaped to respond to, and to no others.
 
+### What the batching itself costs
+
+The table above says what block charging *bought*. It does not say what it
+costs, and issue #120 asked for that half too: the `block_fuel` table's space,
+and what a program pays for a charge that did not cover enough instructions to
+be worth making. Both are measured here, on the same machine as the ablation
+study below and in the same way — `cove run <bench> --backend vm --stats`,
+fifteen times, the median of `execute=`. Three brackets of the shipped build
+agreed to 0.18% on `arith` and 0.37% on `field`, so the machine was quiet.
+
+The comparison is against per-instruction charging restored: the whole
+`block_fuel` mechanism removed — the table reads, the charge at every arrival,
+the `blocks` local — and `self.instructions += 1; self.fuel += 1;` and the
+interval compare put back at the top of the dispatch loop. Both builds run the
+same instruction counts, which is the control that says the ablation moved a
+schedule rather than the work.
+
+| bench     | block charging | per-instruction | block charging is |
+| --------- | -------------: | --------------: | ----------------: |
+| `arith`   |        87.2 ms |        102.3 ms |      14.8% faster |
+| `field`   |       447.5 ms |        470.8 ms |       5.0% faster |
+| `call`    |       280.9 ms |        293.2 ms |       4.2% faster |
+| `pure`    |        2.82 ms |         2.86 ms |       1.4% faster |
+| `branchy` |       249.6 ms |        293.6 ms |      15.0% faster |
+
+`branchy` is not in `benches/`. It is a loop of eight one-statement `if`s
+written for this measurement, to be the case block charging should be worst
+at, and it is not one: it is where block charging wins by the most after
+`arith`.
+
+**Nothing measured pays for a charge it did not need**, and the reason is
+visible in the compression. Counting the charges an instrumented build makes
+against the instructions it executes gives the average extent each charge
+covered:
+
+| bench      |    charges |  instructions | instructions per charge |
+| ---------- | ---------: | ------------: | ----------------------: |
+| `pure`     |     76,621 |       229,862 |                     3.0 |
+| `call`     | 10,000,003 |    37,142,877 |                     3.7 |
+| `method`   | 14,000,005 |    59,428,598 |                     4.2 |
+| `arith`    |  6,000,003 |    31,142,877 |                     5.2 |
+| `branchy`  | 20,000,002 |   114,000,014 |                     5.7 |
+| `hostheavy`|      6,003 |        38,019 |                     6.3 |
+| `chars`    |  6,048,003 |    41,856,022 |                     6.9 |
+| `field`    |  6,000,003 |    47,428,595 |                     7.9 |
+| `arrayget` |  4,000,003 |    42,000,027 |                    10.5 |
+
+A charge is one bounds-checked load from a second array, one add and one
+compare, against the add and compare per instruction it replaces, so the
+crossover is near one instruction per charge. The lowest measured is three,
+and it is `pure` and `call` rather than `branchy` — what shortens an extent is
+a *call*, which ends a line at both ends, and not a branch. `pure`'s 1.4% on a
+2.8 ms run is inside its own 3.8% spread and is the honest reading of "free".
+
+**The space is one `u32` per instruction**, which `lower::validate` enforces
+from both sides, and `size_of::<Inst>()` is 16, so the table is 25% on top of
+the code and nothing else. Every benchmark in `benches/` lowers to 318
+instructions between them, or 1,272 bytes of table. The largest single program
+in this repository, `examples/callbacks`, is 333 instructions in 19 functions:
+5,328 bytes of code and 1,332 bytes of table. A program would have to be four
+hundred times the size of anything here before the table reached a megabyte.
+
+Two of the four figures in this section are the record's rather than mine, and
+they are the two the ablation study already had: removing per-instruction fuel
+and its interval compare from the pre-batching build measured +7.1% on `arith`
+and +3.5% on `field`, and block charging as built recovered 11.4% and 6.9%
+against the commit before it. Everything above — the five-benchmark
+comparison, the charge compression, and the space — was measured for issue
+#120.
+
 ## What the dispatch loop is made of
 
 Each row below was removed *alone* from commit `ba86c24`, with the rest left as
@@ -1440,7 +1648,8 @@ of one of them.
 ## What is settled and what is open
 
 **Settled by measurement.** Typed scalar slots, the calling convention,
-per-block charging, the fused typed field read, and `Value` at 24 bytes. Every
+per-block charging in both directions — what it bought and what it costs — the
+fused typed field read, and `Value` at 24 bytes. Every
 one of those was taken because a number said to, and two of them — the fused
 field read and the 24-byte `Value` — were named as open in an earlier section
 of this document before they were.
@@ -1454,6 +1663,16 @@ and results, the task identities, the ending — agrees exactly. What had to be
 normalized away is wall time, where a collection fell, what it found live, and
 the order two threads reached one sink, and each of those is the backend's or
 the scheduler's rather than the program's.
+
+**Settled by writing the contract down.** What each way of stopping a run may
+let it do first. It was a claim that the batching was not observable, which was
+too strong; it is now a maximum per stop mode, measured by
+`crates/cove-runtime/tests/responsiveness.rs` and decided, as far as the two
+backends' agreement goes, by
+[ADR 0024](adr/0024-a-stop-is-a-bound-not-a-point.md). Writing it down found
+three things wrong: a host polling from inside a cancelled task was told the
+task was fine, a Host effect could follow a raised stop flag, and a stopped run
+lost the fuel it had gathered since its last safepoint.
 
 **Settled by semantics.** The 16-byte floor. It follows from `Int` being a full
 64 bits with overflow a broken invariant, and no measurement can move it,
