@@ -46,6 +46,28 @@
 //! — `cove test`, for instance. Such a case needs no `[run.<case>]` table,
 //! since nothing looks one up.
 //!
+//! # Both backends, for a case that names neither
+//!
+//! ADR 0022 makes the VM what `cove run` runs a program on, so a case
+//! invoked the default way is a VM run and the golden files below are the
+//! VM's answer. That would have quietly retired this suite's coverage of the
+//! interpreter — the same programs, the same real binary, the same real
+//! hosts — so every such case is run a second time with `--backend ast` and
+//! the two runs must agree on stdout, on stderr, and on the exit status.
+//!
+//! This is not the differential harness a second time.
+//! `crates/cove-cli/tests/differential.rs` compares the two backends in
+//! process, against fake hosts, on the value and the console and the trace.
+//! What is compared here is what a person at a terminal sees: the rendered
+//! diagnostic, the exit code, and the output of a real host. Those are
+//! rendered by code neither backend owns, which is exactly why an assertion
+//! that they do not move is cheap to hold and worth holding.
+//!
+//! A case with a `command` file names its own invocation and is run once.
+//! That is how a case that is *about* one backend — `backend_vm`,
+//! `backend_unsupported`, `backend_ast` — says so, and it is the only way to
+//! opt out.
+//!
 //! The rules this harness enforces:
 //!
 //! - the exit status is the one `expected.status` names, for a case that has
@@ -120,6 +142,10 @@ struct Case {
     /// The `cove` subcommand and flags to run, defaulting to
     /// `run <name>`.
     command: Vec<String>,
+    /// Whether a `command` file chose that invocation, which is also what
+    /// excludes the case from the both-backends comparison: a case that
+    /// names its own flags has said which backend it is about.
+    names_its_own_command: bool,
     /// Extra arguments passed after the command.
     args: Vec<String>,
     /// Variables to set, or to remove when the value is `None`.
@@ -127,6 +153,7 @@ struct Case {
 }
 
 /// What one run of the `cove` binary produced.
+#[derive(PartialEq, Eq)]
 struct Actual {
     success: bool,
     /// The exit status, when the process exited rather than being signalled.
@@ -135,6 +162,34 @@ struct Actual {
     stdout: String,
     /// Already normalised.
     stderr: String,
+}
+
+impl Actual {
+    /// How this run and `oracle` differ, or `None` when they do not.
+    ///
+    /// Everything a case is judged by is compared, and nothing else exists
+    /// to compare: two runs of the same program through the same binary
+    /// differ in what they wrote, how they ended, or not at all.
+    fn differs_from(&self, oracle: &Actual) -> Option<String> {
+        if self == oracle {
+            return None;
+        }
+        let mut report = String::new();
+        if self.stdout != oracle.stdout {
+            let _ = write!(report, "stdout\n{}", diff(&oracle.stdout, &self.stdout));
+        }
+        if self.stderr != oracle.stderr {
+            let _ = write!(report, "stderr\n{}", diff(&oracle.stderr, &self.stderr));
+        }
+        if self.code != oracle.code || self.success != oracle.success {
+            let _ = writeln!(
+                report,
+                "  the interpreter exited with {:?} and the VM with {:?}",
+                oracle.code, self.code
+            );
+        }
+        Some(report)
+    }
 }
 
 #[test]
@@ -186,6 +241,19 @@ fn every_case_matches_its_golden_files() {
             case.write_goldens(&actual);
         }
         case.check(&actual, &mut failures);
+        // The golden files above are the default backend's answer, which is
+        // the VM's since ADR 0022. This is the interpreter's, and the two
+        // must be one answer: the oracle is what a disagreement is decided
+        // by, so a difference here is reported as the VM's fault whichever
+        // side of it looks stranger.
+        if case.compares_both_backends() {
+            let oracle = case.run_with(&root, &["--backend", "ast"]);
+            if let Some(difference) = actual.differs_from(&oracle) {
+                failures.push(format!(
+                    "case `{name}`: the VM and the interpreter do not agree\n{difference}"
+                ));
+            }
+        }
     }
 
     for name in &shared_declared {
@@ -221,14 +289,14 @@ impl Case {
         let args = read_optional(&dir.join("args"))
             .map(|text| text.lines().map(str::to_string).collect())
             .unwrap_or_default();
-        let command = read_optional(&dir.join("command"))
-            .map(|text| {
-                text.lines()
-                    .filter(|line| !line.trim().is_empty())
-                    .map(|line| line.trim().to_string())
-                    .collect()
-            })
-            .unwrap_or_else(|| vec!["run".to_string(), name.to_string()]);
+        let named = read_optional(&dir.join("command")).map(|text| {
+            text.lines()
+                .filter(|line| !line.trim().is_empty())
+                .map(|line| line.trim().to_string())
+                .collect::<Vec<String>>()
+        });
+        let names_its_own_command = named.is_some();
+        let command = named.unwrap_or_else(|| vec!["run".to_string(), name.to_string()]);
         let env = read_optional(&dir.join("env"))
             .map(|text| {
                 text.lines()
@@ -245,6 +313,7 @@ impl Case {
             dir,
             run_dir,
             command,
+            names_its_own_command,
             args,
             env,
         }
@@ -256,13 +325,27 @@ impl Case {
         self.command == ["run".to_string(), self.name.clone()]
     }
 
+    /// Whether this case is compared across both backends: one that named
+    /// neither a command of its own nor, therefore, a backend.
+    fn compares_both_backends(&self) -> bool {
+        !self.names_its_own_command && self.runs_an_entry()
+    }
+
     /// Runs the real `cove` binary, from `run_dir`, with this case's command.
     /// `root` is the shared
     /// `tests/e2e` directory, whose absolute path is normalised out of
     /// stderr even for an own-package case nested below it.
     fn run(&self, root: &Path) -> Actual {
+        self.run_with(root, &[])
+    }
+
+    /// [`Case::run`], with `extra` flags appended to the command before the
+    /// program's own arguments — which is where a `cove run` flag goes, and
+    /// the only thing the both-backends comparison needs to vary.
+    fn run_with(&self, root: &Path, extra: &[&str]) -> Actual {
         let mut command = Command::new(env!("CARGO_BIN_EXE_cove"));
         command.current_dir(&self.run_dir).args(&self.command);
+        command.args(extra);
         command.args(&self.args);
         for (key, value) in &self.env {
             match value {

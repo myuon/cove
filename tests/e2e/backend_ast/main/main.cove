@@ -1,0 +1,19 @@
+use console.println
+
+/// The escape hatch, exercised: the same program `backend_unsupported`
+/// refuses, run on the interpreter and finishing.
+///
+/// ADR 0022 made the VM what runs a program, and named the cost — a Cove
+/// program that ran before it and does not run after it unless its author
+/// passes `--backend ast`. `backend_unsupported` pins the refusal; this
+/// pins that the flag the refusal names actually runs the thing. A help
+/// message that pointed at a flag which did not work would be worse than no
+/// help at all, and nothing else in the suite would notice.
+export fn main() -> Result<Unit, Error> {
+  println("this line runs on the interpreter")?
+  fn double(n: Int) -> Int {
+    n * 2
+  }
+  println("doubled {double(21)}")?
+  Ok(())
+}

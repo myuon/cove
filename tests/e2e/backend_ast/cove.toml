@@ -1,0 +1,3 @@
+[run.backend_ast]
+entry = "main.main"
+allow = ["console"]
