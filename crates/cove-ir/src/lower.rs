@@ -9373,11 +9373,11 @@ mod tests {
             span,
         };
         let written = vec![arg("b"), arg("a")];
-        let why =
-            match arguments_in_order(&["a", "b"], Args::new(&written, None), "g", false, span) {
-                Ok(_) => panic!("labels out of declaration order are refused"),
-                Err(why) => why,
-            };
+        let why = match arguments_in_order(&["a", "b"], Args::new(&written, None), "g", false, span)
+        {
+            Ok(_) => panic!("labels out of declaration order are refused"),
+            Err(why) => why,
+        };
         assert_eq!(
             why.what,
             "a call to `g` whose arguments do not stand in declaration order"
