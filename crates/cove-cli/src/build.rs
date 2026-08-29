@@ -25,7 +25,7 @@ use cove_diag::SourceMap;
 use cove_sema::package::Package;
 use cove_sema::resolve::Program;
 
-use crate::{flag_value, parse_duration_flag, CliError};
+use crate::{flag_value, parse_duration_flag, Backend, CliError};
 
 /// Where a build's generated crates live, under the package's own `target/`
 /// so that a second build of the same run is incremental.
@@ -39,9 +39,10 @@ usage:
 
 `cove build` writes a native executable that embeds the package's sources and
 the Cove runtime, and that runs `[run.<name>]`'s entry when it is started. It
-is not a code generator: the binary interprets the same program `cove run`
-does, so building changes how a program is delivered, not how fast it runs.
-See docs/adr/0009-cove-build.md.
+is not a code generator: the binary runs the same program `cove run` does,
+on the same backend, so building changes how a program is delivered rather
+than how fast it runs. See docs/adr/0009-cove-build.md and, for which backend
+that is, docs/adr/0022-the-vm-is-the-default-backend.md.
 
 The binary needs no toolchain, no `cove` on the path, and no source tree. Its
 entry, its granted capabilities, and its limits are the ones `[run.<name>]`
@@ -73,6 +74,15 @@ flags:
                         `documents/` there for the `documents` host
   --allow-exec <path>   an absolute path `process.run` may start; repeat to
                         allow more, and omit to allow none
+  --backend <ast|vm>    which backend the binary runs on: `vm`, the dedicated
+                        VM and the default, or `ast`, the tree-walking
+                        interpreter
+
+`--backend` is baked in like everything else, because a built binary honours
+no flag of its own. A program the VM cannot run is refused here, at build
+time, rather than by the binary when somebody starts it: the refusal names a
+construct in source, and the person holding the source is the one who can do
+something about it. Rebuild with `--backend ast` to get a binary that runs it.
 
 Each flag overrides the `[run.<name>]` table for this build only. There is no
 `--stats` and no `--trace`: those are flags of the command that runs a
@@ -99,6 +109,12 @@ pub(crate) fn cmd_build(args: &[String]) -> Result<(), CliError> {
     // not check is not built.
     let (sources, package, program) = crate::load(None)?;
     let plan = plan(&sources, &package, &program, &flags)?;
+    if let Err(why) = refuse_what_the_backend_cannot_run(&plan, &program) {
+        return Err(CliError::Diagnostics {
+            items: vec![why.to_diagnostic()],
+            sources: std::sync::Arc::new(sources),
+        });
+    }
 
     emit(&plan)?;
     let artifact = compile(&plan)?;
@@ -117,6 +133,7 @@ struct BuildFlags {
     max_tasks: Option<u64>,
     files_root: Option<PathBuf>,
     allow_exec: Vec<PathBuf>,
+    backend: Backend,
 }
 
 /// Parses `cove build`'s arguments.
@@ -135,6 +152,7 @@ fn parse_build_flags(args: &[String]) -> Result<BuildFlags, CliError> {
         max_tasks: None,
         files_root: None,
         allow_exec: Vec::new(),
+        backend: Backend::default_for_a_run(),
     };
     let mut i = 0;
     while i < args.len() {
@@ -174,6 +192,14 @@ fn parse_build_flags(args: &[String]) -> Result<BuildFlags, CliError> {
             "--files-root" => {
                 let value = flag_value(args, &mut i, "--files-root")?;
                 flags.files_root = Some(absolute(Path::new(&value))?);
+            }
+            "--backend" => {
+                let value = flag_value(args, &mut i, "--backend")?;
+                flags.backend = Backend::parse(&value).ok_or_else(|| {
+                    CliError::Message(format!(
+                        "`--backend` must be `ast` or `vm`, found `{value}`"
+                    ))
+                })?;
             }
             "--allow-exec" => {
                 let value = flag_value(args, &mut i, "--allow-exec")?;
@@ -245,6 +271,8 @@ pub(crate) struct BuildPlan {
     /// Cargo writes before it is copied to `out`.
     pub(crate) artifact: String,
     pub(crate) sources: Vec<EmbeddedFile>,
+    /// The backend the binary is built to run on.
+    pub(crate) backend: Backend,
 }
 
 /// Works out what to build, or says why it cannot.
@@ -316,7 +344,36 @@ fn plan(
         target_dir: package.root.join(SCRATCH).join("target"),
         artifact: artifact_name(name),
         sources: embedded,
+        backend: flags.backend,
     })
+}
+
+/// Lowers what the binary will lower, so that a binary that could not start
+/// is never written.
+///
+/// ADR 0009's rule is that "a built binary must not defer an error to
+/// whoever runs it", which is why `cove build` checks the package rather
+/// than leaving it to the binary. A refused lowering is the same kind of
+/// error and gets the same treatment: it names a construct in source, and
+/// whoever holds the source is who can act on it.
+///
+/// The IR is thrown away. ADR 0019 leaves it unserialized, so the binary
+/// lowers again when it starts; what this buys is the moment the refusal
+/// arrives, not the work.
+fn refuse_what_the_backend_cannot_run(
+    plan: &BuildPlan,
+    program: &Program,
+) -> Result<(), cove_ir::Unsupported> {
+    if plan.backend != Backend::Vm {
+        return Ok(());
+    }
+    // `plan` was built from an entry `lookup_entry` already validated, so
+    // the split and the lookup below both succeed for anything that got
+    // here.
+    let Some((module, entry)) = plan.entry.rsplit_once('.') else {
+        return Ok(());
+    };
+    cove_ir::lower::lower_entry(program, module, entry).map(|_| ())
 }
 
 /// The file name an executable for `name` gets, which is `name` itself
@@ -474,7 +531,7 @@ fn generated_main(plan: &BuildPlan) -> String {
 //! table below is the one they were built for. Nothing here reads a
 //! `cove.toml`: this binary's authority was decided when it was made.
 
-use cove_runtime::embed::{{Embedded, EmbeddedRun, EmbeddedSource}};
+use cove_runtime::embed::{{Embedded, EmbeddedBackend, EmbeddedRun, EmbeddedSource}};
 
 /// Every `.cove` file of the package, keyed by its path relative to the
 /// package root, which is what names its module.
@@ -496,6 +553,7 @@ fn main() -> std::process::ExitCode {{
             files_root: {files_root},
             allow_exec: &[{allow_exec}],
         }},
+        backend: EmbeddedBackend::{backend},
     }}
     .main()
 }}
@@ -519,6 +577,10 @@ fn main() -> std::process::ExitCode {{
                 .iter()
                 .map(|p| p.to_str().unwrap_or_default())
         ),
+        backend = match plan.backend {
+            Backend::Ast => "Ast",
+            Backend::Vm => "Vm",
+        },
     )
 }
 
@@ -639,10 +701,12 @@ pub(crate) fn build_summary(plan: &BuildPlan) -> String {
     }
     format!(
         "built `{name}` from {files} file(s) into `{out}`\n  \
-         entry:  {entry}\n  \
-         grants: {grants}\n  \
-         limits: {limits}",
+         entry:   {entry}\n  \
+         backend: {backend}\n  \
+         grants:  {grants}\n  \
+         limits:  {limits}",
         name = plan.name,
+        backend = plan.backend,
         files = plan.sources.len(),
         out = plan.out.display(),
         entry = plan.entry,
@@ -692,6 +756,7 @@ export fn main(args: Array<String>) -> Result<Unit, Error> {
             max_tasks: None,
             files_root: None,
             allow_exec: Vec::new(),
+            backend: Backend::default_for_a_run(),
         }
     }
 
@@ -884,9 +949,10 @@ export fn main() -> Result<Unit, Error> {
             summary.starts_with("built `app` from 1 file(s) into `"),
             "{summary}"
         );
-        assert!(summary.contains("entry:  app.main"), "{summary}");
-        assert!(summary.contains("grants: console"), "{summary}");
-        assert!(summary.contains("limits: fuel 10"), "{summary}");
+        assert!(summary.contains("entry:   app.main"), "{summary}");
+        assert!(summary.contains("backend: vm"), "{summary}");
+        assert!(summary.contains("grants:  console"), "{summary}");
+        assert!(summary.contains("limits:  fuel 10"), "{summary}");
     }
 
     #[test]
@@ -895,8 +961,55 @@ export fn main() -> Result<Unit, Error> {
         fixture(dir.path(), "[run.app]\nentry = \"app.main\"\n");
         let plan = plan_ok(dir.path(), &flags("app"));
         let summary = build_summary(&plan);
-        assert!(summary.contains("grants: (none)"), "{summary}");
-        assert!(summary.contains("limits: (none)"), "{summary}");
+        assert!(summary.contains("grants:  (none)"), "{summary}");
+        assert!(summary.contains("limits:  (none)"), "{summary}");
+    }
+
+    /// The backend the binary was built for is part of the summary, because
+    /// it is part of what was baked in: a person handed two binaries built
+    /// from the same run table has no other way to tell them apart.
+    #[test]
+    fn the_summary_names_the_backend_the_binary_was_built_for() {
+        let dir = TempDir::new("build-summary-backend");
+        fixture(dir.path(), "[run.app]\nentry = \"app.main\"\n");
+        let mut chosen = flags("app");
+        chosen.backend = Backend::Ast;
+        let summary = build_summary(&plan_ok(dir.path(), &chosen));
+        assert!(summary.contains("backend: ast"), "{summary}");
+    }
+
+    /// A binary that could not start is never written: `cove build` lowers
+    /// what the binary will lower and reports the refusal to whoever holds
+    /// the source, which is the only person who can act on it.
+    #[test]
+    fn a_construct_the_vm_cannot_run_is_refused_at_build_time() {
+        let dir = TempDir::new("build-unsupported");
+        write(dir.path(), "cove.toml", "[run.app]\nentry = \"app.main\"\n");
+        write(
+            dir.path(),
+            "app/main.cove",
+            "\
+/// Runs.
+export fn main() -> Result<Unit, Error> {
+  fn double(n: Int) -> Int {
+    n * 2
+  }
+  assertEqual(double(21), 42)?
+  Ok(())
+}
+",
+        );
+        let plan = plan_ok(dir.path(), &flags("app"));
+        let (_, _, program) = crate::fixture::check_fixture(dir.path());
+        let why = refuse_what_the_backend_cannot_run(&plan, &program)
+            .expect_err("a nested function has no lowering");
+        assert_eq!(why.what, "a function declared inside a function body");
+
+        // And the escape hatch actually escapes.
+        let mut on_the_oracle = flags("app");
+        on_the_oracle.backend = Backend::Ast;
+        let plan = plan_ok(dir.path(), &on_the_oracle);
+        assert!(refuse_what_the_backend_cannot_run(&plan, &program).is_ok());
     }
 
     #[test]

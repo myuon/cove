@@ -68,8 +68,8 @@ one is enough to deny.
 
 `cove build` writes a native executable that embeds the program and the
 runtime, so what it produces runs with no toolchain, no `cove` on the path,
-and no source tree. It is not a code generator: the binary interprets the
-same program `cove run` does. Its entry, its granted capabilities, and its
+and no source tree. It is not a code generator: the binary runs the same
+program `cove run` does, on the same backend `cove build` chose for it. Its entry, its granted capabilities, and its
 limits are the ones `[run.<name>]` recorded when it was built, and a
 `cove.toml` placed beside it grants it nothing. Building one needs `cargo`
 and this toolchain's own source, because an executable has to link the

@@ -13,7 +13,7 @@
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::OnceLock;
+use std::sync::{Mutex, OnceLock};
 
 /// A package in this repository, resolved so that the child process reports
 /// the same absolute paths this suite passes it.
@@ -29,11 +29,30 @@ fn package(relative: &str) -> PathBuf {
 /// binary, and answers with the executable it wrote and what the build
 /// reported.
 fn build(relative: &str, name: &str) -> (PathBuf, String) {
+    build_on(relative, name, &[], name)
+}
+
+/// [`build`], with `extra` flags and a suffix of its own for the executable,
+/// so that two builds of the same run do not overwrite each other.
+fn build_on(relative: &str, name: &str, extra: &[&str], suffix: &str) -> (PathBuf, String) {
+    // One build at a time. The generated crate lives at
+    // `target/cove-build/<name>/`, keyed by the run rather than by anything
+    // this suite chooses, so two builds of one run — the same program on the
+    // two backends — write the same directory and `emit` clears it. Cargo's
+    // own lock does not help: the race is in the crate, before Cargo sees
+    // it.
+    static ONE_AT_A_TIME: Mutex<()> = Mutex::new(());
+    let _building = ONE_AT_A_TIME
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+
     let root = package(relative);
-    let out = root.join(format!("target/{name}-e2e"));
+    let out = root.join(format!("target/{suffix}-e2e"));
     let output = Command::new(env!("CARGO_BIN_EXE_cove"))
         .current_dir(&root)
-        .args(["build", name, "--out"])
+        .args(["build", name])
+        .args(extra)
+        .arg("--out")
         .arg(&out)
         .output()
         .expect("`cove build` starts");
@@ -54,7 +73,9 @@ fn built_hello() -> &'static Path {
     BUILT.get_or_init(|| {
         let (out, summary) = build("examples", "hello");
         assert!(
-            summary.contains("entry:  hello.main") && summary.contains("grants: console"),
+            summary.contains("entry:   hello.main")
+                && summary.contains("backend: vm")
+                && summary.contains("grants:  console"),
             "the build must report the boundary it baked in:\n{summary}"
         );
         out
@@ -119,6 +140,71 @@ fn a_cove_toml_beside_a_built_binary_changes_nothing() {
     let outcome = run(&program, dir.path(), &["--files-root", "/"]);
     assert!(outcome.status.success(), "{}", outcome.stderr);
     assert_eq!(outcome.stdout, "Hello, --files-root!\n");
+}
+
+/// ADR 0022 moved a built binary to the VM, and this is what the move must
+/// not have changed: the same program, built the other way, answering the
+/// same thing.
+///
+/// It is the only test in this file that names a backend. Everything else
+/// here builds the default one, which is the point — a suite that named the
+/// backend everywhere would stop noticing the day the default moved again.
+#[test]
+fn the_same_program_built_on_either_backend_answers_the_same() {
+    let (on_the_oracle, summary) =
+        build_on("examples", "hello", &["--backend", "ast"], "hello-ast");
+    assert!(
+        summary.contains("backend: ast"),
+        "a build says which backend it baked in:\n{summary}"
+    );
+
+    let dir = TempDir::new("both-backends");
+    let interpreted = dir.install(&on_the_oracle);
+    let interpreted = run(&interpreted, dir.path(), &["Ada"]);
+
+    let dir = TempDir::new("both-backends-vm");
+    let on_the_vm = dir.install(built_hello());
+    let on_the_vm = run(&on_the_vm, dir.path(), &["Ada"]);
+
+    assert_eq!(interpreted.stdout, on_the_vm.stdout);
+    assert_eq!(interpreted.stderr, on_the_vm.stderr);
+    assert_eq!(
+        interpreted.status.success(),
+        on_the_vm.status.success(),
+        "{}",
+        on_the_vm.stderr
+    );
+}
+
+/// ADR 0009 says a built binary "must not defer an error to whoever runs
+/// it", and a construct the VM cannot run is such an error: the person who
+/// can act on it is holding the source, and they are not the one holding the
+/// binary. So it is refused at build time, and nothing is written.
+///
+/// No `cargo build` happens here, because the refusal comes before one is
+/// started — which is most of why refusing at build time is worth doing.
+#[test]
+fn a_program_the_vm_cannot_run_is_refused_before_a_binary_is_written() {
+    let root = package("tests/e2e/backend_ast");
+    let out = root.join("target/backend_ast-e2e");
+    let _ = std::fs::remove_file(&out);
+    let output = Command::new(env!("CARGO_BIN_EXE_cove"))
+        .current_dir(&root)
+        .args(["build", "backend_ast", "--out"])
+        .arg(&out)
+        .output()
+        .expect("`cove build` starts");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(!output.status.success(), "{stderr}");
+    assert!(stderr.contains("cove::backend::unsupported"), "{stderr}");
+    assert!(
+        stderr.contains("a function declared inside a function body"),
+        "{stderr}"
+    );
+    assert!(
+        !out.exists(),
+        "a binary that could not start must never be written"
+    );
 }
 
 /// ADR 0009 says a built binary's grants cannot be widened after the fact:
