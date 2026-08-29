@@ -207,7 +207,7 @@ use crate::heap::{Collection, Heap, HeapStats, Roots};
 use crate::host::{HostRegistry, Reentry, ResourceHandle};
 use crate::interp::{
     as_dyn, binary, coerce_inside, divide_by_zero, dyn_receiver, no_field, not_a_struct, overflow,
-    returned_error_message, source_text, unary, work_stopped, MAX_CALL_DEPTH,
+    returned_error_message, source_text, stopped_here, unary, MAX_CALL_DEPTH,
 };
 use crate::runtime::{Runtime, ENTRY_TASK};
 use crate::task::{self, ChildFailure, Task, TaskOutcome, TaskScope, Transfer};
@@ -2887,17 +2887,7 @@ impl<'a> Vm<'a> {
     }
 
     fn safepoint(&mut self, span: Span) -> Result<(), RuntimeError> {
-        if let Some(cancellation) = &self.cancellation {
-            if cancellation.is_cancelled() {
-                return Err(crate::interp::task_cancelled(span));
-            }
-        }
-        // A bounded call's flag stops only the body it bounds. The host that
-        // raised it turns the stop into the answer it promised, so this need
-        // only say that the body is not to continue.
-        if self.stops.iter().any(Cancellation::is_cancelled) {
-            return Err(work_stopped(span));
-        }
+        stopped_here(self.cancellation.as_ref(), &self.stops, span)?;
         let fuel = std::mem::take(&mut self.fuel);
         if let Some(Err(error)) = self.hosts.with_budget(|budget| {
             budget
@@ -2926,8 +2916,10 @@ impl<'a> Vm<'a> {
     ///
     /// The grant check, the schema check on both sides, the budget charge,
     /// and the trace all live in [`HostRegistry`], so a VM run is held to
-    /// exactly what an interpreted run is held to — this adds the timing and
-    /// the span and nothing else.
+    /// exactly what an interpreted run is held to — this adds the timing,
+    /// the span, and the two stop flags a `Budget` shared by every task
+    /// cannot ask about. [`stopped_here`] is the whole of that last part,
+    /// and the interpreter calls it here too.
     fn call_host(
         &mut self,
         module: &str,
@@ -2935,6 +2927,7 @@ impl<'a> Vm<'a> {
         values: Vec<Value>,
         span: Span,
     ) -> Result<Value, RuntimeError> {
+        stopped_here(self.cancellation.as_ref(), &self.stops, span)?;
         let hosts = self.hosts;
         let started = Instant::now();
         let result = hosts.call_with(module, op, values, &mut Callback { vm: self, span });
@@ -2959,6 +2952,7 @@ impl<'a> Vm<'a> {
         values: Vec<Value>,
         span: Span,
     ) -> Result<Value, RuntimeError> {
+        stopped_here(self.cancellation.as_ref(), &self.stops, span)?;
         let hosts = self.hosts;
         let started = Instant::now();
         let result = hosts.call_resource(handle, op, values, &mut Callback { vm: self, span });

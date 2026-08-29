@@ -1176,18 +1176,7 @@ impl<'a> Interpreter<'a> {
     /// `match` in Cove source, so it terminates the run rather than failing
     /// one function of it.
     fn charge_safepoint(&mut self, span: Span) -> Result<(), RuntimeError> {
-        if let Some(cancellation) = &self.cancellation {
-            if cancellation.is_cancelled() {
-                return Err(task_cancelled(span));
-            }
-        }
-        // A bounded call's flag stops only the body it bounds. The host that
-        // raised it turns the stop into the answer it promised — a timeout
-        // reports that it timed out — so this need only say that the body is
-        // not to continue.
-        if self.stops.iter().any(Cancellation::is_cancelled) {
-            return Err(work_stopped(span));
-        }
+        stopped_here(self.cancellation.as_ref(), &self.stops, span)?;
         if let Some(Err(error)) = self.hosts.with_budget(|budget| {
             budget
                 .safepoint(SAFEPOINT_FUEL)
@@ -1218,6 +1207,7 @@ impl<'a> Interpreter<'a> {
         values: Vec<Value>,
         span: Span,
     ) -> Result<Value, RuntimeError> {
+        stopped_here(self.cancellation.as_ref(), &self.stops, span)?;
         let hosts = self.hosts;
         let started = Instant::now();
         let result = hosts.call_with(
@@ -1242,6 +1232,7 @@ impl<'a> Interpreter<'a> {
         values: Vec<Value>,
         span: Span,
     ) -> Result<Value, RuntimeError> {
+        stopped_here(self.cancellation.as_ref(), &self.stops, span)?;
         let hosts = self.hosts;
         let started = Instant::now();
         let result = hosts.call_resource(
@@ -3949,6 +3940,48 @@ impl Reentry for Callback<'_, '_> {
     fn task(&self) -> u64 {
         self.interpreter.task_id()
     }
+}
+
+/// The two stop flags a thread owns, asked in one place so that both
+/// backends ask them the same way and in the same order.
+///
+/// `cancellation` is this task's own, set by `Task::cancel` and by a scope
+/// that left with children still running; `stops` are the flags of the
+/// bounded calls this thread is inside, innermost last. Neither is the run's
+/// cancellation, which lives in the shared [`crate::budget::Budget`] and is
+/// read there.
+///
+/// # Why this is asked before a Host call and not only at safepoints
+///
+/// A safepoint is where a *budget* is measured, and a budget can only be
+/// measured where the work is counted. A flag is not measured: it is already
+/// true or already false, and reading it costs an atomic load. So the two
+/// are not on the same schedule, and the Host boundary is the place where
+/// the difference matters — an effect a host performs is the one thing a
+/// stopped run cannot take back.
+///
+/// [`crate::budget::Budget::charge_host_call`] already refuses a call made
+/// by a run that was cancelled or is past its deadline. It cannot ask these
+/// two, because a `Budget` is shared by every task of a run and these belong
+/// to one thread. So the backend asks them, at the same boundary, and a
+/// cancelled task or a bounded call that has been asked to stop performs no
+/// further Host effect.
+pub(crate) fn stopped_here(
+    cancellation: Option<&Cancellation>,
+    stops: &[Cancellation],
+    span: Span,
+) -> Result<(), RuntimeError> {
+    if cancellation.is_some_and(Cancellation::is_cancelled) {
+        return Err(task_cancelled(span));
+    }
+    // A bounded call's flag stops only the body it bounds. The host that
+    // raised it turns the stop into the answer it promised — a timeout
+    // reports that it timed out — so this need only say that the body is not
+    // to continue.
+    if stops.iter().any(Cancellation::is_cancelled) {
+        return Err(work_stopped(span));
+    }
+    Ok(())
 }
 
 /// Work a host call bounded, stopped at a safepoint because the bound was
