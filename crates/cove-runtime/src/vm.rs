@@ -855,6 +855,9 @@ impl<'a> Vm<'a> {
             cpu: timing.cpu(),
             wait: timing.wait(),
         });
+        // Whatever this run charged and had not yet handed over is handed
+        // over now, however the run ended. See `Vm::spend_pending_fuel`.
+        self.spend_pending_fuel();
         // Every task's thread has been joined by now — leaving a scope waits
         // for or cancels its children — so every heap but this one has been
         // retired and the totals are complete. `Interpreter::enter` ends the
@@ -2860,6 +2863,29 @@ impl<'a> Vm<'a> {
         Ok(())
     }
 
+    /// Spends whatever this VM has charged and not yet handed to the run's
+    /// budget, at the end of a run or of a task's thread.
+    ///
+    /// Every ordinary way out of a body already flushes: a `return` and a
+    /// `?` that failed take a safepoint before they leave the frame, and a
+    /// safepoint is what spends. What does not flush is every other way a
+    /// run can end — a raised error, an exhausted budget, a cancelled task,
+    /// a bounded call abandoned by the host that bounded it — because each
+    /// of those leaves through `?` in Rust rather than through an
+    /// instruction. The fuel charged since the last safepoint was work the
+    /// run really did, so it is spent here rather than dropped with the
+    /// stacks.
+    ///
+    /// [`crate::budget::Budget::spend`] rather than [`Vm::safepoint`],
+    /// because this runs after the answer is settled: a stop raised here
+    /// would replace the reason the run actually ended.
+    fn spend_pending_fuel(&mut self) {
+        let fuel = std::mem::take(&mut self.fuel);
+        if fuel != 0 {
+            self.hosts.with_budget(|budget| budget.spend(fuel));
+        }
+    }
+
     fn safepoint(&mut self, span: Span) -> Result<(), RuntimeError> {
         if let Some(cancellation) = &self.cancellation {
             if cancellation.is_cancelled() {
@@ -3554,6 +3580,10 @@ fn run_task(
         .timings
         .pop()
         .expect("a task pushes exactly the one timing it pops");
+    // What this task charged and had not yet spent is the run's fuel as much
+    // as the entry's is, and a task that raised or was cancelled reached no
+    // safepoint to spend it at. See `Vm::spend_pending_fuel`.
+    vm.spend_pending_fuel();
     // This task's heap ends with this thread. What it did joins the run's
     // totals before the value it produced crosses back.
     vm.retire_heap();
