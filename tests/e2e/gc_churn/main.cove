@@ -1,0 +1,35 @@
+use console.println
+
+/// Builds a vector, fills it, and abandons it.
+///
+/// Nothing that leaves this function can reach the storage it allocated, so
+/// the live set after the call is what it was before it.
+fn discard(size: Int) -> Int {
+  var v = Vector.of()
+  var n = 0
+  while n < size {
+    v.push(n)
+    n += 1
+  }
+  v.length()
+}
+
+/// Allocates far more than it ever holds at once.
+///
+/// A backend that reclaims nothing runs this with a live set that grows with
+/// the loop; one that collects runs it with a live set of one vector. Both
+/// answer the same thing, which is the point: what differs is memory, and
+/// memory is what the heap statistics report rather than what a program can
+/// print.
+export fn main() -> Result<Unit, Error> {
+  var kept = Vector.of(7)
+  var total = 0
+  var i = 0
+  while i < 500 {
+    total += discard(4)
+    i += 1
+  }
+  println("five hundred vectors were built and abandoned, summing {total}")?
+  println("the one that was kept still holds {kept}")?
+  Ok(())
+}

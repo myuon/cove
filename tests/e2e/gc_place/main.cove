@@ -1,0 +1,56 @@
+use console.println
+
+/// A counter written through a `var` parameter.
+struct Counter {
+  hits: Int
+}
+
+/// Builds and abandons `count` cycles, which is what makes a collection run.
+fn churn(count: Int) {
+  var i = 0
+  while i < count {
+    var v = Vector.of()
+    v.push(v)
+    i += 1
+  }
+}
+
+/// Writes through the caller's place, collecting between the writes.
+fn fill(var output: Vector<Int>, upTo: Int) {
+  var n = 0
+  while n < upTo {
+    output.push(n)
+    churn(80)
+    n += 1
+  }
+}
+
+/// Passes the place it was handed on to a third frame, which collects again.
+fn forward(var counter: Counter) {
+  churn(80)
+  count(var counter.hits)
+}
+
+/// Writes an `Int` place that a struct field was refined to.
+fn count(var hits: Int) {
+  churn(80)
+  hits += 1
+}
+
+/// Holds a place across a call and a collection.
+///
+/// A place is an index into the value stack rather than an independent root,
+/// so what it names has to stay rooted by that stack for the whole of the
+/// place's life. Collecting in the middle of a callee that is writing through
+/// one is where that is either true or not.
+export fn main() -> Result<Unit, Error> {
+  var output = Vector.of()
+  fill(var output, upTo: 6)
+  println("the place the callee wrote through holds {output}")?
+
+  var counter = Counter(hits: 0)
+  forward(var counter)
+  forward(var counter)
+  println("a place forwarded two frames deep wrote {counter}")?
+  Ok(())
+}

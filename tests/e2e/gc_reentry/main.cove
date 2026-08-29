@@ -1,0 +1,30 @@
+use clock.timeout
+use console.println
+
+/// Builds and abandons `count` cycles, which is what makes a collection run.
+fn churn(count: Int) {
+  var i = 0
+  while i < count {
+    var v = Vector.of()
+    v.push(v)
+    i += 1
+  }
+}
+
+/// Collects inside a body the host is running re-entrantly.
+///
+/// `clock.timeout` takes the closure off the stack into a vector of its own
+/// and calls back into the evaluator, so while the body runs, the closure and
+/// everything it captured are held only by the host — where no root set can
+/// read them. What keeps them is that a reference nothing can read is a
+/// reference the collector's counting is short of.
+export fn main() -> Result<Unit, Error> {
+  var kept = Vector.of(1, 2, 3)
+  let answered = timeout(60s) {
+    churn(400)
+    kept.length()
+  }?
+  println("the re-entrant body answered {answered}")?
+  println("what it captured is still {kept}")?
+  Ok(())
+}

@@ -123,9 +123,33 @@ allow = ["console"]
 entry = "fn_variadic.main"
 allow = ["console"]
 
+[run.gc_capture]
+entry = "gc_capture.main"
+allow = ["console"]
+
+[run.gc_churn]
+entry = "gc_churn.main"
+allow = ["console"]
+
 [run.gc_cycles]
 entry = "gc_cycles.main"
 allow = ["console"]
+
+[run.gc_frames]
+entry = "gc_frames.main"
+allow = ["console"]
+
+[run.gc_graph]
+entry = "gc_graph.main"
+allow = ["console"]
+
+[run.gc_place]
+entry = "gc_place.main"
+allow = ["console"]
+
+[run.gc_reentry]
+entry = "gc_reentry.main"
+allow = ["clock", "console"]
 
 [run.gc_tasks]
 entry = "gc_tasks.main"

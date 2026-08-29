@@ -1,0 +1,52 @@
+use console.println
+
+/// A node that reaches its peers through storage the node itself does not
+/// own, so a ring of these is a cycle `Rc` alone can never free.
+struct Node {
+  label: String
+  peers: Vector<Node>
+}
+
+/// Builds and abandons `count` cycles, which is what makes a collection run.
+fn churn(count: Int) {
+  var i = 0
+  while i < count {
+    var v: Vector<Node> = Vector.of()
+    v.push(Node(label: "doomed", peers: v))
+    i += 1
+  }
+}
+
+/// Builds a two-node ring and answers one of its members.
+///
+/// A vector is a handle, so the vector a `Node` is built over is the same
+/// storage the builder keeps writing into: `first` and `a.peers` are one
+/// object. The ring is therefore `a` to `first` to `b` to `second` to `a`,
+/// and returning `a` roots the whole of it.
+fn ring() -> Node {
+  var first: Vector<Node> = Vector.of()
+  var second: Vector<Node> = Vector.of()
+  let a = Node(label: "a", peers: first)
+  let b = Node(label: "b", peers: second)
+  first.push(b)
+  second.push(a)
+  a
+}
+
+/// Keeps one member of a graph and lets the collector run.
+export fn main() -> Result<Unit, Error> {
+  let kept = ring()
+  churn(400)
+  println("the member that was kept is {kept.label}")?
+  match kept.peers.get(0) {
+    Some(peer) => {
+      println("it still reaches {peer.label}")?
+      match peer.peers.get(0) {
+        Some(back) => println("which still reaches {back.label}")?
+        None => println("the ring was broken")?
+      }
+    }
+    None => println("the ring was broken")?
+  }
+  Ok(())
+}

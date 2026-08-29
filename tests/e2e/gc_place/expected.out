@@ -1,0 +1,2 @@
+the place the callee wrote through holds [0, 1, 2, 3, 4, 5]
+a place forwarded two frames deep wrote Counter(hits: 2)

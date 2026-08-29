@@ -1,0 +1,31 @@
+use console.println
+
+/// Builds and abandons `count` cycles, which is what makes a collection run.
+fn churn(count: Int) {
+  var i = 0
+  while i < count {
+    var v = Vector.of()
+    v.push(v)
+    i += 1
+  }
+}
+
+/// Answers a closure over a vector no binding of the caller's names.
+///
+/// A closure captures by value and a vector is a handle, so the capture and
+/// the binding are one object; when this returns, the capture is the only
+/// thing left that reaches it.
+fn hidden() -> fn() -> Int {
+  var counted = Vector.of(1, 2, 3, 4, 5)
+  fn() {
+    counted.length()
+  }
+}
+
+/// Collects while a closure capture is the only root there is.
+export fn main() -> Result<Unit, Error> {
+  let count = hidden()
+  churn(400)
+  println("the capture survived every collection and reports {count()}")?
+  Ok(())
+}
