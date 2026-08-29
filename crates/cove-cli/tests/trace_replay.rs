@@ -6,6 +6,14 @@
 //! across two capabilities. Recording it, reading the recording back, and
 //! replaying it is the whole loop the Language Card promises; the divergence
 //! cases are what the loop is for.
+//!
+//! One case here runs the loop across the two backends, which is the half of
+//! [issue #111](https://github.com/myuon/cove/issues/111)'s "replay/state
+//! result" that a replay can answer at all — the other half, comparing what
+//! two backends make of one program, is `tests/differential.rs`'s. Only one
+//! direction of it exists, and
+//! [`a_run_recorded_on_the_vm_replays_on_the_interpreter`] says which and
+//! why.
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
@@ -104,6 +112,96 @@ fn record_tasks_host_order(path: &Path) -> String {
     assert!(run.status.success(), "the run failed: {}", stderr(&run));
     assert_eq!(stdout(&run), "first\nsecond\n");
     std::fs::read_to_string(path).expect("the trace was written")
+}
+
+/// Records a trace of `cove run restricted --backend vm` into `path`.
+///
+/// The same program and the same fakes as [`record`], differing only in which
+/// backend ran it, so the two files can be compared line for line.
+fn record_on_the_vm(path: &Path) -> String {
+    let run = cove(&[
+        "run",
+        "restricted",
+        "--backend",
+        "vm",
+        "--trace",
+        &path.display().to_string(),
+    ]);
+    assert!(run.status.success(), "the run failed: {}", stderr(&run));
+    assert_eq!(stdout(&run), "5 words\n");
+    std::fs::read_to_string(path).expect("the trace was written")
+}
+
+/// One backend records and the other replays.
+///
+/// This is the cross-backend half of what issue #111 asks for under
+/// "replay/state result", and only one of its two directions exists. `cove
+/// replay` builds a `cove_runtime::interp::Interpreter` and takes no
+/// `--backend`, so a trace can be recorded on the VM and replayed on the
+/// interpreter and not the other way about. That the missing direction is
+/// missing is worth saying rather than working around: replaying on the
+/// oracle is the direction with something to prove, since a recording the
+/// oracle cannot follow is the VM having asked for something the language
+/// does not say it should, and the replay reports it as a divergence with
+/// both calls shown.
+///
+/// The direction that does not exist would catch the converse — a VM that
+/// asked for a call the interpreter's recording does not hold. What stands in
+/// for it is `tests/differential.rs`, which compares every host call's
+/// module, operation, arguments and outcome, in order, over every case that
+/// lowers; that is the same tape a replay reads, checked over ninety-three
+/// programs rather than one. What it does not stand in for is a run driven by
+/// a file instead of by a host, which is the only thing a replay does that a
+/// second run does not.
+#[test]
+fn a_run_recorded_on_the_vm_replays_on_the_interpreter() {
+    let dir = TempDir::new("cross-backend");
+    let on_the_vm = dir.join("vm.jsonl");
+    let on_the_interpreter = dir.join("ast.jsonl");
+    let recorded = record_on_the_vm(&on_the_vm);
+    let oracle = record(&on_the_interpreter);
+
+    // The two recordings are one recording once the wall-clock figures are
+    // taken out of them, which is the claim `cove replay` is about to rest
+    // on: what it reads is a file, and the two backends wrote the same file.
+    assert_eq!(
+        without_wall_clock(&recorded),
+        without_wall_clock(&oracle),
+        "the two backends recorded different traces of one program"
+    );
+
+    let replay = cove(&["replay", &on_the_vm.display().to_string(), "restricted"]);
+    assert!(
+        replay.status.success(),
+        "replaying a VM recording on the interpreter failed: {}",
+        stderr(&replay)
+    );
+    let played = stdout(&replay);
+    assert!(
+        played.contains("2 of 2 recorded call(s), answered from the trace"),
+        "{played}"
+    );
+}
+
+/// A trace with the figure under every `_ns` key replaced, so that two
+/// recordings of one program can be compared.
+///
+/// Every `Duration` a trace carries — `cpu`, `wait`, `pause` — is wall time,
+/// and two runs of one program on one backend disagree about all three.
+fn without_wall_clock(trace: &str) -> String {
+    let mut out = String::with_capacity(trace.len());
+    let mut rest = trace;
+    while let Some(at) = rest.find("_ns\":") {
+        let (head, tail) = rest.split_at(at + "_ns\":".len());
+        out.push_str(head);
+        out.push_str("<wall clock>");
+        let end = tail
+            .find(|c: char| !c.is_ascii_digit())
+            .unwrap_or(tail.len());
+        rest = &tail[end..];
+    }
+    out.push_str(rest);
+    out
 }
 
 #[test]
