@@ -359,7 +359,14 @@ use cove_sema::resolve::Program as Checked;
 /// the host is running re-entrantly. Every one of them lowered on the day it
 /// was written, which is the measurement: what they exercise is collection,
 /// and collection is not something a lowering has to reach.
-const LOWERED_FLOOR: usize = 87;
+///
+/// 87 to 88: `tests/e2e:gc_struct`, the program issue #128 asks for. It is
+/// the one case in this corpus whose two answers came apart because of a
+/// collector bug rather than a lowering one, and the oracle is the side that
+/// was wrong: the interpreter printed an emptied vector where the VM printed
+/// the one the program built. It lowered on the day it was written, for the
+/// same reason the six before it did.
+const LOWERED_FLOOR: usize = 88;
 
 // ------------------------------------------------------------------ the test
 

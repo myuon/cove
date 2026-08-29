@@ -1,0 +1,68 @@
+use console.println
+
+/// A node that reaches its own container, so a vector of these is a cycle
+/// `Rc` alone can never free — and that carries a vector of numbers, so a
+/// node reached from the garbage is a path to that vector.
+struct Node {
+  peers: Vector<Node>
+  held: Vector<Int>
+}
+
+/// Builds and abandons `count` cycles, which is what makes a collection run.
+fn churn(count: Int) {
+  var i = 0
+  while i < count {
+    var v: Vector<Node> = Vector.of()
+    v.push(Node(peers: v, held: Vector.of()))
+    i += 1
+  }
+}
+
+/// A vector of `n` numbers that one abandoned node holds and one abandoned
+/// cycle names *twice*.
+///
+/// A struct value is shared storage rather than a copy, so both of `ring`'s
+/// elements are one `Node`, and a collector walking the cycle reaches that
+/// node by two paths. It must count the two references to the node and still
+/// walk what the node holds once: the vector answered here is held by the
+/// node and by the caller's operand, and if the second path counted a second
+/// reference to it the operand's would look accounted for.
+fn sharedByGarbage(n: Int) -> Vector<Int> {
+  var held: Vector<Int> = Vector.of()
+  var i = 0
+  while i < n {
+    held.push(i)
+    i += 1
+  }
+  var ring: Vector<Node> = Vector.of()
+  let node = Node(peers: ring, held: held)
+  ring.push(node)
+  ring.push(node)
+  held
+}
+
+/// A vector of `n` numbers, built after enough abandoned cycles for a
+/// collection to have run.
+fn madeAfterChurn(n: Int) -> Vector<Int> {
+  churn(400)
+  var v: Vector<Int> = Vector.of()
+  var i = 0
+  while i < n {
+    v.push(i)
+    i += 1
+  }
+  v
+}
+
+/// Collects while a vector two garbage paths share is an operand.
+///
+/// The first argument is evaluated and left standing while the second one's
+/// call churns, so the collection runs with that vector held nowhere the
+/// collector can read — nowhere but the abandoned node, which the abandoned
+/// cycle names twice.
+export fn main() -> Result<Unit, Error> {
+  let both: Vector<Vector<Int>> = Vector.of(sharedByGarbage(3), madeAfterChurn(4))
+  println("the vector the garbage shared twice is {both.get(0)}")?
+  println("the one built after the collection is {both.get(1)}")?
+  Ok(())
+}

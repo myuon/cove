@@ -1137,6 +1137,58 @@ mod tests {
         assert_eq!(shared.len(), 1);
     }
 
+    /// The same rule again, with the container shared *twice* by the garbage
+    /// rather than once. A `Value::Struct` is an `Rc`, so one struct value can
+    /// be reached from two places; if the scan walked its fields once per
+    /// path, the vector inside it would be sighted twice, its two sightings
+    /// would account for the two references that exist — the struct's and the
+    /// temporary's — and the shortfall that makes the temporary a root would
+    /// not fire. The sweep would then empty a vector the temporary still
+    /// reaches, which is the failure this whole mechanism exists to prevent.
+    #[test]
+    fn an_object_inside_a_struct_two_garbage_paths_share_survives() {
+        let roots = SlotRoots::new();
+        let mut heap = Heap::new();
+        // The only two references to this are the struct's field and the
+        // local, and the local is what stands for a backend temporary.
+        let held = heap.allocate(vec![Value::Int(7)]);
+        let structure = Rc::new(StructValue {
+            type_name: "test.Holder".into(),
+            fields: vec![("held".into(), Value::Vector(held.clone()))],
+            opaque: false,
+        });
+
+        // A garbage cycle whose two members both name that one struct, so the
+        // scan reaches the struct twice without the program naming it at all.
+        let a = heap.allocate(Vec::new());
+        let b = heap.allocate(Vec::new());
+        a.elements.borrow_mut().push(Value::Vector(b.clone()));
+        b.elements.borrow_mut().push(Value::Vector(a.clone()));
+        a.elements
+            .borrow_mut()
+            .push(Value::Struct(Rc::clone(&structure)));
+        b.elements
+            .borrow_mut()
+            .push(Value::Struct(Rc::clone(&structure)));
+        let cycle = Rc::downgrade(&a);
+        drop(structure);
+        drop(a);
+        drop(b);
+
+        let collected = heap.collect(&roots);
+        assert!(
+            cycle.upgrade().is_none(),
+            "the garbage cycle should have gone: {collected:?}"
+        );
+        assert!(
+            held.elements
+                .borrow()
+                .first()
+                .is_some_and(|element| element.eq_value(&Value::Int(7))),
+            "the sweep emptied a vector a temporary still holds: {collected:?}"
+        );
+    }
+
     #[test]
     fn a_binding_dropped_from_the_roots_is_reclaimed() {
         let mut roots = SlotRoots::new();

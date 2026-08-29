@@ -151,6 +151,10 @@ allow = ["console"]
 entry = "gc_reentry.main"
 allow = ["clock", "console"]
 
+[run.gc_struct]
+entry = "gc_struct.main"
+allow = ["console"]
+
 [run.gc_tasks]
 entry = "gc_tasks.main"
 allow = ["console"]
