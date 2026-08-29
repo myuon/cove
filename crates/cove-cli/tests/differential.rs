@@ -48,10 +48,11 @@
 //! # What is compared, and what is not
 //!
 //! The value the entry answered or the structured error it failed with, every
-//! line written to the fake console in order, how the run ended, and the fake
-//! filesystem as the run left it. Fuel is not compared: ADR 0019 makes
-//! `fuel_spent` backend-specific, since an instruction is not an AST node and
-//! there is no honest mapping between them.
+//! line written to the fake console in order, how the run ended, the fake
+//! filesystem as the run left it, and the trace the run wrote. Fuel is not
+//! compared: ADR 0019 makes `fuel_spent` backend-specific, since an
+//! instruction is not an AST node and there is no honest mapping between
+//! them.
 //!
 //! An error's source position is compared exactly. It did not have to be —
 //! an instruction's span covers the operation it came from and a tree walk's
@@ -70,6 +71,36 @@
 //! left off on purpose: fuel is backend-specific by ADR 0019, and a deadline
 //! is wall-clock, so bounding either would make the two backends disagree by
 //! construction rather than by fault. No case in the corpus sets one today.
+//!
+//! # The trace, and what a normalization is allowed to drop
+//!
+//! Issue #111 asks for "source-level trace events after backend-specific
+//! normalization", so every case that lowers is run with a
+//! `cove_runtime::trace::JsonlSink` on both backends and the two recordings
+//! are compared. The recording rather than the events: the JSONL is what
+//! `cove trace` reads and what `cove replay` consumes, so comparing the lines
+//! compares the artifact somebody else's program is handed, and a field that
+//! stops being written is a change to that artifact whether or not the event
+//! behind it still exists.
+//!
+//! A field dropped because it differed is exactly how a real divergence
+//! hides, so nothing below is dropped for differing. Each exclusion is a
+//! property of a backend rather than of the program, each was established by
+//! running the corpus rather than by assuming, and [`Trace::of`] is where
+//! each one is made and argued.
+//!
+//! What survives the normalization is compared exactly and agrees over the
+//! whole corpus: `entry_enter` and `entry_exit`'s module and function, every
+//! `host_call`'s task, module, operation, capability, grant, arguments and
+//! outcome, `task_spawned`'s id, parent and scope, `run_ended`'s outcome and
+//! message, and what `heap_summary` says a run allocated. The task ids
+//! themselves agree because both backends draw them from the one counter
+//! `cove_runtime::runtime::Runtime` holds, so there was no renumbering to
+//! normalize.
+//!
+//! No trace event carries `fuel_spent`. ADR 0019's backend-specific figure
+//! reaches `cove run --stats` and never the trace, so there was nothing here
+//! to exclude for it.
 //!
 //! # Reading the coverage summary
 //!
@@ -97,8 +128,8 @@ use cove_runtime::host::{Console, Documents, Env, Grants, HostRegistry};
 use cove_runtime::http::Http;
 use cove_runtime::interp::Interpreter;
 use cove_runtime::process::{Process, ProcessLog};
-use cove_runtime::runtime::Runtime;
-use cove_runtime::trace::RunOutcome;
+use cove_runtime::runtime::{Runtime, ENTRY_TASK};
+use cove_runtime::trace::{JsonlSink, RunOutcome, TraceHeader, TraceSink, ValueCapture};
 use cove_runtime::value::Value;
 use cove_runtime::vm::Vm;
 use cove_sema::config::RunConfig;
@@ -521,6 +552,9 @@ fn run_the_corpus() -> Report {
 
         let oracle = run_on_ast(&case, &prepared, module, entry);
         let backend = run_on_vm(&case, &prepared, &Arc::new(ir), module, entry);
+        if !oracle.trace.cancelled.is_empty() || !backend.trace.cancelled.is_empty() {
+            report.races.push(case.name.clone());
+        }
         if oracle != backend {
             report
                 .disagreements
@@ -862,7 +896,11 @@ fn walk(root: &Path, dir: &Path, modules: &mut BTreeMap<String, (PathBuf, Vec<Pa
 // ------------------------------------------------------------ the two runs
 
 /// What one backend made of one case: everything the run can be observed by.
-#[derive(PartialEq, Eq)]
+///
+/// `Eq` is not derived beside `PartialEq` because [`Trace`] equality is not
+/// transitive: whether two traces may be compared over a given task depends
+/// on what both of them did with that task, which is a pairwise question.
+#[derive(PartialEq)]
 struct Ran {
     /// The value the entry answered, rendered, or the structured error it
     /// failed with. Rendered rather than carried because a [`Value`] is
@@ -885,16 +923,26 @@ struct Ran {
     /// The fake filesystem as the run left it. A program told to write a file
     /// says on the console that it did, and the console line is not the file.
     files: BTreeMap<String, String>,
+    /// The trace the run wrote, normalized. What a program did at the Host
+    /// API boundary and what its tasks did is not visible in anything above:
+    /// a run that made a call it should not have made still answers the same
+    /// value and prints the same line.
+    trace: Trace,
 }
 
 /// Runs the case on the interpreter, which is the oracle.
 fn run_on_ast(case: &Case, prepared: &Prepared, module: &str, entry: &str) -> Ran {
-    let (fakes, hosts) = Fakes::build(case);
+    let (fakes, hosts) = Fakes::build(case, module, entry);
+    // The trace reaches the run through two doors and both must be the same
+    // sink: `HostRegistry` records the host calls and `Runtime` records
+    // everything else, exactly as `cove run --trace` wires them.
+    let sink = Arc::clone(&fakes.sink);
     let runtime = Runtime::new(
         prepared.checked.clone(),
         prepared.sources.clone(),
         Arc::new(hosts),
-    );
+    )
+    .with_trace(sink);
     let answer = Interpreter::new(&runtime).run_entry(module, entry, arguments(case));
     fakes.observed(answer)
 }
@@ -907,13 +955,15 @@ fn run_on_vm(
     module: &str,
     entry: &str,
 ) -> Ran {
-    let (fakes, hosts) = Fakes::build(case);
+    let (fakes, hosts) = Fakes::build(case, module, entry);
+    let sink = Arc::clone(&fakes.sink);
     let hosts = Arc::new(hosts);
     let runtime = Runtime::new(
         prepared.checked.clone(),
         prepared.sources.clone(),
         hosts.clone(),
-    );
+    )
+    .with_trace(sink);
     let answer = Vm::new(&runtime, &hosts, ir).run_entry(module, entry, arguments(case));
     fakes.observed(answer)
 }
@@ -929,6 +979,11 @@ struct Fakes {
     console: Buffer,
     diagnostics: Buffer,
     files: Tree,
+    /// The trace, as the JSONL a `--trace` file would hold.
+    trace: Buffer,
+    /// The sink writing into `trace`, which the run's `Runtime` needs as well
+    /// as its `HostRegistry`.
+    sink: Arc<dyn TraceSink>,
 }
 
 impl Fakes {
@@ -939,7 +994,7 @@ impl Fakes {
     /// as `cove run` registers them: the grants are what decide, so a
     /// capability a program reaches for without holding is refused with the
     /// reason rather than with a missing module.
-    fn build(case: &Case) -> (Fakes, HostRegistry) {
+    fn build(case: &Case, module: &str, entry: &str) -> (Fakes, HostRegistry) {
         let console = Buffer::default();
         let diagnostics = Buffer::default();
         let files = Files::in_memory(seeded_files(&case.root));
@@ -961,6 +1016,20 @@ impl Fakes {
             ProcessLog::new(),
         )));
         hosts.register(Box::new(files));
+        // Full capture, because a redacted trace records a value's type and
+        // not the value, and the arguments a program passes a host are the
+        // half of a host call this test most wants compared. Nothing here
+        // reaches a real host, so there is no secret to redact.
+        let trace = Buffer::default();
+        let sink: Arc<dyn TraceSink> = Arc::new(JsonlSink::new(
+            trace.clone(),
+            TraceHeader {
+                values: ValueCapture::Full,
+                entry: format!("{module}.{entry}"),
+                args: case.args.clone(),
+            },
+        ));
+        hosts.set_trace(Arc::clone(&sink));
         hosts.set_budget(Budget::with_cancellation(
             limits(&case.run),
             Cancellation::new(),
@@ -971,6 +1040,8 @@ impl Fakes {
                 console,
                 diagnostics,
                 files: tree,
+                trace,
+                sink,
             },
             hosts,
         )
@@ -989,6 +1060,7 @@ impl Fakes {
             diagnostics: self.diagnostics.lines(),
             outcome,
             files: self.files.files(),
+            trace: Trace::of(&self.trace.lines()),
         }
     }
 }
@@ -1054,9 +1126,262 @@ fn disagreement(name: &str, oracle: &Ran, backend: &Ran) -> String {
         if !ran.files.is_empty() {
             let _ = writeln!(out, "    files: {:?}", ran.files);
         }
+        for (task, events) in &ran.trace.tasks {
+            let _ = writeln!(out, "    trace of task {task}:");
+            for line in events {
+                let _ = writeln!(out, "      {line}");
+            }
+        }
     };
     side("ast (the oracle)", oracle);
     side("vm", backend);
+    out
+}
+
+// -------------------------------------------------------------- the trace
+
+/// One run's trace, normalized so that two backends' recordings of one
+/// program can be compared.
+///
+/// Held per task rather than as the one interleaved file the run wrote. Every
+/// event is produced by whichever task made it and written by the one sink
+/// the run shares, so the order two tasks' events reach that sink is the
+/// order two threads happened to get there — ADR 0008 gives every spawned
+/// task a thread of its own, and nothing in the language fixes which of them
+/// writes first. Grouping by task drops exactly that and keeps everything
+/// else: within one task the order is the program's, and it is compared.
+///
+/// This is not a normalization that could be argued either way. Running the
+/// interpreter against itself thirty times over, `tests/e2e:gc_tasks`,
+/// `tests/e2e:tasks_shared` and `examples:tasks` each wrote a differently
+/// interleaved file every time, and every one of them writes the same file
+/// once it is read per task. A comparison that failed on the interleaving
+/// would be reporting the scheduler, and it would fail against the oracle as
+/// readily as against the VM.
+struct Trace {
+    /// Each task's own events, in the order that task produced them, keyed by
+    /// the task's id. The entry is `cove_runtime::runtime::ENTRY_TASK`, which
+    /// is the convention every event that names a task already uses.
+    tasks: BTreeMap<u64, Vec<String>>,
+    /// The tasks this run cancelled. See [`Trace::eq`] for what that costs.
+    cancelled: BTreeSet<u64>,
+}
+
+impl Trace {
+    /// Reads the JSONL a run wrote, and normalizes it.
+    ///
+    /// # Every `Duration` is blanked
+    ///
+    /// `cpu`, `wait` and `pause` are wall time. Two runs of one program on
+    /// one backend do not agree on any of them either, so comparing them
+    /// would report the machine. The keys are kept and only the figures go,
+    /// so a `_ns` field that stopped being written is still a difference.
+    ///
+    /// # `heap_collected` is dropped whole
+    ///
+    /// The event says when a collection happened and what it found. Both
+    /// halves are the collector's schedule. A collection runs at a safepoint
+    /// where enough has been allocated since the last one, and the two
+    /// backends put safepoints in different places — the interpreter at every
+    /// loop turn, the VM at the first back edge with `BACK_EDGE_FUEL`
+    /// gathered — so the VM crosses the threshold and keeps allocating until
+    /// the next block head. The corpus shows both halves moving:
+    /// `tests/e2e:gc_capture` collects after 64 allocations on the
+    /// interpreter and after 66 on the VM, and `examples:cqSample` runs its
+    /// collection one `files.Writer.writeLine` earlier on the VM than on the
+    /// interpreter, so even a `heap_collected` with every figure blanked
+    /// stands in a different place in the sequence.
+    ///
+    /// What the event was for is not lost, because `heap_summary` says the
+    /// same things about the whole run and is compared. Dropping the event
+    /// and keeping the summary is the only division that is about the
+    /// program rather than the schedule: *what* a run allocated and *how
+    /// often* it collected are the program's, and *when* each collection fell
+    /// is the backend's.
+    ///
+    /// # `heap_summary` keeps what was allocated and drops what was live
+    ///
+    /// `allocated`, `allocated_bytes` and `collections` are compared exactly,
+    /// and they agree on every case in this corpus. That is worth stating
+    /// plainly because `docs/VM_ARCHITECTURE.md` predicted the third of them
+    /// would not: a run that allocates identically "can collect five times
+    /// here and six times there". Over the ninety-three cases that lower it
+    /// never does. The reason the prediction is still right in general and
+    /// wrong here is that the threshold is a count of allocations and the two
+    /// backends allocate the same objects, so the VM's overshoot moves the
+    /// boundary between two collections without changing how many boundaries
+    /// there are; it would take an overshoot large enough to swallow a whole
+    /// threshold to lose one, and nothing in this corpus allocates fast
+    /// enough between two safepoints for that.
+    ///
+    /// `live_bytes` and `peak_bytes` are dropped. They measure the live set,
+    /// and the live set is decided by the root set, which is a frame's slots
+    /// on the VM and an environment chain on the interpreter. A `var`
+    /// declared in a loop body has left the chain by the time the
+    /// interpreter's safepoint is reached and is still the VM frame's slot
+    /// until something writes that slot again, because a frame's window is
+    /// sized once per function rather than opened and closed per block. Both
+    /// backends report truthfully what was reachable from their own roots;
+    /// the two are not the same question. `tests/e2e:gc_churn` peaks at 120
+    /// bytes on the interpreter and 216 on the VM for this reason.
+    ///
+    /// `live_bytes` is the near miss, and it is recorded rather than
+    /// rounded off: it agrees on ninety-two of the ninety-three cases that
+    /// lower. The one that differs is `tests/e2e:fail_freeze_aliased`, which
+    /// ends by raising — and a run that raised abandoned its frames where
+    /// they stood, so the vector its last sweep still finds in a VM frame
+    /// slot is one the interpreter's environment had already left. It is the
+    /// same root-set difference as `peak_bytes`, reached by a different
+    /// route, so it is excluded for the same stated reason rather than kept
+    /// with an exception carved out of it.
+    fn of(lines: &[String]) -> Trace {
+        let mut tasks: BTreeMap<u64, Vec<String>> = BTreeMap::new();
+        let mut cancelled = BTreeSet::new();
+        for line in lines {
+            if event(line) == "heap_collected" {
+                continue;
+            }
+            let mut normalized = blank_durations(line);
+            if event(line) == "heap_summary" {
+                normalized = without(&normalized, "live_bytes");
+                normalized = without(&normalized, "peak_bytes");
+            }
+            if event(line) == "task_cancelled" {
+                cancelled.insert(number(line, "id").unwrap_or(ENTRY_TASK));
+            }
+            tasks.entry(whose(line)).or_default().push(normalized);
+        }
+        Trace { tasks, cancelled }
+    }
+}
+
+/// Two traces of one program, compared task by task.
+///
+/// # A task either run cancelled is compared only by its `task_spawned`
+///
+/// Cancellation is asynchronous: a scope that ends asks its children to stop
+/// and lands wherever each thread happened to be, so how far a cancelled task
+/// got is the scheduler's answer and not the program's. This is measured
+/// rather than assumed. `tests/e2e:fail_max_tasks` records
+/// `task_completed` for task 1 in three of twenty runs *on the interpreter
+/// alone* and `task_cancelled` in the other seventeen; `examples:callbacks`
+/// flips the same way on the VM alone, and on the run where it is cancelled
+/// the `clock.every` call that task would have made is missing from the trace
+/// with it. Holding two backends to a fact one backend does not hold itself
+/// to would be a test that fails at random.
+///
+/// So what is compared for such a task is that it was spawned, with the same
+/// id, by the same parent, into the same scope. What is given up with the
+/// rest is real and is worth naming: a VM that always cancelled where the
+/// interpreter always completed would not be caught here. What catches it
+/// instead is that the entry's own trace is compared exactly, and a task's
+/// work reaches the entry — through what it printed, what it left in the
+/// filesystem, and what the entry answered, all of which this harness
+/// compares whether or not a trace was written. [`Report::races`] names every
+/// case this rule applied to, so the loss is printed rather than silent.
+impl PartialEq for Trace {
+    fn eq(&self, other: &Trace) -> bool {
+        let ids: BTreeSet<u64> = self
+            .tasks
+            .keys()
+            .chain(other.tasks.keys())
+            .copied()
+            .collect();
+        let raced: BTreeSet<u64> = self.cancelled.union(&other.cancelled).copied().collect();
+        ids.into_iter().all(|id| {
+            let mine = self.tasks.get(&id).map(Vec::as_slice).unwrap_or_default();
+            let theirs = other.tasks.get(&id).map(Vec::as_slice).unwrap_or_default();
+            if raced.contains(&id) {
+                spawn_of(mine) == spawn_of(theirs)
+            } else {
+                mine == theirs
+            }
+        })
+    }
+}
+
+/// The `task_spawned` line of one task's events, which is all that is
+/// compared for a task a run cancelled.
+fn spawn_of(events: &[String]) -> Option<&String> {
+    events.iter().find(|line| event(line) == "task_spawned")
+}
+
+/// Which task produced an event.
+///
+/// A `task` field answers directly. A task's own lifecycle events are its
+/// own, including the `task_spawned` the parent recorded and the
+/// `task_cancelled` the joining scope did: what they say is about the task
+/// they name, and keeping them with it is what lets one task's whole life be
+/// compared as one sequence. Everything else — the header, the entry's two
+/// events, the summary, the ending — belongs to the entry, which is the
+/// convention the trace format already uses for the entry's own host calls.
+fn whose(line: &str) -> u64 {
+    if let Some(task) = number(line, "task") {
+        return task;
+    }
+    match event(line) {
+        "task_spawned" | "task_completed" | "task_cancelled" => {
+            number(line, "id").unwrap_or(ENTRY_TASK)
+        }
+        _ => ENTRY_TASK,
+    }
+}
+
+/// The `event` name of one trace line.
+fn event(line: &str) -> &str {
+    let Some(at) = line.find("\"event\":\"") else {
+        return "";
+    };
+    let rest = &line[at + "\"event\":\"".len()..];
+    &rest[..rest.find('"').unwrap_or(rest.len())]
+}
+
+/// The integer under a top-level `key` of one trace line.
+fn number(line: &str, key: &str) -> Option<u64> {
+    let needle = format!("\"{key}\":");
+    let at = line.find(&needle)? + needle.len();
+    let rest = &line[at..];
+    let end = rest
+        .find(|c: char| !c.is_ascii_digit())
+        .unwrap_or(rest.len());
+    rest[..end].parse().ok()
+}
+
+/// The line without `key` and the integer under it.
+fn without(line: &str, key: &str) -> String {
+    let needle = format!("\"{key}\":");
+    let Some(at) = line.find(&needle) else {
+        return line.to_string();
+    };
+    let rest = &line[at + needle.len()..];
+    let end = rest
+        .find(|c: char| !c.is_ascii_digit())
+        .unwrap_or(rest.len());
+    let (mut head, mut tail) = (&line[..at], &rest[end..]);
+    // One of the two commas around the field goes with it, whichever side it
+    // is on, so that what is left is still a JSON object.
+    if let Some(rest) = tail.strip_prefix(',') {
+        tail = rest;
+    } else {
+        head = head.strip_suffix(',').unwrap_or(head);
+    }
+    format!("{head}{tail}")
+}
+
+/// The line with the figure under every `_ns` key replaced by a placeholder.
+fn blank_durations(line: &str) -> String {
+    let mut out = String::with_capacity(line.len());
+    let mut rest = line;
+    while let Some(at) = rest.find("_ns\":") {
+        let (head, tail) = rest.split_at(at + "_ns\":".len());
+        out.push_str(head);
+        out.push_str("<wall clock>");
+        let end = tail
+            .find(|c: char| !c.is_ascii_digit())
+            .unwrap_or(tail.len());
+        rest = &tail[end..];
+    }
+    out.push_str(rest);
     out
 }
 
@@ -1146,6 +1471,12 @@ struct Report {
     refused: Vec<(String, String)>,
     /// Cases whose package does not check, which have no program to run.
     unchecked: Vec<String>,
+    /// Cases in which either run cancelled a task, so that task's own trace
+    /// was compared only by the `task_spawned` that made it. Printed rather
+    /// than kept quiet: this is the one place the trace comparison gives
+    /// something up, and a reader of the summary should be able to see how
+    /// much. [`Trace::eq`] is the argument for why.
+    races: Vec<String>,
     disagreements: Vec<String>,
 }
 
@@ -1183,6 +1514,14 @@ impl Report {
             for (what, cases) in ranked {
                 let _ = writeln!(out, "  {:>3}  {what}", cases.len());
                 let _ = writeln!(out, "       first at {}", cases[0]);
+            }
+        }
+        if !self.races.is_empty() {
+            out.push_str(
+                "\nwhere a cancelled task's own trace is a race, so only its spawn is compared:\n",
+            );
+            for case in &self.races {
+                let _ = writeln!(out, "       {case}");
             }
         }
         if !self.lowered.is_empty() {
