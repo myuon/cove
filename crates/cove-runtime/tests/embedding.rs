@@ -37,13 +37,22 @@
 //! neither can drift.
 //!
 //! The boundary still checks, because a host may register a module the
-//! checker was never handed -- the last case below is one -- and because a
+//! checker was never handed -- one of the cases below is one -- and because a
 //! host is held to its schema whether or not any compiler read it.
+//!
+//! `company` is still a table this file wrote. The last section registers a
+//! module nothing wrote: its name, the capability it is gated on, and the
+//! operations it answers arrive as data once the process is running.
+//! `ModuleSchema` is `Copy` with `'static` contents, so a host like that
+//! assembles its table once and leaks it -- and what the case there holds it
+//! to is the *once*, which is what makes the cost a bounded one instead of a
+//! leak per call.
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::rc::Rc;
-use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use cove_diag::{render, Diagnostic, SourceMap};
 use cove_runtime::interp::Interpreter;
@@ -622,5 +631,223 @@ export fn main() -> Result<Unit, Error> {
         error.message.contains("unknown host module `files`"),
         "{}",
         error.message
+    );
+}
+
+// ---------------------------------------------------------------------------
+// A module whose description is not in the binary at all.
+//
+// `company` above is the embedder's own module and is still a `const`: this
+// file knows what it declares. A plugin does not. Its module name, the
+// capability it is gated on, and the operations it answers arrive as data
+// once the process is running, and `ModuleSchema` is `Copy` with `'static`
+// contents, so there is nothing for such a host to borrow them from. What it
+// does instead is assemble its table once and leak it.
+//
+// The *once* is the part worth a test. A handful of allocations per module
+// for the life of a process is the cost `ModuleSchema`'s documentation
+// accepts, and argues against every alternative; the same host assembling a
+// table inside `module_schema` would leak on every call the registry
+// dispatches, which nothing bounds. Nothing in the type system tells those
+// two apart, so this does.
+
+/// What the embedder learns only at run time: a plugin manifest read from
+/// disk, a service description fetched at connect time, a module named in
+/// configuration. None of it is `'static` and none of it is written here.
+struct Manifest {
+    /// The name Cove source will write, such as `settings`.
+    module: String,
+    /// The capability the module is gated on, which is not its name.
+    capability: String,
+    /// The operations it answers, each taking one `String` and producing a
+    /// `Result<String, Error>`.
+    operations: Vec<String>,
+}
+
+/// How often the host was asked to describe itself, and how often it
+/// actually assembled a table. The gap between the two is what the
+/// `OnceLock` below is for, and what a test can hold it to.
+#[derive(Default)]
+struct Asked {
+    asks: AtomicUsize,
+    assemblies: AtomicUsize,
+}
+
+/// A host that describes itself out of a [`Manifest`] rather than out of a
+/// table this file wrote.
+struct Plugin {
+    manifest: Manifest,
+    /// What the module actually serves, which is data like the manifest is.
+    values: BTreeMap<String, String>,
+    /// The assembled description. Filled on the first ask and copied out
+    /// afterwards, which is what holds the leak to one per module.
+    schema: OnceLock<ModuleSchema>,
+    asked: Arc<Asked>,
+    /// Every call that reached the implementation.
+    calls: Arc<Mutex<Vec<String>>>,
+}
+
+impl Plugin {
+    /// Turns the manifest into the one description this module has.
+    ///
+    /// Every owned piece is leaked: the module name, the capability, each
+    /// operation's name, and the vector of operations itself. None of it is
+    /// freed again, which is the whole reason this runs once.
+    fn assemble(&self) -> ModuleSchema {
+        self.asked.assemblies.fetch_add(1, Ordering::Relaxed);
+        let capability: &'static str = String::leak(self.manifest.capability.clone());
+        let operations: Vec<OperationSchema> = self
+            .manifest
+            .operations
+            .iter()
+            .map(|name| OperationSchema {
+                name: String::leak(name.clone()),
+                params: &[HostType::String],
+                variadic: false,
+                result: HostType::Result(&HostType::String, &HostType::Error),
+                capability,
+                effect: Effect::Read,
+                cancellable: false,
+                recordable: true,
+                result_is_task_safe: true,
+            })
+            .collect();
+        ModuleSchema {
+            name: String::leak(self.manifest.module.clone()),
+            capability,
+            operations: Vec::leak(operations),
+            types: &[],
+            resources: &[],
+        }
+    }
+}
+
+impl HostApi for Plugin {
+    fn module_schema(&self) -> ModuleSchema {
+        self.asked.asks.fetch_add(1, Ordering::Relaxed);
+        *self.schema.get_or_init(|| self.assemble())
+    }
+
+    fn call(&self, op: &str, args: Vec<Value>) -> Result<Value, RuntimeError> {
+        // The boundary checked the call against the assembled table before
+        // dispatching it, exactly as it checks one against a `const` table:
+        // the operation is one the manifest named, and its one argument is a
+        // `String`.
+        let [Value::Str(key)] = args.as_slice() else {
+            unreachable!("checked by HostRegistry::call")
+        };
+        self.calls.lock().unwrap().push(format!("{op}({key})"));
+        Ok(match self.values.get(&**key) {
+            Some(value) => Value::ok(Value::Str(value.as_str().into())),
+            None => Value::err(Value::error(format!("no setting named `{key}`"))),
+        })
+    }
+}
+
+/// The embedding: a manifest discovered at run time, a host that describes
+/// itself from it, and a registry granting exactly the capability it names.
+fn plugin(asked: Arc<Asked>, calls: Arc<Mutex<Vec<String>>>) -> HostRegistry {
+    let manifest = Manifest {
+        module: "settings".to_string(),
+        capability: "configuration".to_string(),
+        operations: vec!["lookup".to_string()],
+    };
+    let mut hosts = HostRegistry::new(Grants::new(vec![manifest.capability.clone()]));
+    hosts.register(Box::new(Plugin {
+        manifest,
+        values: BTreeMap::from([("theme".to_string(), "dark".to_string())]),
+        schema: OnceLock::new(),
+        asked,
+        calls,
+    }));
+    hosts
+}
+
+/// The whole pattern in one case: a module nothing in the binary describes is
+/// checked by the compiler, dispatched by the registry, and assembled exactly
+/// once however many times either of them asks it to describe itself.
+#[test]
+fn a_schema_assembled_at_run_time_is_checked_dispatched_and_built_once() {
+    let asked = Arc::new(Asked::default());
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    let hosts = plugin(Arc::clone(&asked), Arc::clone(&calls));
+
+    let (sources, checked) = compiled(
+        &hosts,
+        "\
+use settings
+
+/// Reads one setting through a module a manifest described.
+export fn main() -> Result<String, Error> {
+  settings.lookup(\"theme\")
+}
+",
+    );
+    let program = checked.expect("a program written against an assembled schema checks");
+    assert!(
+        program.notices.is_empty(),
+        "a module the checker was handed warns about nothing, however its table was built"
+    );
+    // The capability is the manifest's, and neither the module's name nor
+    // anything this file wrote.
+    assert_eq!(
+        program.modules["app"].functions["main"].required_capabilities,
+        [Capability::new("configuration")].into_iter().collect()
+    );
+
+    let value = Interpreter::new(&Runtime::new(
+        Arc::new(program),
+        Arc::new(sources),
+        Arc::new(hosts),
+    ))
+    .run_entry("app", "main", Vec::new())
+    .expect("the checked program runs");
+    assert_eq!(value.to_string(), "Ok(dark)");
+    assert_eq!(*calls.lock().unwrap(), vec!["lookup(theme)".to_string()]);
+
+    // The point of the `OnceLock`. `module_schemas`, every lookup the
+    // boundary made on the way to the call, and the dispatch itself each ask
+    // this module to describe itself, and all of them read one table: a host
+    // that built a new one per ask would have leaked per ask.
+    assert!(
+        asked.asks.load(Ordering::Relaxed) > 1,
+        "checking and dispatching ask a module to describe itself more than once"
+    );
+    assert_eq!(
+        asked.assemblies.load(Ordering::Relaxed),
+        1,
+        "the table is assembled and leaked once per module, however often it is asked for"
+    );
+}
+
+/// And the checker really is reading the assembled table rather than letting
+/// an unknown module through: an operation the manifest never named is an
+/// error at its call site, before anything runs.
+#[test]
+fn a_call_the_manifest_does_not_describe_is_a_static_error() {
+    let asked = Arc::new(Asked::default());
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    let hosts = plugin(Arc::clone(&asked), Arc::clone(&calls));
+
+    let (sources, checked) = compiled(
+        &hosts,
+        "\
+use settings
+
+/// Calls an operation the manifest does not list.
+export fn main() -> Result<String, Error> {
+  settings.locale(\"theme\")
+}
+",
+    );
+    let items = checked.expect_err("an operation the manifest never named is an error");
+    let rendered: String = items.iter().map(|item| render(&sources, item)).collect();
+    assert!(
+        rendered.contains("host module `settings` has no operation `locale`"),
+        "{rendered}"
+    );
+    assert!(
+        calls.lock().unwrap().is_empty(),
+        "a program the checker refused never reaches the host"
     );
 }
