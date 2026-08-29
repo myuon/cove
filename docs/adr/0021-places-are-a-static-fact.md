@@ -11,7 +11,7 @@
   deleting it would leave an evaluator guessing. Everything else in ADR 0004
   stands, including that a clean check guarantees what it says it guarantees
   and that the boundary rules the runtime alone can see are the runtime's
-- Implemented by: [PR #135](https://github.com/myuon/cove/pull/135), closing
+- Implemented by: [PR #138](https://github.com/myuon/cove/pull/138), closing
   [issue #125](https://github.com/myuon/cove/issues/125) and with it
   [#112](https://github.com/myuon/cove/issues/112) and
   [#113](https://github.com/myuon/cove/issues/113)
