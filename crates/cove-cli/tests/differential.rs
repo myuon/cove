@@ -366,7 +366,24 @@ use cove_sema::resolve::Program as Checked;
 /// was wrong: the interpreter printed an emptied vector where the VM printed
 /// the one the program built. It lowered on the day it was written, for the
 /// same reason the six before it did.
-const LOWERED_FLOOR: usize = 88;
+///
+/// 88 to 89: one case and no construct again.
+/// `tests/e2e:host_console_streams` writes records to `console.println` and
+/// complaints to `console.eprintln`, and it lowered on the day it was
+/// written. That is the whole of what issue #102 had to check about the
+/// backends: a second stream is a second operation on a module,
+/// `cove_ir::Inst::CallHost` already carries the module and the operation as
+/// names, and there was no instruction to add. What the case measures is the
+/// fake console, which now has a buffer per stream so that a line written to
+/// the other one on one backend is a disagreement rather than a coincidence.
+///
+/// It was briefly two. A second case, `fail_console_error_not_granted`, was
+/// written and then removed before the change merged: it pinned a run that
+/// granted `console` and not `console.error`, and the repository decided
+/// against a second capability, so there is no refusal for it to pin. The
+/// floor is 89 rather than 90 because that case is gone and for no other
+/// reason — nothing stopped lowering.
+const LOWERED_FLOOR: usize = 89;
 
 // ------------------------------------------------------------------ the test
 
@@ -796,9 +813,17 @@ struct Ran {
     /// failed with. Rendered rather than carried because a [`Value`] is
     /// `Rc`-based and belongs to the run that made it.
     answer: String,
-    /// Every line written to the fake console, in the order they were
-    /// written.
+    /// Every line written to the fake console's output stream, in the order
+    /// they were written.
     console: Vec<String>,
+    /// Every line written to the fake console's diagnostic stream, in the
+    /// order they were written.
+    ///
+    /// Kept apart from `console` rather than merged into it, because a
+    /// program that wrote a line to the other stream on one backend would
+    /// otherwise agree with itself: two streams compared as one are one
+    /// stream again the moment it matters.
+    diagnostics: Vec<String>,
     /// How the run ended, classified exactly as `run_entry` classifies it for
     /// the run's terminal trace event.
     outcome: RunOutcome,
@@ -847,12 +872,13 @@ fn arguments(case: &Case) -> Vec<Rc<str>> {
 /// once the run is over.
 struct Fakes {
     console: Buffer,
+    diagnostics: Buffer,
     files: Tree,
 }
 
 impl Fakes {
-    /// The hosts one run is given, and the handles onto the two of them that
-    /// record what it did.
+    /// The hosts one run is given, and the handles onto the ones that record
+    /// what it did: both of the console's streams and the filesystem.
     ///
     /// Every host is registered whether or not this case reaches it, exactly
     /// as `cove run` registers them: the grants are what decide, so a
@@ -860,11 +886,15 @@ impl Fakes {
     /// reason rather than with a missing module.
     fn build(case: &Case) -> (Fakes, HostRegistry) {
         let console = Buffer::default();
+        let diagnostics = Buffer::default();
         let files = Files::in_memory(seeded_files(&case.root));
         let tree = files.tree();
 
         let mut hosts = HostRegistry::new(Grants::new(case.run.allow.clone()));
-        hosts.register(Box::new(Console::new(console.clone())));
+        // Two buffers, because the host has two streams: one buffer would
+        // make a line that moved from the one to the other invisible here,
+        // which is the only kind of disagreement the second stream adds.
+        hosts.register(Box::new(Console::new(console.clone(), diagnostics.clone())));
         hosts.register(Box::new(Env::new(BTreeMap::new())));
         hosts.register(Box::new(Documents::in_memory(seeded_documents(&case.root))));
         hosts.register(Box::new(Clock::virtual_clock(VirtualTime::new())));
@@ -884,6 +914,7 @@ impl Fakes {
         (
             Fakes {
                 console,
+                diagnostics,
                 files: tree,
             },
             hosts,
@@ -900,6 +931,7 @@ impl Fakes {
         Ran {
             answer: describe(&answer),
             console: self.console.lines(),
+            diagnostics: self.diagnostics.lines(),
             outcome,
             files: self.files.files(),
         }
@@ -961,6 +993,9 @@ fn disagreement(name: &str, oracle: &Ran, backend: &Ran) -> String {
             ran.outcome, ran.answer
         );
         let _ = writeln!(out, "    console: {:?}", ran.console);
+        if !ran.diagnostics.is_empty() {
+            let _ = writeln!(out, "    diagnostics: {:?}", ran.diagnostics);
+        }
         if !ran.files.is_empty() {
             let _ = writeln!(out, "    files: {:?}", ran.files);
         }
@@ -972,7 +1007,8 @@ fn disagreement(name: &str, oracle: &Ran, backend: &Ran) -> String {
 
 // -------------------------------------------------------------- the fakes
 
-/// A `console` a run writes to and this test reads back.
+/// One of a `console`'s streams, which a run writes to and this test reads
+/// back.
 #[derive(Clone, Default)]
 struct Buffer(Arc<Mutex<Vec<u8>>>);
 

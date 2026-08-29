@@ -112,7 +112,12 @@ trace back and summarises it, and `cove replay` runs an entry again with every
 host answering from the trace -- reproducing a resource handle by handing back
 the recorded name -- and reports a divergence when the program asks for
 something the trace does not have. The `console`, `env`, `documents`, `clock`,
-`files`, and `process` hosts each ship a real and a fake implementation; `http`
+`files`, and `process` hosts each ship a real and a fake implementation;
+`console` writes on two streams under the one capability -- `println` and
+`print` carry what a program produces, `eprintln` and `eprint` what it has to
+say about what it produces, so a run's records can be piped somewhere while
+its complaints stay on the terminal
+([ADR 0020](docs/adr/0020-a-diagnostic-stream-for-console.md)); `http`
 ships a real implementation speaking a deliberately small HTTP/1.1 over TCP --
 one request per connection, loopback only, and fixed bounds on the request
 line, on the headers, and on the body it will read, so that a peer cannot

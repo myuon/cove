@@ -97,9 +97,13 @@ struct Fakes {
 /// What one run produced.
 struct Ran {
     value: Value,
-    /// Every line the program printed, in the order this run happened to
-    /// produce them.
+    /// Every line the program printed to the console's output stream, in the
+    /// order this run happened to produce them.
     console: Vec<String>,
+    /// Every line the program printed to the console's diagnostic stream, in
+    /// the same order. A test asserts on this to say that a diagnostic is
+    /// *not* in `console`, which is the whole reason the stream exists.
+    diagnostics: Vec<String>,
     /// Every response the program served, in order, as `<status> <body>`.
     served: Vec<String>,
     /// The fake filesystem as the run left it, by path.
@@ -141,6 +145,7 @@ fn run(entry: &str, allow: &[&str], fakes: Fakes) -> Ran {
     let (module, name) = entry.rsplit_once('.').expect("a qualified entry");
 
     let console = Buffer::default();
+    let diagnostics = Buffer::default();
     let http = Http::recorded(fakes.bodies, fakes.requests);
     let served = http.served();
     let files = Files::in_memory(fakes.files);
@@ -151,7 +156,7 @@ fn run(entry: &str, allow: &[&str], fakes: Fakes) -> Ran {
     // so a capability the program reaches for without being granted is
     // refused with the reason rather than with a missing module.
     let mut hosts = HostRegistry::new(Grants::new(allow.to_vec()));
-    hosts.register(Box::new(Console::new(console.clone())));
+    hosts.register(Box::new(Console::new(console.clone(), diagnostics.clone())));
     hosts.register(Box::new(Env::new(fakes.env)));
     hosts.register(Box::new(Documents::in_memory(fakes.documents)));
     hosts.register(Box::new(files));
@@ -175,6 +180,7 @@ fn run(entry: &str, allow: &[&str], fakes: Fakes) -> Ran {
     Ran {
         value,
         console: console.lines(),
+        diagnostics: diagnostics.lines(),
         served: served.responses(),
         files: tree.files(),
     }
@@ -786,6 +792,13 @@ fn cq_reports_and_skips_the_records_it_cannot_read() {
         "{:?}",
         ran.console
     );
+    // Three complaints, in the middle of the CSV they are complaining about.
+    // That is issue #102's example, and the diagnostic stream this change
+    // adds is what a program needs to do anything about it; moving `cq`'s
+    // reports onto it is #88's. Pinning the stream empty here is what will
+    // make that move show up as the improvement it is rather than as a
+    // silent change of two goldens at once.
+    assert!(ran.diagnostics.is_empty(), "{:?}", ran.diagnostics);
 }
 
 /// `--output` sends the rows to a file and leaves only the report on the

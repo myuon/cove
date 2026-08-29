@@ -199,12 +199,26 @@ impl FromIterator<ModuleSchema> for HostSchemas {
 
 // ------------------------------------------------------------------ console
 
-/// `console`: line-oriented output.
+/// `console`: line-oriented output on two streams.
 ///
-/// Both operations take a variadic `String`, which is why
+/// `println` and `print` write what the program produces; `eprintln` and
+/// `eprint` write what it has to say *about* what it produces — a warning, a
+/// progress line, a summary. With one stream the second kind has to go inside
+/// the first, which is what puts a complaint about a malformed record in the
+/// middle of the records.
+///
+/// Every operation takes a variadic `String`, which is why
 /// `console.println("a", "b")` prints one line of two space-separated parts.
-/// Bytes already handed to the terminal cannot be taken back, so both are
+/// Bytes already handed to the terminal cannot be taken back, so all four are
 /// irreversible writes.
+///
+/// All four are the `console` capability, and the two streams are not two
+/// authorities: a program that may write to the terminal may write to the
+/// terminal, and where a line lands is a question about the program's output
+/// rather than about what it was allowed to do. A host that means to capture
+/// what a run produces and let its complaints through says so by handing
+/// `cove_runtime::host::Console` two different writers, which is where that
+/// choice belongs. ADR 0020 says why.
 pub const CONSOLE: ModuleSchema = ModuleSchema {
     name: "console",
     capability: "console",
@@ -222,6 +236,28 @@ pub const CONSOLE: ModuleSchema = ModuleSchema {
         },
         OperationSchema {
             name: "print",
+            params: &[HostType::String],
+            variadic: true,
+            result: HostType::Result(&HostType::Unit, &HostType::Error),
+            capability: "console",
+            effect: Effect::IrreversibleWrite,
+            cancellable: false,
+            recordable: true,
+            result_is_task_safe: true,
+        },
+        OperationSchema {
+            name: "eprintln",
+            params: &[HostType::String],
+            variadic: true,
+            result: HostType::Result(&HostType::Unit, &HostType::Error),
+            capability: "console",
+            effect: Effect::IrreversibleWrite,
+            cancellable: false,
+            recordable: true,
+            result_is_task_safe: true,
+        },
+        OperationSchema {
+            name: "eprint",
             params: &[HostType::String],
             variadic: true,
             result: HostType::Result(&HostType::Unit, &HostType::Error),

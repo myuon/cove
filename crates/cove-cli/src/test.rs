@@ -269,11 +269,14 @@ fn register_hosts(hosts: &mut HostRegistry, root: &Path, allow_real: &BTreeSet<&
 
     // `Console` is a fake by where it writes: the real one writes to the
     // process's stdout, and a test's writes into a sink, so a test that
-    // prints cannot interleave with the runner's own report.
+    // prints cannot interleave with the runner's own report. Both streams
+    // answer to the one capability, so both are real together or faked
+    // together: `allow_real = ["console"]` names what a test may reach, and
+    // a test that reaches the console reaches the whole of it.
     if real("console") {
-        hosts.register(Box::new(Console::new(std::io::stdout())));
+        hosts.register(Box::new(Console::new(std::io::stdout(), std::io::stderr())));
     } else {
-        hosts.register(Box::new(Console::new(std::io::sink())));
+        hosts.register(Box::new(Console::new(std::io::sink(), std::io::sink())));
     }
     // A fake environment exposes nothing: a test that depends on a variable
     // the developer's shell happens to set is not a test.

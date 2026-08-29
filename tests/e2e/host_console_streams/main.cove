@@ -1,0 +1,20 @@
+use console.println
+use console.eprintln
+use console
+
+/// Writes records to the console's output stream and what it has to say
+/// about them to the console's diagnostic stream, the way a filter does.
+///
+/// The point of the case is what is *not* in `expected.out`: none of the
+/// three complaints, though two of them were written between two records.
+/// A program with one stream would have had to put them there.
+export fn main() -> Result<Unit, Error> {
+  eprintln("reading 3 records")?
+  println("property,nights")?
+  println("harbour-loft,3")?
+  eprintln("record 2 has no `nights` field, skipping")?
+  println("orchard-barn,5")?
+  console.eprint("done: ")?
+  console.eprintln("2 rows written, 1 skipped")?
+  Ok(())
+}

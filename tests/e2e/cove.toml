@@ -179,6 +179,10 @@ allow = ["http", "console"]
 entry = "host_console.main"
 allow = ["console"]
 
+[run.host_console_streams]
+entry = "host_console_streams.main"
+allow = ["console"]
+
 [run.host_documents]
 entry = "host_documents.main"
 allow = ["console", "documents"]

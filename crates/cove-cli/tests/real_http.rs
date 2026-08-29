@@ -148,7 +148,7 @@ fn fetch(url: &str) -> Value {
     let program = cove_sema::resolve::resolve(&package).expect("the package resolves");
 
     let mut hosts = HostRegistry::new(Grants::new(["http", "console"]));
-    hosts.register(Box::new(Console::new(std::io::sink())));
+    hosts.register(Box::new(Console::new(std::io::sink(), std::io::sink())));
     hosts.register(Box::new(Http::real()));
 
     let runtime = Runtime::new(Arc::new(program), Arc::new(sources), Arc::new(hosts));
@@ -221,7 +221,7 @@ fn run_under(name: &str, source: &str, limits: Limits) -> (Result<Value, String>
     let program = cove_sema::resolve::resolve(&package).expect("the package resolves");
 
     let mut hosts = HostRegistry::new(Grants::new(["http", "console"]));
-    hosts.register(Box::new(Console::new(std::io::sink())));
+    hosts.register(Box::new(Console::new(std::io::sink(), std::io::sink())));
     hosts.register(Box::new(Http::real()));
     hosts.set_budget(Budget::new(limits));
 
