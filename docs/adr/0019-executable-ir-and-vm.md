@@ -1,6 +1,11 @@
 # ADR 0019: An executable IR and a dedicated VM
 
 - Status: Accepted
+- Superseded in part by
+  [ADR 0024](0024-a-stop-is-a-bound-not-a-point.md), which replaces
+  "Fuel is charged for VM work"'s consequence that anything comparing runs
+  across backends must compare outcomes rather than fuel: under a fuel limit
+  the outcomes differ too
 - Date: 2026-08-26
 - Supersedes: [ADR 0012](0012-performance-gate-and-native-backend.md)'s
   decision that "the interpreter remains the only backend ... nothing here
