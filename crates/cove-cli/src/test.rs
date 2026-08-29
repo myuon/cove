@@ -48,10 +48,11 @@ use cove_runtime::interp::Interpreter;
 use cove_runtime::process::{Process, ProcessLog};
 use cove_runtime::runtime::Runtime;
 use cove_runtime::value::Value;
+use cove_runtime::vm::Vm;
 use cove_sema::capability::open_reasons;
 use cove_sema::resolve::DeclaredTest;
 
-use crate::{load, CliError};
+use crate::{load, Backend, CliError};
 
 /// The diagnostic a failing test is reported as.
 const FAILED: &str = "cove::test::failed";
@@ -59,10 +60,11 @@ const FAILED: &str = "cove::test::failed";
 /// reported as.
 const NO_HOST: &str = "cove::test::no_host";
 
-/// Runs `cove test [path] [--filter <substring>]`.
+/// Runs `cove test [path] [--filter <substring>] [--backend <ast|vm>]`.
 pub(crate) fn cmd_test(args: &[String]) -> Result<(), CliError> {
     let mut filter: Option<&str> = None;
     let mut path: Option<&Path> = None;
+    let mut backend = Backend::default_for_a_run();
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
@@ -71,6 +73,17 @@ pub(crate) fn cmd_test(args: &[String]) -> Result<(), CliError> {
                     .get(i + 1)
                     .ok_or_else(|| CliError::Message("`--filter` needs a value".to_string()))?;
                 filter = Some(value.as_str());
+                i += 1;
+            }
+            "--backend" => {
+                let value = args.get(i + 1).ok_or_else(|| {
+                    CliError::Message("`--backend` needs a value: `ast` or `vm`".to_string())
+                })?;
+                backend = Backend::parse(value).ok_or_else(|| {
+                    CliError::Message(format!(
+                        "`--backend` must be `ast` or `vm`, found `{value}`"
+                    ))
+                })?;
                 i += 1;
             }
             other => path = Some(Path::new(other)),
@@ -95,7 +108,14 @@ pub(crate) fn cmd_test(args: &[String]) -> Result<(), CliError> {
     let mut failed = 0;
     for test in &selected {
         let name = test.qualified_name();
-        match run_test(test, &package.root, &allow_real, &sources, &program) {
+        match run_test(
+            test,
+            &package.root,
+            &allow_real,
+            &sources,
+            &program,
+            backend,
+        ) {
             None => println!("{}", result_line("ok", &name)),
             Some(diagnostic) => {
                 failed += 1;
@@ -140,6 +160,7 @@ fn run_test(
     allow_real: &BTreeSet<&str>,
     sources: &Arc<SourceMap>,
     program: &Arc<cove_sema::resolve::Program>,
+    backend: Backend,
 ) -> Option<Diagnostic> {
     let required: Vec<&str> = test
         .entry
@@ -174,12 +195,58 @@ fn run_test(
         );
     }
 
+    // A test is an entry, so it is lowered as one: the unit `cove_ir::lower`
+    // measures is what an entry reaches, and a suite is many entries rather
+    // than one. Lowering per test is what keeps a construct the VM cannot
+    // run from refusing the tests that do not reach it -- and lowering runs
+    // once per test against an execution that runs for as long as the test
+    // does, which is the ratio ADR 0019 allows the lowering to be slow on.
+    //
+    // The refusal is reported as this test's failure rather than as the
+    // command's, for the same reason: the other tests still ran, and a
+    // suite that stopped at the first unlowerable test would report nothing
+    // about them.
+    let lowered = match backend {
+        Backend::Ast => None,
+        Backend::Vm => match cove_ir::lower::lower_entry(program, test.module, test.name) {
+            Ok(lowered) => match cove_ir::lower::validate(&lowered.program) {
+                Ok(()) => Some(Arc::new(lowered.program)),
+                Err(why) => {
+                    return Some(
+                        Diagnostic::error(
+                            FAILED,
+                            format!(
+                                "test `{}` could not be lowered: {why}",
+                                test.qualified_name()
+                            ),
+                        )
+                        .at(test.entry.decl.name.span),
+                    )
+                }
+            },
+            Err(why) => return Some(crate::unsupported_by_backend(&why)),
+        },
+    };
+
     let runtime = Runtime::new(Arc::clone(program), Arc::clone(sources), Arc::new(hosts));
-    let mut interpreter = Interpreter::new(&runtime);
-    let outcome = interpreter.run_entry(test.module, test.name, Vec::new());
-    let assertion = interpreter
-        .assertion_failure()
-        .map(|(span, message)| (span, message.to_string()));
+    let (outcome, assertion) = match &lowered {
+        Some(ir) => {
+            let mut vm = Vm::new(&runtime, runtime.hosts(), ir);
+            let outcome = vm.run_entry(test.module, test.name, Vec::new());
+            let assertion = vm
+                .assertion_failure()
+                .map(|(span, message)| (span, message.to_string()));
+            (outcome, assertion)
+        }
+        None => {
+            let mut interpreter = Interpreter::new(&runtime);
+            let outcome = interpreter.run_entry(test.module, test.name, Vec::new());
+            let assertion = interpreter
+                .assertion_failure()
+                .map(|(span, message)| (span, message.to_string()));
+            (outcome, assertion)
+        }
+    };
 
     match outcome {
         Ok(value) => {
@@ -359,7 +426,7 @@ fn summary(selected: usize, total: usize, passed: usize, failed: usize) -> Strin
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::fixture::{load_fixture, write, TempDir};
+    use crate::fixture::{check_fixture, write, TempDir};
 
     /// Writes a one-module package and returns its root.
     fn package(name: &str, config: &str, source: &str) -> TempDir {
@@ -369,17 +436,39 @@ mod tests {
         dir
     }
 
-    /// Runs every test of the package at `root`, in order, reporting each
-    /// one's name and the message it failed with.
+    /// Runs every test of the package at `root` on both backends, in order,
+    /// reporting each one's name and the message it failed with.
+    ///
+    /// Both, and asserting they agree, because `cove test` runs on the VM
+    /// since ADR 0022 and every assertion below used to be about the
+    /// interpreter. Running only the new default would have retired that
+    /// coverage silently; running both keeps it and adds the property that
+    /// matters more than either — that a suite reports the same thing
+    /// whichever backend ran it.
     fn run_all(root: &Path, allow_real: &[&str]) -> Vec<(String, Option<String>)> {
-        let (sources, _, program) = load_fixture(root);
+        let on_the_vm = run_all_on(root, allow_real, Backend::Vm);
+        let on_the_oracle = run_all_on(root, allow_real, Backend::Ast);
+        assert_eq!(
+            on_the_vm, on_the_oracle,
+            "the two backends report this suite differently"
+        );
+        on_the_vm
+    }
+
+    /// One backend's answer for every test of the package at `root`.
+    fn run_all_on(
+        root: &Path,
+        allow_real: &[&str],
+        backend: Backend,
+    ) -> Vec<(String, Option<String>)> {
+        let (sources, _, program) = check_fixture(root);
         let (sources, program) = (Arc::new(sources), Arc::new(program));
         let allow_real: BTreeSet<&str> = allow_real.iter().copied().collect();
         program
             .tests()
             .iter()
             .map(|test| {
-                let outcome = run_test(test, root, &allow_real, &sources, &program);
+                let outcome = run_test(test, root, &allow_real, &sources, &program, backend);
                 (
                     test.qualified_name(),
                     outcome.map(|diagnostic| diagnostic.message),
@@ -432,11 +521,18 @@ mod tests {
     fn a_failing_assertion_points_at_the_assertion_it_failed_in() {
         let source = "test fn fails() -> Result<Unit, Error> {\n  assert(1 == 2)?\n  Ok(())\n}\n";
         let dir = package("assert-span", "", source);
-        let (sources, _, program) = load_fixture(dir.path());
+        let (sources, _, program) = check_fixture(dir.path());
         let (sources, program) = (Arc::new(sources), Arc::new(program));
         let test = program.tests()[0];
-        let diagnostic = run_test(&test, dir.path(), &BTreeSet::new(), &sources, &program)
-            .expect("the test fails");
+        let diagnostic = run_test(
+            &test,
+            dir.path(),
+            &BTreeSet::new(),
+            &sources,
+            &program,
+            Backend::Vm,
+        )
+        .expect("the test fails");
         let rendered = render(&sources, &diagnostic);
         assert!(rendered.contains("unit.cove:2:3"), "{rendered}");
     }
@@ -464,7 +560,7 @@ mod tests {
              test fn timeMoves() -> Result<Unit, Error> {\n  \
              assert(clock.now() <= clock.now())?\n  Ok(())\n}\n",
         );
-        let (_, package, _) = load_fixture(dir.path());
+        let (_, package, _) = check_fixture(dir.path());
         assert_eq!(package.config.test.allow_real, vec!["clock".to_string()]);
         assert_eq!(run_all(dir.path(), &["clock"])[0].1, None);
     }
@@ -486,7 +582,7 @@ mod tests {
              run(fn() {\n    println(\"hello from a closure\")\n  })?\n  Ok(())\n}\n",
         );
 
-        let (_, _, program) = load_fixture(dir.path());
+        let (_, _, program) = check_fixture(dir.path());
         let test = program.tests()[0];
         assert!(
             test.entry
@@ -553,7 +649,7 @@ test fn describesThroughDynDispatch() -> Result<Unit, Error> {
 ",
         );
 
-        let (sources, _, program) = load_fixture(dir.path());
+        let (sources, _, program) = check_fixture(dir.path());
         let (sources, program) = (Arc::new(sources), Arc::new(program));
         let test = program.tests()[0];
         assert!(
@@ -565,8 +661,15 @@ test fn describesThroughDynDispatch() -> Result<Unit, Error> {
         );
         assert!(test.entry.is_capability_open());
 
-        let diagnostic = run_test(&test, dir.path(), &BTreeSet::new(), &sources, &program)
-            .expect("the boundary refuses the call");
+        let diagnostic = run_test(
+            &test,
+            dir.path(),
+            &BTreeSet::new(),
+            &sources,
+            &program,
+            Backend::Vm,
+        )
+        .expect("the boundary refuses the call");
         assert!(
             diagnostic.message.contains("`console` capability"),
             "{}",
@@ -629,7 +732,7 @@ test fn describesThroughDynDispatch() -> Result<Unit, Error> {
             "other/other.cove",
             "test fn alpha() -> Result<Unit, Error> {\n  Ok(())\n}\n",
         );
-        let (_, _, program) = load_fixture(dir.path());
+        let (_, _, program) = check_fixture(dir.path());
         let all = program.tests();
         let names = |filter: Option<&str>| -> Vec<String> {
             select(&all, filter)

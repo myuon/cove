@@ -90,7 +90,9 @@ moves for one.
 
 `cove test` runs every `test fn` in the package, reports each one, and exits
 non-zero when any failed. `--filter` runs only the tests whose qualified name
-contains the given substring. Each test is granted exactly the capabilities
+contains the given substring, and `--backend <ast|vm>` chooses which backend
+runs them, defaulting to the VM as `cove run` does. Each test is lowered on
+its own, so a construct the VM cannot run fails that test and not the suite. Each test is granted exactly the capabilities
 its call graph requires, with each host's fake implementation, so a suite is
 deterministic; `cove.toml`'s `[test] allow_real = [...]` names the
 capabilities to grant for real instead.

@@ -50,10 +50,34 @@ pub(crate) fn write(dir: &Path, rel: &str, text: &str) {
 }
 
 /// Loads and resolves the package rooted at `root`.
+///
+/// Resolution is enough for a test about what the resolver derives — a
+/// public interface, a call graph, an outline — and several fixtures below
+/// this one are written loosely enough that they resolve and do not check.
 pub(crate) fn load_fixture(root: &Path) -> (SourceMap, Package, Program) {
     let mut sources = SourceMap::new();
     let package = cove_sema::package::load(root, &mut sources).expect("fixture package loads");
     let program = cove_sema::resolve::resolve(&package).expect("fixture package resolves");
+    (sources, package, program)
+}
+
+/// Loads and *checks* the package rooted at `root`, exactly as
+/// [`crate::load`] does for a package on disk.
+///
+/// Which is what a fixture that will be executed needs, and what
+/// [`load_fixture`] is not. The difference never showed while the
+/// interpreter was the only backend, because a tree walk reads no type it
+/// was not handed. `cove_ir::lower` reads several — ADR 0019 makes the IR a
+/// recording of the checker's answers rather than a second derivation of
+/// them — so a fixture that skipped the checker made the lowering refuse a
+/// program the real CLI lowers without complaint, which is a fixture
+/// reporting on itself.
+pub(crate) fn check_fixture(root: &Path) -> (SourceMap, Package, Program) {
+    let mut sources = SourceMap::new();
+    let package = cove_sema::package::load(root, &mut sources).expect("fixture package loads");
+    let program = cove_sema::Compiler::new()
+        .compile(&package)
+        .expect("fixture package checks");
     (sources, package, program)
 }
 
