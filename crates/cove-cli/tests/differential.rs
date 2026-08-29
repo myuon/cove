@@ -341,7 +341,15 @@ use cove_sema::resolve::Program as Checked;
 /// *run* time and this refuses at lowering, which is deliberate and is what
 /// issues #112 and #113 are about moving into the checker. Nothing in the
 /// corpus is refused for want of an execution model any more.
-const LOWERED_FLOOR: usize = 90;
+///
+/// 90 to 81, and it is the one time this number has gone *down*. Nine
+/// benchmarks left the corpus, not the lowering: `benches/` is no longer one
+/// of the corpora, for the reason `discover` gives, and all nine of its
+/// cases lowered and agreed on the day they went. Nothing stopped lowering
+/// and nothing stopped agreeing. A floor that falls for any other reason is
+/// the regression this constant exists to catch, and lowering it should
+/// always cost a paragraph saying which.
+const LOWERED_FLOOR: usize = 81;
 
 // ------------------------------------------------------------------ the test
 
@@ -459,16 +467,31 @@ fn repo_root() -> PathBuf {
 
 /// Every case of every corpus, in a fixed order.
 ///
-/// The corpora are `tests/e2e/`, `examples/`, and `benches/`, and a case is a
+/// The corpora are `tests/e2e/` and `examples/`, and a case is a
 /// `[run.<name>]` table of any `cove.toml` inside them — including the ones
 /// an own-package `tests/e2e` case brings, which are packages of their own
 /// exactly as `tests/e2e.rs` treats them.
+///
+/// # Why `benches/` is not one of them
+///
+/// It was, and it was 78 of the 340 seconds this test spent running
+/// programs. A benchmark is sized to be measurable in an optimized build —
+/// `benches/arith` turns a loop two million times — and this test runs
+/// unoptimized, twice per case. Nothing about agreement needs two million
+/// turns to establish; the first one settles it and the rest are the same
+/// instruction again.
+///
+/// The coverage did not go anywhere. `cove-bench` runs every benchmark on
+/// both backends and each of them asserts its own answer, so a backend that
+/// disagreed would fail the assertion on the side that was wrong — and it
+/// runs them optimized, in fifteen seconds, on every push. What is given up
+/// is the console comparison this harness makes and that one does not, and a
+/// benchmark writes almost nothing to the console.
 fn discover() -> Vec<Case> {
     let root = repo_root();
     let mut roots = vec![root.join("tests/e2e")];
     roots.extend(nested_packages(&root.join("tests/e2e")));
     roots.push(root.join("examples"));
-    roots.push(root.join("benches"));
 
     let mut cases = Vec::new();
     for package in roots {
@@ -477,7 +500,10 @@ fn discover() -> Vec<Case> {
         let config = cove_sema::config::parse(&text)
             .unwrap_or_else(|e| panic!("`{}/cove.toml`: {e}", package.display()));
         for (name, run) in config.runs {
-            let args = read_args(&package, &name);
+            let mut args = read_args(&package, &name);
+            if let Some(smaller) = smaller_workload(&name) {
+                args = smaller;
+            }
             cases.push(Case {
                 name: format!("{}:{name}", relative(&root, &package)),
                 root: package.clone(),
@@ -487,6 +513,31 @@ fn discover() -> Vec<Case> {
         }
     }
     cases
+}
+
+/// The arguments that make a case's workload a test's size rather than its
+/// own.
+///
+/// One case needs this. `examples:cqSample` is `cq.sample`, which writes a
+/// file of records for the `cq` benchmark to read, and its own default is a
+/// hundred thousand of them — sixteen megabytes, written twice, unoptimized,
+/// by a test that is asking whether two backends agree. It was 258 of the
+/// 340 seconds this test spent running programs, which is more than the
+/// other eighty-nine cases put together by a factor of sixty.
+///
+/// A hundred records reach every line of it that a hundred thousand do. The
+/// entry already reads the count from its arguments, so this changes nothing
+/// about what runs and only how many times the loop around it turns, and
+/// `cove run cqSample` still writes what the benchmark expects.
+///
+/// This is a list rather than a rule because it should stay short enough to
+/// read. A case that needs to be here is a case whose size was chosen for
+/// something other than this test.
+fn smaller_workload(name: &str) -> Option<Vec<String>> {
+    match name {
+        "cqSample" => Some(vec!["100".to_string(), "bookings-sample.jsonl".to_string()]),
+        _ => None,
+    }
 }
 
 /// Every directory below `root` that holds a `cove.toml` of its own.
