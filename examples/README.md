@@ -58,10 +58,13 @@ is compiled once when an application starts and invoked once per request for
 as long as the application lives, and no `[run.<name>]` describes that. So
 `rules/host/` is a workspace member -- a Rust application that registers a host
 module of its own, hands its `ModuleSchema` to `cove_sema::Compiler`, lowers
-one entry, builds one VM, and invokes it. `examples/rules/README.md` reports
-what each of those costs: what compiling is worth in invocations, what reusing
-one VM instead of building one per request saves, and what share of an
-invocation the Host API boundary is. That is the measurement
+one entry, builds one VM, and invokes it with a pull request it built.
+`examples/rules/README.md` reports what each of those costs: what compiling is
+worth in invocations, what reusing one VM instead of building one per request
+saves, and what the way in costs -- the same decision reached with the pull
+request as an argument and with it fetched across the Host API boundary, which
+is the comparison that says which part of the boundary was carrying an argument
+and which part was doing work. That is the measurement
 [issue #109](https://github.com/myuon/cove/issues/109)'s gate asks for.
 
 `life/` is the second of that kind and asks a different question. `cq/` moves

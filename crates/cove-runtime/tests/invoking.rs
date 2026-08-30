@@ -135,7 +135,10 @@ const BOTH: [Backend; 2] = [Backend::Ast, Backend::Vm];
 
 /// What a case gets back: what the invocation answered, and every terminal
 /// event the run wrote.
-type Answered = (Result<Value, RuntimeError>, Vec<(RunOutcome, Option<String>)>);
+type Answered = (
+    Result<Value, RuntimeError>,
+    Vec<(RunOutcome, Option<String>)>,
+);
 
 /// Every `run_ended` event a run wrote, which is how a case asserts that a
 /// refusal is still a run that ended.
@@ -196,11 +199,7 @@ fn packaged(text: &str) -> (SourceMap, Package) {
 /// reaches. What that costs is a lowering of `identity`, `bump` and `joined`
 /// as well, which is worth having: it says the three are refused by the check
 /// and not by the lowering failing to produce them.
-fn invoke(
-    backend: Backend,
-    name: &str,
-    args: Vec<Value>,
-) -> Answered {
+fn invoke(backend: Backend, name: &str, args: Vec<Value>) -> Answered {
     let (sources, program) = checked();
     on(backend, sources, program, name, args)
 }
