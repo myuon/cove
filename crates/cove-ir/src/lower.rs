@@ -1108,7 +1108,7 @@ impl<'a> Lowering<'a> {
             answers_a_task: is_async,
             captures,
             capture_base,
-            written_params: decl_params.to_vec(),
+            param_names: param_names(decl_params),
             block_fuel: block_fuel(&finished.code),
             code: finished.code,
             spans: finished.spans,
@@ -1344,8 +1344,11 @@ impl<'a> Lowering<'a> {
             // Vec::new()`, because a declaration reads no environment.
             captures: Vec::new(),
             capture_base,
-            written_params: match as_value {
-                true => decl.params.clone(),
+            // Only a function that can become a closure value is ever called
+            // with a count of the caller's choosing, so only that one can
+            // reach the diagnostic these names are for.
+            param_names: match as_value {
+                true => param_names(&decl.params),
                 false => Vec::new(),
             },
             block_fuel: block_fuel(&finished.code),
@@ -6073,6 +6076,20 @@ fn mentions_dyn(ty: &Type) -> bool {
         }
         TypeKind::Unit => false,
     }
+}
+
+/// The names `params` were written with, which is all of a written parameter
+/// list a lowered [`Function`] keeps.
+///
+/// [`Function::param_names`] says what became of the rest. They are copied
+/// into the program's own string type rather than borrowed, for the reason
+/// every other name here is: a [`Program`] outlives the syntax it was lowered
+/// from, and every thread of a run reads it.
+fn param_names(params: &[Param]) -> Vec<Arc<str>> {
+    params
+        .iter()
+        .map(|param| Arc::from(param.name.node.as_str()))
+        .collect()
 }
 
 /// Refuses a parameter the IR has no shape for.

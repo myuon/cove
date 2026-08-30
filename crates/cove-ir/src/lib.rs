@@ -315,20 +315,44 @@ pub struct Function {
     /// the place stack and takes no value slot, and the captures begin one
     /// slot earlier than `arity` would say. See [`Inst::Lock`].
     pub capture_base: u32,
-    /// The parameters as source wrote them, for a function a closure value
-    /// can be made of, and empty for every other.
+    /// The names source gave this function's parameters, for a function a
+    /// closure value can be made of, and empty for every other.
     ///
-    /// `params` above says which stack each argument arrives on, which is
-    /// what a call needs. This says what a closure *value* has to be able to
-    /// answer about itself: `cove_runtime::value::Closure::params` is a
-    /// `Vec<Param>` whichever backend built the closure, and
-    /// `Result.mapError` reads its length to decide whether to hand the
-    /// callback the error it is replacing. A closure the VM built has to
-    /// answer that the way one the interpreter built does, so the written
-    /// parameters travel with the lowered body rather than being
-    /// reconstructed from the slot kinds, which have lost the names and the
-    /// defaults.
-    pub written_params: Vec<cove_syntax::ast::Param>,
+    /// This is the whole of the parameter *declaration* the lowered form
+    /// keeps, and it has one consumer: `cove_runtime::vm::wrong_arity` names
+    /// the parameter that went unfilled when a caller supplied too few
+    /// arguments, in the interpreter's words, and a backend that no longer
+    /// holds the declaration has nowhere else to read that name from. It is
+    /// a diagnostic and nothing runs on it.
+    ///
+    /// Every other question a lowered function was once asked about its
+    /// written parameters is answered above, which is what issue #121
+    /// established:
+    ///
+    /// - *how many there are* is `arity`, which `validate` already holds
+    ///   equal to `params.len()`, and which a closure value carries as
+    ///   `cove_runtime::value::Closure::arity`;
+    /// - *which stack each arrives on* is `params`, and that is also where
+    ///   `Vm::run_locked` reads whether a `lock` closure asked for its
+    ///   parameter by `var` — a [`SlotKind::Place`] in first position is the
+    ///   lowered form of the written `var`;
+    /// - *whether one is variadic* nothing here ever read: a call to a
+    ///   declared function collects the leftovers into one `Array` before
+    ///   the call, so the callee sees an ordinary value slot, and
+    ///   `crate::lower` refuses a variadic declared function used as a value
+    ///   because a call through a value says how many arguments it brought
+    ///   and nothing about which of them were leftovers;
+    /// - *what a default is* is settled at the call site, out of the
+    ///   `supplied` mask a call lowers with, and a parameter with a default
+    ///   is refused on both roads to a closure value — so a lowered body
+    ///   never evaluates a default and no default expression need survive
+    ///   here;
+    /// - *the written type* is the checker's answer, already spent: it chose
+    ///   each slot's kind and every conversion the body performs;
+    /// - *the source span* of a parameter produces no diagnostic. `span`
+    ///   below covers the declaration and `spans` covers each instruction,
+    ///   which is every position a run can report.
+    pub param_names: Vec<Arc<str>>,
     pub code: Vec<Inst>,
     /// How many instructions run from each index control can arrive at before
     /// it can go somewhere else, and 0 at every index it cannot arrive at.

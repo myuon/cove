@@ -30,7 +30,6 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use cove_diag::Span;
-use cove_syntax::ast::{FnDecl, Param};
 
 use crate::budget::Cancellation;
 use crate::error::RuntimeError;
@@ -639,21 +638,23 @@ pub enum Transfer {
 
 /// The parts of a [`Closure`] a receiving task can own.
 ///
-/// The body and the declaration are shared rather than copied: an
-/// [`Arc<Block>`] is immutable syntax, so two threads reading the same one
-/// observe nothing about each other. Only the captures are converted, which
-/// is where the task-safety rule has anything to decide.
+/// The body carries the declaration with it and is shared rather than copied
+/// wherever it can be: an [`Arc<Block>`] is immutable syntax, so two threads
+/// reading the same one observe nothing about each other. Only the captures
+/// are converted, which is where the task-safety rule has anything to decide.
 #[derive(Clone, Debug)]
 pub struct TransferClosure {
     pub is_async: bool,
-    pub params: Vec<Param>,
-    pub decl: Option<Arc<FnDecl>>,
+    /// How many parameters the closure declares — a number, and so nothing
+    /// the task-safety rule has to decide about.
+    pub arity: usize,
     /// The body, in whichever of the two forms the backend that made this
     /// closure builds.
     ///
     /// [`ClosureBody::Tree`] is syntax and crosses the way the declaration
-    /// beside it does: an `Arc<Block>` is immutable, so two threads reading
-    /// one observe nothing about each other. [`ClosureBody::Lowered`] is an
+    /// inside it does: an `Arc<Block>` is immutable, so two threads reading
+    /// one observe nothing about each other, and the parameters beside it are
+    /// copied like any other owned syntax. [`ClosureBody::Lowered`] is an
     /// id into *one run's* `cove_ir::Program`, so what it means depends on
     /// which program the receiving task holds — and the answer is that it
     /// holds the same one. A `cove_ir::Program` is immutable once lowered and
@@ -820,8 +821,7 @@ impl Transfer {
                 }
                 Ok(Transfer::Closure(Box::new(TransferClosure {
                     is_async: closure.is_async,
-                    params: closure.params.clone(),
-                    decl: closure.decl.clone(),
+                    arity: closure.arity,
                     body: closure.body.clone(),
                     module: closure.module.to_string(),
                     captures,
@@ -908,8 +908,7 @@ impl Transfer {
                 let closure = *closure;
                 Value::Closure(Rc::new(Closure {
                     is_async: closure.is_async,
-                    params: closure.params,
-                    decl: closure.decl,
+                    arity: closure.arity,
                     body: closure.body,
                     module: closure.module.into(),
                     captures: closure
@@ -1069,13 +1068,16 @@ mod tests {
         let span = Span::new(FileId(0), 0, 0);
         Value::Closure(Rc::new(Closure {
             is_async: false,
-            params: Vec::new(),
-            decl: None,
-            body: ClosureBody::Tree(Arc::new(Block {
-                statements: Vec::new(),
-                tail: None,
-                span,
-            })),
+            arity: 0,
+            body: ClosureBody::Tree {
+                params: Vec::new(),
+                block: Arc::new(Block {
+                    statements: Vec::new(),
+                    tail: None,
+                    span,
+                }),
+                decl: None,
+            },
             module: module.into(),
             captures: captures
                 .into_iter()

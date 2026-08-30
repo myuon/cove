@@ -1962,12 +1962,18 @@ impl<'a> Vm<'a> {
     /// values.
     ///
     /// What it builds is a `Value::Closure` and not a variant of its own.
-    /// Everything a host reads off a closure — the parameters it declares,
-    /// the module it belongs to, what it captured — is the same fact
-    /// whichever backend made it, and `cove_ir::Function` carries each of
-    /// them for exactly this. Only the body differs, and
-    /// [`crate::value::ClosureBody`] is where that difference is written
-    /// down.
+    /// Everything a host reads off a closure — how many parameters it
+    /// declares, the module it belongs to, what it captured, whether it is
+    /// `async` — is the same fact whichever backend made it, and
+    /// `cove_ir::Function` carries each of them for exactly this. Only the
+    /// body differs, and [`crate::value::ClosureBody`] is where that
+    /// difference is written down.
+    ///
+    /// Nothing here copies syntax. It did: a lowered function carried the
+    /// parameters source wrote so that this could clone them into the value,
+    /// and every reader of them read their length. So what travels is the
+    /// length — see [`crate::value::Closure::arity`], and issue #121 for the
+    /// audit that looked for a second reader and found none.
     fn close_over(&mut self, function: FunctionId, captures: u16) -> Value {
         let target = self.program.function(function);
         let at = self.stack.len() - captures as usize;
@@ -1990,16 +1996,12 @@ impl<'a> Vm<'a> {
             // ends up: a host that receives this closure reads the same field
             // off one the interpreter built.
             is_async: target.answers_a_task,
-            params: target.written_params.clone(),
-            // A lambda has no declaration, which is the same `None` the
-            // interpreter's `make_closure` writes. The field is read for a
-            // written return type, and a lowered body has already made that
-            // conversion itself: `cove_ir::lower` emits a
-            // `cove_ir::Inst::MakeDyn` before every return of a function
-            // whose return type is written `dyn Trait`, so the answer that
-            // comes back out is already the trait object the declaration
-            // promised.
-            decl: None,
+            // The same count the call convention checks an argument list
+            // against, which `cove_ir::lower::validate` holds equal to
+            // `params.len()`. A closure the interpreter built answers the
+            // length of the parameters it will bind, and this is the lowered
+            // form of that same number.
+            arity: target.arity as usize,
             body: ClosureBody::Lowered(function),
             module: Rc::from(&*target.module),
             captures: held,
@@ -2292,7 +2294,7 @@ impl<'a> Vm<'a> {
                         Some(SlotKind::Place)
                     )
                 }
-                ClosureBody::Tree(_) => false,
+                ClosureBody::Tree { .. } => false,
             },
             _ => false,
         };
@@ -3086,6 +3088,11 @@ enum Entered {
 /// went unfilled. A checked program has neither — the checker settles a
 /// closure's arity at the call — so what reaches this is a host that called
 /// a callback with a list of its own choosing.
+///
+/// It is the only reader of `cove_ir::Function::param_names`, and the reason
+/// a lowered function keeps any part of its written parameter list at all: a
+/// name is what makes "needs an argument for `label`" say which one, and a
+/// slot kind cannot say it.
 fn wrong_arity(callee: &Function, argc: u16, span: Span) -> RuntimeError {
     if u32::from(argc) > callee.arity {
         return RuntimeError::new(format!(
@@ -3094,10 +3101,10 @@ fn wrong_arity(callee: &Function, argc: u16, span: Span) -> RuntimeError {
         ))
         .at(span);
     }
-    let missing = callee.written_params.get(argc as usize).map_or_else(
-        || format!("argument {}", argc + 1),
-        |param| param.name.node.clone(),
-    );
+    let missing = callee
+        .param_names
+        .get(argc as usize)
+        .map_or_else(|| format!("argument {}", argc + 1), |name| name.to_string());
     RuntimeError::new(format!("`this closure` needs an argument for `{missing}`")).at(span)
 }
 
@@ -3658,15 +3665,14 @@ impl Callable for Vm<'_> {
     /// How many parameters a closure declares, read off the value.
     ///
     /// The interpreter's own answer, unchanged, and it stays correct for a
-    /// closure this backend built because `cove_ir::Function::written_params`
-    /// carries the parameters source wrote into the value. `mapError` reads
-    /// this to decide whether to hand its callback the error it replaces, so
-    /// a lowered closure that answered `0` where an interpreted one answered
-    /// `1` would be the two backends disagreeing about what `mapError`
-    /// passes.
+    /// closure this backend built because `close_over` writes the lowered
+    /// function's `arity` into the value. `mapError` reads this to decide
+    /// whether to hand its callback the error it replaces, so a lowered
+    /// closure that answered `0` where an interpreted one answered `1` would
+    /// be the two backends disagreeing about what `mapError` passes.
     fn arity(&self, callee: &Value) -> Option<usize> {
         match callee {
-            Value::Closure(closure) => Some(closure.params.len()),
+            Value::Closure(closure) => Some(closure.arity),
             _ => None,
         }
     }
@@ -5774,7 +5780,7 @@ mod tests {
                     answers_a_task: false,
                     captures: Vec::new(),
                     capture_base: 0,
-                    written_params: Vec::new(),
+                    param_names: Vec::new(),
                     spans: vec![span; code.len()],
                     block_fuel: cove_ir::lower::block_fuel(&code),
                     code,
@@ -5889,7 +5895,7 @@ mod tests {
                     answers_a_task: false,
                     captures: Vec::new(),
                     capture_base: 0,
-                    written_params: Vec::new(),
+                    param_names: Vec::new(),
                     spans: vec![span; code.len()],
                     block_fuel: cove_ir::lower::block_fuel(&code),
                     code,
