@@ -171,13 +171,20 @@ makes the allocation a root. `Marker::visit` then marks and bills what is
 reachable, with a per-container `walked` set so a shared `Rc` is not counted
 twice.
 
-That arrangement has one failure mode and it is not "a root was missed". It is
-**a value walked twice**, because a reference counted twice conceals exactly
-the shortfall the rule depends on. #192 kept `Vm::arg_vectors` out of the root
-set for that reason; ADR 0027 kept a place out of it for the same reason
-("walking a place as well would charge one value twice"). Any representation
-this ADR proposes inherits that invariant, and the section below states it as
-an obligation rather than assuming it.
+That arrangement has one failure mode and it is not merely "an object was
+marked twice". It is **a root storage location yielded twice during the
+reference-counting walk**, because a reference counted twice conceals exactly
+the shortfall the rule depends on. That is distinct from two real graph edges
+pointing at one shared object — both edges must be counted — and from marking,
+where one object must be expanded only once. #192 kept `Vm::arg_vectors` out
+of the root set for that reason; ADR 0027 kept a place out of it on the same
+ground.
+
+A VM-owned heap handle is not automatically an `Rc`. If it is an index or
+offset, moving it from the VM stack into a Rust local creates no
+`Rc::strong_count` shortfall, so the current collector cannot infer that
+temporary root. Decision 8 therefore separates the invariant that survives
+from the mechanism that may not.
 
 ## Decision
 
@@ -235,19 +242,32 @@ double is exactly eight bytes with nothing left over, which is the whole
 reason a *typed* slot can hold one and a *tagged* value cannot.
 
 **One logical frame, one slot numbering, one base.** Parameters, locals,
-temporaries and captures occupy one index space from one frame base. This is
-what #162's title asks for and what ADR 0027 explicitly did not decide.
+temporaries and captures occupy one index space from one frame base. A
+*slot* is always one eight-byte word; a *value location* is the first slot
+plus a layout whose width is one or more consecutive slots. Most values have
+width one. A `Dynamic` has width two, and an aggregate may also have width
+greater than one if its lowered layout chooses an inline representation.
+Instructions name the value location's first slot and the function's layout
+metadata supplies its width and the kind of every constituent slot.
+
+This distinction is required rather than optional. Without it, decision 3's
+two-word `Dynamic` would violate the same one-slot-one-index rule that an
+inline enum was said to violate. Slot identity and value identity are not the
+same thing: **every word has one slot index, while one logical value may occupy
+several adjacent slot indices.** This is what #162's title asks for and what
+ADR 0027 explicitly did not decide.
 
 **The physical arrangement is a measurement question and is not decided here.**
 One word-wide array is the obvious realization of the paragraph above and it
 is not mandated, because #179 says why a cross-build absolute on this
 workspace is not evidence and this ADR makes no performance claim it has not
-measured. What *is* decided is the invariant any physical arrangement must
-satisfy: **a slot the layout calls scalar must never be reachable by a walk
-that treats it as a reference, and a slot must not be widened past eight bytes
-to make some other part convenient.** ADR 0027's arrangement — separate
-storage numbered separately — satisfies the first trivially and is one legal
-realization of it.
+measured. A physically split realization is legal only if it presents the
+same single logical numbering and derives every physical offset from the one
+frame layout; three independently numbered stacks and three independent frame
+bases are not one logical frame. What *is* decided is the invariant any
+physical arrangement must satisfy: **a slot the layout calls scalar must never
+be reachable by a walk that treats it as a reference, and a slot must not be
+widened past eight bytes to make some other part convenient.**
 
 **A place is unchanged.** ADR 0027 decided a place is a root and a path where
 the root names a slot; under one numbering there is one kind of root rather
@@ -264,32 +284,42 @@ VM-owned metadata or an object header:
 - its **reference map** — which of its words are handles, so a collector
   scans those and not the scalars beside them;
 - its **payload layout**, including a variable-length tail where it has one;
-- its **movement guarantee**. Under ADR 0011 and the Language Card, collection
-  is **non-moving**, so the guarantee is that a handle stays valid and an
-  object stays put. A moving collector would owe what
-  `docs/VM_ARCHITECTURE.md`'s "Collection is non-moving" already writes down —
-  every place is an index into the value stack, so relocating the stack means
-  rewriting each of them — and this ADR does not propose one.
+- the heap or arena's **movement guarantee**. Under ADR 0011 and the Language
+  Card, collection is **non-moving**, so the guarantee is that a handle stays
+  valid and an object stays put. This is an allocator/arena invariant, not a
+  mandatory word in every object header. A future mixed heap may encode it per
+  layout or object if it needs to. A moving collector would owe what
+  `docs/VM_ARCHITECTURE.md`'s "Collection is non-moving" already writes down,
+  and this ADR does not propose one.
 
 **An object reference does not carry its type when the slot kind or the header
 already provides it.** That is #197's rule and it is taken as written.
 
-**Enum and `Option` values are heap objects with the case in the header, and
-one slot holds the handle.** Multiple typed slots per enum value and niche
-layouts are both refused, and for one reason each:
+**Enum and `Option` layout is selected per lowered type and is not fixed by
+this ADR.** The initial prototype may use a heap object with the case in its
+header and one handle slot, because that is the smallest implementation. It
+must not turn that prototype choice into the permanent cost of every
+`Option<Int>` or fieldless enum without measurement.
 
-- *Multiple typed slots* would make a slot's **count** depend on its type,
-  which breaks the one-slot-one-index rule decision 1 exists to establish.
-- *Niche layouts* would make a slot's **interpretation depend on its value**
-  rather than on its type — a word that is a handle when it is large and a
-  discriminant when it is small. That is the exact property this whole ADR is
-  removing, and buying it back for `Option` would mean the GC reference map
-  could no longer answer "is this word a handle" without reading the word.
+A lowered enum layout may later be:
 
-Both remain available later, on evidence, and neither is available for free.
-#192 already put the arities an ordinary program builds inline in the
+- an immediate discriminant in one scalar slot;
+- a discriminant followed by one or more typed payload slots;
+- one handle slot naming a heap object;
+- a niche layout where semantic analysis and the GC map can describe it
+  precisely.
+
+Decision 1 permits the second: a logical value may occupy several adjacent
+eight-byte slots while every slot still has one index. A niche layout is more
+complex because the reference map may have to interpret the word according to
+the enum layout, so it is neither selected nor forbidden here. The required
+invariant is that the lowered layout completely determines how to find every
+reference; runtime code must not guess.
+
+#192 already put the arities an ordinary program builds inline in
 `EnumValue` rather than in a vector beside it, which is where the
-`Some(x)`-costs-two-allocations finding went; that shape carries over.
+`Some(x)`-costs-two-allocations finding went. The prototype records whether a
+heap representation gives that win back before it becomes the default.
 
 ### 3. A dynamic value is sixteen bytes, and `dyn` and `Any` are not one thing
 
@@ -532,41 +562,50 @@ is for the host that wants to be told when the language changes.
 
 ### 8. What the collector is owed
 
-Every representation above has to be walkable by
-`crates/cove-runtime/src/heap.rs`, and the obligation is stated as an
-invariant because that is what the accounting depends on:
+Every representation above has to be walkable precisely, but the present
+`Rc::strong_count` shortfall mechanism is not assumed to survive a
+VM-owned handle representation unchanged.
 
-**Every reachable object is reached by exactly one walk.** Not "no root is
-missed" — that is necessary and it is not the hard part. Double-counting is
-the one failure the accounting cannot survive, because `Scan::count` finds a
-Rust-held reference by comparing what it can see against `Rc::strong_count`,
-and a reference counted twice conceals exactly that shortfall. #192 kept
-`Vm::arg_vectors` out of the root set on this ground and ADR 0027 kept a place
-out of it on the same one.
+Three different multiplicities must not be conflated:
+
+1. **Root storage locations are yielded once.** Aliased environments or a
+   place and the slot it names must not cause the same stored reference to be
+   reported twice.
+2. **Real graph edges are counted once each.** If two fields point at the same
+   object, both references exist and both count for any reference-count
+   comparison.
+3. **Objects are expanded once during marking.** Shared or cyclic objects may
+   be reached through many edges, but their interiors are traversed once.
 
 Under the representations above:
 
-- a **scalar slot** is not a root by construction — the frame layout says so,
-  and the layout is the checker's answer;
-- a **handle slot** is a root, and the frame's reference map is where the walk
-  learns which slots those are;
-- a **place** is not a root, unchanged from ADR 0027: it names a slot, and
-  whatever that slot reaches the walk already yields;
-- a **heap object's** interior is walked through its header's reference map
-  rather than by inspecting its words;
-- a **`Dynamic` slot** is the one case a per-frame bitmap cannot answer, and
-  it is worth naming because it is genuinely new. Whether its payload word is
-  a handle depends on the witness, not on the frame layout. So the reference
-  map marks a dynamic slot as *ask the witness*, and **a witness carries
-  whether its payload is a handle**. That is a required field of a witness,
-  not an optimization.
+- a **scalar slot** contains no reference by construction;
+- a **handle slot** is a root according to the frame reference map;
+- a **place** is not an additional root: it names storage whose slot is
+  already described by the frame layout;
+- a **heap object's** interior is walked according to its layout's reference
+  map;
+- a **`Dynamic` value** has a two-slot layout whose witness says whether the
+  payload slot is immediate bits or a handle.
 
-The shortfall rule survives all of this untouched, because it is about
-references the walk cannot see rather than about what a value is made of. What
-changes is that a materialized `Value` at the boundary is a *second*
-reference to whatever it materialized, held in a Rust local — which is
-precisely the case the shortfall rule already covers, and it is why
-`Vm::take`'s drained argument vector is safe today.
+The last field is required for precise scanning, but it does not by itself
+solve temporary rooting. The prototype must choose and test one of these
+coherent mechanisms:
+
+- handles participate in reference counting strongly enough for the existing
+  shortfall rule to detect a Rust-local copy;
+- every Rust-local handle that can survive to a safepoint is registered in an
+  explicit temporary/shadow-root stack;
+- the dispatch discipline guarantees that a collection can occur only when
+  every live handle has been returned to a mapped VM slot;
+- another mechanism with the same precise invariant is specified.
+
+An index or offset copied into a Rust local does not change
+`Rc::strong_count`, so **the ADR does not claim that the current shortfall
+collector survives such a handle untouched**. The vertical slice must include
+a safepoint with a heap handle temporarily outside the VM stack and prove that
+the object remains live. Only after handle semantics and temporary-root
+discipline are chosen can the collector migration be called specified.
 
 ## The tension #195 left, and how it is resolved
 
@@ -696,10 +735,11 @@ collector did not have. That is the trade, stated as a trade.
 
 ### `Option` and enum layout, which #197 asks separately
 
-Heap layout with the case in the header, one slot holding the handle, and the
-small arities inline as #192 already put them. Multiple typed slots and niche
-layouts are both refused in decision 2, each for one reason, and both remain
-available later on evidence.
+Not fixed before the prototype. Decision 2 permits an immediate discriminant,
+multiple typed slots, a heap handle, or a precisely described niche layout.
+The initial slice may use the heap form for implementation economy, but it
+must measure allocation and pointer-chasing on `Option<Int>` and
+`Result<Int, Error>` before selecting a default.
 
 ## What this supersedes, and what it does not
 
@@ -802,8 +842,10 @@ family, which is #109's partially-done item and is now load-bearing.
 
 **A witness gains a required field it would not otherwise need.** Decision 8
 makes "is my payload a handle" part of every witness, because a per-frame
-reference map cannot answer it for a dynamic slot. That is a real cost of
-choosing row 4 over row 5.
+reference map cannot answer it for a dynamic value. That is a real cost of
+choosing row 4 over row 5. The prototype additionally owes an explicit
+temporary-root discipline if VM heap handles are indices or offsets rather
+than reference-counted handles.
 
 **`Value`'s 24-byte assertion stops being a compatibility statement.** PR
 #187's `const _` stays — it is a control against silent drift and it earns its
@@ -813,10 +855,13 @@ crate may depend on it.
 ## What is not decided here
 
 **The physical arrangement of the frame.** Decision 1 decides one logical
-frame, one numbering, one base, and an 8-byte typed slot. Whether that is one
-word-wide `Vec` with a reference bitmap or the typed regions ADR 0027 left in
-place is a measurement question, and #179 is why an unmeasured answer would be
-worse than an acknowledged gap. #162's title stays open by exactly this much.
+frame, one numbering, one base, 8-byte slots, and value layouts that may span
+adjacent slots. Whether that is one word-wide `Vec` with a reference bitmap
+or typed physical regions derived from the same logical layout is a
+measurement question, and #179 is why an unmeasured answer would be worse than
+an acknowledged gap. The current three independently based stacks are not the
+decided logical model; #162 stays open until a physical realization is
+measured.
 
 **Every number.** This ADR makes no performance claim it has not measured, and
 the two it cites are #109's width table and #123's crossing cost. The
@@ -847,8 +892,8 @@ belongs.
 
 **Whether a moving collector ever happens.** Non-moving, per ADR 0011 and the
 Card. `docs/VM_ARCHITECTURE.md` already writes down what a moving collector
-would owe; decision 2's movement guarantee makes it a header field so the
-question stays askable, and nothing here asks it.
+would owe. Decision 2 records movement as a heap/arena invariant without
+requiring a word in every object header, and nothing here asks the question.
 
 ## Consequences
 
