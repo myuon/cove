@@ -1102,14 +1102,7 @@ impl<'a> Interpreter<'a> {
     /// as a bare name for either would be.
     fn module_member(&self, owner: &str, name: &str, span: Span) -> Eval {
         if let Some(decl) = self.exported_function(owner, name) {
-            return Ok(Value::Closure(Rc::new(Closure {
-                is_async: decl.is_async,
-                params: decl.params.clone(),
-                body: ClosureBody::Tree(Arc::new(decl.body.clone())),
-                decl: Some(decl),
-                module: owner.into(),
-                captures: Vec::new(),
-            })));
+            return Ok(declared_as_value(owner.into(), decl));
         }
         if self
             .find_exported(owner, name, |resolved| {
@@ -1589,7 +1582,12 @@ impl<'a> Interpreter<'a> {
                 // the only party that builds a lowered body — so this is
                 // said rather than approximated, exactly as the VM says the
                 // reverse.
-                let ClosureBody::Tree(body) = &closure.body else {
+                let ClosureBody::Tree {
+                    params,
+                    block,
+                    decl,
+                } = &closure.body
+                else {
                     return Err(RuntimeError::new(
                         "this closure was built by the VM, and the interpreter runs syntax",
                     )
@@ -1601,16 +1599,13 @@ impl<'a> Interpreter<'a> {
                 self.invoke(
                     &Target {
                         name: "this closure",
-                        params: &closure.params,
-                        body,
+                        params,
+                        body: block,
                         module,
                         receiver: None,
                         is_async: closure.is_async,
                         captures: &closure.captures,
-                        return_type: closure
-                            .decl
-                            .as_ref()
-                            .and_then(|decl| decl.return_type.as_ref()),
+                        return_type: decl.as_ref().and_then(|decl| decl.return_type.as_ref()),
                     },
                     None,
                     args,
@@ -1963,9 +1958,12 @@ impl<'a> Interpreter<'a> {
         let captures = env.captures(&mentioned, span)?;
         Ok(Value::Closure(Rc::new(Closure {
             is_async,
-            params,
-            decl: None,
-            body: ClosureBody::Tree(Arc::new(body)),
+            arity: params.len(),
+            body: ClosureBody::Tree {
+                params,
+                block: Arc::new(body),
+                decl: None,
+            },
             module: env.module.clone(),
             captures,
         })))
@@ -2165,18 +2163,29 @@ impl<'a> Interpreter<'a> {
             .with_help("write `shared.lock(fn(var value) { ... })`")
             .into());
         };
-        let Some(param) = closure.params.first() else {
+        if closure.arity == 0 {
             return Err(RuntimeError::new(
                 "`lock` gives the wrapped value to its closure, but this closure takes no parameter",
             )
             .at(span)
             .with_help("write `shared.lock(fn(var value) { ... })`")
             .into());
-        };
+        }
         // A closure declaring `var` receives the wrapped value as an alias and
         // mutates it where it lies; one that does not receives a copy, exactly
         // as an ordinary parameter does anywhere else in the language.
-        let wants_alias = param.is_var;
+        //
+        // The parameter is the tree body's to state, which is why this reads
+        // it there: `Vm::run_locked` asks the same question of the same
+        // closure and reads a `SlotKind::Place` in first position, which is
+        // what `cove_ir::lower` turns a written `var` into. A body this
+        // evaluator cannot run answers `false` here and is refused a moment
+        // later by `call_value_slots`, in that refusal's own words — the
+        // shape `Vm::run_locked` has for the reverse case.
+        let wants_alias = match &closure.body {
+            ClosureBody::Tree { params, .. } => params.first().is_some_and(|param| param.is_var),
+            ClosureBody::Lowered(_) => false,
+        };
         Ok(cell.lock(span, |value| {
             let place = Place::binding(value);
             let slot = match wants_alias {
@@ -2212,14 +2221,7 @@ impl<'a> Interpreter<'a> {
         }
         let module = env.module.clone();
         if let Some((owner, decl)) = self.find_function(&module, name) {
-            return Ok(Value::Closure(Rc::new(Closure {
-                is_async: decl.is_async,
-                params: decl.params.clone(),
-                body: ClosureBody::Tree(Arc::new(decl.body.clone())),
-                decl: Some(decl),
-                module: owner,
-                captures: Vec::new(),
-            })));
+            return Ok(declared_as_value(owner, decl));
         }
         // A type is named by the module that declares it, wherever it is
         // written: two modules may each declare a `Config`, and a value has
@@ -3110,10 +3112,35 @@ impl Callable for Interpreter<'_> {
 
     fn arity(&self, callee: &Value) -> Option<usize> {
         match callee {
-            Value::Closure(closure) => Some(closure.params.len()),
+            Value::Closure(closure) => Some(closure.arity),
             _ => None,
         }
     }
+}
+
+/// A declared function used as a value: a closure over nothing.
+///
+/// `Env::captures` is not consulted, because a declaration reads no
+/// environment — which is the same `captures: Vec::new()` the VM's
+/// `close_over` writes for a function `cove_ir::lower` lowered as a value.
+///
+/// A bare name and a `module.name` both reach a declaration this way, and
+/// they build the same closure out of it, so they build it here rather than
+/// twice: the arity a closure answers has to be the length of the list its
+/// call binds against, and one place that reads both off the same
+/// declaration is one place they can be made to agree.
+fn declared_as_value(module: Rc<str>, decl: Arc<FnDecl>) -> Value {
+    Value::Closure(Rc::new(Closure {
+        is_async: decl.is_async,
+        arity: decl.params.len(),
+        body: ClosureBody::Tree {
+            params: decl.params.clone(),
+            block: Arc::new(decl.body.clone()),
+            decl: Some(decl),
+        },
+        module,
+        captures: Vec::new(),
+    }))
 }
 
 // -------------------------------------------------------------- operators
