@@ -1530,6 +1530,8 @@ impl Value {
     /// is not an oversight: its elements are behind a `RefCell` because an
     /// alias may write them, so nothing can hand out a plain slice of them,
     /// and there is no constructor for one either.
+    /// [`Value::vector_elements`] is how a vector is read — a guard rather
+    /// than a slice, which is what a part behind a cell can answer with.
     pub fn items(&self) -> Option<&[Value]> {
         match self.erased() {
             Value::Array(items) => Some(items),
@@ -1628,7 +1630,450 @@ impl Value {
             _ => None,
         }
     }
+
+    /// A `Vector`'s elements, in order, for as long as the guard is held.
+    ///
+    /// The companion of [`Value::items`], which answers `None` for a
+    /// `Vector` because its elements sit behind a cell — an alias may write
+    /// them, so nothing can hand out a plain `&[Value]` of them. Issue #196
+    /// records that as "the one place the borrow-based reader design cannot
+    /// reach"; ADR 0028 decision 7 is where it is reached, and this is the
+    /// shape of the answer: a part whose storage will not sit still is handed
+    /// out as an opaque guard, and the guard is public API.
+    ///
+    /// [`Elements`] derefs to `[Value]`, so a host reads a vector the way it
+    /// reads an array. Holding one *borrows* the vector: drop it before
+    /// calling back into Cove through
+    /// [`Reentry`](crate::host::Reentry), because Cove code that writes the
+    /// same vector while the guard is alive is a panic rather than a data
+    /// race.
+    pub fn vector_elements(&self) -> Option<Elements<'_>> {
+        match self.erased() {
+            Value::Vector(storage) => Some(Elements(storage.elements.borrow())),
+            _ => None,
+        }
+    }
+
+    /// The trait a `dyn Trait` value was used at, such as `render.Display`.
+    ///
+    /// The one reader that does *not* look through the wrapper, because it is
+    /// the reader for the wrapper. Every other reader and
+    /// [`Value::view`] call [`Value::erased`] first, for the reason that
+    /// method gives — the wrapper is a representation, not something the
+    /// program put there — so this is how a host that genuinely wants to name
+    /// the trait in a diagnostic asks for it.
+    pub fn dyn_trait(&self) -> Option<&str> {
+        match self {
+            Value::Dyn(d) => Some(&d.trait_name),
+            _ => None,
+        }
+    }
+
+    /// Classify this value: what *kind* of Cove value it is, and its parts.
+    ///
+    /// O(1), allocates nothing, and borrows from `self`. It looks through
+    /// `dyn Trait` exactly as every reader beside it does, which is why
+    /// [`ValueView`] has no `Dyn` variant; [`Value::dyn_trait`] is how a host
+    /// asks about the wrapper.
+    ///
+    /// This is the exhaustive match that sealing takes away, given back
+    /// deliberately. See [`ValueView`] for what it promises and when it
+    /// breaks.
+    ///
+    /// A `Vector` borrows its elements for as long as the view is held, for
+    /// the reason [`Value::vector_elements`] gives.
+    pub fn view(&self) -> ValueView<'_> {
+        match self.erased() {
+            Value::Unit => ValueView::Unit,
+            Value::Bool(b) => ValueView::Bool(*b),
+            Value::Int(n) => ValueView::Int(*n),
+            Value::Float(x) => ValueView::Float(*x),
+            Value::Duration(ns) => ValueView::Duration(*ns),
+            Value::Str(text) => ValueView::Str(text),
+            Value::Array(items) => ValueView::Array(items),
+            Value::Vector(storage) => ValueView::Vector(Elements(storage.elements.borrow())),
+            Value::Map(entries) => ValueView::Map(Entries(entries)),
+            Value::Set(members) => ValueView::Set(Members(members)),
+            Value::Struct(value) => ValueView::Struct(StructView(value)),
+            Value::Enum(value) => ValueView::Enum(EnumView(value)),
+            Value::Closure(closure) => ValueView::Closure(ClosureView(closure)),
+            Value::HostModule(name) => ValueView::HostModule(name),
+            Value::HostFn(host) => ValueView::HostFn {
+                module: &host.module,
+                op: &host.op,
+            },
+            Value::Resource(handle) => ValueView::Resource(handle),
+            Value::Type(name) => ValueView::Type(name),
+            Value::Range {
+                start,
+                end,
+                inclusive_end,
+            } => ValueView::Range(RangeBounds::of(*start, *end, *inclusive_end)),
+            Value::Task(task) => ValueView::Task(TaskView(task)),
+            Value::TaskScope(scope) => ValueView::TaskScope(TaskScopeView(scope)),
+            Value::Shared(_) => ValueView::Shared(SharedView(std::marker::PhantomData)),
+            // `erased` looks through every wrapper, including a wrapper
+            // holding a wrapper, so control never arrives here.
+            Value::Dyn(_) => unreachable!("`Value::erased` answers no `dyn` wrapper"),
+        }
+    }
 }
+
+/// What kind of Cove value this is: the stable public classification, and the
+/// exhaustive match a host is allowed to write.
+///
+/// # Why this exists
+///
+/// [`Value`]'s variants are sealed (ADR 0028 decision 6), which takes away a
+/// real safety property: a host that matched every variant got a compile
+/// error when a new one arrived. Issue #196 raises exactly that objection.
+/// This is the answer, and it is a better answer than the thing it replaces,
+/// because today one enum carries two unrelated kinds of change and a host
+/// cannot tell them apart. Moving a struct from a `Box` to an `Rc` (issue
+/// #104) and "Cove has a new kind of value" arrive at a host as the same
+/// compile error.
+///
+/// After this they are different events:
+///
+/// - a **representation** change is invisible — nothing here names an `Rc`, a
+///   `Box`, a slot, a heap object or a tag, so how the runtime holds a value
+///   may move without a host noticing;
+/// - a **language** change is a compile error at every `match` — a new kind
+///   of Cove value is a new variant here, and that is the right way round.
+///
+/// # It is exhaustive on purpose
+///
+/// This is deliberately **not** `#[non_exhaustive]`, and that is the whole
+/// point. A `#[non_exhaustive]` view would give back the syntax of an
+/// exhaustive match and none of its value: every host would carry a `_` arm,
+/// and the compile error that a new kind of value *should* cause would never
+/// happen anywhere.
+///
+/// The cost is real and is accepted: this is a second place every new kind of
+/// Cove value must be added, and adding one is a breaking change for every
+/// embedder. Forgetting is a compile error inside this crate, at
+/// [`Value::view`], which is the good case.
+///
+/// # What it promises
+///
+/// Each payload borrows from the value or copies out of it, and building one
+/// allocates nothing — so every part named here must still be *stored* as the
+/// thing it answers with. That is a promise about a materialized boundary
+/// value and not about how the VM holds one: ADR 0028 separates the two, and
+/// the parts that will actually move — slots, heap objects, dynamic values —
+/// are not [`Value`] and never reach here.
+///
+/// A part whose storage sits behind a cell is answered as an opaque guard
+/// rather than a borrow: [`Elements`] is the one that exists, and it is what
+/// lets `Vector` be viewed at all.
+///
+/// There is no `Dyn` variant, because [`Value::view`] looks through the
+/// wrapper like every reader beside it. [`Value::dyn_trait`] answers the
+/// trait name for a host that wants it.
+#[derive(Clone, Debug)]
+pub enum ValueView<'a> {
+    /// `()`
+    Unit,
+    Bool(bool),
+    Int(i64),
+    Float(f64),
+    /// A duration in nanoseconds, signed, exactly as
+    /// [`Value::as_duration_nanos`] answers it.
+    Duration(i64),
+    Str(&'a str),
+    /// A fixed-length immutable sequence.
+    Array(&'a [Value]),
+    /// A growable sequence, borrowed for as long as the view is held.
+    Vector(Elements<'a>),
+    Map(Entries<'a>),
+    Set(Members<'a>),
+    Struct(StructView<'a>),
+    /// An enum value, including `Option` and `Result`.
+    Enum(EnumView<'a>),
+    /// A callback. A host calls one back through
+    /// [`Reentry`](crate::host::Reentry) and never directly, since the body
+    /// belongs to the backend that made it.
+    Closure(ClosureView<'a>),
+    /// A bound host module such as `console`.
+    HostModule(&'a str),
+    /// A bound host operation such as `console.println`.
+    HostFn {
+        /// The host module, such as `console`.
+        module: &'a str,
+        /// The operation's own name, such as `println`.
+        op: &'a str,
+    },
+    /// A handle to a resource the host owns. ADR 0013 decides that the handle
+    /// is a name and that every field of it is part of that name, which is
+    /// why the whole of it is the answer.
+    Resource(&'a ResourceHandle),
+    /// A type used as a value, such as `Vector` in `Vector.of(1, 2)`.
+    Type(&'a str),
+    /// An integer range, normalised to half-open bounds.
+    Range(RangeBounds),
+    /// A handle to a spawned task. Its value is reachable only through
+    /// `await` or through the scope settling it.
+    Task(TaskView<'a>),
+    /// The scope `scope tasks { ... }` binds.
+    TaskScope(TaskScopeView<'a>),
+    /// Mutable state more than one task may reach. Its contents are reachable
+    /// only through `lock`, so there is nothing here to read.
+    Shared(SharedView<'a>),
+}
+
+/// A `Vector`'s elements, borrowed.
+///
+/// Reads as `[Value]`, so a host reads a vector the way it reads an array:
+/// `elements.len()`, `elements[0]`, `for value in &elements`.
+///
+/// It is a guard and not a slice because the elements sit behind a cell — the
+/// language lets an alias write them — and a guard is ADR 0028's general
+/// answer for a part whose storage will not sit still. Holding one borrows
+/// the vector, so drop it before letting Cove code write the same vector.
+pub struct Elements<'a>(std::cell::Ref<'a, Vec<Value>>);
+
+impl Clone for Elements<'_> {
+    /// Another guard onto the same elements, which is a second shared borrow
+    /// and never a copy of them.
+    fn clone(&self) -> Self {
+        Elements(std::cell::Ref::clone(&self.0))
+    }
+}
+
+impl std::ops::Deref for Elements<'_> {
+    type Target = [Value];
+
+    fn deref(&self) -> &[Value] {
+        &self.0
+    }
+}
+
+impl fmt::Debug for Elements<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Debug::fmt(&*self.0, f)
+    }
+}
+
+impl<'a, 'b> IntoIterator for &'b Elements<'a> {
+    type Item = &'b Value;
+    type IntoIter = std::slice::Iter<'b, Value>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.iter()
+    }
+}
+
+/// A `Map`'s entries, in ascending key order.
+///
+/// Opaque so that the key-ordered storage behind it stays the runtime's
+/// business; what it promises is the order, which is the order a Cove program
+/// iterating the same map sees.
+#[derive(Clone, Copy, Debug)]
+pub struct Entries<'a>(&'a BTreeMap<MapKey, Value>);
+
+impl<'a> Entries<'a> {
+    /// How many entries the map holds.
+    pub fn len(self) -> usize {
+        self.0.len()
+    }
+
+    /// Whether the map holds none.
+    pub fn is_empty(self) -> bool {
+        self.0.is_empty()
+    }
+
+    /// What `key` maps to, if anything.
+    pub fn get(self, key: &MapKey) -> Option<&'a Value> {
+        self.0.get(key)
+    }
+
+    /// The entries, in ascending key order.
+    pub fn iter(self) -> impl Iterator<Item = (&'a MapKey, &'a Value)> {
+        self.0.iter()
+    }
+}
+
+impl<'a> IntoIterator for Entries<'a> {
+    type Item = (&'a MapKey, &'a Value);
+    type IntoIter = std::collections::btree_map::Iter<'a, MapKey, Value>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.0.iter()
+    }
+}
+
+/// A `Set`'s elements, in ascending key order.
+///
+/// [`MapKey`]s and not [`Value`]s, for the reason [`Value::set`] gives on the
+/// way in: the restriction is real, and showing it is better than pretending
+/// a set holds anything.
+#[derive(Clone, Copy, Debug)]
+pub struct Members<'a>(&'a BTreeSet<MapKey>);
+
+impl<'a> Members<'a> {
+    /// How many elements the set holds.
+    pub fn len(self) -> usize {
+        self.0.len()
+    }
+
+    /// Whether the set holds none.
+    pub fn is_empty(self) -> bool {
+        self.0.is_empty()
+    }
+
+    /// Whether `member` is one of them.
+    pub fn contains(self, member: &MapKey) -> bool {
+        self.0.contains(member)
+    }
+
+    /// The elements, in ascending key order.
+    pub fn iter(self) -> impl Iterator<Item = &'a MapKey> {
+        self.0.iter()
+    }
+}
+
+impl<'a> IntoIterator for Members<'a> {
+    type Item = &'a MapKey;
+    type IntoIter = std::collections::btree_set::Iter<'a, MapKey>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.0.iter()
+    }
+}
+
+/// A struct value's name and fields.
+#[derive(Clone, Copy, Debug)]
+pub struct StructView<'a>(&'a StructValue);
+
+impl<'a> StructView<'a> {
+    /// The qualified name of the declared type, such as
+    /// `rules.policy.PullRequest` — the name [`Value::structure`] takes.
+    pub fn type_name(self) -> &'a str {
+        &self.0.type_name
+    }
+
+    /// The field `name`, or `None` when the struct declares no such field.
+    pub fn field(self, name: &str) -> Option<&'a Value> {
+        self.0.get(name)
+    }
+
+    /// The fields, in declaration order.
+    pub fn fields(self) -> impl Iterator<Item = (&'a str, &'a Value)> {
+        self.0.fields.iter().map(|(name, value)| (&**name, value))
+    }
+
+    /// How many fields the struct declares.
+    pub fn len(self) -> usize {
+        self.0.fields.len()
+    }
+
+    /// Whether the struct declares no fields at all.
+    pub fn is_empty(self) -> bool {
+        self.0.fields.is_empty()
+    }
+
+    /// Whether the declaration said `export opaque struct` (ADR 0014), which
+    /// governs how the value *renders* and nothing else.
+    ///
+    /// The fields are readable here whatever this answers, for the reason
+    /// [`Value::fields`] gives: a host holding the value has already been
+    /// handed it.
+    pub fn is_opaque(self) -> bool {
+        self.0.opaque
+    }
+}
+
+/// An enum value's name, case, and payload.
+#[derive(Clone, Copy, Debug)]
+pub struct EnumView<'a>(&'a EnumValue);
+
+impl<'a> EnumView<'a> {
+    /// The qualified name of the declared type, or `Option` / `Result` for
+    /// the builtins.
+    pub fn type_name(self) -> &'a str {
+        &self.0.type_name
+    }
+
+    /// The case, unqualified: `Some`, `Err`, `Require`.
+    pub fn case(self) -> &'a str {
+        &self.0.case
+    }
+
+    /// What the case carries, in the order the case declares it, and an empty
+    /// slice for a case that carries nothing.
+    pub fn payload(self) -> &'a [Value] {
+        self.0.payload.as_slice()
+    }
+}
+
+/// What a host may read of a callback.
+///
+/// The body is not here and cannot be: the interpreter walks a tree and the
+/// VM runs a lowered function, and calling one is
+/// [`Reentry`](crate::host::Reentry)'s job because only the backend that made
+/// a closure can run it.
+#[derive(Clone, Copy, Debug)]
+pub struct ClosureView<'a>(&'a Closure);
+
+impl ClosureView<'_> {
+    /// How many parameters the closure declares — parameters, not arguments a
+    /// call must supply, so a defaulted or a variadic one counts like any
+    /// other.
+    pub fn arity(self) -> usize {
+        self.0.arity
+    }
+
+    /// Whether it was declared `async`.
+    pub fn is_async(self) -> bool {
+        self.0.is_async
+    }
+}
+
+/// What a host may read of a task handle.
+#[derive(Clone, Copy, Debug)]
+pub struct TaskView<'a>(&'a Task);
+
+impl<'a> TaskView<'a> {
+    /// Trace identity, unique across the run.
+    pub fn id(self) -> u64 {
+        self.0.id
+    }
+
+    /// The name of the scope that owns the task.
+    pub fn scope(self) -> &'a str {
+        &self.0.scope
+    }
+
+    /// Position in spawn order within that scope, counting from one.
+    pub fn position(self) -> usize {
+        self.0.position
+    }
+}
+
+/// What a host may read of a task scope.
+#[derive(Clone, Copy, Debug)]
+pub struct TaskScopeView<'a>(&'a TaskScope);
+
+impl<'a> TaskScopeView<'a> {
+    /// The name the scope is bound to.
+    pub fn name(self) -> &'a str {
+        &self.0.name
+    }
+}
+
+/// A `Shared` cell, which has nothing readable on it.
+///
+/// Its contents are reachable only through `lock`, and showing them here
+/// would be a read outside one — the single thing the type exists to prevent.
+/// The variant is in [`ValueView`] so that a host can *tell* a `Shared` from
+/// everything else, which is all a host can do with one.
+///
+/// It carries the borrow and no accessor, so the cell it was made from is not
+/// reachable through it — deliberately, since reaching it is what `lock` is
+/// for.
+#[derive(Clone, Copy, Debug)]
+pub struct SharedView<'a>(std::marker::PhantomData<&'a SharedCell>);
+
 /// How a value appears inside string interpolation and `console.println`.
 impl fmt::Display for Value {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -2459,6 +2904,157 @@ mod tests {
             captures: Vec::new(),
         }));
         assert_eq!(closure.arity(), Some(2));
+    }
+
+    /// One value of every kind the language has, classified.
+    ///
+    /// The list is exhaustive on purpose: [`ValueView`] is not
+    /// `#[non_exhaustive]`, so a new kind of Cove value is a compile error at
+    /// `Value::view` first and here second, and this is where the count is
+    /// checked. A `_` arm below would defeat both.
+    #[test]
+    fn a_view_names_every_kind_of_value() {
+        let cell = SharedCell::new(crate::Transfer::Int(1));
+        let scope = TaskScope::new("work".into());
+        let task = Task::settled(Value::unit());
+        let kinds = [
+            Value::unit(),
+            Value::bool(true),
+            Value::int(1),
+            Value::float(1.0),
+            Value::duration(1),
+            Value::string("hi"),
+            Value::array([Value::int(1)]),
+            Value::Vector(VectorStorage::new(vec![Value::int(1)])),
+            Value::map([(MapKey::Int(1), Value::int(2))]),
+            Value::set([MapKey::Int(1)]),
+            Value::structure("app.Point", [("x", Value::int(1))]),
+            Value::some(Value::int(1)),
+            Value::Closure(Rc::new(Closure {
+                is_async: true,
+                arity: 2,
+                body: ClosureBody::Lowered(cove_ir::FunctionId(0)),
+                module: "app".into(),
+                captures: Vec::new(),
+            })),
+            Value::host_module("console"),
+            Value::host_fn("console", "println"),
+            Value::from_resource(ResourceHandle {
+                module: "database".to_string(),
+                type_name: "Connection".to_string(),
+                id: 1,
+                task_safe: true,
+            }),
+            Value::type_value("Vector"),
+            Value::range_of(1, 3, false),
+            Value::Task(task),
+            Value::TaskScope(scope),
+            Value::Shared(cell),
+        ];
+        let mut seen = 0;
+        for value in &kinds {
+            seen += 1;
+            match value.view() {
+                ValueView::Unit => assert_eq!(seen, 1),
+                ValueView::Bool(b) => assert!(b),
+                ValueView::Int(n) => assert_eq!(n, 1),
+                ValueView::Float(x) => assert_eq!(x, 1.0),
+                ValueView::Duration(ns) => assert_eq!(ns, 1),
+                ValueView::Str(text) => assert_eq!(text, "hi"),
+                ValueView::Array(items) => assert_eq!(items.len(), 1),
+                // The one part that answers a guard rather than a borrow,
+                // and it reads as the slice it guards.
+                ValueView::Vector(elements) => assert_eq!(elements[0].as_int(), Some(1)),
+                ValueView::Map(entries) => {
+                    assert_eq!(
+                        entries.get(&MapKey::Int(1)).and_then(Value::as_int),
+                        Some(2)
+                    )
+                }
+                ValueView::Set(members) => assert!(members.contains(&MapKey::Int(1))),
+                ValueView::Struct(value) => {
+                    assert_eq!(value.type_name(), "app.Point");
+                    assert!(!value.is_opaque());
+                    assert_eq!(value.field("x").and_then(Value::as_int), Some(1));
+                }
+                ValueView::Enum(value) => {
+                    assert_eq!((value.type_name(), value.case()), ("Option", "Some"));
+                    assert_eq!(value.payload().len(), 1);
+                }
+                ValueView::Closure(closure) => {
+                    assert!(closure.is_async());
+                    assert_eq!(closure.arity(), 2);
+                }
+                ValueView::HostModule(name) => assert_eq!(name, "console"),
+                ValueView::HostFn { module, op } => {
+                    assert_eq!((module, op), ("console", "println"))
+                }
+                ValueView::Resource(handle) => assert_eq!(handle.id, 1),
+                ValueView::Type(name) => assert_eq!(name, "Vector"),
+                ValueView::Range(bounds) => assert_eq!((bounds.start, bounds.end), (1, 3)),
+                ValueView::Task(task) => assert_eq!(task.scope(), "this call"),
+                ValueView::TaskScope(scope) => assert_eq!(scope.name(), "work"),
+                ValueView::Shared(_) => assert_eq!(seen, 21),
+            }
+        }
+        assert_eq!(seen, kinds.len());
+    }
+
+    /// The view looks through a `dyn Trait` wrapper, exactly as every reader
+    /// beside it does — which is why there is no `Dyn` variant to match, and
+    /// why the trait name is a reader instead.
+    #[test]
+    fn a_view_looks_through_a_trait_object() {
+        let wrapped = Value::Dyn(Rc::new(DynValue {
+            trait_name: "render.Display".into(),
+            value: Value::structure("app.Point", [("x", Value::int(1))]),
+        }));
+        let ValueView::Struct(value) = wrapped.view() else {
+            panic!("a wrapped struct views as a struct, not as a wrapper");
+        };
+        assert_eq!(value.type_name(), "app.Point");
+        assert_eq!(wrapped.dyn_trait(), Some("render.Display"));
+        assert_eq!(Value::int(1).dyn_trait(), None);
+
+        // Twice over: `erased` looks through a wrapper holding a wrapper, so
+        // `view` never has one to answer.
+        let twice = Value::Dyn(Rc::new(DynValue {
+            trait_name: "render.Display".into(),
+            value: wrapped,
+        }));
+        assert!(matches!(twice.view(), ValueView::Struct(_)));
+    }
+
+    /// Viewing a value shares nothing new.
+    ///
+    /// The collector infers a root by comparing the references it can see
+    /// against `Rc::strong_count`, so a view that cloned an `Rc` would add a
+    /// reference no walk can see and turn a dead object into a live one — a
+    /// leak — while one that a walk *could* see twice would conceal the
+    /// shortfall that makes a Rust local a root, which is a use-after-free.
+    /// A view borrows and copies scalars, and this is what says so.
+    #[test]
+    fn a_view_changes_no_reference_count() {
+        let storage = VectorStorage::new(vec![Value::int(1)]);
+        let vector = Value::Vector(storage.clone());
+        let fields = Rc::new(StructValue {
+            type_name: "app.Point".into(),
+            fields: vec![("x".into(), Value::int(1))],
+            opaque: false,
+        });
+        let structure = Value::Struct(fields.clone());
+
+        let before = (Rc::strong_count(&storage), Rc::strong_count(&fields));
+        let views = (vector.view(), structure.view(), vector.vector_elements());
+        assert_eq!(
+            before,
+            (Rc::strong_count(&storage), Rc::strong_count(&fields))
+        );
+        drop(views);
+        assert_eq!(
+            before,
+            (Rc::strong_count(&storage), Rc::strong_count(&fields))
+        );
     }
 
     /// Every scalar a host can build, built without naming a variant and read

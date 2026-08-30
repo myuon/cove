@@ -48,5 +48,5 @@ pub use trace::{
     RecordingBackend, RunOutcome, TraceEvent, TraceHeader, TraceSink, ValueCapture,
     TRACE_FORMAT_VERSION,
 };
-pub use value::Value;
+pub use value::{Value, ValueView};
 pub use vm::Vm;
