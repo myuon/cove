@@ -19,8 +19,8 @@ VM" — and [Measurements](#measurements) is that measurement.
 So the interesting question here is not "can Cove express a rule engine",
 which it can and which [Shape](#shape) is the answer to. It is: what does an
 application pay to hold one, and where does the payment go? The short answer
-is that compiling is worth about 162 invocations, that reusing one VM instead
-of building one per request saves 168 allocations against the 237 an invocation
+is that compiling is worth about 168 invocations, that reusing one VM instead
+of building one per request saves 167 allocations against the 237 an invocation
 costs, and that how the pull request gets in is worth 40 allocations and 135
 instructions.
 
@@ -236,7 +236,7 @@ ask for one: a `Budget` belonged to the `HostRegistry`, `set_budget` needs
 exists. Every limit was therefore spent over the whole session — the fuel for
 the first decision came out of the same pot as the fuel for the ten-thousandth
 — and the only way to get a per-request bound was to build a registry, a
-`Runtime` and a backend per request, which is 168 allocations of table
+`Runtime` and a backend per request, which is 167 allocations of table
 rebuilding against a request's own 237 and is the thing compiling once was for
 not doing.
 
@@ -363,50 +363,91 @@ happened to come first. This is the whole argument for
 ## Measurements
 
 ```text
-cargo run --release -p cove-rules --bin cove-rules-measure -- 500
+cargo run --release -p cove-rules --bin cove-rules-measure -- 3000
 ```
 
-**Every number below is now stale, and this change is why.** It made `labels`
-cross as a `Set` instead of as an `Array<String>` the Cove side walked into
-one, which removes a loop from every decision and changes what the conversion
-builds — so the instruction counts and the allocation counts both move, by
-construction and in the direction the change was made for. They were not
-re-taken here, because the machine this was done on was busy with other work
-and `cove-rules-measure` wants a release build and a quiet machine. **The rows
-below are the parent commit's and describe the program as it was**; they are
-left because a table nobody can compare against is worse than one whose
-vintage is stated, and because every *ratio* they were quoted for — compiling
-is worth about 162 invocations, reuse is worth 168 allocations, the boundary
-route costs 40 more than the argument route — is about mechanisms this change
-did not touch.
+Every number below was taken in one sitting on a machine doing nothing else,
+at `732b238`, and the wall times are medians of five runs of that command:
+
+```text
+Intel(R) Core(TM) i7-10700K CPU @ 3.80GHz, 32 GiB, macOS 26.5.2 (x86_64)
+rustc 1.93.1 (01f6ddf75 2026-02-11), --release
+medians of five runs, 3,000 invocations a row
+```
+
+That matters more than a provenance note usually does, because the wall times
+in this document had never been re-taken since it was written and were carried
+from another machine, and because the counts had been marked stale on a
+prediction that turned out to be wrong.
+
+**The prediction was that making `labels` a `Set` would move the invocation
+counts, and it moved none of them.** The reasoning was that the `Set`
+removes a loop from every decision, so instructions and allocations both had
+to fall. Measured at `732b238` and at `69ce074` — the change's parent — in the
+same session on this machine, every per-invocation allocation count and every
+per-invocation instruction count is *identical*, to the unit:
+
+| | parent | now | moved |
+| --- | ---: | ---: | ---: |
+| `decideSample` | 210 allocations, 645 instructions | 210, 645 | nothing |
+| `evaluate` | 237, 600 | 237, 600 | nothing |
+| `pullOnly` | 48, 34 | 48, 34 | nothing |
+| `decideRequest` | 277, 735 | 277, 735 | nothing |
+
+The loop that went away is `PullRequest.labelSet`, and the only caller it ever
+had is `labelled`, which only `GuardedPathRule` asks — and only for a pull
+request that touches a guarded prefix. Every pull request these rows decide is
+`large()`, which touches `src/scheduler.rs` and carries no labels at all. So
+the removed loop was never on the measured path, and "removes a loop from
+every decision" was true of the source and false of these rows. `LabelRule`
+walks `pr.labels` directly and always did; a `Set` of nothing and an `Array` of
+nothing are the same zero turns.
+
+What did move is worth recording, because it is the shape of the change rather
+than the size of it.
+
+**Every invocation moved by exactly 24 bytes, at the same allocation count.**
+210 allocations of 11,275 bytes became 210 of 11,299, and the same +24 appears
+on every row below that carries a pull request — seven of the eight, traced and
+untraced alike, all but the `floor` that carries none. One allocation is 24
+bytes wider than it was: the `Set` value where the `Array` was. A change of
+shape at a fixed number of allocations is what a representation change looks
+like when it is not also an allocation change.
+
+**Lowering lost a function and the allocations that went with it.**
+`decideSample` reaches 33 functions where it reached 34, `evaluate` 26 where it
+reached 27, `decideRequest` 31 where it reached 32 — the missing one is
+`labelSet` — and each lowering costs 9 to 41 fewer allocations. Loading gained
+76 allocations and 9.6 KB, which is the source text of the doc comments that
+explain the new shape. So the change is visible in what is *compiled* and
+invisible in what is *run*, which is the opposite of what the stale note
+predicted, and it is the reason the note is now retired rather than corrected.
+
+**Every ratio this table is quoted for is unchanged**, and for a better reason
+than the stale note gave. The note argued they survived because the change did
+not touch the mechanisms behind them; the measurement says the rows themselves
+did not move, so there was nothing for a ratio to survive. The boundary route
+still costs 40 more allocations and 135 more instructions than the argument
+route, a trace sink still costs 65 allocations on `decideRequest` and none on
+`evaluate`, and one crossing still costs 37 allocations and 30 instructions.
+The two figures that did move are the two with a wall time or a `Vm::new` in
+them: compiling is worth 168 invocations rather than 162, and reuse saves 167
+allocations rather than 168.
 
 Allocations, bytes and instructions come from a counting `GlobalAlloc`
 installed in the measurement binary and from `Vm::instructions`, not from a
 sampler, so they are exact and every row is comparable with every other one
-taken in the same session. The wall times are older again — the ones this
-document has carried since it was written:
+taken in the same session. Each was identical across all five runs.
 
-```text
-Intel(R) Core(TM) i7-10700K CPU @ 3.80GHz, 32 GiB, macOS 26.5.2
-rustc 1.93.1, --release, medians of five runs, 3,000 invocations a row
-```
-
-They were taken before `evaluate` existed, on another machine. **Every number
-in this document needs re-taking, in one session, on a quiet machine** — the
-wall times because they were never re-taken, and the counts because the
-program they counted has changed. Nothing below argues from a time where a
-count would do, and where a time is quoted it is marked.
-
-Re-taking the counts turned up something worth recording, because this document
-had claimed the counts were what a different machine could check. At the parent
-commit, on the machine this change was made on, `decideSample` costs 210
-allocations where the table above said 218, and `decideRequest` 277 where it
-said 285 — a constant eight on every row that runs the rule catalog, on the
-same source at the same commit. So an allocation count is *nearly*
-machine-independent and not exactly: something in the standard library between
-rustc 1.93.0 and 1.93.1 allocates eight fewer times over this program. The
-counts below are one session's, and the base-versus-branch comparison behind
-them was made in that session too.
+An allocation count is *nearly* machine-independent and not exactly, which this
+document found the hard way and keeps recording. An earlier session read
+`decideSample` at 210 allocations where a table taken elsewhere said 218, and
+`decideRequest` at 277 where it said 285 — a constant eight on every row that
+runs the rule catalog, on the same source at the same commit, from something in
+the standard library between rustc 1.93.0 and 1.93.1. This session reads the
+same 210 and 277 at both commits. So a difference of a handful from the table
+above is a fact about the machine that read it, and only a difference measured
+at two commits *in one session* is a fact about the program.
 
 The binary stays in the repository rather than being a scratch instrument that
 is deleted. It is not a benchmark — nothing runs it on a push and it is not in
@@ -420,56 +461,62 @@ route rather than "less".
 
 Over ten `.cove` files in six modules.
 
-| | ns *(stale)* | allocations | bytes |
+| | ns | allocations | bytes |
 | --- | ---: | ---: | ---: |
-| load: read, parse, resolve, check | **5,676,618** | 32,764 | 4,427,704 |
-|   of which: read from disk | 582,767 | | |
-|   of which: parse | 1,434,899 | | |
-|   of which: resolve and check | 3,554,366 | | |
-| lower `rules.decideSample` (34 fns) | 275,637 | 2,014 | 195,691 |
-| lower `rules.embedded.decideRequest` (32 fns) | 264,219 | 1,917 | 176,395 |
-| lower `rules.embedded.evaluate` (27 fns) | — | 1,684 | 151,278 |
-| lower `rules.embedded.pullOnly` (2 fns) | 54,961 | 623 | 50,646 |
-| lower `rules.floor` (1 fn) | 47,491 | 564 | 43,845 |
+| load: read, parse, resolve, check | **5,788,073** | 32,850 | 4,437,621 |
+|   of which: read from disk | 604,595 | | |
+|   of which: parse | 1,433,721 | | |
+|   of which: resolve and check | 3,583,954 | | |
+| lower `rules.decideSample` (33 fns) | 268,799 | 1,985 | 190,574 |
+| lower `rules.embedded.decideRequest` (31 fns) | 256,775 | 1,876 | 170,990 |
+| lower `rules.embedded.evaluate` (26 fns) | 208,398 | 1,643 | 145,873 |
+| lower `rules.embedded.pullOnly` (2 fns) | 56,183 | 614 | 49,338 |
+| lower `rules.floor` (1 fn) | 47,217 | 555 | 42,537 |
 
-Checking is 63% of loading and parsing is 25%, which is the ratio ADR 0022
+Checking is 62% of loading and parsing is 25%, which is the ratio ADR 0022
 predicted when it made a VM run check as well as resolve: the lowering reads
 the checker's answers, so the check is not a second opinion but the thing that
 produces them.
 
-**Checking now records two more kinds of answer, and it costs 42 allocations.**
-`invoke` holds a host's argument to a declared struct's fields and to a
-declared enum case's payload, and the only account of either is the checker's,
-so `cove_sema` records a signature for each — the synthesized initializer
-`PullRequest(id: ..)` calls. Over this package that is about two dozen
-declarations and 42 allocations, or 0.13% of loading. The remaining difference
-between 32,558 at the parent commit and 32,764 here is the source: `evaluate`
-and the doc comments that explain it are 164 allocations of text.
+**Checking records two kinds of answer it did not used to, and it costs 42
+allocations.** `invoke` holds a host's argument to a declared struct's fields
+and to a declared enum case's payload, and the only account of either is the
+checker's, so `cove_sema` records a signature for each — the synthesized
+initializer `PullRequest(id: ..)` calls. Over this package that is about two
+dozen declarations and 42 allocations, or 0.13% of loading. The rest of what
+loading has gained since is source text: `evaluate` and the doc comments that
+explain it were 164 allocations, and the `Set` change's own comments 76 more.
+
+This is the one table the `Set` change moved. Every lowering costs less than it
+did — `decideSample` 1,985 allocations where it cost 2,014, `evaluate` 1,643
+where it cost 1,684 — because `PullRequest.labelSet` is gone and each entry
+that reaches the rule catalog reaches one fewer function for it. Loading costs
+more, because the change is longer to explain than it is to make.
 
 Lowering is measured over twenty turns because the first one a process performs
 is cold; loading is measured once, because loading once is what it is for.
-`evaluate` reaches 27 functions where `decideRequest` reaches 32, and the five
+`evaluate` reaches 26 functions where `decideRequest` reaches 31, and the five
 are `rules.embedded.pullRequest` and what the Host API call it makes drags in.
 
-**Against a 35.1 µs invocation *(stale)*, loading is worth 162 invocations and
-lowering the entry is worth 7.5.** An application that decides more than a
-couple of hundred pull requests over its life spends more of its own time
-deciding than it spent compiling. Compiling per request would not be.
+**Against a 34.5 µs invocation, loading is worth 168 invocations and lowering
+the entry is worth 7.4.** An application that decides more than a couple of
+hundred pull requests over its life spends more of its own time deciding than
+it spent compiling. Compiling per request would not be.
 
 ### What is paid per invocation
 
 One VM serving all of them, which is the shape an embedding is for.
 
-| | ns *(stale)* | allocations | bytes | instructions |
+| | ns | allocations | bytes | instructions |
 | --- | ---: | ---: | ---: | ---: |
-| `rules.floor` — an entry that does nothing | 923 | 11 | 240 | 4 |
-| `rules.decideSample` — the catalog over its own fixture | 26,432 | 210 | 11,275 | 645 |
-| `rules.embedded.evaluate` — the catalog over the host's | — | **237** | 12,037 | **600** |
-| `rules.embedded.pullOnly` — one host call, no rules | 4,083 | 48 | 2,082 | 34 |
-| `rules.embedded.decideRequest` — the catalog, across the boundary | 35,071 | **277** | 13,788 | **735** |
-| `evaluate`, with a trace sink installed | — | 237 | 12,037 | 600 |
-| `pullOnly`, with a trace sink installed | 7,796 | 101 | 4,080 | 34 |
-| `decideRequest`, with a trace sink installed | 40,971 | 342 | 16,372 | 735 |
+| `rules.floor` — an entry that does nothing | 925 | 11 | 240 | 4 |
+| `rules.decideSample` — the catalog over its own fixture | 25,866 | 210 | 11,299 | 645 |
+| `rules.embedded.evaluate` — the catalog over the host's | 27,461 | **237** | 12,061 | **600** |
+| `rules.embedded.pullOnly` — one host call, no rules | 4,113 | 48 | 2,106 | 34 |
+| `rules.embedded.decideRequest` — the catalog, across the boundary | 34,486 | **277** | 13,867 | **735** |
+| `evaluate`, with a trace sink installed | 27,548 | 237 | 12,061 | 600 |
+| `pullOnly`, with a trace sink installed | 8,104 | 101 | 4,154 | 34 |
+| `decideRequest`, with a trace sink installed | 40,664 | 342 | 16,551 | 735 |
 
 Each row is a control on another, and the differences are the answer this
 example was written to produce.
@@ -552,13 +599,13 @@ of `benches/hostheavy`.
 
 ### What reuse is worth
 
-| | ns *(stale)* | allocations | bytes |
+| | ns | allocations | bytes |
 | --- | ---: | ---: | ---: |
-| `decideRequest`, one VM for every invocation | **35,071** | 277 | 13,788 |
-| `decideRequest`, a new `Runtime` and `Vm` each time | 50,319 | 445 | 31,841 |
-| `decideRequest`, on the interpreter | 86,411 | 822 | 44,461 |
+| `decideRequest`, one VM for every invocation | **34,486** | 277 | 13,867 |
+| `decideRequest`, a new `Runtime` and `Vm` each time | 49,264 | 444 | 31,799 |
+| `decideRequest`, on the interpreter | 87,683 | 821 | 44,523 |
 
-**Building a `Runtime` and a `Vm` costs 168 allocations**, against the 277 an
+**Building a `Runtime` and a `Vm` costs 167 allocations**, against the 277 an
 invocation costs. A `Vm::new` reads the lowered program's struct shapes, its
 enum shapes and its constants and builds a table of each, so that cost is
 proportional to the program rather than to the request, and paying it per
@@ -569,18 +616,18 @@ That is the number this example was asked for, and counting the compile as
 well, an application that rebuilt everything per request would pay the whole of
 the load row on top of it.
 
-**The VM allocates 2.97× less than the interpreter here**, on a program written
+**The VM allocates 2.96× less than the interpreter here**, on a program written
 for a domain rather than for a benchmark, with a Host API call in it.
 `docs/VM_ARCHITECTURE.md`'s suite is mechanism benchmarks; this is a second
 kind of evidence for the same claim, and it agrees.
 
 ### The Rust side of the conversion
 
-| | ns *(stale)* | allocations | bytes |
+| | ns | allocations | bytes |
 | --- | ---: | ---: | ---: |
-| `PullRequest::to_cove` | 1,211 | 21 | 1,032 |
-| `PullRequest::to_policy` | — | 21 | 1,032 |
-| `Decision::from_cove` | 440 | 5 | 360 |
+| `PullRequest::to_cove` | 1,268 | 21 | 1,056 |
+| `PullRequest::to_policy` | 1,269 | 21 | 1,056 |
+| `Decision::from_cove` | 409 | 5 | 360 |
 
 The first two are the same ten fields under two type names, and the table says
 so rather than assuming it: `reviews.PullRequest` is what the boundary carries
@@ -658,7 +705,10 @@ Worth recording beside the gaps, because the list is longer.
   thing a schema can now say and no value satisfy — a `Set` element or a `Map`
   key Cove's `MapKey` restriction does not admit — is refused where the schema
   is read, and `the_schema_declares_only_types_a_value_could_have` is the one
-  assertion an embedder writes over its own table to get that.
+  assertion an embedder writes over its own table to get that. What it bought
+  is clarity and one function fewer in every lowering, and *not* a cheaper
+  decision: [Measurements](#measurements) says why the invocation counts did
+  not move a unit, and it is the kind of thing only a measurement says.
 - **A limit can belong to a request.** `evaluate_within` and `decide_within`
   hand one invocation its own `Budget` on a `Vm` that was built once, which is
   [What bounds one request](#what-bounds-one-request) and was
