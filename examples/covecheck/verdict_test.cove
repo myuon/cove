@@ -1,9 +1,25 @@
+use http
+
 /// A check with the conditions given, over an endpoint nothing fetches.
 ///
 /// It names no wait, and none of the tests below could tell if it did:
-/// `judge` is handed a body that has already arrived, so how long the run was
-/// willing to wait for one is not among the things it is deciding.
+/// `judge` is handed a response that has already arrived, so how long the run
+/// was willing to wait for one is not among the things it is deciding.
 fn checking(
+  expect: Option<String>,
+  reject: Option<String>,
+  maxLength: Option<Int>,
+) -> Check {
+  expecting(None, expect, reject, maxLength)
+}
+
+/// The same, and naming a status as well.
+///
+/// The two are separate helpers so that most of the tests below read as they
+/// did before there was a status: a check that names none is the ordinary
+/// one, and the tests about the status are the ones that say so.
+fn expecting(
+  expectStatus: Option<Int>,
   expect: Option<String>,
   reject: Option<String>,
   maxLength: Option<Int>,
@@ -11,6 +27,7 @@ fn checking(
   Check(
     name: "under-test",
     url: "http://a/",
+    expectStatus: expectStatus,
     expect: expect,
     reject: reject,
     maxLength: maxLength,
@@ -18,12 +35,21 @@ fn checking(
   )
 }
 
+/// A `200` carrying `body`, which is what an endpoint that is working sends.
+///
+/// The tests write a response rather than a body because that is what
+/// `http.fetch` now answers, and a helper is what keeps the status out of the
+/// way of the tests that are not about it.
+fn answering(body: String) -> http.Response {
+  http.Response(status: 200, body: body)
+}
+
 /// A body that satisfies every condition passes, and the outcome carries what
 /// the report shows for it: how much body there was.
 test fn passesABodyThatSatisfiesEveryCondition() -> Result<Unit, Error> {
   let outcome = judge(
     checking(Some("ok"), Some("error"), Some(16)),
-    "\{\"status\":\"ok\"\}",
+    answering("\{\"status\":\"ok\"\}"),
   )
   assert(outcome.ok())?
   assertEqual(outcome.label(), "ok")?
@@ -31,9 +57,10 @@ test fn passesABodyThatSatisfiesEveryCondition() -> Result<Unit, Error> {
   Ok(())
 }
 
-/// A check that names no condition still says something: that a body arrived.
+/// A check that names no condition still says something: that a body arrived
+/// with a status that says the service is working.
 test fn passesAnyBodyWhenTheCheckAsksForNothing() -> Result<Unit, Error> {
-  assert(judge(checking(None, None, None), "").ok())?
+  assert(judge(checking(None, None, None), answering("")).ok())?
   Ok(())
 }
 
@@ -41,16 +68,81 @@ test fn passesAnyBodyWhenTheCheckAsksForNothing() -> Result<Unit, Error> {
 /// a report says what to go and look at rather than that something is wrong.
 test fn namesTheConditionThatBroke() -> Result<Unit, Error> {
   assertEqual(
-    judge(checking(Some("ok"), None, None), "down").detail(),
+    judge(checking(Some("ok"), None, None), answering("down")).detail(),
     "the body does not contain `ok`",
   )?
   assertEqual(
-    judge(checking(None, Some("stack trace"), None), "a stack trace").detail(),
+    judge(checking(None, Some("stack trace"), None), answering("a stack trace"))
+      .detail(),
     "the body contains `stack trace`",
   )?
   assertEqual(
-    judge(checking(None, None, Some(3)), "four").detail(),
+    judge(checking(None, None, Some(3)), answering("four")).detail(),
     "the body is 4 character(s), over the bound of 3",
+  )?
+  Ok(())
+}
+
+/// A check that names no status expects a success, and is told which status
+/// arrived when one did not.
+///
+/// This is the condition every check has whether or not it wrote one down,
+/// and it is what keeps a manifest written before there was an `expectStatus`
+/// meaning what it meant: such a check was only ever reached by a `2xx`,
+/// because a `fetch` that answered anything else used to fail.
+test fn expectsASuccessWhenTheCheckNamesNoStatus() -> Result<Unit, Error> {
+  assert(judge(checking(None, None, None), answering("up")).ok())?
+  assert(judge(checking(None, None, None), http.Response(status: 204, body: "")).ok())?
+  assertEqual(
+    judge(checking(None, None, None), http.Response(status: 404, body: "gone"))
+      .detail(),
+    "the status is 404, and the check expects a success",
+  )?
+  Ok(())
+}
+
+/// A check that names a status wants that one, and says so when it is handed
+/// another -- including a success it did not ask for.
+///
+/// The second assertion is the one the field exists for. An endpoint that is
+/// supposed to refuse and instead answers `200` is broken in the way that is
+/// hardest to notice, and a checker that treated every `2xx` as fine would
+/// report it as healthy.
+test fn expectsExactlyTheStatusTheCheckNames() -> Result<Unit, Error> {
+  assert(judge(expecting(Some(404), None, None, None), http.Response(status: 404, body: "gone")).ok())?
+  assertEqual(
+    judge(
+      expecting(Some(404), None, None, None),
+      http.Response(status: 200, body: "here"),
+    )
+      .detail(),
+    "the status is 200, and the check expects 404",
+  )?
+  assertEqual(
+    judge(
+      expecting(Some(200), None, None, None),
+      http.Response(status: 503, body: "busy"),
+    )
+      .detail(),
+    "the status is 503, and the check expects 200",
+  )?
+  Ok(())
+}
+
+/// A wrong status is reported before anything about the body, because the
+/// body of a wrong status is not the body the check is about.
+///
+/// The response here breaks all four conditions at once. What a run says
+/// about it is the status, and every other reason would have been a true
+/// statement about an error page.
+test fn reportsAWrongStatusBeforeAnythingAboutTheBody() -> Result<Unit, Error> {
+  assertEqual(
+    judge(
+      expecting(Some(200), Some("ok"), Some("gone"), Some(2)),
+      http.Response(status: 404, body: "gone"),
+    )
+      .detail(),
+    "the status is 404, and the check expects 200",
   )?
   Ok(())
 }
@@ -58,8 +150,8 @@ test fn namesTheConditionThatBroke() -> Result<Unit, Error> {
 /// A bound is a bound and not a limit to stay under: a body of exactly the
 /// bound is inside it.
 test fn acceptsABodyOfExactlyTheBound() -> Result<Unit, Error> {
-  assert(judge(checking(None, None, Some(4)), "four").ok())?
-  assert(!judge(checking(None, None, Some(3)), "four").ok())?
+  assert(judge(checking(None, None, Some(4)), answering("four")).ok())?
+  assert(!judge(checking(None, None, Some(3)), answering("four")).ok())?
   Ok(())
 }
 
@@ -67,11 +159,13 @@ test fn acceptsABodyOfExactlyTheBound() -> Result<Unit, Error> {
 /// written order and stops, so two runs over one body give one reason.
 test fn reportsTheFirstBrokenConditionAndNoMore() -> Result<Unit, Error> {
   assertEqual(
-    judge(checking(Some("ok"), Some("down"), Some(2)), "down").detail(),
+    judge(checking(Some("ok"), Some("down"), Some(2)), answering("down"))
+      .detail(),
     "the body is 4 character(s), over the bound of 2",
   )?
   assertEqual(
-    judge(checking(Some("ok"), Some("down"), Some(8)), "down").detail(),
+    judge(checking(Some("ok"), Some("down"), Some(8)), answering("down"))
+      .detail(),
     "the body does not contain `ok`",
   )?
   Ok(())

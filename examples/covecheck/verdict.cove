@@ -1,23 +1,29 @@
+use http
+
 /// What a run made of one check.
 ///
 /// The two ways of failing are kept apart because they are different news. A
 /// `Failed` endpoint answered and said the wrong thing, which is a fact about
-/// the service; an `Unchecked` one produced no body to look at, so this run
-/// learned nothing about it and reports that rather than a verdict it did not
-/// reach.
+/// the service; an `Unchecked` one produced no response to look at, so this
+/// run learned nothing about it and reports that rather than a verdict it did
+/// not reach.
 ///
-/// `Unchecked` covers two things at once because the `http` host gives a
-/// client one answer for both: `fetch` produces an `Err` for a connection it
-/// could not make and an `Err` for a status outside 200-299, and which it was
-/// survives only in the prose of the message. That is also why no check here
-/// names an expected status. Issue #145 is that gap.
+/// `Unchecked` used to cover two things at once, because the `http` host gave
+/// a client one answer for both: `fetch` produced an `Err` for a connection
+/// it could not make and an `Err` for a status outside 200-299, and which it
+/// was survived only in the prose of the message. Issue #145 closed that.
+/// `fetch` answers an `http.Response`, so a status is a fact this program
+/// reads rather than a message it would have had to match on, and the two
+/// have separated: a refused connection is `Unchecked` and a `404` is
+/// `Failed`, because the second is a service that answered and said the
+/// wrong thing.
 export enum Outcome {
-  /// A body arrived and satisfied every condition the check wrote down,
-  /// carrying the count of characters it held.
+  /// A response arrived and satisfied every condition the check wrote down,
+  /// carrying the count of characters its body held.
   Passed(Int)
-  /// A body arrived and did not, carrying the first condition it broke.
+  /// A response arrived and did not, carrying the first condition it broke.
   Failed(String)
-  /// No body arrived, carrying what the host said instead.
+  /// No response arrived, carrying what the host said instead.
   Unchecked(String)
   /// The run gave up before starting this check.
   Skipped
@@ -66,15 +72,28 @@ impl Outcome {
   }
 }
 
-/// Judges `body` against everything `check` asked of it.
+/// Judges `answer` against everything `check` asked of it.
 ///
 /// The conditions are tried in a written order and the first one that breaks
-/// is the whole answer, so two runs over the same body report the same
+/// is the whole answer, so two runs over the same response report the same
 /// reason. Reporting every broken condition would be more information and
-/// less of an answer: the length is checked first because a body that is too
-/// large is a fact about the endpoint that the text conditions would then
-/// describe at length.
-export fn judge(check: Check, body: String) -> Outcome {
+/// less of an answer.
+///
+/// The status is first, and it is first for a stronger version of the reason
+/// the length comes before the text: a body that arrived with the wrong
+/// status is not the body the check is about. An endpoint answering `404`
+/// sends an error page, and every text condition would then report something
+/// true about that page and nothing about the service, so a run would say
+/// "the body does not contain `harbour-loft`" where what happened is that the
+/// route is gone. The length is next, because a body that is too large is a
+/// fact about the endpoint that the text conditions would otherwise describe
+/// at length.
+export fn judge(check: Check, answer: http.Response) -> Outcome {
+  match statusBroken(check, answer.status) {
+    Some(reason) => return Outcome.Failed(reason)
+    None => ()
+  }
+  let body = answer.body
   let length = body.length()
   match check.maxLength {
     Some(bound) => {
@@ -103,4 +122,34 @@ export fn judge(check: Check, body: String) -> Outcome {
     None => ()
   }
   Outcome.Passed(length)
+}
+
+/// Why `status` is not the status this check wanted, or `None`.
+///
+/// A check that named one wanted that number and nothing else. A check that
+/// named none wanted a success, which is the range HTTP reserves for them,
+/// and that default is what keeps every manifest written before there was a
+/// status meaning what it meant: those checks were only ever reached by a
+/// `2xx`, because a `fetch` that answered anything else used to fail.
+///
+/// The two messages differ because the two mistakes do. A check that asked
+/// for `200` and got `404` is told both numbers, since the gap between them
+/// is the whole news. A check that asked for nothing in particular is told
+/// what arrived and what the range was, because "the check expects 200" would
+/// be inventing a number the manifest never wrote.
+fn statusBroken(check: Check, status: Int) -> Option<String> {
+  match check.expectStatus {
+    Some(wanted) => {
+      if status != wanted {
+        return Some("the status is {status}, and the check expects {wanted}")
+      }
+      None
+    }
+    None => {
+      if status < 200 || status > 299 {
+        return Some("the status is {status}, and the check expects a success")
+      }
+      None
+    }
+  }
 }

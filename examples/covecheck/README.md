@@ -43,16 +43,24 @@ $ cove run server &
 $ cove run covecheck -- checks.json --concurrency 2
 checks.json: 5 check(s)
   ok          health                  15 character(s)
-  unchecked   bookings                http: http://127.0.0.1:8080/bookings answered 404
-  unchecked   prices                  http: http://127.0.0.1:8080/prices answered 404
-  unchecked   docs                    http: http://127.0.0.1:8080/docs answered 404
-  unchecked   metrics                 http: http://127.0.0.1:8080/metrics answered 404
+  failed      bookings                the status is 404, and the check expects a success
+  failed      prices                  the status is 404, and the check expects a success
+  failed      docs                    the status is 404, and the check expects a success
+  failed      metrics                 the status is 404, and the check expects a success
 1 passed, 4 failed, 0 skipped
 ```
 
 `server` routes only `/health`, so four of the five are 404s. The two examples
 were not written to compose, and this is what that looks like rather than
 something to fix.
+
+Read the two transcripts together, because the pair is the whole of what
+[issue #145](https://github.com/myuon/cove/issues/145) was about. Nothing is
+listening in the first and everything answers `404` in the second, and the run
+now says which happened: `unchecked` for a service this run learned nothing
+about, `failed` for one that answered and answered wrongly. Both used to read
+`unchecked`, and the difference survived only in prose the host had
+written.
 
 `--format json` writes the same run for another program to read, on one line
 (broken here, and only here, to fit the page):
@@ -61,7 +69,7 @@ something to fix.
 $ cove run covecheck -- checks.json --format json
 {"checks":[
 {"detail":"15 character(s)","name":"health","outcome":"ok","url":"http://127.0.0.1:8080/health"},
-{"detail":"http: http://127.0.0.1:8080/bookings answered 404","name":"bookings","outcome":"unchecked","url":"http://127.0.0.1:8080/bookings"},
+{"detail":"the status is 404, and the check expects a success","name":"bookings","outcome":"failed","url":"http://127.0.0.1:8080/bookings"},
 ...
 ],"failed":4,"manifest":"checks.json","passed":1,"skipped":0}
 ```
@@ -93,6 +101,7 @@ many of each.
     {
       "name": "health",
       "url": "http://127.0.0.1:8080/health",
+      "expectStatus": 200,
       "expect": "\"status\":\"ok\"",
       "maxLength": 256,
       "timeoutMs": 500
@@ -101,24 +110,49 @@ many of each.
 }
 ```
 
-`name` and `url` are required; the three conditions and the wait are not, and
-a check that writes none of them still says something — that the endpoint
-answers at all.
+`name` and `url` are required; the four conditions and the wait are not, and a
+check that writes none of them still says something — that the endpoint
+answers, and answers successfully.
 
 | field | what it asks |
 | --- | --- |
+| `expectStatus` | the status must be exactly this |
 | `expect` | the body must contain this text |
 | `reject` | the body must not contain this text |
 | `maxLength` | the body must be no longer than this many characters |
 | `timeoutMs` | the answer must arrive within this many milliseconds |
 
-The three conditions are tried in the order the table lists them and the first
-one that breaks is the whole answer, so two runs over one body report the same
-reason. Reporting every broken condition would be more information and less of
-an answer.
+The four conditions are tried in the order the table lists them and the first
+one that breaks is the whole answer, so two runs over one response report the
+same reason. Reporting every broken condition would be more information and
+less of an answer.
 
-`timeoutMs` is the odd one out of the four and is listed last for that reason.
-The other three are conditions on an answer that arrived; this one bounds how
+`expectStatus` is first in the table because it is first in the judgement, and
+that order is an argument rather than a convention. A `404` sends an error
+page, so a check that looked at the text before the status would report `the
+body does not contain "harbour-loft"` — true of the error page, and silent
+about the fact that the route is gone.
+
+It is also the one condition every check has whether or not it writes one down.
+A check that names no status expects a success, meaning any status from 200 to
+299; a check that names one expects that number and nothing else, which is how
+an endpoint that is *supposed* to refuse gets checked at all. There is no way
+to write "any status", because a checker that accepted any status would not be
+checking the thing an HTTP endpoint most often gets wrong. The default is also
+what keeps a manifest written before this field existed meaning what it meant:
+such a check was only ever reached by a `2xx`, since a `fetch` that answered
+anything else used to fail.
+
+The range is the whole of what its reader adds on top of being a count.
+`expectStatus: 20` and `expectStatus: 4004` are refused, because they are
+typing mistakes for `200` and `404` and a checker that took them would wait for
+an answer that cannot arrive and then report the endpoint as broken.
+`expectStatus: 418` is accepted, and that is the rule rather than an oversight:
+the bound is on the notation and not on a list of statuses this program knows,
+because what an endpoint answers is the endpoint's business.
+
+`timeoutMs` is the odd one out of the five and is listed last for that reason.
+The other four are conditions on an answer that arrived; this one bounds how
 long the run waits for one to arrive at all, and a check that overruns it is
 `unchecked` rather than `failed` — the same news as an endpoint that refused
 the connection, because both are runs that learned nothing about the service.
@@ -145,22 +179,52 @@ parser in this package would test nothing the first one does not, and
 does not write. This is the second cross-example import in `examples/`, after
 `restricted/` importing `text/`.
 
-## What a check cannot say, and why
+## What a check could not say, and what closed it
 
-One thing a health checker obviously wants is missing, and it is not missing
-because the program declined to do it. A second was missing when this program
-was written and is not any more; it is still here, as what it was and what
-closed it, because the thing that closed it was a change to the language that
-this example is the argument for.
+Two things a health checker obviously wants were missing when this program was
+written, and neither was missing because the program declined to do it. Both
+are closed now, and both are still described here — as what the gap was and
+what closed it — because in each case the thing that closed it was a change to
+the language or to its hosts that this example is the argument for.
 
-**An expected status.** `http.fetch` is declared
-`fetch(String) -> Result<String, Error>`: the whole of what a client learns is
-the body, or a message. The real host *has* the status and throws it away — a
-status outside 200-299 becomes `Err("http: {url} answered {status}")` — so a
-program cannot tell "the connection was refused" from "the server answered
-404" except by reading prose the host wrote. That is why this program has one
-`unchecked` outcome covering both, and why no check names a status.
-**[Issue #145](https://github.com/myuon/cove/issues/145)** is that gap.
+**An expected status, which was the first gap and is now closed.** `http.fetch`
+used to be declared `fetch(String) -> Result<String, Error>`, so the whole of
+what a client learned was a body or a message. The real host *had* the status
+and threw it away: anything outside 200-299 became
+`Err("http: {url} answered {status}")`, which meant a program could not tell
+"the connection was refused" from "the server answered 404" except by matching
+on prose the host had written, and prose is not an interface. This program had
+one `unchecked` outcome covering both, and no check could name a status.
+**[Issue #145](https://github.com/myuon/cove/issues/145)** was that gap, and it
+was filed from here.
+
+What closed it is that `fetch` answers `Result<http.Response, Error>` — the
+same `http.Response` a route handler returns and `http.json` builds, so one
+type is what a client receives and what a server sends. **A status the server
+sent is an `Ok`, whatever the number is**, and an `Err` now means only that no
+response arrived: a URL this host will not send, a connection it could not
+make, a read that ran out of time, or a response larger than the host will
+hold. That is the distinction this program needed, and it is a distinction in
+the *shape* of the answer rather than in its wording.
+
+The shape was a decision, and the alternative was a resource handle. `http`
+already issues them — `http.Server` has `port` and `close` — so "a response
+is a handle you ask questions of" was available, and it is what a streaming
+body would need. It was rejected on
+[ADR 0013](../../docs/adr/0013-host-resource-handles.md)'s own line: a handle
+is for something the host owns and can run out of, and something a program
+opens, holds, and closes. A response that has already arrived in full is none
+of those, and making it one would have added a `close` nothing should call and
+a lifetime nothing has — which is the argument
+[ADR 0020](../../docs/adr/0020-a-diagnostic-stream-for-console.md) made against
+a `console.Stream` for the same reason. A body read once is a value.
+
+What it bought this program is small and is the point. `judge` takes an
+`http.Response` instead of a `String` and asks the status first, and
+`runner.cove`'s `match` on the fetch stopped having to guess from a message
+which of two very different things had happened. `Unchecked` still exists and
+still means what its name says; what changed is that it no longer means two
+things at once.
 
 **A per-check timeout, which was the second gap and is now closed.** Every
 check has always been bounded — `runCheck` wraps its fetch in
@@ -211,12 +275,24 @@ an `Int` stops, and a copy of the language's limit written into `manifest.cove`
 would be a second one to keep true.
 
 `maxLength` is a third thing that is smaller than it sounds. The bound is the
-program's, not the host's: `fetch` answers a whole `String` and there is no
-way to ask it for less, so what `maxLength` bounds is what the checker will
-*accept* and not what the run will *hold*. A response that is too large has
-already been held by the time this program measures it. It is a count of
-characters rather than bytes for the same kind of reason — `String.length()`
-counts characters and nothing offers a byte count.
+program's, not the host's: `fetch` answers a whole body and there is no way to
+ask it for less, so what `maxLength` bounds is what the checker will *accept*
+and not what the run will *hold*. A response that is too large has already been
+held by the time this program measures it. It is a count of characters rather
+than bytes for the same kind of reason — `String.length()` counts characters
+and nothing offers a byte count.
+
+The host has a bound of its own now, and it is not this one. A response over a
+mebibyte is refused by `http` before a Cove value is built, which is the same
+number and the same argument as the bounds its listener already held itself to
+and as `files.Reader.readLine`'s: a host reads what it decided to read rather
+than what the input asked it to
+([ADR 0018](../../docs/adr/0018-streaming-file-io.md)). It is deliberately a
+constant rather than a field of a check, for the reason that ADR gives — a
+caller cannot say how large an answer it has not seen yet should be, so a
+per-request bound would make every manifest answer a question about a response
+that has not arrived. `maxLength` is the question a manifest *can* answer,
+which is how large an answer it is willing to call healthy.
 
 ## Determinism is the whole design
 
@@ -347,7 +423,7 @@ what keeps the console out of the tasks.
 
 Three places, and they check different things.
 
-`cove test` runs the 35 `test fn` declarations in this directory, on whichever
+`cove test` runs the 39 `test fn` declarations in this directory, on whichever
 backend it was asked for. Most are about the parts that touch nothing — the
 manifest, the judgement, the command line, the two reports — and five are
 about the runner, over the fake `http` that has no recorded answer for any
@@ -360,9 +436,15 @@ not what happens when one expires, which is the scheduler's and the clock's
 answer rather than this program's.
 
 `crates/cove-cli/tests/examples.rs` runs the whole program against a fake
-`http` seeded with bodies, which is the only way to reach a passing check, a
-text mismatch, and a body over its bound in one run. Its manifest carries a
-`timeoutMs` and one of its runs passes `--timeout`, so the path both numbers
+`http` seeded with responses, which is the only way to reach a passing check, a
+text mismatch, a body over its bound, and a named non-2xx status in one run.
+Its manifest carries a check named `admin` that expects `403` and gets it, next
+to one for an endpoint nothing answers for, so the two verdicts issue #145 was
+about sit side by side in one golden report; a test of its own runs that
+manifest twice over `/admin`, once answered `200` and once not answered at all,
+and pins that the first is `failed` and the second is `unchecked`.
+
+That manifest also carries a `timeoutMs`, and one of its runs passes `--timeout`, so the path both numbers
 take from outside the program to a `clock.timeout` is walked there, and the
 assertion is that a run inside its bounds reports what a run with no bounds
 written down reports. It is also where the two things the fakes *cannot*

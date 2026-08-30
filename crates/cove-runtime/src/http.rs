@@ -56,10 +56,24 @@
 //! whose end this host cannot find is one it will not start. The bounds are
 //! constants, not configuration: this host answers JSON on loopback, and
 //! nothing about that job is served by letting a peer choose how much of this
-//! process it occupies. [`Http::recorded`] is the fake: `fetch` answers from a
-//! table of canned bodies and a listener replays a scripted queue of
-//! requests, so a program that serves is testable without a socket.
-//! [`Http::denied`] refuses everything and says why.
+//! process it occupies.
+//!
+//! The client is bounded on the same argument and by the same number. A
+//! response body over one mebibyte is an error rather than an allocation, and
+//! `MAX_RESPONSE_BYTES` is where that is said — a server this host reaches
+//! is no more this process's to trust than a peer that connects to it, and
+//! [ADR 0018](../../../docs/adr/0018-streaming-file-io.md) already settled
+//! that a host reads what it decided to read rather than what the input asked
+//! it to.
+//!
+//! What the client answers is an `http.Response`: the status the server sent
+//! and the body it carried. A status outside 200-299 is an answer and not a
+//! failure, so a program can tell a `404` it received from a connection it
+//! could not make, which is what a `Result<String, Error>` could only say in
+//! prose. [`Http::recorded`] is the fake: `fetch` answers from a table of
+//! canned responses and a listener replays a scripted queue of requests, so a
+//! program that serves is testable without a socket. [`Http::denied`] refuses
+//! everything and says why.
 
 use std::collections::BTreeMap;
 use std::io::{BufRead, BufReader, ErrorKind, Read, Write};
@@ -139,6 +153,26 @@ const MAX_HEADER_COUNT: usize = 100;
 /// rather than reserved against the claim.
 const MAX_BODY_BYTES: usize = 1024 * 1024;
 
+/// The most of a response the real client will hold.
+///
+/// The same mebibyte as [`MAX_BODY_BYTES`], because it is the same promise
+/// read from the other side: this host will not let something at the other
+/// end of a socket decide how much of this process it occupies, and which end
+/// opened the connection does not change that. A server a program chose to
+/// fetch from is not more trustworthy than a peer that connected to the
+/// listener — a URL in a manifest reaches whatever is answering on that port
+/// today.
+///
+/// The bound is the host's and not the program's, for the reason ADR 0018
+/// gives about `files.Reader.readLine`: a caller has no way to know how large
+/// an answer it has not seen yet is, so a per-request bound would make every
+/// caller answer a question about a response that has not arrived. It is
+/// counted over the whole response as it arrives — status line, headers, and
+/// body together, which is what the client actually holds — rather than
+/// checked against a `Content-Length`, since what a peer claims never decides
+/// what this host allocates.
+const MAX_RESPONSE_BYTES: usize = 1024 * 1024;
+
 /// What `http` declares about itself.
 ///
 /// The table is [`cove_schema::hosts::HTTP`], so the description the compiler
@@ -164,10 +198,10 @@ pub struct Http {
 enum HttpSource {
     /// Sockets, for real.
     Real,
-    /// Canned bodies for `fetch`, and a scripted request queue for a
+    /// Canned responses for `fetch`, and a scripted request queue for a
     /// listener to replay.
     Recorded {
-        bodies: BTreeMap<String, String>,
+        answers: BTreeMap<String, RecordedResponse>,
         requests: Vec<ScriptedRequest>,
         /// What every handled request answered, in order, so a test can read
         /// back what the program served.
@@ -175,6 +209,35 @@ enum HttpSource {
     },
     /// A host with no network at all.
     Denied,
+}
+
+/// One answer a fake client gives, as a test wrote it.
+///
+/// It is a status and a body because that is what an `http.Response` is, so a
+/// test writes down exactly what the program will see. A fake that recorded
+/// only bodies could not produce the one thing a client most often has to
+/// handle — a server that answered, and answered badly.
+#[derive(Clone, Debug)]
+pub struct RecordedResponse {
+    /// The status the fake server sent, such as `200` or `404`.
+    pub status: i64,
+    /// The body it carried.
+    pub body: String,
+}
+
+impl RecordedResponse {
+    /// A `200` carrying `body`, which is what most recorded answers are.
+    pub fn ok(body: &str) -> RecordedResponse {
+        RecordedResponse::new(200, body)
+    }
+
+    /// A `status` carrying `body`.
+    pub fn new(status: i64, body: &str) -> RecordedResponse {
+        RecordedResponse {
+            status,
+            body: body.to_string(),
+        }
+    }
 }
 
 /// One request a fake listener hands to the program, as a test wrote it.
@@ -229,15 +292,18 @@ impl Http {
         Http::with_source(HttpSource::Real)
     }
 
-    /// A fake that answers `fetch` from `bodies` and lets a listener replay
+    /// A fake that answers `fetch` from `answers` and lets a listener replay
     /// `requests`, for tests.
     ///
     /// The key is the URL exactly as the program writes it. This is a
     /// recorded answer, not a client: a fake that resolved a host name would
     /// be reaching the network the grant was supposed to describe.
-    pub fn recorded(bodies: BTreeMap<String, String>, requests: Vec<ScriptedRequest>) -> Self {
+    pub fn recorded(
+        answers: BTreeMap<String, RecordedResponse>,
+        requests: Vec<ScriptedRequest>,
+    ) -> Self {
         Http::with_source(HttpSource::Recorded {
-            bodies,
+            answers,
             requests,
             served: Arc::new(Mutex::new(Vec::new())),
         })
@@ -308,7 +374,15 @@ impl Http {
             .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
-    /// `GET url`, answering the body a `2xx` carried.
+    /// `GET url`, answering the response the server sent.
+    ///
+    /// Whatever status came back is an `Ok`, because a server that answered
+    /// `404` answered: the status is a fact about the endpoint and the client
+    /// is the wrong place to decide which facts are failures. An `Err` is
+    /// reserved for a run that learned nothing — a URL this host will not
+    /// send, a connection it could not make, a read that ran out of time, or
+    /// a response larger than it will hold — so those two are told apart by
+    /// their shape rather than by the wording of a message.
     ///
     /// `time_left` is what the run has before its deadline, which clamps how
     /// long the real client will wait for an answer; `None` leaves it bounded
@@ -316,11 +390,11 @@ impl Http {
     fn fetch(&self, url: &str, time_left: Option<Duration>) -> Value {
         match &self.source {
             HttpSource::Real => match fetch_over_tcp(url, time_left) {
-                Ok(body) => Value::ok(Value::Str(body.into())),
+                Ok((status, body)) => Value::ok(response(status, &body)),
                 Err(message) => Value::err(Value::error(message)),
             },
-            HttpSource::Recorded { bodies, .. } => match bodies.get(url) {
-                Some(body) => Value::ok(Value::Str(body.as_str().into())),
+            HttpSource::Recorded { answers, .. } => match answers.get(url) {
+                Some(answer) => Value::ok(response(answer.status, &answer.body)),
                 None => Value::err(Value::error(format!(
                     "http: no recorded answer for `{url}`"
                 ))),
@@ -835,20 +909,27 @@ fn json_string(s: &str) -> String {
     out
 }
 
-/// Sends one `GET` and reads the body a `2xx` carried.
+/// Sends one `GET` and reads the status and body that came back.
+///
+/// Every status the peer sent is answered, including the ones a program will
+/// call failures. Deciding that here is what the old signature did, and it
+/// cost the caller the difference between a server that refused and a server
+/// that was never reached: both arrived as `Err` and only the wording told
+/// them apart. A status is data, so it travels as data.
 ///
 /// The read is bounded by [`READ_TIMEOUT`], clamped by whatever the run has
 /// left, so a `fetch` cannot outlive its run's deadline by thirty seconds
-/// waiting on a server that has stopped answering. One blocking read needs
-/// one timeout; there is nothing here to poll between, so nothing here is a
-/// loop.
+/// waiting on a server that has stopped answering. It is bounded in size by
+/// [`MAX_RESPONSE_BYTES`] as well, checked as the bytes arrive: a peer that
+/// keeps sending is stopped at the bound rather than after it, which is the
+/// only order in which a bound on an allocation means anything.
 ///
 /// The connect is the one step this does not bound, and a reader should know
 /// it: `TcpStream::connect` resolves a name and completes a handshake with no
 /// timeout of its own, so a run whose deadline expires during either waits
 /// for the platform rather than for the budget. Loopback, which is what this
 /// host is granted authority over, makes both immediate.
-fn fetch_over_tcp(url: &str, time_left: Option<Duration>) -> Result<String, String> {
+fn fetch_over_tcp(url: &str, time_left: Option<Duration>) -> Result<(i64, String), String> {
     let (authority, path) = split_url(url)?;
     let allowance = bounded(READ_TIMEOUT, time_left);
     if allowance.is_zero() {
@@ -867,10 +948,7 @@ fn fetch_over_tcp(url: &str, time_left: Option<Duration>) -> Result<String, Stri
     stream
         .write_all(request.as_bytes())
         .map_err(|e| format!("http: cannot send to {authority}: {e}"))?;
-    let mut answer = Vec::new();
-    stream
-        .read_to_end(&mut answer)
-        .map_err(|e| format!("http: cannot read from {authority}: {e}"))?;
+    let answer = read_response_within(&stream, &authority)?;
     let answer = String::from_utf8_lossy(&answer).into_owned();
     let (head, body) = answer
         .split_once("\r\n\r\n")
@@ -881,10 +959,33 @@ fn fetch_over_tcp(url: &str, time_left: Option<Duration>) -> Result<String, Stri
         .and_then(|line| line.split_whitespace().nth(1))
         .and_then(|code| code.parse::<i64>().ok())
         .ok_or_else(|| format!("http: {authority} sent no status line"))?;
-    if !(200..300).contains(&status) {
-        return Err(format!("http: {url} answered {status}"));
+    Ok((status, body.to_string()))
+}
+
+/// Reads a whole response, or stops at [`MAX_RESPONSE_BYTES`] and says so.
+///
+/// The bound is checked after each read rather than by asking the peer how
+/// much it intends to send, so a response with no `Content-Length`, a
+/// dishonest one, or none at all is held to the same number. The buffer grows
+/// with what arrived and never with what was claimed.
+fn read_response_within(stream: &TcpStream, authority: &str) -> Result<Vec<u8>, String> {
+    let mut reader = stream;
+    let mut answer = Vec::new();
+    let mut chunk = [0u8; 8 * 1024];
+    loop {
+        let read = reader
+            .read(&mut chunk)
+            .map_err(|e| format!("http: cannot read from {authority}: {e}"))?;
+        if read == 0 {
+            return Ok(answer);
+        }
+        answer.extend_from_slice(&chunk[..read]);
+        if answer.len() > MAX_RESPONSE_BYTES {
+            return Err(format!(
+                "http: {authority} sent more than the {MAX_RESPONSE_BYTES} bytes this host reads"
+            ));
+        }
     }
-    Ok(body.to_string())
 }
 
 /// Splits `http://host:port/path` into what to connect to and what to ask
@@ -1272,13 +1373,28 @@ mod tests {
         value.is_ok()
     }
 
-    fn ok_str(value: Value) -> String {
-        match value.ok_payload() {
-            Some(payload) => match payload.first() {
-                Some(Value::Str(s)) => s.to_string(),
-                other => panic!("expected `Ok(String)`, found {other:?}"),
-            },
-            None => panic!("expected `Ok(...)`, found {value}"),
+    /// The status and body of the `http.Response` an `Ok` carries.
+    ///
+    /// Both facts together, because both together are what `fetch` now
+    /// answers and a helper that read one of them would let a test pin a body
+    /// while saying nothing about the status it came with.
+    fn ok_response(value: Value) -> (i64, String) {
+        let Some(payload) = value.ok_payload() else {
+            panic!("expected `Ok(...)`, found {value}");
+        };
+        match payload.first() {
+            Some(Value::Struct(fields)) if &*fields.type_name == "http.Response" => {
+                let status = match fields.get("status") {
+                    Some(Value::Int(status)) => *status,
+                    other => panic!("expected an `Int` status, found {other:?}"),
+                };
+                let body = match fields.get("body") {
+                    Some(Value::Str(body)) => body.to_string(),
+                    other => panic!("expected a `String` body, found {other:?}"),
+                };
+                (status, body)
+            }
+            other => panic!("expected `Ok(http.Response)`, found {other:?}"),
         }
     }
 
@@ -1468,15 +1584,43 @@ mod tests {
     }
 
     #[test]
-    fn a_recorded_fetch_answers_its_body() {
+    fn a_recorded_fetch_answers_its_response() {
         let http = Http::recorded(
-            BTreeMap::from([("http://example.com/".to_string(), "hello".to_string())]),
+            BTreeMap::from([(
+                "http://example.com/".to_string(),
+                RecordedResponse::ok("hello"),
+            )]),
             Vec::new(),
         );
         let answer = http
             .call("fetch", vec![Value::Str("http://example.com/".into())])
             .unwrap();
-        assert_eq!(ok_str(answer), "hello");
+        assert_eq!(ok_response(answer), (200, "hello".to_string()));
+    }
+
+    /// A fake can record a status a program will call a failure, and the
+    /// program is handed it as an answer.
+    ///
+    /// This is what a table of bodies could not express. A test that wanted
+    /// to drive a program's `404` handling had no way to say `404`, so the
+    /// only failure a fake could produce was "no recorded answer", which is
+    /// the shape of a connection that was never made.
+    #[test]
+    fn a_recorded_fetch_answers_a_status_outside_the_2xx_range() {
+        let http = Http::recorded(
+            BTreeMap::from([(
+                "http://example.com/missing".to_string(),
+                RecordedResponse::new(404, "gone"),
+            )]),
+            Vec::new(),
+        );
+        let answer = http
+            .call(
+                "fetch",
+                vec![Value::Str("http://example.com/missing".into())],
+            )
+            .unwrap();
+        assert_eq!(ok_response(answer), (404, "gone".to_string()));
     }
 
     #[test]
@@ -1765,11 +1909,21 @@ mod tests {
             .unwrap();
         server.join().expect("the server thread should not panic");
 
-        assert_eq!(ok_str(answer), "hello from loopback");
+        assert_eq!(
+            ok_response(answer),
+            (200, "hello from loopback".to_string())
+        );
     }
 
+    /// The real client reads a status outside 200-299 off the wire and hands
+    /// it on, with the body that came with it.
+    ///
+    /// This is the same server and the same client as the test above, and the
+    /// only thing that differs is the status line, which is the point: a
+    /// `404` is answered rather than refused, so the two tests differ by the
+    /// number they assert and not by the shape they assert it in.
     #[test]
-    fn a_real_fetch_reports_a_non_2xx_status() {
+    fn a_real_fetch_answers_a_non_2xx_status_and_its_body() {
         let listener =
             TcpListener::bind("127.0.0.1:0").expect("binding to loopback should succeed");
         let port = listener
@@ -1799,7 +1953,57 @@ mod tests {
             .unwrap();
         server.join().expect("the server thread should not panic");
 
-        assert_eq!(err_message(answer), format!("http: {url} answered 404"));
+        assert_eq!(ok_response(answer), (404, "not found here".to_string()));
+    }
+
+    /// A response past [`MAX_RESPONSE_BYTES`] is an error and not an
+    /// allocation.
+    ///
+    /// The server here promises a `Content-Length` it then makes good on, so
+    /// what stops the read is the bound rather than a peer caught lying: the
+    /// client counts what arrives, and a server that means to send two
+    /// mebibytes is stopped at one whether or not it said so first. The
+    /// message names the bound, because a client told only that something was
+    /// too large learns nothing it can act on.
+    #[test]
+    fn a_real_fetch_refuses_a_response_past_the_bound() {
+        let listener =
+            TcpListener::bind("127.0.0.1:0").expect("binding to loopback should succeed");
+        let port = listener
+            .local_addr()
+            .expect("the bound address should be known")
+            .port();
+
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener
+                .accept()
+                .expect("accepting the one connection should succeed");
+            read_request_head(&stream);
+            let body = "a".repeat(MAX_RESPONSE_BYTES + 1);
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            // A client that stops reading at the bound closes the connection,
+            // so the rest of this write may be refused. That is the bound
+            // working rather than the server failing, so the result is
+            // dropped.
+            let _ = stream.write_all(response.as_bytes());
+        });
+
+        let url = format!("http://127.0.0.1:{port}/");
+        let answer = Http::real()
+            .call("fetch", vec![Value::Str(url.into())])
+            .unwrap();
+        let _ = server.join();
+
+        assert!(
+            err_message(answer).ends_with(&format!(
+                "sent more than the {MAX_RESPONSE_BYTES} bytes this host reads"
+            )),
+            "the bound is named"
+        );
     }
 
     /// Exercises the real host both ways at once: `listen` binds an ephemeral

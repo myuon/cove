@@ -12,15 +12,40 @@ export struct Dashboard {
 /// The two fetches run on threads of their own, and `clock.timeout` bounds the
 /// wait for both together: a body it stops does not finish, and the error
 /// names the bound rather than whatever the stopped body was doing.
+///
+/// `http.fetch` answers an `http.Response`, so each task's value is a status
+/// and a body, and `panelOf` is what turns one into the other. A dashboard
+/// renders what its endpoints said and has nothing to say about a `404`
+/// except that the panel is not there, which is why the status is checked
+/// once, in one place, rather than judged: a program that judged a status
+/// against conditions a manifest wrote down would be a checker, and
+/// `examples/covecheck` is that program.
 export async fn loadDashboard() -> Result<Dashboard, Error> {
   scope tasks {
     let bookings = tasks.spawn { http.fetch("http://127.0.0.1:8080/bookings") }
     let prices = tasks.spawn { http.fetch("http://127.0.0.1:8080/prices") }
 
     let result = clock.timeout(500ms) {
-      Dashboard(bookings: bookings.await()?, prices: prices.await()?)
+      Dashboard(
+        bookings: panelOf("bookings", bookings.await()?)?,
+        prices: panelOf("prices", prices.await()?)?,
+      )
     }?
 
     Ok(result)
   }
+}
+
+/// The body of a panel's answer, or the reason there is no panel.
+///
+/// A response this dashboard cannot render is one that arrived, so the
+/// message says what came back rather than that nothing did. Rendering the
+/// body of a `404` would put an error page in the panel and call the load a
+/// success, which is the mistake having the status available exists to
+/// prevent.
+fn panelOf(panel: String, answer: http.Response) -> Result<String, Error> {
+  if answer.status < 200 || answer.status > 299 {
+    return Err(Error("{panel}: the endpoint answered {answer.status}"))
+  }
+  Ok(answer.body)
 }

@@ -1,6 +1,6 @@
 /// A manifest holding one check with every field written out.
 fn whole() -> String {
-  "\{\"checks\":[\{\"name\":\"health\",\"url\":\"http://a/h\",\"expect\":\"ok\",\"reject\":\"err\",\"maxLength\":16,\"timeoutMs\":250\}]\}"
+  "\{\"checks\":[\{\"name\":\"health\",\"url\":\"http://a/h\",\"expectStatus\":204,\"expect\":\"ok\",\"reject\":\"err\",\"maxLength\":16,\"timeoutMs\":250\}]\}"
 }
 
 /// The message `readManifest` refused `text` with, or what it made of it.
@@ -12,13 +12,14 @@ fn manifestRefusal(text: String) -> String {
 }
 
 /// Every field a check may write is read into the type it declares, and the
-/// four optional ones are `Some` when written.
+/// five optional ones are `Some` when written.
 test fn readsACheckWithEveryFieldWritten() -> Result<Unit, Error> {
   let manifest = readManifest("checks.json", whole())?
   let check = manifest.checks.get(0)
-    .unwrapOr(Check(name: "", url: "", expect: None, reject: None, maxLength: None, timeoutMs: None))
+    .unwrapOr(Check(name: "", url: "", expectStatus: None, expect: None, reject: None, maxLength: None, timeoutMs: None))
   assertEqual(check.name, "health")?
   assertEqual(check.url, "http://a/h")?
+  assertEqual(check.expectStatus.unwrapOr(0), 204)?
   assertEqual(check.expect.unwrapOr(""), "ok")?
   assertEqual(check.reject.unwrapOr(""), "err")?
   assertEqual(check.maxLength.unwrapOr(0), 16)?
@@ -26,19 +27,23 @@ test fn readsACheckWithEveryFieldWritten() -> Result<Unit, Error> {
   Ok(())
 }
 
-/// A check that writes only the two required fields is a check, and the four
+/// A check that writes only the two required fields is a check, and the five
 /// optional ones are `None` rather than defaults that mean something.
 ///
-/// `timeoutMs` is the one of the four whose absence a run acts on rather than
-/// ignores: a check that named no wait is bounded by the default instead of
-/// being unbounded, which is why nothing here reads the absence as a zero.
+/// Two of the five have an absence a run acts on rather than ignores, and
+/// both are `None` here rather than a number standing in for one. A check
+/// that named no wait is bounded by the default instead of being unbounded,
+/// and a check that named no status expects a success instead of accepting
+/// any -- so in both cases the default lives where the field is used, and
+/// this reader has nothing to invent.
 test fn readsACheckWithNothingButAnEndpoint() -> Result<Unit, Error> {
   let manifest = readManifest(
     "checks.json",
     "\{\"checks\":[\{\"name\":\"up\",\"url\":\"http://a/\"\}]\}",
   )?
   let check = manifest.checks.get(0)
-    .unwrapOr(Check(name: "", url: "", expect: Some("set"), reject: Some("set"), maxLength: Some(1), timeoutMs: Some(1)))
+    .unwrapOr(Check(name: "", url: "", expectStatus: Some(1), expect: Some("set"), reject: Some("set"), maxLength: Some(1), timeoutMs: Some(1)))
+  assert(check.expectStatus.isNone())?
   assert(check.expect.isNone())?
   assert(check.reject.isNone())?
   assert(check.maxLength.isNone())?
@@ -128,6 +133,44 @@ test fn refusesATimeoutNoCheckCouldAnswerIn() -> Result<Unit, Error> {
   assertEqual(
     manifestRefusal("\{\"checks\":[\{\"name\":\"a\",\"url\":\"http://a/\",\"timeoutMs\":0\}]\}"),
     "checks.json: check 1: `timeoutMs` is 0, and a check with no time cannot answer",
+  )?
+  Ok(())
+}
+
+/// A status is a count like any other and a number between 100 and 599 on top
+/// of that.
+///
+/// The first two refusals are `optionalCount`'s, because a fraction of a
+/// status and a negative one are wrong in the way any count is wrong. The
+/// range is this field's own, and it is what catches the two mistakes a
+/// person actually makes: `20` for `200` and `4004` for `404` are both
+/// numbers a checker would otherwise wait for an answer that cannot arrive
+/// and then report the endpoint as broken over.
+///
+/// `418` is accepted, and that is the rule rather than an oversight. The
+/// bound is on the notation and not on a list of statuses this program knows,
+/// because what an endpoint answers is the endpoint's business and a status
+/// invented next year is still a status.
+test fn refusesAStatusNoEndpointCouldAnswerWith() -> Result<Unit, Error> {
+  assertEqual(
+    manifestRefusal("\{\"checks\":[\{\"name\":\"a\",\"url\":\"http://a/\",\"expectStatus\":200.5\}]\}"),
+    "checks.json: check 1: `expectStatus` is 200.5, which is not a whole number",
+  )?
+  assertEqual(
+    manifestRefusal("\{\"checks\":[\{\"name\":\"a\",\"url\":\"http://a/\",\"expectStatus\":-200\}]\}"),
+    "checks.json: check 1: `expectStatus` is -200, and a bound cannot be negative",
+  )?
+  assertEqual(
+    manifestRefusal("\{\"checks\":[\{\"name\":\"a\",\"url\":\"http://a/\",\"expectStatus\":20\}]\}"),
+    "checks.json: check 1: `expectStatus` is 20, and an HTTP status is between 100 and 599",
+  )?
+  assertEqual(
+    manifestRefusal("\{\"checks\":[\{\"name\":\"a\",\"url\":\"http://a/\",\"expectStatus\":4004\}]\}"),
+    "checks.json: check 1: `expectStatus` is 4004, and an HTTP status is between 100 and 599",
+  )?
+  assertEqual(
+    manifestRefusal("\{\"checks\":[\{\"name\":\"a\",\"url\":\"http://a/\",\"expectStatus\":418\}]\}"),
+    "read 1 check(s)",
   )?
   Ok(())
 }

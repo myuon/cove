@@ -389,11 +389,12 @@ fn register_hosts(hosts: &mut HostRegistry, root: &Path, allow_real: &BTreeSet<&
         hosts.register(Box::new(Database::recorded(BTreeMap::new())));
     }
     // A fake `http` reaches nothing and listens to nothing: `fetch` has no
-    // recorded answers and a listener has no scripted requests, so a test
+    // recorded responses and a listener has no scripted requests, so a test
     // that serves finds its queue already empty. A test that wants either
-    // needs data a `cove.toml` has no way to carry, so it belongs in a Rust
-    // test that can supply it — which is where the representative servers are
-    // exercised.
+    // needs data a `cove.toml` has no way to carry — a recorded response is a
+    // status and a body per URL, which is a table and not a setting — so it
+    // belongs in a Rust test that can supply it, which is where the
+    // representative servers are exercised.
     if real("http") {
         hosts.register(Box::new(Http::real()));
     } else {
