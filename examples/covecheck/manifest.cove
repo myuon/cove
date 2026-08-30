@@ -2,18 +2,27 @@ use cq.json.Json
 use cq.json.field
 use cq.json.parse
 
-/// One endpoint a run asks about, and what its answer has to look like.
+/// One endpoint a run asks about, what its answer has to look like, and how
+/// long the run waits for one.
 ///
 /// Every condition is optional except the two that say which endpoint this
 /// is. A check that writes none of them still says something -- that the
 /// endpoint answers at all -- and that is the check most manifests start
 /// with.
+///
+/// `timeoutMs` is not one of the conditions, and it is a separate field for
+/// the same reason it is a separate paragraph: a condition says what an
+/// answer has to look like, and this says how long an answer has to arrive
+/// in before the run stops waiting for one. A check that leaves it out is
+/// bounded by the default every other check is, which is what the `Option`
+/// says and is why there is no number here meaning "no bound".
 export struct Check {
   name: String
   url: String
   expect: Option<String>
   reject: Option<String>
   maxLength: Option<Int>
+  timeoutMs: Option<Int>
 }
 
 /// Every check of one run, in the order the manifest wrote them.
@@ -67,7 +76,7 @@ export fn readManifest(
 
 /// Reads one entry of the `checks` array.
 fn checkFrom(entry: Json) -> Result<Check, Error> {
-  Ok(Check(name: text(entry, "name")?, url: url(entry)?, expect: optionalText(entry, "expect")?, reject: optionalText(entry, "reject")?, maxLength: optionalCount(entry, "maxLength")?))
+  Ok(Check(name: text(entry, "name")?, url: url(entry)?, expect: optionalText(entry, "expect")?, reject: optionalText(entry, "reject")?, maxLength: optionalCount(entry, "maxLength")?, timeoutMs: timeout(entry)?))
 }
 
 /// Reads the `url` field, and refuses a scheme this program cannot fetch.
@@ -105,8 +114,11 @@ fn optionalText(entry: Json, name: String) -> Result<Option<String>, Error> {
 /// Reads the whole-number field `name`, which the entry may leave out.
 ///
 /// JSON has one number type, so `4096` and `4096.0` arrive identically and
-/// both are this field; `4096.5` is not, because a bound on a count of
-/// characters is a count.
+/// both are this field; `4096.5` is not, because neither a count of
+/// characters nor a count of milliseconds is a fraction of one. It reads
+/// every count a check may write, and whatever a particular field will not
+/// take beyond being a count is that field's own question rather than this
+/// one's.
 fn optionalCount(entry: Json, name: String) -> Result<Option<Int>, Error> {
   let number = match field(entry, name) {
     None => return Ok(None)
@@ -124,6 +136,37 @@ fn optionalCount(entry: Json, name: String) -> Result<Option<Int>, Error> {
     return Err(Error("`{name}` is {whole}, and a bound cannot be negative"))
   }
   Ok(Some(whole))
+}
+
+/// Reads the `timeoutMs` field, which bounds a wait rather than a body.
+///
+/// The count is `optionalCount`'s, so a check that leaves the field out
+/// answers `None` and is left to the default the runner keeps; a fraction of
+/// a millisecond is refused as not a whole number; and a negative wait is
+/// refused as a negative bound. Zero is the one value that reader takes and
+/// this one does not, and it is refused for the reason `--concurrency 0` is:
+/// a check given no time at all can only run out of it, so it would come back
+/// `unchecked` however healthy its endpoint, and a person who wrote `0` meant
+/// something else.
+///
+/// A count so large that its nanoseconds do not fit an `Int` is not refused
+/// here. It stops the run where `Duration.millis` builds it, which is where
+/// every duration that overruns an `Int` stops; a copy of that limit written
+/// into this file would be a second one to keep true, and a manifest asking
+/// for a timeout of a hundred million years is not the typing mistake `0` is.
+fn timeout(entry: Json) -> Result<Option<Int>, Error> {
+  let written = optionalCount(entry, "timeoutMs")?
+  match written {
+    Some(milliseconds) => {
+      if milliseconds == 0 {
+        return Err(Error(
+          "`timeoutMs` is 0, and a check with no time cannot answer",
+        ))
+      }
+    }
+    None => ()
+  }
+  Ok(written)
 }
 
 /// The field `name`, or the error that says it is missing.

@@ -44,21 +44,46 @@ export struct Run {
   tally: Tally
 }
 
-/// How long one check may take.
+/// How long this check may take.
 ///
-/// A constant rather than a field of `Check`, because there is no way to
-/// build a `Duration` out of a number a manifest carries: `Duration` has no
-/// constructor and no multiplication, so the only durations a program has are
-/// the ones it writes down. Issue #146 is that gap.
-fn checkBound() -> Duration {
+/// A check that wrote a `timeoutMs` is bounded by the `Duration`
+/// `Duration.millis` builds out of it, and a check that wrote none is bounded
+/// by `defaultCheckBound()`. The two are the same kind of value and this
+/// function is what says so: one arrives as a literal in this file and the
+/// other as a number in a manifest, and a `clock.timeout` cannot tell them
+/// apart. `Duration.millis` is what made the difference disappear, and until
+/// it existed this function took no argument and could not have one.
+///
+/// The awkward counts are settled before they arrive. A manifest may not
+/// write `0` or a negative number here, so the smallest bound a check can ask
+/// for is one millisecond, and a count too large to be nanoseconds in an
+/// `Int` stops the run inside `Duration.millis` rather than becoming some
+/// other bound quietly.
+fn checkBound(check: Check) -> Duration {
+  match check.timeoutMs {
+    Some(milliseconds) => Duration.millis(milliseconds)
+    None => defaultCheckBound()
+  }
+}
+
+/// How long a check that named no bound of its own may take.
+///
+/// A literal, because this is the bound nobody asked for and a program that
+/// bounds a wait has to have decided one. It stays a function with a name so
+/// that the manifest's bound and this one are reached the same way and the
+/// answer to "what bounds this check" is one expression either way.
+fn defaultCheckBound() -> Duration {
   5s
 }
 
-/// How long a whole run may take.
+/// How long a whole run may take when the command line named no deadline.
 ///
-/// The same constant for the same reason, and it bounds the run rather than
-/// the check: a hundred checks that each finish just inside `checkBound` is a
-/// run nobody waited for.
+/// The same kind of literal for the same reason, and it bounds the run rather
+/// than the check: a hundred checks that each finish just inside their own
+/// bound is a run nobody waited for. `--timeout` replaces it with
+/// `Duration.seconds` of the number a person typed, which is the same
+/// argument one level up -- a bound that came from outside the program and a
+/// bound written in it are one type.
 export fn runBound() -> Duration {
   30s
 }
@@ -125,13 +150,20 @@ async fn runWindow(
 /// It answers rather than fails on purpose. A checker whose first unreachable
 /// endpoint ended the run would report less than the run already knows, and
 /// the thing a check is for is to say what it found.
+///
+/// The bound around the fetch is `checkBound(check)`, so a check that named
+/// its own wait waits that long and every other one waits the default. A
+/// check the bound stops comes back `Unchecked` carrying what the clock said,
+/// which is the same shape of news as an endpoint that refused the
+/// connection: both are runs that learned nothing about the service rather
+/// than runs that learned something bad.
 async fn runCheck(check: Check, tally: Shared<Tally>) -> Verdict {
   tally.lock(fn(var counts) {
     counts.start()
   })
 
   let answer: Result<Result<String, Error>, Error> = clock.timeout(
-    checkBound(),
+    checkBound(check),
   ) {
     http.fetch(check.url)
   }

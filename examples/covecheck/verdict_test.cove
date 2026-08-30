@@ -1,4 +1,8 @@
 /// A check with the conditions given, over an endpoint nothing fetches.
+///
+/// It names no wait, and none of the tests below could tell if it did:
+/// `judge` is handed a body that has already arrived, so how long the run was
+/// willing to wait for one is not among the things it is deciding.
 fn checking(
   expect: Option<String>,
   reject: Option<String>,
@@ -10,6 +14,7 @@ fn checking(
     expect: expect,
     reject: reject,
     maxLength: maxLength,
+    timeoutMs: None,
   )
 }
 

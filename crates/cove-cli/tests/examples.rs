@@ -992,7 +992,11 @@ fn cq_reads_back_the_sample_it_generated() {
 // bounds advances that clock, and what a check's body does is fetch, which
 // does not. `clock.timeout`'s own behaviour is pinned exactly by the unit
 // tests in `crates/cove-runtime/src/clock.rs`, which drive it with a clock
-// they move themselves.
+// they move themselves. What a test here can say is which bound a check was
+// given, and that is now a thing a manifest decides rather than a constant:
+// [`CHECKS`] writes a `timeoutMs` and the runs below pass `--timeout`, so the
+// path from those two numbers to the `Duration` a host call takes is walked
+// by every test in this section.
 //
 // Cancellation is the same shape of gap for a different reason: it is
 // reachable here only through the whole-run deadline, which needs the clock
@@ -1007,10 +1011,17 @@ fn cq_reads_back_the_sample_it_generated() {
 /// conditions are what decide which: `health` is satisfied, `prices` asks for
 /// text the body does not hold, `docs` bounds a body the answer overruns, and
 /// `metrics` names an endpoint no answer is recorded for.
+///
+/// `health` also names a wait of its own, which decides none of that and is
+/// here for what it proves instead: a `timeoutMs` is read, is built into the
+/// `Duration` that check's fetch is bounded by, and changes nothing about a
+/// run that answers inside it. A check with no `timeoutMs` is bounded by the
+/// program's default, and the three below are what say the field is optional
+/// in the run as well as in the reader.
 const CHECKS: &str = concat!(
     r#"{"checks":["#,
     r#"{"name":"health","url":"http://127.0.0.1:8080/health","#,
-    r#""expect":"\"status\":\"ok\"","maxLength":256},"#,
+    r#""expect":"\"status\":\"ok\"","maxLength":256,"timeoutMs":2000},"#,
     r#"{"name":"prices","url":"http://127.0.0.1:8080/prices","expect":"EUR"},"#,
     r#"{"name":"docs","url":"http://127.0.0.1:8080/docs","maxLength":8},"#,
     r#"{"name":"metrics","url":"http://127.0.0.1:8080/metrics"}"#,
@@ -1094,6 +1105,45 @@ fn covecheck_reports_the_same_run_at_every_concurrency() {
 
     assert_eq!(some.console, one.console, "{:?}", some.console);
     assert_eq!(plenty.console, one.console, "{:?}", plenty.console);
+}
+
+/// A run bounded by the manifest and by the command line reports what a run
+/// bounded by the program's own constants reports.
+///
+/// This is the whole of what a fake clock lets a test here say about a
+/// configured timeout, and it is worth saying. The bounds arrive as two
+/// numbers from outside the program — `2000` in [`CHECKS`] and `20` on the
+/// command line — and become the `Duration` values `clock.timeout` takes, so
+/// a run that reported the same verdicts with the bounds removed is a run in
+/// which both numbers were carried the whole way and neither was silently
+/// dropped. What a bound *does* when it expires is `clock.timeout`'s own
+/// question, pinned where a test can move the clock.
+#[test]
+fn covecheck_takes_its_bounds_from_the_manifest_and_the_command_line() {
+    let configured = covecheck(&["checks.json", "--timeout", "20"], endpoints());
+    let unbounded = run(
+        "covecheck.main",
+        &["console", "files", "http", "clock"],
+        Fakes {
+            args: vec!["checks.json".to_string()],
+            files: BTreeMap::from([(
+                "checks.json".to_string(),
+                CHECKS.replace(r#","timeoutMs":2000"#, ""),
+            )]),
+            bodies: endpoints(),
+            ..Fakes::default()
+        },
+    );
+
+    assert_eq!(
+        configured.console, unbounded.console,
+        "{:?}",
+        configured.console
+    );
+    assert_eq!(
+        err(&configured.value),
+        "covecheck: 3 check(s) failed and 0 were not tried"
+    );
 }
 
 /// A run whose every check passes answers `Ok` and says so.
