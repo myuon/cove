@@ -2477,7 +2477,8 @@ this row.
 **It was taken in full.** `Inst::PlaceScalar` names a slot of the scalar stack
 and the pre-pass is deleted; `conv_var` now runs `conv_local`'s instructions
 exactly — 35,142,890 against 35,142,879, which is 17.6 a turn against 17.6 —
-and is **1.00×** of it in the same binary, where it was 1.30×.
+and is **1.00×** of it in the same binary, where it was 1.30× — and 1.37× in
+a control build that changed nothing.
 [ADR 0027](adr/0027-a-place-and-a-capture-name-a-slot.md) is the decision and
 "The layout band is much wider than it was thought to be" below is why the
 ratio is stated and the absolute is not.
@@ -2523,8 +2524,9 @@ between would remove the crossing, and the prize is the 16%.
 the call fills each capture into the slot its own kind names, and
 `Inst::LoadCapture` is gone — a capture is read by the `load-scalar` or the
 `load` every other binding of that kind is read by. `conv_capture` runs one
-instruction a turn fewer, 25.6 against 26.6, and is **1.11×** of
-`conv_closure` in the same binary where it was 1.20×. The four instructions a
+instruction a turn fewer, 25.6 against 26.6, and is **1.10×** of
+`conv_closure` in the same binary where it was 1.23×, and 1.20× in a control
+build that changed nothing. The four instructions a
 turn that remain are two of work — the read and the addition that `+ zero`
 *is* — and two of the general convention: a closure's parameter arrives on the
 value stack and its answer leaves on it, because nothing at a `call-value`
@@ -2616,22 +2618,22 @@ them.
 
 | row | base | control | after | after ÷ base | instructions/turn, base → after |
 | --- | ---: | ---: | ---: | ---: | ---: |
-| `conv_local`   |   86.32 ms |   91.87 ms |   92.76 ms | +7.5% | 17.6 → 17.6 |
-| `conv_var`     |  112.64 ms |  125.73 ms |   92.36 ms | **−18.0%** | 19.6 → **17.6** |
-| `conv_static`  |  155.36 ms |  155.21 ms |  160.53 ms | +3.3% | 18.6 → 18.6 |
-| `conv_generic` |  184.72 ms |  189.35 ms |  193.41 ms | +4.7% | 20.6 → 20.6 |
-| `conv_fnvalue` |  225.36 ms |  233.99 ms |  238.61 ms | +5.9% | 21.6 → 21.6 |
-| `conv_closure` |  226.73 ms |  234.02 ms |  240.03 ms | +5.9% | 21.6 → 21.6 |
-| `conv_capture` |  279.66 ms |  279.66 ms |  265.51 ms | **−5.1%** | 26.6 → **25.6** |
-| `conv_fresh`   |  622.34 ms |  629.78 ms |  621.31 ms | −0.2% | 23.6 → **24.6** |
-| `conv_host`    | 2336.32 ms | 2410.71 ms | 2313.52 ms | −1.0% | 25.6 → **26.6** |
+| `conv_local`   |   86.32 ms |   91.87 ms |   91.32 ms | +5.8% | 17.6 → 17.6 |
+| `conv_var`     |  112.64 ms |  125.73 ms |   91.42 ms | **−18.8%** | 19.6 → **17.6** |
+| `conv_static`  |  155.36 ms |  155.21 ms |  159.00 ms | +2.3% | 18.6 → 18.6 |
+| `conv_generic` |  184.72 ms |  189.35 ms |  194.92 ms | +5.5% | 20.6 → 20.6 |
+| `conv_fnvalue` |  225.36 ms |  233.99 ms |  240.30 ms | +6.6% | 21.6 → 21.6 |
+| `conv_closure` |  226.73 ms |  234.02 ms |  244.23 ms | +7.7% | 21.6 → 21.6 |
+| `conv_capture` |  279.66 ms |  279.66 ms |  267.65 ms | **−4.3%** | 26.6 → **25.6** |
+| `conv_fresh`   |  622.34 ms |  629.78 ms |  622.76 ms | +0.1% | 23.6 → **24.6** |
+| `conv_host`    | 2336.32 ms | 2410.71 ms | 2336.71 ms | +0.0% | 25.6 → **26.6** |
 
 ### The two ratios that are the result
 
 | | base | control | after |
 | --- | ---: | ---: | ---: |
 | `conv_var` ÷ `conv_local` | 1.30× | 1.37× | **1.00×** |
-| `conv_capture` ÷ `conv_closure` | 1.23× | 1.20× | **1.11×** |
+| `conv_capture` ÷ `conv_closure` | 1.23× | 1.20× | **1.10×** |
 
 **The `var`-rooted local is not a cliff any more; it is not a cost at all.**
 `conv_var` and `conv_local` were always the same loop written twice, differing
@@ -2640,7 +2642,7 @@ turn each — and the same time. The 30% the assessment named was the whole of
 what the representation was costing, and the whole of it is gone.
 
 **Half of the captured scalar is gone and the other half is not a capture.**
-`conv_capture` runs one instruction a turn fewer and is 1.11× of
+`conv_capture` runs one instruction a turn fewer and is 1.10× of
 `conv_closure`. The four instructions a turn that remain over `conv_closure`
 are the read and the addition that `+ zero` *is*, plus the two the general
 convention imposes on any closure body that does arithmetic: the parameter
@@ -2661,26 +2663,36 @@ band, and the rows the trade is for moved the way it was made for.
 
 ### The suite
 
-`cove-bench --iterations 15 --baseline`, VM rows, against a base run taken in
-the same session, with the control build's own movement beside it:
+`cove-bench --iterations 15`, VM rows, against a base run taken in the same
+session, with the control build's own movement beside it and the AST backend's
+beside that. (Against the *recorded* base at `2c19429`, taken at the start of
+the session, every row of every build is 2–8% higher and `startup` is 18–20%
+higher on both backends: the machine drifted over the session, which is why
+the base binary was re-run inside it and why that re-run is the column
+compared against.)
 
-| bench | control vs base | after vs base | instructions |
+| bench | control vs base | after vs base | the same benchmark on the AST backend, after vs base |
 | --- | ---: | ---: | ---: |
-| `arith` | **+23.5%** | +4.5% | identical |
-| `chars` | +2.1% | +4.5% | identical |
-| `field` | +1.1% | +2.6% | identical |
-| `method` | +0.4% | +2.6% | identical |
-| `pure` | +2.8% | +2.8% | identical |
-| `call` | −1.4% | +1.8% | identical |
-| `arrayget` | +1.6% | +0.8% | identical |
-| `hostheavy` | +0.6% | −1.0% | identical |
-| `startup` | −2.3% | −0.6% | n/a |
+| `arith` | **+23.5%** | +4.7% | +1.1% |
+| `arrayget` | +1.6% | +4.6% | +3.8% |
+| `pure` | +2.8% | +4.1% | +0.7% |
+| `call` | −1.4% | +2.4% | −2.2% |
+| `field` | +1.1% | +1.8% | +3.8% |
+| `method` | +0.4% | +1.0% | −1.3% |
+| `chars` | +2.1% | +0.4% | +2.8% |
+| `hostheavy` | +0.6% | −0.6% | +5.3% |
+| `startup` | −2.3% | +0.3% | +1.2% |
 
 Not one of these benchmarks builds a place or reads a capture, and every one
-of them runs exactly the instructions it ran before — every `fuel_spent`
-figure is identical between the two builds. The control column is what these
-numbers are worth: a build that changed nothing moved `arith` five times as
-far as this change did.
+of them runs exactly the instructions it ran before: every `fuel_spent` figure
+is identical across all three builds, which is what the table is a control on
+rather than a measurement of.
+
+Two columns say what the middle one is worth. The control build, which changed
+nothing a program can reach, moved `arith` five times as far as this change
+did. And the AST backend — which shares the binary and runs none of the
+changed code — moved by as much or more on four of the nine rows. There is no
+attributable shift on any of them, in either direction.
 
 ## What a character costs, and what a receiver costs on top of it
 

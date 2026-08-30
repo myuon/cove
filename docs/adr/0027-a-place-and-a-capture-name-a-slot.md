@@ -149,7 +149,7 @@ not claim one.
 | | base | control | after |
 | --- | ---: | ---: | ---: |
 | `conv_var` ÷ `conv_local` | 1.30× | 1.37× | **1.00×** |
-| `conv_capture` ÷ `conv_closure` | 1.23× | 1.20× | **1.11×** |
+| `conv_capture` ÷ `conv_closure` | 1.23× | 1.20× | **1.10×** |
 
 Instruction counts, which no layout moves:
 
