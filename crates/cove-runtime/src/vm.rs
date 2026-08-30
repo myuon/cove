@@ -144,6 +144,15 @@
 //! slots, the captures are copied in behind them, and the frame is opened
 //! the way any other call opens one.
 //!
+//! A capture takes the slot its own kind names, which is the second half of
+//! what issue #162 settled about one slot identity. What a closure *holds* is
+//! a list of `(name, Value)` pairs, because a host reads them and because a
+//! lambda is one function however many specialisations of the body around it
+//! are lowered; where a capture *lands* is `cove_ir::Function::captures`,
+//! so one the checker settled as `Int` or `Bool` becomes a word of the scalar
+//! window at the call and is read from there with no boundary instruction at
+//! all. The conversion happens once per call in place of once per read.
+//!
 //! A host that receives such a closure can run it, which is what
 //! `Vm::call_from_host` is: the dispatch loop, entered again on the stacks
 //! as they stand, with fuel, cancellation, the depth limit and the trace all
@@ -328,8 +337,8 @@ struct Frame {
     place_base: usize,
 }
 
-/// An assignable location: a slot of the value stack, and the struct fields
-/// to navigate from what stands in it.
+/// An assignable location: a slot of one of this VM's stacks, and the struct
+/// fields to navigate from what stands in it.
 ///
 /// This is `crate::interp::Place` with the one thing that made it allocate
 /// taken out. The interpreter gives every binding an `Rc<RefCell<Value>>` of
@@ -338,9 +347,25 @@ struct Frame {
 /// allocate nothing, and reintroducing a cell per binding to make places
 /// possible would give back the whole of what the arrangement bought.
 ///
+/// # Which stack, and one slot identity
+///
+/// A place names a *slot*, and a slot is a region and a number in it. That
+/// is issue #162's answer, and it is what [`PlaceRoot`] is: a place rooted
+/// at a value slot walks the value stack, and one rooted at a scalar slot
+/// names a word of the scalar stack and has no path, because an `Int` and a
+/// `Bool` have no fields.
+///
+/// It could only name the value stack until then, and what that cost was
+/// measured. `cove_ir::lower` kept every binding a `var` argument was rooted
+/// at on the value stack even where the checker had settled it as `Int`, so
+/// a body that wrote `bump(var total)` anywhere paid a `scalar-to-value` and
+/// a `value-to-scalar` on *every* read and write of `total` for the whole
+/// body — 1.31x on `benches/convention`'s `conv_var` row against the same
+/// loop without the one line, with the line outside the loop.
+///
 /// # Why an index, and what it rests on
 ///
-/// An index into the value stack, rather than a pointer into it, because the
+/// An index into a stack, rather than a pointer into it, because the
 /// stack is a `Vec` that grows: a push can move every element, and a raw
 /// pointer taken before that push would name freed memory afterwards, while
 /// an index names the same slot before and after. It is also the only form a
@@ -391,19 +416,65 @@ struct Frame {
 /// which is the one difference between the two that is not allowed to exist.
 #[derive(Clone, Debug)]
 struct Place {
-    /// Which slot of the value stack this is rooted at, absolutely.
-    slot: usize,
+    /// Which slot this is rooted at, and in which of the VM's stacks.
+    root: PlaceRoot,
     /// The field positions to walk from there, outermost first. Empty for a
-    /// place that names a binding.
+    /// place that names a binding, and always empty for a scalar root.
     path: Vec<u32>,
+}
+
+/// The slot a [`Place`] is rooted at: which stack, and where in it.
+///
+/// Absolute in both cases, for the reason [`Place`] gives: a place travels
+/// into a call, where the callee's bases are different numbers.
+///
+/// The `Scalar` variant carries which of the two words it is naming, because
+/// the scalar stack keeps no tag — the same fact `cove_ir::Inst::ScalarToValue`
+/// carries an argument for, and for the same reason: a read through the place
+/// has to put a tag back on.
+#[derive(Clone, Copy, Debug)]
+enum PlaceRoot {
+    /// A slot of the value stack.
+    Value(usize),
+    /// A slot of the scalar stack, and what the word in it stands for.
+    Scalar(usize, Scalar),
 }
 
 impl Place {
     /// The place naming `slot` of the value stack, with no path.
     fn rooted_at(slot: usize) -> Place {
         Place {
-            slot,
+            root: PlaceRoot::Value(slot),
             path: Vec::new(),
+        }
+    }
+
+    /// The place naming `slot` of the scalar stack.
+    ///
+    /// There is no path and there can never be one: `cove_ir::lower` emits a
+    /// `place-field` only where the checker settled the struct type the step
+    /// is taken in, and neither `Int` nor `Bool` is one.
+    fn rooted_at_scalar(slot: usize, what: Scalar) -> Place {
+        Place {
+            root: PlaceRoot::Scalar(slot, what),
+            path: Vec::new(),
+        }
+    }
+
+    /// Which slot of the *value* stack this place walks from.
+    ///
+    /// A scalar root never reaches here: an `Int` and a `Bool` have no
+    /// fields, so nothing that walks a path can be handed one, and the two
+    /// instructions that read and write a place without walking branch on
+    /// the root before they ask. So this is a broken invariant of this
+    /// backend rather than a program that could be told about it — the same
+    /// standing an operand stack that came up empty has.
+    fn value_root(&self) -> usize {
+        match self.root {
+            PlaceRoot::Value(slot) => slot,
+            PlaceRoot::Scalar(..) => {
+                unreachable!("a place rooted at a scalar slot has no path to walk")
+            }
         }
     }
 
@@ -413,7 +484,7 @@ impl Place {
         let mut path = self.path.clone();
         path.push(index);
         Place {
-            slot: self.slot,
+            root: self.root,
             path,
         }
     }
@@ -473,8 +544,12 @@ struct OpenScope {
 ///   contribution. Every frame's slots and every frame's operands are in this
 ///   one vector, so `stack[..stack.len()]` is all of them at once: there is
 ///   nothing to slice per frame and nothing to skip inside a frame. A
-///   closure's captures are value slots, copied into the frame's window by
-///   the call that entered the body, so they are in it already.
+///   closure's *value* captures are copied into that window by the call that
+///   entered the body, so they are in it already; a capture the checker
+///   settled as `Int` or `Bool` goes into the scalar window instead and is a
+///   root nowhere, which is right for the reason `scalars` is not a root.
+///   Either way the closure itself holds the value, and the closure is
+///   reached from the slot that holds it.
 /// - `scopes` — **a root**. An `OpenScope` holds an `Rc<TaskScope>`, and a
 ///   scope owns the tasks spawned into it, whose settled values are Cove
 ///   values of this task's heap. A scope's *value* is also an ordinary slot
@@ -485,9 +560,13 @@ struct OpenScope {
 /// - `scalars` — not a root. The two stacks are numbered separately, so a
 ///   scalar slot is not a number in the value stack's space at all; an `i64`
 ///   holds no reference.
-/// - `places` — not a root. A place is an index into the value stack, so what
-///   it reaches is reachable from what is already walked. See [`Vm::places`]
-///   for what that rests on and for what a moving collector would owe.
+/// - `places` — not a root, and issue #162 did not make it one. A place is a
+///   slot number and which stack it is in: a place rooted at a value slot
+///   reaches only what that slot holds, which is inside the window already
+///   walked, and a place rooted at a scalar slot reaches an `i64` and so
+///   reaches nothing at all. Neither adds a reference the walk above does not
+///   already see, and neither may be walked *again* — see [`Vm::places`] for
+///   what that rests on and for what a moving collector would owe.
 /// - `frames` — not a root. A `Frame` is four indices and a `FunctionId`.
 /// - `constants` — not walked, and safe not to be. See [`Vm::constants`]: no
 ///   entry can reach a `Vector`, and walking one would put every constant
@@ -585,8 +664,17 @@ pub struct Vm<'a> {
     /// slots below, operands above, one window per frame.
     ///
     /// Nothing in here is a GC root either, and for a related reason: a
-    /// place holds an index into the value stack, so whatever it reaches is
-    /// already reachable from the value stack's own window.
+    /// place holds a slot number and the stack that number is in, so whatever
+    /// it reaches is already reachable from that stack's own window — and for
+    /// a place rooted at a scalar slot there is nothing to reach, because the
+    /// slot holds an `i64`.
+    ///
+    /// **It must not be walked, rather than merely need not be.** Every
+    /// `Value` a place can name is a value slot the walk above already
+    /// counts, so walking a place as well would charge one value twice. That
+    /// is the failure mode PR #192 kept `Vm::arg_vectors` out of the root set
+    /// for, and it is the same argument: the collector's accounting survives
+    /// a root it reaches by two routes only if it reaches it by one.
     ///
     /// That rests on a place never outliving the window it indexes, which is
     /// the property [`Place`] argues at length and which the collector does
@@ -835,7 +923,7 @@ impl<'a> Vm<'a> {
                     function
                         .captures
                         .iter()
-                        .map(|name| Rc::from(&**name))
+                        .map(|(name, _)| Rc::from(&**name))
                         .collect()
                 })
                 .collect(),
@@ -1298,18 +1386,6 @@ impl<'a> Vm<'a> {
                     let value = self.pop();
                     self.stack[frame.base + slot as usize] = value;
                 }
-                Inst::LoadCapture(index) => {
-                    // A capture is a value slot: the call that entered this
-                    // body copied it out of the closure into
-                    // `capture_base + index`, which is where the captures
-                    // stand because a closure's arguments travel on the value
-                    // stack and so its value parameters fill exactly the
-                    // slots below them. `cove_ir::lower::validate` checked
-                    // both halves of that, so neither is asked about here.
-                    let slot = frame.base + (running.capture_base + index) as usize;
-                    let value = self.stack[slot].clone();
-                    self.stack.push(value);
-                }
                 Inst::Pop => {
                     self.pop();
                 }
@@ -1390,10 +1466,7 @@ impl<'a> Vm<'a> {
                 }
                 Inst::ScalarToValue(what) => {
                     let scalar = self.pop_scalar();
-                    self.stack.push(match what {
-                        Scalar::Int => Value::Int(scalar),
-                        Scalar::Bool => Value::Bool(scalar != 0),
-                    });
+                    self.stack.push(as_value_of(what, scalar));
                 }
                 Inst::ValueToScalar => {
                     let value = self.pop();
@@ -1720,6 +1793,7 @@ impl<'a> Vm<'a> {
                 // Every place instruction, out of line: see `Vm::place_inst`
                 // for why the bodies are not written here.
                 Inst::PlaceLocal(_)
+                | Inst::PlaceScalar(..)
                 | Inst::LoadPlace(_)
                 | Inst::PlaceField(_)
                 | Inst::PlacePop
@@ -1904,6 +1978,14 @@ impl<'a> Vm<'a> {
                 self.places
                     .push(Place::rooted_at(frame.base + slot as usize));
             }
+            Inst::PlaceScalar(slot, what) => {
+                // The same thing on the other stack, and absolute for the
+                // same reason: `frame.scalar_base` is the callee's own.
+                self.places.push(Place::rooted_at_scalar(
+                    frame.scalar_base + slot as usize,
+                    what,
+                ));
+            }
             Inst::LoadPlace(slot) => {
                 let place = self.places[frame.place_base + slot as usize].clone();
                 self.places.push(place);
@@ -1936,14 +2018,29 @@ impl<'a> Vm<'a> {
                 self.fuel += place.path.len() as u64;
                 // Reading a place clones: that is the value-semantics
                 // rule, and it is `crate::interp::Place::read`'s comment.
-                let value = self.place_ref(&place).clone();
+                // A scalar root has nothing to clone and the tag it puts
+                // back on is the one the place carried — the same
+                // conversion `Inst::ScalarToValue` performs, at the one
+                // point a place is the thing that knows.
+                let value = match place.root {
+                    PlaceRoot::Scalar(slot, what) => as_value_of(what, self.scalars[slot]),
+                    PlaceRoot::Value(_) => self.place_ref(&place).clone(),
+                };
                 self.stack.push(value);
             }
             Inst::PlaceWrite => {
                 let value = self.pop();
                 let place = self.pop_place();
                 self.fuel += place.path.len() as u64;
-                *self.place_mut(&place) = value;
+                match place.root {
+                    // `promised_scalar` is the boundary in the inward
+                    // direction and stands on the same ground here: the
+                    // place was built from a slot the checker settled as
+                    // `Int` or `Bool`, and the checker settled what may be
+                    // assigned through it as the same type.
+                    PlaceRoot::Scalar(slot, _) => self.scalars[slot] = promised_scalar(&value),
+                    PlaceRoot::Value(_) => *self.place_mut(&place) = value,
+                }
             }
             Inst::Freeze => {
                 let place = self.pop_place();
@@ -2002,7 +2099,7 @@ impl<'a> Vm<'a> {
     /// emitted only where the checker settled the type it is taken from, and
     /// a struct's fields stand in declaration order wherever one is built.
     fn place_ref(&self, place: &Place) -> &Value {
-        let mut current = &self.stack[place.slot];
+        let mut current = &self.stack[place.value_root()];
         for step in &place.path {
             let Value::Struct(held) = current else {
                 unreachable!(
@@ -2028,7 +2125,7 @@ impl<'a> Vm<'a> {
     /// unobservable. The same call at the same steps in the same order, or
     /// `is`, aliasing, and struct value semantics all change.
     fn place_mut(&mut self, place: &Place) -> &mut Value {
-        let mut current = &mut self.stack[place.slot];
+        let mut current = &mut self.stack[place.value_root()];
         for step in &place.path {
             let Value::Struct(held) = current else {
                 unreachable!(
@@ -2352,14 +2449,36 @@ impl<'a> Vm<'a> {
             self.async_frames.push(self.frames.len());
         }
         let base = self.stack.len() - argc as usize;
-        for (_, value) in &closure.captures {
-            self.stack.push(value.clone());
-        }
-        self.stack
-            .resize(base + callee.value_frame_size as usize, Value::Unit);
         let scalar_base = self.scalars.len();
         self.scalars
             .resize(scalar_base + callee.scalar_frame_size as usize, 0);
+        // Each capture goes into the slot its own kind names, which is the
+        // whole of what issue #162 changed about one. A closure holds
+        // `(name, Value)` pairs on both backends because a host reads them,
+        // so this is the one point at which a capture the checker settled as
+        // `Int` or `Bool` takes the representation its arithmetic wants —
+        // once per call, in place of once per read.
+        //
+        // The two counters are the layout `cove_ir::Function::captures`
+        // states and `cove_ir::lower::validate` checked: the value captures
+        // are dense from `capture_base`, which is where these pushes land
+        // because the arguments filled everything below it, and the scalar
+        // captures are dense from scalar slot 0, which they can be because a
+        // function a closure is made of takes no scalar argument.
+        let mut next_scalar = scalar_base;
+        for ((_, value), (_, kind)) in closure.captures.iter().zip(&callee.captures) {
+            match kind {
+                SlotKind::Scalar(_) => {
+                    self.scalars[next_scalar] = promised_scalar(value);
+                    next_scalar += 1;
+                }
+                // `validate` refuses a capture in a place slot, so the
+                // remaining kind is the value stack.
+                _ => self.stack.push(value.clone()),
+            }
+        }
+        self.stack
+            .resize(base + callee.value_frame_size as usize, Value::Unit);
         let place_base = self.places.len() - place_argc as usize;
         // Almost no closure has a place slot: `Inst::Lock`'s is the one whose
         // parameter can name storage rather than hold a value. So this is
@@ -3515,6 +3634,19 @@ fn as_value(returns: SlotKind, scalar: i64) -> Value {
         SlotKind::Value => unreachable!(
             "`return-scalar` was reached in a function that answers on the value stack"
         ),
+    }
+}
+
+/// The `Value` a scalar word stands for, told which of the two it is.
+///
+/// [`as_value`] asks a [`SlotKind`] the same question; this asks the
+/// [`Scalar`] itself, because the two callers that reach it — the
+/// `Inst::ScalarToValue` arm and a read through a place rooted at a scalar
+/// slot — hold that and not a slot kind.
+fn as_value_of(what: Scalar, scalar: i64) -> Value {
+    match what {
+        Scalar::Int => Value::Int(scalar),
+        Scalar::Bool => Value::Bool(scalar != 0),
     }
 }
 

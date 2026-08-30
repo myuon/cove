@@ -50,8 +50,8 @@
 //! observably a different language, since `two(var x, var x)` answers 11
 //! rather than 10 and only aliasing gives that answer.
 //!
-//! What names storage here is a *place*: an index into the value stack,
-//! together with the field positions to walk from what stands there.
+//! What names storage here is a *place*: one slot — which stack, and where
+//! in it — together with the field positions to walk from what stands there.
 //! [`SlotKind::Place`] is the third kind a slot can have, a `var`
 //! parameter's argument travels on the third stack, and
 //! [`Function::place_frame_size`] is that stack's window the way the other
@@ -60,9 +60,19 @@
 //! `Inst::Call`'s per-stack counts, `Function::params`, and `validate`
 //! already generalise over the question.
 //!
-//! An index rather than a pointer, because the value stack is one `Vec` that
-//! grows, and an index survives a reallocation that a borrow could not even
-//! be written across. It is sound for as long as the frame it addresses is
+//! **A place names a slot, and it does not care which stack the slot is in.**
+//! That is issue #162's one slot identity read at the only place the three
+//! stacks previously disagreed about what a slot was: [`Inst::PlaceLocal`]
+//! names one of the value stack's and [`Inst::PlaceScalar`] one of the scalar
+//! stack's, and a `var` argument rooted at a binding the checker settled as
+//! `Int` therefore leaves the binding where its arithmetic wants it. It could
+//! not until then — the lowering kept every such binding on the value stack
+//! for the whole of the body that named it, and paid a conversion on every
+//! read and every write of it.
+//!
+//! An index rather than a pointer, because a stack is one `Vec` that grows,
+//! and an index survives a reallocation that a borrow could not even be
+//! written across. It is sound for as long as the frame it addresses is
 //! live, and a place never leaves the frame that built it — see the note on
 //! [`Inst::PlaceLocal`], which is where that is argued now that closures
 //! lower.
@@ -219,11 +229,14 @@ pub struct Function {
     /// slot is filled by the calling convention and never assigned. A body
     /// declares no place slots of its own: `var` is a property of a
     /// parameter, and a local that a `var` argument is rooted at is an
-    /// ordinary value slot that a place *names* rather than a place itself.
+    /// ordinary slot of whichever stack its own type named, which a place
+    /// *names* rather than being a place itself.
     ///
-    /// Not a root set, and not a hole in one either. A place holds an index
-    /// and a path of field positions, so it reaches a `Value` only by way of
-    /// the value stack, whose own window is already scanned.
+    /// Not a root set, and not a hole in one either. A place holds a slot
+    /// number, the stack that number is in, and a path of field positions, so
+    /// it reaches a `Value` only by way of the value stack, whose own window
+    /// is already scanned — and a place rooted at a scalar slot reaches no
+    /// `Value` at all.
     pub place_frame_size: u32,
     /// How many arguments a call must supply, `self` included.
     pub arity: u32,
@@ -287,8 +300,8 @@ pub struct Function {
     /// one entry per name, and `crate::lower` walks the same bindings in the
     /// same order. What differs is *when*. There, a capture's position is a
     /// run-time fact — the list is built as the closure is created — and
-    /// here it is decided when the lambda is lowered, which is what lets
-    /// [`Inst::LoadCapture`] be an index.
+    /// here it is decided when the lambda is lowered, which is what lets a
+    /// capture be an ordinary slot the body loads by number.
     ///
     /// The names are kept although nothing reads one to find a capture:
     /// `cove_runtime::value::Closure::captures` is a list of `(name, value)`
@@ -296,24 +309,59 @@ pub struct Function {
     /// so the pairs have to be rebuildable. They are also what a listing
     /// shows.
     ///
-    /// The values themselves live in the first value slots after the
-    /// parameters that arrived on the value stack —
-    /// `capture_base .. capture_base + captures.len()` — put there by the
-    /// call that entered this body, out of the closure it was called
-    /// through. That is why every function a closure can be made of takes
-    /// its arguments on the value stack: the captures follow them there, and
-    /// a scalar parameter would leave a hole between the two.
-    pub captures: Vec<Arc<str>>,
-    /// Where this function's captures begin among its value slots, which is
-    /// how many of its parameters arrived on the value stack.
+    /// The values themselves live in the frame slots this list gives them, put
+    /// there by the call that entered this body, out of the closure it was
+    /// called through.
+    /// One entry per capture, in that order, pairing the name with the stack
+    /// its slot is in.
     ///
-    /// The same number as `arity` for every closure but one, and written out
-    /// rather than derived because [`Inst::LoadCapture`] reads it on a path
-    /// that should not count anything. The exception is the closure
-    /// `Shared::lock` is given a `var` parameter: that parameter names the
-    /// cell's contents rather than receiving a copy of them, so it arrives on
-    /// the place stack and takes no value slot, and the captures begin one
-    /// slot earlier than `arity` would say. See [`Inst::Lock`].
+    /// A capture is a frame slot like any other, and issue #162 is where that
+    /// became true of its *representation* as well as of its numbering. A
+    /// capture the checker settled as `Int` or `Bool` takes a scalar slot, so
+    /// a body that reads it reads it with an [`Inst::LoadScalar`] and the
+    /// arithmetic that consumes it needs no boundary instruction at all.
+    ///
+    /// It could not before, and the cost was measured:
+    /// `benches/convention`'s `conv_capture` row ran five boundary
+    /// instructions a turn against `conv_closure`'s two, because the
+    /// parameter, the capture *and* the answer all crossed, and cost 1.20x
+    /// of it.
+    ///
+    /// The layout is dense within each stack and in this order: the value
+    /// captures fill `capture_base ..` and the scalar captures fill `0 ..`,
+    /// which they can because a function a closure is made of takes no
+    /// scalar argument — `crate::lower::validate` refuses one that does, and
+    /// that refusal is what makes `0` a static number here.
+    ///
+    /// **What travels is still a `Value`.** The closure holds
+    /// `(name, Value)` pairs whichever backend built it, because a host reads
+    /// them and because `crate::lower` numbers one lambda per syntactic site
+    /// however many specialisations of the body around it are lowered — so a
+    /// capture's representation *at the site* is not a fact the callee may
+    /// rely on. What the callee states is where the value lands, and the call
+    /// converts it there. The type is the checker's either way, so the
+    /// conversion cannot fail.
+    ///
+    /// Never [`SlotKind::Place`]: a closure captures the value a place names
+    /// and never the place. [`Inst::PlaceLocal`] is where that is argued.
+    ///
+    /// One list rather than two beside each other, because a name and a slot
+    /// are one fact about one capture and a reader that could hold half of it
+    /// is a reader that could disagree with itself. It also keeps a
+    /// [`Function`] the size it was.
+    pub captures: Vec<(Arc<str>, SlotKind)>,
+    /// Where this function's *value* captures begin among its value slots,
+    /// which is how many of its parameters arrived on the value stack.
+    ///
+    /// The same number as `arity` for every closure but one. The exception is
+    /// the closure `Shared::lock` is given a `var` parameter: that parameter
+    /// names the cell's contents rather than receiving a copy of them, so it
+    /// arrives on the place stack and takes no value slot, and the captures
+    /// begin one slot earlier than `arity` would say. See [`Inst::Lock`].
+    ///
+    /// There is no second field for where the scalar captures begin, because
+    /// the answer is always zero: `validate` refuses a function a closure is
+    /// made of that takes any argument on the scalar stack.
     pub capture_base: u32,
     /// The names source gave this function's parameters, for a function a
     /// closure value can be made of, and empty for every other.
@@ -452,8 +500,8 @@ pub enum SlotKind {
     Value,
     /// An `i64` in the scalar stack, meaning what [`Scalar`] says.
     Scalar(Scalar),
-    /// A place in the place stack: an index into the value stack and the
-    /// field positions to walk from it.
+    /// A place in the place stack: one slot of the value or the scalar
+    /// stack, and the field positions to walk from it.
     ///
     /// What a `var` parameter's slot holds. Reading such a parameter is a
     /// [`Inst::LoadPlace`] and then a [`Inst::PlaceRead`], and writing to it
@@ -559,18 +607,6 @@ pub enum Inst {
     StoreLocal(u32),
     /// Pushes one of this call's captures.
     ///
-    /// A capture is a value slot like any other — the call that entered this
-    /// body copied it out of the closure into
-    /// [`Function::capture_base`]` + index`, which is where the captures
-    /// stand because a closure's arguments travel on the value stack and so
-    /// its value parameters fill exactly the slots below them. This could
-    /// therefore have been a [`Inst::LoadLocal`] of that number, and it is
-    /// not, for two reasons that are the same reason: the layout is a fact
-    /// about the closure rather than about the body, and it is
-    /// [`Function::captures`] that states it. A listing reads `capture 0`
-    /// rather than `load 3`, and `crate::lower::validate` can check an index
-    /// against the capture list instead of against the frame.
-    LoadCapture(u32),
     /// Builds a closure over the top `captures` values, in the order
     /// [`Function::captures`] names them, and pushes it.
     ///
@@ -897,7 +933,7 @@ pub enum Inst {
     ///
     /// This is where a `var` argument rooted at a local comes from, and it
     /// is where the place model's one soundness obligation lives. A place is
-    /// an absolute index into the value stack rather than a borrow of it,
+    /// an absolute slot number rather than a borrow of the stack it is in,
     /// which is what lets the `Vec` reallocate under a place that is
     /// standing, and it is valid for exactly as long as the frame it
     /// addresses is live.
@@ -921,10 +957,35 @@ pub enum Inst {
     /// something only a call's arguments travel on.
     ///
     /// The slot is a [`SlotKind::Value`] one, checked by `validate` rather
-    /// than asked about here: a place cannot address the scalar stack, which
-    /// is why `crate::lower` puts a binding that a `var` argument is rooted
-    /// at into a value slot even where the checker settled it as `Int`.
+    /// than asked about here. [`Inst::PlaceScalar`] is the same instruction
+    /// for a slot of the scalar stack, and the pair is what lets a place
+    /// name storage in either representation.
     PlaceLocal(u32),
+    /// Pushes the place that names one of this frame's *scalar* slots.
+    ///
+    /// The counterpart of [`Inst::PlaceLocal`] and the whole of what issue
+    /// #162 calls one slot identity for a place: a place names a slot, and a
+    /// slot is a region and a number in it, so a binding the checker settled
+    /// as `Int` or `Bool` can be the root of a `var` argument without leaving
+    /// the representation its arithmetic wants.
+    ///
+    /// It used not to be able to, and the cost of that was measured. A
+    /// binding a `var` argument was rooted at was kept on the value stack for
+    /// the whole of the body that declared it, so every read and every write
+    /// of it crossed — `benches/convention`'s `conv_var` row against its
+    /// `conv_local`, 1.31x for one `root(var v)` written *outside* the loop.
+    ///
+    /// The path is always empty. A scalar slot holds an `Int` or a `Bool` and
+    /// neither has a field, so nothing can refine this place; `validate`
+    /// says so by refusing an [`Inst::PlaceField`] that could reach one, and
+    /// `crate::lower` never emits one because a field step needs a struct
+    /// type under it.
+    ///
+    /// The [`Scalar`] travels with the instruction for the reason
+    /// [`Inst::ScalarToValue`] carries one: the scalar stack keeps no tag, so
+    /// a read through this place has to be told which of the two words it is
+    /// putting a tag back on.
+    PlaceScalar(u32, Scalar),
     /// Pushes a copy of the place in one of this frame's *place* slots.
     ///
     /// A `var` parameter's slot holds a place, so this is how the parameter
@@ -1289,7 +1350,8 @@ pub fn render(program: &Program, id: FunctionId) -> String {
         out.push_str(" receiver");
     }
     if !function.captures.is_empty() {
-        out.push_str(&format!(" captures=[{}]", function.captures.join(", ")));
+        let names: Vec<&str> = function.captures.iter().map(|(name, _)| &**name).collect();
+        out.push_str(&format!(" captures=[{}]", names.join(", ")));
     }
     out.push_str(&format!(" -> {}", render_kind(function.returns)));
     out.push('\n');
@@ -1321,7 +1383,6 @@ fn render_inst(program: &Program, inst: Inst) -> String {
         Inst::Const(id) => format!("const {:?}", program.constant(id)),
         Inst::LoadLocal(slot) => format!("load {slot}"),
         Inst::StoreLocal(slot) => format!("store {slot}"),
-        Inst::LoadCapture(index) => format!("capture {index}"),
         Inst::Pop => "pop".to_string(),
         Inst::Dup => "dup".to_string(),
         Inst::Unary(op) => format!("unary {op:?}"),
@@ -1400,6 +1461,7 @@ fn render_inst(program: &Program, inst: Inst) -> String {
             format!("call-assoc {}.{} argc={argc}", name(ty), name(n))
         }
         Inst::PlaceLocal(slot) => format!("place {slot}"),
+        Inst::PlaceScalar(slot, what) => format!("place-scalar {slot} {what:?}"),
         Inst::LoadPlace(slot) => format!("load-place {slot}"),
         Inst::PlaceField(index) => format!("place-field {index}"),
         Inst::PlacePop => "place-pop".to_string(),

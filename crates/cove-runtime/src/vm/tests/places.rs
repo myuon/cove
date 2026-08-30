@@ -166,32 +166,114 @@ fn a_break_inside_a_half_built_call_leaves_no_place_standing() {
     );
 }
 
-/// A `var` parameter whose type the checker settled as `Int` still has a
-/// place, because the binding it names was kept on the value stack — a
-/// place is an index into that stack and there is nothing in the scalar
-/// one for it to address.
+/// A `var` parameter whose type the checker settled as `Int` names the
+/// scalar slot the binding already lived in: nothing moves to be named.
+///
+/// This test recorded the opposite until issue #162. A place could address
+/// only the value stack, so `total` — and, because the pre-pass collected
+/// *names*, every binding of that name in the body — was kept there for the
+/// whole body, and its every read and write crossed. The listing then read
+/// `const Int(1)` / `store 0` / `place 0` and `load 0` / `value-to-scalar`
+/// where it now reads the scalar forms, and `counted` beside it was the
+/// control that said only the rooted name had moved. Now neither has.
 #[test]
-fn a_binding_a_place_is_rooted_at_is_kept_on_the_value_stack() {
+fn a_binding_a_place_is_rooted_at_keeps_its_scalar_slot() {
     let listed = main_of(
         "fn bump(var n: Int) {\n  n += 1\n}\n\nexport fn main() -> Int {\n  var total = 1\n  var counted = 2\n  bump(var total)\n  total + counted\n}\n",
     );
-    // `total` is slot 0 of the *value* frame and `counted` is slot 0 of
-    // the scalar frame: only the name a place is rooted at moved.
+    // Both are scalar slots, and `place-scalar` names the first of them
+    // where it stands.
     assert_eq!(
         listed,
-        "fn m.main arity=0 frame=1/1 -> Int\n\
-         \x20  0  const Int(1)\n\
-         \x20  1  store 0\n\
+        "fn m.main arity=0 frame=0/2 -> Int\n\
+         \x20  0  scalar-const 1\n\
+         \x20  1  store-scalar 0\n\
          \x20  2  scalar-const 2\n\
-         \x20  3  store-scalar 0\n\
-         \x20  4  place 0\n\
+         \x20  3  store-scalar 1\n\
+         \x20  4  place-scalar 0 Int\n\
          \x20  5  call m.bump argc=0/0/1\n\
          \x20  6  pop\n\
-         \x20  7  load 0\n\
-         \x20  8  value-to-scalar\n\
-         \x20  9  load-scalar 0\n\
-         \x20 10  int Add\n\
-         \x20 11  return-scalar\n"
+         \x20  7  load-scalar 0\n\
+         \x20  8  load-scalar 1\n\
+         \x20  9  int Add\n\
+         \x20 10  return-scalar\n"
+    );
+}
+
+/// A `Bool` binding is rooted the same way, and the tag comes back on.
+///
+/// The scalar stack keeps no tag, so a place rooted at one of its slots
+/// carries which of the two words it names — `place-scalar 0 Bool` — and a
+/// read through it puts `Value::Bool` back rather than `Value::Int`. This is
+/// the test that would fail if the tag travelled wrongly, because the two
+/// renderings differ.
+#[test]
+fn a_var_argument_rooted_at_a_bool_reads_and_writes_as_a_bool() {
+    assert_eq!(
+        agree(
+            "fn flip(var b: Bool) -> Bool {\n  let was = b\n  b = !b\n  was\n}\n\nexport fn main() -> String {\n  var on = true\n  let was = flip(var on)\n  \"{was} {on}\"\n}\n"
+        )
+        .value(),
+        "Str(\"true false\")"
+    );
+}
+
+/// A scalar binding rooted for a `var` argument is still the same binding
+/// the loop around it reads and writes.
+///
+/// This is `benches/convention`'s `conv_var` shape as a correctness test:
+/// one `bump(var total)` written after the loop, and a loop body that reads
+/// and writes `total` on the scalar stack throughout. It used to be the
+/// program that proved the *opposite* — that the binding had moved — and
+/// what it proves now is that moving it was never necessary for it to be
+/// right.
+#[test]
+fn a_scalar_local_rooted_after_a_loop_is_the_binding_the_loop_wrote() {
+    assert_eq!(
+        agree(
+            "fn bump(var n: Int) {\n  n += 1\n}\n\nexport fn main() -> Int {\n  var total = 0\n  var i = 0\n  while i < 10 {\n    total += i\n    i += 1\n  }\n  bump(var total)\n  total\n}\n"
+        )
+        .value(),
+        "Int(46)"
+    );
+}
+
+/// The over-approximation the pre-pass performed is gone with it, and this
+/// is the program that used to pay for it.
+///
+/// `var_argument_roots` collected *names*, so a `bump(var total)` anywhere
+/// in a body demoted every binding called `total` the body declared,
+/// including the one in a block no place ever names. Both are scalar slots
+/// now, and the answer is the same either way — which is why the cost was
+/// only ever a cost.
+#[test]
+fn a_shadowing_binding_of_a_rooted_name_is_not_demoted_with_it() {
+    assert_eq!(
+        agree(
+            "fn bump(var n: Int) {\n  n += 1\n}\n\nexport fn main() -> Int {\n  var total = 0\n  if true {\n    var total = 100\n    total += 1\n  }\n  bump(var total)\n  total\n}\n"
+        )
+        .value(),
+        "Int(1)"
+    );
+}
+
+/// A closure over a `var` parameter of a settled scalar type still captures
+/// the *value* the place names, and the place it reads through is rooted at
+/// a scalar slot.
+///
+/// `Inst::PlaceLocal`'s note is the statement being tested: a closure
+/// captures what a place names and never the place, so the answer does not
+/// change when the binding is assigned to after the closure is written.
+/// Nothing about that depended on which stack the binding lived in, and this
+/// is what says so now that it can live in either.
+#[test]
+fn a_closure_over_a_scalar_var_parameter_captures_the_value_it_named() {
+    assert_eq!(
+        agree(
+            "fn watch(var n: Int) -> Int {\n  let f: fn() -> Int = fn() {\n    n\n  }\n  n += 100\n  f()\n}\n\nexport fn main() -> Int {\n  var x = 7\n  let seen = watch(var x)\n  seen + x\n}\n"
+        )
+        .value(),
+        "Int(114)"
     );
 }
 

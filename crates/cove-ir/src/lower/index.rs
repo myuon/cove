@@ -28,7 +28,9 @@ use cove_sema::resolve::Program as Checked;
 use cove_sema::Signature;
 use cove_syntax::ast::{Block, EnumDecl, ExprId, FnDecl, Param, StructDecl, Type, TypeKind};
 
-use crate::{Const, ConstId, Dispatch, DispatchId, Function, FunctionId, Program, Unsupported};
+use crate::{
+    Const, ConstId, Dispatch, DispatchId, Function, FunctionId, Program, SlotKind, Unsupported,
+};
 
 /// Which modules each module of the package can reach, itself included.
 ///
@@ -166,9 +168,7 @@ pub(super) enum Instance {
         /// A body under this convention is lowered the way a body whose
         /// bindings the checker abstained about is: an `Int` parameter is a
         /// value slot, and `Body::expr_scalar` moves it across where
-        /// arithmetic wants it. The same thing `Body::rooted` already does
-        /// to a binding a place is rooted at, for the same reason — both
-        /// representations hold the same value.
+        /// arithmetic wants it — both representations hold the same value.
         ///
         /// [`Inst::CallDyn`]: crate::Inst::CallDyn
         /// [`Inst::CallValue`]: crate::Inst::CallValue
@@ -230,12 +230,23 @@ pub(super) struct LambdaSite<'a> {
     pub(super) body: &'a Block,
     pub(super) span: Span,
     /// The names this lambda captures, in the order their values are pushed
-    /// before [`Inst::MakeClosure`] and in the order its
-    /// [`Inst::LoadCapture`] indices address.
+    /// before [`Inst::MakeClosure`] and in the order `Function::captures` gives
+    /// them their slots.
     ///
-    /// [`Inst::LoadCapture`]: crate::Inst::LoadCapture
     /// [`Inst::MakeClosure`]: crate::Inst::MakeClosure
     pub(super) captures: Vec<&'a str>,
+    /// Which stack each of those captures takes its slot in, in the same
+    /// order — the enclosing binding's own kind, with a `var` parameter's
+    /// place reading as the value it names.
+    ///
+    /// Read from the *first* site to reach this lambda, which is the site
+    /// `crate::lower::index::Lowering::number_lambda` recorded, and that is
+    /// sound although a second reach could disagree about it. A capture
+    /// travels as a `Value` whatever this says; what this decides is where
+    /// the call puts it, and the checker's type is the same on every road to
+    /// the same lambda. So a disagreement costs a conversion and cannot cost
+    /// an answer.
+    pub(super) capture_kinds: Vec<SlotKind>,
     /// Whether this lambda was written `async`, and so answers a settled
     /// task rather than the value its body produced.
     pub(super) is_async: bool,

@@ -3,8 +3,15 @@ use super::*;
 // ------------------------------------------------------------- places
 
 /// `two(var x, var x)` is what a place has to be an alias for: both
-/// arguments are the same `place 0`, so the callee's two parameters name
-/// one slot of the caller's frame and the second write sees the first.
+/// arguments are the same `place-scalar 0 Int`, so the callee's two
+/// parameters name one slot of the caller's frame and the second write sees
+/// the first.
+///
+/// `x` stays a scalar slot, which is the whole of issue #162's first cliff.
+/// This listing used to read `const Int(0)` / `store 0` / `place 0` and end
+/// in `load 0` / `value-to-scalar`, because a place could only address the
+/// value stack and so the binding a place was rooted at had to be kept
+/// there. Nothing moves now: the place names the slot where it is.
 #[test]
 fn two_var_arguments_naming_one_binding_push_the_same_place_twice() {
     assert_eq!(
@@ -12,16 +19,15 @@ fn two_var_arguments_naming_one_binding_push_the_same_place_twice() {
             "fn two(var a: Int, var b: Int) {\n  a += 1\n  b += 10\n}\n\nfn f() -> Int {\n  var x = 0\n  two(var x, var x)\n  x\n}\n",
             "f"
         ),
-        "fn m.f arity=0 frame=1/0 -> Int\n\
-         \x20  0  const Int(0)\n\
-         \x20  1  store 0\n\
-         \x20  2  place 0\n\
-         \x20  3  place 0\n\
+        "fn m.f arity=0 frame=0/1 -> Int\n\
+         \x20  0  scalar-const 0\n\
+         \x20  1  store-scalar 0\n\
+         \x20  2  place-scalar 0 Int\n\
+         \x20  3  place-scalar 0 Int\n\
          \x20  4  call m.two argc=0/0/2\n\
          \x20  5  pop\n\
-         \x20  6  load 0\n\
-         \x20  7  value-to-scalar\n\
-         \x20  8  return-scalar\n"
+         \x20  6  load-scalar 0\n\
+         \x20  7  return-scalar\n"
     );
     assert_eq!(
         listing(

@@ -88,20 +88,17 @@ impl<'a, 'l> Body<'a, 'l> {
                 // An annotation that converts settles it instead: what the
                 // binding holds is the trait object the conversion makes,
                 // which is a `Value` whatever the value it was declared from
-                // was. No annotation the checker settles as `Int` or `Bool`
-                // can convert, so this only ever moves an answer the way
-                // `rooted_kind` does.
+                // was.
                 let converts = ty.as_ref().is_some_and(|ty| dyn_shape(ty).is_some());
                 let kind = match converts {
                     true => SlotKind::Value,
-                    false => self.rooted_kind(name.node.as_str(), self.slot_kind(value)),
+                    false => self.slot_kind(value),
                 };
                 match kind {
                     SlotKind::Scalar(_) => self.expr_scalar(value)?,
                     SlotKind::Value => self.expr(value)?,
                     // `slot_kind` answers about a type and never says
-                    // `Place`, and `rooted_kind` only ever moves an answer
-                    // towards the value stack.
+                    // `Place`.
                     SlotKind::Place => unreachable!("a `let` does not declare a place"),
                 }
                 if let Some(ty) = ty {
@@ -509,16 +506,19 @@ impl<'a, 'l> Body<'a, 'l> {
             return Ok(());
         }
         if let Some(binding) = self.binding(name) {
-            let (slot, kind, capture) = (binding.slot, binding.kind, binding.capture);
-            match (kind, capture) {
+            let (slot, kind) = (binding.slot, binding.kind);
+            match kind {
                 // A `var` parameter's slot holds a place, not the value, so
                 // reading the parameter is loading the place and reading
                 // through it — which is where the caller's own storage is.
-                (SlotKind::Place, _) => {
+                SlotKind::Place => {
                     self.emit(Inst::LoadPlace(slot), span);
                     self.emit(Inst::PlaceRead, span);
                 }
-                (_, Some(index)) => self.emit(Inst::LoadCapture(index), span),
+                // A capture reaches here too, and is not asked about: it is
+                // a slot of this frame like any other, filled by the call
+                // rather than by the body. `Function::captures` is where
+                // that arrangement is written down.
                 _ => self.emit(Inst::LoadLocal(slot), span),
             }
             return Ok(());
@@ -644,22 +644,33 @@ impl<'a, 'l> Body<'a, 'l> {
             ));
         }
         let names: Vec<&'a str> = captured.iter().map(|(name, _)| *name).collect();
+        let mut capture_kinds: Vec<SlotKind> = Vec::with_capacity(captured.len());
         for (_, at) in &captured {
             let binding = &self.live[*at as usize];
-            let (slot, kind, capture) = (binding.slot, binding.kind, binding.capture);
-            match (kind, capture) {
+            let (slot, kind) = (binding.slot, binding.kind);
+            match kind {
                 // The value the place names, not the place: `Env::captures`
-                // calls `place.read`.
-                (SlotKind::Place, _) => {
+                // calls `place.read`. What the callee gets is a value, so
+                // that is the kind recorded for it.
+                SlotKind::Place => {
                     self.emit(Inst::LoadPlace(slot), span);
                     self.emit(Inst::PlaceRead, span);
+                    capture_kinds.push(SlotKind::Value);
                 }
-                (SlotKind::Scalar(what), _) => {
+                // A capture travels as a `Value` whatever it will land in,
+                // because a closure holds `(name, Value)` pairs on both
+                // backends and a host reads them. The kind recorded here is
+                // where the *call* will put it; see
+                // `Function::captures`.
+                SlotKind::Scalar(what) => {
                     self.emit(Inst::LoadScalar(slot), span);
                     self.emit(Inst::ScalarToValue(what), span);
+                    capture_kinds.push(SlotKind::Scalar(what));
                 }
-                (SlotKind::Value, Some(index)) => self.emit(Inst::LoadCapture(index), span),
-                (SlotKind::Value, None) => self.emit(Inst::LoadLocal(slot), span),
+                SlotKind::Value => {
+                    self.emit(Inst::LoadLocal(slot), span);
+                    capture_kinds.push(SlotKind::Value);
+                }
             }
         }
         let count = names.len() as u16;
@@ -671,6 +682,7 @@ impl<'a, 'l> Body<'a, 'l> {
                 body,
                 span,
                 captures: names,
+                capture_kinds,
                 is_async,
                 aliases_first_param,
             },

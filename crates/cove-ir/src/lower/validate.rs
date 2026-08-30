@@ -114,12 +114,14 @@ fn validate_function(program: &Program, id: FunctionId) -> Result<(), String> {
             render_return(other)
         ));
     }
-    // The captures stand in the value slots straight after the parameters
-    // that arrived on the value stack, put there by the call out of the
-    // closure it went through, so `capture_base` has to be that number and
-    // the frame has to have room for both. `Inst::LoadCapture` addresses them
-    // by index into `captures` rather than by slot, so this is the one place
-    // the two are reconciled.
+    // The value captures stand in the value slots straight after the
+    // parameters that arrived on the value stack, put there by the call out
+    // of the closure it went through, so `capture_base` has to be that
+    // number and the frame has to have room for them. The scalar captures
+    // stand at scalar slot 0 for the same reason read on the other stack,
+    // and the check below that no argument arrives there is what makes 0 a
+    // static number. This is the one place the layout the call fills in and
+    // the layout the body reads are reconciled.
     if function.capture_base != value_params {
         return Err(format!(
             "begins its captures at value slot {} and takes {value_params} value argument(s)",
@@ -138,13 +140,32 @@ fn validate_function(program: &Program, id: FunctionId) -> Result<(), String> {
                 function.arity
             ));
         }
-        let window = function.capture_base as usize + function.captures.len();
+        // A closure captures the value a place names and never the place,
+        // so no capture is a place slot. `Inst::PlaceLocal` is the argument.
+        if function
+            .captures
+            .iter()
+            .any(|(_, kind)| matches!(kind, SlotKind::Place))
+        {
+            return Err("holds a capture in a place slot".to_string());
+        }
+        let values = function
+            .captures
+            .iter()
+            .filter(|(_, kind)| matches!(kind, SlotKind::Value))
+            .count();
+        let scalars = function.captures.len() - values;
+        let window = function.capture_base as usize + values;
         if window > function.value_frame_size as usize {
             return Err(format!(
-                "holds {} capture(s) after {} value argument(s) in a value frame of {}",
-                function.captures.len(),
-                function.capture_base,
-                function.value_frame_size
+                "holds {values} value capture(s) after {} value argument(s) in a value frame of {}",
+                function.capture_base, function.value_frame_size
+            ));
+        }
+        if scalars > function.scalar_frame_size as usize {
+            return Err(format!(
+                "holds {scalars} scalar capture(s) in a scalar frame of {}",
+                function.scalar_frame_size
             ));
         }
     }
@@ -200,10 +221,9 @@ fn validate_function(program: &Program, id: FunctionId) -> Result<(), String> {
                     )));
                 }
             }
-            // A place names a slot of the *value* stack, which is the whole
-            // of why `crate::lower` keeps a binding a place is rooted at
-            // there. Checking it here is what makes that a fact rather than
-            // an intention.
+            // A place names one slot of one stack, and which stack it is
+            // is which instruction built it. Checking each against its own
+            // frame size is what makes that a fact rather than an intention.
             Inst::PlaceLocal(slot) => {
                 if slot >= function.value_frame_size {
                     return Err(at(format!(
@@ -212,11 +232,11 @@ fn validate_function(program: &Program, id: FunctionId) -> Result<(), String> {
                     )));
                 }
             }
-            Inst::LoadCapture(index) => {
-                if index as usize >= function.captures.len() {
+            Inst::PlaceScalar(slot, _) => {
+                if slot >= function.scalar_frame_size {
                     return Err(at(format!(
-                        "reaches capture {index} of {}",
-                        function.captures.len()
+                        "names scalar slot {slot} of a frame of {}",
+                        function.scalar_frame_size
                     )));
                 }
             }
@@ -586,9 +606,7 @@ impl Shape {
 /// it simulates, so the two cannot disagree about what an instruction does.
 pub(super) fn stack_shape(constants: &[Const], inst: Inst) -> Shape {
     match inst {
-        Inst::Const(_) | Inst::LoadLocal(_) | Inst::LoadCapture(_) | Inst::MakeHostEnum { .. } => {
-            Shape::on_values(0, 1)
-        }
+        Inst::Const(_) | Inst::LoadLocal(_) | Inst::MakeHostEnum { .. } => Shape::on_values(0, 1),
         Inst::StoreLocal(_) | Inst::Pop => Shape::on_values(1, 0),
         Inst::SpreadArgument => Shape::on_values(2, 1),
         Inst::Dup => Shape::on_values(1, 2),
@@ -627,7 +645,7 @@ pub(super) fn stack_shape(constants: &[Const], inst: Inst) -> Shape {
         // it. A place is built and refined where it stands; reading one puts
         // a `Value` on the value stack and writing one takes a `Value` off
         // it, which is the same kind of boundary the two above are.
-        Inst::PlaceLocal(_) | Inst::LoadPlace(_) => Shape::on_places(0, 1),
+        Inst::PlaceLocal(_) | Inst::PlaceScalar(..) | Inst::LoadPlace(_) => Shape::on_places(0, 1),
         Inst::PlaceField(_) => Shape::on_places(1, 1),
         Inst::PlacePop => Shape::on_places(1, 0),
         Inst::PlaceRead | Inst::Freeze => Shape {

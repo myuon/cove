@@ -24,6 +24,27 @@ fn two_tasks_in_one_scope_answer_what_the_interpreter_answers() {
     );
 }
 
+/// A closure with a scalar capture, built on one task's VM and called on
+/// another's.
+///
+/// A capture takes the slot its own kind names, and the slot is the
+/// *callee's* to state — so a closure that crosses a task boundary is filled
+/// in by the receiving VM out of the same `Function` the sending one lowered.
+/// What crosses is `crate::task::Transfer`'s deep copy of the
+/// `(name, Value)` pairs, in order, which is the one thing the layout is read
+/// against.
+#[test]
+fn a_closure_with_a_scalar_capture_crosses_a_task_boundary() {
+    assert_eq!(
+        value_of(
+            "Result<Int, Error>",
+            "",
+            "  let step = 5\n  let f: fn(Int) -> Int = fn(k) {\n    k + step\n  }\n  scope work {\n    let a = work.spawn { f(1) }\n    let b = work.spawn { f(2) }\n    Ok(await a + await b)\n  }"
+        ),
+        "Enum(EnumValue { type_name: \"Result\", case: \"Ok\", payload: [Int(13)] })"
+    );
+}
+
 /// "Leaving the scope waits for or cancels its child tasks." A task
 /// nobody awaited has still run by the time the scope is left, so its
 /// line is printed before whatever follows the scope.

@@ -322,8 +322,8 @@ fn a_live_operand_above_nested_frames_survives_a_collection() {
     same_heap(&ast, &vm);
 }
 
-/// A place is an index into the value stack rather than an independent
-/// root, so what it names has to stay rooted by that stack for the whole
+/// A place is a slot number rather than an independent root, so what it
+/// names has to stay rooted by the stack that slot is in for the whole
 /// of the place's life. A callee collecting between two writes through
 /// one is where that is either true or not.
 #[test]
@@ -333,6 +333,48 @@ fn a_var_place_is_written_through_across_a_collection() {
         churn(80)
     ));
     assert_eq!(vm.output, "[0, 1, 2, 3]\n");
+    assert_eq!(ast.output, vm.output);
+    assert!(vm.freed() > 0, "{:?}", vm.collections());
+    same_heap(&ast, &vm);
+}
+
+/// The same question asked of a place rooted at a *scalar* slot, which is
+/// what issue #162 added and which the collector must go on ignoring.
+///
+/// A scalar-rooted place reaches an `i64` and so reaches nothing the
+/// collector owns. What has to survive is the other direction: the frames
+/// standing under it hold real values, a collection runs between two writes
+/// through the place, and the answer and the heap have to be the oracle's
+/// either way. `Vm::places` is where the argument is, and this is where it
+/// is run.
+#[test]
+fn a_scalar_var_place_is_written_through_across_a_collection() {
+    let (ast, vm) = heaps_of(&format!(
+        "use console.println\n\nfn count(var total: Int, upTo: Int) {{\n  var n = 0\n  while n < upTo {{\n    total += n\n{}    n += 1\n  }}\n}}\n\nexport fn main() -> Result<Unit, Error> {{\n  var total = 0\n  var held = Vector.of(1, 2, 3)\n  count(var total, upTo: 4)\n  println(\"{{total}} {{held.length()}}\")?\n  Ok(())\n}}\n",
+        churn(80)
+    ));
+    assert_eq!(vm.output, "6 3\n");
+    assert_eq!(ast.output, vm.output);
+    assert!(vm.freed() > 0, "{:?}", vm.collections());
+    same_heap(&ast, &vm);
+}
+
+/// A closure over a scalar and a reference, called across a collection.
+///
+/// Issue #162 put a capture the checker settled as `Int` or `Bool` in the
+/// scalar window rather than the value one, so the frame the call opens no
+/// longer holds a root for it — which is right, because an `i64` reaches
+/// nothing. What still has to hold is everything either side of that: the
+/// closure itself holds `(name, Value)` pairs and is walked as one value, its
+/// reference capture is still a root of the frame that reads it, and the
+/// answer and the heap are the oracle's.
+#[test]
+fn a_closure_over_a_scalar_and_a_reference_survives_a_collection() {
+    let (ast, vm) = heaps_of(&format!(
+        "use console.println\n\nexport fn main() -> Result<Unit, Error> {{\n  let step = 2\n  let label = \"n\"\n  let f: fn(Int) -> String = fn(k) {{\n    \"{{label}}{{k + step}}\"\n  }}\n  var seen = \"\"\n  var turn = 0\n  while turn < 4 {{\n{}    seen = \"{{seen}}{{f(turn)}}\"\n    turn += 1\n  }}\n  println(\"{{seen}}\")?\n  Ok(())\n}}\n",
+        churn(60)
+    ));
+    assert_eq!(vm.output, "n2n3n4n5\n");
     assert_eq!(ast.output, vm.output);
     assert!(vm.freed() > 0, "{:?}", vm.collections());
     same_heap(&ast, &vm);
