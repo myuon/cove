@@ -140,6 +140,40 @@ pub enum Value {
     Shared(Arc<SharedCell>),
 }
 
+// A `Value` is twenty-four bytes, and nothing else in this file says so.
+//
+// It was forty until issue #109's audit, because exactly one variant was wide:
+// `HostFn` inlined two fat pointers, so the variant that names
+// `console.println` set the width of every `Int` both backends move. Boxing it
+// was worth `field` −4.9% and `method` −6.3% on the VM and `arith` −8.2% on
+// the interpreter — the first change since the VM landed to make both backends
+// faster. Width was then measured directly, by widening `Value` with a padding
+// variant nothing constructs and running the suite at 24, 32 and 40: about a
+// percent per eight bytes. See `docs/VM_ARCHITECTURE.md`, "The value
+// representation, audited".
+//
+// So this is the one number a new variant can undo silently. A second variant
+// holding two pointers takes every `Value` in the program back to 32 and costs
+// what the audit bought, and nothing about writing it would say so. This
+// refuses to compile instead.
+//
+// Twenty-four is the floor for the variants that exist — `Range` is two `i128`
+// halves reduced to `(i64, i64, bool)` whose `bool` niche holds the
+// discriminant — and sixteen is the floor for the *language*, since `Int` is a
+// full sixty-four bits with overflow a broken invariant, which is why NaN
+// boxing and pointer tagging are rejected rather than deferred. Neither number
+// is a target to shrink to: 24 → 16 was measured and not taken.
+//
+// Guarded on the pointer width because every non-scalar variant is one
+// pointer, so this says nothing on a 32-bit target.
+#[cfg(target_pointer_width = "64")]
+const _: () = assert!(
+    std::mem::size_of::<Value>() == 24,
+    "a Value is 24 bytes; a variant wider than one pointer takes every value \
+     in the program back to 32 — see docs/VM_ARCHITECTURE.md, \"The value \
+     representation, audited\""
+);
+
 /// The half-open bounds of a [`Value::Range`], widened to `i128` so that an
 /// inclusive `i64::MAX` end cannot overflow.
 #[derive(Clone, Copy, Debug)]
