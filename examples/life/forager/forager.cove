@@ -1,0 +1,60 @@
+use life.instinct.away
+use life.instinct.nearest
+use life.instinct.richest
+use life.instinct.shelter
+use life.instinct.stepOr
+use life.instinct.threats
+use life.instinct.wander
+use life.schema.Decision
+use life.schema.Observation
+use life.schema.SelfView
+
+// The forager: eats what grows, and runs from what eats it.
+//
+// It is the species the other two are defined against. It has no way to
+// defend itself and no reason to wait, so its rule is short and in this
+// order: with a predator next to it, step into a thicket if there is one and
+// away from the predator otherwise; eat what is underfoot; leave while the
+// predator is still two cells off; and, with nothing to run from, walk
+// towards the most food it can see.
+//
+// The order is the whole of the species. Fleeing a predator that is two
+// cells away rather than eating is what a forager that never grows up does,
+// and one that ate with a predator beside it is one that gets eaten.
+
+/// The one intent this forager answers the tick with.
+export fn decide(view: SelfView, observation: Observation) -> Decision {
+  let danger = nearest(threats(observation.nearby))
+  match danger {
+    Some(predator) => if predator.away < 2 {
+      return stepOr(
+        shelter(observation),
+        stepOr(away(predator.at, observation), Decision.Rest),
+      )
+    }
+    None => ()
+  }
+  if observation.here > 0 && view.energy < full() {
+    return Decision.Eat
+  }
+  match danger {
+    Some(predator) => return stepOr(
+      away(predator.at, observation),
+      Decision.Rest,
+    )
+    None => ()
+  }
+  match richest(observation) {
+    Some(patch) => Decision.Move(patch.heading)
+    None => wander(view, observation)
+  }
+}
+
+/// The energy past which a forager stops eating and moves on.
+///
+/// A forager that ate whatever it stood on would sit on one cell until the
+/// cell was bare, which is the behaviour of something that cannot count. This
+/// is the count.
+fn full() -> Int {
+  26
+}

@@ -1,0 +1,41 @@
+// The run's only source of chance.
+//
+// Cove has no random number generator, and this example wants none: a
+// simulation whose randomness came from the host would be a simulation whose
+// answer depended on the host. The generator here is a value. Drawing from it
+// produces a number *and the next generator*, so a draw is visible in the
+// types of everything that makes one, and a function that draws twice cannot
+// pretend it drew once.
+//
+// `examples/cq/sample.cove` has the same recurrence for the same reason, and
+// this is written out again rather than imported because a species has no
+// business importing a booking generator.
+
+/// A draw: the number that came out, and the generator to draw from next.
+export struct Roll {
+  seed: Int
+  value: Int
+}
+
+/// The next state of a linear congruential generator.
+///
+/// The multiplier and the modulus are the ones `rand()` was specified with,
+/// and the arithmetic stays well inside `Int`. That matters in Cove, where
+/// overflow is a broken invariant rather than a wrapped result: a generator
+/// that relied on wrapping would stop the run instead of wrapping.
+export fn next(seed: Int) -> Int {
+  (seed * 1103515245 + 12345) % 2147483648
+}
+
+/// A number in `0..<bound`, and the generator to draw from next.
+///
+/// The high bits are what is kept. The low bits of this recurrence cycle
+/// far too visibly to be a coordinate -- the last bit alternates -- and a
+/// world laid out from them would stripe.
+export fn roll(seed: Int, bound: Int) -> Roll {
+  let advanced = next(seed)
+  if bound < 1 {
+    return Roll(seed: advanced, value: 0)
+  }
+  Roll(seed: advanced, value: advanced / 65536 % bound)
+}

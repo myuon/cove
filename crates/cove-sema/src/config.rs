@@ -334,6 +334,7 @@ mod tests {
                 "cq",
                 "cqSample",
                 "hello",
+                "life",
                 "restricted",
                 "reviewPolicy",
                 "server",

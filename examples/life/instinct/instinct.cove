@@ -1,0 +1,169 @@
+use life.schema.Cell
+use life.schema.Decision
+use life.schema.Heading
+use life.schema.Observation
+use life.schema.Patch
+use life.schema.SelfView
+use life.schema.Sighting
+use life.schema.Species
+use life.schema.stepsBetween
+
+// The moves any creature could make, written once.
+//
+// Three species reading the same observation would otherwise each write
+// their own "which way is the food" and their own tie-break, and two that
+// broke a tie differently would make a run depend on which of them was asked
+// first. What is left in a species module after this is what that species
+// actually decides.
+//
+// Nothing here draws a random number. A behaviour is given no generator, so
+// two creatures in the same position with the same observation answer the
+// same thing -- which is what makes a species a function rather than a
+// process.
+
+/// The cells this creature could step onto: on the grid, and empty.
+export fn open(observation: Observation) -> Array<Patch> {
+  observation.around.filter(fn(patch) {
+    !patch.outside && !patch.occupied
+  })
+}
+
+/// The predators this creature can see.
+export fn threats(sightings: Array<Sighting>) -> Array<Sighting> {
+  sightings.filter(fn(sighting) {
+    match sighting.species {
+      Species.Predator => true
+      _ => false
+    }
+  })
+}
+
+/// The creatures this one would eat, if it ate creatures.
+export fn prey(sightings: Array<Sighting>) -> Array<Sighting> {
+  sightings.filter(fn(sighting) {
+    sighting.species.isPrey()
+  })
+}
+
+/// The nearest of these sightings, and the lowest id among those tied.
+///
+/// A fold rather than a sort: one answer is wanted and a sort would build a
+/// whole ordering to take the front of it. The comparison is strict, so the
+/// earlier element wins a tie -- and `Observation.nearby` already arrives
+/// nearest first and lowest id first, which is the order this preserves
+/// rather than a second ordering laid over it.
+export fn nearest(sightings: Array<Sighting>) -> Option<Sighting> {
+  let nothing: Option<Sighting> = None
+  sightings.fold(
+    initial: nothing,
+    step: fn(best: Option<Sighting>, sighting: Sighting) {
+      match best {
+        None => Some(sighting)
+        Some(found) => if sighting.away < found.away {
+          Some(sighting)
+        } else {
+          Some(found)
+        }
+      }
+    },
+  )
+}
+
+/// The open cell with the most food, if any of them holds any.
+export fn richest(observation: Observation) -> Option<Patch> {
+  let nothing: Option<Patch> = None
+  open(observation).filter(fn(patch) {
+    patch.food > 0
+  }).fold(initial: nothing, step: fn(best: Option<Patch>, patch: Patch) {
+    match best {
+      None => Some(patch)
+      Some(found) => if patch.food > found.food {
+        Some(patch)
+      } else {
+        Some(found)
+      }
+    }
+  })
+}
+
+/// The open cell nearest `target`, if the creature can step at all.
+export fn towards(target: Cell, observation: Observation) -> Option<Heading> {
+  let nothing: Option<Patch> = None
+  let best = open(observation).fold(
+    initial: nothing,
+    step: fn(found: Option<Patch>, patch: Patch) {
+      match found {
+        None => Some(patch)
+        Some(current) => if stepsBetween(patch.at, target) <
+          stepsBetween(current.at, target) {
+          Some(patch)
+        } else {
+          Some(current)
+        }
+      }
+    },
+  )
+  match best {
+    Some(patch) => Some(patch.heading)
+    None => None
+  }
+}
+
+/// The open cell furthest from `target`, if the creature can step at all.
+export fn away(target: Cell, observation: Observation) -> Option<Heading> {
+  let nothing: Option<Patch> = None
+  let best = open(observation).fold(
+    initial: nothing,
+    step: fn(found: Option<Patch>, patch: Patch) {
+      match found {
+        None => Some(patch)
+        Some(current) => if stepsBetween(patch.at, target) >
+          stepsBetween(current.at, target) {
+          Some(patch)
+        } else {
+          Some(current)
+        }
+      }
+    },
+  )
+  match best {
+    Some(patch) => Some(patch.heading)
+    None => None
+  }
+}
+
+/// The open shelter nearest this creature, if it can see one.
+export fn shelter(observation: Observation) -> Option<Heading> {
+  let sheltered = open(observation).filter(fn(patch) {
+    patch.shelter
+  })
+  match sheltered.get(0) {
+    Some(patch) => Some(patch.heading)
+    None => None
+  }
+}
+
+/// A step chosen by nothing in particular, or a rest when there is none.
+///
+/// "Nothing in particular" still has to be the same nothing on every run, so
+/// it is the creature's own id and the tick that choose, and not a draw the
+/// behaviour has no generator to make.
+export fn wander(view: SelfView, observation: Observation) -> Decision {
+  let choices = open(observation)
+  if choices.isEmpty() {
+    return Decision.Rest
+  }
+  let picked = (view.id + observation.tick) % choices.length()
+  match choices.get(picked) {
+    Some(patch) => Decision.Move(patch.heading)
+    None => Decision.Rest
+  }
+}
+
+/// Turns a heading into a move, and no heading into a rest.
+export fn stepOr(heading: Option<Heading>, fallback: Decision) -> Decision {
+  match heading {
+    Some(found) => Decision.Move(found)
+    None => fallback
+  }
+}

@@ -4,7 +4,7 @@
 # against the interface the current source derives, so check it in and let a
 # reviewer read the difference. Do not edit it by hand.
 cove-api 1
-hash fnv1a64:ad6c89cf2e4cce8a
+hash fnv1a64:3f8f89f3917835a9
 
 module callbacks
   /// Task-safe application dependencies captured by request handlers.
@@ -532,6 +532,301 @@ module httpstatus
     case ServiceUnavailable
     /// The numeric HTTP status code.
     export fn code(self) -> Int
+
+module life
+  /// Runs one simulation and reports what happened in it.
+  export fn main() -> Result<Unit, Error>
+    requires console, files, process
+
+module life.forager
+  /// The one intent this forager answers the tick with.
+  export fn decide(view: SelfView, observation: Observation) -> Decision
+
+module life.instinct
+  /// The open cell furthest from `target`, if the creature can step at all.
+  export fn away(target: Cell, observation: Observation) -> Option<Heading>
+  /// The nearest of these sightings, and the lowest id among those tied.
+  ///
+  /// A fold rather than a sort: one answer is wanted and a sort would build a
+  /// whole ordering to take the front of it. The comparison is strict, so the
+  /// earlier element wins a tie -- and `Observation.nearby` already arrives
+  /// nearest first and lowest id first, which is the order this preserves
+  /// rather than a second ordering laid over it.
+  export fn nearest(sightings: Array<Sighting>) -> Option<Sighting>
+  /// The cells this creature could step onto: on the grid, and empty.
+  export fn open(observation: Observation) -> Array<Patch>
+  /// The creatures this one would eat, if it ate creatures.
+  export fn prey(sightings: Array<Sighting>) -> Array<Sighting>
+  /// The open cell with the most food, if any of them holds any.
+  export fn richest(observation: Observation) -> Option<Patch>
+  /// The open shelter nearest this creature, if it can see one.
+  export fn shelter(observation: Observation) -> Option<Heading>
+  /// Turns a heading into a move, and no heading into a rest.
+  export fn stepOr(heading: Option<Heading>, fallback: Decision) -> Decision
+  /// The predators this creature can see.
+  export fn threats(sightings: Array<Sighting>) -> Array<Sighting>
+  /// The open cell nearest `target`, if the creature can step at all.
+  export fn towards(target: Cell, observation: Observation) -> Option<Heading>
+  /// A step chosen by nothing in particular, or a rest when there is none.
+  ///
+  /// "Nothing in particular" still has to be the same nothing on every run, so
+  /// it is the creature's own id and the tick that choose, and not a draw the
+  /// behaviour has no generator to make.
+  export fn wander(view: SelfView, observation: Observation) -> Decision
+
+module life.predator
+  /// The one intent this predator answers the tick with.
+  export fn decide(view: SelfView, observation: Observation) -> Decision
+
+module life.rng
+  /// A draw: the number that came out, and the generator to draw from next.
+  export struct Roll
+    field seed: Int
+    field value: Int
+  /// The next state of a linear congruential generator.
+  ///
+  /// The multiplier and the modulus are the ones `rand()` was specified with,
+  /// and the arithmetic stays well inside `Int`. That matters in Cove, where
+  /// overflow is a broken invariant rather than a wrapped result: a generator
+  /// that relied on wrapping would stop the run instead of wrapping.
+  export fn next(seed: Int) -> Int
+  /// A number in `0..<bound`, and the generator to draw from next.
+  ///
+  /// The high bits are what is kept. The low bits of this recurrence cycle
+  /// far too visibly to be a coordinate -- the last bit alternates -- and a
+  /// world laid out from them would stripe.
+  export fn roll(seed: Int, bound: Int) -> Roll
+
+module life.scavenger
+  /// The one intent this scavenger answers the tick with.
+  export fn decide(view: SelfView, observation: Observation) -> Decision
+
+module life.schema
+  /// What the world did with an intent.
+  ///
+  /// Every case but the last is something that happened. `Refused` is the
+  /// world declining an intent it will not carry out -- a step off the edge, a
+  /// meal in an empty cell, a hunt of a creature that is not there -- and it
+  /// costs the creature that tick and nothing else.
+  export enum ActionResult
+    case Moved(Heading)
+    case Blocked(Heading)
+    case Ate(Int)
+    case Hunted(Int)
+    case Missed(Int)
+    case Hid
+    case Rested
+    case Refused(String)
+    /// The word this result is written with.
+    export fn name(self) -> String
+    /// Why the world refused this intent, for a result that is a refusal.
+    export fn refusal(self) -> Option<String>
+  /// A place in the grid, and also a step from one place to another.
+  ///
+  /// One type for both because a step is what the difference of two places is,
+  /// and a second struct with the same two fields would only make the addition
+  /// need a conversion.
+  export struct Cell
+    field x: Int
+    field y: Int
+  /// The one intent a behaviour answers a tick with.
+  ///
+  /// Exactly one, whatever the creature would rather do. A behaviour that wants
+  /// to move and eat has to decide which, and the world resolves what it said
+  /// rather than what it meant.
+  export enum Decision
+    case Move(Heading)
+    case Eat
+    case Hunt(Int)
+    case Hide
+    case Rest
+    /// The word this decision is written with.
+    export fn name(self) -> String
+  /// The four directions a step may take.
+  export enum Heading
+    case North
+    case East
+    case South
+    case West
+    /// The word this heading is written with.
+    export fn name(self) -> String
+    /// The step this heading is.
+    export fn step(self) -> Cell
+  /// Everything a creature is told about the world this tick.
+  ///
+  /// It is bounded: four patches, and at most `sightLimit()` sightings, nearest
+  /// first. A behaviour that wants to see further cannot, which is what makes
+  /// the cost of a tick a function of the population and not of its square.
+  export struct Observation
+    field tick: Int
+    field here: Int
+    field shelter: Bool
+    field around: Array<Patch>
+    field nearby: Array<Sighting>
+    field scent: Option<Heading>
+  /// One of the four cells a creature could step onto.
+  export struct Patch
+    field heading: Heading
+    field at: Cell
+    field food: Int
+    field shelter: Bool
+    field outside: Bool
+    field occupied: Bool
+  /// What a creature is told about itself.
+  export struct SelfView
+    field id: Int
+    field species: Species
+    field at: Cell
+    field energy: Int
+    field hidden: Bool
+  /// Another creature, as this one can see it.
+  ///
+  /// `away` is the number of steps between the two, so a behaviour never has to
+  /// compute a distance and two behaviours cannot compute it differently.
+  export struct Sighting
+    field id: Int
+    field species: Species
+    field at: Cell
+    field away: Int
+  /// Which kind of creature this is.
+  export enum Species
+    case Forager
+    case Predator
+    case Scavenger
+    /// Whether a predator will hunt this species.
+    export fn isPrey(self) -> Bool
+    /// The word this species is written with.
+    export fn name(self) -> String
+  /// Every heading, in the order a tie is broken in.
+  ///
+  /// The order is north, east, south, west, and it is written down here rather
+  /// than left to each behaviour, because two species that broke a tie
+  /// differently would make the same run depend on which one moved first.
+  export fn headings() -> Array<Heading>
+  /// How many sightings an observation carries, at most.
+  export fn sightLimit() -> Int
+  /// How far a creature of this species can see, in steps.
+  ///
+  /// The predator's is the long one, and it is what makes a predator a
+  /// predator: prey walks away from what it can see, so a hunter that saw no
+  /// further than its prey could only ever find one by walking into it. It is
+  /// still bounded, and so is what it can be told about what it sees.
+  export fn sightRange(species: Species) -> Int
+  /// Whether this species can smell food it cannot see.
+  export fn smells(species: Species) -> Bool
+  /// The distance between two cells, in steps.
+  export fn stepsBetween(from: Cell, to: Cell) -> Int
+
+module life.world
+  /// What is alive, what it is standing on, and what has happened so far.
+  export struct Census
+    field tick: Int
+    field alive: Int
+    field foragers: Int
+    field predators: Int
+    field scavengers: Int
+    field food: Int
+    field energy: Int
+    field births: Int
+    field deaths: Int
+    field refusals: Int
+  /// One creature, as the world keeps it.
+  export struct Creature
+    field id: Int
+    field species: Species
+    field at: Cell
+    field energy: Int
+    field hidden: Bool
+    field born: Int
+  /// One creature's intent for this tick.
+  export struct Intent
+    field id: Int
+    field decision: Decision
+  /// What one creature's intent came to.
+  export struct Outcome
+    field id: Int
+    field species: Species
+    field decision: Decision
+    field result: ActionResult
+  /// The world after a tick, and what every intent came to in it.
+  export struct Turn
+    field world: World
+    field outcomes: Array<Outcome>
+  /// Everything there is, at one tick.
+  export struct World
+    field tick: Int
+    field seed: Int
+    field width: Int
+    field height: Int
+    field food: Array<Int>
+    field creatures: Array<Creature>
+    field nextId: Int
+    field births: Int
+    field deaths: Int
+    field refusals: Int
+  /// The world one tick later, and what every creature's intent came to.
+  export fn advance(world: World) -> Turn
+  /// The most creatures of one species this world holds at once, per cell.
+  ///
+  /// A cap rather than a curve, for two reasons. A simulation that can double
+  /// its population twice is a simulation whose running time nobody has
+  /// bounded, and this one is run by a test. And a cap per species is what
+  /// keeps a predator boom from being the last thing that happens here: a
+  /// predator population that cannot grow past a fortieth of the grid can take
+  /// the foragers down and cannot take them out, so the world goes on having
+  /// all three species in it.
+  export fn capacity(species: Species, cells: Int) -> Int
+  /// Which cell of the grid this is.
+  export fn cellIndex(world: World, at: Cell) -> Int
+  /// The census of this world.
+  export fn census(world: World) -> Census
+  /// The creature with this id, if it is alive.
+  export fn creatureNamed(world: World, id: Int) -> Option<Creature>
+  /// One intent per creature, in creature-id order.
+  ///
+  /// A `map`: every creature is asked the same question about a world none of
+  /// them has changed yet, so the answers cannot depend on each other and the
+  /// order they are computed in is not a fact about the run.
+  export fn decisions(world: World) -> Array<Intent>
+  /// How much food this cell holds.
+  export fn foodAt(world: World, at: Cell) -> Int
+  /// The state hash: one number that is the whole world.
+  ///
+  /// Two runs of the same seed and the same number of ticks agree here or the
+  /// simulation is not deterministic. It is a `fold` because that is what a
+  /// hash is -- every element, in order, into one accumulator -- and the
+  /// arithmetic stays inside `Int`, where overflow would stop the run.
+  export fn hash(world: World) -> Int
+  /// Whether this cell is on the grid at all.
+  export fn inside(world: World, at: Cell) -> Bool
+  /// Whether this cell is a thicket: a place to hide, and a place no hunt
+  /// reaches into.
+  ///
+  /// This is the refuge, and a world without one does not last. A predator and
+  /// its prey both move one cell a tick, so prey that can be seen can always be
+  /// caught eventually, and a run with nowhere safe ends with the predators
+  /// eating everything and then starving in an empty world. It ended that way
+  /// for every seed until the thickets were here.
+  ///
+  /// Derived from the coordinates rather than stored, because a thicket never
+  /// moves and a second array would be a second thing to keep in step.
+  export fn isShelter(at: Cell) -> Bool
+  /// The most food one cell can hold.
+  export fn maxFood() -> Int
+  /// The world a seed describes, before anything has happened in it.
+  export fn newWorld(seed: Int, width: Int, height: Int) -> World
+  /// How many creatures of one species are alive.
+  export fn population(world: World, species: Species) -> Int
+  /// Carries out the intents, in creature-id order, and answers the world they
+  /// leave behind.
+  ///
+  /// It takes the intents rather than asking for them so that a test can hand
+  /// it intents no species would produce. That is how this package says what it
+  /// means by isolation: an intent the world will not carry out costs the
+  /// creature that made it its turn, and the loop goes on to the next creature.
+  export fn resolve(world: World, intents: Array<Intent>) -> Turn
+  /// The world one tick later.
+  export fn tick(world: World) -> World
 
 module restricted
   /// Reads only through the document capability supplied by the host.

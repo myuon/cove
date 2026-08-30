@@ -1,0 +1,896 @@
+use life.forager
+use life.predator
+use life.rng.roll
+use life.scavenger
+use life.schema.ActionResult
+use life.schema.Cell
+use life.schema.Decision
+use life.schema.Heading
+use life.schema.Observation
+use life.schema.Patch
+use life.schema.SelfView
+use life.schema.Sighting
+use life.schema.Species
+use life.schema.headings
+use life.schema.sightLimit
+use life.schema.sightRange
+use life.schema.smells
+use life.schema.stepsBetween
+
+// The world: the only thing in this package that changes anything.
+//
+// A tick is two phases and they are different shapes on purpose.
+//
+// **Deciding is a `map`.** Every creature is shown a bounded observation and
+// answers one intent, and no creature's answer can depend on another's,
+// because none of them has been carried out yet. Nothing is shared and
+// nothing is ordered, so the phase is written as the walk it is.
+//
+// **Resolving is a loop.** Two creatures that want the same cell cannot both
+// have it, and something has to decide which -- so this phase runs in
+// creature-id order, and being earlier is what winning a conflict means.
+// Ordering it by anything the world could not reproduce would be the end of
+// determinism, and id order is the one order a world reconstructed from a
+// seed always has.
+//
+// The world is a struct of immutable arrays and holds no `Vector`, which is
+// what makes `let earlier = world` a snapshot rather than a second handle to
+// the same population. Every `Vector` here is scratch inside one call, and
+// each is frozen before the tick it belongs to ends.
+
+/// One creature, as the world keeps it.
+export struct Creature {
+  id: Int
+  species: Species
+  at: Cell
+  energy: Int
+  hidden: Bool
+  born: Int
+}
+
+/// Everything there is, at one tick.
+export struct World {
+  tick: Int
+  /// The generator the next draw comes from. Chance is the world's, not a
+  /// creature's: a behaviour is handed no generator and cannot draw.
+  seed: Int
+  width: Int
+  height: Int
+  food: Array<Int>
+  creatures: Array<Creature>
+  nextId: Int
+  births: Int
+  deaths: Int
+  refusals: Int
+}
+
+/// One creature's intent for this tick.
+export struct Intent {
+  id: Int
+  decision: Decision
+}
+
+/// What one creature's intent came to.
+export struct Outcome {
+  id: Int
+  species: Species
+  decision: Decision
+  result: ActionResult
+}
+
+/// The world after a tick, and what every intent came to in it.
+export struct Turn {
+  world: World
+  outcomes: Array<Outcome>
+}
+
+/// A change to one cell's food, positive or negative.
+struct Delta {
+  cell: Int
+  change: Int
+}
+
+/// The world a seed describes, before anything has happened in it.
+export fn newWorld(seed: Int, width: Int, height: Int) -> World {
+  var generator = seed
+  var food = Vector.of()
+  for index in 0..<width * height {
+    let drawn = roll(generator, maxFood() + 1)
+    generator = drawn.seed
+    food.push(drawn.value)
+  }
+  var creatures = Vector.of()
+  var nextId = 1
+  for species in founders() {
+    let drawn = roll(generator, width * height)
+    generator = drawn.seed
+    let placed = firstFree(drawn.value, width, height, creatures)
+    creatures.push(Creature(id: nextId, species: species, at: placed, energy: startingEnergy(species), hidden: false, born: 0))
+    nextId += 1
+  }
+  World(
+    tick: 0,
+    seed: generator,
+    width: width,
+    height: height,
+    food: food.freeze(),
+    creatures: creatures.freeze(),
+    nextId: nextId,
+    births: 0,
+    deaths: 0,
+    refusals: 0,
+  )
+}
+
+/// The world one tick later.
+export fn tick(world: World) -> World {
+  advance(world).world
+}
+
+/// The world one tick later, and what every creature's intent came to.
+export fn advance(world: World) -> Turn {
+  resolve(world, decisions(world))
+}
+
+/// One intent per creature, in creature-id order.
+///
+/// A `map`: every creature is asked the same question about a world none of
+/// them has changed yet, so the answers cannot depend on each other and the
+/// order they are computed in is not a fact about the run.
+export fn decisions(world: World) -> Array<Intent> {
+  world.creatures.map(fn(creature) {
+    Intent(id: creature.id, decision: ask(world, creature))
+  })
+}
+
+/// Asks a creature's species what it wants to do.
+///
+/// A `match` over the species rather than a table of function values: adding
+/// a species is a case the checker will not let anybody forget, and a table
+/// would make the same change something a reader has to find.
+fn ask(world: World, creature: Creature) -> Decision {
+  let view = SelfView(
+    id: creature.id,
+    species: creature.species,
+    at: creature.at,
+    energy: creature.energy,
+    hidden: creature.hidden,
+  )
+  let observation = look(world, creature)
+  match creature.species {
+    Species.Forager => forager.decide(view, observation)
+    Species.Predator => predator.decide(view, observation)
+    Species.Scavenger => scavenger.decide(view, observation)
+  }
+}
+
+/// What one creature is shown this tick.
+fn look(world: World, creature: Creature) -> Observation {
+  let seen = sightings(world, creature)
+  Observation(
+    tick: world.tick,
+    here: foodAt(world, creature.at),
+    shelter: isShelter(creature.at),
+    around: patches(world, creature, seen),
+    nearby: seen,
+    scent: scent(world, creature),
+  )
+}
+
+/// The way to the most food within range, for a creature that can smell.
+///
+/// The best cell is the fullest, then the nearest, then the first in the
+/// order the grid is written in, and the answer is the first heading in
+/// heading order that gets closer to it. Three tie-breaks and every one of
+/// them is a rule rather than a draw, because two scavengers standing in the
+/// same place must smell the same thing.
+fn scent(world: World, creature: Creature) -> Option<Heading> {
+  if !smells(creature.species) {
+    return None
+  }
+  let range = sightRange(creature.species)
+  var bestAt = creature.at
+  var bestFood = 0
+  var bestAway = 0
+  for dy in -range..range {
+    for dx in -range..range {
+      let at = Cell(x: creature.at.x + dx, y: creature.at.y + dy)
+      let away = stepsBetween(at, creature.at)
+      if away > 0 && away <= range && inside(world, at) {
+        let level = foodAt(world, at)
+        if level > bestFood || level == bestFood && level > 0 && away < bestAway {
+          bestFood = level
+          bestAway = away
+          bestAt = at
+        }
+      }
+    }
+  }
+  if bestFood < 1 {
+    return None
+  }
+  for heading in headings() {
+    let target = stepFrom(creature.at, heading)
+    if inside(world, target) && stepsBetween(target, bestAt) < bestAway {
+      return Some(heading)
+    }
+  }
+  None
+}
+
+/// The creatures this one can see: near, not hidden, nearest first.
+///
+/// Bounded twice over -- by `sightRange()` and then by `sightLimit()` -- so
+/// what a creature is told does not grow with the population.
+fn sightings(world: World, creature: Creature) -> Array<Sighting> {
+  let visible = world.creatures.filter(fn(other) {
+    other.id != creature.id && !other.hidden &&
+      stepsBetween(other.at, creature.at) <= sightRange(creature.species)
+  }).map(fn(other) {
+    Sighting(
+      id: other.id,
+      species: other.species,
+      at: other.at,
+      away: stepsBetween(other.at, creature.at),
+    )
+  }).sorted(by: fn(a: Sighting, b: Sighting) {
+    if a.away == b.away {
+      a.id < b.id
+    } else {
+      a.away < b.away
+    }
+  })
+  take(visible, sightLimit())
+}
+
+/// The four cells around a creature, in heading order.
+///
+/// `occupied` is read out of what this creature can see, so a hidden
+/// neighbour leaves its cell looking empty. A step into it is still blocked
+/// when the tick is resolved, which is the whole of what hiding costs the
+/// creature that walks into one.
+fn patches(
+  world: World,
+  creature: Creature,
+  seen: Array<Sighting>,
+) -> Array<Patch> {
+  var found = Vector.of()
+  for heading in headings() {
+    let target = stepFrom(creature.at, heading)
+    let outside = !inside(world, target)
+    found.push(Patch(
+      heading: heading,
+      at: target,
+      food: if outside {
+        0
+      } else {
+        foodAt(world, target)
+      },
+      shelter: !outside && isShelter(target),
+      outside: outside,
+      occupied: standsOn(seen, target),
+    ))
+  }
+  found.freeze()
+}
+
+/// Carries out the intents, in creature-id order, and answers the world they
+/// leave behind.
+///
+/// It takes the intents rather than asking for them so that a test can hand
+/// it intents no species would produce. That is how this package says what it
+/// means by isolation: an intent the world will not carry out costs the
+/// creature that made it its turn, and the loop goes on to the next creature.
+export fn resolve(world: World, intents: Array<Intent>) -> Turn {
+  var claims = Vector.of()
+  var hunted = Vector.of()
+  var changes = Vector.of()
+  var after = Vector.of()
+  var outcomes = Vector.of()
+  var nextId = world.nextId
+  var births = 0
+  var refusals = 0
+  var position = 0
+  var generator = world.seed
+
+  for creature in world.creatures {
+    let intent = intentAt(intents, position)
+    position += 1
+    var energy = creature.energy - upkeep()
+    var standing = creature.at
+    var hidden = false
+    var result = ActionResult.Rested
+
+    if intent.id != creature.id {
+      result = ActionResult.Refused("this intent names creature {intent.id}, and the world is asking creature {creature.id}")
+    } else {
+      match intent.decision {
+        Decision.Rest => result = ActionResult.Rested
+        Decision.Move(heading) => {
+          let target = stepFrom(creature.at, heading)
+          if !inside(world, target) {
+            result = ActionResult.Refused("a step {heading.name()} from {creature.at.x},{creature.at.y} leaves the world")
+          } else if standsHere(world, target) ||
+            has(claims, cellIndex(world, target)) {
+            result = ActionResult.Blocked(heading)
+          } else {
+            standing = target
+            energy -= stride(creature.species)
+            claims.push(cellIndex(world, target))
+            result = ActionResult.Moved(heading)
+          }
+        }
+        Decision.Eat => {
+          let level = foodAt(world, creature.at)
+          if level < 1 {
+            result = ActionResult.Refused(
+              "there is nothing to eat at {creature.at.x},{creature.at.y}",
+            )
+          } else {
+            changes.push(Delta(cell: cellIndex(world, creature.at), change: -1))
+            energy += forage(creature.species)
+            result = ActionResult.Ate(1)
+          }
+        }
+        Decision.Hunt(target) => {
+          match reachable(world, creature, target) {
+            Some(victim) => if isShelter(victim.at) {
+              result = ActionResult.Refused("creature {victim.id} is in the thicket at {victim.at.x},{victim.at.y}")
+            } else if has(hunted, victim.id) {
+              result = ActionResult.Refused(
+                "creature {victim.id} was taken by an earlier hunter this tick",
+              )
+            } else {
+              let drawn = roll(generator, 100)
+              generator = drawn.seed
+              if drawn.value < strike() {
+                hunted.push(victim.id)
+                energy += bounty(victim)
+                result = ActionResult.Hunted(victim.id)
+              } else {
+                result = ActionResult.Missed(victim.id)
+              }
+            }
+            None => result = ActionResult.Refused(
+              "no creature {target} is within reach of creature {creature.id}",
+            )
+          }
+        }
+        Decision.Hide => {
+          if isShelter(creature.at) {
+            hidden = true
+            result = ActionResult.Hid
+          } else {
+            result = ActionResult.Refused(
+              "there is no shelter at {creature.at.x},{creature.at.y}",
+            )
+          }
+        }
+      }
+    }
+
+    match result {
+      ActionResult.Refused(_) => refusals += 1
+      _ => ()
+    }
+
+    if energy > maxEnergy() {
+      energy = maxEnergy()
+    }
+
+    if energy >= birthEnergy(creature.species) &&
+      population(world, creature.species) +
+        born(after, creature.species, world.tick + 1) <
+        capacity(creature.species, world.food.length()) {
+      match nursery(world, standing, claims) {
+        Some(cradle) => {
+          let half = energy / 2
+          energy -= half
+          claims.push(cellIndex(world, cradle))
+          after.push(Creature(id: nextId, species: creature.species, at: cradle, energy: half, hidden: false, born: world.tick + 1))
+          nextId += 1
+          births += 1
+        }
+        None => ()
+      }
+    }
+
+    after.push(Creature(id: creature.id, species: creature.species, at: standing, energy: energy, hidden: hidden, born: creature.born))
+    outcomes.push(Outcome(id: creature.id, species: creature.species, decision: intent.decision, result: result))
+  }
+
+  let taken = hunted.freeze()
+  let acted = after.freeze()
+  var deaths = 0
+  for creature in acted {
+    if creature.energy < 1 || holds(taken, creature.id) {
+      deaths += 1
+      changes.push(
+        Delta(cell: cellIndex(world, creature.at), change: carcass()),
+      )
+    }
+  }
+  let survivors = acted.filter(fn(creature) {
+    creature.energy > 0 && !holds(taken, creature.id)
+  }).sorted(by: fn(a: Creature, b: Creature) {
+    a.id < b.id
+  })
+
+  let sprouted = sprout(world, changes, generator)
+  Turn(
+    world: World(
+      tick: world.tick + 1,
+      seed: sprouted.seed,
+      width: world.width,
+      height: world.height,
+      food: sprouted.food,
+      creatures: survivors,
+      nextId: nextId,
+      births: world.births + births,
+      deaths: world.deaths + deaths,
+      refusals: world.refusals + refusals,
+    ),
+    outcomes: outcomes.freeze(),
+  )
+}
+
+/// The grid after this tick's eating, carcasses, and new growth, and the
+/// generator the growth was drawn from.
+struct Growth {
+  seed: Int
+  food: Array<Int>
+}
+
+/// Grows `sprouts()` cells the generator names, applies `changes`, and
+/// answers the grid that leaves.
+///
+/// The changes are sorted by cell and walked once beside the grid, rather
+/// than searched for cell by cell: a tick makes at most one change per
+/// creature, and a scan per cell would be the population times the grid for
+/// what a merge does in the sum of them.
+fn sprout(world: World, changes: Vector<Delta>, seed: Int) -> Growth {
+  var generator = seed
+  var deltas = changes
+  for attempt in 0..<sprouts(world.food.length()) {
+    let drawn = roll(generator, world.food.length())
+    generator = drawn.seed
+    deltas.push(Delta(cell: drawn.value, change: 1))
+  }
+  let ordered = deltas.sorted(by: fn(a: Delta, b: Delta) {
+    a.cell < b.cell
+  })
+  var levels = Vector.of()
+  var at = 0
+  for index in 0..<world.food.length() {
+    var level = world.food.get(index).unwrapOr(0)
+    while at < ordered.length() && cellOf(ordered, at) == index {
+      level += changeOf(ordered, at)
+      at += 1
+    }
+    if level < 0 {
+      level = 0
+    }
+    if level > maxFood() {
+      level = maxFood()
+    }
+    levels.push(level)
+  }
+  Growth(seed: generator, food: levels.freeze())
+}
+
+/// The state hash: one number that is the whole world.
+///
+/// Two runs of the same seed and the same number of ticks agree here or the
+/// simulation is not deterministic. It is a `fold` because that is what a
+/// hash is -- every element, in order, into one accumulator -- and the
+/// arithmetic stays inside `Int`, where overflow would stop the run.
+export fn hash(world: World) -> Int {
+  let ground = world.food.fold(initial: 8191, step: fn(total: Int, level: Int) {
+    mix(total, level)
+  })
+  let living = world.creatures.fold(
+    initial: ground,
+    step: fn(total: Int, creature: Creature) {
+      mix(
+        mix(
+          mix(mix(total, creature.id), code(creature.species)),
+          cellIndex(world, creature.at),
+        ),
+        creature.energy,
+      )
+    },
+  )
+  mix(mix(mix(living, world.tick), world.births), world.deaths)
+}
+
+/// One value into a running hash.
+fn mix(total: Int, value: Int) -> Int {
+  (total * 131 + value + 1) % 2147483647
+}
+
+/// The number a species hashes as.
+fn code(species: Species) -> Int {
+  match species {
+    Species.Forager => 1
+    Species.Predator => 2
+    Species.Scavenger => 3
+  }
+}
+
+/// What is alive, what it is standing on, and what has happened so far.
+export struct Census {
+  tick: Int
+  alive: Int
+  foragers: Int
+  predators: Int
+  scavengers: Int
+  food: Int
+  energy: Int
+  births: Int
+  deaths: Int
+  refusals: Int
+}
+
+/// The census of this world.
+export fn census(world: World) -> Census {
+  Census(
+    tick: world.tick,
+    alive: world.creatures.length(),
+    foragers: population(world, Species.Forager),
+    predators: population(world, Species.Predator),
+    scavengers: population(world, Species.Scavenger),
+    food: world.food.fold(initial: 0, step: fn(total: Int, level: Int) {
+      total + level
+    }),
+    energy: world.creatures.fold(
+      initial: 0,
+      step: fn(total: Int, creature: Creature) {
+        total + creature.energy
+      },
+    ),
+    births: world.births,
+    deaths: world.deaths,
+    refusals: world.refusals,
+  )
+}
+
+/// How many creatures of one species are alive.
+export fn population(world: World, species: Species) -> Int {
+  world.creatures.filter(fn(creature) {
+    creature.species == species
+  }).length()
+}
+
+/// The creature with this id, if it is alive.
+export fn creatureNamed(world: World, id: Int) -> Option<Creature> {
+  world.creatures.filter(fn(creature) {
+    creature.id == id
+  }).get(0)
+}
+
+/// Which cell of the grid this is.
+export fn cellIndex(world: World, at: Cell) -> Int {
+  at.y * world.width + at.x
+}
+
+/// Whether this cell is on the grid at all.
+export fn inside(world: World, at: Cell) -> Bool {
+  at.x >= 0 && at.y >= 0 && at.x < world.width && at.y < world.height
+}
+
+/// How much food this cell holds.
+export fn foodAt(world: World, at: Cell) -> Int {
+  if !inside(world, at) {
+    return 0
+  }
+  world.food.get(cellIndex(world, at)).unwrapOr(0)
+}
+
+/// Whether this cell is a thicket: a place to hide, and a place no hunt
+/// reaches into.
+///
+/// This is the refuge, and a world without one does not last. A predator and
+/// its prey both move one cell a tick, so prey that can be seen can always be
+/// caught eventually, and a run with nowhere safe ends with the predators
+/// eating everything and then starving in an empty world. It ended that way
+/// for every seed until the thickets were here.
+///
+/// Derived from the coordinates rather than stored, because a thicket never
+/// moves and a second array would be a second thing to keep in step.
+export fn isShelter(at: Cell) -> Bool {
+  (at.x * 3 + at.y * 5) % 7 == 0
+}
+
+/// The cell one step from `at` in this heading.
+fn stepFrom(at: Cell, heading: Heading) -> Cell {
+  let step = heading.step()
+  Cell(x: at.x + step.x, y: at.y + step.y)
+}
+
+/// Whether a creature stood in this cell when the tick began.
+fn standsHere(world: World, at: Cell) -> Bool {
+  for creature in world.creatures {
+    if creature.at.x == at.x && creature.at.y == at.y {
+      return true
+    }
+  }
+  false
+}
+
+/// Whether one of the creatures this one can see stands in this cell.
+fn standsOn(seen: Array<Sighting>, at: Cell) -> Bool {
+  for sighting in seen {
+    if sighting.at.x == at.x && sighting.at.y == at.y {
+      return true
+    }
+  }
+  false
+}
+
+/// The prey a hunt names, if it is alive, adjacent, and huntable.
+fn reachable(world: World, hunter: Creature, target: Int) -> Option<Creature> {
+  match creatureNamed(world, target) {
+    Some(victim) => if victim.species.isPrey() &&
+      stepsBetween(victim.at, hunter.at) <= 1 {
+      Some(victim)
+    } else {
+      None
+    }
+    None => None
+  }
+}
+
+/// What a hunter gains from this prey: half of what the prey was worth when
+/// the tick began, up to a limit no meal goes past.
+fn bounty(victim: Creature) -> Int {
+  let taken = victim.energy / 2
+  if taken > 18 {
+    18
+  } else {
+    taken
+  }
+}
+
+/// A free cell beside `at` for a newborn, in heading order.
+fn nursery(world: World, at: Cell, claims: Vector<Int>) -> Option<Cell> {
+  for heading in headings() {
+    let target = stepFrom(at, heading)
+    if inside(world, target) && !standsHere(world, target) &&
+      !has(claims, cellIndex(world, target)) {
+      return Some(target)
+    }
+  }
+  None
+}
+
+/// Whether `value` is one of the numbers pushed onto `numbers` so far.
+///
+/// `numbers` is an ordinary parameter, so what arrives is a copy of the
+/// handle -- and a copy of a `Vector` is an alias. This reads what the
+/// resolution loop has pushed by the time it asks, and not what the vector
+/// held when the call was written. The tick would resolve two creatures onto
+/// one cell, and two hunters onto one prey, if it did not.
+fn has(numbers: Vector<Int>, value: Int) -> Bool {
+  for number in numbers {
+    if number == value {
+      return true
+    }
+  }
+  false
+}
+
+/// Whether `id` is one of these numbers.
+fn holds(ids: Array<Int>, id: Int) -> Bool {
+  for held in ids {
+    if held == id {
+      return true
+    }
+  }
+  false
+}
+
+/// The intent at this position, or one no creature answers to.
+///
+/// Id 0 belongs to no creature, so a missing intent is refused by the same
+/// rule that refuses an intent naming somebody else.
+fn intentAt(intents: Array<Intent>, at: Int) -> Intent {
+  intents.get(at).unwrapOr(Intent(id: 0, decision: Decision.Rest))
+}
+
+/// Which cell the delta at this position changes.
+fn cellOf(deltas: Array<Delta>, at: Int) -> Int {
+  deltas.get(at).unwrapOr(Delta(cell: -1, change: 0)).cell
+}
+
+/// By how much the delta at this position changes it.
+fn changeOf(deltas: Array<Delta>, at: Int) -> Int {
+  deltas.get(at).unwrapOr(Delta(cell: -1, change: 0)).change
+}
+
+/// The first `count` of these sightings.
+fn take(sightings: Array<Sighting>, count: Int) -> Array<Sighting> {
+  if sightings.length() <= count {
+    return sightings
+  }
+  var kept = Vector.of()
+  for index in 0..<count {
+    match sightings.get(index) {
+      Some(sighting) => kept.push(sighting)
+      None => ()
+    }
+  }
+  kept.freeze()
+}
+
+/// The first free cell at or after `start`, scanning the grid in order.
+fn firstFree(
+  start: Int,
+  width: Int,
+  height: Int,
+  taken: Vector<Creature>,
+) -> Cell {
+  let cells = width * height
+  for step in 0..<cells {
+    let index = (start + step) % cells
+    let at = Cell(x: index % width, y: index / width)
+    var free = true
+    for creature in taken {
+      if creature.at.x == at.x && creature.at.y == at.y {
+        free = false
+      }
+    }
+    if free {
+      return at
+    }
+  }
+  Cell(x: 0, y: 0)
+}
+
+/// The creatures a world starts with, in the order they are given their ids.
+///
+/// Interleaved rather than grouped, because id order is what breaks every
+/// conflict in a tick and a world whose foragers all had lower ids than its
+/// predators would be a world where being a forager was an advantage nobody
+/// wrote down.
+fn founders() -> Array<Species> {
+  [
+    Species.Forager,
+    Species.Scavenger,
+    Species.Forager,
+    Species.Predator,
+    Species.Forager,
+    Species.Scavenger,
+    Species.Forager,
+    Species.Predator,
+  ]
+}
+
+/// What a creature of this species starts with.
+fn startingEnergy(species: Species) -> Int {
+  match species {
+    Species.Forager => 12
+    Species.Predator => 18
+    Species.Scavenger => 14
+  }
+}
+
+/// The most food one cell can hold.
+export fn maxFood() -> Int {
+  4
+}
+
+/// How many cells grow by one each tick.
+///
+/// Proportional to the grid, so that `--width` and `--height` describe a
+/// bigger world rather than a hungrier one.
+fn sprouts(cells: Int) -> Int {
+  cells / 16
+}
+
+/// What living costs, whatever a creature does with the tick.
+fn upkeep() -> Int {
+  1
+}
+
+/// What a step costs this species on top of the upkeep.
+///
+/// A scavenger walks for nothing. It is the small one, it eats what other
+/// creatures leave, and finding a carcass before it is eaten is the whole of
+/// what it does -- a scavenger that paid a forager's price for walking spent
+/// its life a step behind the food and was gone by the three hundredth tick.
+fn stride(species: Species) -> Int {
+  match species {
+    Species.Forager => 1
+    Species.Predator => 1
+    Species.Scavenger => 0
+  }
+}
+
+/// What one unit of food is worth to the species that ate it.
+///
+/// A forager is what the grass is for. A scavenger gets less out of it and is
+/// meant to: what it is waiting for is a carcass, which is worth a cell's
+/// whole capacity at once.
+fn forage(species: Species) -> Int {
+  match species {
+    Species.Forager => 6
+    Species.Predator => 4
+    Species.Scavenger => 5
+  }
+}
+
+/// The most energy a creature carries.
+///
+/// Without a ceiling a population that has reached `capacity()` has nothing
+/// to do with what it eats but hold it, and a run long enough shows a world
+/// of creatures that cannot die and cannot divide. The ceiling is what keeps
+/// a full world turning over.
+fn maxEnergy() -> Int {
+  44
+}
+
+/// How often a hunt within reach succeeds, in draws out of a hundred.
+///
+/// The one thing in a tick that is decided by chance rather than by a rule,
+/// and it is decided by the world: a behaviour is handed no generator, so a
+/// predator cannot know and cannot cheat. A hunt that always killed would
+/// make fleeing pointless -- a predator and its prey move one cell a tick, so
+/// a chase once begun could never be lost -- and the world would end in a
+/// hundred ticks with nothing alive in it. It did, before this was here.
+fn strike() -> Int {
+  70
+}
+
+/// What a dead creature leaves behind in the cell it died in.
+fn carcass() -> Int {
+  3
+}
+
+/// The energy at which a creature of this species divides.
+///
+/// A predator's is highest, and that is part of what keeps this world from
+/// ending inside its first few hundred ticks: a predator that divided as
+/// cheaply as what it eats does eats everything, and then starves in an empty
+/// world.
+/// Numbers like this one are the model, and there is no rule to derive them
+/// from -- they were chosen by running the thing.
+fn birthEnergy(species: Species) -> Int {
+  match species {
+    Species.Forager => 30
+    Species.Predator => 34
+    Species.Scavenger => 32
+  }
+}
+
+/// The most creatures of one species this world holds at once, per cell.
+///
+/// A cap rather than a curve, for two reasons. A simulation that can double
+/// its population twice is a simulation whose running time nobody has
+/// bounded, and this one is run by a test. And a cap per species is what
+/// keeps a predator boom from being the last thing that happens here: a
+/// predator population that cannot grow past a fortieth of the grid can take
+/// the foragers down and cannot take them out, so the world goes on having
+/// all three species in it.
+export fn capacity(species: Species, cells: Int) -> Int {
+  match species {
+    Species.Forager => cells / 13
+    Species.Predator => cells / 40
+    Species.Scavenger => cells / 20
+  }
+}
+
+/// How many creatures of this species have been born into `after` this tick.
+///
+/// The comparison is against the tick they would be born on rather than
+/// against zero: a creature born four hundred ticks ago is still a creature
+/// with a birthday, and counting those would let a population's own history
+/// close the species down.
+fn born(after: Vector<Creature>, species: Species, tick: Int) -> Int {
+  var count = 0
+  for creature in after {
+    if creature.born == tick && creature.species == species {
+      count += 1
+    }
+  }
+  count
+}
