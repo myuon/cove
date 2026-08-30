@@ -75,8 +75,15 @@ pub use hosts::{module, shipped, HostSchemas};
 /// printed from a schema entry reads exactly like a signature written by
 /// hand.
 ///
-/// The variants cover exactly the types the shipped hosts use. Add one when a
-/// host needs it; an unused variant is a type nobody can produce.
+/// Add a variant when a host needs it; an unused variant is a type nobody can
+/// produce. That used to read "the variants cover exactly the types the
+/// shipped hosts use", and [`HostType::Set`] and [`HostType::Map`] are why it
+/// no longer does: no shipped host has needed either, and an embedder did
+/// ([issue #153](https://github.com/myuon/cove/issues/153)). An embedder is
+/// not a lesser kind of host — embedding is why `HostApi` is a trait — so the
+/// list is what a host may declare rather than what this workspace happens to
+/// ship, and `crates/cove-runtime/tests/embedding.rs` is where the two new
+/// ones are produced and consumed.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum HostType {
     /// `Unit`, the value an operation returns when it returns nothing.
@@ -93,6 +100,18 @@ pub enum HostType {
     Error,
     /// `Array<T>`, the fixed-length immutable sequence.
     Array(&'static HostType),
+    /// `Set<T>`, the key-ordered immutable set.
+    ///
+    /// `T` must be one [`HostType::may_be_a_key`] allows, because a `Set`
+    /// element is a map key: [`ModuleSchema::validate`] is what refuses a
+    /// declaration that says otherwise, and it refuses it where the schema is
+    /// read rather than where a value is.
+    Set(&'static HostType),
+    /// `Map<K, V>`, the key-ordered immutable map.
+    ///
+    /// `K` carries the same restriction a [`HostType::Set`] element does, and
+    /// for the same reason; `V` carries none.
+    Map(&'static HostType, &'static HostType),
     /// `Option<T>`.
     Option(&'static HostType),
     /// `Result<T, E>`. Expected failure is part of an operation's result
@@ -143,11 +162,106 @@ impl fmt::Display for HostType {
             HostType::Duration => f.write_str("Duration"),
             HostType::Error => f.write_str("Error"),
             HostType::Array(inner) => write!(f, "Array<{inner}>"),
+            HostType::Set(inner) => write!(f, "Set<{inner}>"),
+            HostType::Map(key, value) => write!(f, "Map<{key}, {value}>"),
             HostType::Option(inner) => write!(f, "Option<{inner}>"),
             HostType::Result(ok, error) => write!(f, "Result<{ok}, {error}>"),
             HostType::Named(name) => f.write_str(name),
             HostType::Any => f.write_str("Any"),
         }
+    }
+}
+
+impl HostType {
+    /// Whether a value of this type may be a `Map` key or a `Set` element.
+    ///
+    /// Cove's own rule is `cove_runtime::value::MapKey`'s: "mutable handles
+    /// and structs containing them are not valid map keys", because a key's
+    /// equality must not change while a collection holds it. That rule is
+    /// about a *value*, and this is the most a *name* can say about it.
+    ///
+    /// Everything made only of the scalar types qualifies, and so does any
+    /// composition of qualifying types: an `Array`, an `Option`, a `Result`, a
+    /// `Set`, or a `Map` is a key exactly when everything nested inside it is.
+    ///
+    /// [`HostType::Named`] and [`HostType::Any`] do not, and the reason is the
+    /// same in both cases: neither says what its values are made of.
+    /// `cove_runtime::schema::Admits` checks a named type by the name the
+    /// value carries and deliberately looks no further — ADR 0013's amendment
+    /// draws that line — so a schema naming `reviews.PullRequest` has made no
+    /// claim about the ten fields behind it, and a `ResourceSchema`'s handle
+    /// can never be a key at all. `Any` says less again. A declaration that
+    /// promised more than the boundary checks would be a promise nothing
+    /// keeps.
+    pub fn may_be_a_key(&self) -> bool {
+        match self {
+            HostType::Unit
+            | HostType::Bool
+            | HostType::Int
+            | HostType::String
+            | HostType::Duration
+            | HostType::Error => true,
+            HostType::Array(item) | HostType::Set(item) | HostType::Option(item) => {
+                item.may_be_a_key()
+            }
+            HostType::Map(key, value) => key.may_be_a_key() && value.may_be_a_key(),
+            HostType::Result(ok, error) => ok.may_be_a_key() && error.may_be_a_key(),
+            HostType::Named(_) | HostType::Any => false,
+        }
+    }
+
+    /// The first part of this type that is declared as a key and cannot be
+    /// one.
+    ///
+    /// `Some(t)` names the offending key or element type rather than the
+    /// collection around it, because `t` is what a reader has to change.
+    fn unkeyable(&self) -> Option<HostType> {
+        match self {
+            HostType::Set(item) => {
+                if item.may_be_a_key() {
+                    item.unkeyable()
+                } else {
+                    Some(**item)
+                }
+            }
+            HostType::Map(key, value) => {
+                if key.may_be_a_key() {
+                    key.unkeyable().or_else(|| value.unkeyable())
+                } else {
+                    Some(**key)
+                }
+            }
+            HostType::Array(item) | HostType::Option(item) => item.unkeyable(),
+            HostType::Result(ok, error) => ok.unkeyable().or_else(|| error.unkeyable()),
+            _ => None,
+        }
+    }
+}
+
+/// A schema that declares something no value can be.
+///
+/// One kind of fault so far, and it is the one adding `Map` and `Set` to the
+/// vocabulary introduced: a key or an element position may only hold a type
+/// [`HostType::may_be_a_key`] allows. Everything else a `HostType` can say is
+/// satisfiable by construction.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SchemaFault {
+    /// Where in the module it was found, as a reader would name the place:
+    /// `reviews.pull`'s result, or `reviews.PullRequest.labels`.
+    pub place: String,
+    /// The whole declared type the fault was found in.
+    pub declared: HostType,
+    /// The part of it that is declared as a key and cannot be one.
+    pub key: HostType,
+}
+
+impl fmt::Display for SchemaFault {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "{} is declared `{}`, and `{}` cannot be a `Map` key or a `Set` element",
+            self.place, self.declared, self.key
+        )
     }
 }
 
@@ -540,6 +654,71 @@ impl ModuleSchema {
     pub fn declares_type(&self, name: &str) -> bool {
         self.declared_type(name).is_some() || self.resource(name).is_some()
     }
+
+    /// Whether every type this module declares is one some value could be.
+    ///
+    /// There is one way to write a type that nothing can satisfy, and
+    /// [`HostType::Set`] and [`HostType::Map`] are what introduced it: a `Set`
+    /// element and a `Map` key have to satisfy Cove's `MapKey` restriction,
+    /// and [`HostType::may_be_a_key`] says which declarations do.
+    ///
+    /// It is checked here, where a schema is *read*, rather than at the
+    /// boundary where a value is. A `Set<reviews.PullRequest>` the boundary
+    /// refused would be refused on the first call that carried one, in
+    /// production, in whichever operation happened to come first — which is
+    /// the failure mode ADR 0017 moved a Host API description out of the
+    /// runtime to prevent. Read here it is one sentence naming the field.
+    ///
+    /// Every table this workspace ships is held to this by
+    /// `cove_schema::hosts`'s own tests. An embedder's table is the
+    /// embedder's, so an embedder calls this on it — one assertion in the test
+    /// that already exists is enough, and
+    /// `examples/rules/host/tests/embedding.rs` is where that is written down.
+    pub fn validate(&self) -> Result<(), SchemaFault> {
+        let operations = self
+            .operations
+            .iter()
+            .map(|entry| (self.name.to_string(), entry))
+            .chain(self.resources.iter().flat_map(|resource| {
+                resource
+                    .operations
+                    .iter()
+                    .map(move |entry| (format!("{}.{}", self.name, resource.name), entry))
+            }));
+        for (owner, entry) in operations {
+            for (index, param) in entry.params.iter().enumerate() {
+                fault(
+                    format!("argument {} of `{owner}.{}`", index + 1, entry.name),
+                    param,
+                )?;
+            }
+            fault(
+                format!("the result of `{owner}.{}`", entry.name),
+                &entry.result,
+            )?;
+        }
+        for declared in self.types {
+            for field in declared.fields {
+                fault(
+                    format!("`{}.{}.{}`", self.name, declared.name, field.name),
+                    &field.ty,
+                )?;
+            }
+        }
+        Ok(())
+    }
+}
+
+/// The fault `declared` carries at `place`, if it carries one.
+fn fault(place: String, declared: &HostType) -> Result<(), SchemaFault> {
+    match declared.unkeyable() {
+        Some(key) => Err(SchemaFault {
+            place,
+            declared: *declared,
+            key,
+        }),
+        None => Ok(()),
+    }
 }
 
 #[cfg(test)]
@@ -587,6 +766,138 @@ mod tests {
         assert_eq!(
             HostType::Result(&HostType::Unit, &HostType::Error).to_string(),
             "Result<Unit, Error>"
+        );
+        assert_eq!(HostType::Set(&HostType::String).to_string(), "Set<String>");
+        assert_eq!(
+            HostType::Map(&HostType::String, &HostType::Int).to_string(),
+            "Map<String, Int>"
+        );
+    }
+
+    // ------------------------------------------- what may be a key, and why
+    //
+    // A `Set` element and a `Map` key have to satisfy Cove's `MapKey`
+    // restriction. These pin what a *name* can promise about that, which is
+    // less than what a value can be held to and is the whole of what a schema
+    // gets to say.
+
+    #[test]
+    fn a_type_made_of_scalars_may_be_a_key() {
+        for scalar in [
+            HostType::Unit,
+            HostType::Bool,
+            HostType::Int,
+            HostType::String,
+            HostType::Duration,
+            HostType::Error,
+        ] {
+            assert!(scalar.may_be_a_key(), "{scalar}");
+        }
+        assert!(HostType::Array(&HostType::String).may_be_a_key());
+        assert!(HostType::Option(&HostType::Int).may_be_a_key());
+        assert!(HostType::Set(&HostType::String).may_be_a_key());
+        assert!(HostType::Map(&HostType::String, &HostType::Int).may_be_a_key());
+        assert!(HostType::Result(&HostType::Int, &HostType::Error).may_be_a_key());
+    }
+
+    /// Neither says what its values are made of, so neither can promise the
+    /// one thing a key position needs.
+    #[test]
+    fn a_named_type_and_any_may_not_be_a_key() {
+        assert!(!HostType::Named("reviews.PullRequest").may_be_a_key());
+        assert!(!HostType::Any.may_be_a_key());
+        assert!(!HostType::Array(&HostType::Any).may_be_a_key());
+        assert!(!HostType::Set(&HostType::Named("reviews.PullRequest")).may_be_a_key());
+    }
+
+    /// The rule is only about the key half. A map from a name to a pull
+    /// request is ordinary, and only a map *keyed* by one is not.
+    #[test]
+    fn a_module_declaring_a_key_no_value_can_be_is_refused_where_it_is_read() {
+        const KEYED_BY_A_STRUCT: ModuleSchema = ModuleSchema {
+            name: "reviews",
+            capability: "reviews",
+            operations: &[],
+            types: &[TypeSchema {
+                name: "Board",
+                cases: &[],
+                fields: &[FieldSchema {
+                    name: "open",
+                    ty: HostType::Set(&HostType::Named("reviews.PullRequest")),
+                }],
+            }],
+            resources: &[],
+        };
+        let fault = KEYED_BY_A_STRUCT
+            .validate()
+            .expect_err("a set of a named type is not a set anything can be");
+        assert_eq!(
+            fault.to_string(),
+            "`reviews.Board.open` is declared `Set<reviews.PullRequest>`, and `reviews.PullRequest` cannot be a `Map` key or a `Set` element"
+        );
+
+        const VALUED_BY_A_STRUCT: ModuleSchema = ModuleSchema {
+            types: &[TypeSchema {
+                name: "Board",
+                cases: &[],
+                fields: &[FieldSchema {
+                    name: "open",
+                    ty: HostType::Map(&HostType::String, &HostType::Named("reviews.PullRequest")),
+                }],
+            }],
+            ..KEYED_BY_A_STRUCT
+        };
+        assert!(VALUED_BY_A_STRUCT.validate().is_ok());
+    }
+
+    /// An operation's own signature is read the same way a declared type's
+    /// fields are, and the place a fault names is the one a reader has to go
+    /// and edit.
+    #[test]
+    fn an_operation_s_signature_is_read_for_the_same_fault() {
+        const TAKES_ONE: OperationSchema = OperationSchema {
+            name: "post",
+            params: &[HostType::Set(&HostType::Any)],
+            variadic: false,
+            result: HostType::Unit,
+            capability: "reviews",
+            effect: Effect::Read,
+            cancellable: false,
+            recordable: true,
+            result_is_task_safe: true,
+        };
+        const MODULE: ModuleSchema = ModuleSchema {
+            name: "reviews",
+            capability: "reviews",
+            operations: &[TAKES_ONE],
+            types: &[],
+            resources: &[],
+        };
+        assert_eq!(
+            MODULE
+                .validate()
+                .expect_err("`Any` promises nothing about a key")
+                .place,
+            "argument 1 of `reviews.post`"
+        );
+
+        const ANSWERS_ONE: ModuleSchema = ModuleSchema {
+            operations: &[OperationSchema {
+                params: &[],
+                result: HostType::Result(
+                    &HostType::Map(&HostType::Named("reviews.PullRequest"), &HostType::Int),
+                    &HostType::Error,
+                ),
+                ..TAKES_ONE
+            }],
+            ..MODULE
+        };
+        assert_eq!(
+            ANSWERS_ONE
+                .validate()
+                .expect_err("a map keyed by a named type is not one either")
+                .place,
+            "the result of `reviews.post`"
         );
     }
 

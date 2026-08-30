@@ -200,7 +200,7 @@ use cove_ir::{
 use cove_schema::builtins::{free_builtin, FreeBuiltinKind, MAP_ENTRY, NONE_CASE, OPTION, RESULT};
 use cove_syntax::ast::{BinaryOp, EnumDecl, UnaryOp};
 
-use crate::budget::{Cancellation, Stopped};
+use crate::budget::{Budget, Cancellation, Stopped};
 use crate::builtins::{self, Callable};
 use crate::error::RuntimeError;
 use crate::heap::{Collection, Heap, HeapStats, Roots};
@@ -941,6 +941,58 @@ impl<'a> Vm<'a> {
         args: Vec<Value>,
     ) -> Result<Value, RuntimeError> {
         let outcome = self.invoke_checked(module, name, args);
+        self.ended(outcome)
+    }
+
+    /// The same call, bounded by `budget` and by nothing else.
+    ///
+    /// [`crate::interp::Interpreter::invoke_within`] takes the same four
+    /// things and answers the same way, and its documentation is the
+    /// description of both: what a budget belongs to, when the deadline starts
+    /// running, and why there is no way to install one that does not take
+    /// `&mut self`. Selecting a backend selects which of the two to build and
+    /// decides nothing else, exactly as it does for `invoke`.
+    pub fn invoke_within(
+        &mut self,
+        budget: Budget,
+        module: &str,
+        name: &str,
+        args: Vec<Value>,
+    ) -> Result<Value, RuntimeError> {
+        let outcome = self.checked_within(budget, module, name, args);
+        self.ended(outcome)
+    }
+
+    /// The check, the budget, and then the call.
+    ///
+    /// In that order, so a call refused for a wrong argument spends none of
+    /// the budget it was handed and leaves whatever bounded the backend where
+    /// it was.
+    fn checked_within(
+        &mut self,
+        budget: Budget,
+        module: &str,
+        name: &str,
+        args: Vec<Value>,
+    ) -> Result<Value, RuntimeError> {
+        crate::invoke::check(self.runtime.program(), module, name, &args)?;
+        self.hosts.begin_run(budget);
+        self.invoke_checked(module, name, args)
+    }
+
+    /// [`Vm::run_entry`], bounded by `budget` and by nothing else.
+    ///
+    /// The command-shaped way in, bounded the way [`Vm::invoke_within`] bounds
+    /// the application-shaped one.
+    pub fn run_entry_within(
+        &mut self,
+        budget: Budget,
+        module: &str,
+        name: &str,
+        args: Vec<Rc<str>>,
+    ) -> Result<Value, RuntimeError> {
+        self.hosts.begin_run(budget);
+        let outcome = self.invoke_entry(module, name, args);
         self.ended(outcome)
     }
 
@@ -3997,6 +4049,145 @@ mod tests {
             .map(|item| cove_diag::render(sources, item))
             .collect::<Vec<_>>()
             .join("\n")
+    }
+
+    /// A program whose one function costs fuel to run: a loop is charged at
+    /// its back edge on the tree walk and by the block on the VM, so both
+    /// backends spend something measurable on it.
+    const COUNTS: &str = "\
+/// Adds every number below `n`.
+export fn work(n: Int) -> Int {
+  var total = 0
+  for i in 0..n {
+    total = total + i
+  }
+  total
+}
+";
+
+    /// Invokes `m.work` `times` times on one backend and answers how each
+    /// invocation came out, together with what the registry's budget holds
+    /// afterwards.
+    ///
+    /// `session` is a budget the registry is arranged with before anything
+    /// runs, which is what a `cove run` gets; `per_call` is one every
+    /// invocation is handed for itself. The point of the test below is that
+    /// those two are different things, so this can produce either.
+    fn invocations(
+        checked: &Arc<Checked>,
+        sources: &Arc<SourceMap>,
+        lowered: &Arc<cove_ir::Program>,
+        on_vm: bool,
+        session: Option<Limits>,
+        per_call: Option<Limits>,
+        times: usize,
+    ) -> (Vec<Option<String>>, u64) {
+        let buffer = Buffer::default();
+        let hosts = hosts(&buffer, session.map(Budget::new));
+        let runtime = Runtime::new(checked.clone(), sources.clone(), hosts.clone());
+        let argument = || vec![Value::Int(200)];
+        let described = |outcome: Result<Value, RuntimeError>| outcome.err().map(|e| e.message);
+        let outcomes = if on_vm {
+            let mut vm = Vm::new(&runtime, &hosts, lowered);
+            (0..times)
+                .map(|_| {
+                    described(match &per_call {
+                        Some(limits) => {
+                            vm.invoke_within(Budget::new(limits.clone()), "m", "work", argument())
+                        }
+                        None => vm.invoke("m", "work", argument()),
+                    })
+                })
+                .collect()
+        } else {
+            let mut interpreter = Interpreter::new(&runtime);
+            (0..times)
+                .map(|_| {
+                    described(match &per_call {
+                        Some(limits) => interpreter.invoke_within(
+                            Budget::new(limits.clone()),
+                            "m",
+                            "work",
+                            argument(),
+                        ),
+                        None => interpreter.invoke("m", "work", argument()),
+                    })
+                })
+                .collect()
+        };
+        let spent = hosts.with_budget(|budget| budget.fuel_spent()).unwrap_or(0);
+        (outcomes, spent)
+    }
+
+    /// A budget bounds one invocation, and the registry's own bounds every
+    /// invocation. Both backends, because a limit is not a backend's.
+    ///
+    /// The limit here is measured rather than written down: one invocation is
+    /// run first to find what it costs, and the bound is that and a half. ADR
+    /// 0024 makes a fuel limit non-portable between backends — the two charge
+    /// different amounts for the same work and neither owes the other a number
+    /// — so a constant would have been a constant for one of them.
+    #[test]
+    fn a_budget_handed_to_an_invocation_bounds_that_invocation_alone() {
+        let (sources, checked) = checked_module(COUNTS);
+        let lowered = Arc::new(cove_ir::lower::lower(&checked).expect("the program lowers"));
+
+        for on_vm in [false, true] {
+            let backend = if on_vm { "the VM" } else { "the interpreter" };
+            let (first, once) = crate::on_cove_stack(|| {
+                invocations(
+                    &checked,
+                    &sources,
+                    &lowered,
+                    on_vm,
+                    Some(Limits::default()),
+                    None,
+                    1,
+                )
+            })
+            .expect("a thread to run Cove on");
+            assert_eq!(first, vec![None], "on {backend}");
+            assert!(once > 0, "an invocation costs fuel on {backend}");
+
+            let bound = Limits {
+                fuel: Some(once + once / 2),
+                ..Limits::default()
+            };
+
+            // What the registry was arranged with is spent over the whole
+            // life of the backend, so a second invocation of the same work
+            // has half a run's worth of fuel left and stops.
+            let (session, _) = crate::on_cove_stack(|| {
+                invocations(
+                    &checked,
+                    &sources,
+                    &lowered,
+                    on_vm,
+                    Some(bound.clone()),
+                    None,
+                    3,
+                )
+            })
+            .expect("a thread to run Cove on");
+            assert_eq!(session[0], None, "on {backend}");
+            assert!(
+                session[1]
+                    .as_deref()
+                    .is_some_and(|why| why.contains("fuel")),
+                "on {backend}: {session:?}"
+            );
+
+            // The same limit handed to each invocation bounds each of them,
+            // on one backend that was built once. What the registry holds
+            // afterwards is the last invocation's spend and not the three
+            // added up, which is what makes reading it per request possible.
+            let (each, spent) = crate::on_cove_stack(|| {
+                invocations(&checked, &sources, &lowered, on_vm, None, Some(bound), 3)
+            })
+            .expect("a thread to run Cove on");
+            assert!(each.iter().all(Option::is_none), "on {backend}: {each:?}");
+            assert_eq!(spent, once, "on {backend}");
+        }
     }
 
     /// **The differential test.** Runs `source` on both backends and asserts

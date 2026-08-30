@@ -34,9 +34,69 @@
 //! and the one the boundary holds a call to cannot drift apart. Restating
 //! one of them is what drift is made of.
 //!
-//! Nothing is serialized. The in-process embedding API is the case that
-//! exists, and a format for describing a host module out of process should
-//! be invented when something outside a process needs to read one.
+//! # No `cove` command can be handed one, and none should be
+//!
+//! This used to end "nothing is serialized: a format for describing a host
+//! module out of process should be invented when something outside a process
+//! needs to read one".
+//! [Issue #151](https://github.com/myuon/cove/issues/151) is a candidate for
+//! that something, and the answer it settled on is no. It is worth stating
+//! here rather than in an issue, because this is where an embedder meets the
+//! question.
+//!
+//! The complaint is real. A rule package written against an embedder's module
+//! can be checked by the embedder, in Rust, and cannot be checked by the
+//! toolchain the person who wrote it has: `cove check` reports
+//! `cove::resolve::unchecked_host` and stops at the boundary, and `cove test`
+//! cannot run a test that touches the module at all. The rule author's whole
+//! toolchain is `cove fmt`, `cove check` and `cove test`, and two of the three
+//! stop where the embedder begins.
+//!
+//! What would not fix it is a `[hosts]` key in `cove.toml` naming a serialized
+//! schema. The whole of what makes a [`ModuleSchema`] worth anything is that
+//! the value the checker reads and the value the boundary enforces are one
+//! value; a description in a config file is a second one, written by hand in
+//! another vocabulary, kept true by whoever remembered. A checker reading the
+//! second while the run enforces the first reports exactly the failure ADR
+//! 0017 exists to prevent, with the authority of having checked. Generating
+//! the file from the `const` removes the drift and leaves the rest: the copy
+//! is stale the moment the embedder rebuilds, and nothing in the package can
+//! tell.
+//!
+//! `cove test` is what settles it, though, and it settles it for any format.
+//! A schema lets the checker *check* a call into `reviews`; it lets nothing
+//! *run* one, because what answers a call is an implementation, an
+//! implementation is Rust, and no description carries one. A `cove` that had
+//! been handed a schema would check a rule package it still could not test —
+//! one of the two commands the issue is about, and the one a rule author uses
+//! most.
+//!
+//! So the toolchain for a package written against an embedder's module is the
+//! embedder's to provide, and providing it is one line, because the value that
+//! describes the module is the value the registry was registered with:
+//!
+//! ```ignore
+//! let package = cove_sema::package::load(root, &mut sources)?;
+//! let program = Compiler::new()
+//!     .with_host_schemas(hosts.module_schemas())
+//!     .compile(&package)?;
+//! for notice in &program.notices {
+//!     eprint!("{}", cove_diag::render(&sources, notice));
+//! }
+//! ```
+//!
+//! `examples/rules/host/src/bin/check.rs` is that, whole: it is the `cove
+//! check` of an application that embeds Cove, and it reads the same `REVIEWS`
+//! its `HostApi` answers with, so the two cannot drift. An embedder that wants
+//! the test runner too registers its hosts beside the schemas and runs the
+//! package's `test fn` declarations against them — which needs the
+//! implementation, and is the same conclusion reached from the other end.
+//!
+//! The `unchecked_host` warning stays, and it is accurate: a `cove check` that
+//! was handed no description has not checked those calls, and saying so is
+//! better than a silence that reads like a proof. Its `help` already names the
+//! API to hand the schema to; what it cannot say in one line, and what this
+//! section is, is why there is no flag to hand it to instead.
 
 use cove_diag::Diagnostic;
 use cove_schema::{HostSchemas, ModuleSchema};

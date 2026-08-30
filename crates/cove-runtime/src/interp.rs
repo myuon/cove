@@ -38,7 +38,7 @@ use cove_syntax::ast::{
     PatternKind, Receiver, StmtKind, StrPart, StructDecl, Type, TypeKind, UnaryOp,
 };
 
-use crate::budget::{Cancellation, Stopped};
+use crate::budget::{Budget, Cancellation, Stopped};
 use crate::builtins::{self, Callable};
 use crate::error::RuntimeError;
 use crate::heap::{Collection, Heap, HeapStats, SlotRoots};
@@ -893,6 +893,89 @@ impl<'a> Interpreter<'a> {
         args: Vec<Value>,
     ) -> Result<Value, RuntimeError> {
         let outcome = self.invoke_checked(module, name, args);
+        self.ended(outcome)
+    }
+
+    /// The same call, bounded by `budget` and by nothing else.
+    ///
+    /// # What a budget belongs to
+    ///
+    /// A [`Budget`] used to belong to the [`HostRegistry`]: `set_budget` needs
+    /// `&mut HostRegistry`, a backend holds the registry by shared reference
+    /// for as long as it exists, and so every limit it carried — `fuel`, the
+    /// deadline, `max_host_calls`, `max_tasks` — was spent over the whole life
+    /// of the backend. For a `cove run` that is exactly right, because a run
+    /// is one invocation and `[run.<name>]`'s limits bound it. For an
+    /// embedding it is not: compile-once/invoke-many is the point, an
+    /// application wants to bound one *request*, and the only way to get that
+    /// was to build a registry, a `Runtime` and a backend per request — which
+    /// is 168 allocations of table-building against a request's own 237, and
+    /// is the thing compiling once was for not doing.
+    ///
+    /// A budget belongs to an invocation. It still *lives* on the registry,
+    /// because ADR 0008 draws a spawned task's fuel from the run's budget and
+    /// a task thread reaches the budget through the `Arc<Runtime>` it carries;
+    /// a task's charges are still the invocation's. What this changes is when
+    /// it is put there and how long it stands: `budget` is installed as this
+    /// call is entered, bounds everything the invocation and its tasks do, and
+    /// is left behind afterwards holding what the invocation spent — the same
+    /// state a finished `cove run` leaves and reads its `--stats` out of. The
+    /// next `invoke_within` replaces it.
+    ///
+    /// **The deadline runs from here**, not from wherever `budget` was built.
+    /// A budget built to bound an invocation that has not begun would
+    /// otherwise spend it waiting for its turn. Every count starts at zero for
+    /// the same reason. A [`Cancellation`] is the one thing not reset: a
+    /// caller that wants to stop this invocation from another thread builds
+    /// the budget with
+    /// [`Budget::with_cancellation`](crate::Budget::with_cancellation) and
+    /// keeps the handle, and a flag already raised stays raised.
+    ///
+    /// # Why this takes `&mut self` and there is no way to install a budget
+    /// that does not
+    ///
+    /// ADR 0024 states each way a run can be stopped as a bound that holds
+    /// over the run, in that backend's own fuel. A budget that could be
+    /// replaced while the run it bounds was executing would make every one of
+    /// those bounds a claim about something that had changed underneath it,
+    /// and the ADR's argument would have to be revisited to say what a bound
+    /// even meant. So the registry has no public way to install one: this and
+    /// its three siblings are the only doors, each takes `&mut self` on the
+    /// backend, and a backend running an invocation is mutably borrowed for
+    /// its whole duration. The shape is what forbids it rather than a rule in
+    /// a comment.
+    ///
+    /// Everything [`Interpreter::invoke`] says about what holds the arguments
+    /// holds here unchanged, and so does the refusal: the argument check runs
+    /// before the budget is installed, so a call refused for a wrong argument
+    /// spends none of it.
+    pub fn invoke_within(
+        &mut self,
+        budget: Budget,
+        module: &str,
+        name: &str,
+        args: Vec<Value>,
+    ) -> Result<Value, RuntimeError> {
+        crate::invoke::check(self.program, module, name, &args)?;
+        self.hosts().begin_run(budget);
+        let outcome = self.enter_with(module, name, args);
+        self.ended(outcome)
+    }
+
+    /// [`Interpreter::run_entry`], bounded by `budget` and by nothing else.
+    ///
+    /// The command-shaped way in, bounded the way
+    /// [`Interpreter::invoke_within`] bounds the application-shaped one, and
+    /// that method's documentation is the description of both.
+    pub fn run_entry_within(
+        &mut self,
+        budget: Budget,
+        module: &str,
+        name: &str,
+        args: Vec<Rc<str>>,
+    ) -> Result<Value, RuntimeError> {
+        self.hosts().begin_run(budget);
+        let outcome = self.enter(module, name, args);
         self.ended(outcome)
     }
 

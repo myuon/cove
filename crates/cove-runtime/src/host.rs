@@ -681,10 +681,50 @@ impl HostRegistry {
     /// budget installed earlier; the default is no budget, which imposes no
     /// host-call limit here (the interpreter's own safepoints still apply
     /// its other limits).
+    ///
+    /// This arranges a registry before anything runs, and what it installs is
+    /// spent over every run the registry serves. That is exactly right for a
+    /// `cove run`, which is one run, and it is what `[run.<name>]`'s limits
+    /// come through. It is not what an embedding that invokes one compiled
+    /// program many times wants, because there the limits of every request
+    /// would add up over the life of the process:
+    /// [`Vm::invoke_within`](crate::vm::Vm::invoke_within) and its three
+    /// siblings are how a single invocation is bounded instead.
     pub fn set_budget(&mut self, budget: Budget) {
         *self
             .budget
             .get_mut()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(budget);
+    }
+
+    /// Installs `budget` for the run that is about to start, and starts its
+    /// deadline clock here.
+    ///
+    /// This is what makes a limit bound *one* invocation rather than the whole
+    /// life of a registry, which is issue #152. A `Budget` has to live where
+    /// every thread of a run can reach it — ADR 0008 draws a task's fuel from
+    /// the run's budget, and a task thread reaches this registry through the
+    /// `Arc<Runtime>` it holds — so it stays here; what changes is when it is
+    /// put here. [`HostRegistry::set_budget`] arranges a registry before
+    /// anything runs, and this replaces that arrangement for the duration of
+    /// one run and leaves what the run spent behind it, which is the same
+    /// state `cove run` reads its `--stats` out of.
+    ///
+    /// It takes `&self` where `set_budget` takes `&mut self`, and it is
+    /// `pub(crate)` because of it. ADR 0024 states each stop as a bound that
+    /// holds over a run, and a budget that could be swapped while the run it
+    /// bounds is executing would make every one of those bounds a claim about
+    /// a thing that had changed underneath it. So the only doors to this are
+    /// [`Vm::invoke_within`](crate::vm::Vm::invoke_within) and its three
+    /// siblings, each of which takes `&mut self` on the backend: a backend
+    /// running an invocation is mutably borrowed for its whole duration, so a
+    /// second invocation on it cannot begin, and the shape rather than a rule
+    /// in a comment is what prevents the swap.
+    pub(crate) fn begin_run(&self, mut budget: Budget) {
+        budget.restart();
+        *self
+            .budget
+            .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(budget);
     }
 

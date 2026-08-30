@@ -72,6 +72,30 @@ impl Admits for HostType {
                 }
                 Ok(())
             }
+            // A `Set` element and a `Map` key are `MapKey`s by construction,
+            // so the restriction a schema declares them under is already kept
+            // and what is left to check is the type. Each is read back as the
+            // value it stands for, which costs an allocation for a `Str` key
+            // and nothing for a scalar one; it is what lets one `admits` walk
+            // answer for both halves of a map rather than a second walk over a
+            // second vocabulary.
+            (HostType::Set(item), Value::Set(items)) => {
+                for (index, element) in items.iter().enumerate() {
+                    item.admits(&element.to_value())
+                        .map_err(|mismatch| mismatch.inside(&format!("[{index}]")))?;
+                }
+                Ok(())
+            }
+            (HostType::Map(key, value), Value::Map(entries)) => {
+                for (index, (found, held)) in entries.iter().enumerate() {
+                    key.admits(&found.to_value())
+                        .map_err(|mismatch| mismatch.inside(&format!("key[{index}]")))?;
+                    value
+                        .admits(held)
+                        .map_err(|mismatch| mismatch.inside(&format!("[{found}]")))?;
+                }
+                Ok(())
+            }
             // The two builtin enums, whose cases `cove_schema::builtins`
             // declares: a case's name and how much it carries are read off
             // the same entry `Value::some` and `Value::ok` build from.
@@ -194,7 +218,7 @@ impl Mismatch {
 mod tests {
     use super::*;
     use crate::host::ResourceHandle;
-    use crate::value::StructValue;
+    use crate::value::{MapKey, StructValue};
     use std::rc::Rc;
 
     // ------------------------------------------- what a declared type admits
@@ -291,6 +315,91 @@ mod tests {
         assert_eq!(
             mismatch.describe("wayward.list", Part::Argument(2)),
             "`wayward.list` was given `Int` at `Ok(_)[1]` of argument 2, but its schema declares `String` there"
+        );
+    }
+
+    /// A `Set` the host built crosses whole, which is what having the variant
+    /// is for: the element type is followed exactly as an `Array`'s is.
+    #[test]
+    fn a_set_is_followed_into_its_elements() {
+        let declared = HostType::Set(&HostType::String);
+        assert!(declared
+            .admits(&Value::set([
+                MapKey::Str("docs".to_string()),
+                MapKey::Str("migration".to_string()),
+            ]))
+            .is_ok());
+        assert!(
+            declared.admits(&Value::set([])).is_ok(),
+            "an empty set is a set of anything"
+        );
+
+        let mismatch = declared
+            .admits(&Value::set([
+                MapKey::Str("docs".to_string()),
+                MapKey::Int(2),
+            ]))
+            .expect_err("an `Int` among the declared strings is not admitted");
+        // Ascending key order, which is the order a `Set` has: the `Int` sorts
+        // before the `Str`.
+        assert_eq!(mismatch.path, "[0]");
+        assert_eq!(mismatch.expected, HostType::String);
+        assert_eq!(
+            mismatch.describe("reviews.labels", Part::Result),
+            "`reviews.labels` answered `Int` at `[0]` of its result, but its schema declares `String` there"
+        );
+    }
+
+    /// A `Map` has two halves and the diagnostic says which one disagreed: a
+    /// key is named by its position and a value by the key it was held under,
+    /// because that is how a reader finds each of them again.
+    #[test]
+    fn a_map_is_followed_into_both_of_its_halves() {
+        let declared = HostType::Map(&HostType::String, &HostType::Int);
+        assert!(declared
+            .admits(&Value::map([(
+                MapKey::Str("breaking-change".to_string()),
+                Value::Int(3),
+            )]))
+            .is_ok());
+
+        let wrong_value = declared
+            .admits(&Value::map([(
+                MapKey::Str("breaking-change".to_string()),
+                Value::Str("three".into()),
+            )]))
+            .expect_err("a `String` is not the declared `Int`");
+        assert_eq!(wrong_value.path, "[breaking-change]");
+        assert_eq!(wrong_value.expected, HostType::Int);
+
+        let wrong_key = declared
+            .admits(&Value::map([(MapKey::Int(3), Value::Int(3))]))
+            .expect_err("an `Int` is not the declared `String`");
+        assert_eq!(wrong_key.path, "key[0]");
+        assert_eq!(wrong_key.expected, HostType::String);
+    }
+
+    /// The two are ordinary compound types everywhere else a compound type is
+    /// read, so a `Set` nested in a `Result` is followed through both.
+    #[test]
+    fn a_set_nested_in_a_result_is_reached_through_it() {
+        let declared = HostType::Result(&HostType::Set(&HostType::String), &HostType::Error);
+        assert!(declared
+            .admits(&Value::ok(Value::set([MapKey::Str("docs".to_string())])))
+            .is_ok());
+        assert_eq!(
+            declared
+                .admits(&Value::ok(Value::set([MapKey::Int(1)])))
+                .expect_err("the element type is checked through the `Ok`")
+                .path,
+            "Ok(_)[0]"
+        );
+        assert_eq!(
+            declared
+                .admits(&Value::ok(Value::Array(vec![].into())))
+                .expect_err("an array is not a set")
+                .found,
+            "Array"
         );
     }
 

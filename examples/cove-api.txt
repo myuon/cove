@@ -4,7 +4,7 @@
 # against the interface the current source derives, so check it in and let a
 # reviewer read the difference. Do not edit it by hand.
 cove-api 1
-hash fnv1a64:c464e69420a0aa93
+hash fnv1a64:aec136443490c6f9
 
 module callbacks
   /// Task-safe application dependencies captured by request handlers.
@@ -1207,18 +1207,18 @@ module rules.policy
     field targetBranch: String
     field changedLines: Int
     field filesTouched: Array<String>
-    field labels: Array<String>
+    field labels: Set<String>
     field approvals: Int
     field isDraft: Bool
     field hasTests: Bool
-    /// The labels as a set, which is what a membership question wants.
-    ///
-    /// The field itself stays an `Array`, because that is the shape a host can
-    /// hand one over in -- a Host API schema has no `Set`, which is issue #153
-    /// -- and the conversion lives here rather than at the boundary so that the
-    /// embedded caller and the fixtures below reach it by the same route.
-    export fn labelSet(self) -> Set<String>
     /// Whether this pull request carries `label`.
+    ///
+    /// One question and one call, because `labels` is the shape the question
+    /// wants. It was an `Array<String>` with a `labelSet` beside it that walked
+    /// it into a `Set` on every ask, and that loop was not about review policy:
+    /// it was here because a Host API schema could not say `Set` and the host
+    /// therefore could not hand one over. It can (issue #153), so the field is
+    /// what it always meant and the conversion is gone.
     export fn labelled(self, label: String) -> Bool
     /// Whether any file this pull request touches sits under `prefix`.
     export fn touches(self, prefix: String) -> Bool

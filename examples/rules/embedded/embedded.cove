@@ -82,8 +82,11 @@ export fn pullOnly(args: Array<String>) -> Result<PullRequest, Error> {
 /// are written out once, here, where a field the host stops sending is a
 /// check-time error at the line that reads it.
 ///
-/// `labels` crosses as an `Array` and becomes a `Set` only where a rule asks
-/// a membership question, because `HostType` has no `Set` either.
+/// Every field crosses as the shape it is. `labels` is a `Set<String>` on
+/// both sides and is copied across like any other field: it used to cross as
+/// an `Array` and be walked into a `Set` wherever a rule asked a membership
+/// question, because `HostType` had no `Set` to declare one with, and issue
+/// #153 closed that.
 fn pullRequest(requestId: String) -> Result<PullRequest, Error> {
   let supplied = reviews.pull(requestId)?
   Ok(PullRequest(id: supplied.id, title: supplied.title, author: supplied.author, targetBranch: supplied.targetBranch, changedLines: supplied.changedLines, filesTouched: supplied.filesTouched, labels: supplied.labels, approvals: supplied.approvals, isDraft: supplied.isDraft, hasTests: supplied.hasTests))

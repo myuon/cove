@@ -56,7 +56,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 
 use cove_diag::{render, Diagnostic, SourceMap};
 use cove_runtime::interp::Interpreter;
-use cove_runtime::value::StructValue;
+use cove_runtime::value::{MapKey, StructValue};
 use cove_runtime::{
     Budget, Effect, FieldSchema, Grants, HostApi, HostRegistry, HostType, Limits, ModuleSchema,
     OperationSchema, Runtime, RuntimeError, TypeSchema, Value,
@@ -351,17 +351,49 @@ export fn main() -> Result<Unit, Error> {
 const COMPANY: ModuleSchema = ModuleSchema {
     name: "company",
     capability: "directory",
-    operations: &[OperationSchema {
-        name: "employee",
-        params: &[HostType::String],
-        variadic: false,
-        result: HostType::Result(&HostType::Named("company.Employee"), &HostType::Error),
-        capability: "directory",
-        effect: Effect::Read,
-        cancellable: false,
-        recordable: true,
-        result_is_task_safe: true,
-    }],
+    operations: &[
+        OperationSchema {
+            name: "employee",
+            params: &[HostType::String],
+            variadic: false,
+            result: HostType::Result(&HostType::Named("company.Employee"), &HostType::Error),
+            capability: "directory",
+            effect: Effect::Read,
+            cancellable: false,
+            recordable: true,
+            result_is_task_safe: true,
+        },
+        // A table the application holds and the program reads, and a set the
+        // program builds and the application is asked about. Neither could be
+        // declared until `HostType` gained `Map` and `Set` (issue #153); before
+        // that a host handed the first over as two arrays or as an array of
+        // pairs, and the Cove side rebuilt what the host already had.
+        OperationSchema {
+            name: "rates",
+            params: &[],
+            variadic: false,
+            result: HostType::Result(
+                &HostType::Map(&HostType::String, &HostType::Int),
+                &HostType::Error,
+            ),
+            capability: "directory",
+            effect: Effect::Read,
+            cancellable: false,
+            recordable: true,
+            result_is_task_safe: true,
+        },
+        OperationSchema {
+            name: "staffed",
+            params: &[HostType::Set(&HostType::String)],
+            variadic: false,
+            result: HostType::Result(&HostType::Int, &HostType::Error),
+            capability: "directory",
+            effect: Effect::Read,
+            cancellable: false,
+            recordable: true,
+            result_is_task_safe: true,
+        },
+    ],
     types: &[TypeSchema {
         name: "Employee",
         cases: &[],
@@ -393,22 +425,43 @@ impl HostApi for Directory {
     }
 
     fn call(&self, op: &str, args: Vec<Value>) -> Result<Value, RuntimeError> {
-        assert_eq!(op, "employee", "the only operation `company` declares");
-        let [Value::Str(id)] = args.as_slice() else {
-            unreachable!("checked by HostRegistry::call")
-        };
-        self.lookups.lock().unwrap().push(id.to_string());
-        Ok(match self.people.get(&**id) {
-            Some(seniority) => Value::ok(Value::Struct(Rc::new(StructValue {
-                type_name: "company.Employee".into(),
-                fields: vec![
-                    ("name".into(), Value::Str(id.clone())),
-                    ("seniority".into(), Value::Int(*seniority)),
-                ],
-                opaque: false,
-            }))),
-            None => Value::err(Value::error(format!("no employee named `{id}`"))),
-        })
+        match (op, args.as_slice()) {
+            ("employee", [Value::Str(id)]) => {
+                self.lookups.lock().unwrap().push(id.to_string());
+                Ok(match self.people.get(&**id) {
+                    Some(seniority) => Value::ok(Value::Struct(Rc::new(StructValue {
+                        type_name: "company.Employee".into(),
+                        fields: vec![
+                            ("name".into(), Value::Str(id.clone())),
+                            ("seniority".into(), Value::Int(*seniority)),
+                        ],
+                        opaque: false,
+                    }))),
+                    None => Value::err(Value::error(format!("no employee named `{id}`"))),
+                })
+            }
+            // The whole table, handed over as the one value it is. A host
+            // builds a `Map` out of `MapKey`s because a `Map` key is a
+            // `MapKey`; nothing here converts, and nothing on the Cove side
+            // rebuilds.
+            ("rates", []) => {
+                Ok(Value::ok(Value::map(self.people.iter().map(
+                    |(name, rate)| (MapKey::Str((*name).to_string()), Value::Int(*rate)),
+                ))))
+            }
+            // And the other direction: the set the program built arrives
+            // whole, and the host reads it as the set it is.
+            ("staffed", [Value::Set(names)]) => Ok(Value::ok(Value::Int(
+                names
+                    .iter()
+                    .filter(|name| match name {
+                        MapKey::Str(text) => self.people.contains_key(text.as_str()),
+                        _ => unreachable!("checked by HostRegistry::call"),
+                    })
+                    .count() as i64,
+            ))),
+            (op, _) => unreachable!("`company` declares no operation `{op}` of this shape"),
+        }
     }
 }
 
@@ -482,6 +535,123 @@ fn a_registered_host_s_own_schema_checks_the_program_that_calls_it() {
 
     assert_eq!(value.to_string(), "Ok(7)");
     assert_eq!(*lookups.lock().unwrap(), vec!["ada".to_string()]);
+}
+
+/// A `Map` and a `Set` cross whole, in both directions.
+///
+/// `HostType` had `Array`, `Option` and `Result` and nothing else compound
+/// until issue #153, so a host holding a table of rates handed it over as
+/// something else and the Cove side rebuilt what the host already had. Both
+/// are ordinary `Value` variants and both are types the checker knows, so
+/// what was missing was only the vocabulary to declare them in.
+///
+/// The checker reads the declaration — `rates.get("ada")` is an
+/// `Option<Int>` here and nothing else would type — and the boundary enforces
+/// the same one, which is the pairing the rest of this file is about.
+#[test]
+fn a_host_may_declare_a_map_and_a_set_and_hand_one_over_whole() {
+    let hosts = directory(Arc::new(Mutex::new(Vec::new())));
+    let (sources, checked) = compiled(
+        &hosts,
+        "\
+use company
+
+/// Reads a table the application holds, and asks it about a set.
+export fn main() -> Result<Int, Error> {
+  let rates = company.rates()?
+  let known = company.staffed(Set.of(\"ada\", \"grace\"))?
+  Ok(rates.get(\"ada\").unwrapOr(0) + known)
+}
+",
+    );
+    let program = checked.unwrap_or_else(|items| {
+        panic!(
+            "{}",
+            items
+                .iter()
+                .map(|item| render(&sources, item))
+                .collect::<String>()
+        )
+    });
+    assert!(program.notices.is_empty(), "{:?}", program.notices);
+
+    let value = Interpreter::new(&Runtime::new(
+        Arc::new(program),
+        Arc::new(sources),
+        Arc::new(hosts),
+    ))
+    .run_entry("app", "main", Vec::new())
+    .expect("the checked program runs");
+
+    // Seven from the table plus the one name of the two that the directory
+    // knows.
+    assert_eq!(value.to_string(), "Ok(8)");
+}
+
+/// The element type of a declared `Set` is checked, so a program handing one
+/// of the wrong element type over is refused at its call site.
+#[test]
+fn a_set_of_the_wrong_element_type_is_a_static_error() {
+    let hosts = directory(Arc::new(Mutex::new(Vec::new())));
+    let (sources, checked) = compiled(
+        &hosts,
+        "\
+use company
+
+/// Hands a set of `Int` where the schema declares `Set<String>`.
+export fn main() -> Result<Int, Error> {
+  Ok(company.staffed(Set.of(1, 2))?)
+}
+",
+    );
+    let items = checked.expect_err("a `Set<Int>` is not the declared `Set<String>`");
+    let rendered: String = items.iter().map(|item| render(&sources, item)).collect();
+    assert!(
+        rendered.contains("expected `Set<String>`, found `Set<Int>`"),
+        "{rendered}"
+    );
+}
+
+/// A schema declaring a key no value can be is refused where the schema is
+/// read, which for an embedder is a test it writes once over its own table.
+///
+/// This is the one thing adding `Map` and `Set` made possible to write and
+/// impossible to satisfy: a `Set` element is a `MapKey`, and a name says
+/// nothing about whether the values behind it are. The boundary would have
+/// refused every value of it, on whichever call happened to carry one first;
+/// `ModuleSchema::validate` says so before anything runs.
+#[test]
+fn a_schema_declaring_a_key_no_value_can_be_is_refused_where_it_is_read() {
+    const KEYED_BY_A_DECLARED_TYPE: ModuleSchema = ModuleSchema {
+        name: "company",
+        capability: "directory",
+        operations: &[OperationSchema {
+            name: "roster",
+            params: &[],
+            variadic: false,
+            result: HostType::Result(
+                &HostType::Set(&HostType::Named("company.Employee")),
+                &HostType::Error,
+            ),
+            capability: "directory",
+            effect: Effect::Read,
+            cancellable: false,
+            recordable: true,
+            result_is_task_safe: true,
+        }],
+        types: COMPANY.types,
+        resources: &[],
+    };
+
+    assert!(COMPANY.validate().is_ok());
+    assert_eq!(
+        KEYED_BY_A_DECLARED_TYPE
+            .validate()
+            .expect_err("a set of a named type is not one anything can be")
+            .to_string(),
+        "the result of `company.roster` is declared `Result<Set<company.Employee>, Error>`, \
+         and `company.Employee` cannot be a `Map` key or a `Set` element"
+    );
 }
 
 /// The other half, and the point of the whole exercise: a mistake in a call

@@ -919,10 +919,12 @@ mod tests {
         fn named(ty: &HostType, found: &mut Vec<&'static str>) {
             match ty {
                 HostType::Named(name) => found.push(name),
-                HostType::Array(inner) | HostType::Option(inner) => named(inner, found),
-                HostType::Result(ok, error) => {
-                    named(ok, found);
-                    named(error, found);
+                HostType::Array(inner) | HostType::Set(inner) | HostType::Option(inner) => {
+                    named(inner, found)
+                }
+                HostType::Map(key, value) | HostType::Result(key, value) => {
+                    named(key, found);
+                    named(value, found);
                 }
                 _ => {}
             }
@@ -957,6 +959,22 @@ mod tests {
                 "`{name}` names a type `{}` does not declare",
                 owner.name
             );
+        }
+    }
+
+    /// Every shipped module declares only types some value could be.
+    ///
+    /// One thing a `HostType` can say is unsatisfiable — a `Set` element or a
+    /// `Map` key that is not one Cove's `MapKey` restriction admits — and
+    /// `ModuleSchema::validate` is what says so. No shipped table declares a
+    /// `Set` or a `Map` today, so this asserts nothing about them yet and is
+    /// the rule the first one that does will be held to.
+    #[test]
+    fn every_shipped_module_declares_a_type_some_value_could_be() {
+        for module in SHIPPED {
+            if let Err(fault) = module.validate() {
+                panic!("`{}`: {fault}", module.name);
+            }
         }
     }
 

@@ -37,7 +37,7 @@ mechanism meant for reaching outside the process. `Vm::invoke` closed that
 each other and splits the old number in two. The old path is still here and
 still measured, because it is the control that makes the split possible.
 
-`host/` is a workspace member, so `cargo test --workspace` runs its eighteen
+`host/` is a workspace member, so `cargo test --workspace` runs its twenty-two
 cases and `cargo clippy` sees it. An example of an API that is not compiled
 against that API is an example that has already rotted.
 
@@ -103,7 +103,7 @@ that is not there.
 | `rules.fixtures` | six pull requests, one per arm of the policy |
 | `rules.embedded` | the adapter the Rust host invokes: `evaluate`, and the boundary controls `decideRequest` and `pullOnly` |
 | `rules` | `main`, and the two measurement controls `decideSample` and `floor` |
-| `host/` | the Rust application that embeds all of the above |
+| `host/` | the Rust application that embeds all of the above, and the two binaries it ships: `cove-rules-measure` and `cove-rules-check` |
 
 The one signature everything else exists to serve:
 
@@ -220,6 +220,58 @@ A capability is not part of that check, and an invocation grants nothing: what
 run `cove run` started. `evaluate` reaches nothing, which is why the case above
 grants it nothing.
 
+### What bounds one request
+
+```rust
+session.evaluate_within(Limits { fuel: Some(1_200), ..Limits::default() },
+                        "rules.embedded", "evaluate", pr)
+```
+
+A rule package is somebody else's code. It can loop, and an application that
+runs one would rather be told which request went wrong than stop serving. So
+the ordinary thing to want is a limit on a *request*, and until
+[issue #152](https://github.com/myuon/cove/issues/152) an embedding could not
+ask for one: a `Budget` belonged to the `HostRegistry`, `set_budget` needs
+`&mut`, and a backend holds the registry by shared reference for as long as it
+exists. Every limit was therefore spent over the whole session — the fuel for
+the first decision came out of the same pot as the fuel for the ten-thousandth
+— and the only way to get a per-request bound was to build a registry, a
+`Runtime` and a backend per request, which is 168 allocations of table
+rebuilding against a request's own 237 and is the thing compiling once was for
+not doing.
+
+**A budget belongs to an invocation.** `invoke_within` and `run_entry_within`
+take one, install it as the call is entered, and leave it behind holding what
+that invocation spent. It still lives on the registry, because ADR 0008 draws
+a spawned task's fuel from the run's budget and a task thread reaches it
+through the `Runtime` it carries; a task's charges are still its request's.
+The deadline runs from the moment the invocation starts rather than from
+wherever the `Limits` were written, which is what makes a per-request deadline
+mean the request.
+
+`embedding(reviews, grants, limits)` still installs a session budget, and that
+is still right for the limits that are about the process. The two are
+different questions and the example asks both:
+`a_budget_on_the_registry_is_spent_over_every_invocation` is the session, and
+`fuel_handed_to_one_invocation_bounds_that_invocation_alone` is the request —
+the same three decisions, differing in one call, where the session runs out on
+the second and the requests each answer.
+
+Which limit to reach for is ADR 0024's, not this example's. **`max_host_calls`
+is the control that bounds effects exactly**; fuel bounds work and bounds
+effects only to within a straight line, and a fuel limit is not portable
+between the two backends. So `decide_within` is the case written against
+`max_host_calls` — one decision makes two calls, `pull` and `record` — and it
+is the one asserted on both backends, because a call is a call on either and a
+unit of fuel is not.
+
+There is no way to install a budget that does not take `&mut self` on a
+backend. ADR 0024 states each stop as a bound that holds over a run, and a
+budget swappable while the run it bounds was executing would make each of
+those bounds a claim about something that had changed underneath it; a backend
+running an invocation is mutably borrowed for its whole duration, so the shape
+forbids it.
+
 ### Who checks this program
 
 `cove check` in `examples/` reports one warning, and it is correct:
@@ -239,12 +291,45 @@ exactly that: the same source compiled with the schema in hand produces no
 notices at all, which
 `embedding.one_compiled_package_decides_every_open_request` asserts.
 
-This is worth leaving visible rather than hiding, because it is the shape of a
-real problem. The person who writes rules is not the person who wrote the
-embedder, and the rule author's toolchain is `cove check`, `cove fmt` and
-`cove test`, none of which can be handed a schema. Today they can format their
-rules and can only half-check them. That is
-[issue #151](https://github.com/myuon/cove/issues/151).
+[Issue #151](https://github.com/myuon/cove/issues/151) asked for the missing
+key — a `--schema` flag, or a `[hosts]` table in `cove.toml`. **The answer is
+that there should not be one**, and this document used to be the argument for
+filing it, so it is the right place to record why. The argument is made in
+full where an embedder meets it, in `cove_sema::compile`'s module doc; the
+short of it is two things.
+
+A serialized description is a *second* description. The only thing that makes
+`REVIEWS` worth anything is that the checker and the boundary read one value;
+a table in `cove.toml` is another one, written by hand in another vocabulary,
+and a checker reading it while the run enforces the `const` reports exactly
+the failure [ADR 0017](../../docs/adr/0017-embedder-host-api-schemas.md)
+exists to prevent — with the authority of having checked. Generating the file
+from the `const` removes the drift and leaves the staleness.
+
+And `cove test` settles it for any format at all. A schema lets the checker
+*check* a call into `reviews`; it lets nothing *run* one, because what answers
+a call is `Reviews`, an implementation, and no description carries one. A
+`cove` handed a schema would check a rule package it still could not test —
+which is the command a rule author uses most.
+
+So the toolchain is the embedder's to provide, and the checking half of it is
+one line:
+
+```console
+$ cargo run -p cove-rules --bin cove-rules-check
+`rules` checks against `reviews`: 10 files, 6 modules, no notices
+```
+
+`host/src/bin/check.rs` is the whole of it. It is not a fork of `cove check`:
+it reads the same package off disk, runs the same `cove_sema::Compiler`,
+renders with the same `cove_diag::render`, and differs by the schemas it was
+handed — the same `REVIEWS` the registry answers with, so the two cannot
+drift. The test runner is more than one line because it needs `Reviews` as
+well, which is the same conclusion arriving from the other end.
+
+The warning stays visible. A `cove check` that was handed no description has
+not checked those calls, and saying so is better than a silence that reads
+like a proof.
 
 The rest of what the embedding checks is checked properly, and the tests in
 `host/tests/embedding.rs` say so one case at a time: an argument the schema
@@ -281,22 +366,36 @@ happened to come first. This is the whole argument for
 cargo run --release -p cove-rules --bin cove-rules-measure -- 500
 ```
 
-**The counts below were re-taken for this change and the times were not.**
+**Every number below is now stale, and this change is why.** It made `labels`
+cross as a `Set` instead of as an `Array<String>` the Cove side walked into
+one, which removes a loop from every decision and changes what the conversion
+builds — so the instruction counts and the allocation counts both move, by
+construction and in the direction the change was made for. They were not
+re-taken here, because the machine this was done on was busy with other work
+and `cove-rules-measure` wants a release build and a quiet machine. **The rows
+below are the parent commit's and describe the program as it was**; they are
+left because a table nobody can compare against is worse than one whose
+vintage is stated, and because every *ratio* they were quoted for — compiling
+is worth about 162 invocations, reuse is worth 168 allocations, the boundary
+route costs 40 more than the argument route — is about mechanisms this change
+did not touch.
+
 Allocations, bytes and instructions come from a counting `GlobalAlloc`
 installed in the measurement binary and from `Vm::instructions`, not from a
-sampler, so they are exact and every row is comparable with every other. The
-wall times are the ones this document has carried since it was written:
+sampler, so they are exact and every row is comparable with every other one
+taken in the same session. The wall times are older again — the ones this
+document has carried since it was written:
 
 ```text
 Intel(R) Core(TM) i7-10700K CPU @ 3.80GHz, 32 GiB, macOS 26.5.2
 rustc 1.93.1, --release, medians of five runs, 3,000 invocations a row
 ```
 
-They were taken before `evaluate` existed, on another machine, and the machine
-this change was made on was busy with other work. **Every wall time in this
-document needs re-taking, in one session, on a quiet machine**, and the two new
-rows have none at all. Nothing below argues from a time where a count would do,
-and where a time is quoted it is marked.
+They were taken before `evaluate` existed, on another machine. **Every number
+in this document needs re-taking, in one session, on a quiet machine** — the
+wall times because they were never re-taken, and the counts because the
+program they counted has changed. Nothing below argues from a time where a
+count would do, and where a time is quoted it is marked.
 
 Re-taking the counts turned up something worth recording, because this document
 had claimed the counts were what a different machine could check. At the parent
@@ -509,25 +608,14 @@ They are issues rather than workarounds in the program.
   [Issue #109](https://github.com/myuon/cove/issues/109) asks for the internal
   representation to become less exposed than that, and gates the work on VM
   profiles it also asks this example to produce.
-- **A rule package written against an embedder's module cannot be checked by
-  `cove check`.** There is nowhere to hand the CLI a `ModuleSchema`: not a
-  flag, not a `cove.toml` key. The author of a rule package therefore cannot
-  run the checker the embedder runs, and `cove test` cannot run a test that
-  touches the embedder's module at all.
-  [#151](https://github.com/myuon/cove/issues/151)
-- **A budget cannot be given to one invocation.** A `Budget` lives on the
-  `HostRegistry`, `set_budget` needs `&mut`, and a backend holds the registry by
-  shared reference for as long as it exists. So fuel, the deadline and the
-  host-call limit are spent over the whole session rather than reset per
-  invocation, and an embedder that wants to bound one request has to build a
-  registry, a `Runtime` and a `Vm` for it — the 168 allocations above.
-  `embedding.fuel_is_spent_over_the_session_and_not_over_one_invocation` pins
-  the behaviour as it is. [#152](https://github.com/myuon/cove/issues/152)
-- **A Host API schema cannot declare a `Map` or a `Set`.** `HostType` has
-  `Array`, `Option` and `Result` and nothing else compound, so `labels` crosses
-  as an `Array<String>` and `rules.policy.PullRequest.labelSet` converts it
-  where a membership question is asked.
-  [#153](https://github.com/myuon/cove/issues/153)
+- **A rule package written against an embedder's module still cannot be
+  checked by `cove check`, and that is now a decision rather than a gap.**
+  [#151](https://github.com/myuon/cove/issues/151) asked for a flag or a
+  `cove.toml` key and the answer is no, for the two reasons
+  [Who checks this program](#who-checks-this-program) gives: a serialized
+  schema is a second description of a module whose first one is Rust, and a
+  schema would let `cove check` check a package that `cove test` still could
+  not run. The toolchain is the embedder's, and `cove-rules-check` is it.
 - **A package directory must be a Cove identifier**, so this example is
   `examples/rules/` and not `examples/cove-rules/` as issue #90 names it: a
   directory holding `.cove` files becomes a module and `cove-rules` is not an
@@ -560,6 +648,21 @@ Worth recording beside the gaps, because the list is longer.
   `Compiler::with_host_schema` and comes back out of `HostApi::module_schema`,
   so a rename is a check-time error rather than a boundary surprise, and there
   is no second copy to keep in step.
+- **A field crosses as the shape it is.** `labels` is a `Set<String>` on both
+  sides. It was an `Array<String>` with a `labelSet` in `rules.policy` that
+  walked it into a set wherever a rule asked a membership question, and that
+  loop was in the module about review policy for a limitation of the schema
+  vocabulary rather than for anything about reviews.
+  [Issue #153](https://github.com/myuon/cove/issues/153) gave `HostType` a
+  `Set` and a `Map`, so the host builds the set and the rules ask it. The one
+  thing a schema can now say and no value satisfy — a `Set` element or a `Map`
+  key Cove's `MapKey` restriction does not admit — is refused where the schema
+  is read, and `the_schema_declares_only_types_a_value_could_have` is the one
+  assertion an embedder writes over its own table to get that.
+- **A limit can belong to a request.** `evaluate_within` and `decide_within`
+  hand one invocation its own `Budget` on a `Vm` that was built once, which is
+  [What bounds one request](#what-bounds-one-request) and was
+  [issue #152](https://github.com/myuon/cove/issues/152).
 - **A failed invocation does not damage the session.** A host that fails, a
   request that does not exist, a schema the host broke, and a capability that
   was not granted are four different failures and all four leave the VM able to
@@ -571,22 +674,24 @@ Worth recording beside the gaps, because the list is longer.
 
 ## Tests
 
-`cove test` runs 27 `test fn` declarations across `rules.policy`,
+`cove test` runs 28 `test fn` declarations across `rules.policy`,
 `rules.catalog` and `rules.engine`: each rule in isolation, both dispatch forms
 against each other, the six fixtures against the six arms of the policy, and
 `policyFor` over findings assembled by hand so that a combination rule can be
 asserted without arranging a pull request that produces it.
 
-`cargo test -p cove-rules` runs eighteen more, in `host/tests/embedding.rs`:
+`cargo test -p cove-rules` runs twenty-two more, in `host/tests/embedding.rs`:
 six pull requests evaluated directly, the two ways in reaching the same
 decision, both backends answering a direct invocation the same way, an argument
 the declaration does not admit, one compiled package deciding six requests
 across the boundary, both backends agreeing on the embedded entry, the Rust
 fixtures and the Cove fixtures agreeing, an additive schema change, a breaking
 one, an argument and a result the boundary refused, a capability that was not
-granted, a host that failed, a session that kept serving, fuel, a host-call
-limit, the request identifier in the trace, and the conversion following the
-schema's field order.
+granted, a host that failed, a session that kept serving, a budget spent over
+the session and a budget spent by one request, a host-call limit per request
+on both backends, the request identifier in the trace, the conversion
+following the schema's field order, `labels` crossing as the set it is, and
+the schema itself declaring only types some value could have.
 
 The fixtures are written twice — once in `rules.fixtures` and once in
 `cove_rules::samples` — because in a real embedding they arrive from the

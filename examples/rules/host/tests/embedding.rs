@@ -622,17 +622,16 @@ fn a_failed_invocation_leaves_the_session_serving() {
     );
 }
 
-/// A fuel limit stops a run, and — this is the part an embedder has to know —
-/// it is spent over the whole session rather than reset per invocation.
+/// A budget installed on the registry is spent over the whole session.
 ///
-/// A `Budget` belongs to the `HostRegistry`, `set_budget` needs `&mut`, and a
-/// backend holds the registry by shared reference for as long as it exists.
-/// So there is no way to hand one invocation its own fuel without building a
-/// registry, a `Runtime` and a backend for it, which is the thing compiling
-/// once was for avoiding. Issue #152 is the gap; this case pins the behaviour
-/// as it is.
+/// This is what a `cove run` gets and it is right for what a `cove run` is,
+/// which is one invocation. For an application that decides one pull request
+/// per request it is a limit on the *process*: the first decision is inside
+/// it, and by the third there is no fuel left for anybody. Held here because
+/// it is still the behaviour of `embedding(..., limits)`, and because it is
+/// the control the case below is read against.
 #[test]
-fn fuel_is_spent_over_the_session_and_not_over_one_invocation() {
+fn a_budget_on_the_registry_is_spent_over_every_invocation() {
     let outcomes = cove_runtime::on_cove_stack(|| {
         let package = compiled();
         let lowering = package.lower(ENTRY.0, ENTRY.1).expect("the entry lowers");
@@ -672,43 +671,199 @@ fn fuel_is_spent_over_the_session_and_not_over_one_invocation() {
     assert!(exhausted.contains("fuel"), "{exhausted}");
 }
 
-/// A host-call limit is spent the same way, and stops an invocation at the
-/// boundary rather than inside the program.
+/// **The same fuel, handed to each invocation, bounds each invocation.**
+///
+/// The case above and this one differ in one call — `evaluate` against
+/// `evaluate_within` — and in nothing else: one compiled package, one
+/// `Runtime`, one `Vm`, one registry. Three requests that each fit the limit
+/// all answer, where three requests sharing it did not, and the fourth here
+/// is a request too big for its own limit, which stops and leaves the session
+/// serving the fifth.
+///
+/// That is the whole of issue #152. An application running somebody else's
+/// rules wants to be told when a rule loops rather than to stop serving, and
+/// before this the only way to get a limit per request was to build a
+/// registry, a `Runtime` and a backend per request — the 168 allocations of
+/// table rebuilding `examples/rules/README.md` measures, on top of a request
+/// that costs 237.
 #[test]
-fn a_host_call_limit_stops_an_invocation() {
-    let outcome = cove_runtime::on_cove_stack(|| {
+fn fuel_handed_to_one_invocation_bounds_that_invocation_alone() {
+    let (generous, mean, after) = cove_runtime::on_cove_stack(|| {
+        let package = compiled();
+        let lowering = package
+            .lower(EVALUATE.0, EVALUATE.1)
+            .expect("the entry lowers");
+        // Nothing bounds the session, so every bound below is the request's.
+        let embed = embedding(
+            Reviews::new(cove_rules::samples()),
+            &["reviews"],
+            Limits::default(),
+        );
+        let samples = cove_rules::samples();
+        package.serve(Arc::clone(&embed.hosts), Some(&lowering), |session| {
+            let mut each = |limits: Limits, request: &str| {
+                session.evaluate_within(limits, EVALUATE.0, EVALUATE.1, &samples[request])
+            };
+            let generous: Vec<Result<Decision, String>> = ["req-2", "req-2", "req-2"]
+                .into_iter()
+                .map(|request| {
+                    each(
+                        Limits {
+                            fuel: Some(1_200),
+                            ..Limits::default()
+                        },
+                        request,
+                    )
+                })
+                .collect();
+            let mean = each(
+                Limits {
+                    fuel: Some(50),
+                    ..Limits::default()
+                },
+                "req-2",
+            );
+            // And the session still serves, with nothing carried over from
+            // the request that ran out.
+            let after = each(
+                Limits {
+                    fuel: Some(1_200),
+                    ..Limits::default()
+                },
+                "req-3",
+            );
+            (generous, mean, after)
+        })
+    })
+    .expect("a thread to run Cove on");
+
+    assert!(
+        generous.iter().all(Result::is_ok),
+        "each request has its own fuel: {generous:?}"
+    );
+    assert!(
+        mean.as_ref()
+            .expect_err("a request under its own limit stops")
+            .contains("fuel"),
+        "{mean:?}"
+    );
+    assert_eq!(
+        after.expect("the session serves the next request").policy,
+        ReviewPolicy::Block {
+            reason: "guarded_path:auth/".to_string(),
+        }
+    );
+}
+
+/// A host-call limit belongs to a request the same way, and is the control
+/// that bounds what one request may do to the outside world.
+///
+/// ADR 0024: `max_host_calls` bounds effects exactly, where fuel bounds work
+/// and bounds effects only to within a straight line. So this is the limit an
+/// application actually reaches for, and it is per request or it is not much
+/// use — one decision makes two calls, `pull` and `record`, and a limit of two
+/// spent over a session is a limit that permits one request ever.
+#[test]
+fn a_host_call_limit_handed_to_one_invocation_bounds_that_invocation_alone() {
+    let (allowed, refused, after) = cove_runtime::on_cove_stack(|| {
         let package = compiled();
         let lowering = package.lower(ENTRY.0, ENTRY.1).expect("the entry lowers");
         let embed = embedding(
             Reviews::new(cove_rules::samples()),
             &["reviews"],
-            Limits {
-                // One decision makes two calls: `pull` and `record`.
-                max_host_calls: Some(3),
-                ..Limits::default()
-            },
+            Limits::default(),
         );
         package.serve(Arc::clone(&embed.hosts), Some(&lowering), |session| {
-            (0..2)
-                .map(|_| {
-                    session
-                        .run(ENTRY.0, ENTRY.1, &["req-2"])
-                        .map(|_| ())
-                        .map_err(|error| error.message)
-                })
-                .collect::<Vec<_>>()
+            let two = || Limits {
+                max_host_calls: Some(2),
+                ..Limits::default()
+            };
+            let allowed: Vec<Result<Decision, String>> = (0..3)
+                .map(|_| session.decide_within(two(), ENTRY.0, ENTRY.1, "req-2"))
+                .collect();
+            let refused = session.decide_within(
+                Limits {
+                    max_host_calls: Some(1),
+                    ..Limits::default()
+                },
+                ENTRY.0,
+                ENTRY.1,
+                "req-2",
+            );
+            let after = session.decide_within(two(), ENTRY.0, ENTRY.1, "req-2");
+            (allowed, refused, after)
         })
     })
     .expect("a thread to run Cove on");
 
-    assert!(outcome[0].is_ok(), "{outcome:?}");
-    let refused = outcome[1]
-        .as_ref()
-        .expect_err("the fourth host call is over the limit");
     assert!(
-        refused.contains("host-call limit of 3 exceeded"),
-        "{refused}"
+        allowed.iter().all(Result::is_ok),
+        "two calls each, three requests, two allowed each: {allowed:?}"
     );
+    assert!(
+        refused
+            .as_ref()
+            .expect_err("a second call is over a limit of one")
+            .contains("host-call limit of 1 exceeded"),
+        "{refused:?}"
+    );
+    assert!(after.is_ok(), "{after:?}");
+}
+
+/// The same limit per invocation on both backends.
+///
+/// A budget is not a backend's, so the interpreter and the VM answer it the
+/// same way. What they do not owe each other is the *number*: ADR 0024 makes a
+/// fuel limit non-portable, so this uses `max_host_calls`, which counts calls
+/// and not work and therefore means the same thing on both.
+#[test]
+fn both_backends_bound_one_invocation_the_same_way() {
+    for vm in [false, true] {
+        let (allowed, refused) = cove_runtime::on_cove_stack(|| {
+            let package = compiled();
+            let lowering = package.lower(ENTRY.0, ENTRY.1).expect("the entry lowers");
+            let embed = embedding(
+                Reviews::new(cove_rules::samples()),
+                &["reviews"],
+                Limits::default(),
+            );
+            package.serve(
+                Arc::clone(&embed.hosts),
+                if vm { Some(&lowering) } else { None },
+                |session| {
+                    let allowed = session.decide_within(
+                        Limits {
+                            max_host_calls: Some(2),
+                            ..Limits::default()
+                        },
+                        ENTRY.0,
+                        ENTRY.1,
+                        "req-2",
+                    );
+                    let refused = session.decide_within(
+                        Limits {
+                            max_host_calls: Some(1),
+                            ..Limits::default()
+                        },
+                        ENTRY.0,
+                        ENTRY.1,
+                        "req-2",
+                    );
+                    (allowed, refused)
+                },
+            )
+        })
+        .expect("a thread to run Cove on");
+
+        assert!(allowed.is_ok(), "on backend vm={vm}: {allowed:?}");
+        assert!(
+            refused
+                .as_ref()
+                .expect_err("the second call is over the limit")
+                .contains("host-call limit of 1 exceeded"),
+            "on backend vm={vm}: {refused:?}"
+        );
+    }
 }
 
 // ------------------------------------------------------------ attribution
@@ -776,4 +931,54 @@ fn a_rust_pull_request_becomes_the_struct_the_schema_declares() {
     let declared: Vec<&str> = REVIEWS.types[0].fields.iter().map(|f| f.name).collect();
     let built: Vec<&str> = value.fields.iter().map(|(name, _)| &**name).collect();
     assert_eq!(built, declared, "the conversion follows the schema's order");
+}
+
+/// `labels` crosses as the `Set` it is, and nothing on the Cove side turns it
+/// into one.
+///
+/// It used to cross as an `Array<String>` and `rules.policy.PullRequest`
+/// carried a `labelSet` that walked it into a set wherever a rule asked a
+/// membership question — a loop written into the module that is supposed to be
+/// about review policy, for a limitation of the schema vocabulary. Issue #153
+/// gave `HostType` a `Set`, so the host builds one and the rules ask it
+/// directly.
+#[test]
+fn labels_cross_as_the_set_a_membership_question_wants() {
+    let pr = PullRequest {
+        labels: vec!["docs".to_string(), "docs".to_string()],
+        ..cove_rules::samples()["req-1"].clone()
+    };
+    let Value::Struct(value) = pr.to_cove() else {
+        panic!("a pull request converts to a struct value");
+    };
+    let labels = value.get("labels").expect("the field the schema declares");
+    let Value::Set(carried) = labels else {
+        panic!("`labels` crosses as a `Set`, not as {labels}");
+    };
+    assert_eq!(carried.len(), 1, "a label written twice is carried once");
+
+    // And the schema says so, which is what makes it checked at both ends.
+    let declared = REVIEWS.types[0]
+        .fields
+        .iter()
+        .find(|field| field.name == "labels")
+        .expect("`labels` is declared");
+    assert_eq!(declared.ty.to_string(), "Set<String>");
+}
+
+/// The schema this crate registers declares only types some value could have.
+///
+/// One thing a `HostType` can say and no value satisfy: a `Set` element or a
+/// `Map` key that Cove's `MapKey` restriction does not admit. It is refused
+/// where the schema is read, and for an embedder that means one assertion over
+/// its own table, in the test file it already has. `Set<reviews.PullRequest>`
+/// would be the mistake here, and it would otherwise be found by whichever
+/// call first carried a value.
+#[test]
+fn the_schema_declares_only_types_a_value_could_have() {
+    for schema in [REVIEWS, REVIEWS_NEXT, REVIEWS_RENAMED] {
+        if let Err(fault) = schema.validate() {
+            panic!("`{}`: {fault}", schema.name);
+        }
+    }
 }

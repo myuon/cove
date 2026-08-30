@@ -743,6 +743,34 @@ impl Value {
         Value::Array(items.into_iter().collect())
     }
 
+    /// A `Set` holding `items`.
+    ///
+    /// The elements are [`MapKey`]s and not [`Value`]s, and that is the
+    /// [`MapKey`] restriction showing through rather than an inconvenience: a
+    /// set of values would be a constructor that could fail, and there is
+    /// nothing sensible for it to do when it does. A host building one from
+    /// its own data writes the key it means — `MapKey::Str(name)` for a set of
+    /// names — and a host holding a [`Value`] it did not build converts with
+    /// [`MapKey::from_value`], which reports the part that cannot be a key and
+    /// the path to reach it.
+    ///
+    /// Duplicates collapse, exactly as they do for a `Set` a Cove program
+    /// builds, and the order the set iterates in is ascending key order
+    /// whatever order they arrived in.
+    pub fn set(items: impl IntoIterator<Item = MapKey>) -> Value {
+        Value::Set(Rc::new(items.into_iter().collect()))
+    }
+
+    /// A `Map` holding `entries`.
+    ///
+    /// The companion of [`Value::set`], with the same reason for taking a
+    /// [`MapKey`]: only the key carries the restriction, so the value half is
+    /// an ordinary [`Value`]. A later entry under a key an earlier one used
+    /// replaces it.
+    pub fn map(entries: impl IntoIterator<Item = (MapKey, Value)>) -> Value {
+        Value::Map(Rc::new(entries.into_iter().collect()))
+    }
+
     /// Whether this is an `Ok`, the success case of a `Result`.
     pub fn is_ok(&self) -> bool {
         self.builtin_case(&RESULT, &OK_CASE).is_some()
