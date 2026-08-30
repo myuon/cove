@@ -9,6 +9,15 @@
 //! that was not granted, a request identifier that links an invocation to
 //! every host call it made, and an additive and a breaking schema change.
 //!
+//! There are two ways into the program and both are here. `evaluate` takes the
+//! pull request as an argument, which is what issue #150 asked for and what an
+//! application should use; `decideRequest` takes a request identifier as a
+//! process argument and fetches the pull request back across the Host API
+//! boundary, which is what an embedding had to do before and is now the
+//! control the boundary is measured with. The cases that matter most are the
+//! two that hold them to each other: they must reach the same decision, and
+//! each must reach the same decision on both backends.
+//!
 //! Everything runs inside [`cove_runtime::on_cove_stack`], because a backend's
 //! call-depth limit is a promise about a stack the runtime sized and a test
 //! thread's stack is not one it chose.
@@ -22,6 +31,11 @@ use cove_rules::{
 use cove_runtime::{Limits, Value};
 
 /// The entry an embedding invokes, one pull request at a time.
+const EVALUATE: (&str, &str) = ("rules.embedded", "evaluate");
+
+/// The control it is measured against: the same decision, reached with the
+/// request identifier as a process argument and the pull request fetched back
+/// across the Host API boundary.
 const ENTRY: (&str, &str) = ("rules.embedded", "decideRequest");
 
 /// The rule package, checked against the schema this crate registers.
@@ -44,6 +58,174 @@ fn decide(request: &str) -> Result<Decision, String> {
         })
     })
     .expect("a thread to run Cove on")
+}
+
+/// The same decision reached the other way: the pull request handed in as an
+/// argument, on `backend`.
+fn evaluate(pr: &PullRequest, grants: &[&str], vm: bool) -> Result<Decision, String> {
+    cove_runtime::on_cove_stack(|| {
+        let package = compiled();
+        let lowering = package
+            .lower(EVALUATE.0, EVALUATE.1)
+            .expect("the entry lowers");
+        let embed = embedding(
+            Reviews::new(cove_rules::samples()),
+            grants,
+            Limits::default(),
+        );
+        let answer = package.serve(
+            Arc::clone(&embed.hosts),
+            if vm { Some(&lowering) } else { None },
+            |session| session.evaluate(EVALUATE.0, EVALUATE.1, pr),
+        );
+        assert!(
+            embed.calls.all().is_empty(),
+            "a direct invocation crosses no Host API boundary: {:?}",
+            embed.calls.all()
+        );
+        answer
+    })
+    .expect("a thread to run Cove on")
+}
+
+// -------------------------------------------------------------- the way in
+
+/// What issue #150 asked for, in one case: the application hands the rules a
+/// pull request it built and reads the decision back.
+///
+/// The six samples, the six decisions, and — the part that is not about
+/// values — not one host call between them. The pull request goes in as an
+/// argument and the decision comes out as a result, so the embedder's own
+/// `reviews` module is not reached, no capability is asked for, and a trace
+/// sink watching the boundary sees nothing to record.
+#[test]
+fn a_host_evaluates_every_open_request_with_a_value_it_built() {
+    let policies: Vec<ReviewPolicy> = cove_rules::samples()
+        .values()
+        .map(|pr| {
+            evaluate(pr, &[], true)
+                .expect("every pull request decides")
+                .policy
+        })
+        .collect();
+    assert_eq!(
+        policies,
+        vec![
+            ReviewPolicy::Normal,
+            ReviewPolicy::Require {
+                reviewers: 2,
+                reason: "large_change".to_string(),
+            },
+            ReviewPolicy::Block {
+                reason: "guarded_path:auth/".to_string(),
+            },
+            ReviewPolicy::Require {
+                reviewers: 2,
+                reason: "guarded_path_waived:auth/".to_string(),
+            },
+            ReviewPolicy::Normal,
+            ReviewPolicy::Require {
+                reviewers: 3,
+                reason: "label:breaking-change".to_string(),
+            },
+        ]
+    );
+}
+
+/// The two ways in reach the same decision.
+///
+/// `evaluate` takes the pull request as an argument and `decideRequest` fetches
+/// it across the Host API boundary, and this is what says the difference
+/// between them is cost and nothing else. It is also what would notice if the
+/// field-by-field rebuild in `rules.embedded.pullRequest` and the struct the
+/// host builds for an invocation stopped meaning the same thing.
+#[test]
+fn the_two_ways_in_reach_the_same_decision() {
+    for (request, pr) in cove_rules::samples() {
+        assert_eq!(
+            evaluate(&pr, &[], true).expect("the direct invocation decides"),
+            decide(&request).expect("the boundary invocation decides"),
+            "the two ways into `{request}` disagree"
+        );
+    }
+}
+
+/// Both backends answer one invocation the same way, which the differential
+/// corpus cannot say: it runs entries the way `cove run` does, and no
+/// `[run.<name>]` table can hand a struct to a function.
+#[test]
+fn both_backends_answer_the_direct_invocation_the_same_way() {
+    for pr in cove_rules::samples().values() {
+        assert_eq!(
+            evaluate(pr, &[], true).expect("the VM decides"),
+            evaluate(pr, &[], false).expect("the interpreter decides"),
+            "the two backends disagree about `{}`",
+            pr.id
+        );
+    }
+}
+
+/// An argument the declaration does not admit is refused before the first
+/// instruction, in the checker's words.
+///
+/// Three ways to get it wrong, and all three are the host's rather than the
+/// program's: the wrong type, the wrong struct, and the right struct carrying
+/// the wrong fields. The last is the one that has to be refused rather than
+/// merely reported — the lowering reads a declared struct's field by index, so
+/// a value whose fields are not the declaration's would read past the end of
+/// one or answer the wrong field silently.
+#[test]
+fn an_argument_the_rules_do_not_declare_is_refused_before_anything_runs() {
+    // The argument is built inside the closure rather than handed to it,
+    // because a `Value` is `Rc`-based and cannot cross a thread boundary --
+    // which is the same reason `RulePackage::serve` takes a closure.
+    let refused = |argument: fn() -> Value| -> String {
+        cove_runtime::on_cove_stack(move || {
+            let package = compiled();
+            let lowering = package
+                .lower(EVALUATE.0, EVALUATE.1)
+                .expect("the entry lowers");
+            let embed = embedding(Reviews::new(cove_rules::samples()), &[], Limits::default());
+            package.serve(Arc::clone(&embed.hosts), Some(&lowering), |session| {
+                session
+                    .invoke(EVALUATE.0, EVALUATE.1, vec![argument()])
+                    .expect_err("this argument must be refused")
+                    .message
+            })
+        })
+        .expect("a thread to run Cove on")
+    };
+
+    assert_eq!(
+        refused(|| Value::Int(1)),
+        "`rules.embedded.evaluate` was given `Int` as argument 1, but it declares `rules.policy.PullRequest` there"
+    );
+    assert_eq!(
+        refused(|| {
+            cove_rules::samples()
+                .remove("req-1")
+                .expect("the sample exists")
+                .to_cove()
+        }),
+        "`rules.embedded.evaluate` was given `reviews.PullRequest` as argument 1, but it declares `rules.policy.PullRequest` there",
+        "the host's own type and the package's are two types, and always were"
+    );
+    assert!(
+        refused(missing_fields)
+        .starts_with(
+            "`rules.embedded.evaluate` was given a `rules.policy.PullRequest` carrying `id` as argument 1, but"
+        ),
+        "{}",
+        refused(missing_fields)
+    );
+}
+
+/// A `rules.policy.PullRequest` carrying one of its ten fields.
+fn missing_fields() -> Value {
+    Value::structure(
+        "rules.policy.PullRequest",
+        [("id", Value::Str("pr-1".into()))],
+    )
 }
 
 // ------------------------------------------------------------ a valid result
@@ -310,7 +492,7 @@ fn a_result_the_host_s_own_schema_does_not_admit_is_refused() {
             Limits::default(),
         );
         package.serve(Arc::clone(&embed.hosts), Some(&lowering), |session| {
-            session.invoke(ENTRY.0, ENTRY.1, &["req-1"]).map(|_| ())
+            session.run(ENTRY.0, ENTRY.1, &["req-1"]).map(|_| ())
         })
     })
     .expect("a thread to run Cove on");
@@ -333,7 +515,7 @@ fn an_ungranted_capability_is_refused_before_the_host_is_reached() {
         let lowering = package.lower(ENTRY.0, ENTRY.1).expect("the entry lowers");
         let embed = embedding(Reviews::new(cove_rules::samples()), &[], Limits::default());
         let outcome = package.serve(Arc::clone(&embed.hosts), Some(&lowering), |session| {
-            session.invoke(ENTRY.0, ENTRY.1, &["req-1"]).map(|_| ())
+            session.run(ENTRY.0, ENTRY.1, &["req-1"]).map(|_| ())
         });
         let recorded = embed.log.lock().unwrap().clone();
         (outcome, recorded)
@@ -392,7 +574,7 @@ fn a_failed_invocation_leaves_the_session_serving() {
         );
         package.serve(Arc::clone(&broken.hosts), Some(&lowering), |session| {
             let failed = session
-                .invoke(ENTRY.0, ENTRY.1, &["req-1"])
+                .run(ENTRY.0, ENTRY.1, &["req-1"])
                 .expect_err("a host that fails stops the invocation")
                 .message;
             // The same session, invoked again: a request the host holds and
@@ -423,7 +605,7 @@ fn a_failed_invocation_leaves_the_session_serving() {
             Limits::default(),
         );
         package.serve(Arc::clone(&embed.hosts), Some(&lowering), |session| {
-            let _ = session.invoke(ENTRY.0, ENTRY.1, &["req-nothing"]);
+            let _ = session.run(ENTRY.0, ENTRY.1, &["req-nothing"]);
             session.decide(ENTRY.0, ENTRY.1, "req-2")
         })
     })
@@ -469,7 +651,7 @@ fn fuel_is_spent_over_the_session_and_not_over_one_invocation() {
             (0..3)
                 .map(|_| {
                     session
-                        .invoke(ENTRY.0, ENTRY.1, &["req-2"])
+                        .run(ENTRY.0, ENTRY.1, &["req-2"])
                         .map(|_| ())
                         .map_err(|error| error.message)
                 })
@@ -510,7 +692,7 @@ fn a_host_call_limit_stops_an_invocation() {
             (0..2)
                 .map(|_| {
                     session
-                        .invoke(ENTRY.0, ENTRY.1, &["req-2"])
+                        .run(ENTRY.0, ENTRY.1, &["req-2"])
                         .map(|_| ())
                         .map_err(|error| error.message)
                 })

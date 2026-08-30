@@ -4,7 +4,7 @@
 # against the interface the current source derives, so check it in and let a
 # reviewer read the difference. Do not edit it by hand.
 cove-api 1
-hash fnv1a64:3f8f89f3917835a9
+hash fnv1a64:84a6c8cdb4695a17
 
 module callbacks
   /// Task-safe application dependencies captured by request handlers.
@@ -1009,28 +1009,50 @@ module rules.embedded
   /// Decides the one pull request the host names, and reports the decision back
   /// to it.
   ///
-  /// This is the function the Rust host in `examples/rules/host/` invokes, once
-  /// per application request, against a module it compiled and lowered once.
-  /// Everything about it is shaped by what an embedding can and cannot do
-  /// today, and each of those is worth stating rather than leaving to be
-  /// inferred from the code.
+  /// The control. This reaches `decide` over a pull request fetched through
+  /// `reviews.pull` and reports the answer through `reviews.record`, so
+  /// everything it does that `evaluate` does not is the Host API boundary. The
+  /// embedding measures the two against each other, which is what turns "the
+  /// boundary costs something" into a number.
   ///
-  /// The request identifier arrives as a process argument, because
-  /// `Vm::run_entry` and `Interpreter::run_entry` take `Vec<Rc<str>>` and
-  /// nothing else: there is no public way to call an exported Cove function
-  /// with a Rust-built argument, which is issue #150. So the pull request
-  /// itself cannot be passed in, and comes back through `reviews.pull` instead
-  /// -- which is the Host API boundary, and is therefore also the thing whose
-  /// cost the embedding measures.
+  /// It was once the only way in. `run_entry` takes `Vec<Rc<str>>` on both
+  /// backends, so the request identifier had to arrive as a process argument
+  /// and the pull request had to come back out through a host call; that was
+  /// issue #150, and `evaluate` above is what closed it. What the shape is
+  /// still good for is a second thing this entry demonstrates: both `reviews`
+  /// operations take the identifier as their first argument, so every
+  /// `HostCall` event a trace sink sees carries it and a run's calls group by
+  /// application request without the runtime knowing what an application
+  /// request is.
   ///
   /// The decision leaves by both routes at once, on purpose. It is returned, so
   /// the host reads a typed `rules.policy.Decision` out of the run's answer, and
   /// it is also handed to `reviews.record`, so the same decision crosses the
   /// boundary in the other direction under the request identifier that started
-  /// it. The two are what a trace links: every `HostCall` event this run writes
-  /// carries the identifier, because both calls were given it.
+  /// it.
   export fn decideRequest(args: Array<String>) -> Result<Decision, Error>
     requires reviews
+    capability-open
+  /// Decides one pull request the host built, and answers what it decided.
+  ///
+  /// This is the function the Rust host in `examples/rules/host/` invokes, once
+  /// per application request, against a module it compiled and lowered once. It
+  /// is the signature issue #90 wrote down and issue #150 could not call:
+  /// `Vm::invoke` and `Interpreter::invoke` take a `Vec<Value>`, so the host
+  /// builds a `rules.policy.PullRequest` and hands it over, and reads the
+  /// `rules.policy.Decision` back out of the answer.
+  ///
+  /// Nothing crosses the Host API boundary here, and that is the point rather
+  /// than an omission. The pull request arrives as an argument and the decision
+  /// leaves as a result, so this entry needs no host module, asks for no
+  /// capability, and makes no call a trace would record. What an embedding
+  /// wanted a boundary for was carrying values in and out, and a boundary is a
+  /// poor way to carry values.
+  ///
+  /// `decideRequest` below is the same decision reached the other way, and it
+  /// stays because the difference between the two is what
+  /// `examples/rules/README.md` measures.
+  export fn evaluate(pr: PullRequest) -> Decision
     capability-open
   /// Fetches the pull request the host holds under `requestId`, and answers
   /// nothing else.
