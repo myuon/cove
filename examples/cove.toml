@@ -42,3 +42,7 @@ allow = ["console", "files", "process"]
 entry = "codegen.statusCodes"
 allow = ["files"]
 generates = "httpstatus/status_code.cove"
+
+[run.life]
+entry = "life.main"
+allow = ["console", "files", "process"]

@@ -1,0 +1,337 @@
+use life.schema.ActionResult
+use life.schema.Cell
+use life.schema.Decision
+use life.schema.Heading
+use life.schema.Species
+
+/// The same seed is the same world, tick for tick.
+///
+/// Two worlds built from one seed are run separately and hashed at every
+/// tick, and the two lists of hashes are compared as a whole. This is the
+/// claim the example is named for, and it is checked over a sequence rather
+/// than at the end, because two runs that ended in the same place having gone
+/// different ways would pass the weaker test.
+test fn theSameSeedRunsTheSameWay() -> Result<Unit, Error> {
+  assertEqual(
+    hashes(newWorld(seed: 7, width: 12, height: 8), 12),
+    hashes(newWorld(seed: 7, width: 12, height: 8), 12),
+  )?
+  Ok(())
+}
+
+/// Two seeds are two worlds.
+test fn aDifferentSeedRunsADifferentWay() -> Result<Unit, Error> {
+  assert(hashes(newWorld(seed: 7, width: 12, height: 8), 12) != hashes(newWorld(seed: 8, width: 12, height: 8), 12))?
+  Ok(())
+}
+
+/// A copy of the world is a snapshot of it, and stays one.
+///
+/// This is why `World` holds `Array`s and no `Vector`. A struct copies
+/// field-wise and an `Array` cannot be written through, so `let earlier =
+/// world` is the whole of what taking a snapshot takes -- no `snapshot`
+/// method, no deep copy, and nothing to remember to call.
+test fn aCopyOfTheWorldIsASnapshot() -> Result<Unit, Error> {
+  var world = newWorld(seed: 7, width: 12, height: 8)
+  let earlier = world
+  let before = hash(earlier)
+  for step in 0..<8 {
+    world = tick(world)
+  }
+  assertEqual(hash(earlier), before)?
+  assertEqual(earlier.tick, 0)?
+  assert(hash(world) != before)?
+  Ok(())
+}
+
+/// A copy of a `Vector` is not a snapshot: it is the same storage.
+///
+/// The other half of the rule above, and the reason the resolution loop can
+/// hand its claims to a helper and have the helper see what the loop has
+/// pushed since. `is` is what says the two handles are one, and `==` cannot:
+/// two vectors holding equal elements are equal without being the same.
+test fn aCopyOfAVectorIsAnAlias() -> Result<Unit, Error> {
+  var claims = Vector.of(1, 2)
+  var alias = claims
+  alias.push(3)
+  assert(claims is alias)?
+  assertEqual(claims.length(), 3)?
+  let taken = claims.toArray()
+  alias.push(4)
+  assertEqual(taken.length(), 3)?
+  assertEqual(claims.length(), 4)?
+  var separate = Vector.of(1, 2, 3, 4)
+  assertEqual(separate, claims)?
+  assert(!(separate is claims))?
+  Ok(())
+}
+
+/// Two creatures cannot take one cell, and the lower id is the one that does.
+///
+/// The tie-break is the whole of the world's conflict rule, so it is pinned
+/// on a world small enough to read: two foragers either side of one empty
+/// cell, both told to step into it.
+test fn oneCellGoesToTheLowerId() -> Result<Unit, Error> {
+  let world = arena()
+  let turn = resolve(
+    world,
+    [
+      Intent(id: 1, decision: Decision.Move(Heading.East)),
+      Intent(id: 2, decision: Decision.Move(Heading.West)),
+    ],
+  )
+  assertEqual(resultOf(turn, 1), ActionResult.Moved(Heading.East))?
+  assertEqual(resultOf(turn, 2), ActionResult.Blocked(Heading.West))?
+  assertEqual(standingOf(turn, 1), Cell(x: 1, y: 1))?
+  assertEqual(standingOf(turn, 2), Cell(x: 2, y: 1))?
+  Ok(())
+}
+
+/// Intents in the wrong order are refused rather than carried out on the
+/// wrong creature.
+///
+/// The world walks its population in id order and reads the intents in the
+/// same order, so an intent list shuffled by its caller does not decide who
+/// wins a conflict -- it is refused, one intent at a time, and the tick goes
+/// on. Both of these name a creature the world is not asking, so both are
+/// refused and nothing moves.
+test fn intentsInTheWrongOrderAreRefused() -> Result<Unit, Error> {
+  let world = arena()
+  let turn = resolve(
+    world,
+    [
+      Intent(id: 2, decision: Decision.Move(Heading.West)),
+      Intent(id: 1, decision: Decision.Move(Heading.East)),
+    ],
+  )
+  assertEqual(turn.outcomes.length(), 2)?
+  assertEqual(refusalsIn(turn), 2)?
+  Ok(())
+}
+
+/// An intent the world refuses costs its own creature the tick and nothing
+/// else.
+///
+/// The broken intent here is a hunt of a creature that does not exist, which
+/// is what a behaviour with a bug in it produces. The other creature acts,
+/// the tick completes, and the refusal is counted rather than raised: there
+/// is no path from one creature's mistake to another creature's turn.
+test fn aBrokenIntentCostsOnlyItsOwnCreature() -> Result<Unit, Error> {
+  let world = arena()
+  let turn = resolve(
+    world,
+    [
+      Intent(id: 1, decision: Decision.Hunt(9999)),
+      Intent(id: 2, decision: Decision.Move(Heading.West)),
+    ],
+  )
+  assertEqual(refusalsIn(turn), 1)?
+  assertEqual(turn.world.refusals, 1)?
+  assertEqual(resultOf(turn, 2), ActionResult.Moved(Heading.West))?
+  assertEqual(standingOf(turn, 2), Cell(x: 1, y: 1))?
+  assertEqual(turn.world.creatures.length(), 2)?
+  assertEqual(turn.world.tick, 1)?
+  Ok(())
+}
+
+/// An intent that names another creature is refused, and does not act on the
+/// creature it names.
+///
+/// The world asks its creatures in id order and reads their answers in the
+/// same order. An answer that turned up in the wrong place would otherwise be
+/// carried out on somebody else, which is the one way a mistake in the
+/// decision phase could reach a creature that did not make it.
+test fn anIntentThatNamesAnotherCreatureIsRefused() -> Result<Unit, Error> {
+  let world = arena()
+  let turn = resolve(
+    world,
+    [
+      Intent(id: 2, decision: Decision.Move(Heading.East)),
+      Intent(id: 2, decision: Decision.Move(Heading.West)),
+    ],
+  )
+  assertEqual(refusalsIn(turn), 1)?
+  assertEqual(standingOf(turn, 1), Cell(x: 0, y: 1))?
+  assertEqual(resultOf(turn, 2), ActionResult.Moved(Heading.West))?
+  Ok(())
+}
+
+/// A hunt into a thicket is refused, and the prey stands where it stood.
+///
+/// The thicket is the refuge the whole model rests on, so what makes it one
+/// is pinned here rather than left to the run: a predator standing next to
+/// prey that is in one gets a refusal, and the prey is still there
+/// afterwards.
+test fn aHuntIntoAThicketIsRefused() -> Result<Unit, Error> {
+  let world = thicket()
+  assert(isShelter(Cell(x: 3, y: 1)))?
+  let turn = resolve(
+    world,
+    [
+      Intent(id: 1, decision: Decision.Rest),
+      Intent(id: 2, decision: Decision.Hunt(1)),
+    ],
+  )
+  assertEqual(refusalsIn(turn), 1)?
+  assertEqual(turn.world.creatures.length(), 2)?
+  assertEqual(standingOf(turn, 1), Cell(x: 3, y: 1))?
+  Ok(())
+}
+
+/// The same two creatures, with the prey inside the thicket at 3,1.
+fn thicket() -> World {
+  let open = arena()
+  World(
+    tick: open.tick,
+    seed: open.seed,
+    width: open.width,
+    height: open.height,
+    food: open.food,
+    creatures: open.creatures.map(fn(creature: Creature) {
+      if creature.id == 1 {
+        Creature(
+          id: creature.id,
+          species: creature.species,
+          at: Cell(x: 3, y: 1),
+          energy: creature.energy,
+          hidden: creature.hidden,
+          born: creature.born,
+        )
+      } else {
+        creature
+      }
+    }),
+    nextId: open.nextId,
+    births: open.births,
+    deaths: open.deaths,
+    refusals: open.refusals,
+  )
+}
+
+/// Every creature is asked for one intent, and gets one answer back.
+test fn everyCreatureDecidesOnceAndIsAnsweredOnce() -> Result<Unit, Error> {
+  let world = newWorld(seed: 7, width: 12, height: 8)
+  let intents = decisions(world)
+  assertEqual(intents.length(), world.creatures.length())?
+  let turn = resolve(world, intents)
+  assertEqual(turn.outcomes.length(), world.creatures.length())?
+  Ok(())
+}
+
+/// Nothing grows without bound: a long run's world is the same size as a
+/// short run's.
+///
+/// The population is capped per species and the grid never changes size, so
+/// what a tick costs at the thousandth is what it cost at the tenth. That is
+/// the property a simulation has to have before anybody runs one for a long
+/// time, and it is cheap to check here because it is a property of the state
+/// rather than of the machine.
+test fn theWorldDoesNotGrow() -> Result<Unit, Error> {
+  var world = newWorld(seed: 3, width: 12, height: 8)
+  let cells = world.food.length()
+  for step in 0..<30 {
+    world = tick(world)
+    assertEqual(world.food.length(), cells)?
+    assert(world.creatures.length() <= 16)?
+    assert(populationsAreCapped(world))?
+  }
+  Ok(())
+}
+
+/// Food is bounded above and below, whatever is eaten or dies in a cell.
+test fn everyCellStaysInsideItsBounds() -> Result<Unit, Error> {
+  var world = newWorld(seed: 42, width: 12, height: 8)
+  for step in 0..<20 {
+    world = tick(world)
+    for level in world.food {
+      assert(level >= 0 && level <= maxFood())?
+    }
+  }
+  Ok(())
+}
+
+/// A world two creatures wide, with a thicket at one end.
+///
+/// Cell 0,1 is a thicket -- `isShelter` says so and the test above checks it
+/// -- and cell 1,1 is the empty one both creatures are told to step into.
+fn arena() -> World {
+  var food = Vector.of()
+  for index in 0..<12 {
+    food.push(0)
+  }
+  World(
+    tick: 0,
+    seed: 1,
+    width: 4,
+    height: 3,
+    food: food.freeze(),
+    creatures: [
+      Creature(
+        id: 1,
+        species: Species.Forager,
+        at: Cell(x: 0, y: 1),
+        energy: 10,
+        hidden: false,
+        born: 0,
+      ),
+      Creature(
+        id: 2,
+        species: Species.Predator,
+        at: Cell(x: 2, y: 1),
+        energy: 10,
+        hidden: false,
+        born: 0,
+      ),
+    ],
+    nextId: 3,
+    births: 0,
+    deaths: 0,
+    refusals: 0,
+  )
+}
+
+/// What the world did with this creature's intent.
+fn resultOf(turn: Turn, id: Int) -> ActionResult {
+  match turn.outcomes.filter(fn(outcome) {
+    outcome.id == id
+  }).get(0) {
+    Some(outcome) => outcome.result
+    None => ActionResult.Refused("there is no outcome for creature {id}")
+  }
+}
+
+/// Where this creature stands after the tick.
+fn standingOf(turn: Turn, id: Int) -> Cell {
+  match creatureNamed(turn.world, id) {
+    Some(creature) => creature.at
+    None => Cell(x: -1, y: -1)
+  }
+}
+
+/// How many of this turn's intents the world refused.
+fn refusalsIn(turn: Turn) -> Int {
+  turn.outcomes.filter(fn(outcome) {
+    outcome.result.refusal().isSome()
+  }).length()
+}
+
+/// Whether every species is inside the number of creatures the world holds.
+fn populationsAreCapped(world: World) -> Bool {
+  let cells = world.food.length()
+  population(world, Species.Forager) <= capacity(Species.Forager, cells) &&
+    population(world, Species.Predator) <= capacity(Species.Predator, cells) &&
+    population(world, Species.Scavenger) <= capacity(Species.Scavenger, cells)
+}
+
+/// The hash of this world at every tick, from where it stands to `ticks`
+/// later.
+fn hashes(start: World, ticks: Int) -> Array<Int> {
+  var world = start
+  var written = Vector.of()
+  written.push(hash(world))
+  for step in 0..<ticks {
+    world = tick(world)
+    written.push(hash(world))
+  }
+  written.freeze()
+}

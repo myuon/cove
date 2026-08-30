@@ -3,7 +3,7 @@
 These programs are executable design tests for Cove. The syntax is still
 provisional.
 
-All nine run today; asynchronous execution is no longer what blocks any of
+All ten run today; asynchronous execution is no longer what blocks any of
 them -- tasks run on threads.
 
 What a run of the last three does depends on the hosts it was given, and
@@ -16,7 +16,7 @@ reports a connection error; run `server` first and it has something to reach,
 though `server` routes only `/health`, so what comes back is a pair of 404s
 rather than bookings and prices. The two are not written to compose.
 
-`crates/cove-cli/tests/examples.rs` runs every one of the nine against
+`crates/cove-cli/tests/examples.rs` runs every one of the ten against
 deterministic fake hosts instead -- a listener with a scripted queue of
 requests, a `fetch` with recorded answers, a clock that moves only when
 something moves it, and a database of canned rows -- which is where their
@@ -49,6 +49,17 @@ wall-clock, heap, allocation, and records-per-second numbers over a
 100,000-record input -- the first measurement this repository has of Cove doing
 a real job rather than a benchmark. Reading it is the point of it.
 
+`life/` is the second of that kind and asks a different question. `cq/` moves
+data through a program; `life/` keeps state and changes it, tick by tick,
+which is where what a copy means stops being a curiosity and starts deciding
+whether the program is right. Its world is a struct of immutable arrays, so
+`let earlier = world` is a snapshot and nothing had to be written to make it
+one; its resolution loop hands a `Vector` to a helper and relies on the copy
+being an alias. `examples/life/README.md` records both, along with what ten
+thousand ticks cost and what they leave on the heap, and the two collection
+gaps the program hit on the way ([#154](https://github.com/myuon/cove/issues/154),
+[#155](https://github.com/myuon/cove/issues/155)).
+
 Together they test the core product hypotheses:
 
 | Program | What it validates |
@@ -62,6 +73,7 @@ Together they test the core product hypotheses:
 | `traits/` | Nominal traits, generic bounds, and both dispatch forms |
 | `callbacks/` | Routers, middleware, events, timers, retries, and task-safe captures |
 | `cq/` | A whole practical program: streaming JSON Lines and CSV transformation, typed records, actionable diagnostics, and measured throughput. [Its own README](cq/README.md) records what it found |
+| `life/` | A deterministic ecosystem simulation: a seeded generator written in Cove, a world that is a value because it holds no Vector, a resolution loop that works because a Vector is a handle, and three species that are modules. [Its own README](life/README.md) records what it found |
 | `text/` | Not a program: the module `restricted/` imports, for `export` and capabilities across a boundary, and the package's own `test fn` declarations |
 | `codegen/` | `cove generate`: a capability-controlled generator that reads `files/status_codes.txt` |
 | `httpstatus/` | Not written by hand: `codegen.statusCodes`'s output, checked in and kept honest by `cove generate --check` |
@@ -75,7 +87,7 @@ A module may name another module's exported declarations with `use`, so
 required capabilities are derived from the package's call graph, not one
 module's.
 The first implementation milestone, making `hello/` run, is done, and so is
-the one that follows it: all nine programs now have defined behavior in
+the one that follows it: all ten programs now have defined behavior in
 both diagnostics and execution, whether that behavior is a clean run, like
 `hello`'s, or a documented refusal, like `callbacks`' immediate stop when
 `database.connect` finds no real database behind `cove run` to connect to.

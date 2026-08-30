@@ -1,0 +1,95 @@
+use life.instinct.away
+use life.instinct.nearest
+use life.instinct.richest
+use life.instinct.shelter
+use life.instinct.stepOr
+use life.instinct.threats
+use life.instinct.wander
+use life.schema.Cell
+use life.schema.Decision
+use life.schema.Observation
+use life.schema.SelfView
+
+// The shy scavenger: hides first, eats second, and waits for the rest.
+//
+// It is the species the world's refusals are visible through. Cornered by a
+// predator, with no thicket beside it and nowhere left to step, it hides
+// where it stands -- and a cell that is not a thicket is not one to hide in,
+// so the world refuses the intent and the scavenger loses the tick. That is
+// deliberate: a behaviour that is wrong about the world costs itself a turn,
+// and the tick goes on around it. The alternative -- answering `Rest` in
+// that last case and never being refused -- is one word away, and is the
+// word this example is here to leave out.
+//
+// What it is not is idle. It walks for nothing, it smells food it cannot
+// see, and a carcass is worth more than a cell of grass -- but waiting where
+// nothing is going to die is how a scavenger starves, so being hungry is
+// what makes it go looking.
+
+/// The one intent this scavenger answers the tick with.
+export fn decide(view: SelfView, observation: Observation) -> Decision {
+  match nearest(threats(observation.nearby)) {
+    Some(predator) => return flee(predator.at, observation)
+    None => ()
+  }
+  if observation.here > 0 && view.energy < full() {
+    return Decision.Eat
+  }
+  match nearest(observation.nearby) {
+    Some(crowd) => if crowd.away < 2 && view.energy >= searching() {
+      return stepOr(away(crowd.at, observation), Decision.Rest)
+    }
+    None => ()
+  }
+  if view.energy < full() {
+    match observation.scent {
+      Some(heading) => return Decision.Move(heading)
+      None => ()
+    }
+  }
+  match richest(observation) {
+    Some(patch) => Decision.Move(patch.heading)
+    None => if view.energy < searching() {
+      wander(view, observation)
+    } else {
+      Decision.Rest
+    }
+  }
+}
+
+/// The energy below which a scavenger stops waiting and goes looking.
+///
+/// Waiting is what a scavenger does, and waiting where nothing is going to
+/// die is how one starves. This is the line between the two, and a scavenger
+/// that did not have it sat still until it was dead -- which the run said
+/// plainly, and which reads in the code as a `Rest` that looks perfectly
+/// reasonable.
+fn searching() -> Int {
+  18
+}
+
+/// What to do about a predator that is already this close.
+///
+/// A shelter is hidden in and a shelter in sight is walked to. A scavenger
+/// with neither, and nowhere left to step, hides where it stands -- and the
+/// world refuses that, because the cell it is standing in is not a shelter.
+fn flee(threat: Cell, observation: Observation) -> Decision {
+  if observation.shelter {
+    return Decision.Hide
+  }
+  match shelter(observation) {
+    Some(heading) => Decision.Move(heading)
+    None => stepOr(away(threat, observation), Decision.Hide)
+  }
+}
+
+/// The energy past which a scavenger stops eating and waits.
+///
+/// Above what it takes to divide, and it has to be: a creature that stopped
+/// eating below that threshold could never reach it, and a species that can
+/// never divide is a species with a fixed number of ticks left. That was true
+/// of this one for an afternoon, and the run said so -- the scavengers were
+/// gone by the hundredth tick of every seed.
+fn full() -> Int {
+  30
+}

@@ -1,0 +1,76 @@
+/// A run with no arguments is the default world, and the default world is
+/// the one a test can afford.
+///
+/// The numbers are pinned because they are a promise about cost as much as
+/// about behaviour: this entry is in the differential corpus, which runs it
+/// on both backends on every push, and twelve ticks over ninety-six cells is
+/// what that can pay for. A bigger world is `--ticks` and `--width`.
+test fn theDefaultRunIsTheOneATestCanAfford() -> Result<Unit, Error> {
+  let options = readOptions([])?
+  assertEqual(options.seed, 7)?
+  assertEqual(options.ticks, 12)?
+  assertEqual(options.every, 4)?
+  assertEqual(options.width, 12)?
+  assertEqual(options.height, 8)?
+  assertEqual(options.inspect, false)?
+  assertEqual(options.journal.isSome(), false)?
+  Ok(())
+}
+
+/// Every option is read, and reading one does not disturb the rest.
+test fn eachOptionIsRead() -> Result<Unit, Error> {
+  let options = readOptions(["--seed", "42", "--ticks", "1000", "--every", "100", "--width", "20", "--height", "12", "--journal", "run-42.jsonl", "--inspect"])?
+  assertEqual(options.seed, 42)?
+  assertEqual(options.ticks, 1000)?
+  assertEqual(options.every, 100)?
+  assertEqual(options.width, 20)?
+  assertEqual(options.height, 12)?
+  assertEqual(options.journal.unwrapOr(""), "run-42.jsonl")?
+  assertEqual(options.inspect, true)?
+  Ok(())
+}
+
+/// Nothing about the command line is guessed at, and every refusal says what
+/// was wrong with it.
+test fn everyRefusalNamesWhatWasWrong() -> Result<Unit, Error> {
+  assertEqual(
+    refusal(["--verbose"]),
+    "`--verbose` is not an option; run with `--help`",
+  )?
+  assertEqual(
+    refusal(["--seed", "--ticks", "10"]),
+    "`--seed` needs a value, and `--ticks` is another option",
+  )?
+  assertEqual(refusal(["--seed"]), "`--seed` needs a value")?
+  assertEqual(
+    refusal(["--seed", "later"]),
+    "`--seed` cannot be `later`, which is not a whole number",
+  )?
+  assertEqual(refusal(["--ticks", "0"]), "`--ticks` must be at least 1")?
+  assertEqual(
+    refusal(["--width", "2"]),
+    "`--width` cannot be fewer than 4 cells",
+  )?
+  assertEqual(
+    refusal(["--height", "200"]),
+    "`--height` cannot be more than 64 cells",
+  )?
+  Ok(())
+}
+
+/// `--help` is asked for by name, and by nothing else.
+test fn helpIsAskedForByName() -> Result<Unit, Error> {
+  assert(wantsHelp(["--help"]))?
+  assert(wantsHelp(["--seed", "3", "-h"]))?
+  assert(!wantsHelp([]))?
+  assert(!wantsHelp(["--seed", "3"]))?
+  Ok(())
+}
+
+/// What `readOptions` refused these arguments with.
+fn refusal(arguments: Array<String>) -> String {
+  match readOptions(arguments) {
+    Ok(options) => "read a run of {options.ticks} tick(s)"
+    Err(error) => error.message
+  }
+}

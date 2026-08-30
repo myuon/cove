@@ -1,0 +1,74 @@
+use life.instinct.nearest
+use life.instinct.prey
+use life.instinct.stepOr
+use life.instinct.towards
+use life.instinct.wander
+use life.schema.Decision
+use life.schema.Observation
+use life.schema.Patch
+use life.schema.SelfView
+use life.schema.Sighting
+
+// The predator: hunts what it can reach, and follows what it cannot.
+//
+// Prey is what it is for, and grass is what it falls back on: a predator
+// with nothing in sight is a predator spending energy on walking, and a
+// patrol it cannot pay for is how one starves. So below `patrol()` it eats
+// what is underfoot if anything is, and waits if nothing is, and does not
+// walk.
+
+/// The one intent this predator answers the tick with.
+export fn decide(view: SelfView, observation: Observation) -> Decision {
+  let visible = prey(observation.nearby)
+  match nearest(reachable(within(visible, 1), observation)) {
+    Some(caught) => return Decision.Hunt(caught.id)
+    None => ()
+  }
+  match nearest(visible) {
+    Some(seen) => return stepOr(towards(seen.at, observation), Decision.Rest)
+    None => ()
+  }
+  if view.energy < patrol() {
+    if observation.here > 0 {
+      return Decision.Eat
+    }
+    return Decision.Rest
+  }
+  wander(view, observation)
+}
+
+/// The sightings no further away than `steps`.
+fn within(sightings: Array<Sighting>, steps: Int) -> Array<Sighting> {
+  sightings.filter(fn(sighting) {
+    sighting.away <= steps
+  })
+}
+
+/// The adjacent prey a hunt would actually reach.
+///
+/// The world refuses a hunt into a thicket, and a predator that lunged at one
+/// anyway would spend the tick finding that out. It can see which of the four
+/// cells around it is one, so it is the predator that decides not to.
+fn reachable(
+  sightings: Array<Sighting>,
+  observation: Observation,
+) -> Array<Sighting> {
+  sightings.filter(fn(sighting) {
+    !thicket(observation.around, sighting)
+  })
+}
+
+/// Whether the cell this sighting stands in is a thicket.
+fn thicket(around: Array<Patch>, sighting: Sighting) -> Bool {
+  for patch in around {
+    if patch.at.x == sighting.at.x && patch.at.y == sighting.at.y {
+      return patch.shelter
+    }
+  }
+  false
+}
+
+/// The energy below which a predator stops patrolling and waits.
+fn patrol() -> Int {
+  20
+}

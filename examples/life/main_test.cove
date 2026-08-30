@@ -1,0 +1,44 @@
+use life.world.census
+use life.world.hash
+use life.world.newWorld
+use life.world.tick
+
+/// A journal line is exactly this, field for field and order for order.
+///
+/// It is what `cove run life -- --journal run.jsonl` writes and what anything
+/// replaying a run reads, so it is pinned as text rather than described. The
+/// hash is in it because a journal that recorded a population without a
+/// fingerprint could say two different runs went the same way.
+test fn aJournalLineIsJsonAndSaysWhatTheTickWas() -> Result<Unit, Error> {
+  let world = newWorld(seed: 7, width: 12, height: 8)
+  assertEqual(
+    event(census(world), hash(world)),
+    "\{\"tick\":0,\"hash\":902111605,\"alive\":8,\"foragers\":4,\"predators\":2,\"scavengers\":2,\"food\":204,\"energy\":112,\"births\":0,\"deaths\":0,\"refusals\":0\}",
+  )?
+  Ok(())
+}
+
+/// The reported line is a table: the counts stand in columns of their own
+/// width, so two ticks can be read down the page.
+///
+/// Every column but the last, that is. A hash is as wide as it is, it is the
+/// last thing on the line, and padding it to ten would say that a nine-digit
+/// hash is a smaller number rather than a shorter one.
+test fn aReportedTickLinesUpWithTheOnesAroundIt() -> Result<Unit, Error> {
+  let world = newWorld(seed: 7, width: 12, height: 8)
+  let later = tick(tick(world))
+  assertEqual(
+    report(census(world), hash(world)),
+    "tick     0  alive   8  forager  4  predator  2  scavenger  2  food  204  energy   112  hash 902111605",
+  )?
+  assert(report(census(later), hash(later)).startsWith("tick     2  alive   8"))?
+  Ok(())
+}
+
+/// Padding pads what is short and leaves alone what is not.
+test fn aNumberIsPaddedToItsColumn() -> Result<Unit, Error> {
+  assertEqual(number(7, 3), "  7")?
+  assertEqual(number(1234, 3), "1234")?
+  assertEqual(padded("", 2), "  ")?
+  Ok(())
+}

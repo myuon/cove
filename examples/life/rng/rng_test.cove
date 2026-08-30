@@ -1,0 +1,54 @@
+/// A seed answers the same sequence every time it is drawn from.
+///
+/// This is the whole of what "deterministic" rests on here, so it is the
+/// first thing pinned: everything else in the package is a pure function of
+/// what this answers.
+test fn theSameSeedDrawsTheSameSequence() -> Result<Unit, Error> {
+  assertEqual(sequence(7, 8), sequence(7, 8))?
+  Ok(())
+}
+
+/// Two seeds are two worlds.
+test fn aDifferentSeedDrawsADifferentSequence() -> Result<Unit, Error> {
+  assert(sequence(7, 8) != sequence(8, 8))?
+  Ok(())
+}
+
+/// A draw stays inside the bound it was given, including the awkward ones.
+test fn aDrawStaysInsideItsBound() -> Result<Unit, Error> {
+  var seed = 12345
+  for step in 0..<64 {
+    let drawn = roll(seed, 5)
+    seed = drawn.seed
+    assert(drawn.value >= 0 && drawn.value < 5)?
+  }
+  assertEqual(roll(seed, 1).value, 0)?
+  assertEqual(roll(seed, 0).value, 0)?
+  Ok(())
+}
+
+/// The generator never leaves the range its modulus describes, which is what
+/// keeps the multiplication inside `Int`.
+///
+/// Overflow is a broken invariant in Cove, so a generator that drifted out of
+/// range would not wrap: it would stop the run.
+test fn theGeneratorStaysInsideItsModulus() -> Result<Unit, Error> {
+  var seed = 2147483647
+  for step in 0..<64 {
+    seed = next(seed)
+    assert(seed >= 0 && seed < 2147483648)?
+  }
+  Ok(())
+}
+
+/// The first `count` draws from `seed`.
+fn sequence(seed: Int, count: Int) -> Array<Int> {
+  var drawn = Vector.of()
+  var generator = seed
+  for step in 0..<count {
+    let drawing = roll(generator, 100)
+    generator = drawing.seed
+    drawn.push(drawing.value)
+  }
+  drawn.freeze()
+}

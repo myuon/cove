@@ -1,0 +1,154 @@
+use console.println
+use files
+use process.args
+use life.schema.Species
+use life.world.Census
+use life.world.Creature
+use life.world.World
+use life.world.census
+use life.world.hash
+use life.world.newWorld
+use life.world.tick
+
+// `cove-life` -- a deterministic headless ecosystem.
+//
+// Two runs of the same seed and the same number of ticks print the same
+// bytes, on either backend, on any machine. Nothing here reads a clock, an
+// environment, or a random source; the only chance in the world is drawn
+// from a generator the world carries, and `--seed` is the whole of what
+// picks one world out of the rest.
+//
+// The default is twelve ticks, which is what a test can afford twice on two
+// backends -- this entry is in the differential corpus and is run on both of
+// them on every push. Ten thousand is `--ticks 10000`, and is the same
+// program.
+
+/// Runs one simulation and reports what happened in it.
+export fn main() -> Result<Unit, Error> {
+  let arguments = args()
+  if wantsHelp(arguments) {
+    println(usage())?
+    return Ok(())
+  }
+  run(readOptions(arguments)?)
+}
+
+/// Runs the ticks, reports every `every`th one, and writes the journal.
+fn run(options: Options) -> Result<Unit, Error> {
+  var world = newWorld(
+    seed: options.seed,
+    width: options.width,
+    height: options.height,
+  )
+  var journal = Vector.of()
+  println("cove-life: seed {options.seed}, {options.ticks} tick(s) over {options.width}x{options.height} cells")?
+  var count = census(world)
+  var fingerprint = hash(world)
+  println(report(count, fingerprint))?
+  journal.push(event(count, fingerprint))
+  for step in 1..options.ticks {
+    world = tick(world)
+    if world.tick % options.every == 0 || world.tick == options.ticks {
+      count = census(world)
+      fingerprint = hash(world)
+      println(report(count, fingerprint))?
+      journal.push(event(count, fingerprint))
+    }
+  }
+  let summary = census(world)
+  println("cove-life: {summary.tick} tick(s), {summary.births} birth(s), {summary.deaths} death(s), {summary.refusals} refusal(s), hash {hash(world)}")?
+  if options.inspect {
+    println(roster(world))?
+  }
+  match options.journal {
+    Some(path) => write(journal.freeze(), path)?
+    None => ()
+  }
+  Ok(())
+}
+
+/// One reported tick, as a line a person reads.
+///
+/// The census and the hash are passed in rather than taken here, because the
+/// two reports want the same two answers and each is a walk over the whole
+/// world.
+fn report(count: Census, fingerprint: Int) -> String {
+  "tick {number(count.tick, 5)}  alive {number(count.alive, 3)}  forager {number(count.foragers, 2)}  predator {number(count.predators, 2)}  scavenger {number(count.scavengers, 2)}  food {number(count.food, 4)}  energy {number(count.energy, 5)}  hash {fingerprint}"
+}
+
+/// One reported tick, as a line a program reads.
+///
+/// Built by interpolation rather than through a JSON module, because this
+/// package has none: `examples/cq` is where JSON is written and parsed, and
+/// eleven fields do not need a second one.
+fn event(count: Census, fingerprint: Int) -> String {
+  var fields = Vector.of()
+  fields.push("\"tick\":{count.tick}")
+  fields.push("\"hash\":{fingerprint}")
+  fields.push("\"alive\":{count.alive}")
+  fields.push("\"foragers\":{count.foragers}")
+  fields.push("\"predators\":{count.predators}")
+  fields.push("\"scavengers\":{count.scavengers}")
+  fields.push("\"food\":{count.food}")
+  fields.push("\"energy\":{count.energy}")
+  fields.push("\"births\":{count.births}")
+  fields.push("\"deaths\":{count.deaths}")
+  fields.push("\"refusals\":{count.refusals}")
+  "\{{",".join(fields.freeze())}\}"
+}
+
+/// Every creature that is alive, by species and then by id.
+///
+/// The sort is written down rather than relied on: the world already keeps
+/// its population in id order, and grouping it by species is this report's
+/// idea rather than the world's.
+fn roster(world: World) -> String {
+  let ordered = world.creatures.sorted(by: fn(a: Creature, b: Creature) {
+    if code(a.species) == code(b.species) {
+      a.id < b.id
+    } else {
+      code(a.species) < code(b.species)
+    }
+  })
+  var lines = Vector.of()
+  for creature in ordered {
+    lines.push("  {number(creature.id, 3)}  {creature.species.name()} at {creature.at.x},{creature.at.y}, energy {number(creature.energy, 3)}, born at tick {creature.born}")
+  }
+  if lines.isEmpty() {
+    lines.push("  (nothing is alive)")
+  }
+  "\n".join(lines.freeze())
+}
+
+/// The order the roster groups species in.
+fn code(species: Species) -> Int {
+  match species {
+    Species.Forager => 1
+    Species.Predator => 2
+    Species.Scavenger => 3
+  }
+}
+
+/// Writes the journal as JSON Lines.
+fn write(events: Array<String>, path: String) -> Result<Unit, Error> {
+  let writer = files.create(path)?
+  for entry in events {
+    writer.writeLine(entry)?
+  }
+  writer.close()?
+  println("cove-life: wrote {events.length()} event(s) to {path}")
+}
+
+/// A number right-aligned in `width` columns.
+fn number(value: Int, width: Int) -> String {
+  padded("{value}", width)
+}
+
+/// `text`, right-aligned in `width` columns, or as it is when it is wider.
+fn padded(text: String, width: Int) -> String {
+  var padding = ""
+  for column in text.length()..<width {
+    padding = "{padding} "
+  }
+  "{padding}{text}"
+}

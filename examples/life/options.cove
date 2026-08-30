@@ -1,0 +1,154 @@
+/// What one run of `cove-life` was asked to do.
+struct Options {
+  seed: Int
+  ticks: Int
+  every: Int
+  width: Int
+  height: Int
+  journal: Option<String>
+  inspect: Bool
+}
+
+/// Reads the command line, or reports what is wrong with it.
+///
+/// Nothing here touches a host, for the reason `examples/cq` gives: argument
+/// parsing that reads the environment is argument parsing that cannot be
+/// tested without one, and this is where a person is most likely to be wrong.
+fn readOptions(arguments: Array<String>) -> Result<Options, Error> {
+  var seed = 7
+  var ticks = 12
+  var every = 4
+  var width = 12
+  var height = 8
+  var journal: Option<String> = None
+  var inspect = false
+  var at = 0
+  while at < arguments.length() {
+    let argument = arguments.get(at).unwrapOr("")
+    match argument {
+      "--seed" => {
+        seed = countAfter(arguments, at)?
+        at += 2
+      }
+      "--ticks" => {
+        ticks = positiveAfter(arguments, at)?
+        at += 2
+      }
+      "--every" => {
+        every = positiveAfter(arguments, at)?
+        at += 2
+      }
+      "--width" => {
+        width = sizeAfter(arguments, at)?
+        at += 2
+      }
+      "--height" => {
+        height = sizeAfter(arguments, at)?
+        at += 2
+      }
+      "--journal" => {
+        journal = Some(valueAfter(arguments, at)?)
+        at += 2
+      }
+      "--inspect" => {
+        inspect = true
+        at += 1
+      }
+      other => return Err(
+        Error("`{other}` is not an option; run with `--help`"),
+      )
+    }
+  }
+  Ok(Options(seed: seed, ticks: ticks, every: every, width: width, height: height, journal: journal, inspect: inspect))
+}
+
+/// Whether `arguments` asks for the usage text rather than a run.
+///
+/// No arguments is a run here, and not a request for help: this program has a
+/// default world, and `cove run life` should show it.
+fn wantsHelp(arguments: Array<String>) -> Bool {
+  for argument in arguments {
+    if argument == "--help" || argument == "-h" {
+      return true
+    }
+  }
+  false
+}
+
+/// The usage text.
+fn usage() -> String {
+  var lines = Vector.of()
+  lines.push("cove-life -- a deterministic headless ecosystem")
+  lines.push("")
+  lines.push("usage: cove run life -- [options]")
+  lines.push("")
+  lines.push("options:")
+  lines.push("  --seed <number>     the world the run starts from (default 7)")
+  lines.push("  --ticks <count>     how many ticks to run (default 12)")
+  lines.push("  --every <count>     report every this many ticks (default 4)")
+  lines.push("  --width <cells>     the grid's width (default 12)")
+  lines.push("  --height <cells>    the grid's height (default 8)")
+  lines.push(
+    "  --journal <path>    write the reported ticks there as JSON Lines",
+  )
+  lines.push(
+    "  --inspect           list every creature that is alive at the end",
+  )
+  lines.push("  --help              this text")
+  "\n".join(lines.freeze())
+}
+
+/// The value after the option at `at`, which must not be another option.
+fn valueAfter(arguments: Array<String>, at: Int) -> Result<String, Error> {
+  let option = arguments.get(at).unwrapOr("")
+  match arguments.get(at + 1) {
+    Some(value) => if value.startsWith("--") {
+      Err(Error("`{option}` needs a value, and `{value}` is another option"))
+    } else {
+      Ok(value)
+    }
+    None => Err(Error("`{option}` needs a value"))
+  }
+}
+
+/// A whole number after the option at `at`.
+fn countAfter(arguments: Array<String>, at: Int) -> Result<Int, Error> {
+  let option = arguments.get(at).unwrapOr("")
+  let text = valueAfter(arguments, at)?
+  match Int.parse(text) {
+    Ok(value) => if value < 0 {
+      Err(Error("`{option}` cannot be `{text}`, which is negative"))
+    } else {
+      Ok(value)
+    }
+    Err(_) => Err(Error(
+      "`{option}` cannot be `{text}`, which is not a whole number",
+    ))
+  }
+}
+
+/// A number of at least one after the option at `at`.
+fn positiveAfter(arguments: Array<String>, at: Int) -> Result<Int, Error> {
+  let option = arguments.get(at).unwrapOr("")
+  let value = countAfter(arguments, at)?
+  if value < 1 {
+    return Err(Error("`{option}` must be at least 1"))
+  }
+  Ok(value)
+}
+
+/// A grid dimension after the option at `at`.
+///
+/// Bounded above as well as below, because the grid is walked once per tick
+/// and a world nobody can finish is not a bigger world.
+fn sizeAfter(arguments: Array<String>, at: Int) -> Result<Int, Error> {
+  let option = arguments.get(at).unwrapOr("")
+  let value = positiveAfter(arguments, at)?
+  if value > 64 {
+    return Err(Error("`{option}` cannot be more than 64 cells"))
+  }
+  if value < 4 {
+    return Err(Error("`{option}` cannot be fewer than 4 cells"))
+  }
+  Ok(value)
+}

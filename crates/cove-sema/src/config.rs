@@ -333,6 +333,7 @@ mod tests {
                 "cq",
                 "cqSample",
                 "hello",
+                "life",
                 "restricted",
                 "server",
                 "statusCodes",
