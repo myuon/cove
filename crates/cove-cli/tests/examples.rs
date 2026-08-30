@@ -940,3 +940,89 @@ fn cq_reads_back_the_sample_it_generated() {
         read.console
     );
 }
+
+// ---------------------------------------------------------------------- life
+
+/// `life` runs the same world from the same seed, and says the same thing
+/// about it every time.
+///
+/// The console is asserted line for line because a simulation's output is its
+/// whole claim: a run that agreed about the census and not about the hash, or
+/// about the hash and not about which tick it belonged to, would be a run
+/// that had gone somewhere else and arrived in the same place.
+#[test]
+fn life_runs_one_world_and_reports_the_same_one_twice() {
+    let ran = run(
+        "life.main",
+        &["console", "process", "files"],
+        Fakes::default(),
+    );
+
+    assert!(ok(&ran.value).eq_value(&Value::Unit), "{}", ran.value);
+    assert_eq!(
+        ran.console,
+        [
+            "cove-life: seed 7, 12 tick(s) over 12x8 cells",
+            "tick     0  alive   8  forager  4  predator  2  scavenger  2  food  204  energy   112  hash 902111605",
+            "tick     4  alive   7  forager  3  predator  2  scavenger  2  food  205  energy   166  hash 1549081087",
+            "tick     8  alive  13  forager  7  predator  2  scavenger  4  food  204  energy   240  hash 990376900",
+            "tick    12  alive  13  forager  7  predator  2  scavenger  4  food  191  energy   334  hash 1234420474",
+            "cove-life: 12 tick(s), 7 birth(s), 2 death(s), 0 refusal(s), hash 1234420474",
+        ],
+        "{:?}",
+        ran.console
+    );
+
+    let again = run(
+        "life.main",
+        &["console", "process", "files"],
+        Fakes::default(),
+    );
+    assert_eq!(again.console, ran.console);
+}
+
+/// A seed is the whole of what picks a world, and `--journal` writes the
+/// ticks it reported as the JSON Lines a replay reads.
+#[test]
+fn life_takes_its_world_from_its_seed_and_writes_a_journal() {
+    let ran = run(
+        "life.main",
+        &["console", "process", "files"],
+        Fakes {
+            args: vec![
+                "--seed".into(),
+                "42".into(),
+                "--ticks".into(),
+                "8".into(),
+                "--every".into(),
+                "4".into(),
+                "--journal".into(),
+                "run-42.jsonl".into(),
+            ],
+            ..Fakes::default()
+        },
+    );
+
+    assert!(ok(&ran.value).eq_value(&Value::Unit), "{}", ran.value);
+    assert_eq!(
+        ran.console.first().map(String::as_str),
+        Some("cove-life: seed 42, 8 tick(s) over 12x8 cells")
+    );
+    assert_eq!(
+        ran.console.last().map(String::as_str),
+        Some("cove-life: wrote 3 event(s) to run-42.jsonl")
+    );
+    assert_eq!(
+        ran.files.get("run-42.jsonl").map(String::as_str),
+        Some(concat!(
+            r#"{"tick":0,"hash":1428189045,"alive":8,"foragers":4,"predators":2,"scavengers":2,"food":175,"energy":112,"births":0,"deaths":0,"refusals":0}"#,
+            "\n",
+            r#"{"tick":4,"hash":1691880004,"alive":8,"foragers":4,"predators":2,"scavengers":2,"food":183,"energy":144,"births":0,"deaths":0,"refusals":0}"#,
+            "\n",
+            r#"{"tick":8,"hash":1530115049,"alive":9,"foragers":5,"predators":2,"scavengers":2,"food":191,"energy":174,"births":2,"deaths":1,"refusals":1}"#,
+            "\n",
+        )),
+        "{:?}",
+        ran.files
+    );
+}

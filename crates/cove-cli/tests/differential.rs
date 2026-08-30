@@ -469,7 +469,28 @@ use cove_sema::resolve::Program as Checked;
 /// pin what a backend does with one. It names a function declared inside a
 /// function body now, which is unsupported in the plain sense — the
 /// interpreter runs it and the lowering has no instruction for it.
-const LOWERED_FLOOR: usize = 93;
+///
+/// 93 to 94: one case, no construct, and the largest program in the corpus.
+/// `examples:life` is a deterministic ecosystem simulation — a grid, a
+/// population, three species as separate modules, and a seeded generator
+/// written in Cove — and it lowered on the day it was written, like every
+/// case before it since the higher-order builtins landed. That is the whole
+/// of what it had to prove about the lowering, and it is worth having for
+/// what it proves about the two backends instead: a run of it is twelve
+/// ticks of `map`, `filter`, `fold` and `sorted(by:)` over structs and enums
+/// with payloads, threading one `Int` seed, and the two backends print the
+/// same census and the same state hash at every tick they report. A simulation is the program shape where a
+/// disagreement about a copy, an alias, or a callback's order would show up
+/// as a different world rather than as a different line, and this is the
+/// corpus's first one.
+///
+/// It is also the corpus's most expensive case, and it was sized to be less
+/// so: twelve ticks over ninety-six cells is a third of a second across both
+/// backends here, where the whole corpus was four tenths. The size lives in
+/// `examples/life/options.cove` as the default `--ticks`, pinned by a
+/// `test fn` that says why, rather than in [`smaller_workload`] — a case
+/// whose own default is what a test can afford needs no second size.
+const LOWERED_FLOOR: usize = 94;
 
 // ------------------------------------------------------------------ the test
 
