@@ -645,7 +645,7 @@ ADR 0008 gives a thread to `spawn` and not to every `async fn`. So an
 `async fn` runs its body at the call site like any other function, and what a
 call to one answers is a handle that is already settled: the body has run
 whether or not anything awaits it, and only `await` produces the value.
-`Interpreter::invoke` says that in one line, by wrapping the result of the
+`Interpreter::call_target` says that in one line, by wrapping the result of the
 whole call in `Task::settled`.
 
 The VM cannot wrap at the call site, and the reason is the same one that fixes
@@ -1813,7 +1813,7 @@ because `Vm` is public and nothing about constructing one promises that a
 budget has been installed yet.
 
 Nothing else moves. The order the three checks are made in is the order
-`Interpreter::invoke` makes them and is unchanged, the lock is still taken to
+`Interpreter::call_target` makes them and is unchanged, the lock is still taken to
 build the error when the limit is exceeded, and a `Vm` with no budget behind
 its registry still has no limit, which is what `with_budget` answering `None`
 has always meant.
@@ -1836,7 +1836,7 @@ nothing was left behind.
 
 The interpreter does the same thing at the same point and was not changed.
 Nothing here measures the oracle, and a change to it would have to be measured
-before it could be claimed; the site is `Interpreter::invoke`'s own
+before it could be claimed; the site is `Interpreter::call_target`'s own
 `max_call_depth` read, for whoever asks the question next.
 
 What is left on the call path is two acquisitions a turn, one at the call and

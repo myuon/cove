@@ -109,6 +109,19 @@ pub struct MethodTarget {
 /// without inferring it from a count. `ret` is `Ty::Unit` for a declaration
 /// with no `->`, because a function with no declared return type returns
 /// `()` and that is a settled type rather than an absence.
+///
+/// # Three kinds of declaration have one
+///
+/// A function or a method, written with a `fn`; a struct, whose initializer
+/// `Point(x: 0.0)` is a call the checker synthesizes a signature for out of
+/// the fields, so `params` is the field types in declaration order; and one
+/// case of an enum, whose `params` is its payload types. The last two are
+/// what publishes a declared type's *shape* — the only other thing that knows
+/// it is the lowering, which turns it into slot numbers and keeps no names.
+///
+/// A struct's and a case's types are the declaration's own, so a generic
+/// declaration records the `Ty::Param` it was written with; a consumer
+/// holding a *use* completes them with `Ty::instantiate`.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Signature {
     /// The type of `self`, for a method, and nothing for a free function.
@@ -132,8 +145,9 @@ pub struct Facts {
     /// entry rather than a missing one, because the index has to stay the
     /// id.
     files: Vec<FileFacts>,
-    /// One entry per declared function or method, keyed by the file it was
-    /// written in and the start offset of its `fn` declaration.
+    /// One entry per declared function, method, struct, and enum case, keyed
+    /// by the file it was written in and the start offset of its
+    /// declaration.
     ///
     /// A hash where the expression tables are a `Vec`, and the difference is
     /// a difference in size rather than a change of mind. A declaration's
@@ -196,6 +210,9 @@ impl Facts {
     /// the checker records against the same span, so a declaration found in
     /// the tree and the fact recorded about it meet without either naming
     /// the other.
+    ///
+    /// `decl` is a `fn` declaration's span, a struct declaration's, or one
+    /// enum case's — see [`Signature`] for what each records.
     ///
     /// `None` means the checker never resolved this declaration — a body it
     /// stopped before reaching, or a tree that was never part of a checked

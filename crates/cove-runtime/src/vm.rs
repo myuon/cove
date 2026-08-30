@@ -776,6 +776,14 @@ impl<'a> Vm<'a> {
     /// API is written in, so this is where an argument whose slot is a
     /// scalar one crosses. The entry's own answer crosses back at the other
     /// end of the same boundary: the return that has no caller.
+    ///
+    /// It trusts what it is given past the argument count. A `Value` whose
+    /// parameter's slot is a scalar one is read as the `Int` or `Bool` the
+    /// lowering promised it would be, and a caller that promised wrongly ends
+    /// the process rather than getting an error back — because the lowering
+    /// has spent the checker's answer by now and there is nothing here to hold
+    /// the value to. [`Vm::invoke`] is the door that holds it, against the
+    /// declaration the checker resolved, and is what an embedder should call.
     pub fn run(&mut self, function: FunctionId, args: Vec<Value>) -> Result<Value, RuntimeError> {
         let entry = self.program.function(function);
         if args.len() as u32 != entry.arity {
@@ -905,6 +913,64 @@ impl<'a> Vm<'a> {
         args: Vec<Rc<str>>,
     ) -> Result<Value, RuntimeError> {
         let outcome = self.invoke_entry(module, name, args);
+        self.ended(outcome)
+    }
+
+    /// Calls `module.name` with the arguments `args`, and reports how the run
+    /// ended.
+    ///
+    /// [`crate::interp::Interpreter::invoke`] takes the same three things and
+    /// answers the same way, and its documentation is the description of both:
+    /// what a host may call, what holds its arguments, and what a refusal
+    /// says. Selecting a backend selects which of the two to build and decides
+    /// nothing else, exactly as it does for `run_entry`.
+    ///
+    /// Two refusals belong to this backend rather than to the language, and
+    /// both are about the *lowering* rather than about the program.
+    /// [`cove_ir::lower::lower_entry`] lowers what one entry can reach and
+    /// nothing else, so a VM built for one entry cannot invoke a function no
+    /// path from that entry leads to; this says so, and says what to lower
+    /// instead. And a lowered `var` parameter is a slot of this VM's own
+    /// stack, which a host has nothing to put in — though nothing reaches that
+    /// refusal, because the check `invoke` makes first has already refused a
+    /// `var` parameter from the declaration.
+    pub fn invoke(
+        &mut self,
+        module: &str,
+        name: &str,
+        args: Vec<Value>,
+    ) -> Result<Value, RuntimeError> {
+        let outcome = self.invoke_checked(module, name, args);
+        self.ended(outcome)
+    }
+
+    /// The check, and then the call.
+    fn invoke_checked(
+        &mut self,
+        module: &str,
+        name: &str,
+        args: Vec<Value>,
+    ) -> Result<Value, RuntimeError> {
+        crate::invoke::check(self.runtime.program(), module, name, &args)?;
+        let Some(id) = self.program.function_named(module, name) else {
+            // The check above passed, so the package *does* declare this
+            // function and the reader should not be told it does not. What is
+            // missing is the lowering, and the remedy is the caller's.
+            return Err(RuntimeError::new(format!(
+                "this run's lowering does not include `{module}.{name}`"
+            ))
+            .with_rule(
+                "A VM runs the functions one entry can reach, because that is what `lower_entry` lowers.",
+            )
+            .with_help(format!(
+                "lower it too, with `cove_ir::lower::lower_entry(program, \"{module}\", \"{name}\")`, and build a `Vm` on that program"
+            )));
+        };
+        self.run(id, args)
+    }
+
+    /// Writes a run's terminal event, whichever way in produced it.
+    fn ended(&self, outcome: Result<Value, RuntimeError>) -> Result<Value, RuntimeError> {
         let (classification, message) = match &outcome {
             // Cove's entry returns `Result<Unit, Error>`, so an `Err` is the
             // program saying what it was written to say, exactly as it is on
@@ -1042,7 +1108,7 @@ impl<'a> Vm<'a> {
 
         // Entering a call is a safepoint and the entry is a call, so a run
         // that was cancelled before it began stops before its first
-        // instruction — which is what `Interpreter::invoke` does for the
+        // instruction — which is what `Interpreter::call_target` does for the
         // entry as well.
         self.safepoint(running.span)?;
         self.charge(blocks[0], || running.span_at(0))?;
@@ -2019,7 +2085,7 @@ impl<'a> Vm<'a> {
     /// left is to copy the captures in behind them and give the rest of the
     /// frame room.
     ///
-    /// The order of the checks is `Interpreter::invoke`'s, through
+    /// The order of the checks is `Interpreter::call_target`'s, through
     /// [`Vm::enter`]: the depth limit, the host's own, and the safepoint
     /// every call is. The arity is checked first and in the interpreter's
     /// words, because `bind_params` reports it before it reaches any of
@@ -2545,7 +2611,7 @@ impl<'a> Vm<'a> {
 
     /// Checks what a call is allowed to do before it does it.
     ///
-    /// The three checks, in the order `Interpreter::invoke` makes them: the
+    /// The three checks, in the order `Interpreter::call_target` makes them: the
     /// unconditional depth limit, the host's own `max_call_depth`, and the
     /// safepoint, because every call is one.
     fn enter(&mut self, callee: &Function, span: Span) -> Result<(), RuntimeError> {
@@ -2625,7 +2691,7 @@ impl<'a> Vm<'a> {
         // settled: the body ran here, at the call, and only `await` produces
         // the value. Wrapping where the frame closes catches every way a body
         // can end — a `return`, the last instruction, and a `?` that failed —
-        // which is what `Interpreter::invoke` gets by wrapping the result of
+        // which is what `Interpreter::call_target` gets by wrapping the result of
         // the whole call. Guarded rather than read off the callee, for the
         // reason `Vm::async_frames` gives.
         if self.async_frames.last() == Some(&self.frames.len()) {

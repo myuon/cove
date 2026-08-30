@@ -786,14 +786,15 @@ impl<'a> Interpreter<'a> {
     /// `args` are the process arguments; they are passed as an
     /// `Array<String>` when the entry declares a parameter for them.
     ///
-    /// Every path into a Cove program passes through here — `cove run`, `cove
-    /// test`, `cove generate`, `cove replay`, a `cove build` binary, and a
-    /// host embedding the runtime — so this is where a run's terminal event
-    /// is written, and writing it here is what makes "every run has one" true
-    /// rather than a claim about the paths somebody remembered. It wraps
-    /// `Interpreter::enter` rather than living inside it so that a run that
-    /// never reached its entry — one that named a function this package does
-    /// not declare, say — still ends with an event saying so.
+    /// Every path a *command* takes into a Cove program passes through here —
+    /// `cove run`, `cove test`, `cove generate`, `cove replay`, and a `cove
+    /// build` binary — because a command has strings to hand over and nothing
+    /// else. A host that has a value instead calls [`Interpreter::invoke`],
+    /// which is the same run with a different way in.
+    ///
+    /// It wraps `Interpreter::enter` rather than living inside it so that a
+    /// run that never reached its entry — one that named a function this
+    /// package does not declare, say — still ends with an event saying so.
     ///
     /// # Run this on a thread with at least [`STACK_SIZE`] bytes
     ///
@@ -842,6 +843,76 @@ impl<'a> Interpreter<'a> {
         args: Vec<Rc<str>>,
     ) -> Result<Value, RuntimeError> {
         let outcome = self.enter(module, name, args);
+        self.ended(outcome)
+    }
+
+    /// Calls `module.name` with the arguments `args`, and records how the run
+    /// came out.
+    ///
+    /// This is the other public way into a Cove program, and the one
+    /// [`Interpreter::run_entry`] is not: an entry takes the process
+    /// arguments, which are strings, so `run_entry` is how a *command* speaks
+    /// to a program and this is how an *application* does. A rule engine's
+    /// `evaluate(pr: PullRequest) -> Decision` is invoked here with a
+    /// [`Value`] the host built, and answers the `Decision` the host reads —
+    /// which the entry's result already allowed, so this is the way in
+    /// catching up with the way out. See issue #150.
+    ///
+    /// [`Vm::invoke`](crate::vm::Vm::invoke) takes the same three things and
+    /// answers the same way, exactly as the two `run_entry`s do.
+    ///
+    /// # What holds the arguments to anything
+    ///
+    /// Everything the checker settled, and nothing else. Before the first
+    /// instruction runs:
+    ///
+    /// - the declaration must be one a host can call at all — no type
+    ///   parameter, no `var` parameter, no variadic one;
+    /// - `args` must be exactly as long as the declared parameter list, a
+    ///   parameter with a default included;
+    /// - each value must be one its declared type admits, followed as deeply
+    ///   as the type goes, with a nominal type checked by the name the value
+    ///   carries.
+    ///
+    /// A capability is *not* checked here, because an invocation grants
+    /// nothing: what the called function may reach is what the
+    /// [`HostRegistry`] it runs against was granted, exactly as for any other
+    /// run.
+    ///
+    /// Every one of those refusals is a [`RuntimeError`] carrying the rule it
+    /// broke, the span of the parameter it was about, and the signature the
+    /// checker resolved.
+    ///
+    /// # Run this on a thread with at least [`STACK_SIZE`] bytes
+    ///
+    /// For the reason [`Interpreter::run_entry`] gives, and in the same way.
+    pub fn invoke(
+        &mut self,
+        module: &str,
+        name: &str,
+        args: Vec<Value>,
+    ) -> Result<Value, RuntimeError> {
+        let outcome = self.invoke_checked(module, name, args);
+        self.ended(outcome)
+    }
+
+    /// The check, and then the call.
+    fn invoke_checked(
+        &mut self,
+        module: &str,
+        name: &str,
+        args: Vec<Value>,
+    ) -> Result<Value, RuntimeError> {
+        crate::invoke::check(self.program, module, name, &args)?;
+        self.enter_with(module, name, args)
+    }
+
+    /// Writes a run's terminal event, whichever way in produced it.
+    ///
+    /// Every path into a Cove program passes through here, which is what makes
+    /// "every run has one" true rather than a claim about the paths somebody
+    /// remembered.
+    fn ended(&self, outcome: Result<Value, RuntimeError>) -> Result<Value, RuntimeError> {
         let (classification, message) = match &outcome {
             // Cove's entry returns `Result<Unit, Error>`, so an `Err` is the
             // program saying what it was written to say. It is a failure of
@@ -858,7 +929,10 @@ impl<'a> Interpreter<'a> {
         outcome
     }
 
-    /// The entry itself, from looking it up to retiring the last heap.
+    /// The process arguments as the one value an entry may take them as.
+    ///
+    /// The entry-shape rule is the language's and not a backend's, so this and
+    /// [`crate::vm::Vm`]'s copy of it refuse in the same words.
     fn enter(
         &mut self,
         module: &str,
@@ -873,12 +947,7 @@ impl<'a> Interpreter<'a> {
 
         let arguments = match decl.params.len() {
             0 => Vec::new(),
-            1 => vec![EvaluatedArg {
-                label: None,
-                spread: false,
-                slot: ArgSlot::Value(Value::Array(args.into_iter().map(Value::Str).collect())),
-                span,
-            }],
+            1 => vec![Value::Array(args.into_iter().map(Value::Str).collect())],
             other => {
                 return Err(RuntimeError::new(format!(
                     "entry `{module}.{name}` declares {other} parameters"
@@ -892,6 +961,39 @@ impl<'a> Interpreter<'a> {
                 )));
             }
         };
+        self.enter_with(module, name, arguments)
+    }
+
+    /// The call itself, from looking the declaration up to retiring the last
+    /// heap.
+    ///
+    /// The one seam. `run_entry` reaches it having turned the process
+    /// arguments into the array an entry declares, and [`Interpreter::invoke`]
+    /// reaches it having held a host's own values to what the checker
+    /// resolved; nothing below this line knows which of the two happened.
+    fn enter_with(
+        &mut self,
+        module: &str,
+        name: &str,
+        args: Vec<Value>,
+    ) -> Result<Value, RuntimeError> {
+        let entry = self.program.lookup_fn(module, name).ok_or_else(|| {
+            RuntimeError::new(format!("this package does not declare `{module}.{name}`"))
+        })?;
+        let decl = entry.decl.clone();
+        let span = decl.span;
+        let arguments: Vec<EvaluatedArg> = args
+            .into_iter()
+            .enumerate()
+            .map(|(position, value)| EvaluatedArg {
+                label: None,
+                spread: false,
+                slot: ArgSlot::Value(value),
+                // A host's argument was written nowhere, so what a diagnostic
+                // about it points at is the parameter it was given to.
+                span: decl.params.get(position).map_or(span, |param| param.span),
+            })
+            .collect();
 
         self.runtime.trace(TraceEvent::EntryEnter {
             module: module.to_string(),
@@ -900,7 +1002,7 @@ impl<'a> Interpreter<'a> {
         self.timings.push(Timing::start());
 
         let outcome = self
-            .invoke(
+            .call_target(
                 &Target {
                     name,
                     params: &decl.params,
@@ -1336,7 +1438,7 @@ pub(crate) fn host_enum_case(
 impl<'a> Interpreter<'a> {
     // ---------------------------------------------------------------- calls
 
-    fn invoke(
+    fn call_target(
         &mut self,
         target: &Target<'_>,
         receiver: Option<ArgSlot>,
@@ -1596,7 +1698,7 @@ impl<'a> Interpreter<'a> {
                         "A run has one backend, and a closure belongs to the run that made it.",
                     ));
                 };
-                self.invoke(
+                self.call_target(
                     &Target {
                         name: "this closure",
                         params,
@@ -2358,7 +2460,7 @@ impl<'a> Interpreter<'a> {
                 let module = env.module.clone();
                 if let Some((owner, decl)) = self.find_function(&module, name) {
                     let args = self.eval_args(env, args, trailing)?;
-                    return Ok(self.invoke(
+                    return Ok(self.call_target(
                         &Target {
                             name,
                             params: &decl.params,
@@ -2452,7 +2554,7 @@ impl<'a> Interpreter<'a> {
                                     self.find_method(&owner, head, &name.node)
                                 {
                                     let args = self.eval_args(env, args, trailing)?;
-                                    return Ok(self.invoke(
+                                    return Ok(self.call_target(
                                         &Target {
                                             name: &name.node,
                                             params: &decl.params,
@@ -2480,7 +2582,7 @@ impl<'a> Interpreter<'a> {
                                 self.find_method(&owner, head, &name.node)
                             {
                                 let args = self.eval_args(env, args, trailing)?;
-                                return Ok(self.invoke(
+                                return Ok(self.call_target(
                                     &Target {
                                         name: &name.node,
                                         params: &decl.params,
@@ -2502,7 +2604,7 @@ impl<'a> Interpreter<'a> {
                         if let Some(owner) = self.imported_module(&module, head) {
                             if let Some(decl) = self.exported_function(&owner, &name.node) {
                                 let args = self.eval_args(env, args, trailing)?;
-                                return Ok(self.invoke(
+                                return Ok(self.call_target(
                                     &Target {
                                         name: &name.node,
                                         params: &decl.params,
@@ -2676,7 +2778,7 @@ impl<'a> Interpreter<'a> {
                     }),
                 };
                 let args = self.eval_args(env, args, trailing)?;
-                return Ok(self.invoke(
+                return Ok(self.call_target(
                     &Target {
                         name,
                         params: &decl.params,
@@ -3065,7 +3167,7 @@ impl<'a> Interpreter<'a> {
         let Some((module, decl)) = self.find_method(type_module, short, "snapshot") else {
             return Err(builtins::no_snapshot_conformance(&receiver, span));
         };
-        self.invoke(
+        self.call_target(
             &Target {
                 name: "snapshot",
                 params: &decl.params,

@@ -684,6 +684,65 @@ impl Value {
         }))
     }
 
+    /// A value of the declared struct type `type_name`, carrying `fields` in
+    /// declaration order.
+    ///
+    /// `type_name` is the qualified name the declaring module gives it, such
+    /// as `rules.policy.PullRequest`: that is the name every value of a
+    /// declared type carries, and the name an invocation and the Host API
+    /// boundary both check against.
+    ///
+    /// This exists so that a host building an argument for
+    /// [`Vm::invoke`](crate::vm::Vm::invoke) does not have to name
+    /// [`StructValue`]'s layout to do it — the `Rc`, the field vector, and in
+    /// particular `opaque`, which records that the *declaration* said `export
+    /// opaque struct` (ADR 0014) and is therefore not a thing a caller has an
+    /// answer for. Issue #109 asks that the internal representation become
+    /// less exposed to embedders; this is one place it was exposed for no
+    /// reason.
+    pub fn structure<N: Into<Rc<str>>>(
+        type_name: impl Into<Rc<str>>,
+        fields: impl IntoIterator<Item = (N, Value)>,
+    ) -> Value {
+        Value::Struct(Rc::new(StructValue {
+            type_name: type_name.into(),
+            fields: fields
+                .into_iter()
+                .map(|(name, value)| (name.into(), value))
+                .collect(),
+            opaque: false,
+        }))
+    }
+
+    /// A value of the declared enum type `type_name`, in the case `case`,
+    /// carrying `payload` in the order the case declares it.
+    ///
+    /// The companion of [`Value::structure`] for the other declared shape.
+    /// [`Value::ok`] and the three beside it build the *builtin* enums, whose
+    /// case names come from `cove_schema::builtins` and are not a caller's to
+    /// choose; this one takes both names because a package's own enum is a
+    /// package's own.
+    pub fn enumeration(
+        type_name: impl Into<Rc<str>>,
+        case: impl Into<Rc<str>>,
+        payload: impl IntoIterator<Item = Value>,
+    ) -> Value {
+        Value::Enum(Box::new(EnumValue {
+            type_name: type_name.into(),
+            case: case.into(),
+            payload: payload.into_iter().collect(),
+        }))
+    }
+
+    /// An `Array` holding `items`, in order.
+    ///
+    /// The companion of [`Value::structure`], and there for the same reason: a
+    /// host that builds an array should not have to know that the elements are
+    /// stored behind a shared pointer to a slice.
+    pub fn array(items: impl IntoIterator<Item = Value>) -> Value {
+        Value::Array(items.into_iter().collect())
+    }
+
     /// Whether this is an `Ok`, the success case of a `Result`.
     pub fn is_ok(&self) -> bool {
         self.builtin_case(&RESULT, &OK_CASE).is_some()

@@ -1078,7 +1078,7 @@ impl<'a> Lowering<'a> {
             // A lambda's parameters are bound by the same `bind_params`, so
             // one written `dyn Trait` receives a trait object exactly as a
             // declaration's does. A lambda has no written return type, so
-            // there is no second conversion here: `Interpreter::invoke`
+            // there is no second conversion here: `Interpreter::call_target`
             // reads one off `Closure::decl`, and a lambda's is `None`.
             body.coerce_param(module, param, params[at], slots[at], true);
         }
@@ -1102,7 +1102,7 @@ impl<'a> Lowering<'a> {
             returns: SlotKind::Value,
             has_receiver: false,
             // An `async` lambda answers a settled task exactly as an `async
-            // fn` does, and for the same reason: `Interpreter::invoke` reads
+            // fn` does, and for the same reason: `Interpreter::call_target` reads
             // `is_async` off the closure it was handed and wraps what the
             // body produced.
             answers_a_task: is_async,
@@ -1537,7 +1537,7 @@ struct Body<'a, 'l> {
     /// The conversion this function's written return type asks for, emitted
     /// before every one of its returns.
     ///
-    /// `Interpreter::invoke` converts what a body answered against the type
+    /// `Interpreter::call_target` converts what a body answered against the type
     /// the declaration *wrote*, so the conversion belongs to the callee and
     /// not to the call: a declaration with a `dyn Trait` return type answers
     /// a trait object whichever call site asked. Kept here rather than
@@ -1744,7 +1744,7 @@ impl<'a, 'l> Body<'a, 'l> {
     /// carries the answer out.
     ///
     /// Every return of a function reaches this, because
-    /// `Interpreter::invoke` converts the one value a call answered and does
+    /// `Interpreter::call_target` converts the one value a call answered and does
     /// not ask which `return` produced it.
     fn emit_dyn_return(&mut self, span: Span) {
         if let Some(inst) = self.dyn_return {
@@ -9216,7 +9216,7 @@ mod tests {
     }
 
     /// A declared `dyn Trait` return type converts the answer before it
-    /// leaves, which is where `Interpreter::invoke` converts one — so the
+    /// leaves, which is where `Interpreter::call_target` converts one — so the
     /// conversion belongs to the callee and every `return` of it reaches
     /// one.
     #[test]
