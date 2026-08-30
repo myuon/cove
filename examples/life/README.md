@@ -346,11 +346,24 @@ is where that generalization actually lives. `take(visible, sightLimit())` is
 guard went with it, because `slice` clamps. That was
 [issue #155](https://github.com/myuon/cove/issues/155).
 
-The fourth thing that issue asked for is still missing: an indexed walk. Where
-a walk needs to know *where* it is, this program still writes a `for` over a
-range with `get(index).unwrapOr(...)`, and the default in that `unwrapOr` is a
-value that cannot happen. `indexOf` answers where a *value* is, which is a
-different question.
+The fourth thing that issue asked for is still missing: an indexed walk. It is
+worth naming the one place precisely, because the shape it takes is not the
+shape the issue predicted and the fix the issue proposed would not reach it.
+`world.resolve` walks `world.creatures` with a `for` and keeps a `position`
+counter beside it by hand, advanced the moment it has been read, so that it
+can read the intent at the same position out of a parallel `Array`:
+`intents.get(at).unwrapOr(...)`, whose default is an intent no creature
+answers to and which cannot happen. `indexOf` answers where a *value* is,
+which is a different question, and it is not the one this loop asks.
+
+The issue's own suggestion was a second callback arity on `map` and `filter` —
+`fn(T, Int) -> R` — on the grounds that it is "not a language change" but an
+entry in a table. That would not help here: a callback arity only reaches a
+walk that could have been a `map` to begin with, and this one cannot be, since
+its body mutates ten `var`s that outlive it and it is the resolution loop
+rather than a walk. What would reach it is a `for` that knows its own
+position, and that needs either a loop form or a pair type — a language change
+either way, which is the opposite of what the issue assumed.
 
 **Was not easy, and now is easier: the grid.** A `Vector` could be pushed onto
 and could never have an element replaced, so the grid — the one piece of state
