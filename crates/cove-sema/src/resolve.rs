@@ -5863,6 +5863,73 @@ export struct Booking {
             .any(|d| d.code == "cove::resolve::duplicate_match_arm"));
     }
 
+    /// Two arms naming one case are not duplicates when their sub-patterns
+    /// disagree: `Some(Json.Text(value))` matches only a `Some` holding a
+    /// `Json.Text`, so the `Some(other)` after it is reachable, and both
+    /// arms bind. Only a sub-pattern that matches everything makes the case
+    /// covered.
+    #[test]
+    fn a_narrower_sub_pattern_does_not_cover_its_whole_case() {
+        let module = module_from_sources(
+            "nested_sub_pattern",
+            &["enum Json {\n  Text(String)\n  Number(Int)\n}\n\n\
+               fn describe(entry: Option<Json>) -> String {\n  \
+               match entry {\n    \
+               None => \"none\"\n    \
+               Some(Json.Text(value)) => value\n    \
+               Some(other) => \"other\"\n  \
+               }\n}\n"],
+        );
+        let package = package_of(module);
+        let program = resolve(&package).expect("resolves: the arms do not overlap");
+        assert!(!program
+            .notices
+            .iter()
+            .any(|d| d.code == "cove::resolve::unreachable_match_arm"));
+    }
+
+    /// A binding sub-pattern *is* a catch-all for its case, so a second
+    /// `Some` arm after one is the dead code the rule exists to catch.
+    #[test]
+    fn a_binding_sub_pattern_covers_its_whole_case() {
+        let module = module_from_sources(
+            "binding_sub_pattern",
+            &["fn describe(entry: Option<Int>) -> String {\n  \
+               match entry {\n    \
+               None => \"none\"\n    \
+               Some(first) => \"first\"\n    \
+               Some(second) => \"second\"\n  \
+               }\n}\n"],
+        );
+        let package = package_of(module);
+        let errs = resolve(&package).unwrap_err();
+        assert!(errs
+            .iter()
+            .any(|d| d.code == "cove::resolve::duplicate_match_arm"));
+    }
+
+    /// The distinction recurses: two arms whose sub-patterns are themselves
+    /// the same pattern are still a duplicate, however deep the agreement
+    /// goes.
+    #[test]
+    fn identical_sub_patterns_are_still_a_duplicate() {
+        let module = module_from_sources(
+            "identical_sub_pattern",
+            &["enum Json {\n  Text(String)\n  Number(Int)\n}\n\n\
+               fn describe(entry: Option<Json>) -> String {\n  \
+               match entry {\n    \
+               None => \"none\"\n    \
+               Some(Json.Text(first)) => first\n    \
+               Some(Json.Text(second)) => second\n  \
+               }\n}\n"],
+        );
+        let package = package_of(module);
+        let errs = resolve(&package).unwrap_err();
+        assert!(errs
+            .iter()
+            .any(|d| d.code == "cove::resolve::duplicate_match_arm"));
+    }
+
     #[test]
     fn arm_after_a_wildcard_is_an_unreachable_warning() {
         let module = module_from_sources(
