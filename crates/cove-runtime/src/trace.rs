@@ -89,7 +89,7 @@ use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use crate::task::Transfer;
-use crate::value::Value;
+use crate::value::{Repr, Value};
 
 /// The version of the JSONL trace format this build writes, and the only one
 /// it reads.
@@ -631,28 +631,28 @@ fn encode_value(value: &Value) -> String {
         )
     };
     match value {
-        Value::Unit => "{\"type\":\"unit\"}".to_string(),
-        Value::Bool(b) => format!("{{\"type\":\"bool\",\"value\":{b}}}"),
-        Value::Int(i) => format!("{{\"type\":\"int\",\"value\":{i}}}"),
+        Value(Repr::Unit) => "{\"type\":\"unit\"}".to_string(),
+        Value(Repr::Bool(b)) => format!("{{\"type\":\"bool\",\"value\":{b}}}"),
+        Value(Repr::Int(i)) => format!("{{\"type\":\"int\",\"value\":{i}}}"),
         // JSON has no way to write an infinity or a NaN, so a float that is
         // not finite is recorded as what it printed rather than as a number
         // no reader could parse back.
-        Value::Float(x) if x.is_finite() => format!("{{\"type\":\"float\",\"value\":{x:?}}}"),
-        Value::Duration(ns) => format!("{{\"type\":\"duration\",\"ns\":{ns}}}"),
-        Value::Str(s) => format!("{{\"type\":\"string\",\"value\":{}}}", json_string(s)),
+        Value(Repr::Float(x)) if x.is_finite() => format!("{{\"type\":\"float\",\"value\":{x:?}}}"),
+        Value(Repr::Duration(ns)) => format!("{{\"type\":\"duration\",\"ns\":{ns}}}"),
+        Value(Repr::Str(s)) => format!("{{\"type\":\"string\",\"value\":{}}}", json_string(s)),
         // A handle is a name, so recording it whole is recording the name:
         // that is exactly what a replay needs in order to hand the same
         // resource back and match the calls later made on it.
-        Value::Resource(handle) => format!(
+        Value(Repr::Resource(handle)) => format!(
             "{{\"type\":\"resource\",\"name\":{},\"id\":{}}}",
             json_string(&handle.qualified_type()),
             handle.id
         ),
-        Value::Array(items) => {
+        Value(Repr::Array(items)) => {
             let items = items.iter().map(encode_value).collect::<Vec<_>>().join(",");
             format!("{{\"type\":\"array\",\"items\":[{items}]}}")
         }
-        Value::Enum(value) => {
+        Value(Repr::Enum(value)) => {
             let payload = value
                 .payload
                 .iter()
@@ -665,7 +665,7 @@ fn encode_value(value: &Value) -> String {
                 json_string(&value.case)
             )
         }
-        Value::Struct(value) => {
+        Value(Repr::Struct(value)) => {
             let fields = value
                 .fields
                 .iter()
@@ -1054,8 +1054,8 @@ mod tests {
     fn a_granted_call_records_its_arguments_and_its_result() {
         assert_eq!(
             record_one(host_call(
-                vec![Value::Str("input".into())],
-                answered(Value::ok(Value::Str("text".into()))),
+                vec![Value(Repr::Str("input".into()))],
+                answered(Value::ok(Value(Repr::Str("text".into())))),
             )),
             r#"{"event":"host_call","task":0,"module":"documents","op":"read","capability":"documents","wait_ns":900,"granted":true,"args":[{"type":"string","value":"input"}],"outcome":{"kind":"value","value":{"type":"enum","name":"Result","case":"Ok","payload":[{"type":"string","value":"text"}]}}}"#
         );
@@ -1071,7 +1071,7 @@ mod tests {
                 capability: "network".to_string(),
                 wait: Duration::ZERO,
                 granted: false,
-                args: vec![recorded(Value::Str("https://example.test".into()))],
+                args: vec![recorded(Value(Repr::Str("https://example.test".into())))],
                 outcome: None,
             }),
             r#"{"event":"host_call","task":3,"module":"network","op":"fetch","capability":"network","wait_ns":0,"granted":false,"args":[{"type":"string","value":"https://example.test"}],"outcome":null}"#
@@ -1108,8 +1108,8 @@ mod tests {
             record_with(
                 ValueCapture::Redacted,
                 host_call(
-                    vec![Value::Str("PASSWORD".into())],
-                    answered(Value::some(Value::Str("hunter2".into()))),
+                    vec![Value(Repr::Str("PASSWORD".into()))],
+                    answered(Value::some(Value(Repr::Str("hunter2".into())))),
                 )
             ),
             r#"{"event":"host_call","task":0,"module":"documents","op":"read","capability":"documents","wait_ns":900,"granted":true,"args":[{"type":"redacted","of":"String"}],"outcome":{"kind":"value","value":{"type":"redacted","of":"Option"}}}"#
@@ -1123,11 +1123,11 @@ mod tests {
         let text = record_with(
             ValueCapture::Redacted,
             host_call(
-                vec![Value::Struct(Rc::new(crate::value::StructValue {
+                vec![Value(Repr::Struct(Rc::new(crate::value::StructValue {
                     type_name: "Credentials".into(),
-                    fields: vec![("token".into(), Value::Str("hunter2".into()))],
+                    fields: vec![("token".into(), Value(Repr::Str("hunter2".into())))],
                     opaque: false,
-                }))],
+                })))],
                 None,
             ),
         );
@@ -1142,26 +1142,31 @@ mod tests {
     #[test]
     fn every_value_shape_that_crosses_the_boundary_has_an_encoding() {
         let encoded = |value: Value| encode_value(&value);
-        assert_eq!(encoded(Value::Unit), r#"{"type":"unit"}"#);
+        assert_eq!(encoded(Value(Repr::Unit)), r#"{"type":"unit"}"#);
         assert_eq!(
-            encoded(Value::Bool(true)),
+            encoded(Value(Repr::Bool(true))),
             r#"{"type":"bool","value":true}"#
         );
-        assert_eq!(encoded(Value::Int(-7)), r#"{"type":"int","value":-7}"#);
         assert_eq!(
-            encoded(Value::Float(1.5)),
+            encoded(Value(Repr::Int(-7))),
+            r#"{"type":"int","value":-7}"#
+        );
+        assert_eq!(
+            encoded(Value(Repr::Float(1.5))),
             r#"{"type":"float","value":1.5}"#
         );
         assert_eq!(
-            encoded(Value::Duration(1_000)),
+            encoded(Value(Repr::Duration(1_000))),
             r#"{"type":"duration","ns":1000}"#
         );
         assert_eq!(
-            encoded(Value::Str("hi".into())),
+            encoded(Value(Repr::Str("hi".into()))),
             r#"{"type":"string","value":"hi"}"#
         );
         assert_eq!(
-            encoded(Value::Array(vec![Value::Int(1), Value::Int(2)].into())),
+            encoded(Value(Repr::Array(
+                vec![Value(Repr::Int(1)), Value(Repr::Int(2))].into()
+            ))),
             r#"{"type":"array","items":[{"type":"int","value":1},{"type":"int","value":2}]}"#
         );
         assert_eq!(
@@ -1180,7 +1185,9 @@ mod tests {
     /// call was made by the entry or by a task.
     #[test]
     fn a_value_that_may_not_cross_a_boundary_is_recorded_as_opaque() {
-        let vector = Value::Vector(crate::value::VectorStorage::new(vec![Value::Int(1)]));
+        let vector = Value(Repr::Vector(crate::value::VectorStorage::new(vec![Value(
+            Repr::Int(1),
+        )])));
         let recorded = RecordedValue::of(&vector);
         assert!(
             matches!(&recorded, RecordedValue::Opaque { of, shown } if of == "Vector" && shown == "[1]")
@@ -1199,7 +1206,7 @@ mod tests {
     /// writing side produces the encoding it would have had all along.
     #[test]
     fn a_value_that_may_cross_a_boundary_is_carried_whole() {
-        let recorded = RecordedValue::of(&Value::ok(Value::Str("text".into())));
+        let recorded = RecordedValue::of(&Value::ok(Value(Repr::Str("text".into()))));
         assert!(matches!(recorded, RecordedValue::Carried(_)));
         assert_eq!(
             recorded_to_json(&recorded, ValueCapture::Full),
@@ -1213,13 +1220,13 @@ mod tests {
     #[test]
     fn a_value_the_encoding_cannot_represent_is_recorded_as_opaque() {
         assert_eq!(
-            encode_value(&Value::Vector(crate::value::VectorStorage::new(vec![
-                Value::Int(1)
-            ]))),
+            encode_value(&Value(Repr::Vector(crate::value::VectorStorage::new(
+                vec![Value(Repr::Int(1))]
+            )))),
             r#"{"type":"opaque","of":"Vector","shown":"[1]"}"#
         );
         assert_eq!(
-            encode_value(&Value::Float(f64::INFINITY)),
+            encode_value(&Value(Repr::Float(f64::INFINITY))),
             r#"{"type":"opaque","of":"Float","shown":"inf"}"#
         );
     }

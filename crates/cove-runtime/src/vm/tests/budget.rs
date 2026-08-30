@@ -5,6 +5,7 @@
 //! that a limit is reached, and which invocation it bounds, does not.
 
 use super::*;
+use crate::value::Repr;
 
 /// A program whose one function costs fuel to run: a loop is charged at
 /// its back edge on the tree walk and by the block on the VM, so both
@@ -40,7 +41,7 @@ fn invocations(
     let buffer = Buffer::default();
     let hosts = hosts(&buffer, session.map(Budget::new));
     let runtime = Runtime::new(checked.clone(), sources.clone(), hosts.clone());
-    let argument = || vec![Value::Int(200)];
+    let argument = || vec![Value(Repr::Int(200))];
     let described = |outcome: Result<Value, RuntimeError>| outcome.err().map(|e| e.message);
     let outcomes = if on_vm {
         let mut vm = Vm::new(&runtime, &hosts, lowered);

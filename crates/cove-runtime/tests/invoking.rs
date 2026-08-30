@@ -237,12 +237,12 @@ fn note(id: &str, tags: &[&str], weight: i64) -> Value {
     Value::structure(
         "m.Note",
         [
-            ("id", Value::Str(id.into())),
+            ("id", Value::string(id)),
             (
                 "tags",
-                Value::array(tags.iter().map(|tag| Value::Str((*tag).into()))),
+                Value::array(tags.iter().map(|tag| Value::string(*tag))),
             ),
-            ("weight", Value::Int(weight)),
+            ("weight", Value::int(weight)),
         ],
     )
 }
@@ -301,14 +301,14 @@ fn a_host_invokes_an_exported_function_with_a_value_it_built() {
 #[test]
 fn a_scalar_parameter_takes_the_value_and_refuses_anything_else() {
     for backend in BOTH {
-        let (answer, _) = invoke(backend, "doubled", vec![Value::Int(21)]);
+        let (answer, _) = invoke(backend, "doubled", vec![Value::int(21)]);
         assert!(
-            matches!(answer, Ok(Value::Int(42))),
+            answer.as_ref().is_ok_and(|v| v.as_int() == Some(42)),
             "{backend:?}: {answer:?}"
         );
 
         let (message, rule, help) =
-            refusal(invoke(backend, "doubled", vec![Value::Str("21".into())]).0);
+            refusal(invoke(backend, "doubled", vec![Value::string("21")]).0);
         assert_eq!(
             message, "`m.doubled` was given `String` as argument 1, but it declares `Int` there",
             "{backend:?}"
@@ -325,7 +325,10 @@ fn a_scalar_parameter_takes_the_value_and_refuses_anything_else() {
 fn a_function_with_no_parameters_is_invoked_with_no_arguments() {
     for backend in BOTH {
         let (answer, _) = invoke(backend, "floor", Vec::new());
-        assert!(matches!(answer, Ok(Value::Int(7))), "{backend:?}");
+        assert!(
+            answer.as_ref().is_ok_and(|v| v.as_int() == Some(7)),
+            "{backend:?}"
+        );
     }
 }
 
@@ -334,7 +337,7 @@ fn a_function_with_no_parameters_is_invoked_with_no_arguments() {
 #[test]
 fn a_struct_of_another_declared_type_is_refused_by_name() {
     for backend in BOTH {
-        let wrong = Value::structure("m.Trinket", [("id", Value::Str("t".into()))]);
+        let wrong = Value::structure("m.Trinket", [("id", Value::string("t"))]);
         let (message, _, _) = refusal(invoke(backend, "judge", vec![wrong]).0);
         assert_eq!(
             message,
@@ -356,7 +359,7 @@ fn a_struct_carrying_the_wrong_fields_is_refused_by_shape() {
     for backend in BOTH {
         let missing = Value::structure(
             "m.Note",
-            [("id", Value::Str("n-3".into())), ("weight", Value::Int(1))],
+            [("id", Value::string("n-3")), ("weight", Value::int(1))],
         );
         let (message, _, _) = refusal(invoke(backend, "judge", vec![missing]).0);
         assert_eq!(
@@ -368,9 +371,9 @@ fn a_struct_carrying_the_wrong_fields_is_refused_by_shape() {
         let reordered = Value::structure(
             "m.Note",
             [
-                ("id", Value::Str("n-3".into())),
-                ("weight", Value::Int(1)),
-                ("tags", Value::array([Value::Str("docs".into())])),
+                ("id", Value::string("n-3")),
+                ("weight", Value::int(1)),
+                ("tags", Value::array([Value::string("docs")])),
             ],
         );
         let (message, _, _) = refusal(invoke(backend, "judge", vec![reordered]).0);
@@ -390,12 +393,9 @@ fn a_declared_type_is_followed_into_what_it_contains() {
         let wrong = Value::structure(
             "m.Note",
             [
-                ("id", Value::Str("n-3".into())),
-                (
-                    "tags",
-                    Value::array([Value::Str("docs".into()), Value::Int(2)]),
-                ),
-                ("weight", Value::Int(1)),
+                ("id", Value::string("n-3")),
+                ("tags", Value::array([Value::string("docs"), Value::int(2)])),
+                ("weight", Value::int(1)),
             ],
         );
         let (message, _, _) = refusal(invoke(backend, "judge", vec![wrong]).0);
@@ -409,7 +409,7 @@ fn a_declared_type_is_followed_into_what_it_contains() {
             invoke(
                 backend,
                 "describe",
-                vec![note("n-4", &["a"], 1), Value::Int(2)],
+                vec![note("n-4", &["a"], 1), Value::int(2)],
             )
             .0,
         );
@@ -436,11 +436,11 @@ fn a_declared_enum_is_held_to_its_case_and_its_payload() {
             vec![Value::enumeration(
                 "m.Verdict",
                 "Drop",
-                [Value::Str("x".into())],
+                [Value::string("x")],
             )],
         );
         assert!(
-            matches!(&answer, Ok(Value::Str(text)) if &**text == "x"),
+            answer.as_ref().is_ok_and(|v| v.as_str() == Some("x")),
             "{backend:?}: {answer:?}"
         );
 
@@ -462,7 +462,7 @@ fn a_declared_enum_is_held_to_its_case_and_its_payload() {
             invoke(
                 backend,
                 "reason",
-                vec![Value::enumeration("m.Verdict", "Drop", [Value::Int(1)])],
+                vec![Value::enumeration("m.Verdict", "Drop", [Value::int(1)])],
             )
             .0,
         );
@@ -476,7 +476,7 @@ fn a_declared_enum_is_held_to_its_case_and_its_payload() {
             invoke(
                 backend,
                 "reason",
-                vec![Value::enumeration("m.Verdict", "Keep", [Value::Int(1)])],
+                vec![Value::enumeration("m.Verdict", "Keep", [Value::int(1)])],
             )
             .0,
         );
@@ -494,14 +494,13 @@ fn a_declared_enum_is_held_to_its_case_and_its_payload() {
 fn a_generic_struct_is_checked_against_the_arguments_the_use_was_written_with() {
     for backend in BOTH {
         let boxed = |value| Value::structure("m.Boxed", [("held", value)]);
-        let (answer, _) = invoke(backend, "unbox", vec![boxed(Value::Int(5))]);
+        let (answer, _) = invoke(backend, "unbox", vec![boxed(Value::int(5))]);
         assert!(
-            matches!(answer, Ok(Value::Int(5))),
+            answer.as_ref().is_ok_and(|v| v.as_int() == Some(5)),
             "{backend:?}: {answer:?}"
         );
 
-        let (message, _, _) =
-            refusal(invoke(backend, "unbox", vec![boxed(Value::Str("5".into()))]).0);
+        let (message, _, _) = refusal(invoke(backend, "unbox", vec![boxed(Value::string("5"))]).0);
         assert_eq!(
             message,
             "`m.unbox` was given `String` at `.held` of argument 1, but it declares `Int` there",
@@ -516,7 +515,7 @@ fn a_generic_struct_is_checked_against_the_arguments_the_use_was_written_with() 
 #[test]
 fn too_few_or_too_many_arguments_are_refused_before_anything_runs() {
     for backend in BOTH {
-        let (message, _, help) = refusal(invoke(backend, "describe", vec![Value::Int(1)]).0);
+        let (message, _, help) = refusal(invoke(backend, "describe", vec![Value::int(1)]).0);
         assert_eq!(
             message, "`m.describe` takes 2 parameters, but 1 was given",
             "{backend:?}"
@@ -530,7 +529,7 @@ fn too_few_or_too_many_arguments_are_refused_before_anything_runs() {
             invoke(
                 backend,
                 "floor",
-                vec![Value::Int(1), Value::Int(2), Value::Int(3)],
+                vec![Value::int(1), Value::int(2), Value::int(3)],
             )
             .0,
         );
@@ -548,7 +547,7 @@ fn too_few_or_too_many_arguments_are_refused_before_anything_runs() {
 #[test]
 fn a_defaulted_parameter_must_still_be_supplied() {
     for backend in BOTH {
-        let (message, _, help) = refusal(invoke(backend, "weighted", vec![Value::Int(4)]).0);
+        let (message, _, help) = refusal(invoke(backend, "weighted", vec![Value::int(4)]).0);
         assert_eq!(
             message, "`m.weighted` takes 2 parameters, but 1 was given",
             "{backend:?}"
@@ -559,8 +558,11 @@ fn a_defaulted_parameter_must_still_be_supplied() {
             "{backend:?}"
         );
 
-        let (answer, _) = invoke(backend, "weighted", vec![Value::Int(4), Value::Int(5)]);
-        assert!(matches!(answer, Ok(Value::Int(20))), "{backend:?}");
+        let (answer, _) = invoke(backend, "weighted", vec![Value::int(4), Value::int(5)]);
+        assert!(
+            answer.as_ref().is_ok_and(|v| v.as_int() == Some(20)),
+            "{backend:?}"
+        );
     }
 }
 
@@ -569,7 +571,7 @@ fn a_defaulted_parameter_must_still_be_supplied() {
 #[test]
 fn a_type_parameter_a_var_and_a_variadic_are_refused_from_the_declaration() {
     for backend in BOTH {
-        let (message, _, help) = refusal(invoke(backend, "identity", vec![Value::Int(1)]).0);
+        let (message, _, help) = refusal(invoke(backend, "identity", vec![Value::int(1)]).0);
         assert_eq!(
             message,
             "`m.identity` declares the type parameter `T`, which an invocation cannot settle",
@@ -577,14 +579,14 @@ fn a_type_parameter_a_var_and_a_variadic_are_refused_from_the_declaration() {
         );
         assert!(help.is_some_and(|help| help.contains("supplies values, not types")));
 
-        let (message, _, help) = refusal(invoke(backend, "bump", vec![Value::Int(1)]).0);
+        let (message, _, help) = refusal(invoke(backend, "bump", vec![Value::int(1)]).0);
         assert_eq!(
             message, "`m.bump` declares `var n`, which an invocation cannot supply",
             "{backend:?}"
         );
         assert!(help.is_some_and(|help| help.contains("has no frame")));
 
-        let (message, _, _) = refusal(invoke(backend, "joined", vec![Value::Str("a".into())]).0);
+        let (message, _, _) = refusal(invoke(backend, "joined", vec![Value::string("a")]).0);
         assert_eq!(
             message,
             "`m.joined` declares the variadic parameter `parts`, which an invocation cannot supply",
@@ -614,7 +616,7 @@ fn a_function_the_package_does_not_declare_is_refused_by_name() {
 #[test]
 fn a_refused_invocation_still_ends_the_run_it_never_started() {
     for backend in BOTH {
-        let (_, ended) = invoke(backend, "doubled", vec![Value::Unit]);
+        let (_, ended) = invoke(backend, "doubled", vec![Value::unit()]);
         assert_eq!(ended.len(), 1, "{backend:?}");
         assert_eq!(ended[0].0, RunOutcome::Invariant, "{backend:?}");
         assert!(
@@ -669,7 +671,7 @@ fn a_program_that_was_resolved_but_not_checked_refuses_to_be_invoked() {
         Arc::new(sources),
         program,
         "doubled",
-        vec![Value::Int(1)],
+        vec![Value::int(1)],
     );
     let (message, _, help) = refusal(answer);
     assert!(
@@ -691,24 +693,21 @@ fn both_backends_answer_one_invocation_the_same_way() {
     let calls: Vec<(&str, Vec<Value>)> = vec![
         ("judge", vec![note("n-6", &["docs"], 3)]),
         ("judge", vec![note("n-7", &[], 3)]),
-        (
-            "describe",
-            vec![note("n-8", &["a"], 4), Value::Str("p".into())],
-        ),
-        ("doubled", vec![Value::Int(3)]),
+        ("describe", vec![note("n-8", &["a"], 4), Value::string("p")]),
+        ("doubled", vec![Value::int(3)]),
         ("floor", Vec::new()),
-        ("weighted", vec![Value::Int(2), Value::Int(5)]),
-        ("doubled", vec![Value::Unit]),
+        ("weighted", vec![Value::int(2), Value::int(5)]),
+        ("doubled", vec![Value::unit()]),
         ("describe", vec![note("n-9", &["a"], 1)]),
-        ("identity", vec![Value::Int(1)]),
-        ("bump", vec![Value::Int(1)]),
-        ("joined", vec![Value::Str("a".into())]),
+        ("identity", vec![Value::int(1)]),
+        ("bump", vec![Value::int(1)]),
+        ("joined", vec![Value::string("a")]),
         (
             "reason",
             vec![Value::enumeration(
                 "m.Verdict",
                 "Drop",
-                [Value::Str("x".into())],
+                [Value::string("x")],
             )],
         ),
         (
@@ -717,15 +716,15 @@ fn both_backends_answer_one_invocation_the_same_way() {
         ),
         (
             "unbox",
-            vec![Value::structure("m.Boxed", [("held", Value::Int(5))])],
+            vec![Value::structure("m.Boxed", [("held", Value::int(5))])],
         ),
         (
             "unbox",
-            vec![Value::structure("m.Boxed", [("held", Value::Unit)])],
+            vec![Value::structure("m.Boxed", [("held", Value::unit())])],
         ),
         (
             "judge",
-            vec![Value::structure("m.Note", [("id", Value::Str("n".into()))])],
+            vec![Value::structure("m.Note", [("id", Value::string("n"))])],
         ),
         ("absent", Vec::new()),
     ];

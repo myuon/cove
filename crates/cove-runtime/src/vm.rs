@@ -221,7 +221,7 @@ use crate::interp::{
 use crate::runtime::{Runtime, ENTRY_TASK};
 use crate::task::{self, ChildFailure, Task, TaskOutcome, TaskScope, Transfer};
 use crate::trace::{RunOutcome, Timing, TraceEvent};
-use crate::value::{Closure, ClosureBody, StructValue, Value};
+use crate::value::{Closure, ClosureBody, Repr, StructValue, Value};
 
 /// Fuel charged for executing one instruction.
 ///
@@ -618,7 +618,7 @@ impl Roots for StackRoots<'_> {
             visit(value);
         }
         for open in self.scopes {
-            visit(&Value::TaskScope(Rc::clone(&open.scope)));
+            visit(&Value(Repr::TaskScope(Rc::clone(&open.scope))));
         }
     }
 }
@@ -1030,7 +1030,7 @@ impl<'a> Vm<'a> {
             }
         }
         self.stack
-            .resize(entry.value_frame_size as usize, Value::Unit);
+            .resize(entry.value_frame_size as usize, Value(Repr::Unit));
         self.scalars.resize(entry.scalar_frame_size as usize, 0);
         self.places
             .resize(entry.place_frame_size as usize, Place::rooted_at(0));
@@ -1056,7 +1056,7 @@ impl<'a> Vm<'a> {
             // hands back its value rather than a handle the host cannot
             // settle. `Interpreter::enter` does the same thing at the same
             // place, and through the same `crate::task::settle`.
-            Value::Task(handle) => {
+            Value(Repr::Task(handle)) => {
                 let span = self.program.function(function).span;
                 task::settle(self, &handle, span)
             }
@@ -1267,7 +1267,9 @@ impl<'a> Vm<'a> {
         let entry = self.program.function(id);
         let arguments = match entry.arity {
             0 => Vec::new(),
-            1 => vec![Value::Array(args.into_iter().map(Value::Str).collect())],
+            1 => vec![Value(Repr::Array(
+                args.into_iter().map(Value::string).collect(),
+            ))],
             other => {
                 return Err(RuntimeError::new(format!(
                     "entry `{module}.{name}` declares {other} parameters"
@@ -1489,7 +1491,7 @@ impl<'a> Vm<'a> {
                     let taken_on = matches!(code[pc], Inst::JumpIfTrue(_));
                     let to = to as usize;
                     let test = self.pop();
-                    let Value::Bool(test) = test else {
+                    let Value(Repr::Bool(test)) = test else {
                         return Err(not_a_condition(&test, running.span_at(pc)));
                     };
                     if test == taken_on {
@@ -1528,7 +1530,7 @@ impl<'a> Vm<'a> {
                     // and a return truncates both back.
                     let base = self.stack.len() - value_argc as usize;
                     self.stack
-                        .resize(base + callee.value_frame_size as usize, Value::Unit);
+                        .resize(base + callee.value_frame_size as usize, Value(Repr::Unit));
                     let scalar_base = self.scalars.len() - scalar_argc as usize;
                     self.scalars
                         .resize(scalar_base + callee.scalar_frame_size as usize, 0);
@@ -1623,7 +1625,7 @@ impl<'a> Vm<'a> {
                     let at = self.stack.len() - len as usize;
                     let items: Rc<[Value]> = self.stack.drain(at..).collect();
                     self.fuel += u64::from(len);
-                    self.stack.push(Value::Array(items));
+                    self.stack.push(Value(Repr::Array(items)));
                 }
                 Inst::Concat(parts) => {
                     let at = self.stack.len() - parts as usize;
@@ -1636,7 +1638,7 @@ impl<'a> Vm<'a> {
                     }
                     self.stack.truncate(at);
                     self.fuel += u64::from(parts) + text.len() as u64;
-                    self.stack.push(Value::Str(text.into()));
+                    self.stack.push(Value(Repr::Str(text.into())));
                 }
                 Inst::MakeStruct { ty, .. } => {
                     let shape = self.shapes[ty.0 as usize]
@@ -1650,11 +1652,11 @@ impl<'a> Vm<'a> {
                         .cloned()
                         .zip(self.stack.drain(at..))
                         .collect();
-                    let value = Value::Struct(Rc::new(StructValue {
+                    let value = Value(Repr::Struct(Rc::new(StructValue {
                         type_name: shape.type_name.clone(),
                         fields,
                         opaque: shape.opaque,
-                    }));
+                    })));
                     self.fuel += width as u64;
                     self.stack.push(value);
                 }
@@ -1662,7 +1664,7 @@ impl<'a> Vm<'a> {
                     let span = running.span_at(pc);
                     let field = name(program, field);
                     let base_value = self.pop();
-                    let Value::Struct(held) = &base_value else {
+                    let Value(Repr::Struct(held)) = &base_value else {
                         return Err(RuntimeError::new(format!(
                             "`{}` has no field `{field}`",
                             base_value.type_name()
@@ -1682,7 +1684,7 @@ impl<'a> Vm<'a> {
                     // declaration order wherever one is built, so both are
                     // invariants of this backend rather than facts to confirm.
                     let base_value = self.pop();
-                    let Value::Struct(held) = &base_value else {
+                    let Value(Repr::Struct(held)) = &base_value else {
                         unreachable!(
                             "`get-field-at` was emitted for a struct, and was handed a `{}`",
                             base_value.type_name()
@@ -1703,7 +1705,7 @@ impl<'a> Vm<'a> {
                     // rather than cloned onto the value stack just to be
                     // read back off it.
                     let base_value = self.pop();
-                    let Value::Struct(held) = &base_value else {
+                    let Value(Repr::Struct(held)) = &base_value else {
                         unreachable!(
                             "`get-field-at-scalar` was emitted for a struct, and was handed a `{}`",
                             base_value.type_name()
@@ -1723,7 +1725,7 @@ impl<'a> Vm<'a> {
                     let field = name(program, field);
                     let value = self.pop();
                     let target = self.pop();
-                    let Value::Struct(mut held) = target else {
+                    let Value(Repr::Struct(mut held)) = target else {
                         return Err(not_a_struct(&target, field, span));
                     };
                     let type_name = held.type_name.clone();
@@ -1736,7 +1738,7 @@ impl<'a> Vm<'a> {
                     };
                     *slot = value;
                     self.fuel += held.fields.len() as u64;
-                    self.stack.push(Value::Struct(held));
+                    self.stack.push(Value(Repr::Struct(held)));
                 }
                 Inst::MakeBuiltin { name: which, argc } => {
                     let span = running.span_at(pc);
@@ -1803,7 +1805,7 @@ impl<'a> Vm<'a> {
                 Inst::TestCase(case) => {
                     let case = name(program, case);
                     let subject = self.stack.last().expect("`test-case` has a value to test");
-                    self.stack.push(Value::Bool(is_case(subject, case)));
+                    self.stack.push(Value(Repr::Bool(is_case(subject, case))));
                 }
                 Inst::GetPayload(index) => {
                     let span = running.span_at(pc);
@@ -1811,7 +1813,7 @@ impl<'a> Vm<'a> {
                         .stack
                         .last()
                         .expect("`get-payload` has a value to read");
-                    let Value::Enum(held) = subject else {
+                    let Value(Repr::Enum(held)) = subject else {
                         return Err(not_an_enum(subject, span));
                     };
                     let Some(found) = held.payload.get(index as usize).cloned() else {
@@ -1831,7 +1833,7 @@ impl<'a> Vm<'a> {
                     // follows how many there were rather than the one
                     // instruction that asked.
                     self.fuel += items.len() as u64;
-                    self.stack.push(Value::Array(items.into()));
+                    self.stack.push(Value(Repr::Array(items.into())));
                 }
                 // Six instructions in one arm, calling an `#[inline(never)]`
                 // helper, for the reason the place and closure instructions
@@ -2060,7 +2062,7 @@ impl<'a> Vm<'a> {
                 // `builtins::call_method` fails in, and not a broken
                 // invariant.
                 let value = match self.place_mut(&place) {
-                    Value::Vector(storage) => builtins::freeze(storage, span)?,
+                    Value(Repr::Vector(storage)) => builtins::freeze(storage, span)?,
                     other => {
                         return Err(RuntimeError::new(format!(
                             "`{}` has no method `freeze`",
@@ -2101,7 +2103,7 @@ impl<'a> Vm<'a> {
     fn place_ref(&self, place: &Place) -> &Value {
         let mut current = &self.stack[place.value_root()];
         for step in &place.path {
-            let Value::Struct(held) = current else {
+            let Value(Repr::Struct(held)) = current else {
                 unreachable!(
                     "a place step was emitted for a struct, and reached a `{}`",
                     current.type_name()
@@ -2127,7 +2129,7 @@ impl<'a> Vm<'a> {
     fn place_mut(&mut self, place: &Place) -> &mut Value {
         let mut current = &mut self.stack[place.value_root()];
         for step in &place.path {
-            let Value::Struct(held) = current else {
+            let Value(Repr::Struct(held)) = current else {
                 unreachable!(
                     "a place step was emitted for a struct, and reached a `{}`",
                     current.type_name()
@@ -2202,7 +2204,7 @@ impl<'a> Vm<'a> {
                 // receiver as a host resource, so a handle standing here
                 // is an invariant of this backend rather than a fact to
                 // confirm.
-                let Value::Resource(handle) = &receiver else {
+                let Value(Repr::Resource(handle)) = &receiver else {
                     unreachable!(
                         "`call-resource` was emitted for a resource handle, and was handed a `{}`",
                         receiver.type_name()
@@ -2229,7 +2231,7 @@ impl<'a> Vm<'a> {
             Inst::SpreadArgument => {
                 let spread = self.pop();
                 let mut items: Vec<Value> = match self.pop() {
-                    Value::Array(built) => built.to_vec(),
+                    Value(Repr::Array(built)) => built.to_vec(),
                     other => unreachable!(
                         "`spread-argument` appends to the array below it, and was handed a `{}`",
                         other.type_name()
@@ -2240,14 +2242,14 @@ impl<'a> Vm<'a> {
                 // which is the borrow the interpreter takes at the same
                 // moment.
                 match &spread {
-                    Value::Array(values) => items.extend(values.iter().cloned()),
-                    Value::Vector(storage) => {
+                    Value(Repr::Array(values)) => items.extend(values.iter().cloned()),
+                    Value(Repr::Vector(storage)) => {
                         items.extend(storage.elements.borrow().iter().cloned());
                     }
                     _ => return Err(builtins::spread_needs_a_sequence(span)),
                 }
                 self.fuel += items.len() as u64;
-                self.stack.push(Value::Array(items.into()));
+                self.stack.push(Value(Repr::Array(items.into())));
             }
             Inst::MakeRange { inclusive_end } => {
                 // The end is above the start, because that is the order
@@ -2258,11 +2260,11 @@ impl<'a> Vm<'a> {
                 // `Value::eq_value` and `Display` both read this flag.
                 let end = self.pop_scalar();
                 let start = self.pop_scalar();
-                self.stack.push(Value::Range {
+                self.stack.push(Value(Repr::Range {
                     start,
                     end,
                     inclusive_end,
-                });
+                }));
             }
             Inst::MakeHostEnum { ty, case } => {
                 // The registry rather than the static schema, because
@@ -2370,7 +2372,7 @@ impl<'a> Vm<'a> {
         // A closure is built from what it captured, so what it costs follows
         // how much that was — the rule `Inst::MakeEnum` is charged by.
         self.fuel += u64::from(captures);
-        Value::Closure(Rc::new(Closure {
+        Value(Repr::Closure(Rc::new(Closure {
             // Read off the lowered function, because that is where `async`
             // ends up: a host that receives this closure reads the same field
             // off one the interpreter built.
@@ -2384,7 +2386,7 @@ impl<'a> Vm<'a> {
             body: ClosureBody::Lowered(function),
             module: Rc::from(&*target.module),
             captures: held,
-        }))
+        })))
     }
 
     /// Opens the frame a call through a value enters, or answers the call
@@ -2413,13 +2415,13 @@ impl<'a> Vm<'a> {
         span: Span,
     ) -> Result<Entered, RuntimeError> {
         let closure = match callee {
-            Value::Closure(closure) => closure,
+            Value(Repr::Closure(closure)) => closure,
             // A bound host operation is callable and is a name: the registry
             // resolves it, which is what `Interpreter::call_value_slots`
             // does with one. Nothing this backend lowers builds one — a host
             // operation used as a value is refused — so this is here for a
             // value a host handed back.
-            Value::HostFn(host) => {
+            Value(Repr::HostFn(host)) => {
                 let values = self.take(argc as usize);
                 let (module, op) = (host.module.clone(), host.op.clone());
                 return Ok(Entered::Answer(self.call_host(&module, &op, values, span)?));
@@ -2478,7 +2480,7 @@ impl<'a> Vm<'a> {
             }
         }
         self.stack
-            .resize(base + callee.value_frame_size as usize, Value::Unit);
+            .resize(base + callee.value_frame_size as usize, Value(Repr::Unit));
         let place_base = self.places.len() - place_argc as usize;
         // Almost no closure has a place slot: `Inst::Lock`'s is the one whose
         // parameter can name storage rather than hold a value. So this is
@@ -2547,7 +2549,7 @@ impl<'a> Vm<'a> {
                     depth: self.frames.len(),
                     scope: Rc::clone(&scope),
                 });
-                self.stack.push(Value::TaskScope(scope));
+                self.stack.push(Value(Repr::TaskScope(scope)));
             }
             Inst::LeaveScope => {
                 let value = self.pop();
@@ -2582,7 +2584,7 @@ impl<'a> Vm<'a> {
             Inst::Spawn => {
                 let body = self.pop();
                 let scope = self.pop();
-                let Value::TaskScope(scope) = scope else {
+                let Value(Repr::TaskScope(scope)) = scope else {
                     unreachable!("a validated `spawn` stands on a task scope");
                 };
                 let program = Arc::clone(self.program);
@@ -2603,7 +2605,7 @@ impl<'a> Vm<'a> {
                 // settles, and a task awaiting a task should notice a stop.
                 self.safepoint(span)?;
                 let value = self.pop();
-                let Value::Task(handle) = value else {
+                let Value(Repr::Task(handle)) = value else {
                     unreachable!("a validated `await` stands on a task");
                 };
                 let settled = task::settle(self, &handle, span)?;
@@ -2611,19 +2613,19 @@ impl<'a> Vm<'a> {
             }
             Inst::Cancel => {
                 let value = self.pop();
-                let Value::Task(handle) = value else {
+                let Value(Repr::Task(handle)) = value else {
                     unreachable!("a validated `cancel` stands on a task");
                 };
                 // Asking is all this does. A cancelled task stops at its next
                 // safepoint, and whether it stopped or had already finished is
                 // known only once something waits for it.
                 handle.cancel();
-                self.stack.push(Value::Unit);
+                self.stack.push(Value(Repr::Unit));
             }
             Inst::Lock => {
                 let body = self.pop();
                 let receiver = self.pop();
-                let Value::Shared(cell) = receiver else {
+                let Value(Repr::Shared(cell)) = receiver else {
                     unreachable!("a validated `lock` stands on a `Shared`");
                 };
                 // `SharedCell::lock` holds the cell for the whole of the
@@ -2688,7 +2690,7 @@ impl<'a> Vm<'a> {
         span: Span,
     ) -> Result<Value, RuntimeError> {
         let takes_place = match body {
-            Value::Closure(closure) => match closure.body {
+            Value(Repr::Closure(closure)) => match closure.body {
                 ClosureBody::Lowered(target) => {
                     matches!(
                         self.program.function(target).params.first(),
@@ -2744,7 +2746,7 @@ impl<'a> Vm<'a> {
     /// [`Vm::constants`] is, and this hands out a share of it.
     fn shared_name(&self, id: ConstId) -> Rc<str> {
         match &self.constants[id.0 as usize] {
-            Value::Str(text) => text.clone(),
+            Value(Repr::Str(text)) => text.clone(),
             other => unreachable!("an instruction named {other} rather than a name"),
         }
     }
@@ -2819,7 +2821,7 @@ impl<'a> Vm<'a> {
             self.async_frames.push(self.frames.len());
         }
         self.stack
-            .resize(base + callee.value_frame_size as usize, Value::Unit);
+            .resize(base + callee.value_frame_size as usize, Value(Repr::Unit));
         let scalar_base = self.scalars.len();
         self.scalars
             .resize(scalar_base + callee.scalar_frame_size as usize, 0);
@@ -3017,7 +3019,7 @@ impl<'a> Vm<'a> {
                     as_value(self.program.function(done.function).returns, scalar)
                 }
             };
-            answer = Answered::Value(Value::Task(Task::settled(value)));
+            answer = Answered::Value(Value(Repr::Task(Task::settled(value))));
         }
         // A frame that returns out of the middle of a task scope — through a
         // `return`, or through a `?` that failed — never reaches the
@@ -3416,11 +3418,11 @@ impl<'a> Vm<'a> {
                 .map(|field| Rc::from(field.name))
                 .zip(values.drain(..))
                 .collect();
-            return Ok(Value::Struct(Rc::new(StructValue {
+            return Ok(Value(Repr::Struct(Rc::new(StructValue {
                 type_name: MAP_ENTRY.name.into(),
                 fields,
                 opaque: false,
-            })));
+            }))));
         }
         let assertion =
             free_builtin(which).is_some_and(|schema| schema.kind == FreeBuiltinKind::Assertion);
@@ -3508,13 +3510,15 @@ enum Answered {
 /// its word is not a reason to lose the shape of the answer.
 fn opened(value: Value, span: Span) -> Result<Result<Value, Value>, RuntimeError> {
     match &value {
-        Value::Enum(result) if &*result.type_name == RESULT.name => Ok(match value.ok_payload() {
-            Some(payload) => Ok(payload.first().cloned().unwrap_or(Value::Unit)),
-            None => Err(value),
-        }),
-        Value::Enum(option) if &*option.type_name == OPTION.name => {
+        Value(Repr::Enum(result)) if &*result.type_name == RESULT.name => {
+            Ok(match value.ok_payload() {
+                Some(payload) => Ok(payload.first().cloned().unwrap_or(Value(Repr::Unit))),
+                None => Err(value),
+            })
+        }
+        Value(Repr::Enum(option)) if &*option.type_name == OPTION.name => {
             Ok(match value.some_payload() {
-                Some(payload) => Ok(payload.first().cloned().unwrap_or(Value::Unit)),
+                Some(payload) => Ok(payload.first().cloned().unwrap_or(Value(Repr::Unit))),
                 None => Err(Value::none()),
             })
         }
@@ -3546,21 +3550,21 @@ fn not_a_condition(value: &Value, span: Span) -> RuntimeError {
 /// One constant as the value it stands for.
 fn constant(held: &Const) -> Value {
     match held {
-        Const::Unit => Value::Unit,
-        Const::Bool(value) => Value::Bool(*value),
-        Const::Int(value) => Value::Int(*value),
-        Const::Float(value) => Value::Float(*value),
-        Const::Duration(value) => Value::Duration(*value),
+        Const::Unit => Value(Repr::Unit),
+        Const::Bool(value) => Value(Repr::Bool(*value)),
+        Const::Int(value) => Value(Repr::Int(*value)),
+        Const::Float(value) => Value(Repr::Float(*value)),
+        Const::Duration(value) => Value(Repr::Duration(*value)),
         // The pool holds its text as an `Arc<str>`, because one lowered
         // program is read by every thread of a run, and a `Value::Str` holds
         // an `Rc<str>`, because a value belongs to the task that built it.
         // This is where the one becomes the other, and [`Vm::constants`] is
         // why it happens once per VM rather than once per load.
-        Const::Str(text) => Value::Str(Rc::from(&**text)),
+        Const::Str(text) => Value(Repr::Str(Rc::from(&**text))),
         // A name is carried by an instruction that already knows what to do
         // with it, and nothing loads one as a value. It is still a string, so
         // there is nothing to invent if something ever does.
-        Const::Name(text) => Value::Str(Rc::from(&**text)),
+        Const::Name(text) => Value(Repr::Str(Rc::from(&**text))),
     }
 }
 
@@ -3615,8 +3619,8 @@ fn binary_op(op: IrBinary) -> BinaryOp {
 /// without cloning it first.
 fn promised_scalar(value: &Value) -> i64 {
     match value {
-        Value::Int(value) => *value,
-        Value::Bool(value) => i64::from(*value),
+        Value(Repr::Int(value)) => *value,
+        Value(Repr::Bool(value)) => i64::from(*value),
         other => unreachable!(
             "a scalar was promised for an `Int` or a `Bool`, and was handed a `{}`",
             other.type_name()
@@ -3636,8 +3640,8 @@ fn promised_scalar(value: &Value) -> i64 {
 /// about it.
 fn as_value(returns: SlotKind, scalar: i64) -> Value {
     match returns {
-        SlotKind::Scalar(Scalar::Int) => Value::Int(scalar),
-        SlotKind::Scalar(Scalar::Bool) => Value::Bool(scalar != 0),
+        SlotKind::Scalar(Scalar::Int) => Value(Repr::Int(scalar)),
+        SlotKind::Scalar(Scalar::Bool) => Value(Repr::Bool(scalar != 0)),
         SlotKind::Place => unreachable!("no function answers a place; `validate` refuses one"),
         SlotKind::Value => unreachable!(
             "`return-scalar` was reached in a function that answers on the value stack"
@@ -3653,8 +3657,8 @@ fn as_value(returns: SlotKind, scalar: i64) -> Value {
 /// slot — hold that and not a slot kind.
 fn as_value_of(what: Scalar, scalar: i64) -> Value {
     match what {
-        Scalar::Int => Value::Int(scalar),
-        Scalar::Bool => Value::Bool(scalar != 0),
+        Scalar::Int => Value(Repr::Int(scalar)),
+        Scalar::Bool => Value(Repr::Bool(scalar != 0)),
     }
 }
 
@@ -3719,10 +3723,10 @@ fn int_binary(op: IntOp, lhs: i64, rhs: i64, span: Span) -> Result<i64, RuntimeE
 /// on the paths that ask.
 fn size_of_value(value: &Value) -> u64 {
     match value {
-        Value::Str(text) => text.len() as u64,
-        Value::Array(items) => items.len() as u64,
-        Value::Struct(held) => held.fields.len() as u64,
-        Value::Enum(case) => case.payload.len() as u64,
+        Value(Repr::Str(text)) => text.len() as u64,
+        Value(Repr::Array(items)) => items.len() as u64,
+        Value(Repr::Struct(held)) => held.fields.len() as u64,
+        Value(Repr::Enum(case)) => case.payload.len() as u64,
         _ => 0,
     }
 }
@@ -3825,7 +3829,7 @@ fn enum_shapes(runtime: &Runtime, program: &Program) -> Vec<Option<EnumShape>> {
 /// another's. A value that is not an enum at all matches neither, which is
 /// the `else` that pattern begins with.
 fn is_case(value: &Value, tested: &str) -> bool {
-    let Value::Enum(subject) = value else {
+    let Value(Repr::Enum(subject)) = value else {
         return false;
     };
     let (expected_type, case) = match tested.rsplit_once('.') {
@@ -4021,7 +4025,7 @@ fn run_task(
 
 impl Callable for Vm<'_> {
     fn allocate_vector(&mut self, elements: Vec<Value>) -> Value {
-        Value::Vector(self.heap.allocate(elements))
+        Value(Repr::Vector(self.heap.allocate(elements)))
     }
 
     /// The half of `Snapshot` no conformance answers, and nothing else.
@@ -4066,7 +4070,7 @@ impl Callable for Vm<'_> {
     /// be the two backends disagreeing about what `mapError` passes.
     fn arity(&self, callee: &Value) -> Option<usize> {
         match callee {
-            Value::Closure(closure) => Some(closure.arity),
+            Value(Repr::Closure(closure)) => Some(closure.arity),
             _ => None,
         }
     }

@@ -23,12 +23,11 @@
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
 use std::path::Path;
-use std::rc::Rc;
 use std::time::Duration;
 
 use cove_runtime::schema::{Effect, OperationSchema};
 use cove_runtime::{
-    value_to_json, RecordingBackend, RunOutcome, Value, ValueCapture, ENTRY_TASK,
+    value_to_json, RecordingBackend, RunOutcome, Value, ValueCapture, ValueView, ENTRY_TASK,
     TRACE_FORMAT_VERSION,
 };
 
@@ -431,35 +430,35 @@ fn decode_value(json: &Json) -> Result<Recorded, String> {
         })
     };
     match tag {
-        "unit" => recorded(Value::Unit, "()".to_string()),
+        "unit" => recorded(Value::unit(), "()".to_string()),
         "bool" => {
             let b = field(json, "value")?
                 .as_bool()
                 .ok_or_else(|| "a `bool` needs a boolean `value`".to_string())?;
-            recorded(Value::Bool(b), b.to_string())
+            recorded(Value::bool(b), b.to_string())
         }
         "int" => {
             let i = field(json, "value")?
                 .as_i64()
                 .ok_or_else(|| "an `int` needs a `value` that fits in 64 bits".to_string())?;
-            recorded(Value::Int(i), i.to_string())
+            recorded(Value::int(i), i.to_string())
         }
         "float" => {
             let x = field(json, "value")?
                 .as_f64()
                 .ok_or_else(|| "a `float` needs a numeric `value`".to_string())?;
-            recorded(Value::Float(x), format!("{x:?}"))
+            recorded(Value::float(x), format!("{x:?}"))
         }
         "duration" => {
             let ns = field(json, "ns")?
                 .as_i64()
                 .ok_or_else(|| "a `duration` needs an integer `ns`".to_string())?;
-            recorded(Value::Duration(ns), format!("{ns}ns"))
+            recorded(Value::duration(ns), format!("{ns}ns"))
         }
         "string" => {
             let text = string_field(json, "value")?;
             let shown = quote(&text);
-            recorded(Value::Str(text.into()), shown)
+            recorded(Value::string(text), shown)
         }
         "array" => {
             let items = field(json, "items")?
@@ -470,7 +469,7 @@ fn decode_value(json: &Json) -> Result<Recorded, String> {
                 .collect::<Result<Vec<_>, _>>()?;
             let shown = format!("[{}]", joined(&shown_parts(&items)));
             match collect(&items) {
-                Ok(values) => recorded(Value::Array(values.into()), shown),
+                Ok(values) => recorded(Value::array(values), shown),
                 Err(missing) => Ok(Recorded {
                     value: Err(missing),
                     shown,
@@ -488,14 +487,7 @@ fn decode_value(json: &Json) -> Result<Recorded, String> {
                 .collect::<Result<Vec<_>, _>>()?;
             let shown = show_case(&name, &case, &shown_parts(&payload));
             match collect(&payload) {
-                Ok(values) => recorded(
-                    Value::Enum(Box::new(cove_runtime::value::EnumValue {
-                        type_name: name.into(),
-                        case: case.into(),
-                        payload: values.into(),
-                    })),
-                    shown,
-                ),
+                Ok(values) => recorded(Value::enumeration(name, case, values), shown),
                 Err(missing) => Ok(Recorded {
                     value: Err(missing),
                     shown,
@@ -524,15 +516,7 @@ fn decode_value(json: &Json) -> Result<Recorded, String> {
             );
             match collect(&fields) {
                 Ok(values) => recorded(
-                    Value::Struct(Rc::new(cove_runtime::value::StructValue {
-                        type_name: name.into(),
-                        fields: names
-                            .into_iter()
-                            .map(Into::into)
-                            .zip(values)
-                            .collect(),
-                        opaque: false,
-                    })),
+                    Value::structure(name, names.into_iter().zip(values)),
                     shown,
                 ),
                 Err(missing) => Ok(Recorded {
@@ -559,7 +543,7 @@ fn decode_value(json: &Json) -> Result<Recorded, String> {
                 task_safe: true,
             };
             let shown = format!("<{handle}>");
-            recorded(Value::Resource(std::sync::Arc::new(handle)), shown)
+            recorded(Value::from_resource(handle), shown)
         }
         "redacted" => {
             let of = string_field(json, "of")?;
@@ -622,26 +606,37 @@ fn show_case(name: &str, case: &str, payload: &[String]) -> String {
 /// one, so a divergence report can put what the program asked for beside
 /// what the trace recorded and have them read the same way.
 pub(crate) fn show_value(value: &Value) -> String {
-    match value {
-        Value::Unit => "()".to_string(),
-        Value::Bool(b) => b.to_string(),
-        Value::Int(i) => i.to_string(),
-        Value::Float(x) => format!("{x:?}"),
-        Value::Duration(ns) => format!("{ns}ns"),
-        Value::Str(s) => quote(s),
-        Value::Array(items) => format!("[{}]", joined(&shown_all(items))),
-        Value::Enum(value) => show_case(&value.type_name, &value.case, &shown_all(&value.payload)),
-        Value::Struct(value) => format!(
+    // A `dyn Trait` value shows as the wrapper it is, which `Value::view`
+    // deliberately does not: a divergence report names the trait, and
+    // `Value::dyn_trait` is the reader that answers it.
+    if value.dyn_trait().is_some() {
+        return format!("<{} {value}>", value.type_name());
+    }
+    match value.view() {
+        ValueView::Unit => "()".to_string(),
+        ValueView::Bool(b) => b.to_string(),
+        ValueView::Int(i) => i.to_string(),
+        ValueView::Float(x) => format!("{x:?}"),
+        ValueView::Duration(ns) => format!("{ns}ns"),
+        ValueView::Str(s) => quote(s),
+        ValueView::Array(items) => format!("[{}]", joined(&shown_all(items))),
+        ValueView::Enum(shape) => {
+            show_case(shape.type_name(), shape.case(), &shown_all(shape.payload()))
+        }
+        ValueView::Struct(shape) => format!(
             "{}({})",
-            value.type_name,
-            value
-                .fields
-                .iter()
+            shape.type_name(),
+            shape
+                .fields()
                 .map(|(name, field)| format!("{name}: {}", show_value(field)))
                 .collect::<Vec<_>>()
                 .join(", ")
         ),
-        other => format!("<{} {other}>", other.type_name()),
+        // Every other kind renders as what it is and what it shows, which is
+        // what a recorded value that is not one of the shapes above records.
+        // A kind the language gains renders that way too, so this arm is a
+        // decision rather than a gap.
+        _ => format!("<{} {value}>", value.type_name()),
     }
 }
 

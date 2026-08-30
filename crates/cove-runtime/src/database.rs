@@ -37,7 +37,7 @@ use std::sync::Mutex;
 use crate::error::RuntimeError;
 use crate::host::{HostApi, Reentry, ResourceHandle};
 use crate::schema::ModuleSchema;
-use crate::value::Value;
+use crate::value::{Repr, Value};
 
 /// `database`: querying a database, when the host has one.
 pub struct Database {
@@ -103,11 +103,11 @@ impl Database {
             DatabaseSource::Recorded(_) => {
                 let id = self.next_id.fetch_add(1, Ordering::Relaxed);
                 self.locked().insert(id, name.to_string());
-                Value::ok(Value::Resource(ResourceHandle::new(
+                Value::ok(Value(Repr::Resource(ResourceHandle::new(
                     "database",
                     &SCHEMA.resources[0],
                     id,
-                )))
+                ))))
             }
             DatabaseSource::Denied => Value::err(Value::error(
                 "database: this host has no database, so nothing can connect",
@@ -142,13 +142,13 @@ impl HostApi for Database {
     fn call(&self, op: &str, args: Vec<Value>) -> Result<Value, RuntimeError> {
         match op {
             "query" => {
-                let [Value::Str(sql)] = args.as_slice() else {
+                let [Value(Repr::Str(sql))] = args.as_slice() else {
                     unreachable!("checked by HostRegistry::call")
                 };
                 Ok(rows_of(self.query(sql)))
             }
             "connect" => {
-                let [Value::Str(name)] = args.as_slice() else {
+                let [Value(Repr::Str(name))] = args.as_slice() else {
                     unreachable!("checked by HostRegistry::call")
                 };
                 Ok(self.connect(name))
@@ -166,7 +166,7 @@ impl HostApi for Database {
     ) -> Result<Value, RuntimeError> {
         match op {
             "query" => {
-                let [Value::Str(sql)] = args.as_slice() else {
+                let [Value(Repr::Str(sql))] = args.as_slice() else {
                     unreachable!("checked by HostRegistry::call")
                 };
                 if !self.locked().contains_key(&handle.id) {
@@ -175,7 +175,7 @@ impl HostApi for Database {
                 Ok(rows_of(self.query(sql)))
             }
             "close" => match self.locked().remove(&handle.id) {
-                Some(_) => Ok(Value::ok(Value::Unit)),
+                Some(_) => Ok(Value::ok(Value(Repr::Unit))),
                 None => Err(closed(handle, "close")),
             },
             _ => unreachable!("checked by HostRegistry::call_resource"),
@@ -186,9 +186,11 @@ impl HostApi for Database {
 /// `Ok(rows)` or `Err(Error(message))`, as Cove reads it.
 fn rows_of(answer: Result<Vec<String>, String>) -> Value {
     match answer {
-        Ok(rows) => Value::ok(Value::Array(
-            rows.into_iter().map(|row| Value::Str(row.into())).collect(),
-        )),
+        Ok(rows) => Value::ok(Value(Repr::Array(
+            rows.into_iter()
+                .map(|row| Value(Repr::Str(row.into())))
+                .collect(),
+        ))),
         Err(message) => Value::err(Value::error(message)),
     }
 }
@@ -215,13 +217,13 @@ mod tests {
     use crate::host::{Grants, HostRegistry, NoReentry};
 
     fn str_arg(text: &str) -> Value {
-        Value::Str(text.into())
+        Value(Repr::Str(text.into()))
     }
 
     fn rows(value: Value) -> Vec<String> {
         match value.ok_payload() {
             Some(payload) => match payload.first() {
-                Some(Value::Array(items)) => items.iter().map(ToString::to_string).collect(),
+                Some(Value(Repr::Array(items))) => items.iter().map(ToString::to_string).collect(),
                 other => panic!("expected `Ok(Array)`, found {other:?}"),
             },
             None => panic!("expected `Ok(...)`, found {value}"),
@@ -348,10 +350,11 @@ mod tests {
         let opened = hosts
             .call("database", "connect", vec![str_arg("bookings")])
             .expect("the call should be allowed");
-        let Value::Enum(result) = opened else {
+        let Value(Repr::Enum(result)) = opened else {
             panic!("expected `Ok(...)`");
         };
-        let Some(Value::Resource(handle)) = result.payload.into_vec().into_iter().next() else {
+        let Some(Value(Repr::Resource(handle))) = result.payload.into_vec().into_iter().next()
+        else {
             panic!("`connect` answers with a handle");
         };
         assert_eq!(handle.qualified_type(), "database.Connection");

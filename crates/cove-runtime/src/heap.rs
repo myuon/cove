@@ -36,13 +36,13 @@
 //!
 //! ADR 0011 is explicit that the roots are the interpreter's own structures
 //! rather than a machine stack, so there are no stack maps here. What those
-//! structures are is not the same on both backends, so [`Roots`] is a trait
+//! structures are is not the same on both backends, so `Roots` is a trait
 //! rather than a list: it names something that can *drive* a walk of one
 //! task's roots, and each backend describes its own.
 //!
 //! The two descriptions have nothing in common but the values they yield.
 //! Every binding the interpreter creates is a [`crate::interp`] `Place`,
-//! whose slot is an `Rc<RefCell<Value>>` registered in a [`SlotRoots`] list
+//! whose slot is an `Rc<RefCell<Value>>` registered in a `SlotRoots` list
 //! with the same push-and-truncate discipline the environment chain already
 //! has; the collector borrows each cell as it walks, so what it sees is what
 //! the slot holds now rather than what it held when the binding was made. The
@@ -133,7 +133,7 @@ use std::rc::{Rc, Weak};
 use std::time::{Duration, Instant};
 
 use crate::task::{Task, TaskScope};
-use crate::value::{MapKey, Value, VectorStorage};
+use crate::value::{MapKey, Repr, Value, VectorStorage};
 
 /// The fewest objects a task may allocate between two collections.
 ///
@@ -191,7 +191,7 @@ const GROWTH_FACTOR: u64 = 2;
 /// Yielding *too few* is safe in the same accounting, and is the reason the
 /// VM need not walk its constant pool: an unseen reference is a shortfall,
 /// and a shortfall is a root.
-pub trait Roots {
+pub(crate) trait Roots {
     /// Calls `visit` once for every value this task holds directly.
     fn walk(&self, visit: &mut dyn FnMut(&Value));
 }
@@ -211,35 +211,30 @@ type Slot = Rc<RefCell<Value>>;
 /// exactly. There is one list per interpreter and one interpreter per task, so
 /// this *is* a task's roots — nothing has to be sliced out of a larger set.
 #[derive(Default)]
-pub struct SlotRoots {
+pub(crate) struct SlotRoots {
     slots: Vec<Slot>,
 }
 
 impl SlotRoots {
     /// An empty root set.
-    pub fn new() -> SlotRoots {
+    pub(crate) fn new() -> SlotRoots {
         SlotRoots::default()
     }
 
     /// How many slots are registered. A caller records this before entering a
     /// scope and hands it back to [`SlotRoots::truncate`] on the way out.
-    pub fn len(&self) -> usize {
+    pub(crate) fn len(&self) -> usize {
         self.slots.len()
     }
 
-    /// Whether no binding is registered at all.
-    pub fn is_empty(&self) -> bool {
-        self.slots.is_empty()
-    }
-
     /// Registers one binding's slot.
-    pub fn push(&mut self, slot: Slot) {
+    pub(crate) fn push(&mut self, slot: Slot) {
         self.slots.push(slot);
     }
 
     /// Drops every slot registered after `len`, which is what leaving a block
     /// or a call does.
-    pub fn truncate(&mut self, len: usize) {
+    pub(crate) fn truncate(&mut self, len: usize) {
         self.slots.truncate(len);
     }
 }
@@ -284,8 +279,9 @@ pub struct Collection {
     pub freed_bytes: u64,
     /// Objects still live after the sweep.
     pub live_objects: u64,
-    /// Bytes the live set holds, by the accounting [`Heap::live_bytes`]
-    /// describes.
+    /// Bytes the live set holds: every string, array, map, set, struct, enum
+    /// case and closure the live objects and the roots reach, with each
+    /// shared allocation counted once.
     pub live_bytes: u64,
     /// How long the program was stopped for this collection.
     pub pause: Duration,
@@ -340,7 +336,7 @@ impl HeapStats {
 /// is what makes that a language rule rather than an approximation: a vector
 /// may not cross a task boundary, so no two tasks ever hold the same one, and
 /// a task can collect without waiting for any other task to reach a safepoint.
-pub struct Heap {
+pub(crate) struct Heap {
     /// Every object this task has allocated and not yet lost, keyed by the
     /// address the object was allocated at. The address is stable while the
     /// `Weak` lives, so it identifies the object even after `Rc` has already
@@ -353,7 +349,7 @@ pub struct Heap {
 
 impl Heap {
     /// An empty heap.
-    pub fn new() -> Heap {
+    pub(crate) fn new() -> Heap {
         Heap {
             objects: HashMap::new(),
             allocations_since_collection: 0,
@@ -363,13 +359,13 @@ impl Heap {
     }
 
     /// This heap's totals so far.
-    pub fn stats(&self) -> HeapStats {
+    pub(crate) fn stats(&self) -> HeapStats {
         self.stats
     }
 
     /// Whether the heap is tracking no object at all, which is what a program
     /// that never made a vector looks like.
-    pub fn is_empty(&self) -> bool {
+    pub(crate) fn is_empty(&self) -> bool {
         self.objects.is_empty()
     }
 
@@ -380,7 +376,7 @@ impl Heap {
     /// counters rather than reading them keeps a second fold from counting the
     /// same allocation twice. The live figures describe the heap right now and
     /// are not counters, so they are left alone.
-    pub fn take_stats(&mut self) -> HeapStats {
+    pub(crate) fn take_stats(&mut self) -> HeapStats {
         let taken = self.stats;
         self.stats = HeapStats {
             live_bytes: self.stats.live_bytes,
@@ -396,7 +392,7 @@ impl Heap {
     /// The returned `Rc` is the program's handle; the heap keeps only a
     /// `Weak`, so the value's lifetime is still `Rc`'s to decide until a cycle
     /// takes that decision away from it.
-    pub fn allocate(&mut self, elements: Vec<Value>) -> Rc<VectorStorage> {
+    pub(crate) fn allocate(&mut self, elements: Vec<Value>) -> Rc<VectorStorage> {
         let storage = VectorStorage::new(elements);
         self.stats.allocated_objects += 1;
         self.stats.allocated_bytes += object_bytes(&storage);
@@ -408,26 +404,15 @@ impl Heap {
 
     /// Whether enough has been allocated since the last collection to be worth
     /// another one.
-    pub fn should_collect(&self) -> bool {
+    pub(crate) fn should_collect(&self) -> bool {
         self.allocations_since_collection >= self.next_collection_at
-    }
-
-    /// Bytes live as of the most recent collection.
-    ///
-    /// This counts the whole live set, not only the objects the heap manages:
-    /// every string, array, map, set, struct, enum case, and closure the live
-    /// objects and the roots reach, with each shared allocation counted once.
-    /// It is the storage the runtime holds for the program's values, and the
-    /// figure the memory budget is checked against.
-    pub fn live_bytes(&self) -> u64 {
-        self.stats.live_bytes
     }
 
     /// Marks from the roots and sweeps what is not marked.
     ///
     /// `roots` is walked twice and never consumed: see [`Roots`] for what a
     /// walk owes, and for why the two backends describe theirs differently.
-    pub fn collect(&mut self, roots: &dyn Roots) -> Collection {
+    pub(crate) fn collect(&mut self, roots: &dyn Roots) -> Collection {
         let started = Instant::now();
 
         // An object `Rc` already reclaimed leaves a dead `Weak` behind. Drop
@@ -659,7 +644,7 @@ impl Scan {
         let at = Rc::as_ptr(object) as usize;
         if let std::collections::hash_map::Entry::Vacant(slot) = self.seen.entry(at) {
             slot.insert(Sighting {
-                held: Value::Vector(object.clone()),
+                held: Value(Repr::Vector(object.clone())),
                 sighted: 0,
                 // A managed object's real count is snapshotted by
                 // `Heap::collect` before anything upgrades a handle; this
@@ -677,21 +662,21 @@ impl Scan {
     /// count its outgoing references twice.
     fn count(&mut self, value: &Value) {
         match value {
-            Value::Vector(storage) => {
+            Value(Repr::Vector(storage)) => {
                 self.sight(
                     Rc::as_ptr(storage) as usize,
                     Rc::strong_count(storage),
                     || value.clone(),
                 );
             }
-            Value::Array(items) => {
+            Value(Repr::Array(items)) => {
                 if self.sight(array_addr(items), Rc::strong_count(items), || value.clone()) {
                     for item in items.iter() {
                         self.count(item);
                     }
                 }
             }
-            Value::Map(entries) => {
+            Value(Repr::Map(entries)) => {
                 if self.sight(
                     Rc::as_ptr(entries) as usize,
                     Rc::strong_count(entries),
@@ -702,7 +687,7 @@ impl Scan {
                     }
                 }
             }
-            Value::Closure(closure) => {
+            Value(Repr::Closure(closure)) => {
                 if self.sight(
                     Rc::as_ptr(closure) as usize,
                     Rc::strong_count(closure),
@@ -713,7 +698,7 @@ impl Scan {
                     }
                 }
             }
-            Value::Dyn(wrapped) => {
+            Value(Repr::Dyn(wrapped)) => {
                 if self.sight(
                     Rc::as_ptr(wrapped) as usize,
                     Rc::strong_count(wrapped),
@@ -722,8 +707,8 @@ impl Scan {
                     self.count(&wrapped.value);
                 }
             }
-            Value::Task(task) => self.count_task(task),
-            Value::TaskScope(scope) => {
+            Value(Repr::Task(task)) => self.count_task(task),
+            Value(Repr::TaskScope(scope)) => {
                 if self.sight(Rc::as_ptr(scope) as usize, Rc::strong_count(scope), || {
                     value.clone()
                 }) {
@@ -740,7 +725,7 @@ impl Scan {
             // sighting only. Walking them once per path would count every
             // reference inside it twice, and a reference counted twice is a
             // shortfall concealed.
-            Value::Struct(structure) => {
+            Value(Repr::Struct(structure)) => {
                 if self.sight(
                     Rc::as_ptr(structure) as usize,
                     Rc::strong_count(structure),
@@ -758,7 +743,7 @@ impl Scan {
             // or in the slice a longer one points at, so walking it yields
             // each reference exactly once — which is the property this
             // module's documentation says the whole accounting rests on.
-            Value::Enum(enumeration) => {
+            Value(Repr::Enum(enumeration)) => {
                 for item in &enumeration.payload {
                     self.count(item);
                 }
@@ -767,7 +752,7 @@ impl Scan {
             // `Vector` can be part of, so no reference to a managed object
             // hides in one — and reading it would mean taking a lock the
             // collecting thread may already hold.
-            Value::Shared(_) => {}
+            Value(Repr::Shared(_)) => {}
             // A `Set`'s elements are `MapKey`s, which no mutable handle can
             // be, so no reference hides in one. A resource handle is a name
             // the host resolves, so it owns no Cove object either. A bound
@@ -781,7 +766,7 @@ impl Scan {
 
     fn count_task(&mut self, task: &Rc<Task>) {
         let first = self.sight(Rc::as_ptr(task) as usize, Rc::strong_count(task), || {
-            Value::Task(Rc::clone(task))
+            Value(Repr::Task(Rc::clone(task)))
         });
         if !first {
             return;
@@ -850,17 +835,17 @@ impl Marker<'_> {
             // A vector this heap does not manage — another task's, or one
             // built outside the interpreter — is neither its to mark nor its
             // to measure.
-            Value::Vector(storage)
+            Value(Repr::Vector(storage))
                 if self.managed.contains_key(&(Rc::as_ptr(storage) as usize)) =>
             {
                 self.enqueue(storage.clone());
             }
-            Value::Str(text) => {
+            Value(Repr::Str(text)) => {
                 if self.walked.insert(text.as_ptr() as usize) {
                     self.bytes += text.len() as u64;
                 }
             }
-            Value::Array(items) => {
+            Value(Repr::Array(items)) => {
                 if self.walked.insert(array_addr(items)) {
                     self.bytes += (items.len() * size_of::<Value>()) as u64;
                     for item in items.iter() {
@@ -868,7 +853,7 @@ impl Marker<'_> {
                     }
                 }
             }
-            Value::Map(entries) => {
+            Value(Repr::Map(entries)) => {
                 if self.walked.insert(Rc::as_ptr(entries) as usize) {
                     for (key, entry) in entries.iter() {
                         self.bytes += key_bytes(key) + size_of::<Value>() as u64;
@@ -876,7 +861,7 @@ impl Marker<'_> {
                     }
                 }
             }
-            Value::Set(items) => {
+            Value(Repr::Set(items)) => {
                 if self.walked.insert(Rc::as_ptr(items) as usize) {
                     for item in items.iter() {
                         self.bytes += key_bytes(item);
@@ -890,7 +875,7 @@ impl Marker<'_> {
             // `live_bytes` twice, and a chain of structs each holding two
             // references to the one below is walked in time exponential in
             // the chain's length.
-            Value::Struct(structure) => {
+            Value(Repr::Struct(structure)) => {
                 if self.walked.insert(Rc::as_ptr(structure) as usize) {
                     self.bytes += size_of::<crate::value::StructValue>() as u64;
                     for (name, field) in &structure.fields {
@@ -909,7 +894,7 @@ impl Marker<'_> {
             // than by counting them: an inline slot is already inside the
             // `size_of::<EnumValue>()` charged above, and charging it again
             // would say a `Some(x)` costs a `Value` more than it does.
-            Value::Enum(enumeration) => {
+            Value(Repr::Enum(enumeration)) => {
                 self.bytes += size_of::<crate::value::EnumValue>() as u64;
                 if let crate::value::Payload::Many(items) = &enumeration.payload {
                     self.bytes += (items.len() * size_of::<Value>()) as u64;
@@ -918,7 +903,7 @@ impl Marker<'_> {
                     self.visit(item);
                 }
             }
-            Value::Closure(closure) => {
+            Value(Repr::Closure(closure)) => {
                 if self.walked.insert(Rc::as_ptr(closure) as usize) {
                     self.bytes += size_of::<crate::value::Closure>() as u64;
                     for (name, captured) in &closure.captures {
@@ -927,18 +912,18 @@ impl Marker<'_> {
                     }
                 }
             }
-            Value::Dyn(wrapped) => {
+            Value(Repr::Dyn(wrapped)) => {
                 if self.walked.insert(Rc::as_ptr(wrapped) as usize) {
                     self.bytes += size_of::<crate::value::DynValue>() as u64;
                     self.visit(&wrapped.value);
                 }
             }
-            Value::Task(task) => self.visit_task(task),
+            Value(Repr::Task(task)) => self.visit_task(task),
             // A `Shared`'s contents belong to the cell, not to this task, so
             // they are neither marked nor measured here; see this module's
             // documentation for why the lock is never taken.
-            Value::Shared(_) => {}
-            Value::TaskScope(scope) if self.walked.insert(Rc::as_ptr(scope) as usize) => {
+            Value(Repr::Shared(_)) => {}
+            Value(Repr::TaskScope(scope)) if self.walked.insert(Rc::as_ptr(scope) as usize) => {
                 self.bytes += size_of::<TaskScope>() as u64;
                 // A scope this thread is mid-way through mutating cannot be
                 // read, so its tasks go unsighted and the shortfall rule
@@ -1029,7 +1014,7 @@ mod tests {
     fn an_unreachable_object_is_reclaimed() {
         let roots = SlotRoots::new();
         let mut heap = Heap::new();
-        let storage = heap.allocate(vec![Value::Int(1)]);
+        let storage = heap.allocate(vec![Value(Repr::Int(1))]);
         drop(storage);
         let collected = heap.collect(&roots);
         // `Rc` already freed it, so there was nothing left for the sweep to
@@ -1041,8 +1026,8 @@ mod tests {
     fn a_reachable_object_survives() {
         let mut roots = SlotRoots::new();
         let mut heap = Heap::new();
-        let storage = heap.allocate(vec![Value::Int(1)]);
-        let _slot = root(&mut roots, Value::Vector(storage));
+        let storage = heap.allocate(vec![Value(Repr::Int(1))]);
+        let _slot = root(&mut roots, Value(Repr::Vector(storage)));
         let collected = heap.collect(&roots);
         assert_eq!(collected.live_objects, 1);
         assert_eq!(collected.freed_objects, 0);
@@ -1056,8 +1041,8 @@ mod tests {
         let mut heap = Heap::new();
         let a = heap.allocate(Vec::new());
         let b = heap.allocate(Vec::new());
-        a.elements.borrow_mut().push(Value::Vector(b.clone()));
-        b.elements.borrow_mut().push(Value::Vector(a.clone()));
+        a.elements.borrow_mut().push(Value(Repr::Vector(b.clone())));
+        b.elements.borrow_mut().push(Value(Repr::Vector(a.clone())));
         let weak = Rc::downgrade(&a);
         drop(a);
         drop(b);
@@ -1074,8 +1059,8 @@ mod tests {
         let mut roots = SlotRoots::new();
         let mut heap = Heap::new();
         let a = heap.allocate(Vec::new());
-        a.elements.borrow_mut().push(Value::Vector(a.clone()));
-        let _slot = root(&mut roots, Value::Vector(a.clone()));
+        a.elements.borrow_mut().push(Value(Repr::Vector(a.clone())));
+        let _slot = root(&mut roots, Value(Repr::Vector(a.clone())));
         drop(a);
         let collected = heap.collect(&roots);
         assert_eq!(collected.freed_objects, 0);
@@ -1091,11 +1076,11 @@ mod tests {
         object
             .elements
             .borrow_mut()
-            .push(Value::Struct(Rc::new(StructValue {
+            .push(Value(Repr::Struct(Rc::new(StructValue {
                 type_name: "test.Node".into(),
-                fields: vec![("next".into(), Value::Vector(object.clone()))],
+                fields: vec![("next".into(), Value(Repr::Vector(object.clone())))],
                 opaque: false,
-            })));
+            }))));
         let weak = Rc::downgrade(&object);
         drop(object);
         assert!(weak.upgrade().is_some());
@@ -1111,7 +1096,7 @@ mod tests {
     fn an_object_held_only_by_a_temporary_is_a_root() {
         let roots = SlotRoots::new();
         let mut heap = Heap::new();
-        let held = heap.allocate(vec![Value::Int(1)]);
+        let held = heap.allocate(vec![Value(Repr::Int(1))]);
         let collected = heap.collect(&roots);
         assert_eq!(collected.freed_objects, 0);
         assert_eq!(collected.live_objects, 1);
@@ -1124,9 +1109,9 @@ mod tests {
     fn an_object_inside_a_temporary_container_is_a_root() {
         let roots = SlotRoots::new();
         let mut heap = Heap::new();
-        let inner = heap.allocate(vec![Value::Int(7)]);
+        let inner = heap.allocate(vec![Value(Repr::Int(7))]);
         let weak = Rc::downgrade(&inner);
-        let temporary = Value::Array(vec![Value::Vector(inner)].into());
+        let temporary = Value(Repr::Array(vec![Value(Repr::Vector(inner))].into()));
         let collected = heap.collect(&roots);
         assert_eq!(collected.freed_objects, 0);
         assert!(weak.upgrade().is_some());
@@ -1142,17 +1127,17 @@ mod tests {
     fn an_object_reached_through_a_container_a_temporary_shares_with_garbage_survives() {
         let roots = SlotRoots::new();
         let mut heap = Heap::new();
-        let inner = heap.allocate(vec![Value::Int(7)]);
+        let inner = heap.allocate(vec![Value(Repr::Int(7))]);
         let alive = Rc::downgrade(&inner);
-        let shared: Rc<[Value]> = vec![Value::Vector(inner)].into();
+        let shared: Rc<[Value]> = vec![Value(Repr::Vector(inner))].into();
 
         let a = heap.allocate(Vec::new());
         let b = heap.allocate(Vec::new());
-        a.elements.borrow_mut().push(Value::Vector(b.clone()));
+        a.elements.borrow_mut().push(Value(Repr::Vector(b.clone())));
         a.elements
             .borrow_mut()
-            .push(Value::Array(Rc::clone(&shared)));
-        b.elements.borrow_mut().push(Value::Vector(a.clone()));
+            .push(Value(Repr::Array(Rc::clone(&shared))));
+        b.elements.borrow_mut().push(Value(Repr::Vector(a.clone())));
         let cycle = Rc::downgrade(&a);
         drop(a);
         drop(b);
@@ -1172,7 +1157,7 @@ mod tests {
                 .elements
                 .borrow()
                 .first()
-                .is_some_and(|element| element.eq_value(&Value::Int(7))),
+                .is_some_and(|element| element.eq_value(&Value(Repr::Int(7)))),
             "the sweep emptied a vector something still holds: {collected:?}"
         );
         assert_eq!(shared.len(), 1);
@@ -1192,10 +1177,10 @@ mod tests {
         let mut heap = Heap::new();
         // The only two references to this are the struct's field and the
         // local, and the local is what stands for a backend temporary.
-        let held = heap.allocate(vec![Value::Int(7)]);
+        let held = heap.allocate(vec![Value(Repr::Int(7))]);
         let structure = Rc::new(StructValue {
             type_name: "test.Holder".into(),
-            fields: vec![("held".into(), Value::Vector(held.clone()))],
+            fields: vec![("held".into(), Value(Repr::Vector(held.clone())))],
             opaque: false,
         });
 
@@ -1203,14 +1188,14 @@ mod tests {
         // scan reaches the struct twice without the program naming it at all.
         let a = heap.allocate(Vec::new());
         let b = heap.allocate(Vec::new());
-        a.elements.borrow_mut().push(Value::Vector(b.clone()));
-        b.elements.borrow_mut().push(Value::Vector(a.clone()));
+        a.elements.borrow_mut().push(Value(Repr::Vector(b.clone())));
+        b.elements.borrow_mut().push(Value(Repr::Vector(a.clone())));
         a.elements
             .borrow_mut()
-            .push(Value::Struct(Rc::clone(&structure)));
+            .push(Value(Repr::Struct(Rc::clone(&structure))));
         b.elements
             .borrow_mut()
-            .push(Value::Struct(Rc::clone(&structure)));
+            .push(Value(Repr::Struct(Rc::clone(&structure))));
         let cycle = Rc::downgrade(&a);
         drop(structure);
         drop(a);
@@ -1225,7 +1210,7 @@ mod tests {
             held.elements
                 .borrow()
                 .first()
-                .is_some_and(|element| element.eq_value(&Value::Int(7))),
+                .is_some_and(|element| element.eq_value(&Value(Repr::Int(7)))),
             "the sweep emptied a vector a temporary still holds: {collected:?}"
         );
     }
@@ -1235,11 +1220,11 @@ mod tests {
         let mut roots = SlotRoots::new();
         let mut heap = Heap::new();
         let object = heap.allocate(Vec::new());
-        let cycle = Value::Vector(object.clone());
+        let cycle = Value(Repr::Vector(object.clone()));
         object.elements.borrow_mut().push(cycle);
         drop(object);
         let base = roots.len();
-        let slot = Rc::new(RefCell::new(Value::Unit));
+        let slot = Rc::new(RefCell::new(Value(Repr::Unit)));
         roots.push(slot.clone());
         drop(slot);
         roots.truncate(base);
@@ -1250,10 +1235,10 @@ mod tests {
     fn live_bytes_falls_when_a_cycle_is_reclaimed() {
         let roots = SlotRoots::new();
         let mut heap = Heap::new();
-        let a = heap.allocate(vec![Value::Str("a fairly long string".into())]);
+        let a = heap.allocate(vec![Value(Repr::Str("a fairly long string".into()))]);
         let b = heap.allocate(Vec::new());
-        a.elements.borrow_mut().push(Value::Vector(b.clone()));
-        b.elements.borrow_mut().push(Value::Vector(a.clone()));
+        a.elements.borrow_mut().push(Value(Repr::Vector(b.clone())));
+        b.elements.borrow_mut().push(Value(Repr::Vector(a.clone())));
 
         let before = {
             // With both handles held, the cycle is rooted by the temporaries.
@@ -1283,16 +1268,16 @@ mod tests {
         for arity in [1usize, 3] {
             let mut roots = SlotRoots::new();
             let mut heap = Heap::new();
-            let held = heap.allocate(vec![Value::Int(7)]);
-            let mut payload: Vec<Value> = vec![Value::Vector(held.clone())];
-            payload.resize(arity, Value::Unit);
+            let held = heap.allocate(vec![Value(Repr::Int(7))]);
+            let mut payload: Vec<Value> = vec![Value(Repr::Vector(held.clone()))];
+            payload.resize(arity, Value(Repr::Unit));
             let _slot = root(
                 &mut roots,
-                Value::Enum(Box::new(crate::value::EnumValue {
+                Value(Repr::Enum(Box::new(crate::value::EnumValue {
                     type_name: "test.Carrier".into(),
                     case: "Holds".into(),
                     payload: payload.into(),
-                })),
+                }))),
             );
             let weak = Rc::downgrade(&held);
             drop(held);
@@ -1306,7 +1291,7 @@ mod tests {
                     .elements
                     .borrow()
                     .first()
-                    .is_some_and(|element| element.eq_value(&Value::Int(7))),
+                    .is_some_and(|element| element.eq_value(&Value(Repr::Int(7)))),
                 "the sweep emptied a vector an enum case of arity {arity} \
                  still reaches: {collected:?}"
             );
@@ -1332,11 +1317,11 @@ mod tests {
             let mut heap = Heap::new();
             let _slot = root(
                 &mut roots,
-                Value::Enum(Box::new(crate::value::EnumValue {
+                Value(Repr::Enum(Box::new(crate::value::EnumValue {
                     type_name: "test.Carrier".into(),
                     case: "Holds".into(),
-                    payload: vec![Value::Int(1); arity].into(),
-                })),
+                    payload: vec![Value(Repr::Int(1)); arity].into(),
+                }))),
             );
             heap.collect(&roots).live_bytes
         };
@@ -1372,12 +1357,12 @@ mod tests {
             body: crate::value::ClosureBody::Lowered(cove_ir::FunctionId(0)),
             module: "test".into(),
             captures: vec![
-                ("species".into(), Value::Int(7)),
-                ("world".into(), Value::Unit),
+                ("species".into(), Value(Repr::Int(7))),
+                ("world".into(), Value(Repr::Unit)),
             ],
         });
-        let _a = root(&mut roots, Value::Closure(Rc::clone(&closure)));
-        let _b = root(&mut roots, Value::Closure(Rc::clone(&closure)));
+        let _a = root(&mut roots, Value(Repr::Closure(Rc::clone(&closure))));
+        let _b = root(&mut roots, Value(Repr::Closure(Rc::clone(&closure))));
         // The same reason the struct test below drops its local: an unrooted
         // binding is a temporary, and the shortfall rule would rightly treat
         // it as a third live path.
@@ -1406,16 +1391,16 @@ mod tests {
     fn an_object_a_closure_captured_is_reachable_through_the_capture() {
         let mut roots = SlotRoots::new();
         let mut heap = Heap::new();
-        let held = heap.allocate(vec![Value::Int(7)]);
+        let held = heap.allocate(vec![Value(Repr::Int(7))]);
         let _slot = root(
             &mut roots,
-            Value::Closure(Rc::new(crate::value::Closure {
+            Value(Repr::Closure(Rc::new(crate::value::Closure {
                 is_async: false,
                 arity: 1,
                 body: crate::value::ClosureBody::Lowered(cove_ir::FunctionId(0)),
                 module: "test".into(),
-                captures: vec![("held".into(), Value::Vector(held.clone()))],
-            })),
+                captures: vec![("held".into(), Value(Repr::Vector(held.clone())))],
+            }))),
         );
         let weak = Rc::downgrade(&held);
         drop(held);
@@ -1427,7 +1412,7 @@ mod tests {
                 .elements
                 .borrow()
                 .first()
-                .is_some_and(|element| element.eq_value(&Value::Int(7))),
+                .is_some_and(|element| element.eq_value(&Value(Repr::Int(7)))),
             "the sweep emptied a vector a closure capture still reaches: {collected:?}"
         );
         assert_eq!(collected.freed_objects, 0);
@@ -1444,11 +1429,11 @@ mod tests {
         let mut heap = Heap::new();
         let structure = Rc::new(StructValue {
             type_name: "test.Shared".into(),
-            fields: vec![("value".into(), Value::Int(7))],
+            fields: vec![("value".into(), Value(Repr::Int(7)))],
             opaque: false,
         });
-        let _a = root(&mut roots, Value::Struct(Rc::clone(&structure)));
-        let _b = root(&mut roots, Value::Struct(Rc::clone(&structure)));
+        let _a = root(&mut roots, Value(Repr::Struct(Rc::clone(&structure))));
+        let _b = root(&mut roots, Value(Repr::Struct(Rc::clone(&structure))));
         // Drop the local so the only two references left are the roots' —
         // otherwise this binding is itself an unrooted temporary, and the
         // shortfall rule would (correctly) treat it as a third live path.
@@ -1494,17 +1479,17 @@ mod tests {
             let mut roots = SlotRoots::new();
             let mut heap = Heap::new();
 
-            let mut current = Value::Struct(Rc::new(StructValue {
+            let mut current = Value(Repr::Struct(Rc::new(StructValue {
                 type_name: "test.Level0".into(),
                 fields: Vec::new(),
                 opaque: false,
-            }));
+            })));
             for level in 1..=DEPTH {
-                current = Value::Struct(Rc::new(StructValue {
+                current = Value(Repr::Struct(Rc::new(StructValue {
                     type_name: format!("test.Level{level}").into(),
                     fields: vec![("a".into(), current.clone()), ("b".into(), current)],
                     opaque: false,
-                }));
+                })));
             }
             let _slot = root(&mut roots, current);
 
@@ -1545,7 +1530,7 @@ mod tests {
         let roots = SlotRoots::new();
         let mut heap = Heap::new();
         let object = heap.allocate(Vec::new());
-        let cycle = Value::Vector(object.clone());
+        let cycle = Value(Repr::Vector(object.clone()));
         object.elements.borrow_mut().push(cycle);
         drop(object);
         heap.collect(&roots);

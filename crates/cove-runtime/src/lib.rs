@@ -28,7 +28,7 @@ pub use clock::{Clock, VirtualTime};
 pub use database::Database;
 pub use error::RuntimeError;
 pub use files::Files;
-pub use heap::{Collection, Heap, HeapStats, Roots, SlotRoots};
+pub use heap::{Collection, HeapStats};
 pub use host::{
     shipped_schema, Console, Documents, Env, GrantSource, Grants, HostApi, HostRegistry, NoReentry,
     Reentry, ResourceHandle,
@@ -48,5 +48,5 @@ pub use trace::{
     RecordingBackend, RunOutcome, TraceEvent, TraceHeader, TraceSink, ValueCapture,
     TRACE_FORMAT_VERSION,
 };
-pub use value::Value;
+pub use value::{Value, ValueView};
 pub use vm::Vm;

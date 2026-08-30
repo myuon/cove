@@ -176,15 +176,15 @@ fn fetch(url: &str) -> Value {
 
 /// The `Ok` payload, or the message an `Err` carried.
 fn outcome(value: &Value) -> Result<String, String> {
-    let Value::Enum(result) = value else {
+    let Some(case) = value.case() else {
         panic!("expected a `Result`, found {value}");
     };
-    let payload = result
-        .payload
-        .first()
+    let payload = value
+        .payload()
+        .and_then(<[Value]>::first)
         .map(ToString::to_string)
         .unwrap_or_default();
-    match &*result.case {
+    match case {
         "Ok" => Ok(payload),
         _ => Err(payload),
     }

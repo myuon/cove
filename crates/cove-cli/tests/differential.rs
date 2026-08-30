@@ -151,7 +151,7 @@ use cove_sema::resolve::Program as Checked;
 /// number in the same change that raises the coverage.
 ///
 /// 55 to 56: a range used as a value builds one now — `cove_ir::Inst::MakeRange`
-/// takes two `Int` bounds off the scalar stack and leaves the `Value::Range`
+/// takes two `Int` bounds off the scalar stack and leaves the range value
 /// they make on the value stack — where the lowering previously had no
 /// instruction that made one and refused every range a `for` header did not
 /// consume. `tests/e2e:values_range` is the case that gained a lowering, and

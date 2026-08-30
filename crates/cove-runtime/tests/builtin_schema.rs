@@ -988,7 +988,7 @@ fn every_builtin_field_the_schema_declares_checks_and_runs() {
 fn check_and_answer(what: &str, body: &str, answer: i64) {
     let answered = check_and_run(what, body);
     assert!(
-        matches!(answered, Value::Int(found) if found == answer),
+        matches!(answered.as_int(), Some(found) if found == answer),
         "`{what}` is declared by the schema, but the program that exercises it \
          answered `{answered}` rather than `{answer}`"
     );

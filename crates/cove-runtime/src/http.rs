@@ -98,7 +98,7 @@ use cove_schema::builtins::RESULT;
 use crate::error::RuntimeError;
 use crate::host::{HostApi, NoReentry, Reentry, ResourceHandle};
 use crate::schema::ModuleSchema;
-use crate::value::{EnumValue, StructValue, Value};
+use crate::value::{EnumValue, Repr, StructValue, Value};
 
 /// How long the real host is willing to spend reading one whole request.
 ///
@@ -373,11 +373,11 @@ impl Http {
         };
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         self.locked().insert(id, listener);
-        Ok(Value::ok(Value::Resource(ResourceHandle::new(
+        Ok(Value::ok(Value(Repr::Resource(ResourceHandle::new(
             "http",
             &SCHEMA.resources[0],
             id,
-        ))))
+        )))))
     }
 
     fn locked(&self) -> std::sync::MutexGuard<'_, BTreeMap<u64, Listener>> {
@@ -442,7 +442,7 @@ impl Http {
         routes: &Value,
         back: &mut dyn Reentry,
     ) -> Result<Value, RuntimeError> {
-        let Value::Array(routes) = routes else {
+        let Value(Repr::Array(routes)) = routes else {
             return Err(RuntimeError::new(format!(
                 "`http.Server.handle` takes an `Array<http.Route>`, but found `{}`",
                 routes.type_name()
@@ -457,7 +457,7 @@ impl Http {
                 None => return Err(stale(handle, "handle")),
                 Some(Listener::Scripted { requests, .. }) => {
                     if requests.is_empty() {
-                        return Ok(Value::ok(Value::Bool(false)));
+                        return Ok(Value::ok(Value(Repr::Bool(false))));
                     }
                     Next::Scripted(requests.remove(0))
                 }
@@ -497,11 +497,11 @@ impl Http {
                                 unread.status,
                                 &json_string(&unread.message),
                             );
-                            return Ok(Value::ok(Value::Bool(true)));
+                            return Ok(Value::ok(Value(Repr::Bool(true))));
                         }
                     }
                 }
-                Waited::Stopped => return Ok(Value::ok(Value::Bool(false))),
+                Waited::Stopped => return Ok(Value::ok(Value(Repr::Bool(false)))),
                 Waited::Failed(e) => {
                     return Ok(Value::err(Value::error(format!(
                         "http: cannot accept on {handle}: {e}"
@@ -532,7 +532,7 @@ impl Http {
             }
             None => self.record_served(status, &body),
         }
-        Ok(Value::ok(Value::Bool(true)))
+        Ok(Value::ok(Value(Repr::Bool(true))))
     }
 
     /// Remembers what a fake listener answered, so a test can read it back.
@@ -649,15 +649,15 @@ fn bounded(allowance: Duration, time_left: Option<Duration>) -> Duration {
 /// The handler of the first route that matches `asked`.
 fn route_for(routes: &[Value], asked: &ScriptedRequest) -> Option<Value> {
     routes.iter().find_map(|route| {
-        let Value::Struct(route) = route else {
+        let Value(Repr::Struct(route)) = route else {
             return None;
         };
         let method = match route.get("method") {
-            Some(Value::Enum(method)) => method.case.to_string(),
+            Some(Value(Repr::Enum(method))) => method.case.to_string(),
             _ => return None,
         };
         let path = match route.get("path") {
-            Some(Value::Str(path)) => path.to_string(),
+            Some(Value(Repr::Str(path))) => path.to_string(),
             _ => return None,
         };
         (method == asked.method && path == asked.path).then(|| route.get("handler").cloned())?
@@ -671,31 +671,33 @@ fn route_for(routes: &[Value], asked: &ScriptedRequest) -> Option<Value> {
 /// server reports as a `500` rather than a reason to stop serving.
 fn response_of(value: &Value) -> Result<(i64, String), RuntimeError> {
     match value {
-        Value::Struct(structure) if &*structure.type_name == "http.Response" => {
+        Value(Repr::Struct(structure)) if &*structure.type_name == "http.Response" => {
             let status = match structure.get("status") {
-                Some(Value::Int(status)) => *status,
+                Some(Value(Repr::Int(status))) => *status,
                 _ => 200,
             };
             let body = match structure.get("body") {
-                Some(Value::Str(body)) => body.to_string(),
+                Some(Value(Repr::Str(body))) => body.to_string(),
                 Some(other) => json_of(other),
                 None => String::new(),
             };
             Ok((status, body))
         }
-        Value::Enum(result) if &*result.type_name == RESULT.name => match value.ok_payload() {
-            Some(payload) => response_of(payload.first().unwrap_or(&Value::Unit)),
-            None => Ok((
-                500,
-                json_string(
-                    &result
-                        .payload
-                        .first()
-                        .map(ToString::to_string)
-                        .unwrap_or_default(),
-                ),
-            )),
-        },
+        Value(Repr::Enum(result)) if &*result.type_name == RESULT.name => {
+            match value.ok_payload() {
+                Some(payload) => response_of(payload.first().unwrap_or(&Value(Repr::Unit))),
+                None => Ok((
+                    500,
+                    json_string(
+                        &result
+                            .payload
+                            .first()
+                            .map(ToString::to_string)
+                            .unwrap_or_default(),
+                    ),
+                )),
+            }
+        }
         other => Err(RuntimeError::new(format!(
             "a route handler must answer with an `http.Response`, but this one answered `{}`",
             other.type_name()
@@ -758,7 +760,7 @@ impl HostApi for Http {
     ) -> Result<Value, RuntimeError> {
         match op {
             "fetch" => {
-                let [Value::Str(url)] = args.as_slice() else {
+                let [Value(Repr::Str(url))] = args.as_slice() else {
                     unreachable!("checked by HostRegistry::call")
                 };
                 Ok(self.fetch(url, back))
@@ -770,7 +772,7 @@ impl HostApi for Http {
     fn call(&self, op: &str, args: Vec<Value>) -> Result<Value, RuntimeError> {
         match op {
             "fetch" => {
-                let [Value::Str(url)] = args.as_slice() else {
+                let [Value(Repr::Str(url))] = args.as_slice() else {
                     unreachable!("checked by HostRegistry::call")
                 };
                 // Reached only by a caller holding the host directly, which
@@ -779,13 +781,13 @@ impl HostApi for Http {
                 Ok(self.fetch(url, &NoReentry))
             }
             "json" => {
-                let [Value::Int(status), body] = args.as_slice() else {
+                let [Value(Repr::Int(status)), body] = args.as_slice() else {
                     unreachable!("checked by HostRegistry::call")
                 };
                 Ok(response(*status, &json_of(body)))
             }
             "listen" => {
-                let [Value::Int(port)] = args.as_slice() else {
+                let [Value(Repr::Int(port))] = args.as_slice() else {
                     unreachable!("checked by HostRegistry::call")
                 };
                 self.listen(*port)
@@ -803,13 +805,13 @@ impl HostApi for Http {
     ) -> Result<Value, RuntimeError> {
         match op {
             "port" => match self.locked().get(&handle.id) {
-                Some(Listener::Real(listener)) => Ok(Value::Int(
+                Some(Listener::Real(listener)) => Ok(Value(Repr::Int(
                     listener
                         .local_addr()
                         .map(|a| i64::from(a.port()))
                         .unwrap_or(0),
-                )),
-                Some(Listener::Scripted { port, .. }) => Ok(Value::Int(*port)),
+                ))),
+                Some(Listener::Scripted { port, .. }) => Ok(Value(Repr::Int(*port))),
                 None => Err(stale(handle, "port")),
             },
             "handle" => {
@@ -819,7 +821,7 @@ impl HostApi for Http {
                 self.serve_one(handle, routes, back)
             }
             "close" => match self.locked().remove(&handle.id) {
-                Some(_) => Ok(Value::ok(Value::Unit)),
+                Some(_) => Ok(Value::ok(Value(Repr::Unit))),
                 None => Err(stale(handle, "close")),
             },
             _ => unreachable!("checked by HostRegistry::call_resource"),
@@ -829,36 +831,36 @@ impl HostApi for Http {
 
 /// `http.Response(status: ..., body: ...)`.
 fn response(status: i64, body: &str) -> Value {
-    Value::Struct(Rc::new(StructValue {
+    Value(Repr::Struct(Rc::new(StructValue {
         type_name: "http.Response".into(),
         fields: vec![
-            ("status".into(), Value::Int(status)),
-            ("body".into(), Value::Str(body.into())),
+            ("status".into(), Value(Repr::Int(status))),
+            ("body".into(), Value(Repr::Str(body.into()))),
         ],
         opaque: false,
-    }))
+    })))
 }
 
 /// `http.Request(method: ..., path: ..., body: ...)`.
 fn request(method: &str, path: &str, body: &str) -> Value {
-    Value::Struct(Rc::new(StructValue {
+    Value(Repr::Struct(Rc::new(StructValue {
         type_name: "http.Request".into(),
         fields: vec![
             ("method".into(), method_value(method)),
-            ("path".into(), Value::Str(path.into())),
-            ("body".into(), Value::Str(body.into())),
+            ("path".into(), Value(Repr::Str(path.into()))),
+            ("body".into(), Value(Repr::Str(body.into()))),
         ],
         opaque: false,
-    }))
+    })))
 }
 
 /// `http.Method.Get` and `http.Method.Post`.
 fn method_value(case: &str) -> Value {
-    Value::Enum(Box::new(EnumValue {
+    Value(Repr::Enum(Box::new(EnumValue {
         type_name: "http.Method".into(),
         case: case.into(),
         payload: crate::value::Payload::Empty,
-    }))
+    })))
 }
 
 /// Renders a Cove value as JSON.
@@ -868,16 +870,16 @@ fn method_value(case: &str) -> Value {
 /// tags a trace needs in order to be read back as a value.
 fn json_of(value: &Value) -> String {
     match value {
-        Value::Unit => "null".to_string(),
-        Value::Bool(b) => b.to_string(),
-        Value::Int(n) => n.to_string(),
-        Value::Float(x) if x.is_finite() => format!("{x:?}"),
-        Value::Str(s) => json_string(s),
-        Value::Array(items) => {
+        Value(Repr::Unit) => "null".to_string(),
+        Value(Repr::Bool(b)) => b.to_string(),
+        Value(Repr::Int(n)) => n.to_string(),
+        Value(Repr::Float(x)) if x.is_finite() => format!("{x:?}"),
+        Value(Repr::Str(s)) => json_string(s),
+        Value(Repr::Array(items)) => {
             let items = items.iter().map(json_of).collect::<Vec<_>>().join(",");
             format!("[{items}]")
         }
-        Value::Vector(storage) => {
+        Value(Repr::Vector(storage)) => {
             let items = storage
                 .elements
                 .borrow()
@@ -887,7 +889,7 @@ fn json_of(value: &Value) -> String {
                 .join(",");
             format!("[{items}]")
         }
-        Value::Map(entries) => {
+        Value(Repr::Map(entries)) => {
             let entries = entries
                 .iter()
                 .map(|(key, value)| format!("{}:{}", json_string(&key.to_string()), json_of(value)))
@@ -895,7 +897,7 @@ fn json_of(value: &Value) -> String {
                 .join(",");
             format!("{{{entries}}}")
         }
-        Value::Struct(structure) => {
+        Value(Repr::Struct(structure)) => {
             let fields = structure
                 .fields
                 .iter()
@@ -906,10 +908,10 @@ fn json_of(value: &Value) -> String {
         }
         // A case with no payload is its name, which is how an enum reads as
         // JSON; one with a payload carries it alongside.
-        Value::Enum(enumeration) if enumeration.payload.is_empty() => {
+        Value(Repr::Enum(enumeration)) if enumeration.payload.is_empty() => {
             json_string(&enumeration.case)
         }
-        Value::Enum(enumeration) => {
+        Value(Repr::Enum(enumeration)) => {
             let payload = enumeration
                 .payload
                 .iter()
@@ -1507,13 +1509,13 @@ mod tests {
             panic!("expected `Ok(...)`, found {value}");
         };
         match payload.first() {
-            Some(Value::Struct(fields)) if &*fields.type_name == "http.Response" => {
+            Some(Value(Repr::Struct(fields))) if &*fields.type_name == "http.Response" => {
                 let status = match fields.get("status") {
-                    Some(Value::Int(status)) => *status,
+                    Some(Value(Repr::Int(status))) => *status,
                     other => panic!("expected an `Int` status, found {other:?}"),
                 };
                 let body = match fields.get("body") {
-                    Some(Value::Str(body)) => body.to_string(),
+                    Some(Value(Repr::Str(body))) => body.to_string(),
                     other => panic!("expected a `String` body, found {other:?}"),
                 };
                 (status, body)
@@ -1525,7 +1527,7 @@ mod tests {
     fn bool_ok(value: Value) -> bool {
         match value.ok_payload() {
             Some(payload) => match payload.first() {
-                Some(Value::Bool(b)) => *b,
+                Some(Value(Repr::Bool(b))) => *b,
                 other => panic!("expected `Ok(Bool)`, found {other:?}"),
             },
             None => panic!("expected `Ok(...)`, found {value}"),
@@ -1536,9 +1538,9 @@ mod tests {
     /// test to check the encoding rather than the module's own plumbing.
     fn response_body(value: Value) -> String {
         match value {
-            Value::Struct(structure) if &*structure.type_name == "http.Response" => {
+            Value(Repr::Struct(structure)) if &*structure.type_name == "http.Response" => {
                 match structure.get("body") {
-                    Some(Value::Str(body)) => body.to_string(),
+                    Some(Value(Repr::Str(body))) => body.to_string(),
                     other => panic!("expected a `String` body, found {other:?}"),
                 }
             }
@@ -1548,10 +1550,10 @@ mod tests {
 
     /// Opens a listener on `port` and answers the handle it issued.
     fn listen(http: &Http, port: i64) -> Arc<ResourceHandle> {
-        let answered = http.call("listen", vec![Value::Int(port)]).unwrap();
+        let answered = http.call("listen", vec![Value(Repr::Int(port))]).unwrap();
         match answered.ok_payload() {
             Some(payload) => match payload.first() {
-                Some(Value::Resource(handle)) => handle.clone(),
+                Some(Value(Repr::Resource(handle))) => handle.clone(),
                 other => panic!("expected `Ok(Resource)`, found {other:?}"),
             },
             None => panic!("expected `Ok(...)`, found {answered}"),
@@ -1561,22 +1563,22 @@ mod tests {
     /// One `http.Route`, as Cove source would build it: a method, a path,
     /// and a handler the host never looks inside.
     fn route(method: &str, path: &str) -> Value {
-        Value::Struct(Rc::new(StructValue {
+        Value(Repr::Struct(Rc::new(StructValue {
             type_name: "http.Route".into(),
             fields: vec![
                 (
                     "method".into(),
-                    Value::Enum(Box::new(EnumValue {
+                    Value(Repr::Enum(Box::new(EnumValue {
                         type_name: "http.Method".into(),
                         case: method.into(),
                         payload: crate::value::Payload::Empty,
-                    })),
+                    }))),
                 ),
-                ("path".into(), Value::Str(path.into())),
-                ("handler".into(), Value::Unit),
+                ("path".into(), Value(Repr::Str(path.into()))),
+                ("handler".into(), Value(Repr::Unit)),
             ],
             opaque: false,
-        }))
+        })))
     }
 
     /// Reads and discards one HTTP/1.1 request's headers, so a test server
@@ -1689,7 +1691,10 @@ mod tests {
     fn a_denied_host_refuses_to_fetch() {
         let http = Http::denied();
         let answer = http
-            .call("fetch", vec![Value::Str("http://example.com/".into())])
+            .call(
+                "fetch",
+                vec![Value(Repr::Str("http://example.com/".into()))],
+            )
             .unwrap();
         assert_eq!(
             err_message(answer),
@@ -1700,7 +1705,7 @@ mod tests {
     #[test]
     fn a_denied_host_refuses_to_listen() {
         let http = Http::denied();
-        let answer = http.call("listen", vec![Value::Int(8080)]).unwrap();
+        let answer = http.call("listen", vec![Value(Repr::Int(8080))]).unwrap();
         assert_eq!(
             err_message(answer),
             "http: this host has no network, so nothing can listen"
@@ -1717,7 +1722,10 @@ mod tests {
             Vec::new(),
         );
         let answer = http
-            .call("fetch", vec![Value::Str("http://example.com/".into())])
+            .call(
+                "fetch",
+                vec![Value(Repr::Str("http://example.com/".into()))],
+            )
             .unwrap();
         assert_eq!(ok_response(answer), (200, "hello".to_string()));
     }
@@ -1741,7 +1749,7 @@ mod tests {
         let answer = http
             .call(
                 "fetch",
-                vec![Value::Str("http://example.com/missing".into())],
+                vec![Value(Repr::Str("http://example.com/missing".into()))],
             )
             .unwrap();
         assert_eq!(ok_response(answer), (404, "gone".to_string()));
@@ -1753,7 +1761,7 @@ mod tests {
         let answer = http
             .call(
                 "fetch",
-                vec![Value::Str("http://example.com/missing".into())],
+                vec![Value(Repr::Str("http://example.com/missing".into()))],
             )
             .unwrap();
         assert_eq!(
@@ -1778,7 +1786,7 @@ mod tests {
             .call_resource(&handle, "port", Vec::new(), &mut NoReentry)
             .unwrap()
         {
-            Value::Int(port) => assert_eq!(port, 4242),
+            Value(Repr::Int(port)) => assert_eq!(port, 4242),
             other => panic!("expected an `Int`, found {other}"),
         }
     }
@@ -1788,7 +1796,7 @@ mod tests {
         let http = Http::recorded(BTreeMap::new(), vec![ScriptedRequest::get("/health")]);
         let handle = listen(&http, 0);
 
-        let routes = Value::Array(vec![route("Get", "/health")].into());
+        let routes = Value(Repr::Array(vec![route("Get", "/health")].into()));
         let mut back = StubReentry::new(|| Ok(response(200, "healthy")));
         let answer = http
             .call_resource(&handle, "handle", vec![routes], &mut back)
@@ -1807,7 +1815,7 @@ mod tests {
         let http = Http::recorded(BTreeMap::new(), vec![ScriptedRequest::get("/missing")]);
         let handle = listen(&http, 0);
 
-        let routes = Value::Array(vec![route("Get", "/health")].into());
+        let routes = Value(Repr::Array(vec![route("Get", "/health")].into()));
         let answer = http
             .call_resource(&handle, "handle", vec![routes], &mut NoReentry)
             .unwrap();
@@ -1826,7 +1834,7 @@ mod tests {
     fn handle_drains_its_scripted_queue_then_answers_false() {
         let http = Http::recorded(BTreeMap::new(), vec![ScriptedRequest::get("/health")]);
         let handle = listen(&http, 0);
-        let routes = Value::Array(vec![route("Get", "/health")].into());
+        let routes = Value(Repr::Array(vec![route("Get", "/health")].into()));
         let mut back = StubReentry::new(|| Ok(response(200, "healthy")));
 
         let first = http
@@ -1881,12 +1889,12 @@ mod tests {
             let serving = Arc::clone(&handle);
             let mut back = StubReentry::new(move || {
                 let port = inside.call_resource(&serving, "port", Vec::new(), &mut NoReentry)?;
-                let second = inside.call("listen", vec![Value::Int(8080)])?;
+                let second = inside.call("listen", vec![Value(Repr::Int(8080))])?;
                 assert!(is_ok(&second), "a second listener opened: {second}");
                 Ok(response(200, &format!("{port}")))
             });
 
-            let routes = Value::Array(vec![route("Get", "/health")].into());
+            let routes = Value(Repr::Array(vec![route("Get", "/health")].into()));
             let answer = http
                 .call_resource(&handle, "handle", vec![routes], &mut back)
                 .unwrap();
@@ -1921,12 +1929,17 @@ mod tests {
     #[test]
     fn json_encodes_a_struct_as_an_object() {
         let http = Http::denied();
-        let payload = Value::Struct(Rc::new(StructValue {
+        let payload = Value(Repr::Struct(Rc::new(StructValue {
             type_name: "demo.Point".into(),
-            fields: vec![("x".into(), Value::Int(1)), ("y".into(), Value::Int(2))],
+            fields: vec![
+                ("x".into(), Value(Repr::Int(1))),
+                ("y".into(), Value(Repr::Int(2))),
+            ],
             opaque: false,
-        }));
-        let answer = http.call("json", vec![Value::Int(200), payload]).unwrap();
+        })));
+        let answer = http
+            .call("json", vec![Value(Repr::Int(200)), payload])
+            .unwrap();
         assert_eq!(response_body(answer), "{\"x\":1,\"y\":2}");
     }
 
@@ -1934,9 +1947,12 @@ mod tests {
     fn json_encodes_a_map_as_an_object() {
         let http = Http::denied();
         let mut map = BTreeMap::new();
-        map.insert(MapKey::Str("a".to_string()), Value::Int(1));
+        map.insert(MapKey::Str("a".to_string()), Value(Repr::Int(1)));
         let answer = http
-            .call("json", vec![Value::Int(200), Value::Map(Rc::new(map))])
+            .call(
+                "json",
+                vec![Value(Repr::Int(200)), Value(Repr::Map(Rc::new(map)))],
+            )
             .unwrap();
         assert_eq!(response_body(answer), "{\"a\":1}");
     }
@@ -1945,7 +1961,10 @@ mod tests {
     fn json_encodes_a_string_with_its_quotes() {
         let http = Http::denied();
         let answer = http
-            .call("json", vec![Value::Int(200), Value::Str("hi".into())])
+            .call(
+                "json",
+                vec![Value(Repr::Int(200)), Value(Repr::Str("hi".into()))],
+            )
             .unwrap();
         assert_eq!(response_body(answer), "\"hi\"");
     }
@@ -1953,28 +1972,36 @@ mod tests {
     #[test]
     fn json_encodes_an_array() {
         let http = Http::denied();
-        let payload = Value::Array(vec![Value::Int(1), Value::Int(2)].into());
-        let answer = http.call("json", vec![Value::Int(200), payload]).unwrap();
+        let payload = Value(Repr::Array(
+            vec![Value(Repr::Int(1)), Value(Repr::Int(2))].into(),
+        ));
+        let answer = http
+            .call("json", vec![Value(Repr::Int(200)), payload])
+            .unwrap();
         assert_eq!(response_body(answer), "[1,2]");
     }
 
     #[test]
     fn json_encodes_a_payload_free_enum_case_as_its_name() {
         let http = Http::denied();
-        let payload = Value::Enum(Box::new(EnumValue {
+        let payload = Value(Repr::Enum(Box::new(EnumValue {
             type_name: "demo.Color".into(),
             case: "Red".into(),
             payload: crate::value::Payload::Empty,
-        }));
-        let answer = http.call("json", vec![Value::Int(200), payload]).unwrap();
+        })));
+        let answer = http
+            .call("json", vec![Value(Repr::Int(200)), payload])
+            .unwrap();
         assert_eq!(response_body(answer), "\"Red\"");
     }
 
     #[test]
     fn json_escapes_a_quote_and_a_newline() {
         let http = Http::denied();
-        let payload = Value::Str("a\"b\nc".into());
-        let answer = http.call("json", vec![Value::Int(200), payload]).unwrap();
+        let payload = Value(Repr::Str("a\"b\nc".into()));
+        let answer = http
+            .call("json", vec![Value(Repr::Int(200)), payload])
+            .unwrap();
         assert_eq!(response_body(answer), r#""a\"b\nc""#);
     }
 
@@ -2029,7 +2056,7 @@ mod tests {
 
         let url = format!("http://127.0.0.1:{port}/");
         let answer = Http::real()
-            .call("fetch", vec![Value::Str(url.into())])
+            .call("fetch", vec![Value(Repr::Str(url.into()))])
             .unwrap();
         server.join().expect("the server thread should not panic");
 
@@ -2073,7 +2100,7 @@ mod tests {
 
         let url = format!("http://127.0.0.1:{port}/");
         let answer = Http::real()
-            .call("fetch", vec![Value::Str(url.clone().into())])
+            .call("fetch", vec![Value(Repr::Str(url.clone().into()))])
             .unwrap();
         server.join().expect("the server thread should not panic");
 
@@ -2118,7 +2145,7 @@ mod tests {
 
         let url = format!("http://127.0.0.1:{port}/");
         let answer = Http::real()
-            .call("fetch", vec![Value::Str(url.into())])
+            .call("fetch", vec![Value(Repr::Str(url.into()))])
             .unwrap();
         let _ = server.join();
 
@@ -2137,18 +2164,19 @@ mod tests {
     #[test]
     fn the_real_host_serves_a_request_end_to_end_over_loopback() {
         let http = Http::real();
-        let opened = http.call("listen", vec![Value::Int(0)]).unwrap();
-        let Value::Enum(result) = opened else {
+        let opened = http.call("listen", vec![Value(Repr::Int(0))]).unwrap();
+        let Value(Repr::Enum(result)) = opened else {
             panic!("expected `Ok(...)`");
         };
-        let Some(Value::Resource(handle)) = result.payload.into_vec().into_iter().next() else {
+        let Some(Value(Repr::Resource(handle))) = result.payload.into_vec().into_iter().next()
+        else {
             panic!("`listen` should answer a handle");
         };
         let port = match http
             .call_resource(&handle, "port", Vec::new(), &mut NoReentry)
             .unwrap()
         {
-            Value::Int(port) => port,
+            Value(Repr::Int(port)) => port,
             other => panic!("expected an `Int` port, found {other}"),
         };
 
@@ -2165,7 +2193,7 @@ mod tests {
             String::from_utf8_lossy(&answer).into_owned()
         });
 
-        let routes = Value::Array(vec![route("Get", "/health")].into());
+        let routes = Value(Repr::Array(vec![route("Get", "/health")].into()));
         let mut back = StubReentry::new(|| Ok(response(200, "healthy")));
         let served = bool_ok(
             http.call_resource(&handle, "handle", vec![routes], &mut back)
@@ -2212,7 +2240,7 @@ mod tests {
         (
             http,
             handle,
-            Value::Array(vec![route("Get", "/health")].into()),
+            Value(Repr::Array(vec![route("Get", "/health")].into())),
         )
     }
 
@@ -2333,7 +2361,7 @@ mod tests {
             .call_resource(&handle, "port", Vec::new(), &mut NoReentry)
             .unwrap()
         {
-            Value::Int(port) => port,
+            Value(Repr::Int(port)) => port,
             other => panic!("expected an `Int` port, found {other}"),
         };
 
@@ -2352,7 +2380,7 @@ mod tests {
             String::from_utf8_lossy(&answer).into_owned()
         });
 
-        let routes = Value::Array(vec![route("Get", "/health")].into());
+        let routes = Value(Repr::Array(vec![route("Get", "/health")].into()));
         let mut back = StubReentry::new(|| panic!("no whole request arrives, so no handler runs"))
             .expiring_in(Duration::from_millis(150));
         let started = Instant::now();
@@ -2425,7 +2453,7 @@ mod tests {
             .call_resource(&handle, "port", Vec::new(), &mut NoReentry)
             .unwrap()
         {
-            Value::Int(port) => port,
+            Value(Repr::Int(port)) => port,
             other => panic!("expected an `Int` port, found {other}"),
         };
 
@@ -2443,7 +2471,9 @@ mod tests {
             String::from_utf8_lossy(&answer).into_owned()
         });
 
-        let routes = Value::Array(vec![route("Get", "/health"), route("Post", "/echo")].into());
+        let routes = Value(Repr::Array(
+            vec![route("Get", "/health"), route("Post", "/echo")].into(),
+        ));
         let mut back = StubReentry::new(|| Ok(response(200, "healthy")));
         let seen = back.seen();
         let started = Instant::now();
@@ -2656,8 +2686,8 @@ mod tests {
     /// The body of the one request a handler was given.
     fn body_of(seen: &[Value]) -> String {
         match seen {
-            [Value::Struct(request)] => match request.get("body") {
-                Some(Value::Str(body)) => body.to_string(),
+            [Value(Repr::Struct(request))] => match request.get("body") {
+                Some(Value(Repr::Str(body))) => body.to_string(),
                 other => panic!("expected a `String` body, found {other:?}"),
             },
             other => panic!("expected exactly one request, found {other:?}"),

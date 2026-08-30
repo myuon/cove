@@ -22,7 +22,7 @@ pub use cove_schema::{
 
 use cove_schema::builtins::{ERROR, ERR_CASE, NONE_CASE, OK_CASE, OPTION, RESULT, SOME_CASE};
 
-use crate::value::Value;
+use crate::value::{Repr, Value};
 
 /// Whether a value is one a declared type admits.
 ///
@@ -57,15 +57,17 @@ impl Admits for HostType {
     fn admits(&self, value: &Value) -> Result<(), Mismatch> {
         match (self, value) {
             (HostType::Any, _)
-            | (HostType::Unit, Value::Unit)
-            | (HostType::Bool, Value::Bool(_))
-            | (HostType::Int, Value::Int(_))
-            | (HostType::String, Value::Str(_))
-            | (HostType::Duration, Value::Duration(_)) => Ok(()),
+            | (HostType::Unit, Value(Repr::Unit))
+            | (HostType::Bool, Value(Repr::Bool(_)))
+            | (HostType::Int, Value(Repr::Int(_)))
+            | (HostType::String, Value(Repr::Str(_)))
+            | (HostType::Duration, Value(Repr::Duration(_))) => Ok(()),
             // The builtin error struct, which is what `Err` carries
             // everywhere a host declares one.
-            (HostType::Error, Value::Struct(fields)) if &*fields.type_name == ERROR.name => Ok(()),
-            (HostType::Array(item), Value::Array(items)) => {
+            (HostType::Error, Value(Repr::Struct(fields))) if &*fields.type_name == ERROR.name => {
+                Ok(())
+            }
+            (HostType::Array(item), Value(Repr::Array(items))) => {
                 for (index, element) in items.iter().enumerate() {
                     item.admits(element)
                         .map_err(|mismatch| mismatch.inside(&format!("[{index}]")))?;
@@ -79,14 +81,14 @@ impl Admits for HostType {
             // and nothing for a scalar one; it is what lets one `admits` walk
             // answer for both halves of a map rather than a second walk over a
             // second vocabulary.
-            (HostType::Set(item), Value::Set(items)) => {
+            (HostType::Set(item), Value(Repr::Set(items))) => {
                 for (index, element) in items.iter().enumerate() {
                     item.admits(&element.to_value())
                         .map_err(|mismatch| mismatch.inside(&format!("[{index}]")))?;
                 }
                 Ok(())
             }
-            (HostType::Map(key, value), Value::Map(entries)) => {
+            (HostType::Map(key, value), Value(Repr::Map(entries))) => {
                 for (index, (found, held)) in entries.iter().enumerate() {
                     key.admits(&found.to_value())
                         .map_err(|mismatch| mismatch.inside(&format!("key[{index}]")))?;
@@ -99,7 +101,9 @@ impl Admits for HostType {
             // The two builtin enums, whose cases `cove_schema::builtins`
             // declares: a case's name and how much it carries are read off
             // the same entry `Value::some` and `Value::ok` build from.
-            (HostType::Option(some), Value::Enum(case)) if &*case.type_name == OPTION.name => {
+            (HostType::Option(some), Value(Repr::Enum(case)))
+                if &*case.type_name == OPTION.name =>
+            {
                 match (&*case.case, case.payload.as_slice()) {
                     (name, [inner]) if name == SOME_CASE.name => some
                         .admits(inner)
@@ -108,7 +112,9 @@ impl Admits for HostType {
                     _ => Err(mismatched(self, value)),
                 }
             }
-            (HostType::Result(ok, error), Value::Enum(case)) if &*case.type_name == RESULT.name => {
+            (HostType::Result(ok, error), Value(Repr::Enum(case)))
+                if &*case.type_name == RESULT.name =>
+            {
                 match (&*case.case, case.payload.as_slice()) {
                     (name, [inner]) if name == OK_CASE.name => ok
                         .admits(inner)
@@ -121,13 +127,15 @@ impl Admits for HostType {
             }
             // A handle names its module and its kind, which together are the
             // qualified name a signature writes.
-            (HostType::Named(name), Value::Resource(handle))
+            (HostType::Named(name), Value(Repr::Resource(handle)))
                 if handle.qualified_type() == *name =>
             {
                 Ok(())
             }
-            (HostType::Named(name), Value::Struct(fields)) if &*fields.type_name == *name => Ok(()),
-            (HostType::Named(name), Value::Enum(case)) if &*case.type_name == *name => Ok(()),
+            (HostType::Named(name), Value(Repr::Struct(fields))) if &*fields.type_name == *name => {
+                Ok(())
+            }
+            (HostType::Named(name), Value(Repr::Enum(case))) if &*case.type_name == *name => Ok(()),
             _ => Err(mismatched(self, value)),
         }
     }
@@ -237,30 +245,34 @@ mod tests {
 
     /// A struct value named the way a host builds one: qualified by module.
     fn host_struct(type_name: &str, fields: Vec<(&str, Value)>) -> Value {
-        Value::Struct(Rc::new(StructValue {
+        Value(Repr::Struct(Rc::new(StructValue {
             type_name: type_name.into(),
             fields: fields
                 .into_iter()
                 .map(|(name, value)| (name.into(), value))
                 .collect(),
             opaque: false,
-        }))
+        })))
     }
 
     #[test]
     fn a_declared_type_admits_the_value_it_names() {
-        assert!(HostType::Unit.admits(&Value::Unit).is_ok());
-        assert!(HostType::Bool.admits(&Value::Bool(true)).is_ok());
-        assert!(HostType::Int.admits(&Value::Int(3)).is_ok());
-        assert!(HostType::String.admits(&Value::Str("text".into())).is_ok());
-        assert!(HostType::Duration.admits(&Value::Duration(500)).is_ok());
+        assert!(HostType::Unit.admits(&Value(Repr::Unit)).is_ok());
+        assert!(HostType::Bool.admits(&Value(Repr::Bool(true))).is_ok());
+        assert!(HostType::Int.admits(&Value(Repr::Int(3))).is_ok());
+        assert!(HostType::String
+            .admits(&Value(Repr::Str("text".into())))
+            .is_ok());
+        assert!(HostType::Duration
+            .admits(&Value(Repr::Duration(500)))
+            .is_ok());
         assert!(HostType::Error.admits(&Value::error("gone")).is_ok());
     }
 
     #[test]
     fn a_value_of_another_type_is_a_mismatch_where_the_two_part_company() {
         let mismatch = HostType::String
-            .admits(&Value::Int(3))
+            .admits(&Value(Repr::Int(3)))
             .expect_err("an `Int` is not a `String`");
 
         assert_eq!(mismatch.path, "");
@@ -278,7 +290,7 @@ mod tests {
     #[test]
     fn a_mismatch_names_the_argument_it_was_found_in() {
         let mismatch = HostType::String
-            .admits(&Value::Int(3))
+            .admits(&Value(Repr::Int(3)))
             .expect_err("an `Int` is not a `String`");
 
         assert_eq!(
@@ -292,9 +304,9 @@ mod tests {
         let declared = HostType::Result(&HostType::Array(&HostType::String), &HostType::Error);
 
         assert!(declared
-            .admits(&Value::ok(Value::Array(
-                vec![Value::Str("one".into())].into()
-            )))
+            .admits(&Value::ok(Value(Repr::Array(
+                vec![Value(Repr::Str("one".into()))].into()
+            ))))
             .is_ok());
         assert!(
             declared.admits(&Value::err(Value::error("gone"))).is_ok(),
@@ -302,9 +314,9 @@ mod tests {
         );
 
         let mismatch = declared
-            .admits(&Value::ok(Value::Array(
-                vec![Value::Str("one".into()), Value::Int(2)].into(),
-            )))
+            .admits(&Value::ok(Value(Repr::Array(
+                vec![Value(Repr::Str("one".into())), Value(Repr::Int(2))].into(),
+            ))))
             .expect_err("an `Int` among the declared strings is not admitted");
         assert_eq!(mismatch.path, "Ok(_)[1]");
         assert_eq!(mismatch.expected, HostType::String);
@@ -359,21 +371,21 @@ mod tests {
         assert!(declared
             .admits(&Value::map([(
                 MapKey::Str("breaking-change".to_string()),
-                Value::Int(3),
+                Value(Repr::Int(3)),
             )]))
             .is_ok());
 
         let wrong_value = declared
             .admits(&Value::map([(
                 MapKey::Str("breaking-change".to_string()),
-                Value::Str("three".into()),
+                Value(Repr::Str("three".into())),
             )]))
             .expect_err("a `String` is not the declared `Int`");
         assert_eq!(wrong_value.path, "[breaking-change]");
         assert_eq!(wrong_value.expected, HostType::Int);
 
         let wrong_key = declared
-            .admits(&Value::map([(MapKey::Int(3), Value::Int(3))]))
+            .admits(&Value::map([(MapKey::Int(3), Value(Repr::Int(3)))]))
             .expect_err("an `Int` is not the declared `String`");
         assert_eq!(wrong_key.path, "key[0]");
         assert_eq!(wrong_key.expected, HostType::String);
@@ -396,7 +408,7 @@ mod tests {
         );
         assert_eq!(
             declared
-                .admits(&Value::ok(Value::Array(vec![].into())))
+                .admits(&Value::ok(Value(Repr::Array(vec![].into()))))
                 .expect_err("an array is not a set")
                 .found,
             "Array"
@@ -409,11 +421,11 @@ mod tests {
 
         assert!(declared.admits(&Value::none()).is_ok());
         assert!(declared
-            .admits(&Value::some(Value::Str("set".into())))
+            .admits(&Value::some(Value(Repr::Str("set".into()))))
             .is_ok());
         assert_eq!(
             declared
-                .admits(&Value::some(Value::Int(3)))
+                .admits(&Value::some(Value(Repr::Int(3))))
                 .expect_err("`Some(3)` is not an `Option<String>`")
                 .path,
             "Some(_)"
@@ -422,13 +434,15 @@ mod tests {
 
     #[test]
     fn any_admits_whatever_it_is_given() {
-        assert!(HostType::Any.admits(&Value::Int(3)).is_ok());
-        assert!(HostType::Any.admits(&Value::Unit).is_ok());
+        assert!(HostType::Any.admits(&Value(Repr::Int(3))).is_ok());
+        assert!(HostType::Any.admits(&Value(Repr::Unit)).is_ok());
         assert!(HostType::Any
             .admits(&host_struct("demo.Point", Vec::new()))
             .is_ok());
         assert!(HostType::Array(&HostType::Any)
-            .admits(&Value::Array(vec![Value::Int(1), Value::Unit].into()))
+            .admits(&Value(Repr::Array(
+                vec![Value(Repr::Int(1)), Value(Repr::Unit)].into()
+            )))
             .is_ok());
     }
 
@@ -438,8 +452,8 @@ mod tests {
         let response = host_struct(
             "http.Response",
             vec![
-                ("status", Value::Int(200)),
-                ("body", Value::Str("ok".into())),
+                ("status", Value(Repr::Int(200))),
+                ("body", Value(Repr::Str("ok".into()))),
             ],
         );
         assert!(declared.admits(&response).is_ok());
@@ -462,10 +476,14 @@ mod tests {
     #[test]
     fn a_named_resource_is_checked_by_the_kind_the_handle_was_issued_for() {
         let declared = HostType::Named("database.Connection");
-        let handle = Value::Resource(ResourceHandle::new("database", &CONNECTION, 7));
+        let handle = Value(Repr::Resource(ResourceHandle::new(
+            "database",
+            &CONNECTION,
+            7,
+        )));
         assert!(declared.admits(&handle).is_ok());
 
-        let elsewhere = Value::Resource(ResourceHandle::new("http", &CONNECTION, 7));
+        let elsewhere = Value(Repr::Resource(ResourceHandle::new("http", &CONNECTION, 7)));
         assert_eq!(
             declared
                 .admits(&elsewhere)

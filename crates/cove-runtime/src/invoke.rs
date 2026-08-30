@@ -69,7 +69,7 @@ use cove_sema::typeck::Ty;
 use cove_syntax::ast::{FnDecl, GenericParam};
 
 use crate::error::RuntimeError;
-use crate::value::{EnumValue, StructValue, Value};
+use crate::value::{EnumValue, Repr, StructValue, Value};
 
 /// The rule an invocation keeps, quoted on every refusal so a host author
 /// reads the same sentence whichever way they broke it.
@@ -379,26 +379,28 @@ fn admits(program: &Program, ty: &Ty, value: &Value, module: &str) -> Result<(),
         // The checker settled nothing here, so there is nothing to hold the
         // value to. See the module docs.
         (Ty::Unknown(_), _) => Ok(()),
-        (Ty::Unit, Value::Unit)
-        | (Ty::Bool, Value::Bool(_))
-        | (Ty::Int, Value::Int(_))
-        | (Ty::Float, Value::Float(_))
-        | (Ty::Str, Value::Str(_))
-        | (Ty::Duration, Value::Duration(_))
-        | (Ty::Range, Value::Range { .. })
-        | (Ty::Scope, Value::TaskScope(_)) => Ok(()),
-        (Ty::Error, Value::Struct(fields)) if &*fields.type_name == ERROR.name => Ok(()),
-        (Ty::Array(item), Value::Array(items)) => elements(program, item, items.iter(), module),
-        (Ty::Vector(item), Value::Vector(storage)) => {
+        (Ty::Unit, Value(Repr::Unit))
+        | (Ty::Bool, Value(Repr::Bool(_)))
+        | (Ty::Int, Value(Repr::Int(_)))
+        | (Ty::Float, Value(Repr::Float(_)))
+        | (Ty::Str, Value(Repr::Str(_)))
+        | (Ty::Duration, Value(Repr::Duration(_)))
+        | (Ty::Range, Value(Repr::Range { .. }))
+        | (Ty::Scope, Value(Repr::TaskScope(_))) => Ok(()),
+        (Ty::Error, Value(Repr::Struct(fields))) if &*fields.type_name == ERROR.name => Ok(()),
+        (Ty::Array(item), Value(Repr::Array(items))) => {
+            elements(program, item, items.iter(), module)
+        }
+        (Ty::Vector(item), Value(Repr::Vector(storage))) => {
             elements(program, item, storage.elements.borrow().iter(), module)
         }
-        (Ty::Set(item), Value::Set(keys)) => {
+        (Ty::Set(item), Value(Repr::Set(keys))) => {
             for key in keys.iter() {
                 admits(program, item, &key.to_value(), module).map_err(|m| m.inside("{}"))?;
             }
             Ok(())
         }
-        (Ty::Map(key_ty, value_ty), Value::Map(entries)) => {
+        (Ty::Map(key_ty, value_ty), Value(Repr::Map(entries))) => {
             for (key, held) in entries.iter() {
                 admits(program, key_ty, &key.to_value(), module).map_err(|m| m.inside("{key}"))?;
                 admits(program, value_ty, held, module).map_err(|m| m.inside("{value}"))?;
@@ -408,7 +410,7 @@ fn admits(program: &Program, ty: &Ty, value: &Value, module: &str) -> Result<(),
         // The two builtin enums, read the way `crate::schema` reads them: the
         // case names come from `cove_schema::builtins`, which is also where
         // `Value::some` and `Value::ok` get them.
-        (Ty::Option(some), Value::Enum(case)) if &*case.type_name == OPTION.name => {
+        (Ty::Option(some), Value(Repr::Enum(case))) if &*case.type_name == OPTION.name => {
             match (&*case.case, case.payload.as_slice()) {
                 (name, [inner]) if name == SOME_CASE.name => admits(program, some, inner, module)
                     .map_err(|m| m.inside(&SOME_CASE.wildcard_pattern())),
@@ -416,7 +418,7 @@ fn admits(program: &Program, ty: &Ty, value: &Value, module: &str) -> Result<(),
                 _ => Err(mismatched(ty, value, module)),
             }
         }
-        (Ty::Result(ok, error), Value::Enum(case)) if &*case.type_name == RESULT.name => {
+        (Ty::Result(ok, error), Value(Repr::Enum(case))) if &*case.type_name == RESULT.name => {
             match (&*case.case, case.payload.as_slice()) {
                 (name, [inner]) if name == OK_CASE.name => admits(program, ok, inner, module)
                     .map_err(|m| m.inside(&OK_CASE.wildcard_pattern())),
@@ -425,26 +427,32 @@ fn admits(program: &Program, ty: &Ty, value: &Value, module: &str) -> Result<(),
                 _ => Err(mismatched(ty, value, module)),
             }
         }
-        (Ty::MapEntry(..), Value::Struct(fields)) if &*fields.type_name == MAP_ENTRY.name => Ok(()),
-        (Ty::Struct(name, args), Value::Struct(held)) if named(name, module, &held.type_name) => {
+        (Ty::MapEntry(..), Value(Repr::Struct(fields))) if &*fields.type_name == MAP_ENTRY.name => {
+            Ok(())
+        }
+        (Ty::Struct(name, args), Value(Repr::Struct(held)))
+            if named(name, module, &held.type_name) =>
+        {
             declared_struct(program, name, args, held, module)
         }
-        (Ty::Enum(name, args), Value::Enum(case)) if named(name, module, &case.type_name) => {
+        (Ty::Enum(name, args), Value(Repr::Enum(case))) if named(name, module, &case.type_name) => {
             declared_enum(program, name, args, case, module)
         }
-        (Ty::Dyn(name), Value::Dyn(held)) if named(name, module, &held.trait_name) => Ok(()),
+        (Ty::Dyn(name), Value(Repr::Dyn(held))) if named(name, module, &held.trait_name) => Ok(()),
         // A host type is written the way source writes it — `http.Request` —
         // and is therefore already qualified, whichever module reads it. Its
         // fields are read by name, so they are not followed: see above.
-        (Ty::Host(name), Value::Struct(fields)) if **name == *fields.type_name => Ok(()),
-        (Ty::Host(name), Value::Resource(handle)) if handle.qualified_type() == **name => Ok(()),
+        (Ty::Host(name), Value(Repr::Struct(fields))) if **name == *fields.type_name => Ok(()),
+        (Ty::Host(name), Value(Repr::Resource(handle))) if handle.qualified_type() == **name => {
+            Ok(())
+        }
         // A callable is admitted by being callable. Its parameter types are
         // not checked, because a `Value::Closure` carries an arity and no
         // types: what it would take is the checker's answer about the body it
         // came from, and that body is not this declaration.
-        (Ty::Fn(_), Value::Closure(_) | Value::HostFn(_)) => Ok(()),
-        (Ty::Task(_), Value::Task(_)) => Ok(()),
-        (Ty::Shared(_), Value::Shared(_)) => Ok(()),
+        (Ty::Fn(_), Value(Repr::Closure(_)) | Value(Repr::HostFn(_))) => Ok(()),
+        (Ty::Task(_), Value(Repr::Task(_))) => Ok(()),
+        (Ty::Shared(_), Value(Repr::Shared(_))) => Ok(()),
         _ => Err(mismatched(ty, value, module)),
     }
 }
@@ -653,11 +661,11 @@ mod tests {
 
     #[test]
     fn a_declared_type_admits_the_value_it_names() {
-        assert!(admits(&nothing(), &Ty::Int, &Value::Int(3), "m").is_ok());
-        assert!(admits(&nothing(), &Ty::Str, &Value::Str("t".into()), "m").is_ok());
-        assert!(admits(&nothing(), &Ty::Bool, &Value::Bool(true), "m").is_ok());
+        assert!(admits(&nothing(), &Ty::Int, &Value(Repr::Int(3)), "m").is_ok());
+        assert!(admits(&nothing(), &Ty::Str, &Value(Repr::Str("t".into())), "m").is_ok());
+        assert!(admits(&nothing(), &Ty::Bool, &Value(Repr::Bool(true)), "m").is_ok());
         assert!(admits(&nothing(), &Ty::Error, &Value::error("gone"), "m").is_ok());
-        assert!(admits(&nothing(), &Ty::Unit, &Value::Unit, "m").is_ok());
+        assert!(admits(&nothing(), &Ty::Unit, &Value(Repr::Unit), "m").is_ok());
     }
 
     #[test]
@@ -666,7 +674,7 @@ mod tests {
         assert!(admits(
             &nothing(),
             &declared,
-            &Value::array([Value::Str("one".into())]),
+            &Value::array([Value(Repr::Str("one".into()))]),
             "m"
         )
         .is_ok());
@@ -674,7 +682,7 @@ mod tests {
         let mismatch = admits(
             &nothing(),
             &declared,
-            &Value::array([Value::Str("one".into()), Value::Int(2)]),
+            &Value::array([Value(Repr::Str("one".into())), Value(Repr::Int(2))]),
             "m",
         )
         .expect_err("an `Int` among the declared strings is not admitted");
@@ -725,7 +733,7 @@ mod tests {
     #[test]
     fn a_refusal_spells_the_declared_type_the_way_the_checker_spells_it() {
         let bare = Ty::Struct(Arc::from("PullRequest"), Vec::new());
-        let mismatch = admits(&nothing(), &bare, &Value::Int(3), "rules.policy")
+        let mismatch = admits(&nothing(), &bare, &Value(Repr::Int(3)), "rules.policy")
             .expect_err("an `Int` is not a `PullRequest`");
         assert_eq!(
             mismatch.describe("rules.decide", 1),
@@ -743,7 +751,7 @@ mod tests {
         assert!(admits(
             &nothing(),
             &unknown,
-            &Value::array([Value::Int(1), Value::Unit]),
+            &Value::array([Value(Repr::Int(1)), Value(Repr::Unit)]),
             "m"
         )
         .is_ok());
@@ -756,19 +764,19 @@ mod tests {
         assert!(admits(
             &nothing(),
             &option,
-            &Value::some(Value::Str("s".into())),
+            &Value::some(Value(Repr::Str("s".into()))),
             "m"
         )
         .is_ok());
         assert_eq!(
-            admits(&nothing(), &option, &Value::some(Value::Int(1)), "m")
+            admits(&nothing(), &option, &Value::some(Value(Repr::Int(1))), "m")
                 .expect_err("`Some(1)` is not an `Option<String>`")
                 .describe("m.f", 1),
             "`m.f` was given `Int` at `Some(_)` of argument 1, but it declares `String` there"
         );
 
         let result = Ty::Result(Box::new(Ty::Int), Box::new(Ty::Error));
-        assert!(admits(&nothing(), &result, &Value::ok(Value::Int(1)), "m").is_ok());
+        assert!(admits(&nothing(), &result, &Value::ok(Value(Repr::Int(1))), "m").is_ok());
         assert!(admits(&nothing(), &result, &Value::err(Value::error("gone")), "m").is_ok());
     }
 

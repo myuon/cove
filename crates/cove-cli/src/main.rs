@@ -1761,16 +1761,9 @@ fn print_stats(hosts: &HostRegistry, wait_total: &WaitTotal, heap: &HeapStats) {
 
 /// An entry returning `Err(...)` fails the run and prints the error.
 pub(crate) fn report_exit(value: cove_runtime::Value) -> Result<(), CliError> {
-    use cove_runtime::value::Value;
-    if let Value::Enum(result) = &value {
-        if value.is_err() {
-            let payload = result
-                .payload
-                .first()
-                .map(ToString::to_string)
-                .unwrap_or_default();
-            return Err(CliError::Message(payload));
-        }
+    if let Some(payload) = value.err_payload() {
+        let message = payload.first().map(ToString::to_string).unwrap_or_default();
+        return Err(CliError::Message(message));
     }
     Ok(())
 }

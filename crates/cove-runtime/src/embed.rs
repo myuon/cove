@@ -44,6 +44,7 @@ use crate::interp::Interpreter;
 use crate::process::Process;
 use crate::runtime::Runtime;
 use crate::trace::create_trace_file;
+use crate::value::Repr;
 use crate::vm::Vm;
 use crate::{
     Budget, Cancellation, JsonlSink, Limits, NullSink, RecordingBackend, TraceHeader, TraceSink,
@@ -453,7 +454,7 @@ impl Embedded {
 /// An entry returning `Err(...)` fails the run and prints the error, exactly
 /// as it does under `cove run`.
 fn report_exit(value: &Value) -> Result<(), String> {
-    if let Value::Enum(result) = value {
+    if let Value(Repr::Enum(result)) = value {
         if value.is_err() {
             return Err(result
                 .payload

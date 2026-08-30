@@ -289,15 +289,9 @@ fn capability_open_help(test: &DeclaredTest) -> String {
 
 /// The message a test's returned value reports, or `None` when it passed.
 fn failure_message(value: &Value) -> Option<String> {
-    let Value::Enum(result) = value else {
-        return None;
-    };
-    if !value.is_err() {
-        return None;
-    }
     Some(
-        result
-            .payload
+        value
+            .err_payload()?
             .first()
             .map(ToString::to_string)
             .unwrap_or_default(),

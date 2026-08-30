@@ -479,8 +479,8 @@ impl HostApi for ReplayHost {
     /// Answers an operation on a handle from the trace, the handle included.
     ///
     /// A handle is a name, so a replay reproduces one by handing the recorded
-    /// name back: the `Value::Resource` this receives came out of the trace,
-    /// and matching it against the recorded first argument is what says the
+    /// name back: the handle this receives came out of the trace, and
+    /// matching it against the recorded first argument is what says the
     /// program reached for the same resource it reached for before.
     fn call_resource(
         &self,
@@ -491,7 +491,7 @@ impl HostApi for ReplayHost {
     ) -> Result<Value, RuntimeError> {
         let op = format!("{}.{op}", handle.type_name);
         let mut asked = Vec::with_capacity(args.len() + 1);
-        asked.push(Value::Resource(Arc::new(handle.clone())));
+        asked.push(Value::from_resource(handle.clone()));
         asked.extend(args);
         self.tape
             .lock()
@@ -767,7 +767,7 @@ mod tests {
         let tape = tape_of(&[println_line("hi")]);
         let hosts = registry(&tape);
         let value = hosts
-            .call("console", "println", vec![Value::Str("hi".into())])
+            .call("console", "println", vec![Value::string("hi")])
             .expect("the recorded call is answered");
         assert_eq!(trace::show_value(&value), "Ok(())");
         assert_eq!(
@@ -797,7 +797,7 @@ mod tests {
         let tape = tape_of(&[]);
         let hosts = registry(&tape);
         let error = hosts
-            .call("console", "println", vec![Value::Str("hi".into())])
+            .call("console", "println", vec![Value::string("hi")])
             .expect_err("an unrecorded call diverges");
         assert!(error.message.contains("were all used"), "{}", error.message);
         let report = tape
@@ -819,7 +819,7 @@ mod tests {
         let tape = tape_of(&[println_line("hi")]);
         let hosts = registry(&tape);
         hosts
-            .call("console", "println", vec![Value::Str("bye".into())])
+            .call("console", "println", vec![Value::string("bye")])
             .expect_err("a different argument diverges");
         let report = tape
             .lock()
@@ -844,7 +844,7 @@ mod tests {
         let tape = tape_of(&[println_line("one"), println_line("two")]);
         let hosts = registry(&tape);
         hosts
-            .call("console", "println", vec![Value::Str("two".into())])
+            .call("console", "println", vec![Value::string("two")])
             .expect_err("the recorded order is `one` first");
         let report = tape
             .lock()
@@ -865,7 +865,7 @@ mod tests {
         let tape = tape_of(&[println_line("one"), println_line("two")]);
         let hosts = registry(&tape);
         hosts
-            .call("console", "println", vec![Value::Str("one".into())])
+            .call("console", "println", vec![Value::string("one")])
             .expect("the first recorded call is answered");
         let tape = tape
             .lock()
@@ -898,7 +898,7 @@ mod tests {
             }));
         }
         hosts
-            .call("process", "exit", vec![Value::Int(0)])
+            .call("process", "exit", vec![Value::int(0)])
             .expect_err("a call with no recorded result cannot be answered");
         let report = tape
             .lock()
@@ -936,7 +936,7 @@ mod tests {
         let tape = tape_of(&[r#"{"event":"host_call","task":0,"module":"console","op":"println","capability":"console","wait_ns":0,"granted":true,"args":[{"type":"redacted","of":"String"}],"outcome":{"kind":"value","value":{"type":"enum","name":"Result","case":"Ok","payload":[{"type":"unit"}]}}}"#.to_string()]);
         let hosts = registry(&tape);
         hosts
-            .call("console", "println", vec![Value::Str("anything".into())])
+            .call("console", "println", vec![Value::string("anything")])
             .expect("a redacted argument cannot disagree");
         assert_eq!(
             tape.lock()
@@ -960,7 +960,7 @@ mod tests {
         let tape = tape_of(&[println_line("hi")]);
         let hosts = registry(&tape);
         hosts
-            .call("files", "read", vec![Value::Str("a.txt".into())])
+            .call("files", "read", vec![Value::string("a.txt")])
             .expect_err("`files` was not granted");
         assert!(tape
             .lock()

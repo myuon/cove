@@ -8,6 +8,7 @@
 //! compared against the interpreter's own function, called directly.
 
 use super::*;
+use crate::value::Repr;
 
 /// A value no `for` can walk fails in `interp::items_of`'s words on the
 /// VM, because they *are* its words: `IterItems` calls that function
@@ -65,7 +66,7 @@ fn a_value_that_cannot_be_walked_fails_in_the_interpreters_words() {
             .run(FunctionId(0), Vec::new())
             .expect_err("an `Int` cannot be walked")
             .message;
-        let on_the_oracle = crate::interp::items_of(Value::Int(1), span)
+        let on_the_oracle = crate::interp::items_of(Value(Repr::Int(1)), span)
             .expect_err("an `Int` cannot be walked")
             .message;
         (on_the_vm, on_the_oracle)
@@ -184,7 +185,7 @@ fn built_by_hand(
             "m",
             decl,
             case,
-            &mut vec![Value::Unit; payload as usize],
+            &mut vec![Value(Repr::Unit); payload as usize],
             span,
         )
         .expect_err("the case cannot be built")

@@ -326,26 +326,23 @@ impl PullRequest {
     /// rather than a rule, and it is what lets one list serve both.
     fn fields(&self) -> Vec<(&'static str, Value)> {
         vec![
-            ("id", Value::Str(self.id.as_str().into())),
-            ("title", Value::Str(self.title.as_str().into())),
-            ("author", Value::Str(self.author.as_str().into())),
-            (
-                "targetBranch",
-                Value::Str(self.target_branch.as_str().into()),
-            ),
-            ("changedLines", Value::Int(self.changed_lines)),
+            ("id", Value::string(self.id.as_str())),
+            ("title", Value::string(self.title.as_str())),
+            ("author", Value::string(self.author.as_str())),
+            ("targetBranch", Value::string(self.target_branch.as_str())),
+            ("changedLines", Value::int(self.changed_lines)),
             ("filesTouched", strings(&self.files_touched)),
             ("labels", label_set(&self.labels)),
-            ("approvals", Value::Int(self.approvals)),
-            ("isDraft", Value::Bool(self.is_draft)),
-            ("hasTests", Value::Bool(self.has_tests)),
+            ("approvals", Value::int(self.approvals)),
+            ("isDraft", Value::bool(self.is_draft)),
+            ("hasTests", Value::bool(self.has_tests)),
         ]
     }
 }
 
 /// `texts` as the Cove `Array<String>` both declarations admit.
 fn strings(texts: &[String]) -> Value {
-    Value::array(texts.iter().map(|t| Value::Str(t.as_str().into())))
+    Value::array(texts.iter().map(|t| Value::string(t.as_str())))
 }
 
 /// `labels` as the Cove `Set<String>` both declarations admit.
@@ -611,11 +608,14 @@ impl HostApi for Reviews {
         // restates any of it.
         match op {
             "pull" => {
-                let [Value::Str(request)] = args.as_slice() else {
+                let [request] = args.as_slice() else {
+                    unreachable!("checked by HostRegistry::call")
+                };
+                let Some(request) = request.as_str() else {
                     unreachable!("checked by HostRegistry::call")
                 };
                 match self.fault {
-                    Fault::WrongResultType => return Ok(Value::Int(7)),
+                    Fault::WrongResultType => return Ok(Value::int(7)),
                     Fault::Broken => {
                         return Err(RuntimeError::new(
                             "the review queue is unreachable".to_string(),
@@ -623,26 +623,32 @@ impl HostApi for Reviews {
                     }
                     Fault::None => {}
                 }
-                Ok(match self.open.lock().unwrap().get(&**request) {
+                Ok(match self.open.lock().unwrap().get(request) {
                     Some(pr) => Value::ok(pr.to_cove()),
                     None => Value::err(Value::error(format!("no request named `{request}`"))),
                 })
             }
             "record" => {
-                let [Value::Str(request), Value::Str(policy), Value::Int(reviewers), Value::Str(trail)] =
-                    args.as_slice()
-                else {
+                let [request, policy, reviewers, trail] = args.as_slice() else {
+                    unreachable!("checked by HostRegistry::call")
+                };
+                let (Some(request), Some(policy), Some(reviewers), Some(trail)) = (
+                    request.as_str(),
+                    policy.as_str(),
+                    reviewers.as_int(),
+                    trail.as_str(),
+                ) else {
                     unreachable!("checked by HostRegistry::call")
                 };
                 self.recorded.lock().unwrap().push(Recorded {
                     request: request.to_string(),
                     policy: policy.to_string(),
-                    reviewers: *reviewers,
+                    reviewers,
                     trail: trail.to_string(),
                 });
-                Ok(Value::ok(Value::Unit))
+                Ok(Value::ok(Value::unit()))
             }
-            "blame" => Ok(Value::ok(Value::Str("nobody".into()))),
+            "blame" => Ok(Value::ok(Value::string("nobody"))),
             other => unreachable!("`reviews` declares no operation `{other}`"),
         }
     }
