@@ -49,7 +49,7 @@
 //! {"benchmark":"pure","kind":"trace_overhead","backend":"vm", ...the same fields...}
 //! {"benchmark":"hostheavy", ...the same four lines...}
 //! ... and the same four for each of `arith`, `arrayget`, `field`, `method`,
-//! `call`, and `chars`
+//! `call`, `chars`, and `callback`
 //! {"benchmark":"startup","kind":"process","backend":"ast","iterations":<u32>,"wall_ns":<series>,"ok":<bool>}
 //! {"benchmark":"startup","kind":"process","backend":"vm", ...the same fields...}
 //! ```
@@ -142,6 +142,16 @@
 //! a struct field; `method` adds a call around that field; `call` adds a call
 //! with no receiver; and `chars` is the per-character scan `examples/cq`
 //! spends nearly all of its time in.
+//!
+//! `callback` is issue #193's, and belongs to the same family: 2,000,000
+//! invocations again, but of a closure reached through a higher-order
+//! builtin — `filter`, over an array, with the callback a helper builds over
+//! one capture. It is read beside `call`, which makes the same number of
+//! entries into a body through the call instruction instead, so the
+//! difference between the two is what re-entering the evaluator from inside
+//! a builtin costs. That route had no row before, which is why the per-call
+//! argument vector #184 removed from the builtin path survived on the
+//! callback path with nothing to price it.
 //!
 //! They exist because a wall-clock number for a whole program says how slow
 //! it is and not what is slow about it. They do not replace the application
@@ -288,6 +298,7 @@ fn bench() -> ExitCode {
         "method",
         "call",
         "chars",
+        "callback",
     ] {
         for backend in [Backend::Ast, Backend::Vm] {
             // A benchmark the lowering refused is reported as refused rather

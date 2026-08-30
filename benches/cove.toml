@@ -40,6 +40,15 @@ allow = []
 entry = "chars.main"
 allow = []
 
+# The same 2,000,000 invocations `call` makes, reached through a higher-order
+# builtin's callback rather than through the call instruction. Issue #193
+# added it: `map`, `filter`, `fold` and `sorted` are the only way a builtin
+# runs Cove code, and no row priced that route.
+
+[run.callback]
+entry = "callback.main"
+allow = []
+
 # The calling-convention matrix. Issue #123 asks what each boundary of the
 # typed three-stack convention costs, so each of these is `arith`'s loop with
 # exactly one route from the turn's `i` to the arithmetic that consumes it.
