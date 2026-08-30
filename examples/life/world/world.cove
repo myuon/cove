@@ -468,10 +468,7 @@ fn sprout(world: World, changes: Vector<Delta>, seed: Int) -> Growth {
     generator = drawn.seed
     deltas.push(Delta(cell: drawn.value, change: 1))
   }
-  var levels = Vector.of()
-  for level in world.food {
-    levels.push(level)
-  }
+  var levels = world.food.toVector()
   for delta in deltas {
     let standing = levels.get(delta.cell).unwrapOr(0)
     levels.set(delta.cell, standing + delta.change)

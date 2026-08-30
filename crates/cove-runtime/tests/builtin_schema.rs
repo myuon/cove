@@ -92,6 +92,13 @@ static EXERCISES: &[Exercise] = &[
         name: "slice",
         body: "  let items = [1, 2, 3]\n  items.slice(0, 2).length()",
     },
+    // `toVector` answers a growable copy, so what it produced is what a
+    // `var` binding then holds.
+    Exercise {
+        ty: "Array",
+        name: "toVector",
+        body: "  let items = [1, 2]\n  var copy = items.toVector()\n  copy.length()",
+    },
     Exercise {
         ty: "Array",
         name: "map",
@@ -180,6 +187,18 @@ static EXERCISES: &[Exercise] = &[
         ty: "Vector",
         name: "set",
         body: "  var items = Vector.of(1, 2)\n  items.set(0, 9).unwrapOr(0)",
+    },
+    // `pop` and `remove` take a `var self` receiver for the reason `push`
+    // and `set` do: they write through the shared storage.
+    Exercise {
+        ty: "Vector",
+        name: "pop",
+        body: "  var items = Vector.of(1, 2)\n  items.pop().unwrapOr(0)",
+    },
+    Exercise {
+        ty: "Vector",
+        name: "remove",
+        body: "  var items = Vector.of(1, 2)\n  items.remove(0).unwrapOr(0)",
     },
     Exercise {
         ty: "Vector",
@@ -1729,5 +1748,158 @@ fn an_alias_observes_a_set() {
   let was = second.set(0, 7)
   if first.toArray() == [7, 2] { was.unwrapOr(0) } else { 0 }"#,
         1,
+    );
+}
+
+// ------------------------------ what taking an element back out answers
+//
+// The exercises above prove `pop` and `remove` dispatch; these prove what
+// they answer where there is nothing to take, that they write through the
+// shared storage, and that a removal moves the indices a replacement leaves
+// alone.
+
+/// `pop` answers the last element and the vector is one shorter.
+#[test]
+fn pop_takes_the_last_element_and_answers_it() {
+    check_and_answer(
+        "Vector.pop",
+        r#"  var items = Vector.of(1, 2, 3)
+  let last = items.pop().unwrapOr(0)
+  if items.toArray() == [1, 2] { last } else { 0 }"#,
+        3,
+    );
+}
+
+/// A `pop` on an empty vector answers `None` and writes nothing.
+///
+/// That is not a rule about emptiness. `pop` is `remove(length() - 1)`, and
+/// on an empty vector that index is `-1`, which every index-taking operation
+/// answers `None` for.
+#[test]
+fn popping_an_empty_vector_answers_none() {
+    check_and_answer(
+        "Vector.pop on an empty vector",
+        r#"  var items: Vector<Int> = Vector.of()
+  let answered = match items.pop() { Some(_) => false, None => true }
+  if answered && items.length() == 0 { 1 } else { 0 }"#,
+        1,
+    );
+}
+
+/// `remove` answers what the index held, and everything after it moves down
+/// one — which is the promise replacement does not make.
+#[test]
+fn remove_takes_an_element_out_and_closes_the_gap() {
+    check_and_answer(
+        "Vector.remove in range",
+        r#"  var items = Vector.of(1, 2, 3)
+  let was = items.remove(0).unwrapOr(0)
+  if items.toArray() == [2, 3] { was } else { 0 }"#,
+        1,
+    );
+}
+
+/// An index that is not already in the vector answers `None` and removes
+/// nothing — `get`'s answer and `set`'s, so a program has one rule about
+/// indices rather than three.
+#[test]
+fn removing_an_index_that_is_not_there_answers_none() {
+    check_and_answer(
+        "Vector.remove out of range",
+        r#"  var items = Vector.of(1, 2)
+  let past = match items.remove(2) { Some(_) => false, None => true }
+  let below = match items.remove(-1) { Some(_) => false, None => true }
+  var empty: Vector<Int> = Vector.of()
+  let none = match empty.remove(0) { Some(_) => false, None => true }
+  if past && below && none && items.toArray() == [1, 2] { 1 } else { 0 }"#,
+        1,
+    );
+}
+
+/// `pop` and `remove` write through the shared storage, so an alias observes
+/// the shrink — which is what `push` and `set` do and the reason these take
+/// a `var self` receiver.
+#[test]
+fn an_alias_observes_a_removal() {
+    check_and_answer(
+        "Vector.pop and Vector.remove seen through an alias",
+        r#"  var first = Vector.of(1, 2, 3)
+  var second = first
+  let popped = second.pop().unwrapOr(0)
+  let removed = second.remove(0).unwrapOr(0)
+  if first.toArray() == [2] && first.length() == 1 { popped + removed } else { 0 }"#,
+        4,
+    );
+}
+
+/// A body that shrinks the vector it is walking cannot disturb the walk.
+///
+/// `for` asks for the elements once and walks what it was given, so all
+/// three are visited even though the body empties the vector as it goes.
+/// That rule already existed — it is `cove_ir::Inst::IterItems`' — and
+/// removal is checked against it here rather than assumed under it, since a
+/// body that shrinks the receiver is the case that would have found it
+/// wrong.
+///
+/// A `filter` callback cannot ask the same question. A closure captures a
+/// *copy of the binding*, and a captured binding is a read-only place, so
+/// `items.pop()` inside one is refused by the checker before any of this
+/// is reached. The loop is where the question is askable in Cove.
+#[test]
+fn a_walk_that_removes_as_it_goes_still_sees_every_element() {
+    check_and_answer(
+        "a `for` over a vector the body pops from",
+        r#"  var items = Vector.of(1, 2, 3)
+  var seen = 0
+  for n in items {
+    seen += n
+    let ignored = items.pop()
+  }
+  if items.isEmpty() { seen } else { 0 }"#,
+        6,
+    );
+}
+
+// ------------------------------ the other half of the round trip
+
+/// `toVector` copies an array into a vector that nothing else holds, so
+/// growing it leaves the array alone.
+#[test]
+fn to_vector_answers_an_independent_vector() {
+    check_and_answer(
+        "Array.toVector",
+        r#"  let items = [1, 2]
+  var building = items.toVector()
+  building.push(3)
+  if items == [1, 2] && building.toArray() == [1, 2, 3] { building.length() } else { 0 }"#,
+        3,
+    );
+}
+
+/// An empty array answers an empty vector: there is no receiver this
+/// refuses and no argument it could refuse.
+#[test]
+fn to_vector_of_an_empty_array_is_an_empty_vector() {
+    check_and_answer(
+        "Array.toVector on an empty array",
+        r#"  let empty: Array<Int> = []
+  var building = empty.toVector()
+  if building.isEmpty() { 1 } else { 0 }"#,
+        1,
+    );
+}
+
+/// The vector `toVector` answers holds the only handle to its storage, so
+/// the `freeze()` that ends the round trip is the O(1) one rather than the
+/// copying fallback.
+#[test]
+fn a_vector_from_an_array_can_be_frozen() {
+    check_and_answer(
+        "Array.toVector then freeze",
+        r#"  let items = [1, 2]
+  var building = items.toVector()
+  building.push(3)
+  building.freeze().length()"#,
+        3,
     );
 }

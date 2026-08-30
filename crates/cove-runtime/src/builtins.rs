@@ -39,8 +39,9 @@ pub use cove_schema::builtins::is_builtin_type;
 /// The methods that take a `var self` receiver and therefore need a mutable
 /// place at the call site.
 ///
-/// This is [`cove_schema::builtins::is_mutating_method`]: `push` and `freeze`
-/// declare `mutating` in the shared table, and nothing here restates them.
+/// This is [`cove_schema::builtins::is_mutating_method`]: `push`, `set`,
+/// `pop`, `remove` and `freeze` declare `mutating` in the shared table, and
+/// nothing here restates them.
 pub use cove_schema::builtins::is_mutating_method;
 
 /// How the builtins call back into the evaluator.
@@ -478,6 +479,17 @@ pub fn call_method(
             "contains" => contains("Array.contains", items, args, span),
             "indexOf" => index_of_element("Array.indexOf", items, args, span),
             "slice" => Ok(Value::Array(slice("Array.slice", items, &args, span)?)),
+            // `Vector.toArray` run backwards: a growable copy of these
+            // elements that nothing else holds a handle to, so a `freeze()`
+            // on it is the O(1) one. The elements are cloned as they are
+            // rather than snapshotted, which is `toArray`'s own rule — this
+            // separates the sequence and nothing inside it. The storage
+            // comes from the running task's heap like every other `Vector`,
+            // so the collector sees it.
+            "toVector" => {
+                expect_args("toVector", args, 0, span)?;
+                Ok(host.allocate_vector(items.to_vec()))
+            }
             "map" | "filter" | "fold" | "sorted" => {
                 walk_with(host, "Array", items.to_vec(), name, args, span)
             }
@@ -510,6 +522,39 @@ pub fn call_method(
                         return Ok(Value::none());
                     };
                     Ok(Value::some(std::mem::replace(slot, value)))
+                }
+                // Takes the last element out and answers it, or answers
+                // `None` and writes nothing when there is no last element.
+                //
+                // The empty case is `remove(length() - 1)` on an empty
+                // vector, where that index is `-1` — which `get`, `set` and
+                // `remove` all answer `None` for. One rule about indices,
+                // rather than a rule about indices and a rule about
+                // emptiness.
+                "pop" => {
+                    expect_args("Vector.pop", args, 0, span)?;
+                    Ok(storage
+                        .elements
+                        .borrow_mut()
+                        .pop()
+                        .map(Value::some)
+                        .unwrap_or_else(Value::none))
+                }
+                // Takes the element at `index` out, moves everything after
+                // it down one, and answers what was there — or answers
+                // `None` and removes nothing for an index that is not
+                // already in the vector, which is `get`'s answer and
+                // `set`'s. The write goes through the storage handle, as
+                // `push`'s and `set`'s do, so an alias observes the shrink.
+                "remove" => {
+                    let Some(index) = index_of("Vector.remove", &args, span)? else {
+                        return Ok(Value::none());
+                    };
+                    let mut elements = storage.elements.borrow_mut();
+                    if index >= elements.len() {
+                        return Ok(Value::none());
+                    }
+                    Ok(Value::some(elements.remove(index)))
                 }
                 "get" => Ok(index_of("Vector.get", &args, span)?
                     .and_then(|i| storage.elements.borrow().get(i).cloned())

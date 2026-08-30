@@ -312,8 +312,8 @@ use std::sync::Arc;
 
 use cove_diag::{Diagnostic, FileId, Span};
 use cove_schema::builtins::{
-    is_mutating_method, BuiltinSchema, BuiltinType, FreeBuiltinKind, FreeBuiltinSchema,
-    MethodSchema, ParamSchema, MAP_ENTRY, NONE_CASE, SCOPE,
+    BuiltinSchema, BuiltinType, FreeBuiltinKind, FreeBuiltinSchema, MethodSchema, ParamSchema,
+    MAP_ENTRY, NONE_CASE, SCOPE,
 };
 use cove_schema::{
     HostSchemas, HostType, ModuleSchema, OperationSchema, ResourceSchema, TypeSchema,
@@ -3041,13 +3041,24 @@ impl<'a> Checker<'a> {
             Ty::Dyn(trait_name) => self
                 .mutating_trait_method(trait_name, method)
                 .then_some(true),
-            // A builtin type: `push`, `set`, and `freeze` are the three
-            // that write through their receiver, and `freeze` is the one
-            // that does not need a place to write to — it takes the
-            // storage rather than changing it, so a temporary holding the
-            // only handle can be frozen. The other two need somewhere for
-            // the change to land.
-            _ => is_mutating_method(method).then(|| method != "freeze"),
+            // A builtin type: the shared table says which of its methods
+            // write through their receiver, and `freeze` is the one that
+            // does not need a place to write to — it takes the storage
+            // rather than changing it, so a temporary holding the only
+            // handle can be frozen. The rest need somewhere for the change
+            // to land.
+            //
+            // The receiver's own entry is asked and not the name alone,
+            // because a mutating name belongs to a type: `pop` is a
+            // `Vector`'s and no method of an `Array` at all, so
+            // `items.pop()` on an array is told it has no such method rather
+            // than told to find a place for a receiver it would never need.
+            // `Interpreter::call_builtin_method`'s guard asks the same
+            // question of the value it is holding.
+            _ => cove_schema::builtins::builtin(&builtin_name(ty))
+                .and_then(|entry| entry.method(method))
+                .filter(|declared| declared.mutating)
+                .map(|_| method != "freeze"),
         }
     }
 
@@ -9040,12 +9051,81 @@ fn run() -> Counter {
         assert_eq!(error.message, "expected `Int`, found `String`");
         let error = rejects_body("  var items = Vector.of(1, 2)\n  let n: Int = items.set(0, 9)");
         assert_eq!(error.message, "expected `Int`, found `Option<Int>`");
-        // An `Array` is immutable, so it has no such method to reach at all.
-        // The receiver is a `var` here so that the place rule, which asks by
-        // name before it has a receiver type, has nothing to say first.
-        let error = rejects_body("  var items = [1, 2]\n  let n = items.set(0, 9)");
+        // An `Array` is immutable, so it has no such method to reach at all
+        // — however the receiver was bound. The place rule asks the shared
+        // table what *this* receiver declares rather than asking the name,
+        // so a `let` array is told it has no `set` rather than told to be a
+        // `var` first.
+        for receiver in ["var items = [1, 2]", "let items = [1, 2]"] {
+            let error = rejects_body(&format!("  {receiver}\n  let n = items.set(0, 9)"));
+            assert_eq!(error.code, UNKNOWN_METHOD);
+            assert_eq!(error.message, "`Array` has no method `set`");
+        }
+    }
+
+    /// `pop` and `remove` take an element back out, so both answer the
+    /// receiver's own element type inside an `Option`, and `remove` takes
+    /// the index by the name `get` and `set` already call it.
+    #[test]
+    fn a_vector_answers_what_it_took_out() {
+        accepts_body(
+            "  var items = Vector.of(1, 2)\n  \
+             let last: Option<Int> = items.pop()\n  \
+             let first: Option<Int> = items.remove(0)",
+        );
+        let error = rejects_body("  var items = Vector.of(1, 2)\n  let n: Int = items.pop()");
+        assert_eq!(error.code, MISMATCH);
+        assert_eq!(error.message, "expected `Int`, found `Option<Int>`");
+        let error = rejects_body("  var items = Vector.of(1, 2)\n  let n = items.remove(\"0\")");
+        assert_eq!(error.message, "expected `Int`, found `String`");
+        // An `Array` is immutable and a `Set`'s removal answers a new set,
+        // so neither has these; and `Vector` has no `removed`, because a
+        // past participle would say it answered a new collection.
+        for receiver in ["let items = [1, 2]", "var items = [1, 2]"] {
+            let error = rejects_body(&format!("  {receiver}\n  let n = items.pop()"));
+            assert_eq!(error.code, UNKNOWN_METHOD);
+            assert_eq!(error.message, "`Array` has no method `pop`");
+        }
+        let error = rejects_body("  var items = Vector.of(1, 2)\n  let n = items.removed(0)");
+        assert_eq!(error.message, "`Vector` has no method `removed`");
+        // There is no `clear`: emptying a vector is `pop` in a loop, or a
+        // rebinding.
+        let error = rejects_body("  var items = Vector.of(1, 2)\n  items.clear()");
+        assert_eq!(error.message, "`Vector` has no method `clear`");
+    }
+
+    /// `pop` and `remove` mutate, so their receivers are under exactly the
+    /// place rule `push` and `set` are under.
+    #[test]
+    fn rejects_a_removal_on_a_read_only_place_and_on_no_place() {
+        for call in ["pop()", "remove(0)"] {
+            let error = rejects(&format!(
+                "fn run() -> Int {{\n  let items = Vector.of(1)\n  let n = items.{call}\n  0\n}}\n"
+            ));
+            assert_eq!(error.code, READ_ONLY_PLACE);
+            assert!(
+                error.message.ends_with("but `items` is a read-only place"),
+                "{}",
+                error.message
+            );
+            let error = rejects(&format!(
+                "fn run() -> Int {{\n  let n = Vector.of(1).{call}\n  0\n}}\n"
+            ));
+            assert_eq!(error.code, NOT_A_PLACE);
+        }
+    }
+
+    /// `toVector` answers a growable copy of an array, and it is on `Array`
+    /// only: an independent vector from a vector is `snapshot()`.
+    #[test]
+    fn an_array_answers_a_growable_copy_of_itself() {
+        accepts_body("  let items = [1, 2]\n  var building: Vector<Int> = items.toVector()");
+        let error = rejects_body("  let items = [1, 2]\n  let n: Array<Int> = items.toVector()");
+        assert_eq!(error.code, MISMATCH);
+        assert_eq!(error.message, "expected `Array<Int>`, found `Vector<Int>`");
+        let error = rejects_body("  var items = Vector.of(1, 2)\n  let n = items.toVector()");
         assert_eq!(error.code, UNKNOWN_METHOD);
-        assert_eq!(error.message, "`Array` has no method `set`");
+        assert_eq!(error.message, "`Vector` has no method `toVector`");
     }
 
     /// `set` mutates, so its receiver is the caller's place under exactly

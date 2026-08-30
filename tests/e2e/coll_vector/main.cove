@@ -1,7 +1,7 @@
 use console.println
 
-/// Prints `Vector` construction, mutation, replacement, aliasing, and
-/// `toArray`.
+/// Prints `Vector` construction, mutation, replacement, removal, aliasing,
+/// and `toArray`.
 export fn main() -> Result<Unit, Error> {
   var first = Vector.of(1, 2)
   println("of {first} length {first.length()}")?
@@ -36,6 +36,38 @@ export fn main() -> Result<Unit, Error> {
   )?
   println("set never grows the vector {first.set(first.length(), 0)} {first.length()}")?
 
+  // `pop` and `remove` take an element back out. Both are imperative verbs
+  // because both write through the receiver, unlike `Set.removed`, which
+  // answers a new set. Both answer `Some` of what they took, and an index
+  // that is not already in the vector — including the `-1` a `pop` on an
+  // empty vector asks about — answers `None` and removes nothing.
+  var shrinking = Vector.of(1, 2, 3, 4)
+  println("pop {shrinking.pop()} {shrinking}")?
+  println("remove {shrinking.remove(0)} {shrinking}")?
+  println(
+    "out of range {shrinking.remove(9)} {shrinking.remove(-1)} {shrinking}",
+  )?
+  var alias = shrinking
+  let taken = alias.pop()
+  println("an alias observes the shrink {taken} {shrinking} {alias}")?
+
+  // A removal moves the indices a replacement leaves alone: `indexOf` before
+  // the removal is stale after it.
+  var positions = Vector.of(10, 20, 30)
+  let before = positions.indexOf(30)
+  let gone = positions.remove(0)
+  println("a stale position {before} {positions.indexOf(30)} {gone}")?
+
+  // `for` asks for the elements once and walks what it was given, so a body
+  // that empties the vector still visits every one of them.
+  var walked = Vector.of(1, 2, 3)
+  var seen = 0
+  for level in walked {
+    seen += level
+    let ignored = walked.pop()
+  }
+  println("a walk that empties as it goes {seen} {walked}")?
+
   // Membership, position, and a part of the sequence: the same three an
   // `Array` answers, and `slice` answers an `Array` from a `Vector` too.
   println("contains {first.contains(100)} {first.contains(99)}")?
@@ -47,5 +79,6 @@ export fn main() -> Result<Unit, Error> {
   println(
     "empty answers {empty.contains(1)} {empty.indexOf(1)} {empty.set(0, 1)}",
   )?
+  println("empty shrinks to nothing {empty.pop()} {empty.remove(0)}")?
   Ok(())
 }
