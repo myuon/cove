@@ -469,7 +469,29 @@ use cove_sema::resolve::Program as Checked;
 /// pin what a backend does with one. It names a function declared inside a
 /// function body now, which is unsupported in the plain sense — the
 /// interpreter runs it and the lowering has no instruction for it.
-const LOWERED_FLOOR: usize = 93;
+///
+/// 93 to 94: one case and no construct, and the construct is the point.
+/// `examples:covecheck` is a concurrent HTTP checker — a task scope per
+/// window of checks, a `spawn` per check, an `await` per task in the order
+/// they were spawned, a `Shared` counter every one of those tasks writes, a
+/// `clock.timeout` around each check and another around the whole run, and a
+/// host resource nowhere, because a client that only fetches never holds one.
+/// Every one of those lowered at 82 to 86, 86 to 88 and 88 to 90, one at a
+/// time and each with a case of its own; this is the first case in the corpus
+/// that drives all of them together over a whole program, and it lowered on
+/// the day it was written. The three earlier entries are what it is evidence
+/// for.
+///
+/// It is not in the race list below, and that is a property of the program
+/// rather than luck. Nothing it spawns prints, every window is awaited before
+/// the next is started, and the report is written once at the end by the task
+/// that read the manifest — so the only cancellation it can reach is the
+/// whole-run deadline, which a virtual clock nothing moves never fires.
+/// `examples/covecheck/README.md` is where that argument is made in full,
+/// and the corpus is what checks it: a checker whose output depended on which
+/// endpoint answered first would disagree with itself here long before it
+/// disagreed across backends.
+const LOWERED_FLOOR: usize = 94;
 
 // ------------------------------------------------------------------ the test
 
