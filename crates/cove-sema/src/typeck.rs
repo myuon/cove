@@ -7191,6 +7191,8 @@ fn host_ty(declared: &HostType) -> Ty {
         HostType::Duration => Ty::Duration,
         HostType::Error => Ty::Error,
         HostType::Array(item) => Ty::Array(Box::new(host_ty(item))),
+        HostType::Set(item) => Ty::Set(Box::new(host_ty(item))),
+        HostType::Map(key, value) => Ty::Map(Box::new(host_ty(key)), Box::new(host_ty(value))),
         HostType::Option(some) => Ty::Option(Box::new(host_ty(some))),
         HostType::Result(ok, error) => Ty::Result(Box::new(host_ty(ok)), Box::new(host_ty(error))),
         HostType::Named(name) => Ty::Host((*name).into()),
@@ -7341,8 +7343,12 @@ fn unconstrained(message: String, help: String, span: Span) -> Diagnostic {
 fn contains_any(declared: &HostType) -> bool {
     match declared {
         HostType::Any => true,
-        HostType::Array(inner) | HostType::Option(inner) => contains_any(inner),
-        HostType::Result(ok, error) => contains_any(ok) || contains_any(error),
+        HostType::Array(inner) | HostType::Set(inner) | HostType::Option(inner) => {
+            contains_any(inner)
+        }
+        HostType::Map(key, value) | HostType::Result(key, value) => {
+            contains_any(key) || contains_any(value)
+        }
         _ => false,
     }
 }
