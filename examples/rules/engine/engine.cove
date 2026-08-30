@@ -1,0 +1,95 @@
+use rules.catalog.Rule
+use rules.catalog.standard
+use rules.policy.Decision
+use rules.policy.Finding
+use rules.policy.PullRequest
+use rules.policy.Requirement
+use rules.policy.ReviewPolicy
+
+/// The decision the shipped catalog reaches about `pr`.
+///
+/// This is the one function an embedding calls. It takes a pull request and
+/// answers a decision, and everything between the two is this package's
+/// business: which rules exist, in what order they are weighed, and how their
+/// findings become one policy.
+export fn decide(pr: PullRequest) -> Decision {
+  appraise(pr, standard())
+}
+
+/// The decision `catalog` reaches about `pr`.
+///
+/// Split from `decide` so that a test can ask one rule, or three, without
+/// having to arrange a pull request that the other five stay quiet about.
+export fn appraise(pr: PullRequest, catalog: Array<dyn Rule>) -> Decision {
+  let found = findings(pr, catalog)
+  Decision(policy: policyFor(found), findings: found)
+}
+
+/// Every finding the catalog has about `pr`, most serious first.
+///
+/// `sorted(by:)` is stable, so rules that answered at the same severity keep
+/// the order the catalog put them in. That is what makes the trail a decision
+/// prints reproducible: the catalog is written down, so the order is too.
+export fn findings(
+  pr: PullRequest,
+  catalog: Array<dyn Rule>,
+) -> Array<Finding> {
+  var found = Vector.of()
+  for rule in catalog {
+    match rule.appraise(pr) {
+      Some(finding) => found.push(finding)
+      None => ()
+    }
+  }
+
+  found.freeze().sorted(by: fn(a, b) {
+    a.severity.rank() > b.severity.rank()
+  })
+}
+
+/// The one policy `found` argues for.
+///
+/// Three cases and they are tried in this order for a reason. A blocking
+/// finding decides on its own, whatever else was found, because a block is
+/// not a quantity that other findings can outweigh. Otherwise the reviewers
+/// asked for are the most any one finding asked for, and the reason is that
+/// finding's, because a reason assembled out of six of them is a sentence
+/// nobody reads.
+export fn policyFor(found: Array<Finding>) -> ReviewPolicy {
+  for finding in found {
+    if finding.severity.stops() {
+      return ReviewPolicy.Block(finding.reason)
+    }
+  }
+
+  let most = found.fold(0, fn(soFar, finding) {
+    if finding.reviewers > soFar {
+      finding.reviewers
+    } else {
+      soFar
+    }
+  })
+
+  if most == 0 {
+    return ReviewPolicy.Normal
+  }
+
+  let deciding = found.filter(fn(finding) {
+    finding.reviewers == most
+  })
+  ReviewPolicy.Require(Requirement(reviewers: most, reason: reasonOf(deciding)))
+}
+
+/// The reason the first of `deciding` gives, or `unknown` when there is none.
+///
+/// `deciding` is never empty where `policyFor` calls it -- the maximum of a
+/// non-empty list is one of its members -- so the fallback is unreachable and
+/// is written anyway, because `Array.get` answers an `Option` and a program
+/// that pretends otherwise is one `unwrapOr` away from saying something
+/// untrue.
+fn reasonOf(deciding: Array<Finding>) -> String {
+  match deciding.get(0) {
+    Some(finding) => finding.reason
+    None => "unknown"
+  }
+}

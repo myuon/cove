@@ -279,9 +279,22 @@ pub struct HostFnValue {
 #[derive(Debug)]
 pub struct Closure {
     pub is_async: bool,
-    pub params: Vec<Param>,
-    /// `None` for lambdas, which have no declaration of their own.
-    pub decl: Option<Arc<FnDecl>>,
+    /// How many parameters this closure declares.
+    ///
+    /// The whole of its signature that anything outside the backend that
+    /// built it asks for, and the reason it is a number rather than the
+    /// parameter list it used to be. Every reader wanted a count:
+    /// [`crate::builtins::Callable::arity`] answers out of this,
+    /// `Result.mapError` reads it to decide whether to hand its callback the
+    /// error it is replacing, and `builtins::expect_callback` refuses a
+    /// callback of the wrong shape in one place for both backends. None of
+    /// them wanted a name, a default, a type or a span, and issue #121 is
+    /// where each was asked and answered.
+    ///
+    /// It counts parameters, not arguments a call must supply: a defaulted
+    /// or a variadic parameter is one of these like any other, which is what
+    /// `params.len()` answered when this was a `Vec<Param>`.
+    pub arity: usize,
     pub body: ClosureBody,
     /// The module a closure body resolves names in.
     pub module: Rc<str>,
@@ -298,6 +311,17 @@ pub struct Closure {
 /// walks a tree and the VM runs a lowered function, and neither can run the
 /// other's.
 ///
+/// **The declaration is part of the body, not part of the closure.** The
+/// parameters an interpreted call binds against and the return type it
+/// coerces to are syntax, and syntax is one backend's form of a body: a
+/// lowered function has neither, because `cove_ir::lower` spent both when it
+/// chose the slots and emitted the conversions. Keeping them beside the
+/// `Arc<Block>` they came from is what lets every field of a [`Closure`]
+/// outside this enum be a fact both backends state the same way, so that
+/// reaching syntax means reaching past the one variant that has any — which
+/// is the direction issue #109 asks for, and which issue #121 asked for on
+/// the `cove_ir` side of the same field.
+///
 /// So this is an enum rather than a second `Value` variant. Issue #109 asks
 /// that the internal representation become *less* exposed to an embedder,
 /// not more, and a `Value::LoweredClosure` beside `Value::Closure` would make
@@ -308,8 +332,33 @@ pub struct Closure {
 /// which of these it is.
 #[derive(Clone, Debug)]
 pub enum ClosureBody {
-    /// The syntax [`crate::interp::Interpreter`] walks.
-    Tree(Arc<cove_syntax::ast::Block>),
+    /// The syntax [`crate::interp::Interpreter`] walks, and the declaration
+    /// it walks it under.
+    Tree {
+        /// The parameters as source wrote them.
+        ///
+        /// `Interpreter::bind_params` reads every field of one: the name to
+        /// match a labelled argument against, `variadic` to know which
+        /// arguments to gather, `default` to evaluate in the callee's
+        /// environment when an argument was left out, and `is_var` to bind
+        /// the caller's place rather than a copy — which is also what
+        /// `Interpreter::call_shared_method` reads off the first parameter
+        /// of a `lock` closure. The VM answers that last question from
+        /// `cove_ir::Function::params` instead, and has no use for the other
+        /// three.
+        params: Vec<Param>,
+        /// The block to evaluate.
+        block: Arc<cove_syntax::ast::Block>,
+        /// The declaration this closure came from, and `None` for a lambda,
+        /// which has none of its own.
+        ///
+        /// Read for the written return type: a `dyn Trait` in it is what
+        /// tells the interpreter to wrap what the body produced. The lowered
+        /// form needs no equivalent, because `cove_ir::lower` emits a
+        /// `cove_ir::Inst::MakeDyn` before every return of such a function,
+        /// so the answer that leaves a lowered body is already wrapped.
+        decl: Option<Arc<FnDecl>>,
+    },
     /// The lowered function [`crate::vm::Vm`] runs, addressed in the
     /// [`cove_ir::Program`] that run was given.
     ///

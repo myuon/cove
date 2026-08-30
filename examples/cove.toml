@@ -38,6 +38,10 @@ allow = ["console", "files", "process"]
 entry = "cq.sample"
 allow = ["console", "files", "process"]
 
+[run.covecheck]
+entry = "covecheck.main"
+allow = ["console", "files", "http", "clock"]
+
 [run.statusCodes]
 entry = "codegen.statusCodes"
 allow = ["files"]
@@ -46,3 +50,6 @@ generates = "httpstatus/status_code.cove"
 [run.life]
 entry = "life.main"
 allow = ["console", "files", "process"]
+[run.reviewPolicy]
+entry = "rules.main"
+allow = ["console"]

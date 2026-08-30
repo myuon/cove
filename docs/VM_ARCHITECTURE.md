@@ -740,7 +740,7 @@ made of measurements rather than of expectations. Most of a trace is the
 program's. The entry's module and function, every host call's task, module,
 operation, capability, grant, arguments and outcome, each task's id, parent
 and scope, how the run ended and with what message, and what the run allocated
-are all compared exactly and all agree over the ninety-three cases that lower.
+are all compared exactly and all agree over the ninety-four cases that lower.
 Two of those were expected to need normalizing and did not. Task ids agree
 because both backends draw them from the one counter the `Runtime` holds, so
 there is no renumbering to undo; and no trace event carries `fuel_spent`,

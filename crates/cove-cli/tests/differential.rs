@@ -470,7 +470,52 @@ use cove_sema::resolve::Program as Checked;
 /// function body now, which is unsupported in the plain sense — the
 /// interpreter runs it and the lowering has no instruction for it.
 ///
-/// 93 to 94: one case, no construct, and the largest program in the corpus.
+/// 93 to 94: one case and no construct, and the construct is the point.
+/// `examples:covecheck` is a concurrent HTTP checker — a task scope per
+/// window of checks, a `spawn` per check, an `await` per task in the order
+/// they were spawned, a `Shared` counter every one of those tasks writes, a
+/// `clock.timeout` around each check and another around the whole run, and a
+/// host resource nowhere, because a client that only fetches never holds one.
+/// Every one of those lowered at 82 to 86, 86 to 88 and 88 to 90, one at a
+/// time and each with a case of its own; this is the first case in the corpus
+/// that drives all of them together over a whole program, and it lowered on
+/// the day it was written. The three earlier entries are what it is evidence
+/// for.
+///
+/// It is not in the race list below, and that is a property of the program
+/// rather than luck. Nothing it spawns prints, every window is awaited before
+/// the next is started, and the report is written once at the end by the task
+/// that read the manifest — so the only cancellation it can reach is the
+/// whole-run deadline, which a virtual clock nothing moves never fires.
+/// `examples/covecheck/README.md` is where that argument is made in full,
+/// and the corpus is what checks it: a checker whose output depended on which
+/// endpoint answered first would disagree with itself here long before it
+/// disagreed across backends.
+///
+/// 94 to 95: one case, `examples:reviewPolicy`, and no construct again --
+/// and this time the absence is the finding rather than an aside. The case is
+/// `examples/rules`, the embedded review-policy engine issue #90 asks for,
+/// and it is written the way the language card says to write Cove rather
+/// than the way a program that had to stay inside the lowering would be. Six
+/// rules behind a `dyn Rule` whose third method is a default the trait
+/// supplies and three of the six override; the same call written again
+/// through a bounded type parameter, so the two dispatch forms stand in one
+/// package; `Set` and `Map` as a rule's own state; `sorted(by:)` over a
+/// comparison of an enum's rank, then `fold` and `filter` over closures; and
+/// `match` on an enum case carrying a struct. Every one of them lowered on
+/// the day it was written and nothing had to be avoided.
+///
+/// That is worth recording because ADR 0022 makes the VM what a `cove`
+/// command runs a program on, so a construct the lowering refuses is a
+/// construct most users cannot use. A program written to a domain rather
+/// than to a backend is the only kind of evidence that can say the refusals
+/// are gone; the corpus is 125 cases now, and this is the second entry in a
+/// row whose case was shaped by what an example needed rather than by what
+/// would lower. `covecheck` above drove the task constructs together;
+/// this one drives the dispatch, collection and pattern constructs together,
+/// and neither had to be written around anything.
+///
+/// 95 to 96: one case, no construct, and the largest program in the corpus.
 /// `examples:life` is a deterministic ecosystem simulation — a grid, a
 /// population, three species as separate modules, and a seeded generator
 /// written in Cove — and it lowered on the day it was written, like every
@@ -490,7 +535,7 @@ use cove_sema::resolve::Program as Checked;
 /// `examples/life/options.cove` as the default `--ticks`, pinned by a
 /// `test fn` that says why, rather than in [`smaller_workload`] — a case
 /// whose own default is what a test can afford needs no second size.
-const LOWERED_FLOOR: usize = 94;
+const LOWERED_FLOOR: usize = 96;
 
 // ------------------------------------------------------------------ the test
 

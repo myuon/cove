@@ -1,0 +1,193 @@
+/// How much attention one finding asks for.
+///
+/// Three named levels rather than a number, because what the engine answers
+/// with is a decision about kind and not about degree. Two advisory findings
+/// do not add up to a required one, and no quantity of required ones becomes
+/// a block; a number would invite exactly that arithmetic and then have to
+/// document that it means nothing.
+export enum Severity {
+  /// Worth telling the author about, and nothing more.
+  Advisory
+  /// Costs the change reviewers before it may land.
+  Required
+  /// Stops the change until something about it is different.
+  Blocking
+}
+
+impl Severity {
+  /// Where this level sits against the other two, ascending.
+  ///
+  /// Ordering is the whole of what this means. Nothing sums these.
+  export fn rank(self) -> Int {
+    match self {
+      Severity.Advisory => 0
+      Severity.Required => 1
+      Severity.Blocking => 2
+    }
+  }
+
+  /// Whether a finding at this level stops the change.
+  export fn stops(self) -> Bool {
+    match self {
+      Severity.Advisory => false
+      Severity.Required => false
+      Severity.Blocking => true
+    }
+  }
+
+  /// This level's name, as a decision record spells it.
+  export fn name(self) -> String {
+    match self {
+      Severity.Advisory => "advisory"
+      Severity.Required => "required"
+      Severity.Blocking => "blocking"
+    }
+  }
+}
+
+/// A pull request, as a review policy requires one to be.
+///
+/// Ten fields and not one of them optional. The engine never asks whether a
+/// field was supplied, which is the point of writing the type down: whoever
+/// hands a pull request in decides once, at the boundary, what to do about a
+/// record that is missing something. Past this struct there is no such
+/// record.
+export struct PullRequest {
+  id: String
+  title: String
+  author: String
+  targetBranch: String
+  changedLines: Int
+  filesTouched: Array<String>
+  labels: Array<String>
+  approvals: Int
+  isDraft: Bool
+  hasTests: Bool
+}
+
+impl PullRequest {
+  /// The labels as a set, which is what a membership question wants.
+  ///
+  /// The field itself stays an `Array`, because that is the shape a host can
+  /// hand one over in -- a Host API schema has no `Set`, which is issue #153
+  /// -- and the conversion lives here rather than at the boundary so that the
+  /// embedded caller and the fixtures below reach it by the same route.
+  export fn labelSet(self) -> Set<String> {
+    var found: Set<String> = Set.of()
+    for label in self.labels {
+      found = found.inserted(label)
+    }
+
+    found
+  }
+
+  /// Whether this pull request carries `label`.
+  export fn labelled(self, label: String) -> Bool {
+    self.labelSet().contains(label)
+  }
+
+  /// Whether any file this pull request touches sits under `prefix`.
+  export fn touches(self, prefix: String) -> Bool {
+    for path in self.filesTouched {
+      if path.startsWith(prefix) {
+        return true
+      }
+    }
+
+    false
+  }
+}
+
+/// One thing a rule noticed about one pull request.
+///
+/// A finding names the rule that made it, so a decision can be read back to
+/// the rule that caused it without the engine keeping a second table of which
+/// answer came from where.
+export struct Finding {
+  rule: String
+  severity: Severity
+  reason: String
+  reviewers: Int
+}
+
+/// What a `ReviewPolicy.Require` asks for.
+///
+/// A struct rather than two positional payload values, because an enum case's
+/// payload is positional in Cove and `Require(2, "large_change")` says less at
+/// the call site than the two labels do.
+export struct Requirement {
+  reviewers: Int
+  reason: String
+}
+
+/// What a review policy demands of one pull request.
+export enum ReviewPolicy {
+  /// Nothing beyond what the repository asks of every change.
+  Normal
+  /// Reviewers, and the reason they are being asked for.
+  Require(Requirement)
+  /// The change may not land, and why.
+  Block(String)
+}
+
+impl ReviewPolicy {
+  /// This policy's name, which is the word a host records.
+  export fn name(self) -> String {
+    match self {
+      ReviewPolicy.Normal => "normal"
+      ReviewPolicy.Require(_) => "require"
+      ReviewPolicy.Block(_) => "block"
+    }
+  }
+
+  /// How many reviewers this policy asks for, which is none unless it is
+  /// asking for reviewers.
+  export fn reviewers(self) -> Int {
+    match self {
+      ReviewPolicy.Normal => 0
+      ReviewPolicy.Require(requirement) => requirement.reviewers
+      ReviewPolicy.Block(_) => 0
+    }
+  }
+
+  /// Why this policy was reached, in the words a decision record carries.
+  export fn reason(self) -> String {
+    match self {
+      ReviewPolicy.Normal => "none"
+      ReviewPolicy.Require(requirement) => requirement.reason
+      ReviewPolicy.Block(reason) => reason
+    }
+  }
+}
+
+/// A policy, and every finding that argued for it.
+///
+/// The findings ride along because a decision nobody can account for is one
+/// nobody can argue with. `ReviewPolicy` is what a caller acts on; the
+/// findings are what it shows the author.
+export struct Decision {
+  policy: ReviewPolicy
+  findings: Array<Finding>
+}
+
+impl Decision {
+  /// This decision as one line, for a console or a log.
+  export fn line(self) -> String {
+    "{self.policy.name()} reviewers={self.policy.reviewers()} because={self.policy.reason()}"
+  }
+
+  /// The rules that argued for this decision, in the order they were weighed,
+  /// as one comma-separated list.
+  export fn trail(self) -> String {
+    var parts = Vector.of()
+    for finding in self.findings {
+      parts.push("{finding.rule}:{finding.severity.name()}")
+    }
+
+    if parts.length() == 0 {
+      return "clean"
+    }
+
+    ",".join(parts.freeze())
+  }
+}

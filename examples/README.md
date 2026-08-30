@@ -3,10 +3,10 @@
 These programs are executable design tests for Cove. The syntax is still
 provisional.
 
-All ten run today; asynchronous execution is no longer what blocks any of
+All twelve run today; asynchronous execution is no longer what blocks any of
 them -- tasks run on threads.
 
-What a run of the last three does depends on the hosts it was given, and
+What a run of four of them does depends on the hosts it was given, and
 `cove run` gives it the real ones. `cove run server` binds port 8080 and
 serves until it is interrupted. `cove run callbacks` gets no further than its
 first line: `cove run` installs the denied `database`, so `database.connect`
@@ -15,8 +15,10 @@ fetches `http://127.0.0.1:8080/bookings` and `/prices`, so on its own it
 reports a connection error; run `server` first and it has something to reach,
 though `server` routes only `/health`, so what comes back is a pair of 404s
 rather than bookings and prices. The two are not written to compose.
+`cove run covecheck -- checks.json` is in the same position and says so more
+usefully, because saying which endpoints did not answer is what it is for.
 
-`crates/cove-cli/tests/examples.rs` runs every one of the ten against
+`crates/cove-cli/tests/examples.rs` runs every one of the twelve against
 deterministic fake hosts instead -- a listener with a scripted queue of
 requests, a `fetch` with recorded answers, a clock that moves only when
 something moves it, and a database of canned rows -- which is where their
@@ -41,13 +43,26 @@ asserted. `clock.every`'s own behavior is pinned exactly by the unit tests in
 `crates/cove-runtime/src/clock.rs`, which drive it with no second thread to
 race.
 
-`cq/` is the odd one out and is meant to be. The others are each a few dozen
-lines aimed at one hypothesis; `cq/` is a program of a size somebody might
-actually write, and its purpose is to find out whether writing one is
-comfortable. `examples/cq/README.md` is where that answer lives, along with
-wall-clock, heap, allocation, and records-per-second numbers over a
-100,000-record input -- the first measurement this repository has of Cove doing
-a real job rather than a benchmark. Reading it is the point of it.
+`cq/` and `rules/` are the two odd ones out, and each is meant to be. The
+others are each a few dozen lines aimed at one hypothesis; `cq/` is a program
+of a size somebody might actually write, and its purpose is to find out
+whether writing one is comfortable. `examples/cq/README.md` is where that
+answer lives, along with wall-clock, heap, allocation, and records-per-second
+numbers over a 100,000-record input -- the first measurement this repository
+has of Cove doing a real job rather than a benchmark. Reading it is the point
+of it.
+
+`rules/` is the only one with a Rust half. `cove run reviewPolicy` runs it as
+a program like any other, and that is not the shape it is for: a rule engine
+is compiled once when an application starts and invoked once per request for
+as long as the application lives, and no `[run.<name>]` describes that. So
+`rules/host/` is a workspace member -- a Rust application that registers a host
+module of its own, hands its `ModuleSchema` to `cove_sema::Compiler`, lowers
+one entry, builds one VM, and invokes it. `examples/rules/README.md` reports
+what each of those costs: what compiling is worth in invocations, what reusing
+one VM instead of building one per request saves, and what share of an
+invocation the Host API boundary is. That is the measurement
+[issue #109](https://github.com/myuon/cove/issues/109)'s gate asks for.
 
 `life/` is the second of that kind and asks a different question. `cq/` moves
 data through a program; `life/` keeps state and changes it, tick by tick,
@@ -72,7 +87,9 @@ Together they test the core product hypotheses:
 | `values/` | Struct copies, Vector aliases, immutable Arrays, and freeze |
 | `traits/` | Nominal traits, generic bounds, and both dispatch forms |
 | `callbacks/` | Routers, middleware, events, timers, retries, and task-safe captures |
+| `covecheck/` | A concurrent HTTP checker: bounded concurrency, a shared tally, per-check and whole-run bounds, and a report whose order does not depend on its scheduler. [Its own README](covecheck/README.md) argues that last part |
 | `cq/` | A whole practical program: streaming JSON Lines and CSV transformation, typed records, actionable diagnostics, and measured throughput. [Its own README](cq/README.md) records what it found |
+| `rules/` | Embedding: a Rust host that registers a module of its own, checks a rule package against its schema, and invokes it once per request. [Its own README](rules/README.md) reports what compiling once and invoking many times costs |
 | `life/` | A deterministic ecosystem simulation: a seeded generator written in Cove, a world that is a value because it holds no Vector, a resolution loop that works because a Vector is a handle, and three species that are modules. [Its own README](life/README.md) records what it found |
 | `text/` | Not a program: the module `restricted/` imports, for `export` and capabilities across a boundary, and the package's own `test fn` declarations |
 | `codegen/` | `cove generate`: a capability-controlled generator that reads `files/status_codes.txt` |
@@ -87,7 +104,7 @@ A module may name another module's exported declarations with `use`, so
 required capabilities are derived from the package's call graph, not one
 module's.
 The first implementation milestone, making `hello/` run, is done, and so is
-the one that follows it: all ten programs now have defined behavior in
+the one that follows it: all twelve programs now have defined behavior in
 both diagnostics and execution, whether that behavior is a clean run, like
 `hello`'s, or a documented refusal, like `callbacks`' immediate stop when
 `database.connect` finds no real database behind `cove run` to connect to.

@@ -1,0 +1,149 @@
+use rules.policy.PullRequest
+
+/// The pull requests this package is demonstrated and tested on.
+///
+/// Written down in Cove rather than read from a file, and the reason is the
+/// embedding this example exists for: `examples/rules/host/` builds the same
+/// six records in Rust and hands them across the Host API boundary, and the
+/// test that pins the two paths against each other needs one of them to be
+/// somewhere a Cove test can reach. A JSON file would have put a parser
+/// between the fixture and the assertion, and this package has no opinion
+/// about JSON.
+///
+/// Each of the six reaches a different arm of the policy, which is what makes
+/// `rules.main`'s output worth reading rather than six copies of `normal`.
+export fn samples() -> Array<PullRequest> {
+  [clean(), large(), guarded(), waived(), draft(), labelled()]
+}
+
+/// The sample at `at`, counting from zero, or `None` when there is none.
+///
+/// Written as a chain of comparisons rather than as `samples().get(at)`,
+/// and the reason is the measurement in `examples/rules/host/`. The control
+/// it runs against the embedded entry has to build exactly one pull request,
+/// because the invocation it is a control on receives exactly one; going
+/// through `samples()` would build all six and charge the control for five
+/// pull requests the host never sent.
+export fn sample(at: Int) -> Option<PullRequest> {
+  if at == 0 {
+    return Some(clean())
+  }
+
+  if at == 1 {
+    return Some(large())
+  }
+
+  if at == 2 {
+    return Some(guarded())
+  }
+
+  if at == 3 {
+    return Some(waived())
+  }
+
+  if at == 4 {
+    return Some(draft())
+  }
+
+  if at == 5 {
+    return Some(labelled())
+  }
+
+  None
+}
+
+/// A small change with tests, on an ordinary branch: nothing to say.
+export fn clean() -> PullRequest {
+  PullRequest(
+    id: "pr-1001",
+    title: "Correct a typo in the changelog",
+    author: "ada",
+    targetBranch: "main",
+    changedLines: 4,
+    filesTouched: ["CHANGELOG.md"],
+    labels: ["docs"],
+    approvals: 0,
+    isDraft: false,
+    hasTests: true,
+  )
+}
+
+/// A change over the size threshold, with tests: reviewers, and why.
+export fn large() -> PullRequest {
+  PullRequest(
+    id: "pr-1002",
+    title: "Rewrite the scheduler",
+    author: "grace",
+    targetBranch: "main",
+    changedLines: 2400,
+    filesTouched: ["src/scheduler.rs", "src/queue.rs"],
+    labels: [],
+    approvals: 1,
+    isDraft: false,
+    hasTests: true,
+  )
+}
+
+/// A change that reaches a guarded directory without a waiver: blocked.
+export fn guarded() -> PullRequest {
+  PullRequest(
+    id: "pr-1003",
+    title: "Rotate the signing key",
+    author: "linus",
+    targetBranch: "main",
+    changedLines: 30,
+    filesTouched: ["auth/keys.yaml"],
+    labels: [],
+    approvals: 0,
+    isDraft: false,
+    hasTests: false,
+  )
+}
+
+/// The same guarded directory, with the waiver label: reviewers instead.
+export fn waived() -> PullRequest {
+  PullRequest(
+    id: "pr-1004",
+    title: "Rotate the signing key, reviewed",
+    author: "linus",
+    targetBranch: "main",
+    changedLines: 30,
+    filesTouched: ["auth/keys.yaml"],
+    labels: ["security-reviewed"],
+    approvals: 2,
+    isDraft: false,
+    hasTests: false,
+  )
+}
+
+/// A draft nobody has asked for review on yet: advisory only.
+export fn draft() -> PullRequest {
+  PullRequest(
+    id: "pr-1005",
+    title: "Sketch a cache",
+    author: "ada",
+    targetBranch: "main",
+    changedLines: 12,
+    filesTouched: ["src/cache.rs"],
+    labels: [],
+    approvals: 0,
+    isDraft: true,
+    hasTests: false,
+  )
+}
+
+/// A change aimed at the protected branch, carrying the heaviest label.
+export fn labelled() -> PullRequest {
+  PullRequest(
+    id: "pr-1006",
+    title: "Drop the v1 wire format",
+    author: "grace",
+    targetBranch: "release",
+    changedLines: 300,
+    filesTouched: ["src/wire.rs", "docs/wire.md"],
+    labels: ["breaking-change", "migration"],
+    approvals: 0,
+    isDraft: false,
+    hasTests: true,
+  )
+}

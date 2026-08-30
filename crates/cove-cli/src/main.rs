@@ -1901,9 +1901,10 @@ module config
         // The next module's header is what pins the end of this one: without
         // it a `config` that had grown a declaration would still contain the
         // text above. Modules render in sorted order, so the terminator is
-        // whichever module now sorts next, and `cq` sorts between the two.
+        // whichever module now sorts next, and that is a name a new example
+        // can take: it was `cq`, and `covecheck` sorts before it.
         assert!(
-            out.contains(&format!("{expected_config}module cq\n")),
+            out.contains(&format!("{expected_config}module covecheck\n")),
             "unexpected outline:\n{out}"
         );
     }

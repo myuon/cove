@@ -1,0 +1,27 @@
+use console.println
+use rules.catalog.standard
+use rules.engine.decide
+use rules.fixtures.samples
+
+/// Prints the catalog, and then what it decides about every sample.
+///
+/// This entry exists so that the rule package is a program somebody can run
+/// and read the output of, and so that it joins the differential corpus that
+/// runs every `[run.<name>]` on both backends and compares the answers. The
+/// embedding this example is really about does not call `main` at all: it
+/// calls `rules.embedded.decideRequest`, one pull request at a time, from
+/// Rust. See `examples/rules/README.md`.
+export fn main() -> Result<Unit, Error> {
+  println("catalog")?
+  for rule in standard() {
+    println("  {rule.describes()}")?
+  }
+
+  println("decisions")?
+  for pr in samples() {
+    let decision = decide(pr)
+    println("  {pr.id} {decision.line()} trail={decision.trail()}")?
+  }
+
+  Ok(())
+}

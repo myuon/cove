@@ -1,0 +1,149 @@
+use rules.catalog.BranchRule
+use rules.catalog.DraftRule
+use rules.catalog.GuardedPathRule
+use rules.catalog.SizeRule
+use rules.catalog.TestedRule
+use rules.fixtures.clean
+use rules.fixtures.draft
+use rules.fixtures.guarded
+use rules.fixtures.labelled
+use rules.fixtures.large
+use rules.fixtures.waived
+use rules.policy.Severity
+
+/// The decision the shipped catalog reaches about `pr`, as one line.
+fn reached(pr: PullRequest) -> String {
+  let decision = decide(pr)
+  "{decision.line()} trail={decision.trail()}"
+}
+
+/// A finding at `severity` asking for `reviewers`, from a rule that is not
+/// otherwise interesting.
+fn finding(severity: Severity, reviewers: Int, reason: String) -> Finding {
+  Finding(
+    rule: "test",
+    severity: severity,
+    reason: reason,
+    reviewers: reviewers,
+  )
+}
+
+/// A pull request nothing in the catalog has anything to say about reaches
+/// the normal policy, and its trail says there was nothing rather than
+/// nothing at all.
+test fn aCleanChangeIsNormal() -> Result<Unit, Error> {
+  assertEqual(reached(clean()), "normal reviewers=0 because=none trail=clean")?
+  Ok(())
+}
+
+/// A large change asks for the reviewers the size rule was built with, and
+/// names why.
+test fn aLargeChangeAsksForReviewers() -> Result<Unit, Error> {
+  assertEqual(
+    reached(large()),
+    "require reviewers=2 because=large_change trail=size:required",
+  )?
+  Ok(())
+}
+
+/// A blocked change is blocked whatever else was found, and asks for no
+/// reviewers, because a block is not a number of reviewers away from landing.
+test fn aGuardedPathBlocks() -> Result<Unit, Error> {
+  assertEqual(
+    reached(guarded()),
+    "block reviewers=0 because=guarded_path:auth/ trail=guarded-path:blocking",
+  )?
+  Ok(())
+}
+
+/// The same change with the waiver reaches the policy below the block.
+test fn aWaivedGuardedPathAsksForReviewers() -> Result<Unit, Error> {
+  assertEqual(
+    reached(waived()),
+    "require reviewers=2 because=guarded_path_waived:auth/ trail=guarded-path:required",
+  )?
+  Ok(())
+}
+
+/// An advisory finding is carried in the trail and changes no policy, which
+/// is the whole difference between the two lower levels.
+test fn anAdvisoryFindingLeavesThePolicyNormal() -> Result<Unit, Error> {
+  assertEqual(
+    reached(draft()),
+    "normal reviewers=0 because=none trail=draft:advisory",
+  )?
+  Ok(())
+}
+
+/// Two rules that both ask for reviewers do not add up: the heaviest decides,
+/// and the reason recorded is that rule's rather than a sentence assembled
+/// out of both.
+test fn twoRequiredFindingsDoNotAddUp() -> Result<Unit, Error> {
+  assertEqual(
+    reached(labelled()),
+    "require reviewers=3 because=label:breaking-change trail=branch:required,label:required",
+  )?
+  Ok(())
+}
+
+/// A blocking finding decides even when it was made by a rule the catalog
+/// weighs after one that asked for reviewers, because the findings are
+/// ordered by severity before the policy is read off them.
+test fn aBlockOutranksARequestMadeBeforeIt() -> Result<Unit, Error> {
+  let catalog: Array<dyn Rule> = [
+    SizeRule(threshold: 10, reviewers: 2),
+    GuardedPathRule(prefixes: Set.of("auth/"), waiver: "never"),
+  ]
+  let decision = appraise(guarded(), catalog)
+  assertEqual(decision.policy.name(), "block")?
+  assertEqual(decision.trail(), "guarded-path:blocking,size:required")?
+  Ok(())
+}
+
+/// A catalog with nothing in it reaches the normal policy rather than
+/// failing to reach one.
+test fn anEmptyCatalogDecidesNormal() -> Result<Unit, Error> {
+  let catalog: Array<dyn Rule> = []
+  assertEqual(appraise(large(), catalog).policy.name(), "normal")?
+  Ok(())
+}
+
+/// The order the findings are weighed in is the order they are read off,
+/// which is what makes a trail reproducible: `sorted(by:)` is stable, so two
+/// findings at the same level keep the catalog's order.
+test fn findingsAreOrderedBySeverityThenByCatalog() -> Result<Unit, Error> {
+  let catalog: Array<dyn Rule> = [
+    DraftRule(),
+    TestedRule(floor: 1),
+    BranchRule(protected: "main", reviewers: 1),
+  ]
+  var names = Vector.of()
+  for found in findings(draft(), catalog) {
+    names.push("{found.rule}:{found.severity.name()}")
+  }
+
+  assertEqual(
+    ",".join(names.freeze()),
+    "tested:required,branch:required,draft:advisory",
+  )?
+  Ok(())
+}
+
+/// The policy read off a list of findings is decided by the findings alone,
+/// so it can be asked without arranging a pull request that produces them.
+test fn thePolicyIsReadOffTheFindingsAlone() -> Result<Unit, Error> {
+  assertEqual(policyFor([]).name(), "normal")?
+  assertEqual(
+    policyFor([finding(Severity.Advisory, 0, "draft")]).name(),
+    "normal",
+  )?
+
+  let asked = policyFor([finding(Severity.Required, 1, "no_tests"), finding(Severity.Required, 4, "label:x")])
+  assertEqual(asked.reviewers(), 4)?
+  assertEqual(asked.reason(), "label:x")?
+
+  let stopped = policyFor([finding(Severity.Blocking, 0, "guarded_path:auth/"), finding(Severity.Required, 9, "label:x")])
+  assertEqual(stopped.name(), "block")?
+  assertEqual(stopped.reason(), "guarded_path:auth/")?
+  Ok(())
+}

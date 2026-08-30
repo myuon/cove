@@ -330,11 +330,13 @@ mod tests {
             [
                 "callbacks",
                 "config",
+                "covecheck",
                 "cq",
                 "cqSample",
                 "hello",
                 "life",
                 "restricted",
+                "reviewPolicy",
                 "server",
                 "statusCodes",
                 "tasks",

@@ -1,0 +1,179 @@
+use clock
+use http
+
+/// How the run is bounded, beside the checks themselves.
+export struct Plan {
+  concurrency: Int
+  stopAfter: Option<Int>
+}
+
+/// What every check task writes and the run reads between windows.
+///
+/// `started` is the one thing here that the finished verdicts do not already
+/// say, and it is what tells a report how many checks were never tried. The
+/// counts are kept by the tasks rather than folded out of the array
+/// afterwards because this is the run's one piece of state two tasks reach,
+/// and `lock` is what makes each task's read-modify-write one operation: the
+/// order the increments land in belongs to the scheduler, and the totals do
+/// not depend on it.
+export struct Tally {
+  started: Int
+  passed: Int
+  failed: Int
+}
+
+impl Tally {
+  /// Records one check about to be tried.
+  fn start(var self) {
+    self.started += 1
+  }
+
+  /// Records one check that has settled.
+  fn record(var self, ok: Bool) {
+    if ok {
+      self.passed += 1
+    } else {
+      self.failed += 1
+    }
+  }
+}
+
+/// What one run produced.
+export struct Run {
+  verdicts: Array<Verdict>
+  tally: Tally
+}
+
+/// How long one check may take.
+///
+/// A constant rather than a field of `Check`, because there is no way to
+/// build a `Duration` out of a number a manifest carries: `Duration` has no
+/// constructor and no multiplication, so the only durations a program has are
+/// the ones it writes down. Issue #146 is that gap.
+fn checkBound() -> Duration {
+  5s
+}
+
+/// How long a whole run may take.
+///
+/// The same constant for the same reason, and it bounds the run rather than
+/// the check: a hundred checks that each finish just inside `checkBound` is a
+/// run nobody waited for.
+export fn runBound() -> Duration {
+  30s
+}
+
+/// Runs every check, `plan.concurrency` of them at a time, and answers in
+/// manifest order.
+///
+/// The order is the whole reason the window is awaited in the order it was
+/// spawned rather than as its tasks finish. Nothing here is faster for
+/// awaiting in order -- a window takes as long as its slowest member either
+/// way -- and what it buys is a report that reads the same twice.
+export async fn runAll(checks: Array<Check>, plan: Plan) -> Run {
+  let tally = Shared(Tally(started: 0, passed: 0, failed: 0))
+  var verdicts = Vector.of()
+  var at = 0
+  while at < checks.length() {
+    let window = windowFrom(checks, at, plan.concurrency)
+    if givenUp(tally, plan) {
+      for check in window {
+        verdicts.push(Verdict(
+          name: check.name,
+          url: check.url,
+          outcome: Outcome.Skipped,
+        ))
+      }
+    } else {
+      for verdict in await runWindow(window, tally) {
+        verdicts.push(verdict)
+      }
+    }
+    at += window.length()
+  }
+  Run(verdicts: verdicts.freeze(), tally: tally.lock(fn(counts) {
+    counts
+  }))
+}
+
+/// Runs one window of checks at once, and answers them in the order they were
+/// spawned.
+///
+/// Leaving this scope waits for every task in it, and every task has already
+/// been awaited by the loop below, so the wait is over before the scope ends.
+/// What leaves early is a run whose deadline expired, and then the scope
+/// cancels what is still in flight.
+async fn runWindow(
+  window: Array<Check>,
+  tally: Shared<Tally>,
+) -> Array<Verdict> {
+  scope inflight {
+    var running: Vector<Task<Verdict>> = Vector.of()
+    for check in window {
+      running.push(inflight.spawn { await runCheck(check, tally) })
+    }
+    var settled = Vector.of()
+    for task in running {
+      settled.push(task.await())
+    }
+    settled.freeze()
+  }
+}
+
+/// Performs one check, and answers a verdict whatever happens.
+///
+/// It answers rather than fails on purpose. A checker whose first unreachable
+/// endpoint ended the run would report less than the run already knows, and
+/// the thing a check is for is to say what it found.
+async fn runCheck(check: Check, tally: Shared<Tally>) -> Verdict {
+  tally.lock(fn(var counts) {
+    counts.start()
+  })
+
+  let answer: Result<Result<String, Error>, Error> = clock.timeout(
+    checkBound(),
+  ) {
+    http.fetch(check.url)
+  }
+  let outcome = match answer {
+    Ok(fetched) => match fetched {
+      Ok(body) => judge(check, body)
+      Err(error) => Outcome.Unchecked(error.message)
+    }
+    Err(error) => Outcome.Unchecked(error.message)
+  }
+
+  tally.lock(fn(var counts) {
+    counts.record(outcome.ok())
+  })
+  Verdict(name: check.name, url: check.url, outcome: outcome)
+}
+
+/// Whether the run has failed enough times to stop starting checks.
+///
+/// It is asked between windows and nowhere else, which is what makes the
+/// answer the same twice. Asking it inside a task would make whether a
+/// sibling had already failed a question about which thread ran first, and
+/// the verdict for a check would stop being a fact about the endpoint.
+fn givenUp(tally: Shared<Tally>, plan: Plan) -> Bool {
+  match plan.stopAfter {
+    Some(bound) => tally.lock(fn(counts) {
+      counts.failed
+    }) >= bound
+    None => false
+  }
+}
+
+/// The next `size` checks from `at`, or what is left of them.
+fn windowFrom(checks: Array<Check>, at: Int, size: Int) -> Array<Check> {
+  var taken = Vector.of()
+  var index = at
+  while index < checks.length() && taken.length() < size {
+    match checks.get(index) {
+      Some(check) => taken.push(check)
+      None => ()
+    }
+    index += 1
+  }
+  taken.freeze()
+}

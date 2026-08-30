@@ -1,0 +1,106 @@
+/// What a run made of one check.
+///
+/// The two ways of failing are kept apart because they are different news. A
+/// `Failed` endpoint answered and said the wrong thing, which is a fact about
+/// the service; an `Unchecked` one produced no body to look at, so this run
+/// learned nothing about it and reports that rather than a verdict it did not
+/// reach.
+///
+/// `Unchecked` covers two things at once because the `http` host gives a
+/// client one answer for both: `fetch` produces an `Err` for a connection it
+/// could not make and an `Err` for a status outside 200-299, and which it was
+/// survives only in the prose of the message. That is also why no check here
+/// names an expected status. Issue #145 is that gap.
+export enum Outcome {
+  /// A body arrived and satisfied every condition the check wrote down,
+  /// carrying the count of characters it held.
+  Passed(Int)
+  /// A body arrived and did not, carrying the first condition it broke.
+  Failed(String)
+  /// No body arrived, carrying what the host said instead.
+  Unchecked(String)
+  /// The run gave up before starting this check.
+  Skipped
+}
+
+/// What a run made of one check, and which check it was.
+export struct Verdict {
+  name: String
+  url: String
+  outcome: Outcome
+}
+
+impl Outcome {
+  /// Whether this is an outcome the run may end successfully on.
+  ///
+  /// A skipped check is not one. The run stopped because enough had already
+  /// gone wrong, and reporting the checks it never tried as fine would say
+  /// the opposite of what happened.
+  export fn ok(self) -> Bool {
+    match self {
+      Outcome.Passed(_) => true
+      Outcome.Failed(_) => false
+      Outcome.Unchecked(_) => false
+      Outcome.Skipped => false
+    }
+  }
+
+  /// The word a report puts in its first column.
+  export fn label(self) -> String {
+    match self {
+      Outcome.Passed(_) => "ok"
+      Outcome.Failed(_) => "failed"
+      Outcome.Unchecked(_) => "unchecked"
+      Outcome.Skipped => "skipped"
+    }
+  }
+
+  /// What a report says beside the label.
+  export fn detail(self) -> String {
+    match self {
+      Outcome.Passed(length) => "{length} character(s)"
+      Outcome.Failed(reason) => reason
+      Outcome.Unchecked(reason) => reason
+      Outcome.Skipped => "the run had already given up"
+    }
+  }
+}
+
+/// Judges `body` against everything `check` asked of it.
+///
+/// The conditions are tried in a written order and the first one that breaks
+/// is the whole answer, so two runs over the same body report the same
+/// reason. Reporting every broken condition would be more information and
+/// less of an answer: the length is checked first because a body that is too
+/// large is a fact about the endpoint that the text conditions would then
+/// describe at length.
+export fn judge(check: Check, body: String) -> Outcome {
+  let length = body.length()
+  match check.maxLength {
+    Some(bound) => {
+      if length > bound {
+        return Outcome.Failed(
+          "the body is {length} character(s), over the bound of {bound}",
+        )
+      }
+    }
+    None => ()
+  }
+  match check.expect {
+    Some(wanted) => {
+      if !body.contains(wanted) {
+        return Outcome.Failed("the body does not contain `{wanted}`")
+      }
+    }
+    None => ()
+  }
+  match check.reject {
+    Some(unwanted) => {
+      if body.contains(unwanted) {
+        return Outcome.Failed("the body contains `{unwanted}`")
+      }
+    }
+    None => ()
+  }
+  Outcome.Passed(length)
+}
