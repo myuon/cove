@@ -1,10 +1,11 @@
 # ADR 0028: Five representations, and one of them is public
 
-- Status: Proposed. [Issue #197](https://github.com/myuon/cove/issues/197)
-  makes acceptance the gate — "the first deliverable is an ADR; do not
+- Status: Accepted. [Issue #197](https://github.com/myuon/cove/issues/197)
+  made acceptance the gate — "the first deliverable is an ADR; do not
   implement or migrate the runtime representation before the ADR is reviewed
-  and accepted" — so nothing below is built, and this is the first ADR in
-  `docs/adr/` that is not `Accepted` when it is written
+  and accepted" — so this ADR was written and merged as `Proposed`, which no
+  other ADR in `docs/adr/` has been, and accepted separately once reviewed.
+  The gate is now passed and the work below may be built
 - Date: 2026-08-30
 - Supersedes: nothing. It **decides what
   [ADR 0027](0027-a-place-and-a-capture-name-a-slot.md) left open** under
