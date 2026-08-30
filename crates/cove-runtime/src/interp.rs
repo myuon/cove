@@ -925,9 +925,9 @@ impl<'a> Interpreter<'a> {
     /// **The deadline runs from here**, not from wherever `budget` was built.
     /// A budget built to bound an invocation that has not begun would
     /// otherwise spend it waiting for its turn. Every count starts at zero for
-    /// the same reason. A [`Cancellation`](crate::Cancellation) is the one
-    /// thing not reset: a caller that wants to stop this invocation from
-    /// another thread builds the budget with
+    /// the same reason. A [`Cancellation`] is the one thing not reset: a
+    /// caller that wants to stop this invocation from another thread builds
+    /// the budget with
     /// [`Budget::with_cancellation`](crate::Budget::with_cancellation) and
     /// keeps the handle, and a flag already raised stays raised.
     ///
