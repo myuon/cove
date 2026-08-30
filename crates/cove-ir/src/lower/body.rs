@@ -29,7 +29,6 @@
 //! settled type becomes a different instruction.
 
 use std::collections::BTreeMap;
-use std::collections::BTreeSet;
 
 use cove_diag::Span;
 use cove_schema::hosts;
@@ -278,21 +277,6 @@ pub(super) struct Body<'a, 'l> {
     /// The argument spans of the instructions whose diagnostic quotes source,
     /// which today is the two assertions and nothing else.
     pub(super) arg_spans: BTreeMap<u32, Vec<Span>>,
-    /// Every name this body uses as the root of a place — see
-    /// [`var_argument_roots`], which collects them before a single
-    /// instruction is emitted.
-    ///
-    /// A binding of one of these names is kept on the value stack even where
-    /// the checker settled it as `Int`, because a place is an index into the
-    /// value stack and cannot address the scalar one. It is a set of names
-    /// rather than of bindings, so it over-approximates across shadowing:
-    /// `bump(var total)` written anywhere in a body puts *every* `total` the
-    /// body declares on the value stack, including ones no place ever names.
-    /// That costs a slot its representation and can cost nothing else,
-    /// because both representations hold the same value.
-    ///
-    /// [`var_argument_roots`]: crate::lower::scan::var_argument_roots
-    pub(super) rooted: BTreeSet<&'a str>,
 }
 
 impl<'a, 'l> Body<'a, 'l> {
@@ -319,7 +303,6 @@ impl<'a, 'l> Body<'a, 'l> {
             loops: Vec::new(),
             open_scopes: 0,
             arg_spans: BTreeMap::new(),
-            rooted: BTreeSet::new(),
         }
     }
 
@@ -704,22 +687,6 @@ impl<'a, 'l> Body<'a, 'l> {
         }
     }
 
-    /// Where a binding of `name` declared from something of `kind` actually
-    /// lives.
-    ///
-    /// The one thing that overrides the checker's answer, and it overrides it
-    /// in one direction only: a name a place is rooted at keeps its value
-    /// slot even where the checker settled it as `Int`, because a place is
-    /// an index into the value stack and there is nothing in the scalar
-    /// stack for one to address. See [`Body::rooted`] for what the set is
-    /// and why it over-approximates.
-    pub(super) fn rooted_kind(&self, name: &str, kind: SlotKind) -> SlotKind {
-        match kind.is_scalar() && self.rooted.contains(name) {
-            true => SlotKind::Value,
-            false => kind,
-        }
-    }
-
     /// Builds the place `expr` names, leaving it on the place stack.
     ///
     /// The two forms are the interpreter's two: a name, which is the root,
@@ -747,16 +714,12 @@ impl<'a, 'l> Body<'a, 'l> {
                 match kind {
                     SlotKind::Value => self.emit(Inst::PlaceLocal(slot), expr.span),
                     SlotKind::Place => self.emit(Inst::LoadPlace(slot), expr.span),
-                    // The pre-pass puts every name a `var` argument is
-                    // rooted at on the value stack, so this is a root it did
-                    // not see rather than one it declined. Refusing says so
-                    // instead of addressing eight bytes of the wrong stack.
-                    SlotKind::Scalar(_) => {
-                        return Err(Unsupported::new(
-                            format!("`{name}` as a place, which is a scalar slot"),
-                            expr.span,
-                        ))
-                    }
+                    // A place names a slot, and a slot is a region and a
+                    // number in it. So a binding the checker settled as
+                    // `Int` or `Bool` is rooted where it lives rather than
+                    // moved somewhere a place can reach, which is what issue
+                    // #162 asked for and what `Inst::PlaceScalar` is.
+                    SlotKind::Scalar(what) => self.emit(Inst::PlaceScalar(slot, what), expr.span),
                 }
                 Ok(())
             }

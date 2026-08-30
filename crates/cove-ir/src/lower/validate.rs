@@ -200,15 +200,22 @@ fn validate_function(program: &Program, id: FunctionId) -> Result<(), String> {
                     )));
                 }
             }
-            // A place names a slot of the *value* stack, which is the whole
-            // of why `crate::lower` keeps a binding a place is rooted at
-            // there. Checking it here is what makes that a fact rather than
-            // an intention.
+            // A place names one slot of one stack, and which stack it is
+            // is which instruction built it. Checking each against its own
+            // frame size is what makes that a fact rather than an intention.
             Inst::PlaceLocal(slot) => {
                 if slot >= function.value_frame_size {
                     return Err(at(format!(
                         "names value slot {slot} of a frame of {}",
                         function.value_frame_size
+                    )));
+                }
+            }
+            Inst::PlaceScalar(slot, _) => {
+                if slot >= function.scalar_frame_size {
+                    return Err(at(format!(
+                        "names scalar slot {slot} of a frame of {}",
+                        function.scalar_frame_size
                     )));
                 }
             }
@@ -627,7 +634,7 @@ pub(super) fn stack_shape(constants: &[Const], inst: Inst) -> Shape {
         // it. A place is built and refined where it stands; reading one puts
         // a `Value` on the value stack and writing one takes a `Value` off
         // it, which is the same kind of boundary the two above are.
-        Inst::PlaceLocal(_) | Inst::LoadPlace(_) => Shape::on_places(0, 1),
+        Inst::PlaceLocal(_) | Inst::PlaceScalar(..) | Inst::LoadPlace(_) => Shape::on_places(0, 1),
         Inst::PlaceField(_) => Shape::on_places(1, 1),
         Inst::PlacePop => Shape::on_places(1, 0),
         Inst::PlaceRead | Inst::Freeze => Shape {

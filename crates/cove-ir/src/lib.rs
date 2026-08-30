@@ -50,8 +50,8 @@
 //! observably a different language, since `two(var x, var x)` answers 11
 //! rather than 10 and only aliasing gives that answer.
 //!
-//! What names storage here is a *place*: an index into the value stack,
-//! together with the field positions to walk from what stands there.
+//! What names storage here is a *place*: one slot — which stack, and where
+//! in it — together with the field positions to walk from what stands there.
 //! [`SlotKind::Place`] is the third kind a slot can have, a `var`
 //! parameter's argument travels on the third stack, and
 //! [`Function::place_frame_size`] is that stack's window the way the other
@@ -60,9 +60,19 @@
 //! `Inst::Call`'s per-stack counts, `Function::params`, and `validate`
 //! already generalise over the question.
 //!
-//! An index rather than a pointer, because the value stack is one `Vec` that
-//! grows, and an index survives a reallocation that a borrow could not even
-//! be written across. It is sound for as long as the frame it addresses is
+//! **A place names a slot, and it does not care which stack the slot is in.**
+//! That is issue #162's one slot identity read at the only place the three
+//! stacks previously disagreed about what a slot was: [`Inst::PlaceLocal`]
+//! names one of the value stack's and [`Inst::PlaceScalar`] one of the scalar
+//! stack's, and a `var` argument rooted at a binding the checker settled as
+//! `Int` therefore leaves the binding where its arithmetic wants it. It could
+//! not until then — the lowering kept every such binding on the value stack
+//! for the whole of the body that named it, and paid a conversion on every
+//! read and every write of it.
+//!
+//! An index rather than a pointer, because a stack is one `Vec` that grows,
+//! and an index survives a reallocation that a borrow could not even be
+//! written across. It is sound for as long as the frame it addresses is
 //! live, and a place never leaves the frame that built it — see the note on
 //! [`Inst::PlaceLocal`], which is where that is argued now that closures
 //! lower.
@@ -219,11 +229,14 @@ pub struct Function {
     /// slot is filled by the calling convention and never assigned. A body
     /// declares no place slots of its own: `var` is a property of a
     /// parameter, and a local that a `var` argument is rooted at is an
-    /// ordinary value slot that a place *names* rather than a place itself.
+    /// ordinary slot of whichever stack its own type named, which a place
+    /// *names* rather than being a place itself.
     ///
-    /// Not a root set, and not a hole in one either. A place holds an index
-    /// and a path of field positions, so it reaches a `Value` only by way of
-    /// the value stack, whose own window is already scanned.
+    /// Not a root set, and not a hole in one either. A place holds a slot
+    /// number, the stack that number is in, and a path of field positions, so
+    /// it reaches a `Value` only by way of the value stack, whose own window
+    /// is already scanned — and a place rooted at a scalar slot reaches no
+    /// `Value` at all.
     pub place_frame_size: u32,
     /// How many arguments a call must supply, `self` included.
     pub arity: u32,
@@ -452,8 +465,8 @@ pub enum SlotKind {
     Value,
     /// An `i64` in the scalar stack, meaning what [`Scalar`] says.
     Scalar(Scalar),
-    /// A place in the place stack: an index into the value stack and the
-    /// field positions to walk from it.
+    /// A place in the place stack: one slot of the value or the scalar
+    /// stack, and the field positions to walk from it.
     ///
     /// What a `var` parameter's slot holds. Reading such a parameter is a
     /// [`Inst::LoadPlace`] and then a [`Inst::PlaceRead`], and writing to it
@@ -897,7 +910,7 @@ pub enum Inst {
     ///
     /// This is where a `var` argument rooted at a local comes from, and it
     /// is where the place model's one soundness obligation lives. A place is
-    /// an absolute index into the value stack rather than a borrow of it,
+    /// an absolute slot number rather than a borrow of the stack it is in,
     /// which is what lets the `Vec` reallocate under a place that is
     /// standing, and it is valid for exactly as long as the frame it
     /// addresses is live.
@@ -921,10 +934,35 @@ pub enum Inst {
     /// something only a call's arguments travel on.
     ///
     /// The slot is a [`SlotKind::Value`] one, checked by `validate` rather
-    /// than asked about here: a place cannot address the scalar stack, which
-    /// is why `crate::lower` puts a binding that a `var` argument is rooted
-    /// at into a value slot even where the checker settled it as `Int`.
+    /// than asked about here. [`Inst::PlaceScalar`] is the same instruction
+    /// for a slot of the scalar stack, and the pair is what lets a place
+    /// name storage in either representation.
     PlaceLocal(u32),
+    /// Pushes the place that names one of this frame's *scalar* slots.
+    ///
+    /// The counterpart of [`Inst::PlaceLocal`] and the whole of what issue
+    /// #162 calls one slot identity for a place: a place names a slot, and a
+    /// slot is a region and a number in it, so a binding the checker settled
+    /// as `Int` or `Bool` can be the root of a `var` argument without leaving
+    /// the representation its arithmetic wants.
+    ///
+    /// It used not to be able to, and the cost of that was measured. A
+    /// binding a `var` argument was rooted at was kept on the value stack for
+    /// the whole of the body that declared it, so every read and every write
+    /// of it crossed — `benches/convention`'s `conv_var` row against its
+    /// `conv_local`, 1.31x for one `root(var v)` written *outside* the loop.
+    ///
+    /// The path is always empty. A scalar slot holds an `Int` or a `Bool` and
+    /// neither has a field, so nothing can refine this place; `validate`
+    /// says so by refusing an [`Inst::PlaceField`] that could reach one, and
+    /// `crate::lower` never emits one because a field step needs a struct
+    /// type under it.
+    ///
+    /// The [`Scalar`] travels with the instruction for the reason
+    /// [`Inst::ScalarToValue`] carries one: the scalar stack keeps no tag, so
+    /// a read through this place has to be told which of the two words it is
+    /// putting a tag back on.
+    PlaceScalar(u32, Scalar),
     /// Pushes a copy of the place in one of this frame's *place* slots.
     ///
     /// A `var` parameter's slot holds a place, so this is how the parameter
@@ -1400,6 +1438,7 @@ fn render_inst(program: &Program, inst: Inst) -> String {
             format!("call-assoc {}.{} argc={argc}", name(ty), name(n))
         }
         Inst::PlaceLocal(slot) => format!("place {slot}"),
+        Inst::PlaceScalar(slot, what) => format!("place-scalar {slot} {what:?}"),
         Inst::LoadPlace(slot) => format!("load-place {slot}"),
         Inst::PlaceField(index) => format!("place-field {index}"),
         Inst::PlacePop => "place-pop".to_string(),

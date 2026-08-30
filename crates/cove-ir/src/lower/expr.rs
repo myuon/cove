@@ -88,20 +88,17 @@ impl<'a, 'l> Body<'a, 'l> {
                 // An annotation that converts settles it instead: what the
                 // binding holds is the trait object the conversion makes,
                 // which is a `Value` whatever the value it was declared from
-                // was. No annotation the checker settles as `Int` or `Bool`
-                // can convert, so this only ever moves an answer the way
-                // `rooted_kind` does.
+                // was.
                 let converts = ty.as_ref().is_some_and(|ty| dyn_shape(ty).is_some());
                 let kind = match converts {
                     true => SlotKind::Value,
-                    false => self.rooted_kind(name.node.as_str(), self.slot_kind(value)),
+                    false => self.slot_kind(value),
                 };
                 match kind {
                     SlotKind::Scalar(_) => self.expr_scalar(value)?,
                     SlotKind::Value => self.expr(value)?,
                     // `slot_kind` answers about a type and never says
-                    // `Place`, and `rooted_kind` only ever moves an answer
-                    // towards the value stack.
+                    // `Place`.
                     SlotKind::Place => unreachable!("a `let` does not declare a place"),
                 }
                 if let Some(ty) = ty {

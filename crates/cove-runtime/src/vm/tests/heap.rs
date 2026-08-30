@@ -322,8 +322,8 @@ fn a_live_operand_above_nested_frames_survives_a_collection() {
     same_heap(&ast, &vm);
 }
 
-/// A place is an index into the value stack rather than an independent
-/// root, so what it names has to stay rooted by that stack for the whole
+/// A place is a slot number rather than an independent root, so what it
+/// names has to stay rooted by the stack that slot is in for the whole
 /// of the place's life. A callee collecting between two writes through
 /// one is where that is either true or not.
 #[test]
@@ -333,6 +333,27 @@ fn a_var_place_is_written_through_across_a_collection() {
         churn(80)
     ));
     assert_eq!(vm.output, "[0, 1, 2, 3]\n");
+    assert_eq!(ast.output, vm.output);
+    assert!(vm.freed() > 0, "{:?}", vm.collections());
+    same_heap(&ast, &vm);
+}
+
+/// The same question asked of a place rooted at a *scalar* slot, which is
+/// what issue #162 added and which the collector must go on ignoring.
+///
+/// A scalar-rooted place reaches an `i64` and so reaches nothing the
+/// collector owns. What has to survive is the other direction: the frames
+/// standing under it hold real values, a collection runs between two writes
+/// through the place, and the answer and the heap have to be the oracle's
+/// either way. `Vm::places` is where the argument is, and this is where it
+/// is run.
+#[test]
+fn a_scalar_var_place_is_written_through_across_a_collection() {
+    let (ast, vm) = heaps_of(&format!(
+        "use console.println\n\nfn count(var total: Int, upTo: Int) {{\n  var n = 0\n  while n < upTo {{\n    total += n\n{}    n += 1\n  }}\n}}\n\nexport fn main() -> Result<Unit, Error> {{\n  var total = 0\n  var held = Vector.of(1, 2, 3)\n  count(var total, upTo: 4)\n  println(\"{{total}} {{held.length()}}\")?\n  Ok(())\n}}\n",
+        churn(80)
+    ));
+    assert_eq!(vm.output, "6 3\n");
     assert_eq!(ast.output, vm.output);
     assert!(vm.freed() > 0, "{:?}", vm.collections());
     same_heap(&ast, &vm);

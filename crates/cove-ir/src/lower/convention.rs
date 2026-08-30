@@ -29,7 +29,6 @@ use crate::{Function, Inst, Scalar, SlotKind, Unsupported};
 use super::body::{Body, Position};
 use super::fuel::block_fuel;
 use super::index::{reject_dyn, Key, Lowering};
-use super::scan::var_argument_roots;
 
 impl<'a> Lowering<'a> {
     /// Lowers a lambda: its parameters, then the captures the body that
@@ -71,7 +70,6 @@ impl<'a> Lowering<'a> {
 
         let mut body = Body::new(self, module);
         body.returns = SlotKind::Value;
-        body.rooted = var_argument_roots(decl_body);
 
         let mut params: Vec<SlotKind> = Vec::with_capacity(decl_params.len());
         let mut slots: Vec<u32> = Vec::with_capacity(decl_params.len());
@@ -281,7 +279,6 @@ impl<'a> Lowering<'a> {
         body.dyn_return = dyn_return;
         body.generics = &decl.generics;
         body.self_bound = from_trait_default;
-        body.rooted = var_argument_roots(&decl.body);
         if let Some(receiver) = decl.receiver {
             // `var self` is a place slot and nothing else is. Which stack an
             // ordinary receiver lives in is derived rather than assumed — a

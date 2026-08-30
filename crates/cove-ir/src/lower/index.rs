@@ -166,9 +166,7 @@ pub(super) enum Instance {
         /// A body under this convention is lowered the way a body whose
         /// bindings the checker abstained about is: an `Int` parameter is a
         /// value slot, and `Body::expr_scalar` moves it across where
-        /// arithmetic wants it. The same thing `Body::rooted` already does
-        /// to a binding a place is rooted at, for the same reason — both
-        /// representations hold the same value.
+        /// arithmetic wants it — both representations hold the same value.
         ///
         /// [`Inst::CallDyn`]: crate::Inst::CallDyn
         /// [`Inst::CallValue`]: crate::Inst::CallValue
