@@ -5,6 +5,31 @@
 //! copies its fields, cloning an `Array` shares immutable storage, and cloning
 //! a `Vector` copies only the handle so aliases observe the same elements and
 //! length. Cove never performs an implicit deep copy.
+//!
+//! # What an embedding host should write
+//!
+//! A host builds a value through a constructor — [`Value::structure`],
+//! [`Value::enumeration`], [`Value::array`], [`Value::set`], [`Value::map`],
+//! [`Value::ok`], [`Value::err`], [`Value::some`], [`Value::none`],
+//! [`Value::error`] — and reads one through a reader: [`Value::field`],
+//! [`Value::fields`], [`Value::case`], [`Value::payload`], [`Value::items`],
+//! [`Value::elements`], [`Value::entries`], [`Value::declared_type`],
+//! [`Value::range`], [`Value::resource`], [`Value::host_op`],
+//! [`Value::arity`], and the scalar `as_*` family. Between them they cover
+//! every shape that crosses the Host API boundary, and none of them says how
+//! the runtime holds one.
+//!
+//! **Matching on a variant is the thing that breaks.** [`Value`]'s variants
+//! are `pub`, so nothing prevents it, and every change to what a value *is*
+//! has therefore been a source break for the hosts that did: issue #104 moved
+//! a struct from a `Box` to an `Rc`, issue #109 put a bound host operation's
+//! two names behind one pointer to take every value in the program from forty
+//! bytes to twenty-four, issue #121 replaced a closure's parameter list with
+//! an arity, and issue #183 replaced an enum payload's `Vec<Value>` with
+//! [`Payload`]. Each was invisible through the constructors and visible
+//! through a `match`. The readers are issue #186's answer to that; what they
+//! promise, what borrowing them forecloses, and what they do with a wrong
+//! shape are stated once, on the `impl Value` block that holds them.
 
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
@@ -1183,6 +1208,294 @@ impl Value {
     }
 }
 
+/// Reading a value without naming its representation.
+///
+/// The constructors above — [`Value::structure`], [`Value::enumeration`],
+/// [`Value::array`], [`Value::set`], [`Value::map`], and the builtin four —
+/// let a host *build* every shape that crosses the boundary without writing
+/// an `Rc`, a `Box`, a field vector or the `opaque` flag. These are the other
+/// half: they let a host *read* the same shapes the same way.
+///
+/// Only one half existed, and the missing half cost something every time the
+/// representation moved. Issue #104 made [`Value::Struct`] an
+/// `Rc<StructValue>`; issue #109 put [`Value::HostFn`]'s two names behind one
+/// pointer and took every value in the program from forty bytes to
+/// twenty-four; issue #121 replaced a closure's parameter list with an arity;
+/// issue #183 replaced an enum payload's `Vec<Value>` with [`Payload`]. Every
+/// one of those was invisible to a host that only built values and a source
+/// break for one that read them, because reading meant matching on a variant
+/// and a match on a variant is a match on the representation. Issue #186 is
+/// where that was written down, and this is its answer.
+///
+/// **A reader borrows.** It hands back a reference into the value it was
+/// asked about and the caller clones what it means to keep, which is what
+/// [`Value::ok_payload`] and [`StructValue::get`] already did and what a host
+/// wants: a conversion into the host's own types reads each part once and
+/// keeps no `Value` at all. Borrowing is the half of this that constrains
+/// what can still move, and it constrains it in one direction — every part a
+/// reader answers with has to be *stored* as the thing it answers with. A
+/// struct's fields can move behind a different pointer, a shared shape table,
+/// or an inline arity the way [`Payload`] already did, and none of that is
+/// visible here; they cannot become values that are *computed* — unpacked
+/// from a tagged word, decoded lazily, or held under a lock — without these
+/// signatures changing. A reader that cloned would forbid none of that, and
+/// would charge every read for the possibility. [`Value::Vector`] is where
+/// the line already falls, and it falls the same way for building: its
+/// elements are behind a `RefCell` because the language lets an alias write
+/// them, so there is no borrowing reader for one here and no constructor for
+/// one above.
+///
+/// **A wrong shape answers `None`.** Asking an `Int` for its fields is the
+/// host's mistake rather than the program's — no Cove code asked for it and
+/// none can handle it — so it is not a
+/// [`RuntimeError`](crate::error::RuntimeError); and it is not a panic
+/// either, because a host converting a value it did not build wants to report
+/// what arrived instead. [`Value::type_name`] is what names that in the
+/// report. This is the convention the readers that already existed use:
+/// [`Value::ok_payload`], [`Value::error_message`] and [`StructValue::get`]
+/// all answer `None` to the question they were not the right value for.
+///
+/// **A reader looks through `dyn Trait`.** Each of these calls
+/// [`Value::erased`] first, for the reason that method gives: the wrapper
+/// records where a value was converted, nothing a program can ask should be
+/// able to tell a written `dyn Trait` from a lambda's inferred one, and
+/// [`fmt::Display`] already looks through it — "the wrapper is a
+/// representation, not something the program put there". There is no reader
+/// for the wrapper itself, which matches the constructors, none of which can
+/// build one.
+impl Value {
+    /// The `Bool` this is.
+    pub fn as_bool(&self) -> Option<bool> {
+        match self.erased() {
+            Value::Bool(b) => Some(*b),
+            _ => None,
+        }
+    }
+
+    /// The `Int` this is.
+    ///
+    /// A full sixty-four bits, because an `Int` is one and overflow is a
+    /// broken invariant rather than a wrap.
+    pub fn as_int(&self) -> Option<i64> {
+        match self.erased() {
+            Value::Int(n) => Some(*n),
+            _ => None,
+        }
+    }
+
+    /// The `Float` this is.
+    pub fn as_float(&self) -> Option<f64> {
+        match self.erased() {
+            Value::Float(x) => Some(*x),
+            _ => None,
+        }
+    }
+
+    /// The `Duration` this is, in nanoseconds.
+    ///
+    /// Nanoseconds rather than a [`std::time::Duration`], because a Cove
+    /// duration is a signed count of them: `-1s` is an ordinary value and
+    /// `std::time::Duration` cannot hold it.
+    pub fn as_duration_nanos(&self) -> Option<i64> {
+        match self.erased() {
+            Value::Duration(ns) => Some(*ns),
+            _ => None,
+        }
+    }
+
+    /// The `String` this is.
+    pub fn as_str(&self) -> Option<&str> {
+        match self.erased() {
+            Value::Str(text) => Some(text),
+            _ => None,
+        }
+    }
+
+    /// Whether this is `()`.
+    pub fn is_unit(&self) -> bool {
+        matches!(self.erased(), Value::Unit)
+    }
+
+    /// The declared type this value is of — `rules.policy.Decision`, or
+    /// `Option` for a builtin — for a struct or an enum, and `None` for
+    /// everything else.
+    ///
+    /// The qualified name [`Value::structure`] and [`Value::enumeration`]
+    /// take, which is what a host checks an answer against before reading it
+    /// apart. [`Value::declared_type_name`] answers the same question with
+    /// the shared handle itself, because the two backends clone it to
+    /// dispatch a method; this is the reader, and it does not say what the
+    /// handle is made of.
+    pub fn declared_type(&self) -> Option<&str> {
+        self.erased().declared_type_name().map(|name| &**name)
+    }
+
+    /// The field `name` of a struct value.
+    ///
+    /// `None` both when this is not a struct and when the struct declares no
+    /// such field, because a host has the same thing to say about either and
+    /// [`Value::type_name`] is what says it: "`Int` carries no field
+    /// `policy`" and "`rules.policy.Decision` carries no field `polciy`" are
+    /// the same sentence with the name filled in.
+    pub fn field(&self, name: &str) -> Option<&Value> {
+        match self.erased() {
+            Value::Struct(value) => value.get(name),
+            _ => None,
+        }
+    }
+
+    /// A struct value's fields, in declaration order, and `None` when this is
+    /// not a struct — which is also how a host asks whether it is one.
+    ///
+    /// Declaration order rather than the order anything asked for: it is the
+    /// order [`Value::structure`] was handed and the order the declaration
+    /// states, so a host reading a struct positionally reads what a host
+    /// building one wrote.
+    ///
+    /// An `export opaque struct` (ADR 0014) answers here like any other. The
+    /// flag governs *rendering*, because a `Display` has no idea which module
+    /// is watching; a host holding the value has already been handed it, and
+    /// hiding the fields from it would hide them from the very code the
+    /// module exported the value to.
+    pub fn fields(&self) -> Option<impl Iterator<Item = (&str, &Value)> + '_> {
+        match self.erased() {
+            Value::Struct(value) => Some(value.fields.iter().map(|(name, v)| (&**name, v))),
+            _ => None,
+        }
+    }
+
+    /// The case of an enum value, such as `Some`, `Err`, or `Require`.
+    ///
+    /// The case alone, unqualified, exactly as [`Value::enumeration`] takes
+    /// it; [`Value::declared_type`] is the other half of the name.
+    pub fn case(&self) -> Option<&str> {
+        match self.erased() {
+            Value::Enum(value) => Some(&value.case),
+            _ => None,
+        }
+    }
+
+    /// What an enum value's case carries, in the order the case declares it.
+    ///
+    /// A slice, and an empty one for a case that carries nothing, for the
+    /// reason [`Value::ok_payload`] gives: what a caller does with an empty
+    /// payload differs and only the caller knows which. Those four ask a
+    /// builtin question — "is this an `Ok`?" — and answer the payload as a
+    /// consequence; this one is asked of a value whose case the caller reads
+    /// for itself with [`Value::case`], which is what a package's own enum
+    /// needs.
+    pub fn payload(&self) -> Option<&[Value]> {
+        match self.erased() {
+            Value::Enum(value) => Some(value.payload.as_slice()),
+            _ => None,
+        }
+    }
+
+    /// An `Array`'s elements, in order.
+    ///
+    /// The companion of [`Value::array`]. A `Vector` answers `None` and that
+    /// is not an oversight: its elements are behind a `RefCell` because an
+    /// alias may write them, so nothing can hand out a plain slice of them,
+    /// and there is no constructor for one either.
+    pub fn items(&self) -> Option<&[Value]> {
+        match self.erased() {
+            Value::Array(items) => Some(items),
+            _ => None,
+        }
+    }
+
+    /// A `Set`'s elements, in ascending key order.
+    ///
+    /// [`MapKey`]s and not [`Value`]s, for the reason [`Value::set`] gives on
+    /// the way in: the restriction is real, and showing it is better than a
+    /// reader that pretends a set holds anything. [`MapKey::to_value`]
+    /// converts one back.
+    ///
+    /// Ascending key order whatever order they were inserted in, which is the
+    /// order a Cove program iterating the same set sees.
+    pub fn elements(&self) -> Option<impl Iterator<Item = &MapKey> + '_> {
+        match self.erased() {
+            Value::Set(items) => Some(items.iter()),
+            _ => None,
+        }
+    }
+
+    /// A `Map`'s entries, in ascending key order.
+    ///
+    /// The companion of [`Value::map`], with the same split: only the key
+    /// carries the [`MapKey`] restriction, so the value half is an ordinary
+    /// [`Value`].
+    pub fn entries(&self) -> Option<impl Iterator<Item = (&MapKey, &Value)> + '_> {
+        match self.erased() {
+            Value::Map(entries) => Some(entries.iter()),
+            _ => None,
+        }
+    }
+
+    /// A `Range`'s bounds, half-open.
+    ///
+    /// [`RangeBounds`] rather than the three fields the variant holds,
+    /// because `..` and `..<` are two ways of writing one range: `1..3` and
+    /// `1..<4` cover the same integers, and a host asking what a range covers
+    /// should not have to normalise them itself. The bounds are `i128` so
+    /// that an inclusive `i64::MAX` end cannot overflow.
+    pub fn range(&self) -> Option<RangeBounds> {
+        match *self.erased() {
+            Value::Range {
+                start,
+                end,
+                inclusive_end,
+            } => Some(RangeBounds::of(start, end, inclusive_end)),
+            _ => None,
+        }
+    }
+
+    /// The resource handle this is.
+    ///
+    /// [`ResourceHandle`] is the answer rather than something this hides,
+    /// because ADR 0013 decides that a handle *is* a name: "every field of it
+    /// is part of the name", and there is no field for state because the
+    /// state is the host's. What this hides is the `Arc`, which is there so
+    /// that a handle can cross into a task when its schema allows it.
+    pub fn resource(&self) -> Option<&ResourceHandle> {
+        match self.erased() {
+            Value::Resource(handle) => Some(handle),
+            _ => None,
+        }
+    }
+
+    /// The module and operation a bound host operation names, such as
+    /// `("console", "println")`.
+    ///
+    /// Two names and not an implementation: a bound host operation is a name
+    /// the way [`Value::HostModule`] is, and what it names is found in the
+    /// registry at the call. This is the reader for the variant issue #109
+    /// boxed to buy the sixteen bytes — a host that matched `Value::HostFn {
+    /// module, op }` had to be rewritten, and one that had called this would
+    /// not have noticed.
+    pub fn host_op(&self) -> Option<(&str, &str)> {
+        match self.erased() {
+            Value::HostFn(host) => Some((&host.module, &host.op)),
+            _ => None,
+        }
+    }
+
+    /// How many parameters a closure value declares.
+    ///
+    /// Parameters and not arguments a call must supply: a defaulted or a
+    /// variadic parameter counts like any other. A host that was handed a
+    /// callback asks this to refuse one of the wrong shape before calling it
+    /// back through [`Reentry`](crate::host::Reentry), which is the only way
+    /// to call one, since the body belongs to the backend that made it. This
+    /// is the reader for the field issue #121 replaced with a count, and it
+    /// is the whole of a closure a host has any business reading.
+    pub fn arity(&self) -> Option<usize> {
+        match self.erased() {
+            Value::Closure(closure) => Some(closure.arity),
+            _ => None,
+        }
+    }
+}
 /// How a value appears inside string interpolation and `console.println`.
 impl fmt::Display for Value {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -1807,5 +2120,211 @@ mod tests {
     fn a_set_shows_elements_in_ascending_order() {
         let value = set_of(vec![MapKey::Int(3), MapKey::Int(1), MapKey::Int(2)]);
         assert_eq!(shown(value), "{1, 2, 3}");
+    }
+
+    /// Every shape a constructor builds, read back through a reader, with no
+    /// variant named on either side.
+    ///
+    /// This is the round trip issue #186 asked for: the constructors were the
+    /// only half that existed, so a host could build a boundary value without
+    /// naming `Rc<StructValue>` and could not read one back the same way.
+    #[test]
+    fn every_shape_a_constructor_builds_reads_back_through_a_reader() {
+        let structure = Value::structure(
+            "rules.policy.Decision",
+            [("policy", Value::Int(1)), ("findings", Value::array([]))],
+        );
+        assert_eq!(structure.declared_type(), Some("rules.policy.Decision"));
+        assert_eq!(structure.field("policy").and_then(Value::as_int), Some(1));
+        assert!(structure.field("absent").is_none());
+        assert_eq!(
+            structure
+                .fields()
+                .expect("a struct has fields")
+                .map(|(name, _)| name)
+                .collect::<Vec<_>>(),
+            ["policy", "findings"],
+            "declaration order, which is the order the constructor was handed"
+        );
+
+        let enumeration = Value::enumeration(
+            "rules.policy.ReviewPolicy",
+            "Require",
+            [Value::Int(2), Value::Str("large change".into())],
+        );
+        assert_eq!(
+            enumeration.declared_type(),
+            Some("rules.policy.ReviewPolicy")
+        );
+        assert_eq!(enumeration.case(), Some("Require"));
+        assert_eq!(enumeration.payload().map(<[Value]>::len), Some(2));
+
+        let array = Value::array([Value::Int(1), Value::Int(2)]);
+        assert_eq!(
+            array.items().map(|items| items.len()),
+            Some(2),
+            "an `Array` reads as the slice it is"
+        );
+
+        let set = Value::set([MapKey::Int(2), MapKey::Int(1), MapKey::Int(2)]);
+        assert_eq!(
+            set.elements()
+                .expect("a set has elements")
+                .collect::<Vec<_>>(),
+            [&MapKey::Int(1), &MapKey::Int(2)],
+            "ascending key order, and a duplicate collapsed"
+        );
+
+        let map = Value::map([
+            (MapKey::Int(2), Value::Str("b".into())),
+            (MapKey::Int(1), Value::Str("a".into())),
+        ]);
+        assert_eq!(
+            map.entries()
+                .expect("a map has entries")
+                .map(|(key, value)| (key.clone(), value.to_string()))
+                .collect::<Vec<_>>(),
+            [
+                (MapKey::Int(1), "a".to_string()),
+                (MapKey::Int(2), "b".to_string()),
+            ],
+            "ascending key order, which is what a Cove program iterating sees"
+        );
+
+        assert_eq!(
+            Value::ok(Value::Int(1)).payload().map(<[Value]>::len),
+            Some(1),
+            "a builtin enum reads through the general reader as well as the four"
+        );
+        assert_eq!(
+            Value::none().payload().map(<[Value]>::len),
+            Some(0),
+            "a case that carries nothing reads as an empty slice"
+        );
+        assert_eq!(
+            Value::error("broken")
+                .error_message()
+                .and_then(Value::as_str),
+            Some("broken")
+        );
+    }
+
+    /// Every scalar reads back as the Rust value it was built from.
+    #[test]
+    fn a_scalar_reads_back_as_itself() {
+        assert_eq!(Value::Bool(true).as_bool(), Some(true));
+        assert_eq!(Value::Int(-7).as_int(), Some(-7));
+        assert_eq!(Value::Float(1.5).as_float(), Some(1.5));
+        assert_eq!(Value::Duration(-1_000).as_duration_nanos(), Some(-1_000));
+        assert_eq!(Value::Str("hello".into()).as_str(), Some("hello"));
+        assert!(Value::Unit.is_unit());
+        assert_eq!(
+            Value::Range {
+                start: 1,
+                end: 3,
+                inclusive_end: true,
+            }
+            .range()
+            .map(|bounds| (bounds.start, bounds.end)),
+            Some((1, 4)),
+            "`..` and `..<` normalise to one half-open pair"
+        );
+    }
+
+    /// A wrong shape answers `None` rather than panicking, which is the
+    /// convention `ok_payload` and `StructValue::get` already set.
+    #[test]
+    fn a_reader_asked_of_the_wrong_shape_answers_none() {
+        let value = Value::Int(1);
+        assert_eq!(value.as_str(), None);
+        assert_eq!(value.as_bool(), None);
+        assert_eq!(value.declared_type(), None);
+        assert!(value.field("policy").is_none());
+        assert!(value.fields().is_none());
+        assert_eq!(value.case(), None);
+        assert!(value.payload().is_none());
+        assert!(value.items().is_none());
+        assert!(value.elements().is_none());
+        assert!(value.entries().is_none());
+        assert!(value.range().is_none());
+        assert!(value.resource().is_none());
+        assert_eq!(value.host_op(), None);
+        assert_eq!(value.arity(), None);
+        assert!(!value.is_unit());
+
+        // A `Vector` is not an `Array` and says so, because its elements are
+        // behind a `RefCell` and nothing can hand out a slice of them.
+        let vector = Value::Vector(VectorStorage::new(vec![Value::Int(1)]));
+        assert!(vector.items().is_none());
+    }
+
+    /// A reader looks through a `dyn Trait` wrapper, exactly as `Display` and
+    /// `eq_value` do: nothing a program can ask tells a written conversion
+    /// from a lambda's inferred one.
+    #[test]
+    fn a_reader_looks_through_a_trait_object() {
+        let wrapped = Value::Dyn(Rc::new(DynValue {
+            trait_name: "render.Display".into(),
+            value: Value::structure("app.Point", [("x", Value::Int(1))]),
+        }));
+        assert_eq!(wrapped.declared_type(), Some("app.Point"));
+        assert_eq!(wrapped.field("x").and_then(Value::as_int), Some(1));
+
+        let wrapped_scalar = Value::Dyn(Rc::new(DynValue {
+            trait_name: "render.Display".into(),
+            value: Value::Str("shown".into()),
+        }));
+        assert_eq!(wrapped_scalar.as_str(), Some("shown"));
+    }
+
+    /// The three representation changes that were embedder source breaks, read
+    /// through the API that would have hidden each of them.
+    ///
+    /// Not a test of behaviour so much as of what the signatures admit: every
+    /// assertion below names a shape the *language* has and no type the
+    /// runtime chose to hold it in. Issue #104 moved a struct from a `Box` to
+    /// an `Rc`, issue #109 moved a bound host operation's two names behind one
+    /// pointer, and issue #183 replaced an enum payload's `Vec<Value>` with
+    /// [`Payload`] — a host written against these lines would have compiled
+    /// unchanged across all three, and the point of writing them down is that
+    /// the next such change has to keep them compiling.
+    #[test]
+    fn a_reader_hides_each_representation_change_that_was_a_source_break() {
+        // #104: the struct behind an `Rc`, where a host once wrote
+        // `let Value::Struct(s) = value` and bound a `&Box<StructValue>`.
+        let decision = Value::structure("app.Decision", [("reviewers", Value::Int(2))]);
+        assert_eq!(decision.field("reviewers").and_then(Value::as_int), Some(2));
+
+        // #183: the payload at each of the three arities `Payload` holds, read
+        // as one slice whichever it is.
+        for (payload, len) in [
+            (Vec::new(), 0),
+            (vec![Value::Int(1)], 1),
+            (vec![Value::Int(1), Value::Int(2)], 2),
+        ] {
+            let value = Value::enumeration("app.Verdict", "Case", payload);
+            assert_eq!(value.case(), Some("Case"));
+            assert_eq!(value.payload().map(<[Value]>::len), Some(len));
+        }
+
+        // #109: the two names of a bound host operation, which were inline
+        // fields of the variant until they cost every value in the program
+        // sixteen bytes.
+        let bound = Value::HostFn(Rc::new(HostFnValue {
+            module: "console".into(),
+            op: "println".into(),
+        }));
+        assert_eq!(bound.host_op(), Some(("console", "println")));
+
+        // #121, the fourth of the same kind: a closure's parameter list became
+        // a count, and a host only ever wanted the count.
+        let closure = Value::Closure(Rc::new(Closure {
+            is_async: false,
+            arity: 2,
+            body: ClosureBody::Lowered(cove_ir::FunctionId(0)),
+            module: "app".into(),
+            captures: Vec::new(),
+        }));
+        assert_eq!(closure.arity(), Some(2));
     }
 }

@@ -636,9 +636,9 @@ either costs 21 allocations. Nothing about passing a value directly makes the
 value cheaper to build. What it removes is everything that happened to it
 afterwards.
 
-All three are written the obvious way — build the vector of fields, match the
-enum, clone the string — rather than the fast way, because what an embedder
-writes is what an embedder pays. Inbound costs 4.2× outbound in allocations,
+All three are written the obvious way — build the vector of fields, ask the
+enum for its case, clone the string — rather than the fast way, because what an
+embedder writes is what an embedder pays. Inbound costs 4.2× outbound in allocations,
 and the reason is the shape rather than the direction: ten fields and two
 arrays go in, and a policy and a short list of findings come out.
 
@@ -648,13 +648,19 @@ Each of these is something this example wanted and the toolchain does not have.
 They are issues rather than workarounds in the program.
 
 - **An embedder still builds its arguments out of the runtime's own
-  `Value`.** `Value::structure`, `Value::array` and `Value::enumeration` mean a
-  host no longer names `Rc<StructValue>` or the `opaque` flag to build one, but
-  a `Value` is still what crosses in both directions and
-  `Decision::from_cove` still matches on its variants.
-  [Issue #109](https://github.com/myuon/cove/issues/109) asks for the internal
-  representation to become less exposed than that, and gates the work on VM
-  profiles it also asks this example to produce.
+  `Value`,** though it no longer has to know what one is made of. This bullet
+  used to say that `Decision::from_cove` matched on `Value`'s variants while
+  `Value::structure` and its neighbours meant nothing had to *build* one that
+  way, and [issue #186](https://github.com/myuon/cove/issues/186) closed that
+  half: `Value::field`, `Value::fields`, `Value::case`, `Value::payload`,
+  `Value::items`, `Value::elements`, `Value::entries`, `Value::declared_type`
+  and the scalar `as_*` readers are how this crate reads an answer now, and it
+  names no variant, no `Rc` and no `Box` in either direction. What is left is
+  that a `Value` is still the currency: the variants are still `pub`, so
+  nothing *stops* a host matching on one, and a host that does is the one that
+  a change to the representation still breaks.
+  [Issue #109](https://github.com/myuon/cove/issues/109) asked for less
+  exposure than that, and sealing the variants is the part of it that remains.
 - **A rule package written against an embedder's module still cannot be
   checked by `cove check`, and that is now a decision rather than a gap.**
   [#151](https://github.com/myuon/cove/issues/151) asked for a flag or a

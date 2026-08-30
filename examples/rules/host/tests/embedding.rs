@@ -923,13 +923,14 @@ fn a_rust_pull_request_becomes_the_struct_the_schema_declares() {
         is_draft: false,
         has_tests: true,
     };
-    let Value::Struct(value) = pr.to_cove() else {
+    let value = pr.to_cove();
+    let Some(fields) = value.fields() else {
         panic!("a pull request converts to a struct value");
     };
 
-    assert_eq!(&*value.type_name, "reviews.PullRequest");
+    assert_eq!(value.declared_type(), Some("reviews.PullRequest"));
     let declared: Vec<&str> = REVIEWS.types[0].fields.iter().map(|f| f.name).collect();
-    let built: Vec<&str> = value.fields.iter().map(|(name, _)| &**name).collect();
+    let built: Vec<&str> = fields.map(|(name, _)| name).collect();
     assert_eq!(built, declared, "the conversion follows the schema's order");
 }
 
@@ -948,14 +949,14 @@ fn labels_cross_as_the_set_a_membership_question_wants() {
         labels: vec!["docs".to_string(), "docs".to_string()],
         ..cove_rules::samples()["req-1"].clone()
     };
-    let Value::Struct(value) = pr.to_cove() else {
-        panic!("a pull request converts to a struct value");
-    };
-    let labels = value.get("labels").expect("the field the schema declares");
-    let Value::Set(carried) = labels else {
+    let value = pr.to_cove();
+    let labels = value
+        .field("labels")
+        .expect("the field the schema declares");
+    let Some(carried) = labels.elements() else {
         panic!("`labels` crosses as a `Set`, not as {labels}");
     };
-    assert_eq!(carried.len(), 1, "a label written twice is carried once");
+    assert_eq!(carried.count(), 1, "a label written twice is carried once");
 
     // And the schema says so, which is what makes it checked at both ends.
     let declared = REVIEWS.types[0]

@@ -65,7 +65,7 @@ use std::time::{Duration, Instant};
 use cove_diag::{render, SourceMap};
 use cove_ir::lower::Lowered;
 use cove_runtime::interp::Interpreter;
-use cove_runtime::value::{MapKey, StructValue};
+use cove_runtime::value::MapKey;
 use cove_runtime::{
     Budget, Effect, FieldSchema, Grants, HostApi, HostRegistry, HostType, Limits, ModuleSchema,
     OperationSchema, RecordedValue, Runtime, RuntimeError, TraceEvent, TraceSink, TypeSchema,
@@ -400,9 +400,14 @@ impl Decision {
     /// `None` tells its caller that something was wrong and not what.
     ///
     /// This walk is the outbound half of what the measurement attributes to
-    /// conversion. It is deliberately written the obvious way — match, read
-    /// the field by name, clone the string — rather than the fast way, since
-    /// what an embedder writes is what an embedder's cost is.
+    /// conversion. It is deliberately written the obvious way — ask for the
+    /// case, read the field by name, clone the string — rather than the fast
+    /// way, since what an embedder writes is what an embedder's cost is.
+    ///
+    /// It asks through the readers on [`Value`] and matches on none of its
+    /// variants, which is what issue #186 added them for: the shapes below
+    /// are the ones a `rules.policy` declaration states, and nothing here
+    /// says how the runtime holds one.
     pub fn from_cove(value: &Value) -> Result<Decision, String> {
         Decision::of(ok_payload(value)?)
     }
@@ -415,60 +420,65 @@ impl Decision {
     /// it was the only fallible step. So the answer arrives unwrapped, and
     /// [`Decision::from_cove`] is this with the `Result` peeled off first.
     pub fn of(decision: &Value) -> Result<Decision, String> {
-        let Value::Struct(fields) = decision else {
+        let Some(type_name) = decision.declared_type() else {
             return Err(format!("expected a `Decision` struct, found {decision}"));
         };
-        if &*fields.type_name != "rules.policy.Decision" {
+        if type_name != "rules.policy.Decision" {
             return Err(format!(
-                "expected `rules.policy.Decision`, found `{}`",
-                fields.type_name
+                "expected `rules.policy.Decision`, found `{type_name}`"
             ));
         }
         Ok(Decision {
-            policy: policy_of(field(fields, "policy")?)?,
-            findings: findings_of(field(fields, "findings")?)?,
+            policy: policy_of(field(decision, "policy")?)?,
+            findings: findings_of(field(decision, "findings")?)?,
         })
     }
 }
 
 /// What an `Ok` carries, or a message saying what arrived instead.
+///
+/// `Result` is a builtin, so the readers for it are the four that predate
+/// issue #186: a host asks "is this an `Ok`?" and gets the payload as the
+/// answer, without stating the case names itself.
 fn ok_payload(value: &Value) -> Result<&Value, String> {
-    let Value::Enum(result) = value else {
-        return Err(format!("expected a `Result`, found {value}"));
-    };
-    match (&*result.type_name, &*result.case) {
-        ("Result", "Ok") => Ok(&result.payload[0]),
-        ("Result", "Err") => Err(format!("the rules answered `Err`: {}", result.payload[0])),
-        (name, case) => Err(format!("expected a `Result`, found `{name}.{case}`")),
+    if let Some([payload]) = value.ok_payload() {
+        return Ok(payload);
     }
+    if let Some([error]) = value.err_payload() {
+        return Err(format!("the rules answered `Err`: {error}"));
+    }
+    Err(format!("expected a `Result`, found {value}"))
 }
 
 /// One field of a struct value, or a message naming the field that was
 /// missing and the type that should have carried it.
-fn field<'v>(value: &'v StructValue, name: &str) -> Result<&'v Value, String> {
+///
+/// One message for both halves of what [`Value::field`] answers `None` to,
+/// because the type name is what distinguishes them: a value that is not a
+/// struct at all reports `Int` where a struct missing the field reports
+/// `rules.policy.Decision`.
+fn field<'v>(value: &'v Value, name: &str) -> Result<&'v Value, String> {
     value
-        .get(name)
-        .ok_or_else(|| format!("`{}` carries no field `{name}`", value.type_name))
+        .field(name)
+        .ok_or_else(|| format!("`{}` carries no field `{name}`", value.type_name()))
 }
 
 /// A `rules.policy.ReviewPolicy` value as the Rust enum.
 fn policy_of(value: &Value) -> Result<ReviewPolicy, String> {
-    let Value::Enum(policy) = value else {
+    let (Some(case), Some(payload)) = (value.case(), value.payload()) else {
         return Err(format!("expected a `ReviewPolicy`, found {value}"));
     };
-    match &*policy.case {
+    match case {
         "Normal" => Ok(ReviewPolicy::Normal),
         "Require" => {
-            let Value::Struct(requirement) = &policy.payload[0] else {
-                return Err("a `Require` carries a `Requirement`".to_string());
-            };
+            let requirement = &payload[0];
             Ok(ReviewPolicy::Require {
                 reviewers: int(field(requirement, "reviewers")?)?,
                 reason: text(field(requirement, "reason")?)?,
             })
         }
         "Block" => Ok(ReviewPolicy::Block {
-            reason: text(&policy.payload[0])?,
+            reason: text(&payload[0])?,
         }),
         case => Err(format!("`ReviewPolicy` has no case `{case}`")),
     }
@@ -476,21 +486,25 @@ fn policy_of(value: &Value) -> Result<ReviewPolicy, String> {
 
 /// An `Array<Finding>` as the Rust vector.
 fn findings_of(value: &Value) -> Result<Vec<Finding>, String> {
-    let Value::Array(items) = value else {
+    let Some(items) = value.items() else {
         return Err(format!("expected an `Array<Finding>`, found {value}"));
     };
     items
         .iter()
-        .map(|item| {
-            let Value::Struct(finding) = item else {
-                return Err(format!("expected a `Finding`, found {item}"));
-            };
-            let Value::Enum(severity) = field(finding, "severity")? else {
+        .map(|finding| {
+            // A struct is the one shape with fields, so `fields()` answering
+            // is the question "is this a `Finding`?" asked without naming a
+            // variant.
+            if finding.fields().is_none() {
+                return Err(format!("expected a `Finding`, found {finding}"));
+            }
+            let severity = field(finding, "severity")?;
+            let Some(case) = severity.case() else {
                 return Err("a `Finding` carries a `Severity`".to_string());
             };
             Ok(Finding {
                 rule: text(field(finding, "rule")?)?,
-                severity: severity.case.to_string(),
+                severity: case.to_string(),
                 reason: text(field(finding, "reason")?)?,
                 reviewers: int(field(finding, "reviewers")?)?,
             })
@@ -500,18 +514,17 @@ fn findings_of(value: &Value) -> Result<Vec<Finding>, String> {
 
 /// A `String` value as a Rust `String`.
 fn text(value: &Value) -> Result<String, String> {
-    match value {
-        Value::Str(text) => Ok(text.to_string()),
-        other => Err(format!("expected a `String`, found {other}")),
-    }
+    value
+        .as_str()
+        .map(str::to_string)
+        .ok_or_else(|| format!("expected a `String`, found {value}"))
 }
 
 /// An `Int` value as an `i64`.
 fn int(value: &Value) -> Result<i64, String> {
-    match value {
-        Value::Int(number) => Ok(*number),
-        other => Err(format!("expected an `Int`, found {other}")),
-    }
+    value
+        .as_int()
+        .ok_or_else(|| format!("expected an `Int`, found {value}"))
 }
 
 // ---------------------------------------------------------------------------
