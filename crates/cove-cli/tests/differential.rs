@@ -358,7 +358,7 @@ use cove_sema::resolve::Program as Checked;
 /// 88 to 90: an `async fn`, which is the last of the concurrency cluster.
 /// ADR 0008 gives a thread to `spawn` and not to every `async fn`, so one
 /// runs its body at the call site and answers a handle that is already
-/// settled — `Interpreter::invoke` wraps the result of the whole call, and
+/// settled — `Interpreter::call_target` wraps the result of the whole call, and
 /// `cove_ir::Function::answers_a_task` is the same fact read where the VM
 /// closes the frame, which is what catches a `?` that failed as well as a
 /// `return`. It is the callee's answer and not the call site's, because an

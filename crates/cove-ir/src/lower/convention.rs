@@ -123,7 +123,7 @@ impl<'a> Lowering<'a> {
             // A lambda's parameters are bound by the same `bind_params`, so
             // one written `dyn Trait` receives a trait object exactly as a
             // declaration's does. A lambda has no written return type, so
-            // there is no second conversion here: `Interpreter::invoke`
+            // there is no second conversion here: `Interpreter::call_target`
             // reads one off `Closure::decl`, and a lambda's is `None`.
             body.coerce_param(module, param, params[at], slots[at], true);
         }
@@ -147,7 +147,7 @@ impl<'a> Lowering<'a> {
             returns: SlotKind::Value,
             has_receiver: false,
             // An `async` lambda answers a settled task exactly as an `async
-            // fn` does, and for the same reason: `Interpreter::invoke` reads
+            // fn` does, and for the same reason: `Interpreter::call_target` reads
             // `is_async` off the closure it was handed and wraps what the
             // body produced.
             answers_a_task: is_async,

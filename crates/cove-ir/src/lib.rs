@@ -261,7 +261,7 @@ pub struct Function {
     /// the value the body produced.
     ///
     /// True for an `async fn` and for an `async` lambda, and it is the whole
-    /// of what `async` means to a run. `Interpreter::invoke` runs the body at
+    /// of what `async` means to a run. `Interpreter::call_target` runs the body at
     /// the call site and wraps whatever came out in
     /// `cove_runtime::task::Task::settled`, because ADR 0008 gives a thread
     /// to `spawn` and not to every `async fn`: nothing may depend on when an

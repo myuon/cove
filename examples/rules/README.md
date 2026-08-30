@@ -20,11 +20,24 @@ So the interesting question here is not "can Cove express a rule engine",
 which it can and which [Shape](#shape) is the answer to. It is: what does an
 application pay to hold one, and where does the payment go? The short answer
 is that compiling is worth about 162 invocations, that reusing one VM instead
-of building one per request is worth 43% of an invocation, and that the Host
-API boundary is 25% of an invocation's time and 24% of its allocations before
-anything is traced and 14% more when it is.
+of building one per request saves 168 allocations against the 237 an invocation
+costs, and that how the pull request gets in is worth 40 allocations and 135
+instructions.
 
-`host/` is a workspace member, so `cargo test --workspace` runs its fourteen
+That last number used to be a different number, and how it changed is the
+better half of this document. When this example was written, `run_entry` took a
+list of strings on both backends and there was no other way in, so a pull
+request had to arrive through a Host API call into a host module the embedder
+declared for no other reason. What the measurement found and called "the Host
+API boundary" was, in large part, the cost of carrying an argument through a
+mechanism meant for reaching outside the process. `Vm::invoke` closed that
+([issue #150](https://github.com/myuon/cove/issues/150)),
+`rules.embedded.evaluate` takes the pull request as an argument, and
+[What the way in costs](#what-the-way-in-costs) measures the two ways against
+each other and splits the old number in two. The old path is still here and
+still measured, because it is the control that makes the split possible.
+
+`host/` is a workspace member, so `cargo test --workspace` runs its eighteen
 cases and `cargo clippy` sees it. An example of an API that is not compiled
 against that API is an example that has already rotted.
 
@@ -88,7 +101,7 @@ that is not there.
 | `rules.catalog` | the `Rule` trait, the six rules, and `standard()` |
 | `rules.engine` | `decide`, `appraise`, `findings`, `policyFor` |
 | `rules.fixtures` | six pull requests, one per arm of the policy |
-| `rules.embedded` | the adapter the Rust host invokes: `decideRequest` and `pullOnly` |
+| `rules.embedded` | the adapter the Rust host invokes: `evaluate`, and the boundary controls `decideRequest` and `pullOnly` |
 | `rules` | `main`, and the two measurement controls `decideSample` and `floor` |
 | `host/` | the Rust application that embeds all of the above |
 
@@ -152,20 +165,60 @@ session because a `Vm` borrows the `Runtime` and the lowered program, and
 because nothing Cove-shaped could leave it in any case: a `Value` is `Rc`-based
 and is not `Send`.
 
-### What the boundary carries
+```rust
+session.invoke("rules.embedded", "evaluate", vec![pr.to_policy()])
+```
 
-An application request identifier goes in as the entry's one process argument.
-The pull request comes back out through `reviews.pull`, as a
-`reviews.PullRequest` the Rust side built with `PullRequest::to_cove`. The
-decision leaves twice: as the value the entry returned, which
-`Decision::from_cove` reads into a Rust enum, and through `reviews.record`,
-which carries it back under the same request identifier that started it.
+That is the whole of a request. `Session::evaluate` is that line plus
+`Decision::of` on what came back.
 
-That the input arrives by a Host API call rather than as an argument is not a
-design choice. `run_entry` takes a `Vec<Rc<str>>` on both backends and there is
-no other way in; see [Gaps](#gaps). It does mean the example measures the
-boundary rather than measuring around it, which is what
-[issue #109](https://github.com/myuon/cove/issues/109) needed.
+### The two ways in
+
+**`evaluate(pr: PullRequest) -> Decision`**, invoked with a value. The host
+builds a `rules.policy.PullRequest` with `PullRequest::to_policy` and hands it
+to `Session::invoke`, and reads a `rules.policy.Decision` out of the answer
+with `Decision::of`. Nothing crosses the Host API boundary: no host module is
+reached, no capability is asked for, and a trace sink watching the boundary
+sees nothing at all. This is what an application should write.
+
+**`decideRequest(args: Array<String>) -> Result<Decision, Error>`**, run with a
+process argument. The request identifier goes in as the entry's one argument;
+the pull request comes back out through `reviews.pull`, as a
+`reviews.PullRequest` the Rust side built with `PullRequest::to_cove`; the
+decision leaves twice, as the value the entry returned and through
+`reviews.record` under the same identifier that started it.
+
+The second was once the only one, because `run_entry` takes a `Vec<Rc<str>>` on
+both backends and a host could say nothing else to a program. It stays for two
+reasons. It is the control that makes the Host API boundary measurable — the
+two reach the same decision over the same pull request, so what separates them
+is the boundary and nothing else, which is what
+[issue #109](https://github.com/myuon/cove/issues/109) needed. And it is what a
+host module is genuinely for: both `reviews` operations take the request
+identifier first, so every `HostCall` event a trace sink sees carries it and a
+run's calls group by application request without the runtime knowing what an
+application request is.
+
+### What holds an invocation to the rules
+
+`invoke` is checked against the signature the checker resolved, before the
+first instruction. `rules.embedded.evaluate` declares one parameter, so an
+invocation supplies one value; that value must be a `rules.policy.PullRequest`
+carrying the ten fields the declaration lists, in that order, each of the
+declared type.
+
+The field order is not pedantry. The lowering spends the checker's answer and
+emits `get-field-at 4` where the source wrote `pr.changedLines`, so a struct a
+host built with nine fields would have the VM read past the end of one and a
+struct with ten in another order would answer the wrong field with no sign of
+it. `crates/cove-runtime/src/invoke.rs` is where that is refused, and
+`an_argument_the_rules_do_not_declare_is_refused_before_anything_runs` is what
+holds it to the three ways a host can get it wrong.
+
+A capability is not part of that check, and an invocation grants nothing: what
+`evaluate` may reach is what the `HostRegistry` was granted, exactly as for a
+run `cove run` started. `evaluate` reaches nothing, which is why the case above
+grants it nothing.
 
 ### Who checks this program
 
@@ -225,176 +278,237 @@ happened to come first. This is the whole argument for
 ## Measurements
 
 ```text
-Intel(R) Core(TM) i7-10700K CPU @ 3.80GHz, 32 GiB, macOS 26.5.2
-rustc 1.93.1, --release
-cargo run --release -p cove-rules --bin cove-rules-measure -- 3000
+cargo run --release -p cove-rules --bin cove-rules-measure -- 500
 ```
 
-Times are medians of five runs of the binary, 3,000 invocations a row, and the
-spread between the fastest and slowest run is under 9% on every row below
-except `rules.floor` (16.8%, on a 923 ns row). They were taken on a machine
-doing other things and are worth the ratios between rows rather than the
-absolute figures.
+**The counts below were re-taken for this change and the times were not.**
+Allocations, bytes and instructions come from a counting `GlobalAlloc`
+installed in the measurement binary and from `Vm::instructions`, not from a
+sampler, so they are exact and every row is comparable with every other. The
+wall times are the ones this document has carried since it was written:
 
-**The allocation and instruction counts are exact.** They come from a counting
-`GlobalAlloc` installed in the measurement binary and from `Vm::instructions`,
-not from a sampler, and they were identical in all five runs. That is
-deliberate: [issue #109](https://github.com/myuon/cove/issues/109) asks what a
-call across the boundary costs, and a count is an answer a different machine
-can check.
+```text
+Intel(R) Core(TM) i7-10700K CPU @ 3.80GHz, 32 GiB, macOS 26.5.2
+rustc 1.93.1, --release, medians of five runs, 3,000 invocations a row
+```
+
+They were taken before `evaluate` existed, on another machine, and the machine
+this change was made on was busy with other work. **Every wall time in this
+document needs re-taking, in one session, on a quiet machine**, and the two new
+rows have none at all. Nothing below argues from a time where a count would do,
+and where a time is quoted it is marked.
+
+Re-taking the counts turned up something worth recording, because this document
+had claimed the counts were what a different machine could check. At the parent
+commit, on the machine this change was made on, `decideSample` costs 210
+allocations where the table above said 218, and `decideRequest` 277 where it
+said 285 — a constant eight on every row that runs the rule catalog, on the
+same source at the same commit. So an allocation count is *nearly*
+machine-independent and not exactly: something in the standard library between
+rustc 1.93.0 and 1.93.1 allocates eight fewer times over this program. The
+counts below are one session's, and the base-versus-branch comparison behind
+them was made in that session too.
 
 The binary stays in the repository rather than being a scratch instrument that
 is deleted. It is not a benchmark — nothing runs it on a push and it is not in
 `cove-bench` — but it is the only thing that can say whether a change to the
-Host API made an embedding cheaper or more expensive, and a number nobody can
-reproduce is a number nobody can argue with.
+embedding API made an embedding cheaper or more expensive, and a number nobody
+can reproduce is a number nobody can argue with. It earned that keep here: the
+rows below are what said `evaluate` costs 40 allocations less than the boundary
+route rather than "less".
 
 ### What is paid once
 
-Over ten `.cove` files in six modules, 1,191 lines including tests and
-doc comments.
+Over ten `.cove` files in six modules.
 
-| | ns | allocations | bytes |
+| | ns *(stale)* | allocations | bytes |
 | --- | ---: | ---: | ---: |
-| load: read, parse, resolve, check | **5,676,618** | 32,558 | 4,393,400 |
+| load: read, parse, resolve, check | **5,676,618** | 32,764 | 4,427,704 |
 |   of which: read from disk | 582,767 | | |
 |   of which: parse | 1,434,899 | | |
 |   of which: resolve and check | 3,554,366 | | |
-| lower `rules.embedded.decideRequest` (32 fns) | 264,219 | 1,926 | 178,816 |
-| lower `rules.decideSample` (34 fns) | 275,637 | 2,023 | 198,112 |
-| lower `rules.embedded.pullOnly` (2 fns) | 54,961 | 620 | 50,616 |
-| lower `rules.floor` (1 fn) | 47,491 | 561 | 43,815 |
+| lower `rules.decideSample` (34 fns) | 275,637 | 2,014 | 195,691 |
+| lower `rules.embedded.decideRequest` (32 fns) | 264,219 | 1,917 | 176,395 |
+| lower `rules.embedded.evaluate` (27 fns) | — | 1,684 | 151,278 |
+| lower `rules.embedded.pullOnly` (2 fns) | 54,961 | 623 | 50,646 |
+| lower `rules.floor` (1 fn) | 47,491 | 564 | 43,845 |
 
 Checking is 63% of loading and parsing is 25%, which is the ratio ADR 0022
 predicted when it made a VM run check as well as resolve: the lowering reads
 the checker's answers, so the check is not a second opinion but the thing that
 produces them.
 
-Lowering is measured over twenty turns because the first one a process performs
-is cold; loading is measured once, because loading once is what it is for. The
-disk read is whatever the page cache says — 0.58 ms warm here and 11.7 ms on
-the first run after a build.
+**Checking now records two more kinds of answer, and it costs 42 allocations.**
+`invoke` holds a host's argument to a declared struct's fields and to a
+declared enum case's payload, and the only account of either is the checker's,
+so `cove_sema` records a signature for each — the synthesized initializer
+`PullRequest(id: ..)` calls. Over this package that is about two dozen
+declarations and 42 allocations, or 0.13% of loading. The remaining difference
+between 32,558 at the parent commit and 32,764 here is the source: `evaluate`
+and the doc comments that explain it are 164 allocations of text.
 
-**Against a 35.1 µs invocation, loading is worth 162 invocations and lowering
-the entry is worth 7.5.** An application that decides more than a couple of
-hundred pull requests over its life spends more of its own time deciding than
-it spent compiling, and 5.7 ms is not a startup cost anybody is going to
-notice. Compiling per request would be.
+Lowering is measured over twenty turns because the first one a process performs
+is cold; loading is measured once, because loading once is what it is for.
+`evaluate` reaches 27 functions where `decideRequest` reaches 32, and the five
+are `rules.embedded.pullRequest` and what the Host API call it makes drags in.
+
+**Against a 35.1 µs invocation *(stale)*, loading is worth 162 invocations and
+lowering the entry is worth 7.5.** An application that decides more than a
+couple of hundred pull requests over its life spends more of its own time
+deciding than it spent compiling. Compiling per request would not be.
 
 ### What is paid per invocation
 
 One VM serving all of them, which is the shape an embedding is for.
 
-| | ns | allocations | bytes | instructions |
+| | ns *(stale)* | allocations | bytes | instructions |
 | --- | ---: | ---: | ---: | ---: |
 | `rules.floor` — an entry that does nothing | 923 | 11 | 240 | 4 |
-| `rules.decideSample` — the whole catalog, no host call | 26,432 | 218 | 12,456 | 645 |
+| `rules.decideSample` — the catalog over its own fixture | 26,432 | 210 | 11,275 | 645 |
+| `rules.embedded.evaluate` — the catalog over the host's | — | **237** | 12,037 | **600** |
 | `rules.embedded.pullOnly` — one host call, no rules | 4,083 | 48 | 2,082 | 34 |
-| `rules.embedded.decideRequest` — both | **35,071** | **285** | 15,024 | 735 |
-| `pullOnly`, with a trace sink installed | 7,796 | 101 | 4,130 | 34 |
-| `decideRequest`, with a trace sink installed | 40,971 | 350 | 17,708 | 735 |
+| `rules.embedded.decideRequest` — the catalog, across the boundary | 35,071 | **277** | 13,788 | **735** |
+| `evaluate`, with a trace sink installed | — | 237 | 12,037 | 600 |
+| `pullOnly`, with a trace sink installed | 7,796 | 101 | 4,080 | 34 |
+| `decideRequest`, with a trace sink installed | 40,971 | 342 | 16,372 | 735 |
 
-Each row is a control on the one above it, and the four differences are the
-answer this example was written to produce.
+Each row is a control on another, and the differences are the answer this
+example was written to produce.
 
-**An invocation costs 923 ns before the program does anything.** Finding the
-entry by name, building the `Array<String>` of arguments, entering the frame,
-and answering: 11 allocations and four instructions. That is the floor every
-other row stands on, and it is small enough that nothing below is about it.
+**An invocation costs 11 allocations and four instructions before the program
+does anything.** Finding the entry by name, entering the frame, and answering.
+That is the floor every other row stands on, and it is small enough that
+nothing below is about it.
 
-**The Host API boundary is 25% of an invocation's time and 24% of its
-allocations.** `decideRequest` against `decideSample` is the same rules over
-the same pull request, differing in that one fetches it through `reviews.pull`
-and reports the decision through `reviews.record` and the other builds it in
-Cove and reports nothing: 35,071 ns against 26,432, and 285 allocations against
-218. So two crossings cost **8,639 ns and 67 allocations**, against 90 more VM
-instructions — which is the point. The boundary is not instructions. Fourteen
-percent more instructions cost 33% more time.
+#### What the way in costs
 
-**One crossing carrying a ten-field struct costs 3,160 ns, 37 allocations, and
-30 instructions.** That is `pullOnly` against `floor`: one `reviews.pull`, the
-struct value the Rust side built for it, and the field-by-field rebuild into
-the package's own `PullRequest`. Twenty-one of the 37 allocations are Rust's
-own `PullRequest::to_cove` — an `Rc<str>` per field name and per string, an
-`Rc<[Value]>` per array, a `Vec` for the fields and an `Rc<StructValue>` around
-them — so the runtime's half of one crossing is **16 allocations**.
+`evaluate` and `decideRequest` reach the same decision over the same pull
+request — `the_two_ways_in_reach_the_same_decision` asserts it — and differ in
+how the pull request got there. One takes it as an argument. The other takes a
+request identifier as a process argument, fetches the pull request through
+`reviews.pull`, rebuilds it field by field into the package's own struct, and
+reports the decision back through `reviews.record`.
+
+**The boundary route costs 40 more allocations and 135 more instructions**:
+277 against 237, and 735 against 600. That is 14% of its allocations and 18% of
+its instructions spent on carrying an argument in and an answer out through a
+mechanism meant for reaching outside the process.
+
+The third control decomposes it. `decideSample` runs the same catalog over a
+pull request the package builds in Cove and makes no host call at all, at 210
+allocations and 645 instructions. So:
+
+- `evaluate` against `decideSample` — **+27 allocations, −45 instructions**.
+  The 27 are what it costs for the value to have come from Rust at all, and 21
+  of them are `PullRequest::to_policy` on the Rust side; six are the runtime
+  placing the argument. The 45 fewer instructions are the Cove that
+  `decideSample` runs to build its own fixture and `evaluate` does not.
+- `decideRequest` against `evaluate` — **+40 allocations, +135 instructions**.
+  That is the boundary, isolated: two crossings, the schema check on each, and
+  the ten-field rebuild `rules.embedded.pullRequest` performs because a Host
+  API schema cannot name a type a Cove package owns.
+
+Read against the older reading of the same table, this splits a number the
+document used to quote as one. `decideRequest` against `decideSample` is 67
+allocations, and this example used to call all 67 "the Host API boundary".
+Twenty-seven of them are not: they are what *any* host-supplied input costs,
+and an application pays them whichever way in it uses. Forty are the boundary.
+
+**One crossing carrying a ten-field struct costs 37 allocations and 30
+instructions.** That is `pullOnly` against `floor`: one `reviews.pull`, the
+struct value the Rust side built for it, and the field-by-field rebuild.
+Twenty-one of the 37 are `PullRequest::to_cove`, so the runtime's half of one
+crossing is **16 allocations**.
 
 For scale, with a caveat.
 [Issue #123](https://github.com/myuon/cove/issues/123)'s calling-convention
-matrix measured a Host callback and the reentry that runs it at 1,277 ns and 14
-allocations, on an operation carrying one `Int`. That is not the same
-mechanism: it re-enters the VM to run a Cove closure, which `reviews.pull` does
-not, so it does strictly more per call. And it is still 2.5× cheaper in time
-and 2.6× cheaper in allocations than this one. What differs is what crossed —
-one `Int` against a ten-field struct with two arrays — so the boundary's cost
-is dominated by the value rather than by the call, which is the thing a fixed
-per-call figure could not have said.
+matrix measured a Host callback and the reentry that runs it at 14 allocations,
+on an operation carrying one `Int`. That is not the same mechanism: it
+re-enters the VM to run a Cove closure, which `reviews.pull` does not, so it
+does strictly more per call, and it still allocates 2.6× less. What differs is
+what crossed — one `Int` against a ten-field struct with two arrays — so the
+boundary's cost is dominated by the value rather than by the call, which is the
+thing a fixed per-call figure could not have said. An argument passed to
+`invoke` is that observation taken to its conclusion: the cheapest way to carry
+a value across a boundary is not to.
 
-**A trace sink costs 14% of a traced invocation and 65 allocations.** A
-registry with a sink installed describes every argument and every result a call
-carried, as a `RecordedValue`, which is a deep copy; a registry with the
-default `NullSink` answers `is_recording()` with `false` and skips it. Two
-calls traced cost 5,900 ns and 65 allocations more than two calls untraced.
+#### What a trace costs, and when it costs nothing
 
-The interesting part is how those 65 split. One `pull` traced costs 53
-allocations more than one `pull` untraced, and it carries a ten-field struct;
-the `record` beside it carries four scalars and costs the other 12. So the
-description is not a per-call charge but a per-value one, and a host operation
-that hands a large value across is the one a trace makes expensive.
+**A trace sink costs 65 allocations on `decideRequest` and nothing at all on
+`evaluate`.** 342 against 277, and 237 against 237 — the same number, not a
+number close to it. A registry with a sink installed describes every argument
+and every result a *host call* carried, as a `RecordedValue`, which is a deep
+copy; a registry with the default `NullSink` answers `is_recording()` with
+`false` and skips it. An invocation that makes no host call has nothing to
+describe, so a sink watching it observes the entry and the run ending and
+copies no value.
+
+How the 65 split is the same finding from the other side. One `pull` traced
+costs 53 allocations more than one `pull` untraced and carries a ten-field
+struct; the `record` beside it carries four scalars and costs the other 12. So
+the description is a per-value charge and not a per-call one, and a host
+operation that hands a large value across is the one a trace makes expensive.
 `docs/VM_ARCHITECTURE.md` records the same effect from the other end, at 16.8%
 of `benches/hostheavy`.
 
 ### What reuse is worth
 
-| | ns | allocations | bytes |
+| | ns *(stale)* | allocations | bytes |
 | --- | ---: | ---: | ---: |
-| `decideRequest`, one VM for every invocation | **35,071** | 285 | 15,024 |
-| `decideRequest`, a new `Runtime` and `Vm` each time | 50,319 | 453 | 33,076 |
-| `decideRequest`, on the interpreter | 86,411 | 821 | 44,491 |
+| `decideRequest`, one VM for every invocation | **35,071** | 277 | 13,788 |
+| `decideRequest`, a new `Runtime` and `Vm` each time | 50,319 | 445 | 31,841 |
+| `decideRequest`, on the interpreter | 86,411 | 822 | 44,461 |
 
-**Building a `Runtime` and a `Vm` costs 15,248 ns and 168 allocations**, which
-is 43% of an invocation on top of it. A `Vm::new` reads the lowered program's
-struct shapes, its enum shapes and its constants and builds a table of each, so
-that cost is proportional to the program rather than to the request, and paying
-it per request is paying it for nothing. An application that built one per
-invocation would be doing 43% more work per request, and 30% of everything it
-did would be rebuilding tables it had already built.
+**Building a `Runtime` and a `Vm` costs 168 allocations**, against the 277 an
+invocation costs. A `Vm::new` reads the lowered program's struct shapes, its
+enum shapes and its constants and builds a table of each, so that cost is
+proportional to the program rather than to the request, and paying it per
+request is paying it for nothing: 38% of everything such an application did
+would be rebuilding tables it had already built.
 
-That is the number this example was asked for and it is worth being plain about
-what it is: **compile-once/invoke-many is worth about 30% on this workload,
-before the compile is counted at all.** Counting the compile, an application
-that rebuilt everything per request would pay 5.99 ms rather than 35.1 µs,
-which is 171×.
+That is the number this example was asked for, and counting the compile as
+well, an application that rebuilt everything per request would pay the whole of
+the load row on top of it.
 
-**The VM is 2.46× the interpreter here and allocates 2.88× less**, on a program
-written for a domain rather than for a benchmark, with a Host API call in it.
+**The VM allocates 2.97× less than the interpreter here**, on a program written
+for a domain rather than for a benchmark, with a Host API call in it.
 `docs/VM_ARCHITECTURE.md`'s suite is mechanism benchmarks; this is a second
 kind of evidence for the same claim, and it agrees.
 
 ### The Rust side of the conversion
 
-| | ns | allocations | bytes |
+| | ns *(stale)* | allocations | bytes |
 | --- | ---: | ---: | ---: |
 | `PullRequest::to_cove` | 1,211 | 21 | 1,032 |
+| `PullRequest::to_policy` | — | 21 | 1,032 |
 | `Decision::from_cove` | 440 | 5 | 360 |
 
-Both are written the obvious way — build the `Vec` of fields, match the enum,
-clone the string — rather than the fast way, because what an embedder writes is
-what an embedder pays. Inbound costs 2.8× outbound, and the reason is the
-shape rather than the direction: ten fields and two arrays go in, and a policy
-and a short list of findings come out.
+The first two are the same ten fields under two type names, and the table says
+so rather than assuming it: `reviews.PullRequest` is what the boundary carries
+and `rules.policy.PullRequest` is what an invocation carries, and building
+either costs 21 allocations. Nothing about passing a value directly makes the
+value cheaper to build. What it removes is everything that happened to it
+afterwards.
+
+All three are written the obvious way — build the vector of fields, match the
+enum, clone the string — rather than the fast way, because what an embedder
+writes is what an embedder pays. Inbound costs 4.2× outbound in allocations,
+and the reason is the shape rather than the direction: ten fields and two
+arrays go in, and a policy and a short list of findings come out.
 
 ## Gaps
 
 Each of these is something this example wanted and the toolchain does not have.
 They are issues rather than workarounds in the program.
 
-- **An exported function cannot be invoked with host-supplied arguments.**
-  `Vm::run_entry` and `Interpreter::run_entry` take a `Vec<Rc<str>>` — the
-  process arguments an entry may declare — so there is no way for a Rust host
-  to call `decide(pr)` with a `Value` it built. The input has to arrive by a
-  Host API call instead, which is why `rules.embedded` exists at all.
-  [#150](https://github.com/myuon/cove/issues/150)
+- **An embedder still builds its arguments out of the runtime's own
+  `Value`.** `Value::structure`, `Value::array` and `Value::enumeration` mean a
+  host no longer names `Rc<StructValue>` or the `opaque` flag to build one, but
+  a `Value` is still what crosses in both directions and
+  `Decision::from_cove` still matches on its variants.
+  [Issue #109](https://github.com/myuon/cove/issues/109) asks for the internal
+  representation to become less exposed than that, and gates the work on VM
+  profiles it also asks this example to produce.
 - **A rule package written against an embedder's module cannot be checked by
   `cove check`.** There is nowhere to hand the CLI a `ModuleSchema`: not a
   flag, not a `cove.toml` key. The author of a rule package therefore cannot
@@ -406,7 +520,7 @@ They are issues rather than workarounds in the program.
   shared reference for as long as it exists. So fuel, the deadline and the
   host-call limit are spent over the whole session rather than reset per
   invocation, and an embedder that wants to bound one request has to build a
-  registry, a `Runtime` and a `Vm` for it — the 43% above.
+  registry, a `Runtime` and a `Vm` for it — the 168 allocations above.
   `embedding.fuel_is_spent_over_the_session_and_not_over_one_invocation` pins
   the behaviour as it is. [#152](https://github.com/myuon/cove/issues/152)
 - **A Host API schema cannot declare a `Map` or a `Set`.** `HostType` has
@@ -424,6 +538,17 @@ They are issues rather than workarounds in the program.
 
 Worth recording beside the gaps, because the list is longer.
 
+- **The natural signature is callable.** `export fn evaluate(pr: PullRequest)
+  -> Decision` is what issue #90 wrote down, and an application invokes it with
+  a value it built and reads a typed decision back. What it took was one seam
+  on each backend and one check against the signature the checker had already
+  resolved.
+- **A wrong argument is the checker's diagnostic and not a crash.** The
+  lowering reads a declared struct's field by index, so a host that built one
+  with nine of ten fields would have had the VM read past its end. `invoke`
+  holds the argument to the declaration before the first instruction, so what
+  a host gets back is a sentence naming the argument, the field, and the type
+  the declaration says belongs there.
 - **Nothing in the program had to be written around the lowering.** Six rules
   behind a `dyn` with a defaulted method, the same call again through a bounded
   type parameter, `Set` and `Map` as a rule's state, `sorted(by:)` over a
@@ -452,13 +577,16 @@ against each other, the six fixtures against the six arms of the policy, and
 `policyFor` over findings assembled by hand so that a combination rule can be
 asserted without arranging a pull request that produces it.
 
-`cargo test -p cove-rules` runs fourteen more, in `host/tests/embedding.rs`:
-one compiled package deciding six requests, both backends agreeing on the
-embedded entry, the Rust fixtures and the Cove fixtures agreeing, an additive
-schema change, a breaking one, an argument and a result the boundary refused, a
-capability that was not granted, a host that failed, a session that kept
-serving, fuel, a host-call limit, the request identifier in the trace, and the
-conversion following the schema's field order.
+`cargo test -p cove-rules` runs eighteen more, in `host/tests/embedding.rs`:
+six pull requests evaluated directly, the two ways in reaching the same
+decision, both backends answering a direct invocation the same way, an argument
+the declaration does not admit, one compiled package deciding six requests
+across the boundary, both backends agreeing on the embedded entry, the Rust
+fixtures and the Cove fixtures agreeing, an additive schema change, a breaking
+one, an argument and a result the boundary refused, a capability that was not
+granted, a host that failed, a session that kept serving, fuel, a host-call
+limit, the request identifier in the trace, and the conversion following the
+schema's field order.
 
 The fixtures are written twice — once in `rules.fixtures` and once in
 `cove_rules::samples` — because in a real embedding they arrive from the

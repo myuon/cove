@@ -11,6 +11,9 @@ pub mod heap;
 pub mod host;
 pub mod http;
 pub mod interp;
+// Private: what it holds is one check both backends make, and the public
+// surface of it is `Interpreter::invoke` and `Vm::invoke`.
+mod invoke;
 pub mod process;
 pub mod runtime;
 pub mod schema;

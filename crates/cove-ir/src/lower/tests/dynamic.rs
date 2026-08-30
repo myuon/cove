@@ -79,7 +79,7 @@ fn an_array_of_dyn_converts_each_element() {
 }
 
 /// A declared `dyn Trait` return type converts the answer before it
-/// leaves, which is where `Interpreter::invoke` converts one — so the
+/// leaves, which is where `Interpreter::call_target` converts one — so the
 /// conversion belongs to the callee and every `return` of it reaches
 /// one.
 #[test]

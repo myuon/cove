@@ -21,14 +21,24 @@
 //! Two facts about the API decide the shape of everything below, and both are
 //! worth stating plainly because they are not obvious from the outside.
 //!
-//! **An entry takes process arguments and nothing else.** `run_entry` on
-//! either backend takes a `Vec<Rc<str>>`, so a host cannot call an exported
-//! Cove function with a Rust-built value. The pull request therefore cannot
-//! be passed in: the host passes a *request identifier* as the one argument,
-//! and the Cove program fetches the pull request back out through a Host API
-//! call. That is a real constraint rather than a stylistic choice, and it is
-//! also convenient here, because the Host API call is exactly the boundary
-//! whose cost this example set out to measure. Issue #150 is the gap.
+//! **An exported function is called with values, and an entry is called with
+//! process arguments.** `Vm::invoke` and `Interpreter::invoke` take a
+//! `Vec<Value>`, so [`Session::evaluate`] hands `rules.embedded.evaluate` a
+//! `rules.policy.PullRequest` the Rust side built and reads a
+//! `rules.policy.Decision` out of what came back. Nothing crosses the Host
+//! API boundary on that path at all. `run_entry` is still there and still
+//! takes a `Vec<Rc<str>>`, because a *command* has strings to hand over —
+//! [`Session::decide`] uses it, and what it costs against `evaluate` is the
+//! measurement in `examples/rules/README.md`.
+//!
+//! This is the half of the example that changed. It was written when
+//! `run_entry` was the only way in: the request identifier went in as the one
+//! process argument and the pull request came back out through a Host API
+//! call into this crate's own module, because there was no other channel.
+//! Issue #150 was that gap. The `reviews` module below is not a casualty of
+//! closing it — it is what the two paths are measured against each other
+//! with, and it is still what a host module *is* for, which is reaching
+//! something outside the process rather than carrying an argument into it.
 //!
 //! **A host module the toolchain does not ship is invisible to `cove
 //! check`.** `reviews` is this crate's, so `cove check` in `examples/`
@@ -272,45 +282,63 @@ pub struct PullRequest {
 }
 
 impl PullRequest {
-    /// This pull request as the struct value `reviews.PullRequest` names.
-    ///
-    /// Ten fields, and every one of them is an allocation: an `Rc<str>` for
-    /// each name and each string, an `Rc<[Value]>` for each of the two
-    /// arrays, a `Vec` for the field list, and an `Rc<StructValue>` around
-    /// the whole. The measurement counts them rather than estimating them,
-    /// because the point of counting is to find out whether the estimate was
-    /// right.
+    /// This pull request as the struct value `reviews.PullRequest` names,
+    /// which is what the Host API boundary carries.
     pub fn to_cove(&self) -> Value {
-        Value::Struct(Rc::new(StructValue {
-            type_name: "reviews.PullRequest".into(),
-            fields: vec![
-                ("id".into(), Value::Str(self.id.as_str().into())),
-                ("title".into(), Value::Str(self.title.as_str().into())),
-                ("author".into(), Value::Str(self.author.as_str().into())),
-                (
-                    "targetBranch".into(),
-                    Value::Str(self.target_branch.as_str().into()),
-                ),
-                ("changedLines".into(), Value::Int(self.changed_lines)),
-                ("filesTouched".into(), strings(&self.files_touched)),
-                ("labels".into(), strings(&self.labels)),
-                ("approvals".into(), Value::Int(self.approvals)),
-                ("isDraft".into(), Value::Bool(self.is_draft)),
-                ("hasTests".into(), Value::Bool(self.has_tests)),
-            ],
-            opaque: false,
-        }))
+        Value::structure("reviews.PullRequest", self.fields())
+    }
+
+    /// The same ten fields as the struct value `rules.policy.PullRequest`
+    /// names, which is what [`Session::evaluate`] hands the rules directly.
+    ///
+    /// The two are different types and always were: one is a
+    /// `cove_schema::TypeSchema` this crate wrote in Rust and the other is a
+    /// struct the rule package declared, and a Host API schema has no way to
+    /// name the second. What is new is that a host may build the second —
+    /// which is what makes `rules.embedded.pullRequest`'s field-by-field
+    /// rebuild unnecessary on this path, and is where a chunk of what the
+    /// boundary cost went.
+    pub fn to_policy(&self) -> Value {
+        Value::structure("rules.policy.PullRequest", self.fields())
+    }
+
+    /// The ten fields, in the order both declarations list them.
+    ///
+    /// Every one of them is an allocation: an `Rc<str>` for each name and
+    /// each string, a shared slice for each of the two arrays, a vector for
+    /// the field list, and one more for the struct. The measurement counts
+    /// them rather than estimating them, because the point of counting is to
+    /// find out whether the estimate was right.
+    ///
+    /// The *order* matters to exactly one of the two consumers. The boundary
+    /// reads a `reviews.PullRequest`'s fields by name and does not care; the
+    /// lowering reads a `rules.policy.PullRequest`'s by index, so a value
+    /// whose fields are not the declaration's in the declaration's order is
+    /// refused by `Vm::invoke` before anything runs. That the two
+    /// declarations list the same ten in the same order is a convenience
+    /// rather than a rule, and it is what lets one list serve both.
+    fn fields(&self) -> Vec<(&'static str, Value)> {
+        vec![
+            ("id", Value::Str(self.id.as_str().into())),
+            ("title", Value::Str(self.title.as_str().into())),
+            ("author", Value::Str(self.author.as_str().into())),
+            (
+                "targetBranch",
+                Value::Str(self.target_branch.as_str().into()),
+            ),
+            ("changedLines", Value::Int(self.changed_lines)),
+            ("filesTouched", strings(&self.files_touched)),
+            ("labels", strings(&self.labels)),
+            ("approvals", Value::Int(self.approvals)),
+            ("isDraft", Value::Bool(self.is_draft)),
+            ("hasTests", Value::Bool(self.has_tests)),
+        ]
     }
 }
 
-/// `texts` as the Cove `Array<String>` a schema's `Array(String)` admits.
+/// `texts` as the Cove `Array<String>` both declarations admit.
 fn strings(texts: &[String]) -> Value {
-    Value::Array(
-        texts
-            .iter()
-            .map(|t| Value::Str(t.as_str().into()))
-            .collect(),
-    )
+    Value::array(texts.iter().map(|t| Value::Str(t.as_str().into())))
 }
 
 /// What a review policy demands, as the application receives it.
@@ -357,7 +385,17 @@ impl Decision {
     /// the field by name, clone the string — rather than the fast way, since
     /// what an embedder writes is what an embedder's cost is.
     pub fn from_cove(value: &Value) -> Result<Decision, String> {
-        let decision = ok_payload(value)?;
+        Decision::of(ok_payload(value)?)
+    }
+
+    /// Reads a decision out of a bare `rules.policy.Decision`.
+    ///
+    /// `rules.embedded.evaluate` is declared `-> Decision` rather than `->
+    /// Result<Decision, Error>`, because nothing it does can fail: it takes
+    /// the pull request as an argument instead of fetching it, and fetching
+    /// it was the only fallible step. So the answer arrives unwrapped, and
+    /// [`Decision::from_cove`] is this with the `Result` peeled off first.
+    pub fn of(decision: &Value) -> Result<Decision, String> {
         let Value::Struct(fields) = decision else {
             return Err(format!("expected a `Decision` struct, found {decision}"));
         };
@@ -823,17 +861,34 @@ impl Session<'_> {
         self.build
     }
 
-    /// Invokes `module.entry` with `args`, and answers what it produced.
+    /// Calls `module.entry` with the values `args`, and answers what it
+    /// produced.
     ///
-    /// The one seam. `run_entry` is what both backends are reached through
-    /// and it takes the process arguments an entry may declare, so this is
-    /// the whole of what an embedder can say to a Cove program.
+    /// The seam an application uses. `invoke` holds `args` to the signature
+    /// the checker resolved for `module.entry` — the parameter count, and
+    /// each value against its declared type, followed into a declared
+    /// struct's fields — and refuses before the first instruction if they do
+    /// not match. Both backends answer it the same way; nothing here knows
+    /// which one is underneath.
     pub fn invoke(
         &mut self,
         module: &str,
         entry: &str,
-        args: &[&str],
+        args: Vec<Value>,
     ) -> Result<Value, RuntimeError> {
+        match &mut self.backend {
+            Backend::Ast(interpreter) => interpreter.invoke(module, entry, args),
+            Backend::Vm(vm) => vm.invoke(module, entry, args),
+        }
+    }
+
+    /// Runs `module.entry` as a command would, handing it `args` as the
+    /// process arguments an entry may declare.
+    ///
+    /// The other seam, and the only one there used to be. It is what
+    /// [`Session::decide`] uses to reach `rules.embedded.decideRequest`,
+    /// which is the control the Host API boundary is measured with.
+    pub fn run(&mut self, module: &str, entry: &str, args: &[&str]) -> Result<Value, RuntimeError> {
         let args: Vec<Rc<str>> = args.iter().map(|arg| (*arg).into()).collect();
         match &mut self.backend {
             Backend::Ast(interpreter) => interpreter.run_entry(module, entry, args),
@@ -841,10 +896,32 @@ impl Session<'_> {
         }
     }
 
-    /// Invokes `module.entry` and decodes what it answered as a [`Decision`].
+    /// Decides `pr` by invoking `module.entry` with it, and reads the
+    /// [`Decision`] back.
+    ///
+    /// This is what an application calls once per request. Nothing crosses
+    /// the Host API boundary: the pull request goes in as an argument and the
+    /// decision comes back as a result, so a run of it makes no host call at
+    /// all and needs no capability.
+    pub fn evaluate(
+        &mut self,
+        module: &str,
+        entry: &str,
+        pr: &PullRequest,
+    ) -> Result<Decision, String> {
+        let value = self
+            .invoke(module, entry, vec![pr.to_policy()])
+            .map_err(|error| error.message)?;
+        Decision::of(&value)
+    }
+
+    /// The same decision the other way: `module.entry` is run with the
+    /// request identifier as its one process argument, fetches the pull
+    /// request through `reviews.pull`, and reports the answer through
+    /// `reviews.record`.
     pub fn decide(&mut self, module: &str, entry: &str, request: &str) -> Result<Decision, String> {
         let value = self
-            .invoke(module, entry, &[request])
+            .run(module, entry, &[request])
             .map_err(|error| error.message)?;
         Decision::from_cove(&value)
     }

@@ -23,21 +23,31 @@
 //!
 //! # The rows, and what each isolates
 //!
-//! Six entries, each a control on the one below it.
+//! Each entry is a control on the one below it.
 //!
 //! - `rules.floor` does nothing, so it is what an invocation costs before the
-//!   program does anything: finding the entry, building the `Array<String>`,
-//!   entering the frame, and answering.
+//!   program does anything: finding the entry, entering the frame, and
+//!   answering.
 //! - `rules.decideSample` runs the whole rule catalog over a pull request the
 //!   package itself holds, and makes no Host API call at all.
+//! - `rules.embedded.evaluate` runs the same catalog over a pull request the
+//!   *host* built and handed over as an argument, so what it adds to
+//!   `decideSample` is the argument and nothing else.
 //! - `rules.embedded.pullOnly` makes one Host API call and converts what comes
 //!   back into the package's own struct, and weighs nothing.
 //! - `rules.embedded.decideRequest` does both, and reports the decision back
 //!   through a second call.
 //!
-//! The Rust side of the boundary is measured on its own beside them:
-//! `PullRequest::to_cove` builds the value the host hands over, and
-//! `Decision::from_cove` reads the one it gets back.
+//! The middle three are the point. `evaluate` and `decideRequest` reach the
+//! same decision over the same pull request, one with it as an argument and
+//! one with it fetched across the Host API boundary, so the difference between
+//! them is what the boundary was costing an embedding that had no other way in
+//! (issue #150).
+//!
+//! The Rust side is measured on its own beside them: `PullRequest::to_policy`
+//! builds the value an invocation hands over — the same ten fields
+//! `to_cove` builds for the boundary — and `Decision::from_cove` reads the one
+//! that comes back.
 
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -136,6 +146,39 @@ impl Row {
     }
 }
 
+/// Which way into the program a row is measuring.
+///
+/// The two are what issue #150 was about, and measuring them against each
+/// other is why both are here. A row that builds its argument builds it inside
+/// the loop, because the boundary row pays for the same conversion inside
+/// `reviews.pull` and a comparison that charged one and not the other would be
+/// measuring the bookkeeping.
+#[derive(Clone, Copy)]
+enum Way {
+    /// `run_entry`, with one process argument — the only way in there used to
+    /// be.
+    Command(&'static str),
+    /// `invoke`, with the pull request the host built.
+    Direct,
+}
+
+impl Way {
+    fn call(self, session: &mut Session<'_>, module: &str, entry: &str, pr: &PullRequest) {
+        match self {
+            Way::Command(argument) => {
+                session
+                    .run(module, entry, &[argument])
+                    .expect("every invocation succeeds");
+            }
+            Way::Direct => {
+                session
+                    .invoke(module, entry, vec![pr.to_policy()])
+                    .expect("every invocation succeeds");
+            }
+        }
+    }
+}
+
 /// Prints the header the rows line up under.
 fn header(title: &str) {
     println!();
@@ -208,6 +251,7 @@ fn study(turns: u64) {
     for (module, entry) in [
         ("rules", "floor"),
         ("rules", "decideSample"),
+        ("rules.embedded", "evaluate"),
         ("rules.embedded", "pullOnly"),
         ("rules.embedded", "decideRequest"),
     ] {
@@ -230,13 +274,16 @@ fn study(turns: u64) {
     }
 
     // ------------------------------------------------- paid per invocation
+    let subject: PullRequest = cove_rules::samples()
+        .remove("req-2")
+        .expect("the sample exists");
     header("paid per invocation, one VM serving all of them");
-    for (what, module, entry, argument, grants, trace) in [
+    for (what, module, entry, way, grants, trace) in [
         (
             "floor: an entry that does nothing",
             "rules",
             "floor",
-            "0",
+            Way::Command("0"),
             &[][..],
             false,
         ),
@@ -244,7 +291,15 @@ fn study(turns: u64) {
             "decide, no host call",
             "rules",
             "decideSample",
-            "1",
+            Way::Command("1"),
+            &[][..],
+            false,
+        ),
+        (
+            "evaluate: the request as argument",
+            "rules.embedded",
+            "evaluate",
+            Way::Direct,
             &[][..],
             false,
         ),
@@ -252,7 +307,7 @@ fn study(turns: u64) {
             "pull only: one host call",
             "rules.embedded",
             "pullOnly",
-            "req-2",
+            Way::Command("req-2"),
             &["reviews"][..],
             false,
         ),
@@ -260,15 +315,23 @@ fn study(turns: u64) {
             "decide, two host calls",
             "rules.embedded",
             "decideRequest",
-            "req-2",
+            Way::Command("req-2"),
             &["reviews"][..],
             false,
+        ),
+        (
+            "evaluate, traced",
+            "rules.embedded",
+            "evaluate",
+            Way::Direct,
+            &[][..],
+            true,
         ),
         (
             "pull only, traced",
             "rules.embedded",
             "pullOnly",
-            "req-2",
+            Way::Command("req-2"),
             &["reviews"][..],
             true,
         ),
@@ -276,7 +339,7 @@ fn study(turns: u64) {
             "decide, two host calls, traced",
             "rules.embedded",
             "decideRequest",
-            "req-2",
+            Way::Command("req-2"),
             &["reviews"][..],
             true,
         ),
@@ -294,15 +357,11 @@ fn study(turns: u64) {
             |session: &mut Session<'_>| {
                 // One turn outside the measurement, so that whatever a first
                 // invocation warms is warm for all of them.
-                session
-                    .invoke(module, entry, &[argument])
-                    .expect("the first invocation succeeds");
+                way.call(session, module, entry, &subject);
                 let before = session.instructions().unwrap_or_default();
                 let (_, measured) = cost(|| {
                     for _ in 0..turns {
-                        session
-                            .invoke(module, entry, &[argument])
-                            .expect("every invocation succeeds");
+                        way.call(session, module, entry, &subject);
                     }
                 });
                 (
@@ -334,7 +393,7 @@ fn study(turns: u64) {
         for _ in 0..turns {
             package.serve(Arc::clone(&embed.hosts), Some(&lowering), |session| {
                 session
-                    .invoke("rules.embedded", "decideRequest", &["req-2"])
+                    .run("rules.embedded", "decideRequest", &["req-2"])
                     .expect("every invocation succeeds");
             });
         }
@@ -351,7 +410,7 @@ fn study(turns: u64) {
         package.serve(Arc::clone(&embed.hosts), None, |session| {
             for _ in 0..turns {
                 session
-                    .invoke("rules.embedded", "decideRequest", &["req-2"])
+                    .run("rules.embedded", "decideRequest", &["req-2"])
                     .expect("every invocation succeeds");
             }
         });
@@ -366,12 +425,9 @@ fn study(turns: u64) {
 
     // ------------------------------------------------ the Rust side alone
     header("the conversion, measured on the Rust side alone");
-    let pr: PullRequest = cove_rules::samples()
-        .remove("req-2")
-        .expect("the sample exists");
     let (_, into_cove) = cost(|| {
         for _ in 0..turns {
-            std::hint::black_box(pr.to_cove());
+            std::hint::black_box(subject.to_cove());
         }
     });
     Row {
@@ -382,9 +438,25 @@ fn study(turns: u64) {
     }
     .print();
 
+    // The same ten fields under the other name, which is what an invocation
+    // hands over. It is here rather than assumed equal to the row above
+    // because "the same work" is a claim and a claim is worth a row.
+    let (_, into_policy) = cost(|| {
+        for _ in 0..turns {
+            std::hint::black_box(subject.to_policy());
+        }
+    });
+    Row {
+        what: "PullRequest::to_policy",
+        turns,
+        cost: into_policy,
+        instructions: None,
+    }
+    .print();
+
     let answer = package.serve(Arc::clone(&embed.hosts), Some(&lowering), |session| {
         session
-            .invoke("rules.embedded", "decideRequest", &["req-2"])
+            .run("rules.embedded", "decideRequest", &["req-2"])
             .expect("the invocation succeeds")
     });
     let (_, out_of_cove) = cost(|| {

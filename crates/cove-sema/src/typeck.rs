@@ -1111,6 +1111,18 @@ impl Ty {
         }
     }
 
+    /// This type as it stands when `generics` are the arguments `args`.
+    ///
+    /// A declared type's fields and an enum case's payload are recorded once,
+    /// in terms of the type parameters the declaration binds:
+    /// `Box<T>`'s field is a `T` however many `Box<Int>`s a program holds. A
+    /// consumer holding a *use* — a `Ty::Struct(name, args)` — completes them
+    /// with this. `args` shorter than `generics` leaves the rest unknown,
+    /// which is what an unsettled type argument already means.
+    pub fn instantiate(&self, generics: &[Arc<str>], args: &[Ty]) -> Ty {
+        self.substitute(&substitution(generics, args))
+    }
+
     /// Replaces every type parameter bound in `subst`, leaving the rest.
     fn substitute(&self, subst: &BTreeMap<Arc<str>, Ty>) -> Ty {
         if subst.is_empty() {
@@ -2005,6 +2017,7 @@ impl<'a> Checker<'a> {
             let entry = &self.module.structs[&name];
             let (decl, opaque) = (entry.decl.clone(), entry.opaque);
             let sig = self.struct_sig(&decl, opaque);
+            self.record_struct_signature(&decl, &sig);
             self.structs.insert(name, sig);
         }
 
@@ -2012,6 +2025,7 @@ impl<'a> Checker<'a> {
         for name in enum_names {
             let decl = self.module.enums[&name].decl.clone();
             let sig = self.enum_sig(&decl);
+            self.record_case_signatures(&decl, &sig);
             self.enums.insert(name, sig);
         }
 
@@ -6376,6 +6390,60 @@ impl<'a> Checker<'a> {
                 ret: sig.ret.clone(),
             },
         );
+    }
+
+    /// Records the boundary of a struct declaration's initializer.
+    ///
+    /// `Point(x: 0.0, y: 1.0)` is a call, and the thing it calls is a
+    /// signature this checker synthesizes out of the declaration's fields —
+    /// which is why [`ParamSig`] documents itself as covering one. Recording
+    /// it here is what publishes a struct's *resolved* field types, in
+    /// declaration order, to anything downstream that holds a value to the
+    /// declaration rather than reading a field out of one.
+    ///
+    /// The types are the declaration's own, so a generic struct's field is
+    /// recorded as the `Ty::Param` it was written as; a consumer holding a
+    /// use completes it with [`Ty::instantiate`]. Recording is not deciding,
+    /// exactly as for [`Checker::record_signature`].
+    fn record_struct_signature(&mut self, decl: &StructDecl, sig: &StructSig) {
+        let ret = Ty::Struct(
+            self.key(&decl.name.node).into(),
+            sig.generics.iter().cloned().map(Ty::Param).collect(),
+        );
+        self.facts.record_signature(
+            decl.span.file,
+            decl.span,
+            Signature {
+                receiver: None,
+                params: sig.fields.iter().map(|field| field.ty.clone()).collect(),
+                ret,
+            },
+        );
+    }
+
+    /// The same for each of an enum's cases, whose payload types a case
+    /// expression is checked against.
+    ///
+    /// One record per case rather than one per enum, because a case is what a
+    /// program names and a value carries: `Verdict.Drop(reason)` is the call,
+    /// and the case's own span is what a consumer holding the declaration
+    /// already has to key by.
+    fn record_case_signatures(&mut self, decl: &EnumDecl, sig: &EnumSig) {
+        let ret = Ty::Enum(
+            self.key(&decl.name.node).into(),
+            sig.generics.iter().cloned().map(Ty::Param).collect(),
+        );
+        for (case, declared) in decl.cases.iter().zip(&sig.cases) {
+            self.facts.record_signature(
+                case.span.file,
+                case.span,
+                Signature {
+                    receiver: None,
+                    params: declared.payload.clone(),
+                    ret: ret.clone(),
+                },
+            );
+        }
     }
 
     fn record_target(&mut self, id: ExprId, file: FileId, key: &str, method: &str) {
