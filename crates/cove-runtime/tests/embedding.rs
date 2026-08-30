@@ -50,13 +50,12 @@
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
-use std::rc::Rc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
 use cove_diag::{render, Diagnostic, SourceMap};
 use cove_runtime::interp::Interpreter;
-use cove_runtime::value::{MapKey, StructValue};
+use cove_runtime::value::MapKey;
 use cove_runtime::{
     Budget, Effect, FieldSchema, Grants, HostApi, HostRegistry, HostType, Limits, ModuleSchema,
     OperationSchema, Runtime, RuntimeError, TypeSchema, Value,
@@ -197,14 +196,11 @@ fn a_host_owned_capability_runs_when_granted_and_within_limits() {
     )
     .expect("a granted call within limits must succeed");
 
-    match value {
-        Value::Enum(result) if &*result.type_name == "Result" && &*result.case == "Ok" => {
-            assert_eq!(
-                result.payload[0].to_string(),
-                "hello from a host-owned capability"
-            );
+    match value.ok_payload() {
+        Some([payload]) => {
+            assert_eq!(payload.to_string(), "hello from a host-owned capability");
         }
-        other => panic!("expected `Ok(String)`, found {other}"),
+        _ => panic!("expected `Ok(String)`, found {value}"),
     }
     assert_eq!(*reads.lock().unwrap(), vec!["welcome".to_string()]);
 }
@@ -429,14 +425,17 @@ impl HostApi for Directory {
             ("employee", [Value::Str(id)]) => {
                 self.lookups.lock().unwrap().push(id.to_string());
                 Ok(match self.people.get(&**id) {
-                    Some(seniority) => Value::ok(Value::Struct(Rc::new(StructValue {
-                        type_name: "company.Employee".into(),
-                        fields: vec![
-                            ("name".into(), Value::Str(id.clone())),
-                            ("seniority".into(), Value::Int(*seniority)),
+                    // Through the constructor, which is the whole of what a
+                    // host says about a struct: the type name the schema
+                    // declares and the fields in its order. The `Rc`, the
+                    // field vector and the `opaque` flag are the runtime's.
+                    Some(seniority) => Value::ok(Value::structure(
+                        "company.Employee",
+                        [
+                            ("name", Value::Str(id.clone())),
+                            ("seniority", Value::Int(*seniority)),
                         ],
-                        opaque: false,
-                    }))),
+                    )),
                     None => Value::err(Value::error(format!("no employee named `{id}`"))),
                 })
             }

@@ -2621,8 +2621,24 @@ vector of name-and-value pairs, because dropping the names saves nothing more
 than interning them did; and a callback-per-element benchmark still does not
 exist. The reading half
 of a representation-independent embedding API —
-[#186](https://github.com/myuon/cove/issues/186) — which is why each of those
-three is a source break for embedders as things stand. The heap layout the VM
+[#186](https://github.com/myuon/cove/issues/186), **now built**, which is why
+each of those three *was* a source break for embedders and the next one need
+not be. A host reads a value through `Value::field`, `Value::case`,
+`Value::payload`, `Value::items` and the rest, and names no variant in either
+direction.
+
+Worth recording precisely, because the honest version is narrower than the
+headline. Each of the three stayed *readable* by accident or by shim rather
+than by design: `Box<StructValue>` → `Rc<StructValue>` both deref to
+`StructValue`, so #104's only churn in this repository was a `Box::new` at a
+build site; and #183's `Payload` carries a hand-written `Deref<Target =
+[Value]>` and `From<Vec<Value>>` for exactly this reason, which is why it
+touched no test and no example. The readers are what makes the next one not
+need a shim — and they draw their own line, since `Value::payload` answering a
+`&[Value]` is a promise that a payload stays contiguous. What is still exposed
+is the `pub` variants themselves: nothing stops a host matching on one, and
+sealing them is a larger promise than adding readers was, which is the half of
+#186 that stayed open. The heap layout the VM
 owns — **not filed**, because it is settled by what is still allocating once
 the three above are gone, and that is exactly the evidence it does not have
 yet; this paragraph is its record. A moving collector — also not filed, not yet

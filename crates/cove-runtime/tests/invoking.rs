@@ -249,13 +249,13 @@ fn note(id: &str, tags: &[&str], weight: i64) -> Value {
 
 /// Which case an answered enum is, and what it carried.
 fn verdict(value: &Value) -> (String, Vec<String>) {
-    let Value::Enum(case) = value else {
+    let (Some(case), Some(payload)) = (value.case(), value.payload()) else {
         panic!("expected a `Verdict`, found {value}");
     };
-    assert_eq!(&*case.type_name, "m.Verdict");
+    assert_eq!(value.declared_type(), Some("m.Verdict"));
     (
-        case.case.to_string(),
-        case.payload.iter().map(Value::to_string).collect(),
+        case.to_string(),
+        payload.iter().map(Value::to_string).collect(),
     )
 }
 
