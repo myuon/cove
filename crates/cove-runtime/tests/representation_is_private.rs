@@ -62,7 +62,7 @@ const FORBIDDEN: &[&str] = &[
 /// Every `pub fn` in `cove-runtime` whose signature names one of the words
 /// above, with the reason it is not one of the four private representations.
 ///
-/// Five of the six are `ResourceHandle`, and ADR 0013 is why: a resource handle is
+/// Six of the seven are `ResourceHandle`, and ADR 0013 is why: a resource handle is
 /// a *host's* handle, the name of something the host owns, and "every field
 /// of it is part of the name". It is not a VM heap handle. ADR 0028 decides
 /// the same thing twice over — its `ValueView` sketch has
@@ -79,6 +79,10 @@ const ALLOWED: &[&str] = &[
     "pub fn from_resource(handle: impl Into<Arc<ResourceHandle>>) -> Value",
     // host.rs — the operation a host answers *on* one of its own resources.
     "pub fn call_resource( &self, handle: &ResourceHandle, op: &str, args: Vec<Value>, back: &mut dyn Reentry, ) -> Result<Value, RuntimeError>",
+    // host.rs — the same operation as a trait method, which is where a host
+    // implements it. Caught only because this reads `pub trait` as well as
+    // `pub fn`; ADR 0028's wording would have missed it.
+    "HostApi::call_resource( &self, handle: &ResourceHandle, op: &str, args: Vec<Value>, back: &mut dyn Reentry, ) -> Result<Value, RuntimeError>",
     // task.rs — `std::thread::JoinHandle`, caught by the same blunt match.
     // ADR 0008 gives a spawned task a thread, and this is the standard
     // library's name for the thing that joins one; nothing about it is a
@@ -139,8 +143,14 @@ fn public_signatures_naming_a_representation() -> BTreeSet<String> {
     found
 }
 
-/// Every `pub fn` signature in `text`, from `pub fn` to the `{` or `;` that
-/// ends it, with its whitespace flattened.
+/// Every public signature in `text`, with its whitespace flattened: each
+/// `pub fn`, and each method a `pub trait` declares.
+///
+/// The trait half is not in ADR 0028's wording — it says "a `grep` over `pub
+/// fn`" — and it is here because a trait method is a public signature that
+/// never carries the word `pub`. `Callable::call_value` and
+/// `HostApi::call_resource` are exactly that shape, so a grep for `pub fn`
+/// alone would let the next one through and still pass.
 ///
 /// `pub(crate) fn` is not a public signature and is skipped, which is what
 /// lets the collector keep its own vocabulary: `heap::SlotRoots` is a
@@ -170,14 +180,63 @@ fn signatures(text: &str) -> Vec<String> {
             .position(|b| *b == b'{' || *b == b';')
             .map(|i| start + i);
         let Some(end) = end else { continue };
-        out.push(
-            text[start..end]
-                .split_whitespace()
-                .collect::<Vec<_>>()
-                .join(" "),
-        );
+        out.push(flattened(&text[start..end]));
+    }
+    out.extend(trait_methods(text));
+    out
+}
+
+/// Every method a `pub trait` in `text` declares, named `Trait::method` so
+/// that an exception can be read without going to look it up.
+fn trait_methods(text: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut at = 0;
+    while let Some(found) = text[at..].find("\npub trait ") {
+        let start = at + found + 1;
+        let Some(open) = text[start..].find('{').map(|i| start + i) else {
+            break;
+        };
+        let name = text[start + "pub trait ".len()..open]
+            .split([':', '<', ' '])
+            .next()
+            .unwrap_or_default()
+            .trim()
+            .to_string();
+        let end = block_end(text, open);
+        for (offset, _) in text[open..end].match_indices("\n    fn ") {
+            let from = open + offset + 1;
+            let Some(stop) = text[from..].find(['{', ';']).map(|i| from + i) else {
+                continue;
+            };
+            let signature = flattened(&text[from..stop]);
+            let signature = signature.strip_prefix("fn ").unwrap_or(&signature);
+            out.push(format!("{name}::{signature}"));
+        }
+        at = end;
     }
     out
+}
+
+/// The index just past the `}` matching the `{` at `open`.
+fn block_end(text: &str, open: usize) -> usize {
+    let mut depth = 0;
+    for (i, c) in text[open..].char_indices() {
+        match c {
+            '{' => depth += 1,
+            '}' => {
+                depth -= 1;
+                if depth == 0 {
+                    return open + i + 1;
+                }
+            }
+            _ => {}
+        }
+    }
+    text.len()
+}
+
+fn flattened(signature: &str) -> String {
+    signature.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 /// Every file of `cove-runtime` that is part of its public surface: the
