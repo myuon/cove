@@ -309,11 +309,11 @@ pub struct Function {
     /// so the pairs have to be rebuildable. They are also what a listing
     /// shows.
     ///
-    /// The values themselves live in the frame slots [`Function::capture_kinds`]
-    /// gives them, put there by the call that entered this body, out of the
-    /// closure it was called through.
-    pub captures: Vec<Arc<str>>,
-    /// Which stack each capture takes its slot in, in the same order.
+    /// The values themselves live in the frame slots this list gives them, put
+    /// there by the call that entered this body, out of the closure it was
+    /// called through.
+    /// One entry per capture, in that order, pairing the name with the stack
+    /// its slot is in.
     ///
     /// A capture is a frame slot like any other, and issue #162 is where that
     /// became true of its *representation* as well as of its numbering. A
@@ -344,7 +344,12 @@ pub struct Function {
     ///
     /// Never [`SlotKind::Place`]: a closure captures the value a place names
     /// and never the place. [`Inst::PlaceLocal`] is where that is argued.
-    pub capture_kinds: Vec<SlotKind>,
+    ///
+    /// One list rather than two beside each other, because a name and a slot
+    /// are one fact about one capture and a reader that could hold half of it
+    /// is a reader that could disagree with itself. It also keeps a
+    /// [`Function`] the size it was.
+    pub captures: Vec<(Arc<str>, SlotKind)>,
     /// Where this function's *value* captures begin among its value slots,
     /// which is how many of its parameters arrived on the value stack.
     ///
@@ -1345,7 +1350,8 @@ pub fn render(program: &Program, id: FunctionId) -> String {
         out.push_str(" receiver");
     }
     if !function.captures.is_empty() {
-        out.push_str(&format!(" captures=[{}]", function.captures.join(", ")));
+        let names: Vec<&str> = function.captures.iter().map(|(name, _)| &**name).collect();
+        out.push_str(&format!(" captures=[{}]", names.join(", ")));
     }
     out.push_str(&format!(" -> {}", render_kind(function.returns)));
     out.push('\n');

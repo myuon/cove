@@ -148,7 +148,7 @@
 //! what issue #162 settled about one slot identity. What a closure *holds* is
 //! a list of `(name, Value)` pairs, because a host reads them and because a
 //! lambda is one function however many specialisations of the body around it
-//! are lowered; where a capture *lands* is `cove_ir::Function::capture_kinds`,
+//! are lowered; where a capture *lands* is `cove_ir::Function::captures`,
 //! so one the checker settled as `Int` or `Bool` becomes a word of the scalar
 //! window at the call and is read from there with no boundary instruction at
 //! all. The conversion happens once per call in place of once per read.
@@ -923,7 +923,7 @@ impl<'a> Vm<'a> {
                     function
                         .captures
                         .iter()
-                        .map(|name| Rc::from(&**name))
+                        .map(|(name, _)| Rc::from(&**name))
                         .collect()
                 })
                 .collect(),
@@ -2459,14 +2459,14 @@ impl<'a> Vm<'a> {
         // `Int` or `Bool` takes the representation its arithmetic wants —
         // once per call, in place of once per read.
         //
-        // The two counters are the layout `cove_ir::Function::capture_kinds`
+        // The two counters are the layout `cove_ir::Function::captures`
         // states and `cove_ir::lower::validate` checked: the value captures
         // are dense from `capture_base`, which is where these pushes land
         // because the arguments filled everything below it, and the scalar
         // captures are dense from scalar slot 0, which they can be because a
         // function a closure is made of takes no scalar argument.
         let mut next_scalar = scalar_base;
-        for ((_, value), kind) in closure.captures.iter().zip(&callee.capture_kinds) {
+        for ((_, value), (_, kind)) in closure.captures.iter().zip(&callee.captures) {
             match kind {
                 SlotKind::Scalar(_) => {
                     self.scalars[next_scalar] = promised_scalar(value);

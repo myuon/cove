@@ -230,8 +230,8 @@ pub(super) struct LambdaSite<'a> {
     pub(super) body: &'a Block,
     pub(super) span: Span,
     /// The names this lambda captures, in the order their values are pushed
-    /// before [`Inst::MakeClosure`] and in the order `Function::capture_kinds`
-    /// gives them their slots.
+    /// before [`Inst::MakeClosure`] and in the order `Function::captures` gives
+    /// them their slots.
     ///
     /// [`Inst::MakeClosure`]: crate::Inst::MakeClosure
     pub(super) captures: Vec<&'a str>,

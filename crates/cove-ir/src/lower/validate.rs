@@ -122,13 +122,6 @@ fn validate_function(program: &Program, id: FunctionId) -> Result<(), String> {
     // and the check below that no argument arrives there is what makes 0 a
     // static number. This is the one place the layout the call fills in and
     // the layout the body reads are reconciled.
-    if function.capture_kinds.len() != function.captures.len() {
-        return Err(format!(
-            "names {} capture(s) and gives {} of them a slot",
-            function.captures.len(),
-            function.capture_kinds.len()
-        ));
-    }
     if function.capture_base != value_params {
         return Err(format!(
             "begins its captures at value slot {} and takes {value_params} value argument(s)",
@@ -149,15 +142,19 @@ fn validate_function(program: &Program, id: FunctionId) -> Result<(), String> {
         }
         // A closure captures the value a place names and never the place,
         // so no capture is a place slot. `Inst::PlaceLocal` is the argument.
-        if function.capture_kinds.contains(&SlotKind::Place) {
+        if function
+            .captures
+            .iter()
+            .any(|(_, kind)| matches!(kind, SlotKind::Place))
+        {
             return Err("holds a capture in a place slot".to_string());
         }
         let values = function
-            .capture_kinds
+            .captures
             .iter()
-            .filter(|kind| matches!(kind, SlotKind::Value))
+            .filter(|(_, kind)| matches!(kind, SlotKind::Value))
             .count();
-        let scalars = function.capture_kinds.len() - values;
+        let scalars = function.captures.len() - values;
         let window = function.capture_base as usize + values;
         if window > function.value_frame_size as usize {
             return Err(format!(

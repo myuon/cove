@@ -41,7 +41,7 @@ fn a_capture_is_the_value_the_binding_held_when_the_closure_was_written() {
 /// A capture the checker settled as `Bool` takes a scalar slot too, and the
 /// call puts the tag back where the closure's list had one.
 ///
-/// `Function::capture_kinds` is what says which stack a capture lands in,
+/// `Function::captures` is what says which stack a capture lands in,
 /// and the value that travels is a `Value` either way — so this is the test
 /// that a `Bool` capture comes back a `Bool` and not an `Int`, which the two
 /// renderings would disagree about.
@@ -81,7 +81,7 @@ fn a_closure_over_a_scalar_and_a_value_fills_both_windows() {
 /// reached both directly and through a value lowers *two* specialisations of
 /// itself — its own convention, where an `Int` parameter is a scalar slot,
 /// and the general one, where every argument is a value — while the lambda
-/// inside it stays one function with one `capture_kinds`. So the two
+/// inside it stays one function with one capture layout. So the two
 /// `make-closure` sites can disagree about the representation the capture
 /// had where it stood, and the callee's answer is the one that counts.
 ///

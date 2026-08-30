@@ -63,9 +63,13 @@ impl<'a> Lowering<'a> {
         let span = site.span;
         let decl_params = site.params;
         let decl_body = site.body;
-        let captures: Vec<Arc<str>> = site.captures.iter().map(|name| Arc::from(*name)).collect();
         let capture_names: Vec<&'a str> = site.captures.clone();
         let capture_kinds: Vec<SlotKind> = site.capture_kinds.clone();
+        let captures: Vec<(Arc<str>, SlotKind)> = capture_names
+            .iter()
+            .zip(&capture_kinds)
+            .map(|(name, kind)| (Arc::from(*name), *kind))
+            .collect();
         let aliases = site.aliases_first_param;
         let is_async = site.is_async;
 
@@ -178,7 +182,6 @@ impl<'a> Lowering<'a> {
             // body produced.
             answers_a_task: is_async,
             captures,
-            capture_kinds,
             capture_base,
             param_names: param_names(decl_params),
             block_fuel: block_fuel(&finished.code),
@@ -414,7 +417,6 @@ impl<'a> Lowering<'a> {
             // `Interpreter::eval_ident` builds one with `captures:
             // Vec::new()`, because a declaration reads no environment.
             captures: Vec::new(),
-            capture_kinds: Vec::new(),
             capture_base,
             // Only a function that can become a closure value is ever called
             // with a count of the caller's choosing, so only that one can

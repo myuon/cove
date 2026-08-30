@@ -188,7 +188,7 @@ fn a_nested_lambda_captures_out_of_the_captures_it_stands_in() {
         listing(source, "<closure 1>"),
         // `a` was a scalar slot where this lambda was written and `b` a
         // value one, so the two captures land on different stacks — which is
-        // the layout `Function::capture_kinds` states and the call fills in
+        // the layout `Function::captures` states and the call fills in
         // with one counter per stack.
         "fn m.<closure 1> arity=0 frame=1/1 captures=[a, b] -> value\n\
          \x20  0  load-scalar 0\n\
@@ -1754,7 +1754,7 @@ fn a_return_ends_the_function_where_it_is_written() {
 ///
 /// What travels is a `Value` on both roads, so the closure's list is the
 /// same either way and the call is what puts the capture in the slot
-/// `Function::capture_kinds` names — here a scalar one, read by
+/// `Function::captures` names — here a scalar one, read by
 /// `load-scalar 0` with no boundary instruction beside it. The checker's
 /// type is the same on both roads, so the conversion the call makes cannot
 /// fail; a disagreement costs a conversion and cannot cost an answer.

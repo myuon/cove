@@ -517,7 +517,7 @@ impl<'a, 'l> Body<'a, 'l> {
                 }
                 // A capture reaches here too, and is not asked about: it is
                 // a slot of this frame like any other, filled by the call
-                // rather than by the body. `Function::capture_kinds` is where
+                // rather than by the body. `Function::captures` is where
                 // that arrangement is written down.
                 _ => self.emit(Inst::LoadLocal(slot), span),
             }
@@ -661,7 +661,7 @@ impl<'a, 'l> Body<'a, 'l> {
                 // because a closure holds `(name, Value)` pairs on both
                 // backends and a host reads them. The kind recorded here is
                 // where the *call* will put it; see
-                // `Function::capture_kinds`.
+                // `Function::captures`.
                 SlotKind::Scalar(what) => {
                     self.emit(Inst::LoadScalar(slot), span);
                     self.emit(Inst::ScalarToValue(what), span);
