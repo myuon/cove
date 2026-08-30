@@ -207,7 +207,10 @@ reenters a Cove closure in
 [ADR 0013](docs/adr/0013-host-resource-handles.md), and how an embedding's own
 host modules become ones `cove check` can see in
 [ADR 0017](docs/adr/0017-embedder-host-api-schemas.md), which supersedes ADR
-0001's account of what a compiler cannot see.
+0001's account of what a compiler cannot see. What a host is handed, and how
+that is kept separate from the representations the VM actually runs on, is
+[ADR 0028](docs/adr/0028-five-representations-and-one-is-public.md) — the one
+ADR here that is `Proposed` rather than `Accepted`, and nothing in it is built.
 
 Syntax is still provisional and may change.
 
