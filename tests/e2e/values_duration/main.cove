@@ -1,6 +1,7 @@
 use console.println
 
-/// Prints one duration literal per unit, rendered through interpolation.
+/// Prints one duration literal per unit, rendered through interpolation, and
+/// the same six units built from numbers and read back out.
 export fn main() -> Result<Unit, Error> {
   println("nanoseconds {1ns}")?
   println("microseconds {1us}")?
@@ -12,5 +13,24 @@ export fn main() -> Result<Unit, Error> {
   println("sum {1s + 500ms}")?
   println("difference {1s - 500ms}")?
   println("comparison {1s > 999ms} {1000ms == 1s}")?
+
+  // One builder per suffix above, so a count a program computed becomes the
+  // duration a host call takes. `Duration.seconds(1)` and `1s` are the same
+  // value, which is what makes the two spellings safe to write side by side.
+  let configured = 250
+  println("built {Duration.millis(configured)}")?
+  println("built per unit {Duration.nanos(1)} {Duration.micros(1)} {Duration.millis(1)}")?
+  println("built per unit {Duration.seconds(1)} {Duration.minutes(1)} {Duration.hours(1)}")?
+  println("a builder equals its literal {Duration.seconds(1) == 1s}")?
+
+  // A `Duration` is signed nanoseconds, so a negative count is a negative
+  // duration rather than a refusal.
+  println("negative {Duration.minutes(-2)}")?
+
+  // The same table read backwards, truncated toward zero the way `Int`
+  // division is, so a duration can be reported as well as built.
+  let measured = 1_500ms
+  println("read {measured.millis()} {measured.seconds()} {measured.nanos()}")?
+  println("read toward zero {(0s - measured).seconds()} {1ms.hours()}")?
   Ok(())
 }

@@ -1,7 +1,15 @@
 /// What one run of `covecheck` was asked to do.
+///
+/// The deadline is a `Duration` and not the number of seconds it was written
+/// as, because `clock.timeout` takes a `Duration` and building it once, here,
+/// is what keeps the unit the command line spelled it in from travelling any
+/// further into the program. It sits beside the plan rather than in it
+/// because `runAll` never reads it: it bounds the whole run, which is a thing
+/// `main` does around `runAll` and not a thing `runAll` does to a window.
 struct Options {
   manifest: String
   plan: Plan
+  deadline: Duration
   format: Format
 }
 
@@ -13,6 +21,7 @@ fn readOptions(arguments: Array<String>) -> Result<Options, Error> {
   var manifest: Option<String> = None
   var concurrency = 4
   var stopAfter: Option<Int> = None
+  var deadline = runBound()
   var format = Format.Text
   var at = 0
   while at < arguments.length() {
@@ -24,6 +33,10 @@ fn readOptions(arguments: Array<String>) -> Result<Options, Error> {
       }
       "--stop-after" => {
         stopAfter = Some(countAfter(arguments, at)?)
+        at += 2
+      }
+      "--timeout" => {
+        deadline = deadlineAfter(arguments, at)?
         at += 2
       }
       "--format" => {
@@ -50,6 +63,7 @@ fn readOptions(arguments: Array<String>) -> Result<Options, Error> {
       None => return Err(Error("no manifest was named; run with `--help`"))
     },
     plan: Plan(concurrency: concurrency, stopAfter: stopAfter),
+    deadline: deadline,
     format: format,
   ))
 }
@@ -78,6 +92,7 @@ fn usage() -> String {
   lines.push(
     "  --stop-after <n>   start no more checks once this many have failed",
   )
+  lines.push("  --timeout <n>      stop the whole run after this many seconds (default 30)")
   lines.push("  --format <name>    `text` or `json` (default `text`)")
   lines.push("  --help             this text")
   "\n".join(lines.freeze())
@@ -96,6 +111,31 @@ fn concurrencyAfter(arguments: Array<String>, at: Int) -> Result<Int, Error> {
     ))
   }
   Ok(count)
+}
+
+/// The whole-run deadline after the option at `at`.
+///
+/// The number is seconds and it leaves here as a `Duration`, built by
+/// `Duration.seconds`, which makes it the same value `runBound` writes as
+/// `30s` and the same thing to pass to `clock.timeout`. That is the whole
+/// reason this option can exist: a bound a person types and a bound the
+/// program wrote down are one type, and neither the deadline's unit nor where
+/// it came from survives past this function.
+///
+/// Zero is refused for the reason `--concurrency` refuses it: a run given no
+/// time at all stops before it has checked anything, and a person who wrote
+/// `0` meant something else. A negative number was already refused by
+/// `countAfter`, so the smallest run anybody can ask for is one second, and a
+/// number of seconds too large to be nanoseconds in an `Int` stops the run
+/// inside `Duration.seconds` rather than becoming some other deadline.
+fn deadlineAfter(arguments: Array<String>, at: Int) -> Result<Duration, Error> {
+  let seconds = countAfter(arguments, at)?
+  if seconds == 0 {
+    return Err(Error(
+      "`--timeout` cannot be 0; a run needs time to check anything",
+    ))
+  }
+  Ok(Duration.seconds(seconds))
 }
 
 /// The argument after the option at `at`, or the error that names what is

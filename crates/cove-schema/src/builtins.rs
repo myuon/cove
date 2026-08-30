@@ -99,6 +99,8 @@ pub enum BuiltinType {
     String,
     /// `Error`, the builtin error struct.
     Error,
+    /// `Duration`, a signed count of nanoseconds.
+    Duration,
     /// `Array<T>`, the fixed-length immutable sequence.
     Array(&'static BuiltinType),
     /// `Vector<T>`, the growable one.
@@ -146,6 +148,7 @@ impl fmt::Display for BuiltinType {
             BuiltinType::Float => f.write_str("Float"),
             BuiltinType::String => f.write_str("String"),
             BuiltinType::Error => f.write_str("Error"),
+            BuiltinType::Duration => f.write_str("Duration"),
             BuiltinType::Array(item) => write!(f, "Array<{item}>"),
             BuiltinType::Vector(item) => write!(f, "Vector<{item}>"),
             BuiltinType::Set(item) => write!(f, "Set<{item}>"),
@@ -317,8 +320,10 @@ pub struct BuiltinSchema {
     /// undeclared name. The types that say `false` are the ones no program
     /// writes the name of: a `Task` comes from `scope.spawn`, a `Shared` from
     /// the `Shared(...)` constructor, a `Scope` from `scope name { ... }`,
-    /// and a `Range`, a `Duration`, or a `Unit` from an expression that makes
-    /// one.
+    /// and a `Range` or a `Unit` from an expression that makes one.
+    /// `Duration` used to be in that list and is not any more — a duration
+    /// built from a number a program computed is written
+    /// `Duration.millis(n)`, so the name is one a program writes.
     pub namespace: bool,
     /// The cases, for a builtin enum. Empty for everything else.
     ///
@@ -479,9 +484,9 @@ pub fn is_builtin_type(name: &str) -> bool {
 /// so needs a mutable place at the call site rather than a value.
 ///
 /// The question is asked by name alone, because that is what the call site
-/// has before it has evaluated a receiver. `push` and `freeze` are the two,
-/// and no builtin type spells a mutating method the way another spells an
-/// immutable one.
+/// has before it has evaluated a receiver. `push`, `set`, and `freeze` are
+/// the three, and no builtin type spells a mutating method the way another
+/// spells an immutable one.
 pub fn is_mutating_method(name: &str) -> bool {
     mutating_methods().contains(&name)
 }
@@ -755,6 +760,116 @@ const IS_EMPTY: MethodSchema = MethodSchema {
     mutating: false,
 };
 
+// ------------------------------- the questions an ordered sequence answers
+//
+// `contains`, `indexOf` and `slice` are three questions a program asks a
+// sequence constantly that `get`, `length` and the four higher-order
+// operations below do not answer: whether a value is in there, where it is,
+// and what a part of it is. They are declared once here for the same reason
+// the four are — an `Array` and a `Vector` are one sequence with two storage
+// rules, and a shared constant is what stops one name from becoming two
+// signatures.
+//
+// # Where each belongs, and why the answer is not "on everything"
+//
+// `contains` goes on every collection, because membership is a question
+// every collection can answer. `Map` and `Set` already answered it of a key
+// and an element, and `String` answers it of a substring; this is the same
+// question asked of a sequence's elements, so it is the same word.
+//
+// `indexOf` and `slice` go on the ordered types only — `String`, which
+// already has both, and now `Array` and `Vector`. A position is a fact only
+// where order is. A `Map` and a `Set` do keep their entries in ascending key
+// order, but that is the collection's own storage rule rather than an
+// ordering a caller chose, and `toArray()` is the operation that says "this
+// ordering is mine now"; slicing or indexing what it answers is how a
+// program means it.
+//
+// # What each answers where a caller might not expect one
+//
+// An empty receiver answers `false`, `None`, and `[]`. None of the three is
+// a mistake to ask on an empty sequence, and none of them makes a caller
+// check the length first.
+
+/// `contains(element: T) -> Bool`, whether the receiver holds a value equal
+/// to `element`.
+///
+/// Equality is `==`'s, which is structural: an `Array<Point>` answers `true`
+/// for a `Point` with equal fields whether or not it is the one that was put
+/// in, exactly as `==` on the two would. An empty receiver answers `false`,
+/// and there is no argument this can refuse — every value has an equality.
+///
+/// `Set.contains` is this same constant, so the one operation reads the same
+/// on either. What differs is under the signature rather than in it: a `Set`
+/// may only hold values that can be keys, so it compares keys, and a
+/// sequence holds anything, so it compares values.
+const CONTAINS: MethodSchema = MethodSchema {
+    name: "contains",
+    generics: &[],
+    params: &[ParamSchema {
+        name: "element",
+        ty: BuiltinType::Param("T"),
+    }],
+    variadic: false,
+    result: BuiltinType::Bool,
+    mutating: false,
+};
+
+/// `indexOf(element: T) -> Option<Int>`: the position of the **first**
+/// element equal to `element`, or `None`.
+///
+/// `None` is the not-found answer and the empty-receiver answer both, which
+/// is `String.indexOf`'s rule and `Array.get`'s: a question about a position
+/// that is not there answers a value the caller opens rather than stopping
+/// the run. Equality is [`CONTAINS`]'s, so `items.contains(x)` and
+/// `items.indexOf(x)` are one question asked two ways and cannot disagree.
+const INDEX_OF: MethodSchema = MethodSchema {
+    name: "indexOf",
+    generics: &[],
+    params: &[ParamSchema {
+        name: "element",
+        ty: BuiltinType::Param("T"),
+    }],
+    variadic: false,
+    result: BuiltinType::Option(&BuiltinType::Int),
+    mutating: false,
+};
+
+/// `slice(from: Int, to: Int) -> Array<T>`: the elements at indices `from`
+/// up to but not including `to`.
+///
+/// This is `String.slice` on a sequence, down to the spelling and down to
+/// what it does with an argument nobody would write on purpose. **Both
+/// bounds are clamped into `0..length()`, and a `to` at or below `from`
+/// answers `[]`** — so a negative bound, a bound past the end, and a
+/// reversed pair are each answered rather than refused, and no argument can
+/// stop a program. A prefix is `slice(0, n)` and a suffix is
+/// `slice(n, items.length())`. There is no `take`/`drop` pair beside this:
+/// two spellings of "part of a sequence" is what declaring these three
+/// together was for avoiding, and `String` had already chosen this one.
+///
+/// It answers an `Array` from either receiver, which is the rule `map`,
+/// `filter`, `fold` and `sorted` already follow and for their reason: a part
+/// of a sequence is a finished sequence rather than a second handle to go on
+/// appending to.
+const SLICE: MethodSchema = MethodSchema {
+    name: "slice",
+    generics: &[],
+    params: &[
+        ParamSchema {
+            name: "from",
+            ty: BuiltinType::Int,
+        },
+        ParamSchema {
+            name: "to",
+            ty: BuiltinType::Int,
+        },
+    ],
+    variadic: false,
+    result: BuiltinType::Array(&BuiltinType::Param("T")),
+    mutating: false,
+};
+
 // ------------------------------- the higher-order methods a sequence shares
 //
 // `Array<T>` and `Vector<T>` both bind one parameter and both call it `T`,
@@ -902,8 +1017,10 @@ const SORTED: MethodSchema = MethodSchema {
 /// `get` answers an `Option` rather than trapping, so an index outside the
 /// array is a value the caller has to open rather than a stopped program.
 ///
-/// `map`, `filter`, `fold`, and `sorted` are the four it walks with a
-/// closure, declared once above because a `Vector` has the same four.
+/// `contains`, `indexOf`, and `slice` are the three questions about the
+/// order and the membership of a sequence, and `map`, `filter`, `fold`, and
+/// `sorted` are the four it walks with a closure. All seven are declared
+/// once above, because a `Vector` has the same seven.
 pub const ARRAY: BuiltinSchema = BuiltinSchema {
     name: "Array",
     parameters: &["T"],
@@ -924,6 +1041,9 @@ pub const ARRAY: BuiltinSchema = BuiltinSchema {
         },
         LENGTH,
         IS_EMPTY,
+        CONTAINS,
+        INDEX_OF,
+        SLICE,
         MAP_EACH,
         FILTER,
         FOLD,
@@ -938,15 +1058,16 @@ pub const ARRAY: BuiltinSchema = BuiltinSchema {
 /// `Vector<T>`: the growable sequence, and the one builtin with a mutable
 /// graph of its own.
 ///
-/// `push` and `freeze` are the language's only `var self` methods: one
-/// appends, and the other consumes locally unique storage and hands back an
-/// `Array` in O(1). `toArray` is the copying alternative, for a caller that
-/// cannot give the storage up.
+/// `push`, `set`, and `freeze` are the language's only `var self` methods:
+/// one appends, one replaces, and the third consumes locally unique storage
+/// and hands back an `Array` in O(1). `toArray` is the copying alternative,
+/// for a caller that cannot give the storage up.
 ///
-/// `map`, `filter`, `fold`, and `sorted` are the same four an `Array` has,
-/// and each answers an `Array` here too: `v.sorted(by:)` is
-/// `v.toArray().sorted(by:)` and writes nothing through the handle, so an
-/// alias sees no change and a callback that pushes cannot disturb the walk.
+/// `contains`, `indexOf`, `slice`, `map`, `filter`, `fold`, and `sorted` are
+/// the same seven an `Array` has, and the four that produce a sequence
+/// answer an `Array` here too: `v.sorted(by:)` is `v.toArray().sorted(by:)`
+/// and writes nothing through the handle, so an alias sees no change and a
+/// callback that pushes cannot disturb the walk.
 pub const VECTOR: BuiltinSchema = BuiltinSchema {
     name: "Vector",
     parameters: &["T"],
@@ -967,6 +1088,9 @@ pub const VECTOR: BuiltinSchema = BuiltinSchema {
         },
         LENGTH,
         IS_EMPTY,
+        CONTAINS,
+        INDEX_OF,
+        SLICE,
         MAP_EACH,
         FILTER,
         FOLD,
@@ -980,6 +1104,44 @@ pub const VECTOR: BuiltinSchema = BuiltinSchema {
             }],
             variadic: false,
             result: BuiltinType::Unit,
+            mutating: true,
+        },
+        // `set(index: Int, value: T) -> Option<T>`: replaces the element at
+        // `index` and answers what was there.
+        //
+        // A `Vector` shares its storage, so replacing an element is a
+        // mutation and not a new vector — which is why this is `var self`
+        // like `push` and unlike `Map.inserted`, and why it needs the
+        // caller's own place at the call site for the same reason `push`
+        // does.
+        //
+        // **An index that is not already in the vector answers `None` and
+        // writes nothing.** That is `get`'s answer to the same bad index,
+        // in the shape a replacement can take, and it is deliberately not a
+        // third thing: a negative index, an index at or past `length()`, and
+        // a `set` on an empty vector all answer `None`, exactly as `get`
+        // does, so a program can be written against one rule about indices
+        // rather than two. `Some(previous)` is what the index held before,
+        // so `v.set(i, x)` answers what `v.get(i)` would have.
+        //
+        // It replaces and never appends. A `set` at `length()` is out of
+        // range, because a vector grows by `push` and a `set` that
+        // sometimes grew would make the length depend on the index.
+        MethodSchema {
+            name: "set",
+            generics: &[],
+            params: &[
+                ParamSchema {
+                    name: "index",
+                    ty: BuiltinType::Int,
+                },
+                ParamSchema {
+                    name: "value",
+                    ty: BuiltinType::Param("T"),
+                },
+            ],
+            variadic: false,
+            result: BuiltinType::Option(&BuiltinType::Param("T")),
             mutating: true,
         },
         MethodSchema {
@@ -1145,6 +1307,13 @@ pub const MAP_ENTRY: BuiltinSchema = BuiltinSchema {
 // --------------------------------------------------------------------- Set
 
 /// `Set<T>`: an immutable set, kept in ascending element order.
+///
+/// `contains` is the very declaration `Array` and `Vector` answer membership
+/// with, shared rather than restated, because it is the same question about
+/// a different container — [`ARRAY`] says the rest of it. There is no
+/// `indexOf` or `slice` here: the ascending order is how a set is stored
+/// rather than an order a caller chose, and `toArray()` is where a program
+/// says it wants that order to be its own.
 pub const SET: BuiltinSchema = BuiltinSchema {
     name: "Set",
     parameters: &["T"],
@@ -1162,17 +1331,7 @@ pub const SET: BuiltinSchema = BuiltinSchema {
             result: BuiltinType::Array(&BuiltinType::Param("T")),
             mutating: false,
         },
-        MethodSchema {
-            name: "contains",
-            generics: &[],
-            params: &[ParamSchema {
-                name: "element",
-                ty: BuiltinType::Param("T"),
-            }],
-            variadic: false,
-            result: BuiltinType::Bool,
-            mutating: false,
-        },
+        CONTAINS,
         MethodSchema {
             name: "inserted",
             generics: &[],
@@ -1828,15 +1987,142 @@ pub const UNIT: BuiltinSchema = BuiltinSchema {
 // ---------------------------------------------------------------- Duration
 
 /// `Duration`: a signed count of nanoseconds.
+///
+/// # One function per literal suffix, in both directions
+///
+/// `500ms` is a literal and was, until these existed, the only way to have a
+/// `Duration` at all: a program that read `250` out of a manifest, an
+/// argument, or the environment had no expression that turned it into the
+/// `Duration` `clock.sleep` takes (issue #146). The six associated functions
+/// are that expression, and there is **exactly one per suffix the lexer
+/// accepts** — `ns`, `us`, `ms`, `s`, `m`, `h` — so that
+/// `Duration.seconds(1)` and `1s` are the same value and the reader has one
+/// table to learn rather than two. Nothing about a literal changes: `1s` is
+/// still 1,000,000,000 nanoseconds, written the way it always was.
+///
+/// The six methods are the same table read backwards, which is what lets a
+/// duration be *reported* as well as built: `d.millis()` is the whole number
+/// of milliseconds in `d`. That direction is not free of a choice, so it is
+/// written down — see the entries.
+///
+/// A unit is a function name rather than an argument because a builtin
+/// parameter is a name and a type and nothing else: a `Duration.of(count,
+/// unit)` would need a unit type to pass, which would be a seventh builtin
+/// enum existing only to be an argument. This is `Int.parse`/`Int.parseRadix`
+/// answering the same pressure the same way.
+///
+/// Scalar multiplication — `Duration * Int` — was the other shape and is not
+/// this one. It is a smaller change and it can only build: there is no
+/// expression made of `*` that reads a count back out, and issue #146 asks
+/// for both directions because a timeout that can be configured is a timeout
+/// that gets reported.
+///
+/// # What a builder does with a count it cannot hold
+///
+/// **A negative count is a negative duration and nothing else.** A
+/// `Duration` is *signed* nanoseconds, `-1h` is already a value a program can
+/// write, and `Duration.hours(-1)` is that value. A builder that refused one
+/// would be narrower than the literal it mirrors.
+///
+/// **A count whose nanoseconds do not fit in an `Int` stops the run**, in the
+/// words `Duration` arithmetic already stops it in. The Language Card calls
+/// integer overflow a broken invariant rather than a wrapped result, and
+/// `1h + 1h` past the end already trapped; a builder that answered a
+/// `Result` instead would make the same overflow two different kinds of
+/// event depending on how the duration was reached.
 pub const DURATION: BuiltinSchema = BuiltinSchema {
     name: "Duration",
     parameters: &[],
-    namespace: false,
+    // A program now writes the name: `Duration.millis(n)` is how a computed
+    // duration is built.
+    namespace: true,
     cases: &[],
     fields: &[],
-    methods: &[SNAPSHOT],
-    associated: &[],
+    methods: &[
+        // Each answers the whole number of its unit in the receiver,
+        // **truncated toward zero**, which is what `Int` division already
+        // does and is why `1500ms.seconds()` is 1 and `-1500ms.seconds()`
+        // is -1. Truncating rather than rounding is what makes
+        // `d.seconds()` and `d.nanos() / 1_000_000_000` the same number, so
+        // a program that reads a duration one way and one that reads it the
+        // other cannot disagree.
+        //
+        // None of the six can fail: every unit divides into a count that
+        // fits where the nanoseconds already did.
+        DURATION_NANOS,
+        DURATION_MICROS,
+        DURATION_MILLIS,
+        DURATION_SECONDS,
+        DURATION_MINUTES,
+        DURATION_HOURS,
+        SNAPSHOT,
+    ],
+    associated: &[
+        DURATION_OF_NANOS,
+        DURATION_OF_MICROS,
+        DURATION_OF_MILLIS,
+        DURATION_OF_SECONDS,
+        DURATION_OF_MINUTES,
+        DURATION_OF_HOURS,
+    ],
 };
+
+/// `nanos(count: Int) -> Duration`, which is `count` written `<count>ns`.
+const DURATION_OF_NANOS: MethodSchema = duration_builder("nanos");
+/// `micros(count: Int) -> Duration`, which is `count` written `<count>us`.
+const DURATION_OF_MICROS: MethodSchema = duration_builder("micros");
+/// `millis(count: Int) -> Duration`, which is `count` written `<count>ms`.
+const DURATION_OF_MILLIS: MethodSchema = duration_builder("millis");
+/// `seconds(count: Int) -> Duration`, which is `count` written `<count>s`.
+const DURATION_OF_SECONDS: MethodSchema = duration_builder("seconds");
+/// `minutes(count: Int) -> Duration`, which is `count` written `<count>m`.
+const DURATION_OF_MINUTES: MethodSchema = duration_builder("minutes");
+/// `hours(count: Int) -> Duration`, which is `count` written `<count>h`.
+const DURATION_OF_HOURS: MethodSchema = duration_builder("hours");
+
+/// `nanos() -> Int`, the receiver's whole nanoseconds. This one is exact.
+const DURATION_NANOS: MethodSchema = duration_reader("nanos");
+/// `micros() -> Int`, the receiver's whole microseconds, toward zero.
+const DURATION_MICROS: MethodSchema = duration_reader("micros");
+/// `millis() -> Int`, the receiver's whole milliseconds, toward zero.
+const DURATION_MILLIS: MethodSchema = duration_reader("millis");
+/// `seconds() -> Int`, the receiver's whole seconds, toward zero.
+const DURATION_SECONDS: MethodSchema = duration_reader("seconds");
+/// `minutes() -> Int`, the receiver's whole minutes, toward zero.
+const DURATION_MINUTES: MethodSchema = duration_reader("minutes");
+/// `hours() -> Int`, the receiver's whole hours, toward zero.
+const DURATION_HOURS: MethodSchema = duration_reader("hours");
+
+/// One of the six `Duration.<unit>(count)` associated functions.
+///
+/// Written as a function rather than six literals because the six differ in
+/// one word: a table where the entries differ only in a name is a table one
+/// of whose entries can be wrong on its own.
+const fn duration_builder(name: &'static str) -> MethodSchema {
+    MethodSchema {
+        name,
+        generics: &[],
+        params: &[ParamSchema {
+            name: "count",
+            ty: BuiltinType::Int,
+        }],
+        variadic: false,
+        result: BuiltinType::Duration,
+        mutating: false,
+    }
+}
+
+/// One of the six `duration.<unit>()` methods, the builders read backwards.
+const fn duration_reader(name: &'static str) -> MethodSchema {
+    MethodSchema {
+        name,
+        generics: &[],
+        params: &[],
+        variadic: false,
+        result: BuiltinType::Int,
+        mutating: false,
+    }
+}
 
 // ------------------------------------------------------------------- Error
 
@@ -1990,19 +2276,51 @@ mod tests {
         );
     }
 
-    /// The four higher-order methods are one declaration each, reached
-    /// through either sequence.
+    /// Every method both sequences declare is one declaration, reached
+    /// through either.
     ///
-    /// A `Vector` that walked with a different signature than an `Array` is
-    /// the drift this shares a constant to prevent, and comparing the two
-    /// tables is what makes the sharing a fact rather than an intention.
+    /// A `Vector` that answered a question with a different signature than
+    /// an `Array` is the drift these share constants to prevent, and
+    /// comparing the two tables entry for entry is what makes the sharing a
+    /// fact rather than an intention. It is stated over *every* shared name
+    /// rather than over a list written here, so a method added to one and
+    /// then to the other with a slip in it fails this without anybody
+    /// remembering to extend it.
     #[test]
-    fn a_sequence_walks_with_the_same_four_signatures_whichever_it_is() {
-        for name in ["map", "filter", "fold", "sorted"] {
-            let array = ARRAY.method(name).expect("`Array` walks");
-            let vector = VECTOR.method(name).expect("`Vector` walks");
+    fn a_sequence_answers_with_the_same_signature_whichever_it_is() {
+        let shared: Vec<&str> = ARRAY
+            .methods
+            .iter()
+            .filter(|method| VECTOR.method(method.name).is_some())
+            .map(|method| method.name)
+            .collect();
+        assert_eq!(
+            shared,
+            [
+                "get", "length", "isEmpty", "contains", "indexOf", "slice", "map", "filter",
+                "fold", "sorted", "snapshot"
+            ]
+        );
+        for name in shared {
+            let array = ARRAY.method(name).expect("`Array` declares it");
+            let vector = VECTOR.method(name).expect("`Vector` declares it");
             assert_eq!(array, vector, "`{name}`");
         }
+        // `Set` answers membership with the sequences' own declaration,
+        // because it is the sequences' own question.
+        assert_eq!(SET.method("contains"), ARRAY.method("contains"));
+        assert_eq!(
+            ARRAY.method("contains").unwrap().signature(),
+            "contains(element: T) -> Bool"
+        );
+        assert_eq!(
+            ARRAY.method("indexOf").unwrap().signature(),
+            "indexOf(element: T) -> Option<Int>"
+        );
+        assert_eq!(
+            VECTOR.method("slice").unwrap().signature(),
+            "slice(from: Int, to: Int) -> Array<T>"
+        );
         assert_eq!(
             ARRAY.method("sorted").unwrap().signature(),
             "sorted(by: fn(T, T) -> Bool) -> Array<T>"
@@ -2035,17 +2353,57 @@ mod tests {
             namespaces,
             [
                 "Array", "Vector", "Map", "Set", "String", "Option", "Result", "Int", "Float",
-                "Bool", "Error"
+                "Bool", "Duration", "Error"
             ]
         );
         assert!(is_builtin_type("Vector"));
+        // `Duration` joined the list when it gained the six builders that
+        // turn a number a program computed into one.
+        assert!(is_builtin_type("Duration"));
         assert!(!is_builtin_type("Task"));
     }
 
-    /// `push` and `freeze` are the language's only `var self` methods, and
-    /// the call site asks by name because it has no receiver type yet.
+    /// One `Duration.<unit>(count)` per suffix a duration literal may be
+    /// written with, and one `duration.<unit>()` reading it back.
+    ///
+    /// The pairing is the point: a unit a program can build in and cannot
+    /// report in would make a configured timeout unprintable, and a unit
+    /// the lexer accepts and no function names would make `1s` and
+    /// `Duration.seconds(1)` two vocabularies.
     #[test]
-    fn push_and_freeze_are_the_mutating_methods() {
+    fn a_duration_is_built_and_read_in_the_units_a_literal_is_written_in() {
+        let built: Vec<&str> = DURATION.associated.iter().map(|f| f.name).collect();
+        assert_eq!(
+            built,
+            ["nanos", "micros", "millis", "seconds", "minutes", "hours"]
+        );
+        for name in &built {
+            let builder = DURATION
+                .associated_function(name)
+                .expect("a builder for the unit");
+            assert_eq!(
+                builder.signature(),
+                format!("{name}(count: Int) -> Duration")
+            );
+            let reader = DURATION.method(name).expect("a reader for the same unit");
+            assert_eq!(reader.signature(), format!("{name}() -> Int"));
+        }
+        // `snapshot` is the one method that is not a unit, so the readers
+        // and the builders are otherwise the same list.
+        let read: Vec<&str> = DURATION
+            .methods
+            .iter()
+            .map(|method| method.name)
+            .filter(|name| *name != SNAPSHOT.name)
+            .collect();
+        assert_eq!(read, built);
+    }
+
+    /// `push`, `set`, and `freeze` are the language's only `var self`
+    /// methods, and the call site asks by name because it has no receiver
+    /// type yet.
+    #[test]
+    fn push_set_and_freeze_are_the_mutating_methods() {
         let mut mutating: Vec<&str> = BUILTINS
             .iter()
             .flat_map(|entry| entry.methods)
@@ -2053,8 +2411,10 @@ mod tests {
             .map(|method| method.name)
             .collect();
         mutating.sort_unstable();
-        assert_eq!(mutating, ["freeze", "push"]);
+        assert_eq!(mutating, ["freeze", "push", "set"]);
         assert!(is_mutating_method("push"));
+        assert!(is_mutating_method("set"));
+        assert!(!is_mutating_method("get"));
         assert!(!is_mutating_method("toArray"));
     }
 

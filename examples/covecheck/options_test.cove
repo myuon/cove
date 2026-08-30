@@ -14,16 +14,58 @@ test fn takesAManifestAndNothingElse() -> Result<Unit, Error> {
   assertEqual(options.manifest, "checks.json")?
   assertEqual(options.plan.concurrency, 4)?
   assert(options.plan.stopAfter.isNone())?
+  assertEqual(options.deadline.seconds(), 30)?
   assertEqual(options.format.name(), "text")?
   Ok(())
 }
 
-/// Each option is read into the plan or the format it decides.
+/// Each option is read into the plan, the deadline, or the format it decides.
 test fn readsEveryOption() -> Result<Unit, Error> {
-  let options = readOptions(["checks.json", "--concurrency", "8", "--stop-after", "2", "--format", "json"])?
+  let options = readOptions(["checks.json", "--concurrency", "8", "--stop-after", "2", "--timeout", "90", "--format", "json"])?
   assertEqual(options.plan.concurrency, 8)?
   assertEqual(options.plan.stopAfter.unwrapOr(0), 2)?
+  assertEqual(options.deadline.seconds(), 90)?
   assertEqual(options.format.name(), "json")?
+  Ok(())
+}
+
+/// A deadline typed as a number of seconds is the `Duration` that many
+/// seconds names, and asking it how many seconds it is answers the number
+/// that was typed.
+///
+/// Both halves are the claim. The command line carries a number and
+/// `clock.timeout` takes a `Duration`, so `Duration.seconds` is what joins
+/// them, and a bound that could be built but not read back would be one this
+/// test could only assert by running out of it. `90s` is written here rather
+/// than `Duration.seconds(90)` on purpose: the literal and the built value
+/// are one value, which is the whole reason the option can exist.
+test fn readsAWholeRunDeadlineFromTheCommandLine() -> Result<Unit, Error> {
+  let options = readOptions(["checks.json", "--timeout", "90"])?
+  assertEqual(options.deadline.millis(), 90s.millis())?
+  assertEqual(options.deadline.seconds(), 90)?
+  Ok(())
+}
+
+/// A run with no time to check anything in is a run that does nothing, so `0`
+/// is refused rather than read as "stop immediately", and a deadline that is
+/// not a count of seconds is refused the way every other count is.
+test fn refusesADeadlineNoRunCouldFinishIn() -> Result<Unit, Error> {
+  assertEqual(
+    optionsRefusal(["checks.json", "--timeout", "0"]),
+    "`--timeout` cannot be 0; a run needs time to check anything",
+  )?
+  assertEqual(
+    optionsRefusal(["checks.json", "--timeout", "-5"]),
+    "`--timeout` cannot be `-5`, which is negative",
+  )?
+  assertEqual(
+    optionsRefusal(["checks.json", "--timeout", "soon"]),
+    "`--timeout` cannot be `soon`, which is not a whole number",
+  )?
+  assertEqual(
+    optionsRefusal(["checks.json", "--timeout"]),
+    "`--timeout` needs a value, and the command line ended",
+  )?
   Ok(())
 }
 

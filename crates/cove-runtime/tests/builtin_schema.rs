@@ -79,6 +79,21 @@ static EXERCISES: &[Exercise] = &[
     },
     Exercise {
         ty: "Array",
+        name: "contains",
+        body: "  let items = [1, 2]\n  let has = items.contains(2)\n  0",
+    },
+    Exercise {
+        ty: "Array",
+        name: "indexOf",
+        body: "  let items = [1, 2]\n  items.indexOf(2).unwrapOr(0)",
+    },
+    Exercise {
+        ty: "Array",
+        name: "slice",
+        body: "  let items = [1, 2, 3]\n  items.slice(0, 2).length()",
+    },
+    Exercise {
+        ty: "Array",
         name: "map",
         body: "  let items = [1, 2]\n  items.map(fn(n) { n * 10 }).length()",
     },
@@ -158,6 +173,28 @@ static EXERCISES: &[Exercise] = &[
         ty: "Vector",
         name: "sorted",
         body: "  var items = Vector.of(2, 1)\n  items.sorted(by: fn(a, b) { a < b }).length()",
+    },
+    // `set` takes a `var self` receiver, so its receiver is a `var` binding
+    // for the reason `push`'s is.
+    Exercise {
+        ty: "Vector",
+        name: "set",
+        body: "  var items = Vector.of(1, 2)\n  items.set(0, 9).unwrapOr(0)",
+    },
+    Exercise {
+        ty: "Vector",
+        name: "contains",
+        body: "  var items = Vector.of(1, 2)\n  let has = items.contains(2)\n  0",
+    },
+    Exercise {
+        ty: "Vector",
+        name: "indexOf",
+        body: "  var items = Vector.of(1, 2)\n  items.indexOf(2).unwrapOr(0)",
+    },
+    Exercise {
+        ty: "Vector",
+        name: "slice",
+        body: "  var items = Vector.of(1, 2, 3)\n  items.slice(1, 3).length()",
     },
     Exercise {
         ty: "Map",
@@ -481,6 +518,40 @@ static EXERCISES: &[Exercise] = &[
         ty: "Duration",
         name: "snapshot",
         body: "  let wait = 500ms\n  let copy = wait.snapshot()\n  0",
+    },
+    // One builder and one reader per unit a duration literal is written in.
+    // Each reader is called on what its own builder made, so an exercise
+    // that passes is the round trip rather than two halves that happen to
+    // run.
+    Exercise {
+        ty: "Duration",
+        name: "nanos",
+        body: "  let wait = Duration.nanos(7)\n  wait.nanos()",
+    },
+    Exercise {
+        ty: "Duration",
+        name: "micros",
+        body: "  let wait = Duration.micros(7)\n  wait.micros()",
+    },
+    Exercise {
+        ty: "Duration",
+        name: "millis",
+        body: "  let wait = Duration.millis(7)\n  wait.millis()",
+    },
+    Exercise {
+        ty: "Duration",
+        name: "seconds",
+        body: "  let wait = Duration.seconds(7)\n  wait.seconds()",
+    },
+    Exercise {
+        ty: "Duration",
+        name: "minutes",
+        body: "  let wait = Duration.minutes(7)\n  wait.minutes()",
+    },
+    Exercise {
+        ty: "Duration",
+        name: "hours",
+        body: "  let wait = Duration.hours(7)\n  wait.hours()",
     },
     Exercise {
         ty: "Task",
@@ -1421,6 +1492,242 @@ fn float_max_of_two_nans_is_nan() {
     Ok(nan) => if nan.max(nan) != nan.max(nan) { 1 } else { 0 },
     Err(_) => 0
   }"#,
+        1,
+    );
+}
+
+// --------------------------- what a `Duration` builds from and reads back
+//
+// The exercises above prove each unit's builder and reader dispatch; these
+// prove they are the same table read in two directions, what a negative
+// count means, and where a count stops the run.
+
+/// A builder and the matching literal are the same value, which is the whole
+/// promise: nothing about `1s` changes because `Duration.seconds(1)` exists.
+#[test]
+fn a_built_duration_equals_the_literal_that_names_it() {
+    check_and_answer(
+        "Duration builders against the literals",
+        r#"  let small = Duration.nanos(1) == 1ns && Duration.micros(1) == 1us
+  let middle = Duration.millis(500) == 500ms && Duration.seconds(1) == 1s
+  let large = Duration.minutes(1) == 1m && Duration.hours(1) == 1h
+  if small && middle && large { 1 } else { 0 }"#,
+        1,
+    );
+}
+
+/// A `Duration` is signed nanoseconds, so a negative count is a negative
+/// duration and not a refusal.
+#[test]
+fn a_negative_count_builds_a_negative_duration() {
+    check_and_answer(
+        "Duration.hours with a negative count",
+        r#"  if Duration.hours(-1) == 0s - 1h { 1 } else { 0 }"#,
+        1,
+    );
+}
+
+/// A count whose nanoseconds do not fit stops the run, in the words
+/// `Duration` arithmetic already stops it in.
+#[test]
+fn a_duration_that_does_not_fit_stops_the_run() {
+    let error = check_and_error(
+        "Duration.hours past the end",
+        "  Duration.hours(9223372036854775807).hours()",
+    );
+    assert_eq!(error.message, "`Int` duration arithmetic overflowed");
+    assert_eq!(
+        error.rule.as_deref(),
+        Some("Integer overflow is a broken invariant, not a wrapped result.")
+    );
+}
+
+/// A reader answers the whole number of its unit, truncated toward zero,
+/// which is what `Int` division does and is why the two agree.
+#[test]
+fn a_reader_truncates_toward_zero() {
+    check_and_answer(
+        "Duration readers truncating",
+        r#"  let ahead = 1500ms
+  let behind = 0s - 1500ms
+  let towardZero = ahead.seconds() == 1 && behind.seconds() == -1
+  let agrees = ahead.seconds() == ahead.nanos() / 1000000000
+  if towardZero && agrees { 1 } else { 0 }"#,
+        1,
+    );
+}
+
+/// Zero is zero in every unit, and a duration smaller than the unit it is
+/// read in answers nothing rather than failing.
+#[test]
+fn a_duration_smaller_than_its_unit_reads_as_zero() {
+    check_and_answer(
+        "Duration read in a larger unit",
+        r#"  if 1ms.hours() == 0 && 0s.nanos() == 0 { 1 } else { 0 }"#,
+        1,
+    );
+}
+
+// -------------------------- what a sequence answers about itself
+//
+// The exercises above prove `contains`, `indexOf` and `slice` dispatch;
+// these prove what each answers where a program is most likely to be
+// surprised — on an empty receiver, and on a value that is not there.
+
+/// Membership is `==`'s equality, which is structural, so a value equal to
+/// an element is in the sequence whether or not it is the one that was put
+/// there. Nested arrays are the deepest structure a body with no
+/// declarations can build here; `==` on them is the same `eq_value` a struct
+/// would be compared with.
+#[test]
+fn contains_compares_values_and_not_identity() {
+    check_and_answer(
+        "Array.contains on equal values",
+        r#"  let rows = [[1, 2], [3, 4]]
+  if rows.contains([3, 4]) && !rows.contains([3, 5]) { 1 } else { 0 }"#,
+        1,
+    );
+}
+
+/// An empty sequence holds nothing and has nothing at a position, which is
+/// `false` and `None` rather than a stopped run.
+#[test]
+fn an_empty_sequence_contains_nothing_and_indexes_nothing() {
+    check_and_answer(
+        "contains and indexOf on an empty sequence",
+        r#"  let empty: Array<Int> = []
+  let nowhere = match empty.indexOf(1) { Some(_) => false, None => true }
+  if !empty.contains(1) && nowhere { 1 } else { 0 }"#,
+        1,
+    );
+}
+
+/// A value that is not there has no position, which is the same `None` an
+/// empty receiver answers.
+#[test]
+fn index_of_a_value_that_is_not_there_is_none() {
+    check_and_answer(
+        "Array.indexOf of a value that is not there",
+        r#"  let items = [10, 20]
+  match items.indexOf(30) { Some(_) => 0, None => 1 }"#,
+        1,
+    );
+}
+
+/// `indexOf` answers the first of several equal elements, which is what
+/// makes it and `contains` one question rather than two.
+#[test]
+fn index_of_answers_the_first_occurrence() {
+    check_and_answer(
+        "Array.indexOf with a repeated element",
+        "  let items = [10, 20, 10]\n  items.indexOf(10).unwrapOr(9)",
+        0,
+    );
+}
+
+/// Both bounds are clamped into `0..length()`, exactly as `String.slice`
+/// clamps, so no bound can stop the program.
+#[test]
+fn slice_bounds_outside_are_clamped() {
+    check_and_answer(
+        "Array.slice with bounds outside",
+        r#"  let items = [1, 2]
+  if items.slice(-5, 100) == [1, 2] { 1 } else { 0 }"#,
+        1,
+    );
+}
+
+/// A `to` at or below `from` is the empty array, never an error.
+#[test]
+fn slice_to_at_or_below_from_is_empty() {
+    check_and_answer(
+        "Array.slice with a reversed pair",
+        r#"  let items = [1, 2, 3]
+  let empty: Array<Int> = []
+  if items.slice(2, 1) == empty && items.slice(1, 1) == empty { 1 } else { 0 }"#,
+        1,
+    );
+}
+
+/// An empty receiver answers an empty array whatever the bounds are.
+#[test]
+fn slicing_an_empty_sequence_answers_an_empty_array() {
+    check_and_answer(
+        "Array.slice on an empty sequence",
+        r#"  let empty: Array<Int> = []
+  if empty.slice(0, 4) == empty { 1 } else { 0 }"#,
+        1,
+    );
+}
+
+/// A part of either sequence is an `Array`, so a `Vector`'s slice is a
+/// finished sequence rather than a second handle to go on appending to.
+#[test]
+fn a_vectors_slice_is_an_array() {
+    check_and_answer(
+        "Vector.slice answers an Array",
+        r#"  var items = Vector.of(1, 2, 3)
+  if items.slice(0, 2) == [1, 2] { 1 } else { 0 }"#,
+        1,
+    );
+}
+
+// ------------------------------ what replacing an element answers
+//
+// The exercise above proves `set` dispatches; these prove what it answers
+// on an index nothing put there, that it writes through the shared storage,
+// and that it never grows the vector.
+
+/// `set` answers what the index held, and the vector holds the new value.
+#[test]
+fn set_replaces_an_element_and_answers_the_old_one() {
+    check_and_answer(
+        "Vector.set in range",
+        r#"  var items = Vector.of(1, 2, 3)
+  let was = items.set(1, 9).unwrapOr(0)
+  if items.toArray() == [1, 9, 3] { was } else { 0 }"#,
+        2,
+    );
+}
+
+/// An index that is not already in the vector answers `None` and writes
+/// nothing — which is what `get` answers for the same index, so a program
+/// has one rule about indices rather than two.
+#[test]
+fn set_out_of_range_answers_none_and_writes_nothing() {
+    check_and_answer(
+        "Vector.set out of range",
+        r#"  var items = Vector.of(1, 2)
+  let past = match items.set(2, 9) { Some(_) => false, None => true }
+  let below = match items.set(-1, 9) { Some(_) => false, None => true }
+  if past && below && items.toArray() == [1, 2] { 1 } else { 0 }"#,
+        1,
+    );
+}
+
+/// A `set` on an empty vector is out of range like any other, and a `set` at
+/// `length()` does not append: a vector grows by `push`.
+#[test]
+fn set_never_grows_the_vector() {
+    check_and_answer(
+        "Vector.set on an empty vector",
+        r#"  var items: Vector<Int> = Vector.of()
+  let answered = match items.set(0, 1) { Some(_) => false, None => true }
+  if answered && items.length() == 0 { 1 } else { 0 }"#,
+        1,
+    );
+}
+
+/// `set` writes through the shared storage, so an alias observes it — which
+/// is what `push` does and the reason `set` takes a `var self` receiver.
+#[test]
+fn an_alias_observes_a_set() {
+    check_and_answer(
+        "Vector.set seen through an alias",
+        r#"  var first = Vector.of(1, 2)
+  var second = first
+  let was = second.set(0, 7)
+  if first.toArray() == [7, 2] { was.unwrapOr(0) } else { 0 }"#,
         1,
     );
 }

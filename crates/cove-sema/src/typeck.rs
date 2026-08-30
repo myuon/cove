@@ -2938,10 +2938,13 @@ impl<'a> Checker<'a> {
             Ty::Dyn(trait_name) => self
                 .mutating_trait_method(trait_name, method)
                 .then_some(true),
-            // A builtin type: `push` and `freeze` are the two that write
-            // through their receiver, and `push` is the one that needs a
-            // place to write to.
-            _ => is_mutating_method(method).then(|| method == "push"),
+            // A builtin type: `push`, `set`, and `freeze` are the three
+            // that write through their receiver, and `freeze` is the one
+            // that does not need a place to write to — it takes the
+            // storage rather than changing it, so a temporary holding the
+            // only handle can be frozen. The other two need somewhere for
+            // the change to land.
+            _ => is_mutating_method(method).then(|| method != "freeze"),
         }
     }
 
@@ -7273,6 +7276,7 @@ fn builtin_ty(declared: &BuiltinType, bound: &BTreeMap<&str, Ty>, receiver: Opti
         BuiltinType::Float => Ty::Float,
         BuiltinType::String => Ty::Str,
         BuiltinType::Error => Ty::Error,
+        BuiltinType::Duration => Ty::Duration,
         BuiltinType::Array(item) => Ty::Array(nested(item)),
         BuiltinType::Vector(item) => Ty::Vector(nested(item)),
         BuiltinType::Set(item) => Ty::Set(nested(item)),
@@ -8812,6 +8816,138 @@ fn run() -> Counter {
         assert_eq!(error.message, "expected `Bool`, found `Int`");
     }
 
+    // -------------------- membership, position, and part of a sequence
+
+    /// `contains`, `indexOf`, and `slice` read the same on either sequence,
+    /// and each answers what the shared table says.
+    ///
+    /// The element parameter is where these are got wrong: it is the
+    /// receiver's own `T`, so a `contains` of the wrong type is a mismatch
+    /// rather than a `false`, which is the whole reason a sequence's
+    /// membership is checked and a `Map`'s `Any` key would not be.
+    #[test]
+    fn a_sequence_answers_membership_position_and_a_part_of_itself() {
+        for receiver in ["let items = [1, 2]", "var items = Vector.of(1, 2)"] {
+            accepts_body(&format!(
+                "  {receiver}\n  \
+                 let held: Bool = items.contains(1)\n  \
+                 let at: Option<Int> = items.indexOf(2)\n  \
+                 let first: Array<Int> = items.slice(0, 1)"
+            ));
+            let error = rejects_body(&format!("  {receiver}\n  let n = items.contains(\"1\")"));
+            assert_eq!(error.code, MISMATCH);
+            assert_eq!(error.message, "expected `Int`, found `String`");
+            let error = rejects_body(&format!("  {receiver}\n  let n: Int = items.indexOf(1)"));
+            assert_eq!(error.message, "expected `Int`, found `Option<Int>`");
+            let error = rejects_body(&format!("  {receiver}\n  let n = items.slice(0)"));
+            assert_eq!(error.code, MISSING_ARGUMENT);
+        }
+    }
+
+    /// A `Set` answers membership and nothing about a position, because a
+    /// set has none to answer about.
+    ///
+    /// The ascending order a `Set` and a `Map` are stored in is the
+    /// collection's, not a caller's: `toArray()` is where a program takes
+    /// that ordering as its own, and what it answers has both.
+    #[test]
+    fn an_unordered_collection_answers_membership_and_not_a_position() {
+        accepts_body("  let seen = Set.of(1, 2)\n  let held: Bool = seen.contains(1)");
+        accepts_body(
+            "  let seen = Set.of(1, 2)\n  let at: Option<Int> = seen.toArray().indexOf(1)",
+        );
+        let error = rejects_body("  let seen = Set.of(1, 2)\n  let n = seen.indexOf(1)");
+        assert_eq!(error.code, UNKNOWN_METHOD);
+        assert_eq!(error.message, "`Set` has no method `indexOf`");
+        let error = rejects_body(
+            "  let ages = Map.of(MapEntry(key: \"a\", value: 1))\n  let n = ages.slice(0, 1)",
+        );
+        assert_eq!(error.message, "`Map` has no method `slice`");
+    }
+
+    /// `set` replaces an element, so it takes the receiver's own element
+    /// type and answers what was there.
+    #[test]
+    fn a_vector_replaces_an_element_with_one_of_its_own_type() {
+        accepts_body("  var items = Vector.of(1, 2)\n  let was: Option<Int> = items.set(0, 9)");
+        let error = rejects_body("  var items = Vector.of(1, 2)\n  let n = items.set(0, \"9\")");
+        assert_eq!(error.code, MISMATCH);
+        assert_eq!(error.message, "expected `Int`, found `String`");
+        let error = rejects_body("  var items = Vector.of(1, 2)\n  let n = items.set(\"0\", 9)");
+        assert_eq!(error.message, "expected `Int`, found `String`");
+        let error = rejects_body("  var items = Vector.of(1, 2)\n  let n: Int = items.set(0, 9)");
+        assert_eq!(error.message, "expected `Int`, found `Option<Int>`");
+        // An `Array` is immutable, so it has no such method to reach at all.
+        // The receiver is a `var` here so that the place rule, which asks by
+        // name before it has a receiver type, has nothing to say first.
+        let error = rejects_body("  var items = [1, 2]\n  let n = items.set(0, 9)");
+        assert_eq!(error.code, UNKNOWN_METHOD);
+        assert_eq!(error.message, "`Array` has no method `set`");
+    }
+
+    /// `set` mutates, so its receiver is the caller's place under exactly
+    /// the rule `push`'s receiver is under.
+    #[test]
+    fn rejects_set_on_a_read_only_place_and_on_no_place() {
+        let error = rejects(
+            "fn run() -> Int {\n  let items = Vector.of(1)\n  items.set(0, 2)\n  items.length()\n}\n",
+        );
+        assert_eq!(error.code, READ_ONLY_PLACE);
+        assert_eq!(
+            error.message,
+            "`set` takes a `var self` receiver, but `items` is a read-only place"
+        );
+        assert_eq!(error.help.unwrap(), "declare it with `var items`");
+        let error = rejects("fn run() -> Int {\n  Vector.of(1).set(0, 2)\n  0\n}\n");
+        assert_eq!(error.code, NOT_A_PLACE);
+        assert_eq!(
+            error.message,
+            "`set` takes a `var self` receiver, but `this expression` is not a place"
+        );
+    }
+
+    // ------------------------------------ building and reading a duration
+
+    /// A `Duration` is built from a number in any of the six units a literal
+    /// is written in, and read back in the same six.
+    #[test]
+    fn a_duration_is_built_from_a_count_and_read_back_as_one() {
+        accepts_body(
+            "  let timeout: Duration = Duration.millis(250)\n  \
+             let whole: Duration = Duration.nanos(1) + Duration.micros(1) + \
+             Duration.seconds(1) + Duration.minutes(1) + Duration.hours(1)\n  \
+             let back: Int = timeout.millis()\n  \
+             let coarse: Int = whole.seconds()",
+        );
+        // The builder takes an `Int`; a `Duration` is what it answers rather
+        // than what it takes.
+        let error = rejects_body("  let d = Duration.millis(1s)");
+        assert_eq!(error.code, MISMATCH);
+        assert_eq!(error.message, "expected `Int`, found `Duration`");
+        let error = rejects_body("  let n: Int = Duration.seconds(1)");
+        assert_eq!(error.message, "expected `Int`, found `Duration`");
+        let error = rejects_body("  let d = 1s\n  let n: Duration = d.seconds()");
+        assert_eq!(error.message, "expected `Duration`, found `Int`");
+    }
+
+    /// A unit no literal suffix names is not a unit, in either direction.
+    #[test]
+    fn a_duration_has_only_the_units_a_literal_is_written_in() {
+        let error = rejects_body("  let d = Duration.weeks(1)");
+        assert_eq!(error.code, UNKNOWN_ASSOCIATED);
+        assert_eq!(
+            error.message,
+            "`Duration` has no associated function `weeks`"
+        );
+        let error = rejects_body("  let d = 1s\n  let n = d.weeks()");
+        assert_eq!(error.code, UNKNOWN_METHOD);
+        assert_eq!(error.message, "`Duration` has no method `weeks`");
+        assert_eq!(
+            error.help.unwrap(),
+            "`Duration` has `nanos`, `micros`, `millis`, `seconds`, `minutes`, `hours`, `snapshot`"
+        );
+    }
+
     /// A receiver that is not a sequence has none of the four.
     #[test]
     fn only_a_sequence_walks_with_a_closure() {
@@ -8875,7 +9011,7 @@ fn run() -> Counter {
         assert_eq!(error.message, "`Array` has no associated function `of`");
         assert_eq!(
             error.rule.unwrap(),
-            "A builtin type's associated functions are `Vector.of`, `Map.of`, `Set.of`, `String.fromCodePoint`, `Int.parse`, `Int.parseRadix`, and `Float.parse`."
+            "A builtin type's associated functions are `Vector.of`, `Map.of`, `Set.of`, `String.fromCodePoint`, `Int.parse`, `Int.parseRadix`, `Float.parse`, `Duration.nanos`, `Duration.micros`, `Duration.millis`, `Duration.seconds`, `Duration.minutes`, and `Duration.hours`."
         );
     }
 

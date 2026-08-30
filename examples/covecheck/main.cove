@@ -12,6 +12,12 @@ use files
 /// within a fixed amount of further work, not at the next instruction -- so
 /// how far each one got is not something this program can say and does not
 /// try to.
+///
+/// The bound is `options.deadline`, which is the number of seconds `--timeout`
+/// named or the `30s` `runBound` answers when it named none, and nothing here
+/// can tell which of the two it was holding: a bound a person typed and a
+/// bound the program wrote down are one `Duration` by the time they get this
+/// far.
 export async fn main(arguments: Array<String>) -> Result<Unit, Error> {
   if wantsHelp(arguments) {
     println(usage())?
@@ -20,7 +26,7 @@ export async fn main(arguments: Array<String>) -> Result<Unit, Error> {
   let options = readOptions(arguments)?
   let manifest = readManifest(options.manifest, files.read(options.manifest)?)?
 
-  let bounded: Result<Run, Error> = clock.timeout(runBound()) {
+  let bounded: Result<Run, Error> = clock.timeout(options.deadline) {
     await runAll(manifest.checks, options.plan)
   }
   let run = bounded?

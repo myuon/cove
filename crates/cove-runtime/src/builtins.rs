@@ -340,6 +340,29 @@ pub fn call_associated(
             }
             Ok(Value::Set(Rc::new(set)))
         }
+        // `Duration.millis(n)` and its five neighbours: the six duration
+        // literal suffixes as functions, so a count a program computed
+        // becomes the `Duration` a host call takes. `Duration.seconds(1)`
+        // and `1s` are one value.
+        //
+        // A negative count is a negative duration, because a `Duration` is
+        // signed nanoseconds and `-1s` is already writable. A count whose
+        // nanoseconds do not fit stops the run in the words `Duration`
+        // arithmetic already stops it in — `checked_mul` is the same
+        // question `checked_add` asks for `1h + 1h`, so an overflow is one
+        // kind of event however the duration was reached.
+        ("Duration", unit) if duration_unit(unit).is_some() => {
+            let factor = duration_unit(unit).expect("the guard just asked");
+            let what = format!("Duration.{unit}");
+            let args = expect_args(&what, args, 1, span)?;
+            let Value::Int(count) = &args[0] else {
+                return Err(type_error(&what, "count", "Int", &args[0], span));
+            };
+            let nanos = count
+                .checked_mul(factor)
+                .ok_or_else(|| crate::interp::overflow("duration arithmetic", span))?;
+            Ok(Value::Duration(nanos))
+        }
         ("Int", "parse") => {
             let args = expect_args("Int.parse", args, 1, span)?;
             let Value::Str(text) = &args[0] else {
@@ -452,6 +475,9 @@ pub fn call_method(
                 expect_args(name, args, 0, span)?;
                 Ok(Value::Bool(items.is_empty()))
             }
+            "contains" => contains("Array.contains", items, args, span),
+            "indexOf" => index_of_element("Array.indexOf", items, args, span),
+            "slice" => Ok(Value::Array(slice("Array.slice", items, &args, span)?)),
             "map" | "filter" | "fold" | "sorted" => {
                 walk_with(host, "Array", items.to_vec(), name, args, span)
             }
@@ -465,10 +491,38 @@ pub fn call_method(
                     storage.elements.borrow_mut().push(args.remove(0));
                     Ok(Value::Unit)
                 }
+                // Replaces the element at `index` and answers what was
+                // there, or answers `None` and writes nothing when `index`
+                // is not already in the vector — which is `get`'s answer to
+                // the same bad index, so a program has one rule about
+                // indices rather than two. The write goes through the
+                // storage handle, exactly as `push`'s does, so an alias
+                // observes it and there is nothing to write back to the
+                // receiver's own slot.
+                "set" => {
+                    let mut args = expect_args("Vector.set", args, 2, span)?;
+                    let value = args.remove(1);
+                    let Some(index) = index_of("Vector.set", &args, span)? else {
+                        return Ok(Value::none());
+                    };
+                    let mut elements = storage.elements.borrow_mut();
+                    let Some(slot) = elements.get_mut(index) else {
+                        return Ok(Value::none());
+                    };
+                    Ok(Value::some(std::mem::replace(slot, value)))
+                }
                 "get" => Ok(index_of("Vector.get", &args, span)?
                     .and_then(|i| storage.elements.borrow().get(i).cloned())
                     .map(Value::some)
                     .unwrap_or_else(Value::none)),
+                "contains" => contains("Vector.contains", &storage.elements.borrow(), args, span),
+                "indexOf" => {
+                    index_of_element("Vector.indexOf", &storage.elements.borrow(), args, span)
+                }
+                "slice" => {
+                    let sliced = slice("Vector.slice", &storage.elements.borrow(), &args, span)?;
+                    Ok(Value::Array(sliced))
+                }
                 "length" => {
                     expect_args(name, args, 0, span)?;
                     Ok(Value::Int(storage.len() as i64))
@@ -874,8 +928,41 @@ pub fn call_method(
             }
             _ => Err(no_method("Float", name, span)),
         },
+        // The six builders read backwards: `d.millis()` is the whole number
+        // of milliseconds in `d`, **truncated toward zero**, which is what
+        // `Int` division already does — so `1500ms.seconds()` is 1 and
+        // `(-1500ms).seconds()` is -1, and `d.seconds()` is
+        // `d.nanos() / 1_000_000_000` whichever way a program asks. None can
+        // fail: dividing a count that fits leaves a count that fits.
+        Value::Duration(ns) => match duration_unit(name) {
+            Some(factor) => {
+                expect_args(name, args, 0, span)?;
+                Ok(Value::Int(ns / factor))
+            }
+            None => Err(no_method("Duration", name, span)),
+        },
         other => Err(no_method(&other.type_name(), name, span)),
     }
+}
+
+/// The nanoseconds in one of the six units a `Duration` is written in.
+///
+/// One table for both directions and for both halves of the toolchain's
+/// question: `Duration.millis(n)` multiplies by what `d.millis()` divides
+/// by, so a duration built in a unit and read back in it is the same number.
+/// The names are the schema's, and the factors are the ones the lexer gives
+/// the matching literal suffix — `ns`, `us`, `ms`, `s`, `m`, `h` — so `1s`
+/// and `Duration.seconds(1)` cannot come apart.
+fn duration_unit(name: &str) -> Option<i64> {
+    Some(match name {
+        "nanos" => 1,
+        "micros" => 1_000,
+        "millis" => 1_000_000,
+        "seconds" => 1_000_000_000,
+        "minutes" => 60 * 1_000_000_000,
+        "hours" => 60 * 60 * 1_000_000_000,
+        _ => return None,
+    })
 }
 
 /// `map`, `filter`, `fold`, and `sorted`, which are the same four operations
@@ -1119,6 +1206,74 @@ pub fn check_live(
         .with_help("use the `Array` that `freeze()` returned, or build a new vector"));
     }
     Ok(())
+}
+
+/// `contains(element)` on a sequence: whether any element is `==` to it.
+///
+/// Equality is [`Value::eq_value`], the same one `==` is and the same one
+/// `Map` and `Set` are keyed by, so a sequence answers membership exactly as
+/// a comparison of the two values would. An empty receiver answers `false`,
+/// and no argument can be refused: every value has an equality.
+fn contains(
+    method: &str,
+    items: &[Value],
+    args: Vec<Value>,
+    span: Span,
+) -> Result<Value, RuntimeError> {
+    let args = expect_args(method, args, 1, span)?;
+    Ok(Value::Bool(
+        items.iter().any(|item| item.eq_value(&args[0])),
+    ))
+}
+
+/// `indexOf(element)` on a sequence: the first position holding a value `==`
+/// to it, or `None`.
+///
+/// The same equality [`contains`] uses, so the two cannot disagree about
+/// whether an element is there. An empty receiver and an element that is not
+/// in the sequence both answer `None`, which is what `String.indexOf` and
+/// `Array.get` answer a question with no position to name.
+fn index_of_element(
+    method: &str,
+    items: &[Value],
+    args: Vec<Value>,
+    span: Span,
+) -> Result<Value, RuntimeError> {
+    let args = expect_args(method, args, 1, span)?;
+    Ok(items
+        .iter()
+        .position(|item| item.eq_value(&args[0]))
+        .map(|at| Value::some(Value::Int(at as i64)))
+        .unwrap_or_else(Value::none))
+}
+
+/// `slice(from, to)` on a sequence: the elements at `from..<to`.
+///
+/// Both bounds are clamped into `0..len` and a `to` at or below `from`
+/// answers nothing, which is `String.slice`'s rule applied where the same
+/// question arises rather than a second answer to it. So no argument can
+/// stop the run: this refuses only a bound that is not an `Int` at all,
+/// which is the receiver being called wrongly rather than an index being out
+/// of range.
+fn slice(
+    method: &str,
+    items: &[Value],
+    args: &[Value],
+    span: Span,
+) -> Result<Rc<[Value]>, RuntimeError> {
+    if args.len() != 2 {
+        return Err(arity_error(method, 2, args.len(), span));
+    }
+    let bound = |at: usize, parameter: &str| match &args[at] {
+        Value::Int(index) => Ok((*index).clamp(0, items.len() as i64) as usize),
+        other => Err(type_error(method, parameter, "Int", other, span)),
+    };
+    let from = bound(0, "from")?;
+    let to = bound(1, "to")?;
+    if to <= from {
+        return Ok(Rc::from([]));
+    }
+    Ok(Rc::from(&items[from..to]))
 }
 
 fn index_of(method: &str, args: &[Value], span: Span) -> Result<Option<usize>, RuntimeError> {

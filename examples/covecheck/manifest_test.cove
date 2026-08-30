@@ -1,6 +1,6 @@
 /// A manifest holding one check with every field written out.
 fn whole() -> String {
-  "\{\"checks\":[\{\"name\":\"health\",\"url\":\"http://a/h\",\"expect\":\"ok\",\"reject\":\"err\",\"maxLength\":16\}]\}"
+  "\{\"checks\":[\{\"name\":\"health\",\"url\":\"http://a/h\",\"expect\":\"ok\",\"reject\":\"err\",\"maxLength\":16,\"timeoutMs\":250\}]\}"
 }
 
 /// The message `readManifest` refused `text` with, or what it made of it.
@@ -12,37 +12,37 @@ fn manifestRefusal(text: String) -> String {
 }
 
 /// Every field a check may write is read into the type it declares, and the
-/// three optional ones are `Some` when written.
+/// four optional ones are `Some` when written.
 test fn readsACheckWithEveryFieldWritten() -> Result<Unit, Error> {
   let manifest = readManifest("checks.json", whole())?
   let check = manifest.checks.get(0)
-    .unwrapOr(Check(
-      name: "",
-      url: "",
-      expect: None,
-      reject: None,
-      maxLength: None,
-    ))
+    .unwrapOr(Check(name: "", url: "", expect: None, reject: None, maxLength: None, timeoutMs: None))
   assertEqual(check.name, "health")?
   assertEqual(check.url, "http://a/h")?
   assertEqual(check.expect.unwrapOr(""), "ok")?
   assertEqual(check.reject.unwrapOr(""), "err")?
   assertEqual(check.maxLength.unwrapOr(0), 16)?
+  assertEqual(check.timeoutMs.unwrapOr(0), 250)?
   Ok(())
 }
 
-/// A check that writes only the two required fields is a check, and the three
+/// A check that writes only the two required fields is a check, and the four
 /// optional ones are `None` rather than defaults that mean something.
+///
+/// `timeoutMs` is the one of the four whose absence a run acts on rather than
+/// ignores: a check that named no wait is bounded by the default instead of
+/// being unbounded, which is why nothing here reads the absence as a zero.
 test fn readsACheckWithNothingButAnEndpoint() -> Result<Unit, Error> {
   let manifest = readManifest(
     "checks.json",
     "\{\"checks\":[\{\"name\":\"up\",\"url\":\"http://a/\"\}]\}",
   )?
   let check = manifest.checks.get(0)
-    .unwrapOr(Check(name: "", url: "", expect: Some("set"), reject: Some("set"), maxLength: Some(1)))
+    .unwrapOr(Check(name: "", url: "", expect: Some("set"), reject: Some("set"), maxLength: Some(1), timeoutMs: Some(1)))
   assert(check.expect.isNone())?
   assert(check.reject.isNone())?
   assert(check.maxLength.isNone())?
+  assert(check.timeoutMs.isNone())?
   Ok(())
 }
 
@@ -103,6 +103,31 @@ test fn refusesABoundThatIsNotACount() -> Result<Unit, Error> {
   assertEqual(
     manifestRefusal("\{\"checks\":[\{\"name\":\"a\",\"url\":\"http://a/\",\"maxLength\":-1\}]\}"),
     "checks.json: check 1: `maxLength` is -1, and a bound cannot be negative",
+  )?
+  Ok(())
+}
+
+/// A wait is a count of milliseconds like any other count, and a wait of no
+/// time is refused on top of that.
+///
+/// The first two refusals are `optionalCount`'s and read the same as
+/// `maxLength`'s, because a fraction of a millisecond and a negative one are
+/// wrong in the way any count is wrong. The third is this field's own: `0`
+/// passes every test of being a count and is still not a timeout, since a
+/// check allowed no time can only run out of it and would be reported
+/// `unchecked` whatever its endpoint did.
+test fn refusesATimeoutNoCheckCouldAnswerIn() -> Result<Unit, Error> {
+  assertEqual(
+    manifestRefusal("\{\"checks\":[\{\"name\":\"a\",\"url\":\"http://a/\",\"timeoutMs\":1.5\}]\}"),
+    "checks.json: check 1: `timeoutMs` is 1.5, which is not a whole number",
+  )?
+  assertEqual(
+    manifestRefusal("\{\"checks\":[\{\"name\":\"a\",\"url\":\"http://a/\",\"timeoutMs\":-250\}]\}"),
+    "checks.json: check 1: `timeoutMs` is -250, and a bound cannot be negative",
+  )?
+  assertEqual(
+    manifestRefusal("\{\"checks\":[\{\"name\":\"a\",\"url\":\"http://a/\",\"timeoutMs\":0\}]\}"),
+    "checks.json: check 1: `timeoutMs` is 0, and a check with no time cannot answer",
   )?
   Ok(())
 }

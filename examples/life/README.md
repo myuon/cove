@@ -133,9 +133,10 @@ ticks later, `earlier` is still the world it was. That is one `let`, and it is
 the reason a state hash, a journal, and a replay are all easy here.
 
 **A vector is a handle.** The resolution loop keeps its claims in a `Vector`
-and hands it to `has(numbers, value)` as an ordinary parameter. The copy that
-arrives is an alias, so the helper reads what the loop has pushed by the time
-it asks. The tick would put two creatures on one cell if that were not true.
+and hands it to `nursery(world, at, claims)` as an ordinary parameter. The
+copy that arrives is an alias, so `claims.contains(...)` inside the helper
+answers about what the loop has pushed by the time it asks. The tick would lay
+two newborns in one cell if that were not true.
 
 Both halves are pinned in `world/world_test.cove`, and the second one is where
 `is` earns its place: two vectors holding equal elements are `==` without
@@ -162,12 +163,81 @@ problems, and the collection API says so:
 - **`fold` is the hash and the census**, which are the two questions that are
   about the whole world at once. It is also `instinct.nearest`: one answer is
   wanted, and a sort would build a whole ordering to take the front of it.
-- **`sorted(by:)` is the population after a birth**, and the deltas before the
-  grid is rebuilt, and the sightings a creature is shown. Each of the three is
-  a place where "the order two things are in" is part of the answer rather
-  than an accident, and each `by` is a strict less-than with an explicit
-  tie-break, because a stable sort under a comparison that says nothing about
-  ties is a coin toss with extra steps.
+- **`sorted(by:)` is the population after a birth**, and the sightings a
+  creature is shown. Both are places where "the order two things are in" is
+  part of the answer rather than an accident, and each `by` is a strict
+  less-than with an explicit tie-break, because a stable sort under a
+  comparison that says nothing about ties is a coin toss with extra steps.
+  There used to be a third — the food deltas, sorted so they could be merged
+  against the grid — and it is instructive that it is gone: it was never a
+  question about order, only a way of reaching a cell without being able to
+  address one. See [The grid](#the-grid-what-set-changed-and-what-it-did-not).
+- **`contains` is every membership question the resolution loop asks** — a
+  cell already claimed, a creature already hunted, a creature that did not
+  survive — and it is one word rather than a helper, on a `Vector` and on an
+  `Array` alike. **`slice` is the bound on what a creature is shown.** Neither
+  is a walk; both used to be written as one, which is what made them helpers.
+  `indexOf` is the third of that set and this program has no use for it: it
+  asks where a *value* is, and every position this program wants is one it
+  already knows.
+
+## The grid: what `set` changed, and what it did not
+
+The grid is the one piece of state a simulation updates in place, and until
+`Vector.set` existed there was no way to update one. `world.sprout` did the
+next best thing: it sorted the tick's food deltas by cell and merged them
+against the old grid in a single pass, building the next grid as it went.
+
+It now copies the grid into a `Vector` and writes each change where it
+happened:
+
+```cove
+var levels = Vector.of()
+for level in world.food {
+  levels.push(level)
+}
+for delta in deltas {
+  let standing = levels.get(delta.cell).unwrapOr(0)
+  levels.set(delta.cell, standing + delta.change)
+}
+Growth(seed: generator, food: levels.map(fn(level: Int) {
+  level.max(0).min(maxFood())
+}))
+```
+
+**What that removed is a search, not a copy.** The sort is gone, and so are
+`cellOf` and `changeOf`, two accessors that existed only so the merge could
+read a delta at a position. The merge was never expressing an idea about
+order: it was the shape a program reaches for when it can read a cell and
+cannot write one. Six lines of bookkeeping — an `at` cursor, a `while` that
+had to advance it in step with the outer loop — became one line that says what
+the tick does.
+
+**What it did not remove is the O(cells) tick.** Issue #154 measured the
+rebuild as O(cells) work for O(changes) of change, and it still is, because
+the copy is still there. That is not a shortcoming of `set`: `World.food` is
+an `Array` and the next world needs another `Array`, so a tick that produces a
+new world pays for the whole grid however it fills it in. The only way to stop
+paying would be for the world to hold a `Vector`, and then `let earlier =
+world` would stop being a snapshot — which is the example's first claim and
+worth strictly more than the copy costs. The honest finding is that **`set`
+closes the gap for scratch state and not for the boundary between two
+immutable worlds**, and those are two different problems that looked like one
+from inside the merge loop.
+
+**What it also bought is a smaller failure surface.** The merge advanced its
+cursor only when a delta's cell matched the index the outer loop had reached,
+so a delta naming a cell outside the grid would have stalled the cursor and
+silently dropped every delta after it. Writing by index has no such state to
+get wrong: a `set` outside the grid answers `None`, drops that one change, and
+leaves the rest of the tick alone — which is what the world already does with
+a step off the edge or a hunt of a creature that is not there.
+
+The clamp moved too, from inside the loop to a `map` over the finished grid.
+That is not a change in what a tick computes — the levels are the same and the
+state hash is unchanged, tick for tick — but it is a change in what the code
+says: the levels are summed first and bounded once, rather than bounded on the
+way past.
 
 ## Isolation: what a refusal is for
 
@@ -261,19 +331,34 @@ rules — the tie-break, the refusal, the caps — pinnable one at a time.
 `sorted(by:)`, `fold`, `filter` and `map` covered every walk in the program
 except the resolution loop, which is not a walk.
 
-**Not easy: the grid.** A `Vector` can be pushed onto and can never have an
-element replaced, so the grid — the one piece of state a simulation updates in
-place — cannot be updated in place. Every tick rebuilds all ninety-six cells
-to apply about a dozen changes: the deltas are sorted by cell and merged
-against the old grid in one pass, which is the best shape available and is
-still O(cells) for O(changes) of work. That is
-[issue #154](https://github.com/myuon/cove/issues/154).
-
-**Not easy: asking a sequence a question.** This example writes three helpers
-that should not have to exist — `has` and `holds` (does this sequence contain
-this number), and `take` (the first n) — because `Array` and `Vector` answer
-neither, and `map` and `filter` do not offer an index. That is
+**Was not easy, and now is: asking a sequence a question.** This example used
+to write three helpers that should not have existed — `has` and `holds`, which
+were the same four-line loop written twice because one took a `Vector` and the
+other an `Array`, and `take`, which allocated a vector and looped to express
+"the first four". `Array` and `Vector` now answer `contains(element)`,
+`indexOf(element)` and `slice(from, to)`, and all three helpers are gone. Two
+of the three are what this program needed; `indexOf` is there because the
+three were decided together, and it is used here by nothing.
+`has` and `holds` became one word, which is the point: they were two functions
+because there was no way to write one over "a sequence", and the shared table
+is where that generalization actually lives. `take(visible, sightLimit())` is
+`visible.slice(0, sightLimit())`, and the `if sightings.length() <= count`
+guard went with it, because `slice` clamps. That was
 [issue #155](https://github.com/myuon/cove/issues/155).
+
+The fourth thing that issue asked for is still missing: an indexed walk. Where
+a walk needs to know *where* it is, this program still writes a `for` over a
+range with `get(index).unwrapOr(...)`, and the default in that `unwrapOr` is a
+value that cannot happen. `indexOf` answers where a *value* is, which is a
+different question.
+
+**Was not easy, and now is easier: the grid.** A `Vector` could be pushed onto
+and could never have an element replaced, so the grid — the one piece of state
+a simulation updates in place — could not be updated in place.
+[Issue #154](https://github.com/myuon/cove/issues/154) is that gap and
+`Vector.set(index, value)` closes it. What it bought here is worth being exact
+about, because it is less than it sounds and more than nothing. See
+[The grid](#the-grid-what-set-changed-and-what-it-did-not).
 
 **A name, not a gap.** Issue #91 calls this example `cove-life`. A directory
 in a package is a module and a module name component must be a Cove
