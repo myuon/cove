@@ -793,8 +793,10 @@ impl RulePackage {
         );
         let started = Instant::now();
         let backend = match lowering {
-            Some(lowering) => Backend::Vm(Vm::new(&runtime, runtime.hosts(), &lowering.ir)),
-            None => Backend::Ast(Interpreter::new(&runtime)),
+            Some(lowering) => {
+                Backend::Vm(Box::new(Vm::new(&runtime, runtime.hosts(), &lowering.ir)))
+            }
+            None => Backend::Ast(Box::new(Interpreter::new(&runtime))),
         };
         let mut session = Session {
             build: started.elapsed(),
@@ -862,9 +864,17 @@ pub struct Lowering {
 }
 
 /// Which backend a session runs on.
+///
+/// Both are boxed, which is not a statement about either: an `Interpreter`
+/// and a `Vm` are each several hundred bytes of stacks and tables, so an
+/// enum holding either inline is as wide as the wider one wherever it is
+/// passed. A session is built once per run and invoked many times, so the
+/// indirection costs nothing that anything here measures. Nothing else about
+/// the shape follows from it — the arms below deref through the box and read
+/// the way they read.
 enum Backend<'a> {
-    Ast(Interpreter<'a>),
-    Vm(Vm<'a>),
+    Ast(Box<Interpreter<'a>>),
+    Vm(Box<Vm<'a>>),
 }
 
 /// One backend, ready to be invoked as many times as an embedder likes.

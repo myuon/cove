@@ -731,6 +731,31 @@ pub struct Vm<'a> {
     /// no source position; this is the position, recorded by the one party
     /// that saw the assertion, so a test runner can point at it.
     assertion_failure: Option<(Span, String)>,
+    /// The capture names each lowered function's closures hold, made once
+    /// per VM rather than once per closure.
+    ///
+    /// `cove_ir::Function::captures` is a `Vec<Arc<str>>`, because a lowered
+    /// program is read by every thread of a run;
+    /// `value::Closure::captures` pairs an `Rc<str>` with each captured
+    /// value, because a closure belongs to the task that built it. Turning
+    /// one into the other is an allocation, and `Inst::MakeClosure` runs
+    /// once per closure a program builds — so it is done once here instead,
+    /// exactly as [`Vm::constants`] turns a constant's `Arc<str>` into a
+    /// `Value::Str`'s `Rc<str>` once and for the same reason.
+    ///
+    /// What that saves is one `Rc<str>` per capture per closure. Issue #185
+    /// asked whether anything but `benches/convention`'s `conv_fresh` pays
+    /// for building closures, and the corpus says yes: a small helper that
+    /// builds a `map` or `filter` callback in its body, called once per
+    /// element by its caller, is the shape — `examples/life`'s
+    /// `population()` is one, called once per creature per tick.
+    ///
+    /// Shared as an `Rc<[Rc<str>]>` so that `Vm::close_over` can hold the
+    /// names while it drains the value stack, which it could not do through
+    /// a borrow of `self`.
+    ///
+    /// Not a GC root, and it holds no `Value` to be one with.
+    capture_names: Vec<Rc<[Rc<str>]>>,
     /// Argument vectors, lent to a builtin call and taken back after it.
     ///
     /// A builtin is handed its arguments in a `Vec<Value>` because several
@@ -803,6 +828,17 @@ impl<'a> Vm<'a> {
             timings: Vec::new(),
             wait: Duration::ZERO,
             assertion_failure: None,
+            capture_names: program
+                .functions
+                .iter()
+                .map(|function| {
+                    function
+                        .captures
+                        .iter()
+                        .map(|name| Rc::from(&**name))
+                        .collect()
+                })
+                .collect(),
             arg_vectors: Vec::new(),
         };
         vm.bind_budget();
@@ -2219,16 +2255,21 @@ impl<'a> Vm<'a> {
         let target = self.program.function(function);
         let at = self.stack.len() - captures as usize;
         // Paired with the names the lowering settled, in the order it
-        // settled them, which is the order the values were pushed. The names
-        // are copied rather than shared: the lowering holds one program for
-        // every thread of a run and so writes an `Arc<str>`, and a closure is
-        // a value of the task that built it and so holds an `Rc<str>`.
-        let held: Vec<(Rc<str>, Value)> = target
-            .captures
-            .iter()
-            .map(|name| Rc::from(&**name))
-            .zip(self.stack.drain(at..))
-            .collect();
+        // settled them, which is the order the values were pushed.
+        //
+        // The names are taken from `Vm::capture_names` rather than made
+        // here. They have to be copied out of the lowering at some point —
+        // the lowering holds one program for every thread of a run and so
+        // writes an `Arc<str>`, and a closure is a value of the task that
+        // built it and so holds an `Rc<str>` — but that copy is one string
+        // per capture *site*, not one per closure, and this instruction runs
+        // once per closure. Issue #185 is what measured the difference:
+        // `examples/life` builds a `filter` callback once per creature per
+        // tick, and every one of them was allocating the string `creature`
+        // afresh. The whole of the table's argument is on the field.
+        let names = Rc::clone(&self.capture_names[function.0 as usize]);
+        let held: Vec<(Rc<str>, Value)> =
+            names.iter().cloned().zip(self.stack.drain(at..)).collect();
         // A closure is built from what it captured, so what it costs follows
         // how much that was — the rule `Inst::MakeEnum` is charged by.
         self.fuel += u64::from(captures);
