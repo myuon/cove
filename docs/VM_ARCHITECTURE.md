@@ -1,20 +1,34 @@
 # The VM: what is built, and what is being tried
 
-> Working document for [issue #116](https://github.com/myuon/cove/issues/116).
+> Written as the working document for
+> [issue #116](https://github.com/myuon/cove/issues/116) and for
+> [issue #109](https://github.com/myuon/cove/issues/109)'s representation
+> gate. Both are closed — #116 because its gate passed and its ten acceptance
+> criteria are met, #109 because its gate is passed and the answer was that
+> width is not where the cost is. This is now the record of what they decided
+> and the live list of what they did not, which "What is settled and what is
+> open" at the end names issue by issue.
+>
 > [ADR 0019](adr/0019-executable-ir-and-vm.md) decided that a VM exists and
-> that the tree-walking interpreter stays the semantic oracle. Nothing here
-> revisits that. This is about the VM's *shape*, which ADR 0019 deliberately
-> did not fix, and it stays a working document until a measurement makes one
-> of its choices worth an ADR.
+> that the tree-walking interpreter stays the semantic oracle, and
+> [ADR 0022](adr/0022-the-vm-is-the-default-backend.md) made it the default.
+> Nothing here revisits either. This is about the VM's *shape*, which ADR 0019
+> deliberately did not fix, and it stays a working document until a
+> measurement makes one of its remaining choices worth an ADR.
 
 ## Two things, and they are not the same
 
-**The prototype** is what `crates/cove-runtime/src/vm.rs` is today. It removed
-recursive AST evaluation and it is faster — 1.3× to 4.2× depending on what a
-program spends its time on. But it is still shaped like a flattened tree
-walker: an operand is a general `Value`, a frame is a window into a `Vec` of
-them, and the instruction set only recently began to say what it is operating
-on.
+This section was written when the first was true of `vm.rs` and the second was
+not. It is kept as the distinction #116's first acceptance criterion asked for,
+in the tense it was written in; what is true of `vm.rs` today is most of the
+target, and the parts that are not are named at the end of this document.
+
+**The prototype** is what `crates/cove-runtime/src/vm.rs` was at
+[PR #114](https://github.com/myuon/cove/pull/114). It removed recursive AST
+evaluation and it was faster — 1.3× to 4.2× depending on what a program spends
+its time on. But it was still shaped like a flattened tree walker: an operand
+is a general `Value`, a frame is a window into a `Vec` of them, and the
+instruction set only recently began to say what it is operating on.
 
 **The target** is a typed stack machine: a slot whose type the checker proved
 holds that type's own representation, a call follows a written convention over
@@ -23,7 +37,9 @@ object graph it borrows.
 
 The distinction matters because the prototype's numbers are being read as if
 they were the ceiling of a dedicated VM, and they are not. They are the ceiling
-of *this* VM. Issue #116 exists to measure the other one.
+of *this* VM. Issue #116 existed to measure the other one, and did: the suite
+in "The slice, measured" is what it came back with, and the prototype's range
+of 1.08× to 4.0× in ADR 0019 is 1.25× to 6.62× there.
 
 ## Where the prototype's remaining cost is
 
@@ -1068,7 +1084,10 @@ and a one-element `Vec` costs two allocations whoever is holding the arena.
 
 So the heap design stays open, and it should be decided after those two rather
 than before them. What is still allocating once they are gone is the evidence a
-heap layout would actually be answering.
+heap layout would actually be answering. The two are
+[#183](https://github.com/myuon/cove/issues/183) and
+[#184](https://github.com/myuon/cove/issues/184); the heap itself has no issue,
+deliberately, and "What is settled and what is open" says why.
 
 ## The slice, and the gate
 
@@ -2139,9 +2158,9 @@ the property that matters — the schedule is what ADR 0024 and
 `crates/cove-runtime/tests/responsiveness.rs` fix, and a change that moved it
 would be a different proposal needing a different ADR. The ceiling is the
 ablation's 40.3% on `call` and 5.8% on `field`. **This belongs to
-[#116](https://github.com/myuon/cove/issues/116)**, whose calling convention
-is required to cover "fuel, cancellation, trace" and which is where a call's
-per-call cost is decided.
+[#182](https://github.com/myuon/cove/issues/182)**, split out of #116 when it
+closed — #116's calling convention was required to cover "fuel, cancellation,
+trace", and this is what covering them costs at every call and every return.
 
 **A local rooted for a `var` argument costs 1.30×, and the whole of it is
 representation.** `conv_var` is `conv_local` with one line added *outside* the
@@ -2159,8 +2178,9 @@ emits anything, so `root(var v)` written anywhere in a body demotes every `v`
 the body declares; but here there is one `v` and it really is the one that is
 rooted. What would fix this is a place that can name a scalar slot, which is a
 change to what a place is. **This belongs to
-[#116](https://github.com/myuon/cove/issues/116)**, under the calling
-convention and the typed frame layout, and the size of the prize is the 30% in
+[#162](https://github.com/myuon/cove/issues/162)**, which inherited it from
+#116 and is where one slot identity for parameters, locals, temporaries,
+scalars, references and places is decided. The size of the prize is the 30% in
 this row.
 
 **Reaching a function through a value costs 1.32× reaching it directly, and a
@@ -2195,7 +2215,7 @@ capture and the answer all cross. `drop_in_place<Value>` and `Value::clone`
 are 10.5% of the run. A closure's captures are value slots by construction —
 the call copies them out of the closure into the frame's value window — so a
 captured `Int` has no scalar representation available to it at all. **This
-belongs to [#116](https://github.com/myuon/cove/issues/116)** as well, beside
+belongs to [#162](https://github.com/myuon/cove/issues/162)** as well, beside
 the typed frame layout: a capture area numbered like the two stacks it sits
 between would remove the crossing, and the prize is the 16%.
 
@@ -2214,20 +2234,23 @@ profile agrees about where it is rather than about what it is —
 `Vm::execute` is 8.6%, `HostRegistry::call_with` 4.5%, the two clock reads
 6.7%, and `Vec::from_iter` 3.0%.
 
-**This belongs to [#109](https://github.com/myuon/cove/issues/109)** and it is
-the same two allocation sites that document already names as the next
-measurement: the argument vector allocated per builtin and Host call, and the
-enum payload that makes a two-word `Ok(x)` cost a `Box` and a `Vec`. This row
-is the third witness for both, and the first one that puts a number on what
-they cost *together* on a program shaped to pay them. It also adds a site the
-earlier list did not have, which is the closure value itself at four
-allocations; that one is #109's too, since what it is is a representation.
+**This belongs to [#184](https://github.com/myuon/cove/issues/184) and
+[#183](https://github.com/myuon/cove/issues/183)**, split out of #109 when it
+closed, and they are the same two allocation sites this document already named
+as the next measurement: the argument vector allocated per builtin and Host
+call, and the enum payload that makes a two-word `Ok(x)` cost a `Box` and a
+`Vec`. This row is the third witness for both, and the first one that puts a
+number on what they cost *together* on a program shaped to pay them. It also
+adds a site the earlier list did not have, which is the closure value itself at
+four allocations; that one is [#185](https://github.com/myuon/cove/issues/185),
+since what it is is a representation.
 
 Nothing here is fixed, and one thing is worth saying about why. Each of the
 four is a change to what a slot, a capture, a closure or a payload *is*, and
 this document's own history says what happens when those are changed one at a
-time against their immediate parent. #116 and #109 are where they are decided
-together, and both now have a measured ceiling to decide against.
+time against their immediate parent. #109 and #116 were where they were decided
+together; each now has a narrower issue of its own, and every one of those
+carries the measured ceiling it has to be decided against.
 
 ## What a character costs, and what a receiver costs on top of it
 
@@ -2263,7 +2286,7 @@ three rows run 21.1, 23.1 and 30.2 instructions a character, at 19.3, 18.7 and
 now costs the instructions a call is, plus the per-call constant "The cliffs"
 prices at 71.8 ns and attributes to the budget's mutex rather than to the
 convention or to the receiver. The receiver half of #99 is answered; what is
-left of it is the cliff #116 already owns.
+left of it is the cliff [#182](https://github.com/myuon/cove/issues/182) owns.
 
 **What has not changed is that fuel does not track what is expensive.** The
 issue observed `arith` at 32 M fuel/s against this loop's 7.5 M, on the AST
@@ -2308,7 +2331,8 @@ loop it was in when a receiver was a `Box` copied per call, and it adds 27% a
 call now that `Value::Struct` is an `Rc`, at a per-instruction cost within 11%
 of the same loop with no call in it. "What a character costs, and what a
 receiver costs on top of it" is the measurement; the residue is the per-call
-constant the matrix already priced and #116 already owns, and is not about
+constant the matrix already priced and
+[#182](https://github.com/myuon/cove/issues/182) now owns, and is not about
 receivers.
 
 **Settled by evidence that was missing.** What a trace says. It was the last
@@ -2338,32 +2362,49 @@ stack up to its length and the open task scopes, which follows from the two
 stacks being numbered separately and from a place being an index, and no
 measurement can move that either.
 
-**Open, and what would settle each.** The inline representation of `Option`,
-`Result`, and small enum payloads — settled by building one and measuring
-`arrayget` and `chars`, and now `benches/convention`'s `conv_host` too, which
-pays for the `Result` a Host operation answers with two million times. That one
-now has a size as well as a benchmark: `chars` runs at a sixth of `arith`'s
-fuel rate, and the two things it does that `arith` does not are the `Option`
-per index and the `Rc<str>` per character. The
-argument vector allocated per builtin call — the same benchmarks, the same
-way. The closure value at four allocations, which the matrix added to that
-list. The heap layout the VM owns — settled by what is still allocating once
-those are gone, which is exactly the evidence it does not have yet. A moving
-collector — not yet asked for by anything measured here, and what it would owe
-is now written down rather than assumed, under "Collection is non-moving"
-above.
+**Open, and what would settle each.** Everything below was #109's or #116's
+until both closed. Each is now a narrower issue carrying the measurement that
+would decide it, which is the whole of what the two umbrellas had left.
 
-Everything on that list is downstream of the same allocation sites. That
+The inline representation of `Option`, `Result`, and small enum payloads —
+[#183](https://github.com/myuon/cove/issues/183) — settled by building one and
+measuring `arrayget` and `chars`, and now `benches/convention`'s `conv_host`
+too, which pays for the `Result` a Host operation answers with two million
+times. That one now has a size as well as a benchmark: `chars` runs at a sixth
+of `arith`'s fuel rate, and the two things it does that `arith` does not are
+the `Option` per index and the `Rc<str>` per character. The argument vector
+allocated per builtin call — [#184](https://github.com/myuon/cove/issues/184) —
+the same benchmarks, the same way. The closure value at four allocations, which
+the matrix added to that list — [#185](https://github.com/myuon/cove/issues/185),
+and the honest caveat there is that only `conv_fresh` pays it. The reading half
+of a representation-independent embedding API —
+[#186](https://github.com/myuon/cove/issues/186) — which is why each of those
+three is a source break for embedders as things stand. The heap layout the VM
+owns — **not filed**, because it is settled by what is still allocating once
+the three above are gone, and that is exactly the evidence it does not have
+yet; this paragraph is its record. A moving collector — also not filed, not yet
+asked for by anything measured here, and what it would owe is written down
+rather than assumed, under "Collection is non-moving" above.
+
+Everything in that first group is downstream of the same allocation sites. That
 makes them the next measurement whether or not a VM-owned heap is ever built.
 
 Beside them, and separately, four cliffs the calling-convention matrix
-measured: the two mutex acquisitions still on every call, a `var`-rooted
-local that cannot live on the scalar stack, a closure's captures that cannot
-either, and the Host boundary at twenty-seven times a loop turn. "The cliffs"
-above says what each would take and which of
-[#109](https://github.com/myuon/cove/issues/109) and
-[#116](https://github.com/myuon/cove/issues/116) it belongs to. None is
-fixed, and the reason is this document's own history: each is a change to
-what a slot, a capture, a closure or a payload *is*, and changing those one
-at a time against their immediate parent is what
+measured: the two mutex acquisitions still on every call
+([#182](https://github.com/myuon/cove/issues/182)), a `var`-rooted local that
+cannot live on the scalar stack and a closure's captures that cannot either
+(both [#162](https://github.com/myuon/cove/issues/162)), and the Host boundary
+at twenty-seven times a loop turn (#184 and #183). "The cliffs" above says what
+each would take. None is fixed, and the reason is this document's own history:
+each is a change to what a slot, a capture, a closure or a payload *is*, and
+changing those one at a time against their immediate parent is what
 [#126](https://github.com/myuon/cove/issues/126) is.
+
+One measurement constraint applies to all of them and did not exist when most
+of this document was written.
+[#179](https://github.com/myuon/cove/issues/179): the workspace has no
+`[profile.release]`, so rustc partitions codegen units by module and where code
+lives is a performance variable independent of what it does. "A change to
+`vm.rs` moved a benchmark that cannot execute it" is the cleanest instance.
+What survives it is a dynamic instruction count, an allocation count, and a
+before-and-after through one binary in one sitting.
