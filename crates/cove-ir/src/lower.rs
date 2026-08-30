@@ -4622,32 +4622,6 @@ impl<'a, 'l> Body<'a, 'l> {
         self.jump(Inst::Jump, next, span);
     }
 
-    /// `receiver.name(...)`, where the receiver is a value.
-    ///
-    /// The interpreter tries a declared method of the receiver's *runtime*
-    /// type first and falls back to the builtin table, so which of the two
-    /// applies is a fact about the receiver — and the receiver's type is
-    /// what the checker settled. Two answers follow from it, and the second
-    /// is as much of the point as the first:
-    ///
-    /// - Where the checker recorded the declaration this call reaches, that
-    ///   is the declaration, and nothing about the name is asked.
-    /// - Where it settled the receiver's type and recorded no declaration,
-    ///   this call reaches none: it is a builtin method, and a declared type
-    ///   answering to the same name somewhere in the package is not what it
-    ///   could have meant.
-    ///
-    /// Together those are why `impl Box { fn length(self) }` and
-    /// `[1, 2, 3].length()` can now be written in one program. Both used to
-    /// refuse — the first because a builtin shares the name, the second
-    /// because a declared type does — and a name was all there was to tell
-    /// them apart, which is not enough.
-    ///
-    /// A receiver the checker abstained about, or one it never walked, is
-    /// still resolved by name and still refuses what a name cannot settle.
-    /// Guessing there is the one mistake a second backend must not make:
-    /// `[1, 2, 3].length()` is the builtin's `3` on the oracle, and a `Call`
-    /// to a declared `Box.length` is a different program.
     /// The trait a call to `method` on a value of the type parameter
     /// `param` goes through, qualified, and nothing when no bound declares
     /// one.
@@ -4922,6 +4896,32 @@ impl<'a, 'l> Body<'a, 'l> {
         Ok(None)
     }
 
+    /// `receiver.name(...)`, where the receiver is a value.
+    ///
+    /// The interpreter tries a declared method of the receiver's *runtime*
+    /// type first and falls back to the builtin table, so which of the two
+    /// applies is a fact about the receiver — and the receiver's type is
+    /// what the checker settled. Two answers follow from it, and the second
+    /// is as much of the point as the first:
+    ///
+    /// - Where the checker recorded the declaration this call reaches, that
+    ///   is the declaration, and nothing about the name is asked.
+    /// - Where it settled the receiver's type and recorded no declaration,
+    ///   this call reaches none: it is a builtin method, and a declared type
+    ///   answering to the same name somewhere in the package is not what it
+    ///   could have meant.
+    ///
+    /// Together those are why `impl Box { fn length(self) }` and
+    /// `[1, 2, 3].length()` can now be written in one program. Both used to
+    /// refuse — the first because a builtin shares the name, the second
+    /// because a declared type does — and a name was all there was to tell
+    /// them apart, which is not enough.
+    ///
+    /// A receiver the checker abstained about, or one it never walked, is
+    /// still resolved by name and still refuses what a name cannot settle.
+    /// Guessing there is the one mistake a second backend must not make:
+    /// `[1, 2, 3].length()` is the builtin's `3` on the oracle, and a `Call`
+    /// to a declared `Box.length` is a different program.
     fn method_call(
         &mut self,
         id: ExprId,
@@ -5447,26 +5447,6 @@ fn snapshot_without_a_conformance(ty: &Ty) -> bool {
     }
 }
 
-/// Every name a body uses as the root of a place, collected before anything
-/// is lowered.
-///
-/// A place is an index into the *value* stack, so a binding a place can be
-/// rooted at has to live there — which is a fact about the whole body and
-/// not about the statement that declares the binding, since
-/// `bump(var total)` is written after `var total = 0` and decides where
-/// `total` lives. So the body is walked once first, and
-/// [`Body::rooted`] is what the walk found.
-///
-/// Two forms root a place: a `var` argument, whose root is the name at the
-/// bottom of the `a.b.c` it is written as, and the receiver of `freeze`,
-/// which is the one builtin that needs the storage handle where it lies
-/// rather than a read of it. A `var self` receiver roots one too and is not
-/// collected here, because a method that declares one is declared on a
-/// struct or an enum and a binding of such a type is a value slot already;
-/// `Body::place` refuses rather than guessing if that ever stops being true.
-///
-/// The answer is a set of *names*, which over-approximates across shadowing
-/// on purpose — see [`Body::rooted`] for why that is free.
 /// Every name a lambda's body can read from the environment around it.
 ///
 /// This is `crate::interp`'s `mention_block`, and it has to stay that
@@ -5640,6 +5620,26 @@ fn mention_pattern<'a>(pattern: &'a Pattern, out: &mut BTreeSet<&'a str>) {
     }
 }
 
+/// Every name a body uses as the root of a place, collected before anything
+/// is lowered.
+///
+/// A place is an index into the *value* stack, so a binding a place can be
+/// rooted at has to live there — which is a fact about the whole body and
+/// not about the statement that declares the binding, since
+/// `bump(var total)` is written after `var total = 0` and decides where
+/// `total` lives. So the body is walked once first, and
+/// [`Body::rooted`] is what the walk found.
+///
+/// Two forms root a place: a `var` argument, whose root is the name at the
+/// bottom of the `a.b.c` it is written as, and the receiver of `freeze`,
+/// which is the one builtin that needs the storage handle where it lies
+/// rather than a read of it. A `var self` receiver roots one too and is not
+/// collected here, because a method that declares one is declared on a
+/// struct or an enum and a binding of such a type is a value slot already;
+/// `Body::place` refuses rather than guessing if that ever stops being true.
+///
+/// The answer is a set of *names*, which over-approximates across shadowing
+/// on purpose — see [`Body::rooted`] for why that is free.
 fn var_argument_roots(body: &Block) -> BTreeSet<&str> {
     let mut found = BTreeSet::new();
     walk_block(body, &mut found);
@@ -5798,15 +5798,6 @@ fn var_marking_disagrees(what: &str, param: &str, declared_var: bool, span: Span
     )
 }
 
-/// Neither marking a call site can write, at a call this backend does not
-/// route through a declared function's parameters.
-///
-/// A struct initializer, a host operation, an enum case, a builtin, and a
-/// builtin's associated function all take values. None of them declares a
-/// `var` parameter, so `var` written at one is a program the interpreter
-/// refuses too; and none of them collects a variadic parameter's elements,
-/// so a `...` written at one is a marking the interpreter *ignores* — which
-/// is refused here instead. See [`no_spread_here`].
 /// How many of a function's parameters arrive on the value stack, which is
 /// where its captures begin.
 ///
@@ -5849,6 +5840,15 @@ fn task_arguments(args: Args<'_>, what: &str, takes: usize, span: Span) -> Resul
     Ok(())
 }
 
+/// Neither marking a call site can write, at a call this backend does not
+/// route through a declared function's parameters.
+///
+/// A struct initializer, a host operation, an enum case, a builtin, and a
+/// builtin's associated function all take values. None of them declares a
+/// `var` parameter, so `var` written at one is a program the interpreter
+/// refuses too; and none of them collects a variadic parameter's elements,
+/// so a `...` written at one is a marking the interpreter *ignores* — which
+/// is refused here instead. See [`no_spread_here`].
 fn plain_arguments(args: Args<'_>, what: &str) -> Result<(), Unsupported> {
     if let Some(arg) = args.iter().find(|arg| arg.is_var) {
         return Err(Unsupported::new(
