@@ -99,6 +99,8 @@ pub enum BuiltinType {
     String,
     /// `Error`, the builtin error struct.
     Error,
+    /// `Duration`, a signed count of nanoseconds.
+    Duration,
     /// `Array<T>`, the fixed-length immutable sequence.
     Array(&'static BuiltinType),
     /// `Vector<T>`, the growable one.
@@ -146,6 +148,7 @@ impl fmt::Display for BuiltinType {
             BuiltinType::Float => f.write_str("Float"),
             BuiltinType::String => f.write_str("String"),
             BuiltinType::Error => f.write_str("Error"),
+            BuiltinType::Duration => f.write_str("Duration"),
             BuiltinType::Array(item) => write!(f, "Array<{item}>"),
             BuiltinType::Vector(item) => write!(f, "Vector<{item}>"),
             BuiltinType::Set(item) => write!(f, "Set<{item}>"),
@@ -317,8 +320,10 @@ pub struct BuiltinSchema {
     /// undeclared name. The types that say `false` are the ones no program
     /// writes the name of: a `Task` comes from `scope.spawn`, a `Shared` from
     /// the `Shared(...)` constructor, a `Scope` from `scope name { ... }`,
-    /// and a `Range`, a `Duration`, or a `Unit` from an expression that makes
-    /// one.
+    /// and a `Range` or a `Unit` from an expression that makes one.
+    /// `Duration` used to be in that list and is not any more — a duration
+    /// built from a number a program computed is written
+    /// `Duration.millis(n)`, so the name is one a program writes.
     pub namespace: bool,
     /// The cases, for a builtin enum. Empty for everything else.
     ///
@@ -1828,15 +1833,142 @@ pub const UNIT: BuiltinSchema = BuiltinSchema {
 // ---------------------------------------------------------------- Duration
 
 /// `Duration`: a signed count of nanoseconds.
+///
+/// # One function per literal suffix, in both directions
+///
+/// `500ms` is a literal and was, until these existed, the only way to have a
+/// `Duration` at all: a program that read `250` out of a manifest, an
+/// argument, or the environment had no expression that turned it into the
+/// `Duration` `clock.sleep` takes (issue #146). The six associated functions
+/// are that expression, and there is **exactly one per suffix the lexer
+/// accepts** — `ns`, `us`, `ms`, `s`, `m`, `h` — so that
+/// `Duration.seconds(1)` and `1s` are the same value and the reader has one
+/// table to learn rather than two. Nothing about a literal changes: `1s` is
+/// still 1,000,000,000 nanoseconds, written the way it always was.
+///
+/// The six methods are the same table read backwards, which is what lets a
+/// duration be *reported* as well as built: `d.millis()` is the whole number
+/// of milliseconds in `d`. That direction is not free of a choice, so it is
+/// written down — see the entries.
+///
+/// A unit is a function name rather than an argument because a builtin
+/// parameter is a name and a type and nothing else: a `Duration.of(count,
+/// unit)` would need a unit type to pass, which would be a seventh builtin
+/// enum existing only to be an argument. This is `Int.parse`/`Int.parseRadix`
+/// answering the same pressure the same way.
+///
+/// Scalar multiplication — `Duration * Int` — was the other shape and is not
+/// this one. It is a smaller change and it can only build: there is no
+/// expression made of `*` that reads a count back out, and issue #146 asks
+/// for both directions because a timeout that can be configured is a timeout
+/// that gets reported.
+///
+/// # What a builder does with a count it cannot hold
+///
+/// **A negative count is a negative duration and nothing else.** A
+/// `Duration` is *signed* nanoseconds, `-1h` is already a value a program can
+/// write, and `Duration.hours(-1)` is that value. A builder that refused one
+/// would be narrower than the literal it mirrors.
+///
+/// **A count whose nanoseconds do not fit in an `Int` stops the run**, in the
+/// words `Duration` arithmetic already stops it in. The Language Card calls
+/// integer overflow a broken invariant rather than a wrapped result, and
+/// `1h + 1h` past the end already trapped; a builder that answered a
+/// `Result` instead would make the same overflow two different kinds of
+/// event depending on how the duration was reached.
 pub const DURATION: BuiltinSchema = BuiltinSchema {
     name: "Duration",
     parameters: &[],
-    namespace: false,
+    // A program now writes the name: `Duration.millis(n)` is how a computed
+    // duration is built.
+    namespace: true,
     cases: &[],
     fields: &[],
-    methods: &[SNAPSHOT],
-    associated: &[],
+    methods: &[
+        // Each answers the whole number of its unit in the receiver,
+        // **truncated toward zero**, which is what `Int` division already
+        // does and is why `1500ms.seconds()` is 1 and `-1500ms.seconds()`
+        // is -1. Truncating rather than rounding is what makes
+        // `d.seconds()` and `d.nanos() / 1_000_000_000` the same number, so
+        // a program that reads a duration one way and one that reads it the
+        // other cannot disagree.
+        //
+        // None of the six can fail: every unit divides into a count that
+        // fits where the nanoseconds already did.
+        DURATION_NANOS,
+        DURATION_MICROS,
+        DURATION_MILLIS,
+        DURATION_SECONDS,
+        DURATION_MINUTES,
+        DURATION_HOURS,
+        SNAPSHOT,
+    ],
+    associated: &[
+        DURATION_OF_NANOS,
+        DURATION_OF_MICROS,
+        DURATION_OF_MILLIS,
+        DURATION_OF_SECONDS,
+        DURATION_OF_MINUTES,
+        DURATION_OF_HOURS,
+    ],
 };
+
+/// `nanos(count: Int) -> Duration`, which is `count` written `<count>ns`.
+const DURATION_OF_NANOS: MethodSchema = duration_builder("nanos");
+/// `micros(count: Int) -> Duration`, which is `count` written `<count>us`.
+const DURATION_OF_MICROS: MethodSchema = duration_builder("micros");
+/// `millis(count: Int) -> Duration`, which is `count` written `<count>ms`.
+const DURATION_OF_MILLIS: MethodSchema = duration_builder("millis");
+/// `seconds(count: Int) -> Duration`, which is `count` written `<count>s`.
+const DURATION_OF_SECONDS: MethodSchema = duration_builder("seconds");
+/// `minutes(count: Int) -> Duration`, which is `count` written `<count>m`.
+const DURATION_OF_MINUTES: MethodSchema = duration_builder("minutes");
+/// `hours(count: Int) -> Duration`, which is `count` written `<count>h`.
+const DURATION_OF_HOURS: MethodSchema = duration_builder("hours");
+
+/// `nanos() -> Int`, the receiver's whole nanoseconds. This one is exact.
+const DURATION_NANOS: MethodSchema = duration_reader("nanos");
+/// `micros() -> Int`, the receiver's whole microseconds, toward zero.
+const DURATION_MICROS: MethodSchema = duration_reader("micros");
+/// `millis() -> Int`, the receiver's whole milliseconds, toward zero.
+const DURATION_MILLIS: MethodSchema = duration_reader("millis");
+/// `seconds() -> Int`, the receiver's whole seconds, toward zero.
+const DURATION_SECONDS: MethodSchema = duration_reader("seconds");
+/// `minutes() -> Int`, the receiver's whole minutes, toward zero.
+const DURATION_MINUTES: MethodSchema = duration_reader("minutes");
+/// `hours() -> Int`, the receiver's whole hours, toward zero.
+const DURATION_HOURS: MethodSchema = duration_reader("hours");
+
+/// One of the six `Duration.<unit>(count)` associated functions.
+///
+/// Written as a function rather than six literals because the six differ in
+/// one word: a table where the entries differ only in a name is a table one
+/// of whose entries can be wrong on its own.
+const fn duration_builder(name: &'static str) -> MethodSchema {
+    MethodSchema {
+        name,
+        generics: &[],
+        params: &[ParamSchema {
+            name: "count",
+            ty: BuiltinType::Int,
+        }],
+        variadic: false,
+        result: BuiltinType::Duration,
+        mutating: false,
+    }
+}
+
+/// One of the six `duration.<unit>()` methods, the builders read backwards.
+const fn duration_reader(name: &'static str) -> MethodSchema {
+    MethodSchema {
+        name,
+        generics: &[],
+        params: &[],
+        variadic: false,
+        result: BuiltinType::Int,
+        mutating: false,
+    }
+}
 
 // ------------------------------------------------------------------- Error
 
@@ -2035,11 +2167,50 @@ mod tests {
             namespaces,
             [
                 "Array", "Vector", "Map", "Set", "String", "Option", "Result", "Int", "Float",
-                "Bool", "Error"
+                "Bool", "Duration", "Error"
             ]
         );
         assert!(is_builtin_type("Vector"));
+        // `Duration` joined the list when it gained the six builders that
+        // turn a number a program computed into one.
+        assert!(is_builtin_type("Duration"));
         assert!(!is_builtin_type("Task"));
+    }
+
+    /// One `Duration.<unit>(count)` per suffix a duration literal may be
+    /// written with, and one `duration.<unit>()` reading it back.
+    ///
+    /// The pairing is the point: a unit a program can build in and cannot
+    /// report in would make a configured timeout unprintable, and a unit
+    /// the lexer accepts and no function names would make `1s` and
+    /// `Duration.seconds(1)` two vocabularies.
+    #[test]
+    fn a_duration_is_built_and_read_in_the_units_a_literal_is_written_in() {
+        let built: Vec<&str> = DURATION.associated.iter().map(|f| f.name).collect();
+        assert_eq!(
+            built,
+            ["nanos", "micros", "millis", "seconds", "minutes", "hours"]
+        );
+        for name in &built {
+            let builder = DURATION
+                .associated_function(name)
+                .expect("a builder for the unit");
+            assert_eq!(
+                builder.signature(),
+                format!("{name}(count: Int) -> Duration")
+            );
+            let reader = DURATION.method(name).expect("a reader for the same unit");
+            assert_eq!(reader.signature(), format!("{name}() -> Int"));
+        }
+        // `snapshot` is the one method that is not a unit, so the readers
+        // and the builders are otherwise the same list.
+        let read: Vec<&str> = DURATION
+            .methods
+            .iter()
+            .map(|method| method.name)
+            .filter(|name| *name != SNAPSHOT.name)
+            .collect();
+        assert_eq!(read, built);
     }
 
     /// `push` and `freeze` are the language's only `var self` methods, and

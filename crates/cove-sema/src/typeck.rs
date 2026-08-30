@@ -7273,6 +7273,7 @@ fn builtin_ty(declared: &BuiltinType, bound: &BTreeMap<&str, Ty>, receiver: Opti
         BuiltinType::Float => Ty::Float,
         BuiltinType::String => Ty::Str,
         BuiltinType::Error => Ty::Error,
+        BuiltinType::Duration => Ty::Duration,
         BuiltinType::Array(item) => Ty::Array(nested(item)),
         BuiltinType::Vector(item) => Ty::Vector(nested(item)),
         BuiltinType::Set(item) => Ty::Set(nested(item)),
@@ -8812,6 +8813,48 @@ fn run() -> Counter {
         assert_eq!(error.message, "expected `Bool`, found `Int`");
     }
 
+    // ------------------------------------ building and reading a duration
+
+    /// A `Duration` is built from a number in any of the six units a literal
+    /// is written in, and read back in the same six.
+    #[test]
+    fn a_duration_is_built_from_a_count_and_read_back_as_one() {
+        accepts_body(
+            "  let timeout: Duration = Duration.millis(250)\n  \
+             let whole: Duration = Duration.nanos(1) + Duration.micros(1) + \
+             Duration.seconds(1) + Duration.minutes(1) + Duration.hours(1)\n  \
+             let back: Int = timeout.millis()\n  \
+             let coarse: Int = whole.seconds()",
+        );
+        // The builder takes an `Int`; a `Duration` is what it answers rather
+        // than what it takes.
+        let error = rejects_body("  let d = Duration.millis(1s)");
+        assert_eq!(error.code, MISMATCH);
+        assert_eq!(error.message, "expected `Int`, found `Duration`");
+        let error = rejects_body("  let n: Int = Duration.seconds(1)");
+        assert_eq!(error.message, "expected `Int`, found `Duration`");
+        let error = rejects_body("  let d = 1s\n  let n: Duration = d.seconds()");
+        assert_eq!(error.message, "expected `Duration`, found `Int`");
+    }
+
+    /// A unit no literal suffix names is not a unit, in either direction.
+    #[test]
+    fn a_duration_has_only_the_units_a_literal_is_written_in() {
+        let error = rejects_body("  let d = Duration.weeks(1)");
+        assert_eq!(error.code, UNKNOWN_ASSOCIATED);
+        assert_eq!(
+            error.message,
+            "`Duration` has no associated function `weeks`"
+        );
+        let error = rejects_body("  let d = 1s\n  let n = d.weeks()");
+        assert_eq!(error.code, UNKNOWN_METHOD);
+        assert_eq!(error.message, "`Duration` has no method `weeks`");
+        assert_eq!(
+            error.help.unwrap(),
+            "`Duration` has `nanos`, `micros`, `millis`, `seconds`, `minutes`, `hours`, `snapshot`"
+        );
+    }
+
     /// A receiver that is not a sequence has none of the four.
     #[test]
     fn only_a_sequence_walks_with_a_closure() {
@@ -8875,7 +8918,7 @@ fn run() -> Counter {
         assert_eq!(error.message, "`Array` has no associated function `of`");
         assert_eq!(
             error.rule.unwrap(),
-            "A builtin type's associated functions are `Vector.of`, `Map.of`, `Set.of`, `String.fromCodePoint`, `Int.parse`, `Int.parseRadix`, and `Float.parse`."
+            "A builtin type's associated functions are `Vector.of`, `Map.of`, `Set.of`, `String.fromCodePoint`, `Int.parse`, `Int.parseRadix`, `Float.parse`, `Duration.nanos`, `Duration.micros`, `Duration.millis`, `Duration.seconds`, `Duration.minutes`, and `Duration.hours`."
         );
     }
 

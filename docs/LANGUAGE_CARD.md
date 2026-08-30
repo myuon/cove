@@ -108,6 +108,13 @@ Assignment and ordinary argument passing perform field-wise shallow copies.
   into them, and `String.fromCodePoint(codePoint)` builds one from the number
   that names it, or an `Err` for a number that names none — one out of range,
   or a surrogate half. There is no `Character` type.
+- A `Duration` is a signed count of nanoseconds. `500ms` writes one, and
+  `Duration.millis(n)` builds one from a number the program computed — one
+  associated function per literal suffix, so `Duration.seconds(1)` is `1s`:
+  `nanos`, `micros`, `millis`, `seconds`, `minutes`, `hours`. The same six
+  read one back, as `d.millis()`, truncated toward zero. A negative count is a
+  negative duration; a count whose nanoseconds do not fit stops the run, like
+  every other integer overflow.
 - `Int.parse(text)` reads a decimal number and `Int.parseRadix(text, radix)`
   reads one in a radix from 2 to 36. Text that is not a number answers `Err`;
   a radix outside 2 to 36 stops the run, because it is the call that is wrong

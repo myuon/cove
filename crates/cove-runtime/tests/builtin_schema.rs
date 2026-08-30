@@ -482,6 +482,40 @@ static EXERCISES: &[Exercise] = &[
         name: "snapshot",
         body: "  let wait = 500ms\n  let copy = wait.snapshot()\n  0",
     },
+    // One builder and one reader per unit a duration literal is written in.
+    // Each reader is called on what its own builder made, so an exercise
+    // that passes is the round trip rather than two halves that happen to
+    // run.
+    Exercise {
+        ty: "Duration",
+        name: "nanos",
+        body: "  let wait = Duration.nanos(7)\n  wait.nanos()",
+    },
+    Exercise {
+        ty: "Duration",
+        name: "micros",
+        body: "  let wait = Duration.micros(7)\n  wait.micros()",
+    },
+    Exercise {
+        ty: "Duration",
+        name: "millis",
+        body: "  let wait = Duration.millis(7)\n  wait.millis()",
+    },
+    Exercise {
+        ty: "Duration",
+        name: "seconds",
+        body: "  let wait = Duration.seconds(7)\n  wait.seconds()",
+    },
+    Exercise {
+        ty: "Duration",
+        name: "minutes",
+        body: "  let wait = Duration.minutes(7)\n  wait.minutes()",
+    },
+    Exercise {
+        ty: "Duration",
+        name: "hours",
+        body: "  let wait = Duration.hours(7)\n  wait.hours()",
+    },
     Exercise {
         ty: "Task",
         name: "await",
@@ -1421,6 +1455,78 @@ fn float_max_of_two_nans_is_nan() {
     Ok(nan) => if nan.max(nan) != nan.max(nan) { 1 } else { 0 },
     Err(_) => 0
   }"#,
+        1,
+    );
+}
+
+// --------------------------- what a `Duration` builds from and reads back
+//
+// The exercises above prove each unit's builder and reader dispatch; these
+// prove they are the same table read in two directions, what a negative
+// count means, and where a count stops the run.
+
+/// A builder and the matching literal are the same value, which is the whole
+/// promise: nothing about `1s` changes because `Duration.seconds(1)` exists.
+#[test]
+fn a_built_duration_equals_the_literal_that_names_it() {
+    check_and_answer(
+        "Duration builders against the literals",
+        r#"  let small = Duration.nanos(1) == 1ns && Duration.micros(1) == 1us
+  let middle = Duration.millis(500) == 500ms && Duration.seconds(1) == 1s
+  let large = Duration.minutes(1) == 1m && Duration.hours(1) == 1h
+  if small && middle && large { 1 } else { 0 }"#,
+        1,
+    );
+}
+
+/// A `Duration` is signed nanoseconds, so a negative count is a negative
+/// duration and not a refusal.
+#[test]
+fn a_negative_count_builds_a_negative_duration() {
+    check_and_answer(
+        "Duration.hours with a negative count",
+        r#"  if Duration.hours(-1) == 0s - 1h { 1 } else { 0 }"#,
+        1,
+    );
+}
+
+/// A count whose nanoseconds do not fit stops the run, in the words
+/// `Duration` arithmetic already stops it in.
+#[test]
+fn a_duration_that_does_not_fit_stops_the_run() {
+    let error = check_and_error(
+        "Duration.hours past the end",
+        "  Duration.hours(9223372036854775807).hours()",
+    );
+    assert_eq!(error.message, "`Int` duration arithmetic overflowed");
+    assert_eq!(
+        error.rule.as_deref(),
+        Some("Integer overflow is a broken invariant, not a wrapped result.")
+    );
+}
+
+/// A reader answers the whole number of its unit, truncated toward zero,
+/// which is what `Int` division does and is why the two agree.
+#[test]
+fn a_reader_truncates_toward_zero() {
+    check_and_answer(
+        "Duration readers truncating",
+        r#"  let ahead = 1500ms
+  let behind = 0s - 1500ms
+  let towardZero = ahead.seconds() == 1 && behind.seconds() == -1
+  let agrees = ahead.seconds() == ahead.nanos() / 1000000000
+  if towardZero && agrees { 1 } else { 0 }"#,
+        1,
+    );
+}
+
+/// Zero is zero in every unit, and a duration smaller than the unit it is
+/// read in answers nothing rather than failing.
+#[test]
+fn a_duration_smaller_than_its_unit_reads_as_zero() {
+    check_and_answer(
+        "Duration read in a larger unit",
+        r#"  if 1ms.hours() == 0 && 0s.nanos() == 0 { 1 } else { 0 }"#,
         1,
     );
 }

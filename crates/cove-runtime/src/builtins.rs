@@ -340,6 +340,29 @@ pub fn call_associated(
             }
             Ok(Value::Set(Rc::new(set)))
         }
+        // `Duration.millis(n)` and its five neighbours: the six duration
+        // literal suffixes as functions, so a count a program computed
+        // becomes the `Duration` a host call takes. `Duration.seconds(1)`
+        // and `1s` are one value.
+        //
+        // A negative count is a negative duration, because a `Duration` is
+        // signed nanoseconds and `-1s` is already writable. A count whose
+        // nanoseconds do not fit stops the run in the words `Duration`
+        // arithmetic already stops it in — `checked_mul` is the same
+        // question `checked_add` asks for `1h + 1h`, so an overflow is one
+        // kind of event however the duration was reached.
+        ("Duration", unit) if duration_unit(unit).is_some() => {
+            let factor = duration_unit(unit).expect("the guard just asked");
+            let what = format!("Duration.{unit}");
+            let args = expect_args(&what, args, 1, span)?;
+            let Value::Int(count) = &args[0] else {
+                return Err(type_error(&what, "count", "Int", &args[0], span));
+            };
+            let nanos = count
+                .checked_mul(factor)
+                .ok_or_else(|| crate::interp::overflow("duration arithmetic", span))?;
+            Ok(Value::Duration(nanos))
+        }
         ("Int", "parse") => {
             let args = expect_args("Int.parse", args, 1, span)?;
             let Value::Str(text) = &args[0] else {
@@ -874,8 +897,41 @@ pub fn call_method(
             }
             _ => Err(no_method("Float", name, span)),
         },
+        // The six builders read backwards: `d.millis()` is the whole number
+        // of milliseconds in `d`, **truncated toward zero**, which is what
+        // `Int` division already does — so `1500ms.seconds()` is 1 and
+        // `(-1500ms).seconds()` is -1, and `d.seconds()` is
+        // `d.nanos() / 1_000_000_000` whichever way a program asks. None can
+        // fail: dividing a count that fits leaves a count that fits.
+        Value::Duration(ns) => match duration_unit(name) {
+            Some(factor) => {
+                expect_args(name, args, 0, span)?;
+                Ok(Value::Int(ns / factor))
+            }
+            None => Err(no_method("Duration", name, span)),
+        },
         other => Err(no_method(&other.type_name(), name, span)),
     }
+}
+
+/// The nanoseconds in one of the six units a `Duration` is written in.
+///
+/// One table for both directions and for both halves of the toolchain's
+/// question: `Duration.millis(n)` multiplies by what `d.millis()` divides
+/// by, so a duration built in a unit and read back in it is the same number.
+/// The names are the schema's, and the factors are the ones the lexer gives
+/// the matching literal suffix — `ns`, `us`, `ms`, `s`, `m`, `h` — so `1s`
+/// and `Duration.seconds(1)` cannot come apart.
+fn duration_unit(name: &str) -> Option<i64> {
+    Some(match name {
+        "nanos" => 1,
+        "micros" => 1_000,
+        "millis" => 1_000_000,
+        "seconds" => 1_000_000_000,
+        "minutes" => 60 * 1_000_000_000,
+        "hours" => 60 * 60 * 1_000_000_000,
+        _ => return None,
+    })
 }
 
 /// `map`, `filter`, `fold`, and `sorted`, which are the same four operations
