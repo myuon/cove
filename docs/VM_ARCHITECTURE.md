@@ -1089,6 +1089,105 @@ heap layout would actually be answering. The two are
 [#184](https://github.com/myuon/cove/issues/184); the heap itself has no issue,
 deliberately, and "What is settled and what is open" says why.
 
+### Both were taken, and this is what they were worth
+
+The paragraphs above are left as they were written, because what they argued
+is what was then done and the argument is the record of why. Both changes
+landed together, each committed and measured separately against one fixed
+baseline at `8638f0e` — the discipline
+[#126](https://github.com/myuon/cove/issues/126) exists to enforce — at
+fifteen samples a side, with a 95% percentile-bootstrap interval on the
+median shift. Every figure below is a median with its interval and the sign
+is the sign of the shift, so a negative number is faster.
+
+| benchmark    | #183 alone, VM | #183 + #184, VM | #183 alone, AST | #183 + #184, AST |
+| ------------ | -------------: | --------------: | --------------: | ---------------: |
+| `arrayget`   |        −13.67% |         −37.98% |          −6.14% |           −6.90% |
+| `chars`      |         −8.46% |         −32.93% |          −3.73% |           −5.73% |
+| `hostheavy`  |         −6.41% |          −2.48% |          −4.68% |           −2.92% |
+| `field`      |         −1.41% |          −1.59% |          −1.06% |           −0.83% |
+| `method`     |         −2.15% |          +0.95% |          −2.13% |           −1.74% |
+| `call`       |         −0.85% |          +0.21% |          −1.01% |           −1.66% |
+| `arith`      |         +0.62% |          +3.55% |          −4.27% |           −4.29% |
+
+**`arrayget` is 37 percent faster on the VM and the reason is arithmetic.**
+Its loop allocated four times a turn: the `Box` and the `Vec` of the `Option`
+that `get` answers with, and the argument vector for each of `get` and
+`unwrapOr`. #183 removed the payload's `Vec` and #184 removed both argument
+vectors, so one allocation a turn is left where there were four. `chars` is
+the same shape and moved the same way.
+
+**`arith` is the control and it says what it always says.** It allocates
+nothing and calls no builtin, so neither change can touch what it executes;
+it read +3.55% on the VM and −4.29% on the AST interpreter, both inside the
+±6% layout band this document records, and both in the direction #179
+predicts for a change that adds code to `vm.rs` without adding code to the
+path. `method` at +0.95% and `call` at +0.21% on the VM are the same effect
+at the same size: neither runs a builtin in its loop. **An interval says a
+difference is real; it does not say the difference is your change**, and
+these four rows are where that distinction is doing work.
+
+The one figure worth reading twice is `hostheavy`, which was −6.41% after
+#183 and −2.48% after both. Nothing in #184 could have made a Host call
+slower — it does not touch the Host path, which still owns its argument
+vector for the reason below. What moved is layout, and it moved the more
+sensitive direction on the run that grew `vm.rs`.
+
+**The Host boundary kept its allocation, deliberately.**
+`HostModule::call` takes a `Vec<Value>` and is public API an embedder
+implements; the argument vector is one of the fourteen allocations a turn of
+`conv_host`, and breaking that signature is not paid for by one of fourteen.
+`benches/convention`'s `conv_host` moved from 2583.6 ms to 2386.2 ms after
+#183 — the `Result` a Host operation answers with, two million times — and
+back to 2471.8 ms after #184, which is the same layout effect `hostheavy`
+shows and not a cost of anything #184 did.
+
+So what is still allocating is one `Box` per `Option` a program builds, the
+Host boundary's argument vector and the `Result` it answers with, and the
+closure value. That is the evidence a VM-owned heap would be answering, and
+it is now on the record rather than predicted.
+
+### And the closure, which was the weakest of the three
+
+[#185](https://github.com/myuon/cove/issues/185) was filed with a caveat in
+its title — only `conv_fresh` pays for building a closure — and the first
+thing it asked for was whether any program does. The corpus answers yes, and
+not through the shape that was looked for. No `.cove` file in `examples/`
+writes a closure literal inside a loop body. What it writes is a small helper
+that builds one in its own body and is called once per element:
+`examples/life`'s `population(world, species)` is a `filter` callback over
+one capture, called once per creature per tick from `resolve`'s
+`for creature in world.creatures`, and `creatureNamed`, `hash`, `sightings`
+and `examples/covecheck`'s `runCheck` are the same shape. The two closure
+literals that *are* lexically inside a loop are `Shared.lock` callbacks, in
+`tests/e2e/tasks_shared` and `examples/covecheck/runner_test.cove`.
+
+What was taken is the cheap half. `Inst::MakeClosure` allocated one
+`Rc<str>` per capture, every time, to carry names the VM never reads — a
+lowered closure addresses captures by index, and only the interpreter's
+`invoke_body` and `Transfer::convert`'s not-task-safe diagnostic read one.
+They are now made once per program in `Vm::capture_names`, exactly as
+`Vm::constants` already does for a constant string, and `conv_fresh` fell
+from 706.3 ms to 623.4 ms against the same fixed baseline. Beside it
+`conv_closure` did not move — 224.4 ms to 227.0 ms — which is the check that
+what moved is the `make-closure` and not the call around it: **building and
+dropping a closure went from 240.9 ns a turn to 198.2 ns.**
+
+What was *not* taken is the representation. Dropping the names from
+`Closure::captures` outright saves the same one allocation and no more,
+because the pairs vector is one allocation either way, and it costs the two
+readers above. One claim in the issue is wrong and worth recording as such: a
+closure with no captures does not allocate a `Vec`, because `Vec::new()` and
+a `collect()` from an empty iterator allocate nothing.
+
+The gap that remains is a benchmark. `conv_fresh` is still the only row in
+the suite that builds a closure per turn, and the shape the corpus actually
+has — a callback per element, through a helper — has no row at all. One was
+not added here for a reason about attribution rather than about effort: a
+row the fixed baseline does not contain cannot be compared against it, and
+this round's whole discipline is that every figure is measured against
+`8638f0e`.
+
 ## The slice, and the gate
 
 The smallest end-to-end thing worth measuring is `benches/arith` running with
@@ -2377,6 +2476,15 @@ time against their immediate parent. #109 and #116 were where they were decided
 together; each now has a narrower issue of its own, and every one of those
 carries the measured ceiling it has to be decided against.
 
+Three of them were then fixed, and the paragraph above is left as written
+because its argument is why they were fixed the way they were: together, in
+one sitting, each committed separately and each measured against one fixed
+baseline rather than against the one before it. `conv_host` fell from
+2583.6 ms to 2288.2 ms and `conv_fresh` from 706.3 ms to 623.4 ms across the
+three; "Both were taken, and this is what they were worth" above has the
+whole table and says which row moved for which reason, and which rows moved
+for no reason anybody here can name.
+
 ## What a character costs, and what a receiver costs on top of it
 
 [Issue #99](https://github.com/myuon/cove/issues/99) measured `examples/cq`
@@ -2503,7 +2611,15 @@ the `Option` per index and the `Rc<str>` per character. The argument vector
 allocated per builtin call — [#184](https://github.com/myuon/cove/issues/184) —
 the same benchmarks, the same way. The closure value at four allocations, which
 the matrix added to that list — [#185](https://github.com/myuon/cove/issues/185),
-and the honest caveat there is that only `conv_fresh` pays it. The reading half
+and the honest caveat there is that only `conv_fresh` pays it.
+
+**Those three were built and measured; "Both were taken, and this is what they
+were worth" above is the result, and the paragraph they are named in is left
+as it was written.** What is left of each is written there too: the Host
+boundary still owns an argument vector, on purpose; a `Closure` is still a
+vector of name-and-value pairs, because dropping the names saves nothing more
+than interning them did; and a callback-per-element benchmark still does not
+exist. The reading half
 of a representation-independent embedding API —
 [#186](https://github.com/myuon/cove/issues/186) — which is why each of those
 three is a source break for embedders as things stand. The heap layout the VM
