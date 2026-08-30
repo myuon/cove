@@ -181,7 +181,7 @@ pub use cove_schema::builtins::free_builtin;
 /// table's, so the arity this enforces is the arity `cove check` reported on.
 pub fn call_assertion(
     name: &str,
-    args: Vec<Value>,
+    args: &mut Vec<Value>,
     sources: &[&str],
     span: Span,
 ) -> Result<Value, RuntimeError> {
@@ -265,13 +265,17 @@ fn source_of<'a>(sources: &[&'a str], index: usize) -> &'a str {
 /// Which names these are and how many arguments each carries come from the
 /// shared table; what each one builds is here, because building one needs a
 /// [`Value`].
-pub fn call_constructor(name: &str, args: Vec<Value>, span: Span) -> Result<Value, RuntimeError> {
+pub fn call_constructor(
+    name: &str,
+    args: &mut Vec<Value>,
+    span: Span,
+) -> Result<Value, RuntimeError> {
     let Some(schema) =
         free_builtin(name).filter(|schema| schema.kind == FreeBuiltinKind::Constructor)
     else {
         return Err(RuntimeError::new(format!("unknown constructor `{name}`")).at(span));
     };
-    let mut args = expect_args(name, args, schema.arity(), span)?;
+    let args = expect_args(name, args, schema.arity(), span)?;
     let value = args.remove(0);
     Ok(match name {
         "Ok" => Value::ok(value),
@@ -298,18 +302,18 @@ pub fn call_associated(
     host: &mut dyn Callable,
     type_name: &str,
     name: &str,
-    args: Vec<Value>,
+    args: &mut Vec<Value>,
     span: Span,
 ) -> Result<Value, RuntimeError> {
     match (type_name, name) {
-        ("Vector", "of") => Ok(host.allocate_vector(args)),
+        ("Vector", "of") => Ok(host.allocate_vector(std::mem::take(args))),
         // `Map.of` takes the `MapEntry` values `MapEntry(key:, value:)`
         // builds. A literal with two identical keys is a mistake, not an
         // intent, so a duplicate key is rejected rather than resolved by
         // silently keeping the first or last entry.
         ("Map", "of") => {
             let mut map: BTreeMap<MapKey, Value> = BTreeMap::new();
-            for arg in args {
+            for arg in args.drain(..) {
                 let Value::Struct(entry) = &arg else {
                     return Err(expects_map_entry(&arg, span));
                 };
@@ -333,7 +337,7 @@ pub fn call_associated(
         // rejects a duplicate key.
         ("Set", "of") => {
             let mut set: BTreeSet<MapKey> = BTreeSet::new();
-            for item in args {
+            for item in args.drain(..) {
                 let key = to_map_key("Set.of", "set element", &item, span)?;
                 if !set.insert(key.clone()) {
                     return Err(duplicate_key_error("Set.of", "element", &key, span));
@@ -449,7 +453,7 @@ pub fn call_method(
     host: &mut dyn Callable,
     receiver: &Value,
     name: &str,
-    args: Vec<Value>,
+    args: &mut Vec<Value>,
     span: Span,
 ) -> Result<Value, RuntimeError> {
     // A receiver that answers `length()` is one a program might have written
@@ -464,7 +468,7 @@ pub fn call_method(
     }
     match receiver {
         Value::Array(items) => match name {
-            "get" => Ok(index_of("Array.get", &args, span)?
+            "get" => Ok(index_of("Array.get", args, span)?
                 .and_then(|i| items.get(i).cloned())
                 .map(Value::some)
                 .unwrap_or_else(Value::none)),
@@ -478,7 +482,7 @@ pub fn call_method(
             }
             "contains" => contains("Array.contains", items, args, span),
             "indexOf" => index_of_element("Array.indexOf", items, args, span),
-            "slice" => Ok(Value::Array(slice("Array.slice", items, &args, span)?)),
+            "slice" => Ok(Value::Array(slice("Array.slice", items, args, span)?)),
             // `Vector.toArray` run backwards: a growable copy of these
             // elements that nothing else holds a handle to, so a `freeze()`
             // on it is the O(1) one. The elements are cloned as they are
@@ -499,7 +503,7 @@ pub fn call_method(
             check_live(storage, name, span)?;
             match name {
                 "push" => {
-                    let mut args = expect_args("push", args, 1, span)?;
+                    let args = expect_args("push", args, 1, span)?;
                     storage.elements.borrow_mut().push(args.remove(0));
                     Ok(Value::Unit)
                 }
@@ -512,9 +516,9 @@ pub fn call_method(
                 // observes it and there is nothing to write back to the
                 // receiver's own slot.
                 "set" => {
-                    let mut args = expect_args("Vector.set", args, 2, span)?;
+                    let args = expect_args("Vector.set", args, 2, span)?;
                     let value = args.remove(1);
-                    let Some(index) = index_of("Vector.set", &args, span)? else {
+                    let Some(index) = index_of("Vector.set", args, span)? else {
                         return Ok(Value::none());
                     };
                     let mut elements = storage.elements.borrow_mut();
@@ -547,7 +551,7 @@ pub fn call_method(
                 // `set`'s. The write goes through the storage handle, as
                 // `push`'s and `set`'s do, so an alias observes the shrink.
                 "remove" => {
-                    let Some(index) = index_of("Vector.remove", &args, span)? else {
+                    let Some(index) = index_of("Vector.remove", args, span)? else {
                         return Ok(Value::none());
                     };
                     let mut elements = storage.elements.borrow_mut();
@@ -556,7 +560,7 @@ pub fn call_method(
                     }
                     Ok(Value::some(elements.remove(index)))
                 }
-                "get" => Ok(index_of("Vector.get", &args, span)?
+                "get" => Ok(index_of("Vector.get", args, span)?
                     .and_then(|i| storage.elements.borrow().get(i).cloned())
                     .map(Value::some)
                     .unwrap_or_else(Value::none)),
@@ -565,7 +569,7 @@ pub fn call_method(
                     index_of_element("Vector.indexOf", &storage.elements.borrow(), args, span)
                 }
                 "slice" => {
-                    let sliced = slice("Vector.slice", &storage.elements.borrow(), &args, span)?;
+                    let sliced = slice("Vector.slice", &storage.elements.borrow(), args, span)?;
                     Ok(Value::Array(sliced))
                 }
                 "length" => {
@@ -635,7 +639,7 @@ pub fn call_method(
             // rather than write through `entries`; the past-participle names
             // say so, unlike `Vector`'s mutating `push`.
             "inserted" => {
-                let mut args = expect_args("Map.inserted", args, 2, span)?;
+                let args = expect_args("Map.inserted", args, 2, span)?;
                 let value = args.remove(1);
                 let key = to_map_key("Map.inserted", "map key", &args[0], span)?;
                 let mut next = (**entries).clone();
@@ -856,7 +860,7 @@ pub fn call_method(
                     Ok(Value::Bool(!some))
                 }
                 "unwrapOr" => {
-                    let mut args = expect_args("unwrapOr", args, 1, span)?;
+                    let args = expect_args("unwrapOr", args, 1, span)?;
                     Ok(match value.payload.first() {
                         Some(inner) if some => inner.clone(),
                         _ => args.remove(0),
@@ -882,14 +886,14 @@ pub fn call_method(
                 // and `mapError`: a caller that wants to see the error has
                 // that one, and a caller that has a default has this one.
                 "unwrapOr" => {
-                    let mut args = expect_args("unwrapOr", args, 1, span)?;
+                    let args = expect_args("unwrapOr", args, 1, span)?;
                     Ok(match value.payload.first() {
                         Some(inner) if ok => inner.clone(),
                         _ => args.remove(0),
                     })
                 }
                 "mapError" => {
-                    let mut args = expect_args("mapError", args, 1, span)?;
+                    let args = expect_args("mapError", args, 1, span)?;
                     let callback = args.remove(0);
                     if ok {
                         return Ok(receiver.clone());
@@ -1039,13 +1043,13 @@ fn walk_with(
     type_name: &str,
     elements: Vec<Value>,
     name: &str,
-    args: Vec<Value>,
+    args: &mut Vec<Value>,
     span: Span,
 ) -> Result<Value, RuntimeError> {
     let method = format!("{type_name}.{name}");
     match name {
         "map" => {
-            let mut args = expect_args(&method, args, 1, span)?;
+            let args = expect_args(&method, args, 1, span)?;
             let transform = args.remove(0);
             expect_callback(
                 host,
@@ -1063,7 +1067,7 @@ fn walk_with(
             Ok(Value::Array(mapped.into()))
         }
         "filter" => {
-            let mut args = expect_args(&method, args, 1, span)?;
+            let args = expect_args(&method, args, 1, span)?;
             let keep = args.remove(0);
             expect_callback(host, &method, "keep", "fn(T) -> Bool", 1, &keep, span)?;
             let mut kept = Vec::new();
@@ -1076,7 +1080,7 @@ fn walk_with(
             Ok(Value::Array(kept.into()))
         }
         "fold" => {
-            let mut args = expect_args(&method, args, 2, span)?;
+            let args = expect_args(&method, args, 2, span)?;
             let step = args.remove(1);
             let mut total = args.remove(0);
             expect_callback(host, &method, "step", "fn(R, T) -> R", 2, &step, span)?;
@@ -1086,7 +1090,7 @@ fn walk_with(
             Ok(total)
         }
         "sorted" => {
-            let mut args = expect_args(&method, args, 1, span)?;
+            let args = expect_args(&method, args, 1, span)?;
             let by = args.remove(0);
             expect_callback(host, &method, "by", "fn(T, T) -> Bool", 2, &by, span)?;
             Ok(Value::Array(
@@ -1262,7 +1266,7 @@ pub fn check_live(
 fn contains(
     method: &str,
     items: &[Value],
-    args: Vec<Value>,
+    args: &mut Vec<Value>,
     span: Span,
 ) -> Result<Value, RuntimeError> {
     let args = expect_args(method, args, 1, span)?;
@@ -1281,7 +1285,7 @@ fn contains(
 fn index_of_element(
     method: &str,
     items: &[Value],
-    args: Vec<Value>,
+    args: &mut Vec<Value>,
     span: Span,
 ) -> Result<Value, RuntimeError> {
     let args = expect_args(method, args, 1, span)?;
@@ -1332,12 +1336,12 @@ fn index_of(method: &str, args: &[Value], span: Span) -> Result<Option<usize>, R
     }
 }
 
-fn expect_args(
+fn expect_args<'a>(
     method: &str,
-    args: Vec<Value>,
+    args: &'a mut Vec<Value>,
     count: usize,
     span: Span,
-) -> Result<Vec<Value>, RuntimeError> {
+) -> Result<&'a mut Vec<Value>, RuntimeError> {
     if args.len() != count {
         return Err(arity_error(method, count, args.len(), span));
     }

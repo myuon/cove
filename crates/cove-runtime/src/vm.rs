@@ -731,6 +731,39 @@ pub struct Vm<'a> {
     /// no source position; this is the position, recorded by the one party
     /// that saw the assertion, so a test runner can point at it.
     assertion_failure: Option<(Span, String)>,
+    /// Argument vectors, lent to a builtin call and taken back after it.
+    ///
+    /// A builtin is handed its arguments in a `Vec<Value>` because several
+    /// of them move an argument rather than reading it — `Vector.push` moves
+    /// one into the storage, `fold` moves its accumulator through every
+    /// callback call, `Ok` moves its payload into the value it builds — so a
+    /// slice of the value stack would not do, quite apart from the reentry
+    /// below. Issue #184 is the cost that made this worth arranging: one
+    /// `Vec` allocated and dropped per builtin call, which
+    /// `benches/arrayget` paid twice a turn.
+    ///
+    /// So the vectors are lent instead of made. [`Vm::borrow_args`] takes
+    /// one from here and drains the arguments into it,
+    /// [`Vm::return_args`] empties it and puts it back, and after the first
+    /// turn of any loop the capacity is already there.
+    ///
+    /// A stack rather than a single scratch vector because a builtin
+    /// re-enters: `map` calls a Cove callback through
+    /// [`Vm::call_from_host`], and that callback may call a builtin of its
+    /// own, which asks for a second vector while the first is still lent
+    /// out. The nesting is the call depth, which the budget already bounds.
+    ///
+    /// **Nothing in here is a GC root, and it must not become one.**
+    /// [`Vm::return_args`] clears a vector before storing it, so a stored
+    /// vector holds no `Value` at all. A vector that is *lent out* holds
+    /// values that are no longer on [`Vm::stack`], exactly as the vector
+    /// `Vm::take` used to build did, and the collector reaches them the same
+    /// way it always has — through [`crate::heap`]'s shortfall rule, which
+    /// [`StackRoots`]'s documentation names as covering "the `Vec<Value>` a
+    /// host call was handed". Walking these as roots as well would count
+    /// each reference twice, which that module's documentation says is the
+    /// one thing the accounting cannot survive.
+    arg_vectors: Vec<Vec<Value>>,
 }
 
 impl<'a> Vm<'a> {
@@ -770,6 +803,7 @@ impl<'a> Vm<'a> {
             timings: Vec::new(),
             wait: Duration::ZERO,
             assertion_failure: None,
+            arg_vectors: Vec::new(),
         };
         vm.bind_budget();
         vm
@@ -1465,9 +1499,11 @@ impl<'a> Vm<'a> {
                 Inst::CallBuiltin { name: method, argc } => {
                     let span = running.span_at(pc);
                     let method = name(program, method);
-                    let values = self.take(argc as usize);
+                    let mut values = self.borrow_args(argc as usize);
                     let receiver = self.pop();
-                    let value = builtins::call_method(self, &receiver, method, values, span)?;
+                    let answer = builtins::call_method(self, &receiver, method, &mut values, span);
+                    self.return_args(values);
+                    let value = answer?;
                     // A builtin's cost follows what it produced: `chars()`
                     // builds one element per character, and charging for the
                     // instruction alone would price it like `length()`.
@@ -1596,28 +1632,32 @@ impl<'a> Vm<'a> {
                 Inst::MakeBuiltin { name: which, argc } => {
                     let span = running.span_at(pc);
                     let which = name(program, which);
-                    let values = self.take(argc as usize);
-                    let value = self.make_builtin(which, values, running.arg_spans_at(pc), span)?;
-                    self.stack.push(value);
+                    let mut values = self.borrow_args(argc as usize);
+                    let answer =
+                        self.make_builtin(which, &mut values, running.arg_spans_at(pc), span);
+                    self.return_args(values);
+                    self.stack.push(answer?);
                 }
                 Inst::MakeEnum { ty, case, argc } => {
                     let span = running.span_at(pc);
                     let case = name(program, case);
-                    let payload = self.take(argc as usize);
+                    let mut payload = self.borrow_args(argc as usize);
                     let shape = self.enums[ty.0 as usize]
                         .as_ref()
                         .expect("every `make-enum` names an enum this VM shaped");
                     // The oracle's own constructor, so a case that does not
                     // exist and a payload of the wrong length are reported in
                     // the words `Interpreter::enum_case` reports them in.
-                    let value = crate::interp::enum_case(
+                    let answer = crate::interp::enum_case(
                         self.runtime.program(),
                         &shape.module,
                         &shape.decl,
                         case,
-                        payload,
+                        &mut payload,
                         span,
-                    )?;
+                    );
+                    self.return_args(payload);
+                    let value = answer?;
                     // A case is built from its payload, so what it costs
                     // follows how much payload there was.
                     self.fuel += u64::from(argc);
@@ -1631,8 +1671,10 @@ impl<'a> Vm<'a> {
                     let span = running.span_at(pc);
                     let ty = name(program, ty);
                     let which = name(program, which);
-                    let values = self.take(argc as usize);
-                    let value = builtins::call_associated(self, ty, which, values, span)?;
+                    let mut values = self.borrow_args(argc as usize);
+                    let answer = builtins::call_associated(self, ty, which, &mut values, span);
+                    self.return_args(values);
+                    let value = answer?;
                     // `Vector.of` and `Map.of` are variadic and build one
                     // element per argument, so the arguments are what the
                     // cost follows rather than the one instruction.
@@ -1968,9 +2010,38 @@ impl<'a> Vm<'a> {
     }
 
     /// The top `count` values, in the order they were pushed.
+    ///
+    /// Kept for the calls that hand the values to something that takes them
+    /// away for good — a Host operation, which crosses the public
+    /// [`crate::host::HostModule`] boundary owning what it was given. Every
+    /// call that gets its vector back uses [`Vm::borrow_args`] instead.
     fn take(&mut self, count: usize) -> Vec<Value> {
         let at = self.stack.len() - count;
         self.stack.drain(at..).collect()
+    }
+
+    /// The top `count` values, in a vector this VM lends and expects back.
+    ///
+    /// The counterpart of [`Vm::return_args`], and the two must be used as a
+    /// pair — including on the failing path, since a builtin that returns an
+    /// error has still finished with the vector. See [`Vm::arg_vectors`] for
+    /// why a lent vector is not a GC root and why a returned one holds
+    /// nothing.
+    fn borrow_args(&mut self, count: usize) -> Vec<Value> {
+        let mut args = self.arg_vectors.pop().unwrap_or_default();
+        let at = self.stack.len() - count;
+        args.extend(self.stack.drain(at..));
+        args
+    }
+
+    /// Takes back a vector [`Vm::borrow_args`] lent, emptied.
+    ///
+    /// Emptied here rather than by the callee, so that a stored vector never
+    /// holds a `Value` and the pool is never something the collector has to
+    /// know about. Capacity survives, which is the whole point.
+    fn return_args(&mut self, mut args: Vec<Value>) {
+        args.clear();
+        self.arg_vectors.push(args);
     }
 
     /// The five instructions that call a host resource, copy a value, spread
@@ -2569,9 +2640,12 @@ impl<'a> Vm<'a> {
                 .map(|(_, id)| *id)
         });
         let Some(target) = target else {
-            let values = self.take(argc as usize - 1);
+            let mut values = self.borrow_args(argc as usize - 1);
             let receiver = self.pop();
-            let value = builtins::call_method(self, &receiver, &dispatch.method, values, span)?;
+            let answer =
+                builtins::call_method(self, &receiver, &dispatch.method, &mut values, span);
+            self.return_args(values);
+            let value = answer?;
             self.fuel += size_of_value(&value);
             self.stack.push(value);
             return Ok(None);
@@ -3154,7 +3228,7 @@ impl<'a> Vm<'a> {
     fn make_builtin(
         &mut self,
         which: &str,
-        values: Vec<Value>,
+        values: &mut Vec<Value>,
         arg_spans: &[Span],
         span: Span,
     ) -> Result<Value, RuntimeError> {
@@ -3172,7 +3246,7 @@ impl<'a> Vm<'a> {
                 .fields
                 .iter()
                 .map(|field| Rc::from(field.name))
-                .zip(values)
+                .zip(values.drain(..))
                 .collect();
             return Ok(Value::Struct(Rc::new(StructValue {
                 type_name: MAP_ENTRY.name.into(),
@@ -6189,7 +6263,7 @@ export fn work(n: Int) -> Int {
                 "m",
                 decl,
                 case,
-                vec![Value::Unit; payload as usize],
+                &mut vec![Value::Unit; payload as usize],
                 span,
             )
             .expect_err("the case cannot be built")

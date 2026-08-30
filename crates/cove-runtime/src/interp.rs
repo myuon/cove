@@ -2569,10 +2569,10 @@ impl<'a> Interpreter<'a> {
         module: &str,
         decl: &Arc<EnumDecl>,
         case: &str,
-        payload: Vec<Value>,
+        mut payload: Vec<Value>,
         span: Span,
     ) -> Result<Value, RuntimeError> {
-        enum_case(self.program, module, decl, case, payload, span)
+        enum_case(self.program, module, decl, case, &mut payload, span)
     }
 
     // ---------------------------------------------------------------- calls
@@ -2643,8 +2643,8 @@ impl<'a> Interpreter<'a> {
                         }
                         FreeBuiltinKind::Constructor => {
                             let args = self.eval_args(env, args, trailing)?;
-                            let values = plain_values(args, name)?;
-                            Ok(builtins::call_constructor(name, values, span)?)
+                            let mut values = plain_values(args, name)?;
+                            Ok(builtins::call_constructor(name, &mut values, span)?)
                         }
                     };
                 }
@@ -2782,9 +2782,13 @@ impl<'a> Interpreter<'a> {
                         }
                         if builtins::is_builtin_type(head) {
                             let args = self.eval_args(env, args, trailing)?;
-                            let values = plain_values(args, &format!("{head}.{}", name.node))?;
+                            let mut values = plain_values(args, &format!("{head}.{}", name.node))?;
                             return Ok(builtins::call_associated(
-                                self, head, &name.node, values, span,
+                                self,
+                                head,
+                                &name.node,
+                                &mut values,
+                                span,
                             )?);
                         }
                     }
@@ -2819,9 +2823,9 @@ impl<'a> Interpreter<'a> {
             .chain(trailing.map(|expr| expr.span))
             .collect();
         let evaluated = self.eval_args(env, args, trailing)?;
-        let values = plain_values(evaluated, name)?;
+        let mut values = plain_values(evaluated, name)?;
         let sources: Vec<&str> = spans.iter().map(|span| self.source_text(*span)).collect();
-        let outcome = builtins::call_assertion(name, values, &sources, span)?;
+        let outcome = builtins::call_assertion(name, &mut values, &sources, span)?;
         if let Some(payload) = outcome.err_payload() {
             self.assertion_failure = Some((span, payload[0].to_string()));
         }
@@ -3028,7 +3032,7 @@ impl<'a> Interpreter<'a> {
         }
 
         let args = self.eval_args(env, args, trailing)?;
-        let values = plain_values(args, name)?;
+        let mut values = plain_values(args, name)?;
 
         if name == "freeze" {
             // `freeze` needs the storage handle where it lives, so that the
@@ -3054,7 +3058,7 @@ impl<'a> Interpreter<'a> {
             self,
             &receiver_value,
             name,
-            values,
+            &mut values,
             span,
         )?)
     }
@@ -3681,7 +3685,7 @@ pub(crate) fn enum_case(
     module: &str,
     decl: &Arc<EnumDecl>,
     case: &str,
-    payload: Vec<Value>,
+    payload: &mut Vec<Value>,
     span: Span,
 ) -> Result<Value, RuntimeError> {
     let Some(found) = decl.cases.iter().find(|c| c.name.node == case) else {
@@ -3707,7 +3711,11 @@ pub(crate) fn enum_case(
     Ok(Value::Enum(Box::new(EnumValue {
         type_name: format!("{module}.{}", decl.name.node).into(),
         case: case.into(),
-        payload: payload.into(),
+        // Drained rather than taken whole: the caller lent this vector and
+        // wants it back with its capacity, and a `Payload` built from a
+        // draining iterator allocates nothing at all for the arities that
+        // occur. See `crate::value::Payload` and `Vm::borrow_args`.
+        payload: payload.drain(..).collect(),
     })))
 }
 
