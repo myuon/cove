@@ -1,0 +1,32 @@
+{
+  "checks": [
+    {
+      "name": "health",
+      "url": "http://127.0.0.1:8080/health",
+      "expect": "\"status\":\"ok\"",
+      "maxLength": 256
+    },
+    {
+      "name": "bookings",
+      "url": "http://127.0.0.1:8080/bookings",
+      "expect": "harbour-loft",
+      "reject": "\"error\"",
+      "maxLength": 4096
+    },
+    {
+      "name": "prices",
+      "url": "http://127.0.0.1:8080/prices",
+      "expect": "seaside-cottage"
+    },
+    {
+      "name": "docs",
+      "url": "http://127.0.0.1:8080/docs",
+      "reject": "TODO"
+    },
+    {
+      "name": "metrics",
+      "url": "http://127.0.0.1:8080/metrics",
+      "maxLength": 64
+    }
+  ]
+}

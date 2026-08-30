@@ -1,0 +1,136 @@
+/// A manifest holding one check with every field written out.
+fn whole() -> String {
+  "\{\"checks\":[\{\"name\":\"health\",\"url\":\"http://a/h\",\"expect\":\"ok\",\"reject\":\"err\",\"maxLength\":16\}]\}"
+}
+
+/// The message `readManifest` refused `text` with, or what it made of it.
+fn manifestRefusal(text: String) -> String {
+  match readManifest("checks.json", text) {
+    Ok(manifest) => "read {manifest.checks.length()} check(s)"
+    Err(error) => error.message
+  }
+}
+
+/// Every field a check may write is read into the type it declares, and the
+/// three optional ones are `Some` when written.
+test fn readsACheckWithEveryFieldWritten() -> Result<Unit, Error> {
+  let manifest = readManifest("checks.json", whole())?
+  let check = manifest.checks.get(0)
+    .unwrapOr(Check(
+      name: "",
+      url: "",
+      expect: None,
+      reject: None,
+      maxLength: None,
+    ))
+  assertEqual(check.name, "health")?
+  assertEqual(check.url, "http://a/h")?
+  assertEqual(check.expect.unwrapOr(""), "ok")?
+  assertEqual(check.reject.unwrapOr(""), "err")?
+  assertEqual(check.maxLength.unwrapOr(0), 16)?
+  Ok(())
+}
+
+/// A check that writes only the two required fields is a check, and the three
+/// optional ones are `None` rather than defaults that mean something.
+test fn readsACheckWithNothingButAnEndpoint() -> Result<Unit, Error> {
+  let manifest = readManifest(
+    "checks.json",
+    "\{\"checks\":[\{\"name\":\"up\",\"url\":\"http://a/\"\}]\}",
+  )?
+  let check = manifest.checks.get(0)
+    .unwrapOr(Check(name: "", url: "", expect: Some("set"), reject: Some("set"), maxLength: Some(1)))
+  assert(check.expect.isNone())?
+  assert(check.reject.isNone())?
+  assert(check.maxLength.isNone())?
+  Ok(())
+}
+
+/// The manifest's order is the order the checks come back in, because that is
+/// the order the report is written in whatever order the run finishes them.
+test fn keepsTheOrderTheManifestWroteThemIn() -> Result<Unit, Error> {
+  let manifest = readManifest(
+    "checks.json",
+    "\{\"checks\":[\{\"name\":\"c\",\"url\":\"http://a/c\"\},\{\"name\":\"a\",\"url\":\"http://a/a\"\},\{\"name\":\"b\",\"url\":\"http://a/b\"\}]\}",
+  )?
+  var names = Vector.of()
+  for check in manifest.checks {
+    names.push(check.name)
+  }
+  assertEqual(",".join(names.freeze()), "c,a,b")?
+  Ok(())
+}
+
+/// Every way a manifest can be wrong says which check and which field, and
+/// names the file it came from, because that message is the whole of what a
+/// person gets.
+test fn namesTheCheckAndTheFieldThatIsWrong() -> Result<Unit, Error> {
+  assertEqual(
+    manifestRefusal("\{\"checks\":[\{\"url\":\"http://a/\"\}]\}"),
+    "checks.json: check 1: this check has no `name` field",
+  )?
+  assertEqual(
+    manifestRefusal("\{\"checks\":[\{\"name\":\"a\",\"url\":7\}]\}"),
+    "checks.json: check 1: `url` must be a string, and is a number",
+  )?
+  assertEqual(
+    manifestRefusal("\{\"checks\":[\{\"name\":\"a\",\"url\":\"http://a/\"\},\{\"name\":\"b\",\"url\":\"http://b/\",\"expect\":true\}]\}"),
+    "checks.json: check 2: `expect` must be a string, and is a boolean",
+  )?
+  Ok(())
+}
+
+/// A URL this program cannot fetch is refused when the manifest is read
+/// rather than once per run against the host, because the host would say the
+/// same thing later and one check at a time.
+test fn refusesASchemeTheHttpHostDoesNotSpeak() -> Result<Unit, Error> {
+  assertEqual(
+    manifestRefusal(
+      "\{\"checks\":[\{\"name\":\"a\",\"url\":\"https://a/\"\}]\}",
+    ),
+    "checks.json: check 1: `url` is `https://a/`, and this checker fetches `http://` only",
+  )?
+  Ok(())
+}
+
+/// A bound on a body is a count of characters, so a fraction of one is not a
+/// bound and neither is a negative number.
+test fn refusesABoundThatIsNotACount() -> Result<Unit, Error> {
+  assertEqual(
+    manifestRefusal("\{\"checks\":[\{\"name\":\"a\",\"url\":\"http://a/\",\"maxLength\":1.5\}]\}"),
+    "checks.json: check 1: `maxLength` is 1.5, which is not a whole number",
+  )?
+  assertEqual(
+    manifestRefusal("\{\"checks\":[\{\"name\":\"a\",\"url\":\"http://a/\",\"maxLength\":-1\}]\}"),
+    "checks.json: check 1: `maxLength` is -1, and a bound cannot be negative",
+  )?
+  Ok(())
+}
+
+/// A manifest that is not a manifest is refused as a whole, and each of the
+/// three ways it can be says which one it was.
+test fn refusesAManifestWithNoChecksToRun() -> Result<Unit, Error> {
+  assertEqual(
+    manifestRefusal("\{\}"),
+    "checks.json: this manifest has no `checks` field",
+  )?
+  assertEqual(
+    manifestRefusal("\{\"checks\":\{\}\}"),
+    "checks.json: `checks` must be an array, and is an object",
+  )?
+  assertEqual(
+    manifestRefusal("\{\"checks\":[]\}"),
+    "checks.json: `checks` is empty, so there is nothing to do",
+  )?
+  Ok(())
+}
+
+/// Text that is not JSON is refused with what the parser found, so a manifest
+/// with a trailing comma says so rather than saying it has no checks.
+test fn refusesTextThatIsNotJson() -> Result<Unit, Error> {
+  assertEqual(
+    manifestRefusal("\{\"checks\":[],\}"),
+    "checks.json: a field name must be a quoted string",
+  )?
+  Ok(())
+}

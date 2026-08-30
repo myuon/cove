@@ -1,0 +1,67 @@
+/// A run of four checks with one outcome of each kind, in manifest order.
+///
+/// The tally is written rather than derived, because what a report does with
+/// the counts is what these tests are about and a run that produced them is
+/// not needed to find out.
+fn mixed() -> Run {
+  Run(
+    verdicts: [
+      Verdict(name: "health", url: "http://a/h", outcome: Outcome.Passed(15)),
+      Verdict(
+        name: "prices",
+        url: "http://a/p",
+        outcome: Outcome.Failed("the body does not contain `eur`"),
+      ),
+      Verdict(
+        name: "docs",
+        url: "http://a/d",
+        outcome: Outcome.Unchecked("http: cannot connect"),
+      ),
+      Verdict(name: "metrics", url: "http://a/m", outcome: Outcome.Skipped),
+    ],
+    tally: Tally(started: 3, passed: 1, failed: 2),
+  )
+}
+
+/// The checks a run never started are the ones it has verdicts for and did
+/// not start, which is the one number the verdicts do not carry themselves.
+test fn countsTheChecksTheRunNeverStarted() -> Result<Unit, Error> {
+  assertEqual(skipped(mixed()), 1)?
+  Ok(())
+}
+
+/// The text report is one line per check in manifest order, between a line
+/// naming the manifest and a line counting the outcomes.
+test fn writesOneLinePerCheckInManifestOrder() -> Result<Unit, Error> {
+  assertEqual(
+    report(Format.Text, "checks.json", mixed()),
+    "checks.json: 4 check(s)\n  ok          health                  15 character(s)\n  failed      prices                  the body does not contain `eur`\n  unchecked   docs                    http: cannot connect\n  skipped     metrics                 the run had already given up\n1 passed, 2 failed, 1 skipped",
+  )?
+  Ok(())
+}
+
+/// The JSON report writes the same run for another program to read, with the
+/// checks in manifest order inside an object whose fields are in `Map` order,
+/// so two runs over one manifest write the same bytes.
+test fn writesTheSameRunAsJson() -> Result<Unit, Error> {
+  assertEqual(
+    report(Format.Json, "checks.json", mixed()),
+    "\{\"checks\":[\{\"detail\":\"15 character(s)\",\"name\":\"health\",\"outcome\":\"ok\",\"url\":\"http://a/h\"\},\{\"detail\":\"the body does not contain `eur`\",\"name\":\"prices\",\"outcome\":\"failed\",\"url\":\"http://a/p\"\},\{\"detail\":\"http: cannot connect\",\"name\":\"docs\",\"outcome\":\"unchecked\",\"url\":\"http://a/d\"\},\{\"detail\":\"the run had already given up\",\"name\":\"metrics\",\"outcome\":\"skipped\",\"url\":\"http://a/m\"\}],\"failed\":2,\"manifest\":\"checks.json\",\"passed\":1,\"skipped\":1\}",
+  )?
+  Ok(())
+}
+
+/// Both formats are asked for by name, and a name that is neither is refused
+/// with the two there are rather than a pointer at `--help`.
+test fn readsAndNamesEachFormat() -> Result<Unit, Error> {
+  assertEqual(formatNamed("text")?.name(), "text")?
+  assertEqual(formatNamed("json")?.name(), "json")?
+  assertEqual(
+    match formatNamed("yaml") {
+      Ok(format) => format.name()
+      Err(error) => error.message
+    },
+    "`yaml` is not a report format; there are `text` and `json`",
+  )?
+  Ok(())
+}

@@ -4,7 +4,7 @@
 # against the interface the current source derives, so check it in and let a
 # reviewer read the difference. Do not edit it by hand.
 cove-api 1
-hash fnv1a64:22446a5b3413dbfe
+hash fnv1a64:ff326f85a7002547
 
 module callbacks
   /// Task-safe application dependencies captured by request handlers.
@@ -67,6 +67,145 @@ module config
   /// Loads configuration from the host environment.
   export fn loadConfig() -> Result<Config, ConfigError>
     requires env
+
+module covecheck
+  /// One endpoint a run asks about, and what its answer has to look like.
+  ///
+  /// Every condition is optional except the two that say which endpoint this
+  /// is. A check that writes none of them still says something -- that the
+  /// endpoint answers at all -- and that is the check most manifests start
+  /// with.
+  export struct Check
+    field name: String
+    field url: String
+    field expect: Option<String>
+    field reject: Option<String>
+    field maxLength: Option<Int>
+  /// Which of the two reports a run writes.
+  export enum Format
+    case Text
+    case Json
+    /// The word this format is asked for by.
+    export fn name(self) -> String
+  /// Every check of one run, in the order the manifest wrote them.
+  ///
+  /// The order is part of the manifest rather than an accident of it: it is
+  /// what the report comes back in, whatever order the checks finish in.
+  export struct Manifest
+    field checks: Array<Check>
+  /// What a run made of one check.
+  ///
+  /// The two ways of failing are kept apart because they are different news. A
+  /// `Failed` endpoint answered and said the wrong thing, which is a fact about
+  /// the service; an `Unchecked` one produced no body to look at, so this run
+  /// learned nothing about it and reports that rather than a verdict it did not
+  /// reach.
+  ///
+  /// `Unchecked` covers two things at once because the `http` host gives a
+  /// client one answer for both: `fetch` produces an `Err` for a connection it
+  /// could not make and an `Err` for a status outside 200-299, and which it was
+  /// survives only in the prose of the message. That is also why no check here
+  /// names an expected status. Issue #145 is that gap.
+  export enum Outcome
+    case Passed(Int)
+    case Failed(String)
+    case Unchecked(String)
+    case Skipped
+    /// What a report says beside the label.
+    export fn detail(self) -> String
+    /// The word a report puts in its first column.
+    export fn label(self) -> String
+    /// Whether this is an outcome the run may end successfully on.
+    ///
+    /// A skipped check is not one. The run stopped because enough had already
+    /// gone wrong, and reporting the checks it never tried as fine would say
+    /// the opposite of what happened.
+    export fn ok(self) -> Bool
+  /// How the run is bounded, beside the checks themselves.
+  export struct Plan
+    field concurrency: Int
+    field stopAfter: Option<Int>
+  /// What one run produced.
+  export struct Run
+    field verdicts: Array<Verdict>
+    field tally: Tally
+  /// What every check task writes and the run reads between windows.
+  ///
+  /// `started` is the one thing here that the finished verdicts do not already
+  /// say, and it is what tells a report how many checks were never tried. The
+  /// counts are kept by the tasks rather than folded out of the array
+  /// afterwards because this is the run's one piece of state two tasks reach,
+  /// and `lock` is what makes each task's read-modify-write one operation: the
+  /// order the increments land in belongs to the scheduler, and the totals do
+  /// not depend on it.
+  export struct Tally
+    field started: Int
+    field passed: Int
+    field failed: Int
+  /// What a run made of one check, and which check it was.
+  export struct Verdict
+    field name: String
+    field url: String
+    field outcome: Outcome
+  /// The format `name` asks for, or the error that names the two there are.
+  export fn formatNamed(name: String) -> Result<Format, Error>
+  /// Judges `body` against everything `check` asked of it.
+  ///
+  /// The conditions are tried in a written order and the first one that breaks
+  /// is the whole answer, so two runs over the same body report the same
+  /// reason. Reporting every broken condition would be more information and
+  /// less of an answer: the length is checked first because a body that is too
+  /// large is a fact about the endpoint that the text conditions would then
+  /// describe at length.
+  export fn judge(check: Check, body: String) -> Outcome
+  /// Checks every endpoint one manifest names, and reports what it found.
+  ///
+  /// The whole run is inside one `clock.timeout`, so a run that will not finish
+  /// stops instead of hanging: leaving the bound cancels the window still in
+  /// flight, and the checks it held have no verdicts because a cancelled task
+  /// has no value to await. That is the honest report of a stopped run. ADR
+  /// 0024 makes a stop a bound rather than a point -- a cancelled check stops
+  /// within a fixed amount of further work, not at the next instruction -- so
+  /// how far each one got is not something this program can say and does not
+  /// try to.
+  export async fn main(arguments: Array<String>) -> Result<Unit, Error>
+    requires clock, console, files, http
+  /// Reads a manifest out of the text of one file.
+  ///
+  /// `source` is the file's name and appears in every message, because a
+  /// manifest that will not load is the first thing a person meets and the
+  /// message is the whole of what they get. There is no line number in it: the
+  /// manifest is one JSON document rather than a record per line, so what is
+  /// wrong is a path through that document and not a place in the file.
+  export fn readManifest(source: String, text: String) -> Result<Manifest, Error>
+  /// The report `format` asks for, as the whole text of it.
+  ///
+  /// Both reports are built and returned rather than printed, so the thing a
+  /// test asserts on is the thing a person reads. Neither is written by a task:
+  /// a run's tasks share one console and what order their lines would arrive in
+  /// is the scheduler's answer, so the report is written once, at the end, by
+  /// the one thing that knows the manifest's order.
+  export fn report(format: Format, source: String, run: Run) -> String
+  /// Runs every check, `plan.concurrency` of them at a time, and answers in
+  /// manifest order.
+  ///
+  /// The order is the whole reason the window is awaited in the order it was
+  /// spawned rather than as its tasks finish. Nothing here is faster for
+  /// awaiting in order -- a window takes as long as its slowest member either
+  /// way -- and what it buys is a report that reads the same twice.
+  export async fn runAll(checks: Array<Check>, plan: Plan) -> Run
+    requires clock, http
+  /// How long a whole run may take.
+  ///
+  /// The same constant for the same reason, and it bounds the run rather than
+  /// the check: a hundred checks that each finish just inside `checkBound` is a
+  /// run nobody waited for.
+  export fn runBound() -> Duration
+  /// How many of a run's checks were never tried.
+  ///
+  /// The difference between the checks there were and the checks that started,
+  /// which is the one number the array of verdicts does not carry on its own.
+  export fn skipped(run: Run) -> Int
 
 module cq
   /// Runs one transformation over one file.

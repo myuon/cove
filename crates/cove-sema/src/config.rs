@@ -330,6 +330,7 @@ mod tests {
             [
                 "callbacks",
                 "config",
+                "covecheck",
                 "cq",
                 "cqSample",
                 "hello",
