@@ -112,7 +112,7 @@ use crate::value::{Repr, Value};
 ///     fn call(&self, op: &str, args: Vec<Value>) -> Result<Value, RuntimeError> {
 ///         # let _ = (op, args);
 ///         // unchanged
-///         # Ok(Value::Unit)
+///         # Ok(Value::unit())
 ///     }
 /// }
 /// ```

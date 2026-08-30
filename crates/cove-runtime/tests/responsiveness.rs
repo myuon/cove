@@ -177,7 +177,7 @@ impl HostApi for Probe {
             "release" => self.released.open(),
             other => panic!("no probe operation `{other}`"),
         }
-        Ok(Value::ok(Value::Unit))
+        Ok(Value::ok(Value::unit()))
     }
 
     fn call_with(
@@ -201,7 +201,7 @@ impl HostApi for Probe {
                 std::thread::sleep(Duration::from_millis(1));
             }
             *self.noticed.lock().unwrap() = Some(noticed);
-            return Ok(Value::ok(Value::Unit));
+            return Ok(Value::ok(Value::unit()));
         }
         if op != "bounded" {
             return self.call(op, args);
@@ -215,7 +215,7 @@ impl HostApi for Probe {
         let outcome = back.call_until(&args[0], Vec::new(), &stop);
         self.bounds.lock().unwrap().pop();
         match outcome {
-            Ok(_) => Ok(Value::ok(Value::Unit)),
+            Ok(_) => Ok(Value::ok(Value::unit())),
             Err(_) if stop.is_cancelled() => Ok(Value::err(Value::error("probe: stopped"))),
             Err(error) => Err(error),
         }

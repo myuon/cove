@@ -987,15 +987,9 @@ fn run_once(
 /// `Some(message)` when `value` is the `Err` an entry returned; `None` for
 /// `Ok` or an entry that returns bare `()`.
 fn entry_err_message(value: &Value) -> Option<String> {
-    let Value::Enum(result) = value else {
-        return None;
-    };
-    if &*result.type_name != "Result" || &*result.case != "Err" {
-        return None;
-    }
     Some(
-        result
-            .payload
+        value
+            .err_payload()?
             .first()
             .map(ToString::to_string)
             .unwrap_or_default(),

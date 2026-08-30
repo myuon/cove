@@ -190,11 +190,9 @@ fn run(entry: &str, allow: &[&str], fakes: Fakes) -> Ran {
 
 /// `Ok(...)`, or the message an `Err` carried.
 fn ok(value: &Value) -> &Value {
-    match value {
-        Value::Enum(result) if &*result.type_name == "Result" && &*result.case == "Ok" => {
-            result.payload.first().expect("`Ok` carries a value")
-        }
-        other => panic!("expected `Ok(...)`, found {other}"),
+    match value.ok_payload() {
+        Some(payload) => payload.first().expect("`Ok` carries a value"),
+        None => panic!("expected `Ok(...)`, found {value}"),
     }
 }
 
@@ -213,7 +211,7 @@ fn the_server_answers_its_routes_and_stops_when_the_listener_is_empty() {
         },
     );
 
-    assert!(ok(&ran.value).eq_value(&Value::Unit), "{}", ran.value);
+    assert!(ok(&ran.value).eq_value(&Value::unit()), "{}", ran.value);
     assert_eq!(
         ran.served,
         [
@@ -250,16 +248,14 @@ fn the_dashboard_loads_both_inputs_within_its_timeout() {
         },
     );
 
-    let Value::Struct(dashboard) = ok(&ran.value) else {
-        panic!("expected a `Dashboard`, found {}", ran.value);
-    };
-    assert_eq!(&*dashboard.type_name, "tasks.Dashboard");
+    let dashboard = ok(&ran.value);
+    assert_eq!(dashboard.declared_type(), Some("tasks.Dashboard"));
     assert_eq!(
-        dashboard.get("bookings").map(ToString::to_string),
+        dashboard.field("bookings").map(ToString::to_string),
         Some("[\"b-1\"]".to_string())
     );
     assert_eq!(
-        dashboard.get("prices").map(ToString::to_string),
+        dashboard.field("prices").map(ToString::to_string),
         Some("[\"p-1\"]".to_string())
     );
 }
@@ -280,12 +276,9 @@ fn the_dashboard_loads_both_inputs_within_its_timeout() {
 fn the_dashboard_reports_a_fetch_the_host_could_not_answer() {
     let ran = run("tasks.loadDashboard", &["http", "clock"], Fakes::default());
 
-    let Value::Enum(result) = &ran.value else {
-        panic!("expected a `Result`, found {}", ran.value);
-    };
-    assert_eq!(&*result.case, "Err");
+    assert_eq!(ran.value.case(), Some("Err"), "{}", ran.value);
     assert_eq!(
-        result.payload[0].to_string(),
+        err_message(&ran.value),
         "http: no recorded answer for `http://127.0.0.1:8080/prices`"
     );
 }
@@ -310,12 +303,10 @@ fn the_dashboard_reports_an_awaited_failure_as_the_bodys_own_value() {
         },
     );
 
-    let Value::Enum(result) = ok(&ran.value) else {
-        panic!("expected a `Result`, found {}", ran.value);
-    };
-    assert_eq!(&*result.case, "Err");
+    let inner = ok(&ran.value);
+    assert_eq!(inner.case(), Some("Err"), "{}", ran.value);
     assert_eq!(
-        result.payload[0].to_string(),
+        err_message(inner),
         "http: no recorded answer for `http://127.0.0.1:8080/bookings`"
     );
 }
@@ -373,7 +364,7 @@ fn the_callback_server_serves_both_routes_through_its_middleware() {
         },
     );
 
-    assert!(ok(&ran.value).eq_value(&Value::Unit), "{}", ran.value);
+    assert!(ok(&ran.value).eq_value(&Value::unit()), "{}", ran.value);
     assert_eq!(
         ran.served,
         ["200 {\"status\":\"ok\"}", "201 {\"id\":\"b-1\"}"]
@@ -446,26 +437,22 @@ fn config_validates_what_the_environment_supplied() {
             ..Fakes::default()
         },
     );
-    let Value::Struct(config) = ok(&ran.value) else {
-        panic!("expected a `Config`, found {}", ran.value);
-    };
+    let config = ok(&ran.value);
     assert_eq!(
-        config.get("port").map(ToString::to_string),
+        config.field("port").map(ToString::to_string),
         Some("9000".to_string())
     );
     assert_eq!(
-        config.get("logLevel").map(ToString::to_string),
+        config.field("logLevel").map(ToString::to_string),
         Some("Warn".to_string())
     );
 
     // An environment that says nothing is the documented default, and one
     // that says something unusable is a failure the program reports.
     let defaulted = run("config.loadConfig", &["env"], Fakes::default());
-    let Value::Struct(config) = ok(&defaulted.value) else {
-        panic!("expected a `Config`, found {}", defaulted.value);
-    };
+    let config = ok(&defaulted.value);
     assert_eq!(
-        config.get("port").map(ToString::to_string),
+        config.field("port").map(ToString::to_string),
         Some("8080".to_string())
     );
 
@@ -477,10 +464,7 @@ fn config_validates_what_the_environment_supplied() {
             ..Fakes::default()
         },
     );
-    let Value::Enum(result) = &refused.value else {
-        panic!("expected a `Result`, found {}", refused.value);
-    };
-    assert_eq!(&*result.case, "Err");
+    assert_eq!(refused.value.case(), Some("Err"), "{}", refused.value);
 }
 
 /// `values` prints what copying, aliasing, and freezing actually do: a
@@ -490,7 +474,7 @@ fn config_validates_what_the_environment_supplied() {
 fn values_reports_its_own_collection_lifecycle() {
     let ran = run("values.main", &["console"], Fakes::default());
 
-    assert!(ok(&ran.value).eq_value(&Value::Unit), "{}", ran.value);
+    assert!(ok(&ran.value).eq_value(&Value::unit()), "{}", ran.value);
     assert_eq!(
         ran.console,
         ["Pending", "Confirmed", "2", "2", "2", "1"],
@@ -505,7 +489,7 @@ fn values_reports_its_own_collection_lifecycle() {
 fn traits_reports_both_forms_of_dispatch() {
     let ran = run("traits.main", &["console"], Fakes::default());
 
-    assert!(ok(&ran.value).eq_value(&Value::Unit), "{}", ran.value);
+    assert!(ok(&ran.value).eq_value(&Value::unit()), "{}", ran.value);
     assert_eq!(
         ran.console,
         [
@@ -538,7 +522,7 @@ fn traits_reports_both_forms_of_dispatch() {
 fn rules_decides_every_sample_pull_request() {
     let ran = run("rules.main", &["console"], Fakes::default());
 
-    assert!(ok(&ran.value).eq_value(&Value::Unit), "{}", ran.value);
+    assert!(ok(&ran.value).eq_value(&Value::unit()), "{}", ran.value);
     assert_eq!(
         ran.console,
         [
@@ -578,7 +562,7 @@ fn restricted_reads_only_the_document_the_host_named() {
         },
     );
 
-    assert!(ok(&ran.value).eq_value(&Value::Unit), "{}", ran.value);
+    assert!(ok(&ran.value).eq_value(&Value::unit()), "{}", ran.value);
     assert_eq!(ran.console, ["5 words"]);
 }
 
@@ -644,11 +628,21 @@ fn cq(args: &[&str], files: BTreeMap<String, String>) -> Ran {
 
 /// The message a Cove entry that answered `Err` carried.
 fn err(value: &Value) -> String {
-    let Value::Enum(result) = value else {
-        panic!("expected a `Result`, found {value}");
-    };
-    assert_eq!(&*result.case, "Err", "expected `Err(...)`, found {value}");
-    result.payload[0].to_string()
+    assert_eq!(
+        value.case(),
+        Some("Err"),
+        "expected `Err(...)`, found {value}"
+    );
+    err_message(value)
+}
+
+/// The first value an `Err` carries, rendered.
+fn err_message(value: &Value) -> String {
+    value
+        .err_payload()
+        .and_then(<[Value]>::first)
+        .map(ToString::to_string)
+        .unwrap_or_else(|| panic!("expected `Err(...)`, found {value}"))
 }
 
 /// `revenue-summary` groups the bookings it read by property, in ascending
@@ -664,7 +658,7 @@ fn cq_summarizes_revenue_by_property() {
         file("bookings.jsonl", BOOKINGS),
     );
 
-    assert!(ok(&ran.value).eq_value(&Value::Unit), "{}", ran.value);
+    assert!(ok(&ran.value).eq_value(&Value::unit()), "{}", ran.value);
     assert_eq!(
         ran.console,
         [
@@ -690,7 +684,7 @@ fn cq_normalizes_the_rate_card_into_json_lines() {
         file("rates.csv", RATES),
     );
 
-    assert!(ok(&ran.value).eq_value(&Value::Unit), "{}", ran.value);
+    assert!(ok(&ran.value).eq_value(&Value::unit()), "{}", ran.value);
     assert_eq!(
         ran.console,
         [
@@ -722,7 +716,7 @@ fn cq_stops_after_the_limit_it_was_given() {
         file("bookings.jsonl", BOOKINGS),
     );
 
-    assert!(ok(&ran.value).eq_value(&Value::Unit), "{}", ran.value);
+    assert!(ok(&ran.value).eq_value(&Value::unit()), "{}", ran.value);
     assert_eq!(
         ran.console,
         [
@@ -760,7 +754,7 @@ fn cq_counts_the_records_it_took_against_the_limit_not_the_good_ones() {
         file("bookings-malformed.jsonl", MALFORMED),
     );
 
-    assert!(ok(&ran.value).eq_value(&Value::Unit), "{}", ran.value);
+    assert!(ok(&ran.value).eq_value(&Value::unit()), "{}", ran.value);
     assert_eq!(
         ran.console,
         [
@@ -820,7 +814,7 @@ fn cq_reports_and_skips_the_records_it_cannot_read() {
         file("bookings-malformed.jsonl", MALFORMED),
     );
 
-    assert!(ok(&ran.value).eq_value(&Value::Unit), "{}", ran.value);
+    assert!(ok(&ran.value).eq_value(&Value::unit()), "{}", ran.value);
     assert_eq!(
         ran.console,
         [
@@ -866,7 +860,7 @@ fn cq_writes_to_the_file_it_was_given_rather_than_the_console() {
         file("bookings.jsonl", BOOKINGS),
     );
 
-    assert!(ok(&ran.value).eq_value(&Value::Unit), "{}", ran.value);
+    assert!(ok(&ran.value).eq_value(&Value::unit()), "{}", ran.value);
     assert_eq!(
         ran.console,
         ["cq: read 4 records, wrote 3 rows to summary.csv"],
@@ -898,7 +892,7 @@ fn cq_writes_to_the_file_it_was_given_rather_than_the_console() {
 fn cq_prints_its_usage_when_asked_for_help() {
     let ran = cq(&["--help"], BTreeMap::new());
 
-    assert!(ok(&ran.value).eq_value(&Value::Unit), "{}", ran.value);
+    assert!(ok(&ran.value).eq_value(&Value::unit()), "{}", ran.value);
     assert_eq!(
         ran.console,
         [
@@ -945,7 +939,7 @@ fn cq_reads_back_the_sample_it_generated() {
     );
 
     assert!(
-        ok(&generated.value).eq_value(&Value::Unit),
+        ok(&generated.value).eq_value(&Value::unit()),
         "{}",
         generated.value
     );
@@ -971,7 +965,7 @@ fn cq_reads_back_the_sample_it_generated() {
         generated.files,
     );
 
-    assert!(ok(&read.value).eq_value(&Value::Unit), "{}", read.value);
+    assert!(ok(&read.value).eq_value(&Value::unit()), "{}", read.value);
     assert_eq!(
         read.console,
         [
@@ -1228,7 +1222,7 @@ fn covecheck_answers_ok_when_every_endpoint_is_healthy() {
 
     let ran = covecheck(&["checks.json"], bodies);
 
-    assert!(ok(&ran.value).eq_value(&Value::Unit), "{}", ran.value);
+    assert!(ok(&ran.value).eq_value(&Value::unit()), "{}", ran.value);
     assert_eq!(
         *ran.console.last().expect("a summary line"),
         "5 passed, 0 failed, 0 skipped"
@@ -1380,7 +1374,7 @@ fn life_runs_one_world_and_reports_the_same_one_twice() {
         Fakes::default(),
     );
 
-    assert!(ok(&ran.value).eq_value(&Value::Unit), "{}", ran.value);
+    assert!(ok(&ran.value).eq_value(&Value::unit()), "{}", ran.value);
     assert_eq!(
         ran.console,
         [
@@ -1425,7 +1419,7 @@ fn life_takes_its_world_from_its_seed_and_writes_a_journal() {
         },
     );
 
-    assert!(ok(&ran.value).eq_value(&Value::Unit), "{}", ran.value);
+    assert!(ok(&ran.value).eq_value(&Value::unit()), "{}", ran.value);
     assert_eq!(
         ran.console.first().map(String::as_str),
         Some("cove-life: seed 42, 8 tick(s) over 12x8 cells")

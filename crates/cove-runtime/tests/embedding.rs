@@ -58,7 +58,7 @@ use cove_runtime::interp::Interpreter;
 use cove_runtime::value::MapKey;
 use cove_runtime::{
     Budget, Effect, FieldSchema, Grants, HostApi, HostRegistry, HostType, Limits, ModuleSchema,
-    OperationSchema, Runtime, RuntimeError, TypeSchema, Value,
+    OperationSchema, Runtime, RuntimeError, TypeSchema, Value, ValueView,
 };
 use cove_sema::resolve::Program;
 use cove_sema::{Capability, Compiler, Config, HostSchemas, Module, Package, Unit};
@@ -102,12 +102,15 @@ impl HostApi for HostOwnedDocuments {
         // The registry checked the call against the schema above before
         // dispatching it, so an embedding host restates none of it: the
         // operation exists, there is one argument, and it is a `String`.
-        let [Value::Str(name)] = args.as_slice() else {
+        let [name] = args.as_slice() else {
+            unreachable!("checked by HostRegistry::call")
+        };
+        let Some(name) = name.as_str() else {
             unreachable!("checked by HostRegistry::call")
         };
         self.reads.lock().unwrap().push(name.to_string());
-        Ok(match self.notes.get(&**name) {
-            Some(text) => Value::ok(Value::Str((*text).into())),
+        Ok(match self.notes.get(name) {
+            Some(text) => Value::ok(Value::string(*text)),
             None => Value::err(Value::error(format!("no document named `{name}`"))),
         })
     }
@@ -267,7 +270,7 @@ fn an_argument_the_host_s_own_schema_does_not_admit_is_refused() {
     }));
 
     let error = hosts
-        .call("documents", "read", vec![Value::Int(3)])
+        .call("documents", "read", vec![Value::int(3)])
         .expect_err("an `Int` where the host declared a `String` is refused");
 
     assert_eq!(
@@ -422,18 +425,23 @@ impl HostApi for Directory {
 
     fn call(&self, op: &str, args: Vec<Value>) -> Result<Value, RuntimeError> {
         match (op, args.as_slice()) {
-            ("employee", [Value::Str(id)]) => {
+            ("employee", [id]) => {
+                let Some(id) = id.as_str() else {
+                    unreachable!("checked by HostRegistry::call")
+                };
                 self.lookups.lock().unwrap().push(id.to_string());
-                Ok(match self.people.get(&**id) {
+                Ok(match self.people.get(id) {
                     // Through the constructor, which is the whole of what a
                     // host says about a struct: the type name the schema
                     // declares and the fields in its order. The `Rc`, the
-                    // field vector and the `opaque` flag are the runtime's.
+                    // field vector and the `opaque` flag are the runtime's,
+                    // and since ADR 0028 they are not merely hidden by
+                    // convention -- there is no variant to write instead.
                     Some(seniority) => Value::ok(Value::structure(
                         "company.Employee",
                         [
-                            ("name", Value::Str(id.clone())),
-                            ("seniority", Value::Int(*seniority)),
+                            ("name", Value::string(id)),
+                            ("seniority", Value::int(*seniority)),
                         ],
                     )),
                     None => Value::err(Value::error(format!("no employee named `{id}`"))),
@@ -445,20 +453,24 @@ impl HostApi for Directory {
             // rebuilds.
             ("rates", []) => {
                 Ok(Value::ok(Value::map(self.people.iter().map(
-                    |(name, rate)| (MapKey::Str((*name).to_string()), Value::Int(*rate)),
+                    |(name, rate)| (MapKey::Str((*name).to_string()), Value::int(*rate)),
                 ))))
             }
             // And the other direction: the set the program built arrives
             // whole, and the host reads it as the set it is.
-            ("staffed", [Value::Set(names)]) => Ok(Value::ok(Value::Int(
-                names
-                    .iter()
-                    .filter(|name| match name {
-                        MapKey::Str(text) => self.people.contains_key(text.as_str()),
-                        _ => unreachable!("checked by HostRegistry::call"),
-                    })
-                    .count() as i64,
-            ))),
+            ("staffed", [names]) => {
+                let Some(names) = names.elements() else {
+                    unreachable!("checked by HostRegistry::call")
+                };
+                Ok(Value::ok(Value::int(
+                    names
+                        .filter(|name| match name {
+                            MapKey::Str(text) => self.people.contains_key(text.as_str()),
+                            _ => unreachable!("checked by HostRegistry::call"),
+                        })
+                        .count() as i64,
+                )))
+            }
             (op, _) => unreachable!("`company` declares no operation `{op}` of this shape"),
         }
     }
@@ -902,12 +914,15 @@ impl HostApi for Plugin {
         // dispatching it, exactly as it checks one against a `const` table:
         // the operation is one the manifest named, and its one argument is a
         // `String`.
-        let [Value::Str(key)] = args.as_slice() else {
+        let [key] = args.as_slice() else {
+            unreachable!("checked by HostRegistry::call")
+        };
+        let Some(key) = key.as_str() else {
             unreachable!("checked by HostRegistry::call")
         };
         self.calls.lock().unwrap().push(format!("{op}({key})"));
-        Ok(match self.values.get(&**key) {
-            Some(value) => Value::ok(Value::Str(value.as_str().into())),
+        Ok(match self.values.get(key) {
+            Some(value) => Value::ok(Value::string(value.as_str())),
             None => Value::err(Value::error(format!("no setting named `{key}`"))),
         })
     }
@@ -1018,5 +1033,109 @@ export fn main() -> Result<String, Error> {
     assert!(
         calls.lock().unwrap().is_empty(),
         "a program the checker refused never reaches the host"
+    );
+}
+
+/// A host reads a whole answer without ever naming how the runtime holds it.
+///
+/// This is what ADR 0028 decision 6 makes compulsory rather than advisable.
+/// Every line below is a *host* line — it compiles outside `cove-runtime`,
+/// where `Value` is an abstract type — and there is no longer any other way
+/// to write them: the variants are sealed, so `let Value::Struct(s) = value`
+/// does not compile here at all.
+///
+/// The `Vector` is the case worth the trouble. Its elements sit behind a
+/// cell, so nothing can hand out a `&[Value]` of them; issue #196 recorded
+/// that as the one place the borrow-based reader design could not reach, and
+/// `Value::vector_elements` reaches it with a guard that reads as a slice. A
+/// host cannot *build* one, and that is deliberate too: a vector's identity
+/// is observable, so a materialization that copied one would be wrong. That
+/// is why the value comes back from a program.
+#[test]
+fn a_host_reads_every_part_of_an_answer_through_the_sealed_api() {
+    let (sources, program) = program_of(
+        "\
+/// A draft the host reads apart, one part of each kind.
+export struct Draft {
+  title: String
+  guests: Vector<String>
+  seats: Array<Int>
+  rates: Map<String, Int>
+  tags: Set<String>
+  note: Option<String>
+}
+
+export fn main() -> Draft {
+  Draft(
+    title: \"summit\",
+    guests: Vector.of(\"ada\"),
+    seats: [1, 2],
+    rates: Map.of(MapEntry(key: \"ada\", value: 7)),
+    tags: Set.of(\"vip\"),
+    note: Some(\"soon\"),
+  )
+}
+",
+    );
+    let hosts = HostRegistry::new(Grants::new(Vec::<String>::new()));
+    let value = Interpreter::new(&Runtime::new(program, sources, Arc::new(hosts)))
+        .run_entry("app", "main", Vec::new())
+        .expect("the program runs");
+
+    // The classification, matched with no `_` arm. That is the property
+    // `ValueView` exists for: a representation change leaves this compiling
+    // and a new kind of Cove value does not.
+    let ValueView::Struct(draft) = value.view() else {
+        panic!("expected a struct, found {value}");
+    };
+    assert_eq!(draft.type_name(), "app.Draft");
+    assert!(!draft.is_opaque());
+    assert_eq!(draft.len(), 6);
+    assert_eq!(
+        draft.fields().map(|(name, _)| name).collect::<Vec<_>>(),
+        ["title", "guests", "seats", "rates", "tags", "note"]
+    );
+
+    let part = |name: &str| draft.field(name).expect("a declared field");
+    assert_eq!(part("title").as_str(), Some("summit"));
+
+    let guests = part("guests")
+        .vector_elements()
+        .expect("a vector answers a guard");
+    assert_eq!(guests.len(), 1);
+    assert_eq!(guests[0].as_str(), Some("ada"));
+    assert!(
+        part("guests").items().is_none(),
+        "a vector is not an array, and the reader says so"
+    );
+
+    assert_eq!(
+        part("seats").items().map(<[Value]>::len),
+        Some(2),
+        "an array is contiguous, which is what its reader promises"
+    );
+
+    let ValueView::Map(rates) = part("rates").view() else {
+        panic!("expected a map");
+    };
+    assert_eq!(
+        rates
+            .get(&MapKey::Str("ada".to_string()))
+            .and_then(Value::as_int),
+        Some(7)
+    );
+
+    let ValueView::Set(tags) = part("tags").view() else {
+        panic!("expected a set");
+    };
+    assert!(tags.contains(&MapKey::Str("vip".to_string())));
+
+    assert_eq!(part("note").case(), Some("Some"));
+    assert_eq!(
+        part("note")
+            .some_payload()
+            .and_then(<[Value]>::first)
+            .and_then(Value::as_str),
+        Some("soon")
     );
 }

@@ -197,7 +197,7 @@ fn an_argument_the_rules_do_not_declare_is_refused_before_anything_runs() {
     };
 
     assert_eq!(
-        refused(|| Value::Int(1)),
+        refused(|| Value::int(1)),
         "`rules.embedded.evaluate` was given `Int` as argument 1, but it declares `rules.policy.PullRequest` there"
     );
     assert_eq!(
@@ -222,10 +222,7 @@ fn an_argument_the_rules_do_not_declare_is_refused_before_anything_runs() {
 
 /// A `rules.policy.PullRequest` carrying one of its ten fields.
 fn missing_fields() -> Value {
-    Value::structure(
-        "rules.policy.PullRequest",
-        [("id", Value::Str("pr-1".into()))],
-    )
+    Value::structure("rules.policy.PullRequest", [("id", Value::string("pr-1"))])
 }
 
 // ------------------------------------------------------------ a valid result
@@ -469,7 +466,7 @@ fn an_argument_the_schema_does_not_admit_is_refused_at_the_boundary() {
     );
     let error = embed
         .hosts
-        .call("reviews", "pull", vec![Value::Int(3)])
+        .call("reviews", "pull", vec![Value::int(3)])
         .expect_err("an `Int` where the schema declares a `String` is refused");
 
     assert_eq!(
