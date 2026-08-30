@@ -129,7 +129,9 @@ use cove_runtime::http::Http;
 use cove_runtime::interp::Interpreter;
 use cove_runtime::process::{Process, ProcessLog};
 use cove_runtime::runtime::{Runtime, ENTRY_TASK};
-use cove_runtime::trace::{JsonlSink, RunOutcome, TraceHeader, TraceSink, ValueCapture};
+use cove_runtime::trace::{
+    JsonlSink, RecordingBackend, RunOutcome, TraceHeader, TraceSink, ValueCapture,
+};
 use cove_runtime::value::Value;
 use cove_runtime::vm::Vm;
 use cove_sema::config::RunConfig;
@@ -998,7 +1000,7 @@ struct Ran {
 
 /// Runs the case on the interpreter, which is the oracle.
 fn run_on_ast(case: &Case, prepared: &Prepared, module: &str, entry: &str) -> Ran {
-    let (fakes, hosts) = Fakes::build(case, module, entry);
+    let (fakes, hosts) = Fakes::build(case, module, entry, RecordingBackend::Ast);
     // The trace reaches the run through two doors and both must be the same
     // sink: `HostRegistry` records the host calls and `Runtime` records
     // everything else, exactly as `cove run --trace` wires them.
@@ -1021,7 +1023,7 @@ fn run_on_vm(
     module: &str,
     entry: &str,
 ) -> Ran {
-    let (fakes, hosts) = Fakes::build(case, module, entry);
+    let (fakes, hosts) = Fakes::build(case, module, entry, RecordingBackend::Vm);
     let sink = Arc::clone(&fakes.sink);
     let hosts = Arc::new(hosts);
     let runtime = Runtime::new(
@@ -1060,7 +1062,12 @@ impl Fakes {
     /// as `cove run` registers them: the grants are what decide, so a
     /// capability a program reaches for without holding is refused with the
     /// reason rather than with a missing module.
-    fn build(case: &Case, module: &str, entry: &str) -> (Fakes, HostRegistry) {
+    fn build(
+        case: &Case,
+        module: &str,
+        entry: &str,
+        backend: RecordingBackend,
+    ) -> (Fakes, HostRegistry) {
         let console = Buffer::default();
         let diagnostics = Buffer::default();
         let files = Files::in_memory(seeded_files(&case.root));
@@ -1090,6 +1097,12 @@ impl Fakes {
         let sink: Arc<dyn TraceSink> = Arc::new(JsonlSink::new(
             trace.clone(),
             TraceHeader {
+                // Each side records itself, exactly as `cove run --trace`
+                // does, so the recording each backend produces is the
+                // recording that backend would hand a person. See
+                // [`Trace::of`] for why this one field is then the only one
+                // the comparison drops.
+                backend,
                 values: ValueCapture::Full,
                 entry: format!("{module}.{entry}"),
                 args: case.args.clone(),
@@ -1300,6 +1313,23 @@ impl Trace {
     /// same root-set difference as `peak_bytes`, reached by a different
     /// route, so it is excluded for the same stated reason rather than kept
     /// with an exception carved out of it.
+    ///
+    /// # `trace_header`'s `backend` is dropped, and it is the only field that is
+    ///
+    /// ADR 0026 put the recording backend in the header so that `cove replay`
+    /// can tell a same-backend replay from a cross-backend one. It is the one
+    /// field in the format that is *about* the backend rather than about the
+    /// program: the two sides differ in it by construction, and would differ
+    /// in it for a program with no instructions in it at all. Every other
+    /// header field — the version, the capture mode, the entry, the entry's
+    /// arguments — is compared exactly and agrees, so a header that stopped
+    /// saying one of those is still a difference.
+    ///
+    /// This is the exception that proves the rule stated at the top of this
+    /// file rather than a hole in it. Nothing here is dropped for having
+    /// differed; this is dropped for being, by its own definition, the answer
+    /// to "which backend is this", asked of a harness whose whole job is to
+    /// run one program on both.
     fn of(lines: &[String]) -> Trace {
         let mut tasks: BTreeMap<u64, Vec<String>> = BTreeMap::new();
         let mut cancelled = BTreeSet::new();
@@ -1308,6 +1338,9 @@ impl Trace {
                 continue;
             }
             let mut normalized = blank_durations(line);
+            if event(line) == "trace_header" {
+                normalized = without_string(&normalized, "backend");
+            }
             if event(line) == "heap_summary" {
                 normalized = without(&normalized, "live_bytes");
                 normalized = without(&normalized, "peak_bytes");
@@ -1424,6 +1457,30 @@ fn without(line: &str, key: &str) -> String {
         .find(|c: char| !c.is_ascii_digit())
         .unwrap_or(rest.len());
     let (mut head, mut tail) = (&line[..at], &rest[end..]);
+    // One of the two commas around the field goes with it, whichever side it
+    // is on, so that what is left is still a JSON object.
+    if let Some(rest) = tail.strip_prefix(',') {
+        tail = rest;
+    } else {
+        head = head.strip_suffix(',').unwrap_or(head);
+    }
+    format!("{head}{tail}")
+}
+
+/// The line without `key` and the quoted string under it.
+///
+/// The string sibling of [`without`], which takes an integer. A trace field
+/// is one or the other, and neither helper is asked to guess which.
+fn without_string(line: &str, key: &str) -> String {
+    let needle = format!("\"{key}\":\"");
+    let Some(at) = line.find(&needle) else {
+        return line.to_string();
+    };
+    let rest = &line[at + needle.len()..];
+    let Some(end) = rest.find('"') else {
+        return line.to_string();
+    };
+    let (mut head, mut tail) = (&line[..at], &rest[end + 1..]);
     // One of the two commas around the field goes with it, whichever side it
     // is on, so that what is left is still a JSON object.
     if let Some(rest) = tail.strip_prefix(',') {

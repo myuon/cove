@@ -28,7 +28,8 @@ use std::time::Duration;
 
 use cove_runtime::schema::{Effect, OperationSchema};
 use cove_runtime::{
-    value_to_json, RunOutcome, Value, ValueCapture, ENTRY_TASK, TRACE_FORMAT_VERSION,
+    value_to_json, RecordingBackend, RunOutcome, Value, ValueCapture, ENTRY_TASK,
+    TRACE_FORMAT_VERSION,
 };
 
 use crate::json::{self, Json};
@@ -46,6 +47,8 @@ pub(crate) struct Trace {
 pub(crate) struct Header {
     /// The format version. A reader that does not know it rejects the trace.
     pub(crate) version: u64,
+    /// Which backend ran the program this trace recorded.
+    pub(crate) backend: RecordingBackend,
     /// How much of each host call's values the trace carries.
     pub(crate) values: ValueCapture,
     /// The qualified entry the run started.
@@ -268,11 +271,15 @@ fn parse_header(line: &str) -> Result<Header, String> {
     if version != u64::from(TRACE_FORMAT_VERSION) {
         return Ok(Header {
             version,
+            backend: RecordingBackend::Vm,
             values: ValueCapture::Full,
             entry: String::new(),
             args: Vec::new(),
         });
     }
+    let backend = string_field(&json, "backend")?;
+    let backend = RecordingBackend::parse(&backend)
+        .ok_or_else(|| format!("`backend` must be `ast` or `vm`, found `{backend}`"))?;
     let values = string_field(&json, "values")?;
     let values = ValueCapture::parse(&values)
         .ok_or_else(|| format!("`values` must be `full` or `redacted`, found `{values}`"))?;
@@ -289,6 +296,7 @@ fn parse_header(line: &str) -> Result<Header, String> {
         .collect::<Result<Vec<_>, _>>()?;
     Ok(Header {
         version,
+        backend,
         values,
         entry,
         args,
@@ -734,6 +742,11 @@ pub(crate) fn render_summary(path: &Path, trace: &Trace) -> String {
     let mut out = String::new();
     let _ = writeln!(out, "trace {}", path.display());
     let _ = writeln!(out, "  format     version {}", trace.header.version);
+    let _ = writeln!(
+        out,
+        "  backend    {} — the backend that ran the program this trace recorded",
+        trace.header.backend
+    );
     let _ = writeln!(
         out,
         "  values     {}",
@@ -1189,7 +1202,7 @@ pub(crate) fn cmd_trace(args: &[String]) -> Result<(), CliError> {
 mod tests {
     use super::*;
 
-    const HEADER: &str = r#"{"event":"trace_header","version":2,"values":"full","entry":"restricted.main","args":[]}"#;
+    const HEADER: &str = r#"{"event":"trace_header","version":3,"backend":"vm","values":"full","entry":"restricted.main","args":[]}"#;
 
     fn read(lines: &[&str]) -> Trace {
         Trace::read_str(&lines.join("\n")).expect("the trace reads")
@@ -1209,7 +1222,8 @@ mod tests {
             r#"{"event":"entry_enter","module":"restricted","function":"main"}"#,
             r#"{"event":"host_call","task":0,"module":"documents","op":"read","capability":"documents","wait_ns":900,"granted":true,"args":[{"type":"string","value":"input"}],"outcome":{"kind":"value","value":{"type":"enum","name":"Result","case":"Ok","payload":[{"type":"string","value":"text"}]}}}"#,
         ]);
-        assert_eq!(trace.header.version, 2);
+        assert_eq!(trace.header.version, 3);
+        assert_eq!(trace.header.backend, RecordingBackend::Vm);
         assert_eq!(trace.header.values, ValueCapture::Full);
         assert_eq!(trace.header.entry, "restricted.main");
         assert_eq!(trace.events.len(), 2);
@@ -1228,24 +1242,59 @@ mod tests {
 
     /// A reader that does not know a version must reject the trace rather
     /// than read it as though it were one it does know.
-    /// Version 1 is the version this reader used to be, and a trace of it can
-    /// answer none of the three questions this one now asks: it carries no
-    /// task on a host call, no terminal event, and a null where the entry's
-    /// own heap events now name a task. It is refused for its version, which
-    /// says exactly that, rather than half-read.
+    ///
+    /// Versions 1 and 2 are the versions this reader used to be. A version 1
+    /// trace can answer none of the three questions version 2 asks: it
+    /// carries no task on a host call, no terminal event, and a null where
+    /// the entry's own heap events name a task. A version 2 trace can answer
+    /// all three and not the one ADR 0026 added, which `cove replay` now asks
+    /// first — which backend wrote this. Both are refused for their version,
+    /// which says exactly that, rather than half-read.
+    ///
+    /// This is the compatibility behaviour ADR 0026 chose over an
+    /// unknown-origin replay, and it is the behaviour this format has always
+    /// had: one build reads one version.
     #[test]
     fn a_version_this_build_does_not_know_is_rejected() {
-        for version in [1, 3] {
+        for version in [1, 2, 4] {
             let header = format!(
                 r#"{{"event":"trace_header","version":{version},"values":"full","entry":"a.b","args":[]}}"#
             );
             let message = error(&[&header]);
             assert!(
                 message.contains(&format!(
-                    "is version {version}, and this build of `cove` reads version 2"
+                    "is version {version}, and this build of `cove` reads version 3"
                 )),
                 "{message}"
             );
+        }
+    }
+
+    /// A backend name this build has never heard of is refused, rather than
+    /// kept as a string nothing can act on.
+    ///
+    /// The field decides which backend a replay defaults to, so a value that
+    /// names neither backend is not provenance a reader can fall back on: it
+    /// is a file this build cannot replay by its own rules.
+    #[test]
+    fn a_backend_this_build_does_not_know_is_rejected() {
+        let message = error(&[
+            r#"{"event":"trace_header","version":3,"backend":"jit","values":"full","entry":"a.b","args":[]}"#,
+        ]);
+        assert!(
+            message.contains("`backend` must be `ast` or `vm`, found `jit`"),
+            "{message}"
+        );
+    }
+
+    /// The two backends a header may name both read back as themselves.
+    #[test]
+    fn a_header_reads_back_the_backend_that_recorded_it() {
+        for (name, backend) in [("ast", RecordingBackend::Ast), ("vm", RecordingBackend::Vm)] {
+            let header = format!(
+                r#"{{"event":"trace_header","version":3,"backend":"{name}","values":"full","entry":"a.b","args":[]}}"#
+            );
+            assert_eq!(read(&[&header]).header.backend, backend);
         }
     }
 
@@ -1295,7 +1344,7 @@ mod tests {
     #[test]
     fn a_redacted_value_reads_back_as_missing_rather_than_as_a_value() {
         let trace = read(&[
-            r#"{"event":"trace_header","version":2,"values":"redacted","entry":"a.b","args":[]}"#,
+            r#"{"event":"trace_header","version":3,"backend":"vm","values":"redacted","entry":"a.b","args":[]}"#,
             r#"{"event":"host_call","task":0,"module":"env","op":"get","capability":"env","wait_ns":0,"granted":true,"args":[{"type":"redacted","of":"String"}],"outcome":{"kind":"value","value":{"type":"redacted","of":"Option"}}}"#,
         ]);
         let call = trace.dispatched_calls()[0];
@@ -1612,7 +1661,7 @@ mod tests {
     #[test]
     fn a_redacted_trace_says_it_cannot_be_replayed() {
         let trace = read(&[
-            r#"{"event":"trace_header","version":2,"values":"redacted","entry":"a.b","args":[]}"#,
+            r#"{"event":"trace_header","version":3,"backend":"vm","values":"redacted","entry":"a.b","args":[]}"#,
         ]);
         let text = render_summary(Path::new("t.jsonl"), &trace);
         assert!(text.contains("cannot be replayed"), "{text}");

@@ -1,6 +1,13 @@
 # ADR 0023: A replay chooses its backend
 
 - Status: Accepted
+- Superseded in part by
+  [ADR 0026](0026-a-trace-names-the-backend-that-recorded-it.md), which
+  replaces the decision that a replay's backend is an inference rather than a
+  reading — "The default is the VM, and it is an inference rather than a
+  reading", "The flag may disagree with the recording, and the summary cannot
+  say so" — and the alternative rejected below under "Record the backend in
+  the trace header, and default a replay to it"
 - Date: 2026-08-29
 - Supersedes: [ADR 0022](0022-the-vm-is-the-default-backend.md)'s decision
   that `cove replay` does not move — "`cove replay` builds an `Interpreter`

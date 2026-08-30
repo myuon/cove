@@ -195,16 +195,24 @@ fn a_recording_replays_on_either_backend_from_either_backend() {
         "the two backends recorded different traces of one program"
     );
 
-    for (recorded_on, trace, replayed_on) in [
-        // The ordinary case since ADR 0022: `cove run --trace` then `cove
-        // replay`, neither of them naming a backend, both of them the VM's.
-        ("vm", &on_the_vm, None),
-        // The direction ADR 0023 added, spelled out rather than defaulted.
-        ("ast", &on_the_interpreter, Some("vm")),
-        // The direction that worked before it, which must keep working — and
-        // which now has to be asked for, because the default moved.
-        ("vm", &on_the_vm, Some("ast")),
-        ("ast", &on_the_interpreter, Some("ast")),
+    for (recorded_on, trace, replayed_on, ran_on) in [
+        // The ordinary case: `cove run --trace` then `cove replay`, neither
+        // of them naming a backend. Since ADR 0022 the recording is the VM's;
+        // since ADR 0026 the replay is the VM's *because the file says so*
+        // rather than because both defaults happen to be the VM.
+        ("vm", &on_the_vm, None, "vm"),
+        // The case ADR 0026 is for, and the one no flag could express before
+        // it: an interpreter recording, replayed with no flag, runs on the
+        // interpreter. Under ADR 0023 this same command line crossed
+        // backends silently.
+        ("ast", &on_the_interpreter, None, "ast"),
+        // The direction ADR 0023 added, spelled out rather than defaulted —
+        // and now a crossing the command can see and name.
+        ("ast", &on_the_interpreter, Some("vm"), "vm"),
+        // The direction that worked before ADR 0023, which must keep working.
+        ("vm", &on_the_vm, Some("ast"), "ast"),
+        ("ast", &on_the_interpreter, Some("ast"), "ast"),
+        ("vm", &on_the_vm, Some("vm"), "vm"),
     ] {
         let path = trace.display().to_string();
         let mut args = vec!["replay", path.as_str(), "restricted"];
@@ -214,8 +222,7 @@ fn a_recording_replays_on_either_backend_from_either_backend() {
         let replay = cove(&args);
         assert!(
             replay.status.success(),
-            "a recording made on `{recorded_on}` failed to replay on `{}`: {}",
-            replayed_on.unwrap_or("vm"),
+            "a recording made on `{recorded_on}` failed to replay on `{ran_on}`: {}",
             stderr(&replay)
         );
         let played = stdout(&replay);
@@ -223,17 +230,24 @@ fn a_recording_replays_on_either_backend_from_either_backend() {
             played.contains("2 of 2 recorded call(s), answered from the trace"),
             "{played}"
         );
-        // The replay says which backend read the tape, because the file does
-        // not say which backend wrote it and a divergence's meaning turns on
-        // both.
-        assert!(
-            played.contains(&format!("backend     {}", replayed_on.unwrap_or("vm"))),
-            "{played}"
-        );
-        assert!(
-            played.contains("a trace does not record which backend recorded it"),
-            "{played}"
-        );
+        // The replay says which backend read the tape and whether that is the
+        // one that wrote it, because a divergence's meaning turns on both.
+        if recorded_on == ran_on {
+            assert!(
+                played.contains(&format!(
+                    "backend     {ran_on}, which is the backend that recorded this trace"
+                )),
+                "{played}"
+            );
+        } else {
+            assert!(
+                played.contains(&format!(
+                    "backend     {ran_on}, and this trace was recorded on {recorded_on}; this is a"
+                )),
+                "{played}"
+            );
+            assert!(played.contains("cross-backend replay"), "{played}");
+        }
     }
 }
 
@@ -251,6 +265,15 @@ fn a_recording_replays_on_either_backend_from_either_backend() {
 /// this program at all. That is the point twice over: the trace exists, it is
 /// perfectly replayable, and `--backend vm` still refuses it rather than
 /// reading it on the backend that could.
+///
+/// What ADR 0026 changed is which command line gets the refusal. Under ADR
+/// 0023 it was the bare one, because the default was the VM and no file could
+/// argue: "a recording that only one backend can replay" was listed there
+/// under what that decision gave up, and the flag it needed was one the file
+/// could not suggest. Now the file suggests it, so the bare command replays
+/// this recording on the interpreter that made it, and the refusal belongs to
+/// the person who asked for the VM by name. The rule the refusal enforces is
+/// untouched: `--backend vm` never quietly finishes on the interpreter.
 #[test]
 fn a_replay_on_the_vm_of_a_program_the_lowering_refuses_is_refused() {
     let dir = TempDir::new("unsupported");
@@ -271,7 +294,23 @@ fn a_replay_on_the_vm_of_a_program_the_lowering_refuses_is_refused() {
     );
     assert!(run.status.success(), "the run failed: {}", stderr(&run));
 
-    let refused = cove_in(&root, &["replay", &trace, "backend_unsupported"]);
+    // The bare command reads the file, finds `ast`, and replays there.
+    let bare = cove_in(&root, &["replay", &trace, "backend_unsupported"]);
+    assert!(
+        bare.status.success(),
+        "a recording the file says is the interpreter's must replay with no flag: {}",
+        stderr(&bare)
+    );
+    assert!(
+        stdout(&bare).contains("backend     ast, which is the backend that recorded this trace"),
+        "{}",
+        stdout(&bare)
+    );
+
+    let refused = cove_in(
+        &root,
+        &["replay", &trace, "backend_unsupported", "--backend", "vm"],
+    );
     assert!(
         !refused.status.success(),
         "a replay on the VM of a program the lowering refuses must refuse"
@@ -353,11 +392,20 @@ fn the_backend_flag_is_spelled_as_it_is_everywhere_else() {
     );
 }
 
-/// A trace with the figure under every `_ns` key replaced, so that two
-/// recordings of one program can be compared.
+/// A trace with the figure under every `_ns` key replaced, and the header's
+/// recording backend with it, so that two recordings of one program can be
+/// compared.
 ///
 /// Every `Duration` a trace carries — `cpu`, `wait`, `pause` — is wall time,
 /// and two runs of one program on one backend disagree about all three.
+///
+/// The header's `backend` goes for the opposite reason. ADR 0026 put it there
+/// precisely so that a recording says which of the two made it, so the two
+/// files being compared here differ in it by definition and would differ in
+/// it for a program that did nothing at all. It is the one field in the
+/// format that is about the backend rather than about the run; everything
+/// else in the header, the version and the capture mode and the entry and its
+/// arguments, is still compared exactly.
 fn without_wall_clock(trace: &str) -> String {
     let mut out = String::with_capacity(trace.len());
     let mut rest = trace;
@@ -371,7 +419,8 @@ fn without_wall_clock(trace: &str) -> String {
         rest = &tail[end..];
     }
     out.push_str(rest);
-    out
+    out.replace(r#""backend":"ast","#, r#""backend":"<either>","#)
+        .replace(r#""backend":"vm","#, r#""backend":"<either>","#)
 }
 
 #[test]
@@ -380,7 +429,7 @@ fn a_recorded_run_reads_back_and_replays() {
     let path = dir.join("t.jsonl");
     let recorded = record(&path);
     assert!(
-        recorded.starts_with(r#"{"event":"trace_header","version":2,"values":"full","entry":"restricted.main","args":[]}"#),
+        recorded.starts_with(r#"{"event":"trace_header","version":3,"backend":"vm","values":"full","entry":"restricted.main","args":[]}"#),
         "{recorded}"
     );
 
@@ -443,8 +492,77 @@ fn a_program_that_asks_for_a_different_call_diverges() {
         "at recorded call   2",
         r#"the trace records  console.println("4 words")"#,
         r#"the program asked  console.println("5 words")"#,
+        // No flag was given, so the replay ran on the backend the file names,
+        // and the report says the strong thing ADR 0023 could not say: this
+        // divergence is the program's.
+        "this replay ran on `vm`, which is the backend that",
+        "recorded the trace, so a divergence is the program's rather",
     ] {
         assert!(report.contains(expected), "missing `{expected}`:\n{report}");
+    }
+}
+
+/// The same divergence, replayed across backends on purpose, gets the
+/// opposite note.
+///
+/// This is the pair that makes the header field worth its format version.
+/// ADR 0023 had to append the caveat to every divergence report, because no
+/// file could say whether the crossing had happened; ADR 0026 lets the report
+/// say which of the two situations this is, and the two sentences say
+/// opposite things about what the divergence can be blamed on. A test that
+/// only saw one of them would not be testing the distinction.
+#[test]
+fn a_cross_backend_divergence_says_the_two_backends_could_be_the_difference() {
+    let dir = TempDir::new("diverge-crossed");
+    let path = dir.join("t.jsonl");
+    let recorded = record(&path);
+    std::fs::write(&path, recorded.replace("5 words", "4 words")).unwrap();
+
+    let replay = cove(&[
+        "replay",
+        &path.display().to_string(),
+        "restricted",
+        "--backend",
+        "ast",
+    ]);
+    assert!(
+        !replay.status.success(),
+        "a divergence must fail the replay"
+    );
+    let report = stderr(&replay);
+    for expected in [
+        "divergence: the program asked for a different host call",
+        "this replay ran on `ast` and the trace was recorded on",
+        "`vm`, so a divergence here could be the two backends'",
+    ] {
+        assert!(report.contains(expected), "missing `{expected}`:\n{report}");
+    }
+}
+
+/// `cove trace` names the backend that recorded the file, so a trace can be
+/// asked about its provenance without being replayed.
+#[test]
+fn a_summary_names_the_backend_that_recorded_the_trace() {
+    let dir = TempDir::new("summary-backend");
+    for (name, record_it, expected) in [
+        ("vm.jsonl", record as fn(&Path) -> String, "vm"),
+        (
+            "ast.jsonl",
+            record_on_the_interpreter as fn(&Path) -> String,
+            "ast",
+        ),
+    ] {
+        let path = dir.join(name);
+        record_it(&path);
+        let inspect = cove(&["trace", &path.display().to_string()]);
+        assert!(inspect.status.success(), "{}", stderr(&inspect));
+        let report = stdout(&inspect);
+        assert!(
+            report.contains(&format!(
+                "backend    {expected} — the backend that ran the program this trace recorded"
+            )),
+            "{report}"
+        );
     }
 }
 
@@ -481,28 +599,46 @@ fn a_program_that_stops_before_the_trace_does_diverges() {
 
 /// A reader that does not know a version rejects the trace rather than
 /// reading it as one it does know.
+///
+/// Both directions, because ADR 0026 moved the format forward and the
+/// backward one is the compatibility decision it had to make. Version 2 is
+/// the version every recording made before ADR 0026 carries, and it is
+/// refused by exactly the sentence a version from the future gets: this
+/// reader has always read one version, and the alternative — reading a
+/// version 2 file and calling its backend unknown — would have been a second
+/// compatibility policy invented to serve a replay outcome nothing this build
+/// can write is able to produce.
 #[test]
-fn a_trace_from_a_future_version_is_rejected_by_both_commands() {
+fn a_trace_from_a_version_this_build_does_not_read_is_rejected_by_both_commands() {
     let dir = TempDir::new("version");
     let path = dir.join("t.jsonl");
     let recorded = record(&path);
-    std::fs::write(&path, recorded.replace(r#""version":2"#, r#""version":99"#)).unwrap();
 
-    let path = path.display().to_string();
-    for args in [
-        vec!["trace", path.as_str()],
-        vec!["replay", path.as_str(), "restricted"],
-    ] {
-        let output = cove(&args);
-        assert!(
-            !output.status.success(),
-            "an unknown version must be rejected"
-        );
-        assert!(
-            stderr(&output).contains("is version 99, and this build of `cove` reads version 2"),
-            "{}",
-            stderr(&output)
-        );
+    for version in ["99", "2"] {
+        std::fs::write(
+            &path,
+            recorded.replace(r#""version":3"#, &format!(r#""version":{version}"#)),
+        )
+        .unwrap();
+
+        let path = path.display().to_string();
+        for args in [
+            vec!["trace", path.as_str()],
+            vec!["replay", path.as_str(), "restricted"],
+        ] {
+            let output = cove(&args);
+            assert!(
+                !output.status.success(),
+                "version {version} must be rejected"
+            );
+            assert!(
+                stderr(&output).contains(&format!(
+                    "is version {version}, and this build of `cove` reads version 3"
+                )),
+                "{}",
+                stderr(&output)
+            );
+        }
     }
 }
 
