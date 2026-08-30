@@ -101,12 +101,25 @@ const SEED: u64 = 0x0000_0C0F_FEE5_EED0;
 
 /// A series of samples and the order statistics read off it.
 ///
-/// Holds the samples sorted, because everything below is an order statistic
-/// and because a baseline is only useful if the samples themselves survive
-/// into the report — a summary cannot be compared against a later run with
+/// Holds the samples twice: sorted, because everything below is an order
+/// statistic, and in the order the run took them, because that is what the
+/// report carries and a baseline is only useful if the samples themselves
+/// survive into it — a summary cannot be compared against a later run with
 /// anything better than arithmetic on summaries.
+///
+/// The two copies exist for a reason a sorted one alone cannot serve.
+/// [Issue #205](https://github.com/myuon/cove/issues/205) asks whether a
+/// run-to-run disagreement is drift *within* a suite or *between* two of
+/// them, and a sorted array cannot answer it: whether the slow samples were
+/// the first three or the last three is exactly the information sorting
+/// throws away. Nothing in this file reads the run order — every statistic
+/// below is an order statistic and the bootstrap resamples with replacement
+/// — so keeping it costs one vector and buys a question that could not be
+/// asked before.
 pub struct Stats {
     sorted: Vec<u64>,
+    /// The same samples, in the order the run took them. Reported; not read.
+    taken: Vec<u64>,
     mean: u64,
 }
 
@@ -114,11 +127,16 @@ impl Stats {
     /// Summarizes `samples`, which must not be empty.
     pub fn of(samples: &[u64]) -> Stats {
         assert!(!samples.is_empty(), "a series has at least one sample");
-        let mut sorted = samples.to_vec();
+        let taken = samples.to_vec();
+        let mut sorted = taken.clone();
         sorted.sort_unstable();
         let sum: u128 = sorted.iter().map(|&n| u128::from(n)).sum();
         let mean = (sum / sorted.len() as u128) as u64;
-        Stats { sorted, mean }
+        Stats {
+            sorted,
+            taken,
+            mean,
+        }
     }
 
     /// The samples, in ascending order.
@@ -183,10 +201,18 @@ impl Stats {
     /// What makes a recorded run a baseline rather than a memory of one: a
     /// comparison needs the samples, not a summary of them, because the
     /// interval it reports is built by resampling them.
+    ///
+    /// **In the order the run took them**, which is strictly more than a
+    /// sorted array says and costs a reader who wanted the sorted one a
+    /// `sort`. Nothing that compares two runs is affected — every statistic
+    /// here is an order statistic and [`Comparison::of`] sorts what it is
+    /// given — and what it buys is that a reader can see *when* in a series a
+    /// slow sample arrived, which is the difference between a machine that
+    /// drifted and a benchmark that is noisy.
     pub fn to_json_with_samples(&self) -> String {
         let mut json = self.to_json();
         json.pop();
-        let samples: Vec<String> = self.sorted.iter().map(u64::to_string).collect();
+        let samples: Vec<String> = self.taken.iter().map(u64::to_string).collect();
         json.push_str(&format!(",\"samples\":[{}]}}", samples.join(",")));
         json
     }
@@ -581,6 +607,23 @@ mod tests {
         assert_eq!(Stats::of(&polluted).mean(), 190);
     }
 
+    /// Issue #205 needs to know *when* a slow sample arrived, and a sorted
+    /// array cannot say. The order statistics stay what they were.
+    #[test]
+    fn the_report_carries_the_series_in_the_order_it_was_taken() {
+        let stats = Stats::of(&[30, 10, 20]);
+        assert!(
+            stats
+                .to_json_with_samples()
+                .contains("\"samples\":[30,10,20]"),
+            "{}",
+            stats.to_json_with_samples()
+        );
+        assert_eq!(stats.median(), 20.0);
+        assert_eq!(stats.min(), 10);
+        assert_eq!(stats.max(), 30);
+    }
+
     #[test]
     fn stats_keeps_what_adr_0012_named() {
         let stats = Stats::of(&[30, 10, 20]);
@@ -589,6 +632,10 @@ mod tests {
         assert_eq!(stats.mean(), 20);
         assert_eq!(stats.samples(), &[10, 20, 30]);
         let json = stats.to_json();
+        assert!(
+            !json.contains("samples"),
+            "the summary alone carries no samples: {json}"
+        );
         for field in ["\"min\":10", "\"mean\":20", "\"max\":30"] {
             assert!(json.contains(field), "{json} is missing {field}");
         }
@@ -755,9 +802,11 @@ mod tests {
         );
         let baseline = Baseline::parse(&line).expect("the line parses");
         assert_eq!(baseline.len(), 1);
+        // In the order the run took them, not sorted: the report carries the
+        // series as it happened, and a comparison sorts what it is given.
         assert_eq!(
             baseline.samples("field", "vm", "vm"),
-            Some([3u64, 5, 7, 9].as_slice())
+            Some([7u64, 3, 5, 9].as_slice())
         );
         assert_eq!(baseline.samples("field", "interpreter", "ast"), None);
     }

@@ -2557,6 +2557,270 @@ wall time per profile on this machine, and the first thing it should establish
 is whether the ±7% same-binary drift can be brought down at all — because if it
 cannot, the experiment cannot resolve anything smaller and should not be run.
 
+### The ±7% was a maximum over two dozen rows, and a row's own error bar is a quarter of it
+
+[Issue #205](https://github.com/myuon/cove/issues/205) took the number the
+section above ends on — one binary disagreeing with itself by 7.4% — and asked
+what it is, what it is correlated with, and whether it can be brought down.
+The first answer changes how every table above should be read, and it is not
+about the machine at all.
+
+#### What was run
+
+Twenty-two `cove-bench --iterations 15` suites in one four-hour sitting,
+nothing under test changing between any two of them:
+
+- **Six back to back**, one release binary, no other work on the machine.
+- **Six more of that same binary**, each preceded by a real incremental
+  rebuild (`touch crates/cove-runtime/src/vm.rs`, then
+  `cargo build --release -j 4 -p cove-cli -p cove-bench`, 16 s every time) —
+  because the session that produced the 7.4% had builds in it and this one had
+  to find out whether that mattered.
+- **Ten of a second binary**, alternating the two sample orders the subsection
+  after next is about, in the sequence `b r r b b r r b b r` so that neither
+  arm sits at one end of the session.
+
+Every suite is bracketed by a **direct measurement of the CPU's effective
+clock**: a dependent `addq` chain, which retires at exactly one add per cycle
+on this microarchitecture, so five hundred million adds timed give gigahertz
+without needing root. Five before each suite and five after, 220 probes in
+all. `sysctl vm.loadavg`, `machdep.xcpm.ratio_changes_total` and
+`pmset -g therm` were recorded at the same points.
+
+#### The machine, since this document has never said
+
+An **Intel Core i7-10700K**, eight cores and sixteen threads, macOS 25G83,
+32 GiB, and `vm.swapusage` total `0.00M`. `machdep.xcpm.hard_plimit_max_100mhz_ratio`
+is 51 against a 3.8 GHz base, so the hardware is free to move between 0.8 and
+5.1 GHz and turbo alone could account for far more than 7%. It did not.
+
+| the clock probe, 220 samples over four hours | GHz |
+| ------------------------------------------- | ---: |
+| 1st percentile                               | 4.6162 |
+| 25th                                         | 4.6730 |
+| median                                       | 4.6808 |
+| 75th                                         | 4.7053 |
+| 99th                                         | 4.7450 |
+| the single worst probe                       | 4.5069 |
+
+**The middle half of the machine's clock spans 0.7%**, and `pmset -g therm`
+reported `CPU_Speed_Limit` of 100 at every one of its 44 snapshots — no
+thermal and no scheduler limit, ever. `powermetrics` needs root and was not
+run, so there is **no package temperature and no per-core residency figure
+here**; that is a gap in this measurement and is stated rather than guessed
+at. What the probe does establish is that whatever moves the benchmarks, the
+core they run on is not changing speed by anything like the amount the
+benchmarks move.
+
+#### What a row's disagreement with itself actually is
+
+Twelve suites of one binary, 66 pairs per row, the shift between two runs'
+medians:
+
+| row | median | 90th | worst |
+| --- | -----: | ---: | ----: |
+| `arith` (VM)      | 0.25% | 0.53% |  0.84% |
+| `field` (VM)      | 0.35% | 0.92% |  1.10% |
+| `arrayget` (VM)   | 0.48% | 1.07% |  1.41% |
+| `call` (VM)       | 0.55% | 1.79% |  2.72% |
+| `chars` (VM)      | 0.78% | 1.42% |  2.42% |
+| `pure` (VM)       | 0.84% | 2.43% |  3.20% |
+| `arith` (AST)     | 1.20% | 2.58% |  3.29% |
+| `hostheavy` (VM)  | 1.41% | 2.97% |  4.26% |
+| `field` (AST)     | 1.65% | 3.35% |  4.70% |
+| `startup` (VM)    | 1.66% | 3.85% |  5.63% |
+| `startup` (AST)   | 2.18% | 5.13% |  6.97% |
+| `benches` lowering| 2.28% | 9.29% | 12.01% |
+| **all 21 rows pooled** | **0.78%** | **2.58%** | 12.01% |
+| **without the lowering and the two `startup` rows** | **0.71%** | **2.18%** | 5.78% |
+
+That is the number this repository did not have. **A row's honest error bar on
+this machine is about 0.8% in the middle and 2.5% at the 90th percentile**,
+and the quietest row in the suite, `arith` on the VM, never moved by more than
+0.84% in 66 comparisons of one binary with itself.
+
+#### It is not the gap between the runs, and it is not the builds
+
+The 7.4% was framed as drift "over forty minutes". It is not.
+
+| gap between the two suites | median | 90th | 99th | worst |
+| --- | ---: | ---: | ---: | ---: |
+| under 15 minutes  | 0.74% | 2.67% | 5.47% |  9.01% |
+| 15 to 45 minutes  | 0.79% | 2.47% | 7.05% | 11.40% |
+| over 45 minutes   | 0.78% | 2.66% | 6.05% | 12.01% |
+
+**The three distributions are the same one.** Two suites nine minutes apart
+disagree exactly as much as two suites two hours apart, so nothing here is
+accumulating with time — not heat, not page-cache state, not uptime. The six
+suites with a 16-second `cargo build -j 4` in front of them are not
+distinguishable from the six without, either. Whatever this is, it is present
+between any two runs and does not grow.
+
+#### The 7.4% was `max over rows`, which is a different statistic
+
+Take the same twelve suites of one binary and compute, for each of the 66
+pairs, *the largest shift over the suite's rows* — which is what "disagreed
+with itself by up to 7.40%" reports:
+
+| statistic | over all 21 rows | over the 18 execution rows |
+| --- | ---: | ---: |
+| median | 3.99% | 2.89% |
+| 90th percentile | 9.29% | 4.23% |
+| worst | 12.01% | 5.78% |
+| pairs reaching 7.4% or more | **14%** | **none** |
+
+**7.4% is an ordinary draw from this null.** A maximum over two dozen rows is
+a maximum of two dozen samples of a heavy-tailed thing, and its median is five
+times the median of any one row. Nothing was wrong with the observation; what
+was wrong was reading a suite-wide maximum as a per-row error bar. **It is
+not, and no row should be compared against it.**
+
+Which rows carry that maximum is the other half of the answer:
+
+| row | how often it is the largest shift in a null pair |
+| --- | ---: |
+| `benches` lowering        | 36% |
+| `startup` (AST)           | 20% |
+| `startup` (VM)            | 12% |
+| `hostheavy` (both)        | 14% |
+| `field` (AST)             |  8% |
+| `callback` (AST)          |  5% |
+| the remaining fifteen rows |  6% between them |
+
+The two worst are the two that are not really benchmarks of the runtime's
+steady state. The lowering row times a **0.13 ms** operation, so fifteen
+samples of it are two milliseconds of measurement; `startup` spawns a process
+and pays whatever the operating system charges for that, and its 99th
+percentile sample is **eighty times its median** — the page-cache effect ADR
+0012 warned about, still there. **Neither is evidence of anything at the
+few-percent level and neither ever was.**
+
+#### The shape of a series, which `stats.rs` asked for and could not have
+
+`crates/cove-bench/src/stats.rs` argues for the median from the shape of the
+failure and then says, honestly, that the skew argument was not supported by
+the only data available — three order statistics from nine-sample series. It
+asks whoever next takes a run on a quiet machine to look at the real shape.
+Ninety samples a row, pooled over six suites, each expressed against its own
+row's median:
+
+| row | 1st | 25th | 75th | 99th | worst |
+| --- | --: | ---: | ---: | ---: | ----: |
+| `field` (VM)    | −0.86% | −0.33% | +0.34% |  +2.77% |    +2.8% |
+| `arith` (VM)    | −1.23% | −0.42% | +0.29% | +34.00% |     +34% |
+| `pure` (VM)     | −5.21% | −0.97% | +1.73% | +15.89% |     +16% |
+| `startup` (AST) | −7.40% | −1.63% | +18.9% |  +8131% |  +8,131% |
+
+**It is a floor with a long right tail, and the tail is much longer than the
+body.** The middle half of a good row spans less than a percent while its
+worst sample is tens of percent above the median. So the median was the right
+choice for the reason `stats.rs` gives — a decision must not move when one
+sample arrives late — and the argument from skew, which that file declined to
+rely on, turns out to hold after all. The interquartile range was the right
+spread for the same reason: on `arith`/VM, `max − min` is 35% of the median
+and the IQR is 0.7%.
+
+#### Bracketing helps, and it helps less than it sounds like it should
+
+The rule the section above adopted — base, variant, base again, quote the
+variant against the mean of the two — was never measured. Over consecutive
+triples of the twelve suites:
+
+| what is quoted | median error | 90th | worst |
+| --- | ---: | ---: | ---: |
+| the pair, `B` against one `A` | 0.74% | 2.51% | 9.58% |
+| the bracket, `B` against the mean of two `A`s | 0.64% | 2.06% | 9.74% |
+| the bracket's own null, the two `A`s against each other | 0.71% | 2.43% | 11.40% |
+
+**Averaging two base runs takes about 15% off the error**, which is roughly
+what averaging two draws of anything does, and it does nothing at all to the
+worst case. The value of the rule is the third row, not the second: the
+bracket's real product is *an error bar that was measured in the same session
+as the result*, and that is worth the extra run whatever the average does.
+
+#### What was tried: taking the samples in a different order
+
+`cove-bench` took every sample of one row before starting the next. So a row's
+whole series was taken at one instant of a nine-and-a-half-minute suite, and
+for the fastest rows that instant is very short indeed — fifteen samples of
+`pure` on the VM are twenty milliseconds of measurement, and fifteen of the
+lowering are two. Whatever the machine was doing then is the whole of the
+row's answer, and nothing in the row's own spread can say so.
+
+`--sample-order round-robin`, now the default, takes one sample of every row
+per pass instead. The same rows run the same number of times, the suite takes
+the same 564 seconds, and only *when* each sample is taken changes. Five
+suites of each order, alternating, one binary:
+
+| over the 18 rows the order governs | blocked | round-robin |
+| --- | ---: | ---: |
+| median disagreement between two suites | 0.61% | **0.45%** |
+| 90th percentile | 1.97% | **1.67%** |
+| worst | 4.40% | **3.62%** |
+| rows that improved | — | **13 of 18** |
+
+**A quarter of the noise, for nothing.** That is the honest size of it: it is
+not a fix, and the sign test on thirteen of eighteen is not overwhelming
+either. It is the default because it costs no time, no work, and no output
+format — and because it removes a structural embarrassment rather than a
+number, namely that a row could take its entire answer from one instant it
+could not report.
+
+Two things say not to claim more than that.
+
+**The rows the flag cannot touch also "improved", and they cannot have.** The
+lowering row and both `startup` rows are measured outside the loop the order
+governs, and their null still came out 2× to 4× smaller in the round-robin
+arm. That is two outlier suites landing in the other arm by luck — the
+lowering read +8.66% and +6.91% in two blocked suites, `startup`/AST read
++15.37% in one. **Five suites an arm cannot resolve a heavy-tailed row**, so
+the all-rows figure (0.80% → 0.51%) overstates what the change did, and the
+eighteen-row figure is the one to read.
+
+**The two orders report the same numbers, as far as this can tell.** The
+median absolute difference between an arm's row medians is 0.73% and the worst
+is 2.77% — the same size as the null itself, so there is no evidence that
+round-robin measures anything different. A baseline recorded under one order
+can be compared against a run under the other; it just has one more source of
+disagreement in it than a same-order comparison does.
+
+One detail is worth reading the other way round. `pure` on the VM went from a
+within-run IQR of 1.86% to 2.87% while its *between*-run disagreement halved.
+The series got wider and the answer got steadier, which is exactly what should
+happen: a series spread over the suite starts including the variation a series
+taken at one instant was blind to. **The wider interval is the more honest
+one.**
+
+#### The rule, narrowed
+
+The section above says a same-build absolute taken forty minutes later is not
+evidence. That was too strong, and it was too strong in a specific way: it
+generalised a maximum over rows into a bound on every row. What this round
+supports:
+
+- **A row's error bar is about 0.8% at the median and 2.5% at the 90th
+  percentile on this machine**, per row, per pair of runs. Not 7%. A
+  difference of 3% on a single execution row, seen twice, is outside the null;
+  the earlier rule would have thrown it away.
+- **Never quote the suite's largest shift as an error bar.** Its median on a
+  null is 4% and it reaches 15%. Quote the row.
+- **The lowering row and both `startup` rows are not evidence** at anything
+  under about 10%. They carry two thirds of every null maximum.
+- **Bracket anyway.** Not because averaging the two base runs is worth much —
+  it is worth 15% — but because the two base runs' disagreement is the only
+  error bar measured in the same conditions as the result.
+- **Time between runs is not a variable**, and neither is an incremental build
+  between them. Both were measured and neither is.
+- **This is the floor, and it is close.** The machine's own clock holds to
+  0.7% through its middle half, `arith`/VM's null is 0.25%, and the remaining
+  rows sit between that and the machine. There is no large remedy left to
+  find here; what is left is arithmetic — more samples, more perturbations —
+  and the reason to want it is layout, which is a property of the builds and
+  not of the machine.
+
+`--sample-order blocked` reproduces every "blocked" figure above, and nothing
+selects it otherwise.
+
 ## The calling-convention matrix
 
 Issue #123's second half asks what the typed three-stack convention costs at

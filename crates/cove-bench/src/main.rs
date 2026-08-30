@@ -39,7 +39,9 @@
 //!
 //! # Output
 //!
-//! One JSON object per line on stdout, in the order the benchmarks ran:
+//! One JSON object per line on stdout, in the order the benchmarks are
+//! listed here — which is not necessarily the order they were timed in; see
+//! `--sample-order` below:
 //!
 //! ```text
 //! {"benchmark":"benches","kind":"lowering","backend":"vm","iterations":<u32>,"wall_ns":<series>,"functions":<usize>,"ok":<bool>}
@@ -68,10 +70,14 @@
 //! expected to remember. `crates/cove-bench/src/stats.rs` says why the median
 //! and the interquartile range rather than the mean and a standard deviation.
 //!
-//! `samples` is every timing the run took, on the wall-time series alone. It
-//! is what turns a recorded run into a baseline: a summary can only be
-//! compared against another summary by arithmetic that invents the spread it
-//! needs, and the samples do not have to be invented.
+//! `samples` is every timing the run took, on the wall-time series alone,
+//! **in the order the run took them**. It is what turns a recorded run into a
+//! baseline: a summary can only be compared against another summary by
+//! arithmetic that invents the spread it needs, and the samples do not have to
+//! be invented. The order is what says *when* a slow sample arrived, which is
+//! the difference between a machine that drifted through a series and a
+//! benchmark that is noisy in it; nothing that compares two runs reads it,
+//! because every statistic here is an order statistic.
 //!
 //! A benchmark the lowering refuses reports that instead of its `vm` lines:
 //!
@@ -123,13 +129,26 @@
 //!
 //! **Bracket the variant, do not pair it.** Run the base binary, then the
 //! variant, then the base binary *again*, and quote the variant against the
-//! mean of the two base runs. A single base-then-variant pair cannot tell the
-//! change from the time that passed between them: on the machine
-//! `docs/VM_ARCHITECTURE.md`'s tables were taken on, one unmodified binary
-//! disagreed with itself by 7.4% over forty minutes with nothing changed at
-//! all. The two base runs' disagreement with each other is the measurement's
-//! own error bar, it costs one extra run, and it should be quoted beside the
-//! result -- where it is as large as the effect, that is the result.
+//! mean of the two base runs. The two base runs' disagreement with each other
+//! is the measurement's own error bar, it costs one extra run, and it should
+//! be quoted beside the result -- where it is as large as the effect, that is
+//! the result.
+//!
+//! **Compare one row against itself. Never the largest row of the suite.**
+//! Twenty-two suites in which nothing under test changed, measured for
+//! [issue #205](https://github.com/myuon/cove/issues/205), put a single row's
+//! disagreement with itself at 0.5% to 0.8% in the middle and 2% to 3% at the
+//! 90th percentile. The *largest* disagreement over the suite's twenty-one
+//! rows is a different statistic with a different distribution: on that same
+//! null its median is about 4% and it reaches 15%.
+//! `docs/VM_ARCHITECTURE.md`'s earlier "7.4% against itself" was that
+//! statistic, so it is not the error bar for any row and no row should be read
+//! against it.
+//!
+//! **Two rows are not evidence at the few-percent level, and never were.**
+//! `benches`/`lowering` times a 0.13 ms lowering and `startup` times a
+//! spawned process; between them they carry the suite's largest null shift
+//! two thirds of the time. Read the execution rows.
 //!
 //! Nothing about this makes a comparison across two machines, two build
 //! profiles, or two busy afternoons meaningful. It compares the samples it is
@@ -177,6 +196,7 @@
 //! cargo build --release --workspace
 //! ./target/release/cove-bench --iterations 1      # what CI runs, for correctness
 //! ./target/release/cove-bench --iterations 15     # a real local measurement
+//! ./target/release/cove-bench --iterations 15 --sample-order blocked
 //! ```
 //!
 //! **`--release` is the profile to measure under.** The workspace also defines
@@ -202,6 +222,17 @@
 //! costs it nothing, and is why it stays at one. Six is the fewest samples
 //! any comparison here will draw a conclusion from, and
 //! `docs/VM_ARCHITECTURE.md` takes its tables at fifteen.
+//!
+//! **`--sample-order` is when those samples are taken**, and the default is
+//! `round-robin`: one sample of every row, then a second of every row, so
+//! that each row's series is spread over the whole suite rather than taken at
+//! one instant of it. `blocked` is the order this harness used before
+//! [issue #205](https://github.com/myuon/cove/issues/205) — every sample of a
+//! row before the next row starts — and it is kept so the round that changed
+//! the default can be reproduced. Neither costs more than the other: the
+//! suite takes the same 564 seconds, runs the same runs, and reports the same
+//! fields. At `--iterations 1` the two are the same sequence, so CI is
+//! unaffected.
 //!
 //! Reading one backend against the other is what the output is arranged for:
 //! the two `wall_ns` medians of one benchmark are the comparison, and the
@@ -241,6 +272,68 @@ use stats::{Baseline, Comparison, Stats, Verdict};
 /// says why no number here is gated.
 const DEFAULT_ITERATIONS: u32 = 5;
 
+/// The benchmarks the suite runs, in the order their rows are reported.
+const BENCHMARKS: [&str; 9] = [
+    "pure",
+    "hostheavy",
+    "arith",
+    "arrayget",
+    "field",
+    "method",
+    "call",
+    "chars",
+    "callback",
+];
+
+/// The order the suite takes its samples in.
+///
+/// This changes nothing about *what* is measured -- the same rows run the
+/// same number of times either way, each row's report is the same shape, and
+/// a whole suite takes the same 564 seconds under either -- only *when* each
+/// sample is taken. `docs/VM_ARCHITECTURE.md`, "What the measurement itself
+/// costs", is the round that measured which one to prefer, and by how little.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum SampleOrder {
+    /// Every sample of one row, then every sample of the next.
+    ///
+    /// The order this harness used until [issue
+    /// #205](https://github.com/myuon/cove/issues/205), and the reason a short
+    /// row was the least reliable thing in the suite: `pure` on the VM runs in
+    /// about 1.4 ms, so fifteen samples of it are twenty milliseconds of
+    /// measurement taken at one instant of a suite that lasts nine and a half
+    /// minutes. Whatever the machine was doing in that instant is the whole of
+    /// that row's answer, and nothing in the row's own spread can say so.
+    ///
+    /// Kept because the round that replaced it was run against it, and a
+    /// result nobody can reproduce is a result nobody can check.
+    Blocked,
+    /// One sample of every row, then a second of every row, and so on.
+    ///
+    /// The same total work, rearranged so that each row's series is spread
+    /// over the whole suite instead of one instant of it. A machine that
+    /// drifts over the suite then drifts *through* every row's series rather
+    /// than between one row's series and another's, so the median of a series
+    /// is a summary of the session rather than of a moment in it, and the
+    /// interquartile range beside it starts including the drift instead of
+    /// being blind to it.
+    RoundRobin,
+}
+
+/// The order a run uses when `--sample-order` is not given.
+///
+/// Round-robin, on this evidence: five suites an arm, interleaved on one
+/// machine, one unmodified binary against itself. Over the eighteen rows the
+/// order actually governs, the median disagreement between two suites fell
+/// from 0.61% to 0.45% and its 90th percentile from 1.97% to 1.67%, thirteen
+/// of eighteen rows improved, and the suite took the same time. That is a
+/// quarter of the noise and not a fix; it is the default because it costs
+/// nothing, not because it settles anything.
+///
+/// A run at `--iterations 1` -- which is what CI does -- takes exactly the
+/// same samples in exactly the same sequence under either order, because one
+/// pass over the rows *is* one sample of each.
+const DEFAULT_SAMPLE_ORDER: SampleOrder = SampleOrder::RoundRobin;
+
 fn main() -> ExitCode {
     // The benchmarks run Cove entries, so they run on the stack the runtime
     // sizes for that, the same as `cove run` does. Measuring an interpreter
@@ -257,6 +350,13 @@ fn main() -> ExitCode {
 /// Runs every benchmark and reports each one as a line of JSON.
 fn bench() -> ExitCode {
     let iterations = parse_iterations();
+    let order = match parse_sample_order() {
+        Ok(order) => order,
+        Err(message) => {
+            eprintln!("cove-bench: {message}");
+            return ExitCode::FAILURE;
+        }
+    };
 
     // Read before anything is measured, so a baseline that does not exist or
     // that a build too old to record its samples produced is a failure before
@@ -285,7 +385,7 @@ fn bench() -> ExitCode {
                 "cove-bench: `--baseline` compares the benchmark suite, not `--matrix`; ignoring it"
             );
         }
-        return matrix(&package, &program, &sources, iterations);
+        return matrix(&package, &program, &sources, iterations, order);
     }
 
     let mut ok = true;
@@ -310,17 +410,13 @@ fn bench() -> ExitCode {
         Err(why) => eprintln!("cove-bench: the VM cannot run `benches/`: {why}"),
     }
 
-    for name in [
-        "pure",
-        "hostheavy",
-        "arith",
-        "arrayget",
-        "field",
-        "method",
-        "call",
-        "chars",
-        "callback",
-    ] {
+    // Every row this run will time, resolved before any of them is timed.
+    // An entry that does not exist, or a benchmark the lowering refused, is
+    // a fact about the suite rather than about the machine, and finding it
+    // out halfway through would put an error message inside somebody's
+    // series.
+    let mut rows: Vec<Row> = Vec::new();
+    for name in BENCHMARKS {
         for backend in [Backend::Ast, Backend::Vm] {
             // A benchmark the lowering refused is reported as refused rather
             // than skipped: a missing row reads as a benchmark nobody ran,
@@ -334,43 +430,39 @@ fn bench() -> ExitCode {
                     continue;
                 }
             };
-
-            match bench_execution(&package, &program, &sources, name, iterations, backend, ir) {
-                Ok(report) => {
-                    ok &= report.ok;
-                    println!("{}", report.to_json());
-                    // A run that did not pass is not a measurement of
-                    // anything, so it is not compared: the module docs say a
-                    // caller should refuse numbers from a run that is not
-                    // `ok`, and this is that caller.
-                    if report.ok {
-                        compare(
-                            baseline.as_ref(),
-                            &mut compared,
-                            name,
-                            backend.kind(),
-                            &backend.to_string(),
-                            &report.wall_ns,
-                        );
-                    }
-                }
+            match Row::resolve(&package, &program, name, backend, ir) {
+                Ok(row) => rows.push(row),
                 Err(message) => {
                     eprintln!("cove-bench: benchmark `{name}` on {backend}: {message}");
                     ok = false;
                 }
             }
-
-            match bench_trace_overhead(&package, &program, &sources, name, iterations, backend, ir)
-            {
-                Ok(report) => println!("{}", report.to_json()),
-                Err(message) => {
-                    eprintln!(
-                        "cove-bench: benchmark `{name}` on {backend} (trace overhead): {message}"
-                    );
-                    ok = false;
-                }
-            }
         }
+    }
+
+    take_samples(&program, &sources, &mut rows, iterations, order);
+
+    for row in &rows {
+        let report = row.report(iterations);
+        ok &= report.ok;
+        println!("{}", report.to_json());
+        // A run that did not pass is not a measurement of anything, so it is
+        // not compared: the module docs say a caller should refuse numbers
+        // from a run that is not `ok`, and this is that caller.
+        if report.ok {
+            compare(
+                baseline.as_ref(),
+                &mut compared,
+                row.name,
+                row.backend.kind(),
+                &row.backend.to_string(),
+                &report.wall_ns,
+            );
+        }
+        println!(
+            "{}",
+            bench_trace_overhead(&program, &sources, row, iterations).to_json()
+        );
     }
 
     for backend in [Backend::Ast, Backend::Vm] {
@@ -549,6 +641,31 @@ fn parse_iterations() -> u32 {
         i += 1;
     }
     DEFAULT_ITERATIONS
+}
+
+/// Reads `--sample-order <blocked|round-robin>` from the process arguments.
+///
+/// Unlike `--iterations`, a value this does not recognize is an error rather
+/// than a fallback: the two orders disagree with each other by more than most
+/// changes this repository measures, so a run that silently used the other
+/// one would be a measurement of the wrong thing under the right name.
+fn parse_sample_order() -> Result<SampleOrder, String> {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let mut i = 0;
+    while i < args.len() {
+        if args[i] == "--sample-order" {
+            return match args.get(i + 1).map(String::as_str) {
+                Some("blocked") => Ok(SampleOrder::Blocked),
+                Some("round-robin") => Ok(SampleOrder::RoundRobin),
+                Some(other) => Err(format!(
+                    "`--sample-order` is `blocked` or `round-robin`, not `{other}`"
+                )),
+                None => Err("`--sample-order` needs `blocked` or `round-robin`".to_string()),
+            };
+        }
+        i += 1;
+    }
+    Ok(DEFAULT_SAMPLE_ORDER)
 }
 
 // ------------------------------------------------------- comparing two runs
@@ -740,11 +857,24 @@ const MATRIX_TURNS: u64 = 2_000_000;
 /// This does not run under `cove-bench` with no arguments, and that is
 /// deliberate: eight two-million-turn loops on top of the suite would double
 /// what every push waits for, to answer a question nobody asked on that push.
+/// One row of the calling-convention matrix, and the samples taken of it.
+struct MatrixRow<'a> {
+    name: &'static str,
+    what: &'static str,
+    module: &'a str,
+    entry: &'a str,
+    allow: Vec<String>,
+    samples: Vec<u64>,
+    instructions: u64,
+    ok: bool,
+}
+
 fn matrix(
     package: &Package,
     program: &Arc<Program>,
     sources: &Arc<SourceMap>,
     iterations: u32,
+    order: SampleOrder,
 ) -> ExitCode {
     let lowered = match cove_ir::lower::lower(program) {
         Ok(lowered) => Arc::new(lowered),
@@ -771,9 +901,14 @@ instructions per turn   ns/turn  what"
         .nth(1)
         .filter(|argument| !argument.starts_with("--"));
 
-    let mut ok = true;
-    let mut baseline = 0.0f64;
-    for (index, (name, what)) in MATRIX.iter().enumerate() {
+    // The matrix is read as ratios *between* its rows, so the order it takes
+    // its samples in matters to it more than it does to the suite: a row
+    // measured minutes after the row it is divided by carries whatever the
+    // machine did in between into the quotient. So it obeys `--sample-order`
+    // too, which is why every row is opened before any of them is timed and
+    // nothing is printed until all of them are finished.
+    let mut rows: Vec<MatrixRow> = Vec::new();
+    for (name, what) in MATRIX.iter() {
         if only.as_deref().is_some_and(|wanted| wanted != *name) {
             continue;
         }
@@ -784,29 +919,64 @@ instructions per turn   ns/turn  what"
                 return ExitCode::FAILURE;
             }
         };
+        rows.push(MatrixRow {
+            name,
+            what,
+            module,
+            entry,
+            allow,
+            samples: Vec::with_capacity(iterations as usize),
+            instructions: 0,
+            ok: true,
+        });
+    }
 
-        let mut samples = Vec::with_capacity(iterations as usize);
-        let mut instructions = 0;
-        for _ in 0..iterations {
-            let measurement = run_once(
-                program,
-                sources,
-                module,
-                entry,
-                &allow,
-                Arc::new(NullSink),
-                Some(&lowered),
+    let sample = |row: &mut MatrixRow| {
+        let measurement = run_once(
+            program,
+            sources,
+            row.module,
+            row.entry,
+            &row.allow,
+            Arc::new(NullSink),
+            Some(&lowered),
+        );
+        row.samples.push(measurement.wall.as_nanos() as u64);
+        row.instructions = measurement.instructions.unwrap_or(0);
+        if let Some(message) = measurement.failure {
+            eprintln!(
+                "cove-bench: matrix row `{}` did not pass: {message}",
+                row.name
             );
-            samples.push(measurement.wall.as_nanos() as u64);
-            instructions = measurement.instructions.unwrap_or(0);
-            if let Some(message) = measurement.failure {
-                eprintln!("cove-bench: matrix row `{name}` did not pass: {message}");
-                ok = false;
+            row.ok = false;
+        }
+    };
+    match order {
+        SampleOrder::Blocked => {
+            for row in rows.iter_mut() {
+                for _ in 0..iterations {
+                    sample(row);
+                }
             }
         }
+        SampleOrder::RoundRobin => {
+            for _ in 0..iterations {
+                for row in rows.iter_mut() {
+                    sample(row);
+                }
+            }
+        }
+    }
+
+    let mut ok = true;
+    let mut baseline = 0.0f64;
+    for (index, row) in rows.iter_mut().enumerate() {
+        let (name, what, instructions) = (row.name, row.what, row.instructions);
+        ok &= row.ok;
+        let samples = &mut row.samples;
         samples.sort_unstable();
 
-        let median = stats::quantile(&samples, 0.5) / 1e6;
+        let median = stats::quantile(samples, 0.5) / 1e6;
         let min = samples[0] as f64 / 1e6;
         let max = samples[samples.len() - 1] as f64 / 1e6;
         if index == 0 {
@@ -1057,65 +1227,137 @@ impl ExecutionReport {
     }
 }
 
-#[allow(clippy::too_many_arguments)]
-fn bench_execution(
-    package: &Package,
-    program: &Arc<Program>,
-    sources: &Arc<SourceMap>,
+/// One benchmark on one backend, and the samples taken of it so far.
+///
+/// The series is a field rather than a local of the loop that fills it
+/// because [`SampleOrder::RoundRobin`] leaves and comes back: a row is opened
+/// once, sampled at whatever points in the suite the order says, and read
+/// only when every row is finished.
+struct Row<'a> {
     name: &'static str,
-    iterations: u32,
     backend: Backend,
-    ir: Option<&Arc<cove_ir::Program>>,
-) -> Result<ExecutionReport, String> {
-    let (module, entry, allow) = entry_for(package, program, name)?;
+    module: &'a str,
+    entry: &'a str,
+    allow: Vec<String>,
+    ir: Option<&'a Arc<cove_ir::Program>>,
+    wall_ns: Vec<u64>,
+    heap_peak: Vec<u64>,
+    fuel_spent: u64,
+    host_calls: u64,
+    irreversible_writes: u64,
+    ok: bool,
+}
 
-    let mut wall_ns = Vec::with_capacity(iterations as usize);
-    let mut heap_peak = Vec::with_capacity(iterations as usize);
-    let mut fuel_spent = 0;
-    let mut host_calls = 0;
-    let mut irreversible_writes = 0;
-    let mut ok = true;
+impl<'a> Row<'a> {
+    /// Looks the benchmark's entry up, without running anything.
+    fn resolve(
+        package: &'a Package,
+        program: &Program,
+        name: &'static str,
+        backend: Backend,
+        ir: Option<&'a Arc<cove_ir::Program>>,
+    ) -> Result<Row<'a>, String> {
+        let (module, entry, allow) = entry_for(package, program, name)?;
+        Ok(Row {
+            name,
+            backend,
+            module,
+            entry,
+            allow,
+            ir,
+            wall_ns: Vec::new(),
+            heap_peak: Vec::new(),
+            fuel_spent: 0,
+            host_calls: 0,
+            irreversible_writes: 0,
+            ok: true,
+        })
+    }
 
-    for _ in 0..iterations {
+    /// Runs the benchmark once more and keeps what that run measured.
+    ///
+    /// The counters are assignments rather than accumulations because they
+    /// are exact and every run produces the same ones: a benchmark that ran a
+    /// different number of instructions on its ninth sample than on its first
+    /// would be a different benchmark, and that is what `fuel_spent` being
+    /// identical across a table is there to prove.
+    fn sample(&mut self, program: &Arc<Program>, sources: &Arc<SourceMap>) {
         let measurement = run_once(
             program,
             sources,
-            module,
-            entry,
-            &allow,
+            self.module,
+            self.entry,
+            &self.allow,
             Arc::new(NullSink),
-            ir,
+            self.ir,
         );
-        wall_ns.push(measurement.wall.as_nanos() as u64);
-        heap_peak.push(measurement.heap.peak_bytes);
-        fuel_spent = measurement.fuel_spent;
-        host_calls = measurement.host_calls;
-        irreversible_writes = measurement.irreversible_writes;
+        self.wall_ns.push(measurement.wall.as_nanos() as u64);
+        self.heap_peak.push(measurement.heap.peak_bytes);
+        self.fuel_spent = measurement.fuel_spent;
+        self.host_calls = measurement.host_calls;
+        self.irreversible_writes = measurement.irreversible_writes;
         if let Some(message) = measurement.failure {
-            eprintln!("cove-bench: benchmark `{name}` on {backend} did not pass: {message}");
-            ok = false;
+            eprintln!(
+                "cove-bench: benchmark `{}` on {} did not pass: {message}",
+                self.name, self.backend
+            );
+            self.ok = false;
         }
     }
 
-    let wall = Stats::of(&wall_ns);
-    let fuel_per_sec = if wall.mean() > 0 {
-        fuel_spent as f64 / (wall.mean() as f64 / 1e9)
-    } else {
-        0.0
-    };
+    /// What the row measured, once every sample of it has been taken.
+    fn report(&self, iterations: u32) -> ExecutionReport {
+        let wall = Stats::of(&self.wall_ns);
+        let fuel_per_sec = if wall.mean() > 0 {
+            self.fuel_spent as f64 / (wall.mean() as f64 / 1e9)
+        } else {
+            0.0
+        };
+        ExecutionReport {
+            benchmark: self.name,
+            backend: self.backend,
+            iterations,
+            wall_ns: wall,
+            fuel_spent: self.fuel_spent,
+            fuel_per_sec,
+            heap_peak_bytes: Stats::of(&self.heap_peak),
+            host_calls: self.host_calls,
+            irreversible_writes: self.irreversible_writes,
+            ok: self.ok,
+        }
+    }
+}
 
-    Ok(ExecutionReport {
-        benchmark: name,
-        backend,
-        iterations,
-        wall_ns: wall,
-        fuel_spent,
-        fuel_per_sec,
-        heap_peak_bytes: Stats::of(&heap_peak),
-        host_calls,
-        irreversible_writes,
-        ok,
-    })
+/// Fills every row's series, in the order `order` asks for.
+///
+/// Both orders run exactly the same runs exactly as many times. What differs
+/// is when: [`SampleOrder::Blocked`] finishes a row before it starts the next
+/// one, so a row's whole series is taken in one span of the suite, and
+/// [`SampleOrder::RoundRobin`] takes one sample of every row per pass, so
+/// each row's series is spread across the whole of it.
+fn take_samples(
+    program: &Arc<Program>,
+    sources: &Arc<SourceMap>,
+    rows: &mut [Row<'_>],
+    iterations: u32,
+    order: SampleOrder,
+) {
+    match order {
+        SampleOrder::Blocked => {
+            for row in rows.iter_mut() {
+                for _ in 0..iterations {
+                    row.sample(program, sources);
+                }
+            }
+        }
+        SampleOrder::RoundRobin => {
+            for _ in 0..iterations {
+                for row in rows.iter_mut() {
+                    row.sample(program, sources);
+                }
+            }
+        }
+    }
 }
 
 /// Compares one benchmark run untraced against the same run under a real
@@ -1142,17 +1384,20 @@ impl TraceOverheadReport {
     }
 }
 
-#[allow(clippy::too_many_arguments)]
+/// Times one row untraced and then traced, back to back.
+///
+/// This one stays blocked whatever `--sample-order` says, and deliberately:
+/// what it reports is the *ratio* of two series of the same work, so the two
+/// have to be taken as close together as they can be. Spreading them apart
+/// would put the machine's drift between the numerator and the denominator,
+/// which is the mistake the flag exists to avoid making everywhere else.
 fn bench_trace_overhead(
-    package: &Package,
     program: &Arc<Program>,
     sources: &Arc<SourceMap>,
-    name: &'static str,
+    row: &Row<'_>,
     iterations: u32,
-    backend: Backend,
-    ir: Option<&Arc<cove_ir::Program>>,
-) -> Result<TraceOverheadReport, String> {
-    let (module, entry, allow) = entry_for(package, program, name)?;
+) -> TraceOverheadReport {
+    let (module, entry, allow, ir) = (row.module, row.entry, &row.allow, row.ir);
 
     let mut untraced = Vec::with_capacity(iterations as usize);
     for _ in 0..iterations {
@@ -1161,7 +1406,7 @@ fn bench_trace_overhead(
             sources,
             module,
             entry,
-            &allow,
+            allow,
             Arc::new(NullSink),
             ir,
         );
@@ -1173,7 +1418,7 @@ fn bench_trace_overhead(
         let header = TraceHeader {
             // The backend this measurement is of, which is the one the
             // recording would have been made on had it been kept.
-            backend: match backend {
+            backend: match row.backend {
                 Backend::Ast => RecordingBackend::Ast,
                 Backend::Vm => RecordingBackend::Vm,
             },
@@ -1182,7 +1427,7 @@ fn bench_trace_overhead(
             args: Vec::new(),
         };
         let sink: Arc<dyn TraceSink> = Arc::new(JsonlSink::new(std::io::sink(), header));
-        let m = run_once(program, sources, module, entry, &allow, sink, ir);
+        let m = run_once(program, sources, module, entry, allow, sink, ir);
         traced.push(m.wall.as_nanos() as u64);
     }
 
@@ -1194,13 +1439,13 @@ fn bench_trace_overhead(
         1.0
     };
 
-    Ok(TraceOverheadReport {
-        benchmark: name,
-        backend,
+    TraceOverheadReport {
+        benchmark: row.name,
+        backend: row.backend,
         untraced_wall_ns: untraced_mean,
         traced_wall_ns: traced_mean,
         overhead_ratio,
-    })
+    }
 }
 
 /// Process-level startup: spawns the real `cove` binary and times the whole
