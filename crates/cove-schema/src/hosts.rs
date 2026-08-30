@@ -729,6 +729,13 @@ pub const DATABASE: ModuleSchema = ModuleSchema {
 /// all — it is a constructor the host owns because the host owns the
 /// encoding.
 ///
+/// `http.Response` is the type of both halves of this module: it is what a
+/// route's handler answers, what `json` builds, and what `fetch` hands a
+/// client. A client and a server learn the same two facts about a response —
+/// its status and its body — so declaring them twice would have been two
+/// names for one shape, and a program that proxied one to the other would
+/// have had to copy it field by field.
+///
 /// The listener lives behind a lock the host owns, so two tasks may both hold
 /// the handle and take turns accepting: the resource is task-safe, and the
 /// schema is where it says so.
@@ -740,7 +747,11 @@ pub const HTTP: ModuleSchema = ModuleSchema {
             name: "fetch",
             params: &[HostType::String],
             variadic: false,
-            result: HostType::Result(&HostType::String, &HostType::Error),
+            // A status the server sent is part of the answer rather than a
+            // reason there was none, so an `Err` here means no response
+            // arrived at all: a URL that will not parse, a connection that
+            // could not be made, or one this host would not hold.
+            result: HostType::Result(&HostType::Named("http.Response"), &HostType::Error),
             capability: "http",
             effect: Effect::Read,
             cancellable: true,

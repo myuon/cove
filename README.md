@@ -125,9 +125,15 @@ its complaints stay on the terminal
 ([ADR 0020](docs/adr/0020-a-diagnostic-stream-for-console.md)); `http`
 ships a real implementation speaking a deliberately small HTTP/1.1 over TCP --
 one request per connection, loopback only, and fixed bounds on the request
-line, on the headers, and on the body it will read, so that a peer cannot
-choose how much of the process it occupies -- a recorded fake, and a denied
-one; `database` ships a fake and a denied one, because connecting to a real
+line, on the headers, on the body it will read and on the response it will
+hold, so that neither end of a connection chooses how much of the process it
+occupies -- a recorded fake, and a denied one. A client is told what the
+server answered: `http.fetch` produces the `http.Response` a handler returns
+and `http.json` builds, so a status outside 200-299 is an answer with a number
+in it rather than a message, and a program tells a `404` from a refused
+connection by the shape of what it was handed
+([ADR 0025](docs/adr/0025-a-client-is-told-what-a-server-answered.md));
+`database` ships a fake and a denied one, because connecting to a real
 database needs more than the standard library. `clock.timeout` bounds a block
 against a watchdog on a real clock, and against how far the block pushed a
 virtual one that has no time of its own; `clock.every` repeats a callback until

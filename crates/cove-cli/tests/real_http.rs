@@ -11,7 +11,10 @@
 //!
 //! What it proves that a fake cannot is that `http.fetch` speaks the protocol.
 //! A recorded fake answers a URL from a table and would keep answering it if
-//! the client sent nothing at all.
+//! the client sent nothing at all. That now includes the status: `fetch`
+//! answers an `http.Response`, and the number in it has to have been read off
+//! a real status line for these tests to pass, which is the half of issue
+//! #145 a table of canned answers cannot vouch for.
 //!
 //! The last test here is the other thing a fake cannot show: that a run's
 //! deadline reaches a program sitting inside `http.Server.handle` with a real
@@ -129,14 +132,22 @@ fn read_request(stream: &TcpStream) -> Asked {
 }
 
 /// Runs a one-module package that fetches `url`, against the real host.
+///
+/// The program answers `<status> <body>` rather than the response itself,
+/// because a `Value` a test reads back is easiest to assert on as text and
+/// because writing the two together is what says the program saw both. What
+/// it proves is that the status crossed the whole boundary: off a real socket,
+/// through `http.fetch`'s declared `Result<http.Response, Error>`, past the
+/// schema check the registry makes on the way out, and into an interpolation
+/// in Cove source.
 fn fetch(url: &str) -> Value {
     let dir = TempDir::new("fetch");
     let source = format!(
         "use http\n\n\
          /// Fetches one URL and answers what came back.\n\
          export fn main() -> Result<String, Error> {{\n  \
-         let body = http.fetch(\"{url}\")?\n  \
-         Ok(body)\n\
+         let answer = http.fetch(\"{url}\")?\n  \
+         Ok(\"{{answer.status}} {{answer.body}}\")\n\
          }}\n"
     );
     std::fs::create_dir_all(dir.path().join("app")).unwrap();
@@ -273,27 +284,61 @@ fn a_run_deadline_stops_a_program_waiting_for_a_connection() {
 
 /// A Cove program reaching a real server, over a real socket.
 #[test]
-fn a_program_fetches_a_body_from_a_server_on_loopback() {
+fn a_program_fetches_a_response_from_a_server_on_loopback() {
     let (port, server) = serve_once("200 OK", "{\"status\":\"ok\"}");
 
     let value = fetch(&format!("http://127.0.0.1:{port}/health"));
-    assert_eq!(outcome(&value), Ok("{\"status\":\"ok\"}".to_string()));
+    assert_eq!(outcome(&value), Ok("200 {\"status\":\"ok\"}".to_string()));
 
     let asked = server.join().expect("the server thread finishes");
     assert_eq!(asked.method, "GET");
     assert_eq!(asked.target, "/health");
 }
 
-/// A status the server refused with is an ordinary Cove failure, not a body.
+/// A status the server refused with reaches the program as a status.
+///
+/// This is the same program and the same socket as the test above, and the
+/// only thing that differs is the number the server put on its status line,
+/// which is the point of issue #145. It used to be an ordinary Cove failure
+/// carrying the message `http: {url} answered 503`, so a program had prose
+/// where the status was and could not tell this run from one where nothing
+/// answered at all. It is now an answer, and the body the `503` carried comes
+/// with it -- which a failure could not have carried either, and which is
+/// usually where a server says what went wrong.
 #[test]
-fn a_program_is_told_when_a_server_answers_a_failure_status() {
+fn a_program_is_told_the_failure_status_a_server_answered_with() {
     let (port, server) = serve_once("503 Service Unavailable", "busy");
 
     let value = fetch(&format!("http://127.0.0.1:{port}/health"));
-    let Err(message) = outcome(&value) else {
-        panic!("a 503 is a failure, not a body: {value}");
-    };
-    assert!(message.ends_with("answered 503"), "{message}");
+    assert_eq!(outcome(&value), Ok("503 busy".to_string()));
 
     server.join().expect("the server thread finishes");
+}
+
+/// A connection nothing is listening on is still a failure, and that is what
+/// keeps the two apart.
+///
+/// The pair this makes with the test above is the whole of what issue #145
+/// asked for: one URL answered `503` and one was never reached, and a program
+/// tells them apart by the shape of what it was handed rather than by reading
+/// the message. The port is bound and then dropped, so it is one nothing is
+/// listening on rather than one that might belong to something else.
+#[test]
+fn a_program_is_told_when_no_server_answered_at_all() {
+    let port = {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("loopback is available");
+        listener
+            .local_addr()
+            .expect("a bound socket has an address")
+            .port()
+    };
+
+    let value = fetch(&format!("http://127.0.0.1:{port}/health"));
+    let Err(message) = outcome(&value) else {
+        panic!("nothing was listening, so there is no response: {value}");
+    };
+    assert!(
+        message.starts_with(&format!("http: cannot connect to 127.0.0.1:{port}")),
+        "{message}"
+    );
 }
