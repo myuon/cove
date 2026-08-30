@@ -26,10 +26,10 @@ use cove_syntax::ast::Param;
 
 use crate::{Function, Inst, Scalar, SlotKind, Unsupported};
 
+use super::body::{Body, Position};
 use super::fuel::block_fuel;
 use super::index::{reject_dyn, Key, Lowering};
 use super::scan::var_argument_roots;
-use super::{Body, Position};
 
 impl<'a> Lowering<'a> {
     /// Lowers a lambda: its parameters, then the captures the body that
