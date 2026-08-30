@@ -491,6 +491,26 @@ pub fn call_method(
                     storage.elements.borrow_mut().push(args.remove(0));
                     Ok(Value::Unit)
                 }
+                // Replaces the element at `index` and answers what was
+                // there, or answers `None` and writes nothing when `index`
+                // is not already in the vector — which is `get`'s answer to
+                // the same bad index, so a program has one rule about
+                // indices rather than two. The write goes through the
+                // storage handle, exactly as `push`'s does, so an alias
+                // observes it and there is nothing to write back to the
+                // receiver's own slot.
+                "set" => {
+                    let mut args = expect_args("Vector.set", args, 2, span)?;
+                    let value = args.remove(1);
+                    let Some(index) = index_of("Vector.set", &args, span)? else {
+                        return Ok(Value::none());
+                    };
+                    let mut elements = storage.elements.borrow_mut();
+                    let Some(slot) = elements.get_mut(index) else {
+                        return Ok(Value::none());
+                    };
+                    Ok(Value::some(std::mem::replace(slot, value)))
+                }
                 "get" => Ok(index_of("Vector.get", &args, span)?
                     .and_then(|i| storage.elements.borrow().get(i).cloned())
                     .map(Value::some)

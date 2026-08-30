@@ -484,9 +484,9 @@ pub fn is_builtin_type(name: &str) -> bool {
 /// so needs a mutable place at the call site rather than a value.
 ///
 /// The question is asked by name alone, because that is what the call site
-/// has before it has evaluated a receiver. `push` and `freeze` are the two,
-/// and no builtin type spells a mutating method the way another spells an
-/// immutable one.
+/// has before it has evaluated a receiver. `push`, `set`, and `freeze` are
+/// the three, and no builtin type spells a mutating method the way another
+/// spells an immutable one.
 pub fn is_mutating_method(name: &str) -> bool {
     mutating_methods().contains(&name)
 }
@@ -1058,10 +1058,10 @@ pub const ARRAY: BuiltinSchema = BuiltinSchema {
 /// `Vector<T>`: the growable sequence, and the one builtin with a mutable
 /// graph of its own.
 ///
-/// `push` and `freeze` are the language's only `var self` methods: one
-/// appends, and the other consumes locally unique storage and hands back an
-/// `Array` in O(1). `toArray` is the copying alternative, for a caller that
-/// cannot give the storage up.
+/// `push`, `set`, and `freeze` are the language's only `var self` methods:
+/// one appends, one replaces, and the third consumes locally unique storage
+/// and hands back an `Array` in O(1). `toArray` is the copying alternative,
+/// for a caller that cannot give the storage up.
 ///
 /// `contains`, `indexOf`, `slice`, `map`, `filter`, `fold`, and `sorted` are
 /// the same seven an `Array` has, and the four that produce a sequence
@@ -1104,6 +1104,44 @@ pub const VECTOR: BuiltinSchema = BuiltinSchema {
             }],
             variadic: false,
             result: BuiltinType::Unit,
+            mutating: true,
+        },
+        // `set(index: Int, value: T) -> Option<T>`: replaces the element at
+        // `index` and answers what was there.
+        //
+        // A `Vector` shares its storage, so replacing an element is a
+        // mutation and not a new vector — which is why this is `var self`
+        // like `push` and unlike `Map.inserted`, and why it needs the
+        // caller's own place at the call site for the same reason `push`
+        // does.
+        //
+        // **An index that is not already in the vector answers `None` and
+        // writes nothing.** That is `get`'s answer to the same bad index,
+        // in the shape a replacement can take, and it is deliberately not a
+        // third thing: a negative index, an index at or past `length()`, and
+        // a `set` on an empty vector all answer `None`, exactly as `get`
+        // does, so a program can be written against one rule about indices
+        // rather than two. `Some(previous)` is what the index held before,
+        // so `v.set(i, x)` answers what `v.get(i)` would have.
+        //
+        // It replaces and never appends. A `set` at `length()` is out of
+        // range, because a vector grows by `push` and a `set` that
+        // sometimes grew would make the length depend on the index.
+        MethodSchema {
+            name: "set",
+            generics: &[],
+            params: &[
+                ParamSchema {
+                    name: "index",
+                    ty: BuiltinType::Int,
+                },
+                ParamSchema {
+                    name: "value",
+                    ty: BuiltinType::Param("T"),
+                },
+            ],
+            variadic: false,
+            result: BuiltinType::Option(&BuiltinType::Param("T")),
             mutating: true,
         },
         MethodSchema {
@@ -2361,10 +2399,11 @@ mod tests {
         assert_eq!(read, built);
     }
 
-    /// `push` and `freeze` are the language's only `var self` methods, and
-    /// the call site asks by name because it has no receiver type yet.
+    /// `push`, `set`, and `freeze` are the language's only `var self`
+    /// methods, and the call site asks by name because it has no receiver
+    /// type yet.
     #[test]
-    fn push_and_freeze_are_the_mutating_methods() {
+    fn push_set_and_freeze_are_the_mutating_methods() {
         let mut mutating: Vec<&str> = BUILTINS
             .iter()
             .flat_map(|entry| entry.methods)
@@ -2372,8 +2411,10 @@ mod tests {
             .map(|method| method.name)
             .collect();
         mutating.sort_unstable();
-        assert_eq!(mutating, ["freeze", "push"]);
+        assert_eq!(mutating, ["freeze", "push", "set"]);
         assert!(is_mutating_method("push"));
+        assert!(is_mutating_method("set"));
+        assert!(!is_mutating_method("get"));
         assert!(!is_mutating_method("toArray"));
     }
 

@@ -7,8 +7,12 @@ toArray produced an independent array [1, 2, 3, 4]
 the vector kept growing [1, 2, 3, 4, 5]
 get Some(1) None
 length 5 isEmpty false
+set answers what was there Some(1)
+the alias observes the replacement [100, 2, 3, 4, 5]
+out of range None None unchanged [100, 2, 3, 4, 5]
+set never grows the vector None 5
 contains true false
 indexOf Some(0) None
-slice [1, 2] [1, 2, 3, 4, 5]
+slice [100, 2] [100, 2, 3, 4, 5]
 empty [] true
-empty answers false None
+empty answers false None None

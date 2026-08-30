@@ -116,6 +116,11 @@ Assignment and ordinary argument passing perform field-wise shallow copies.
 - `slice` clamps both bounds into `0..length()` and answers nothing when `to`
   is at or below `from`, so no argument to it can stop a program. A prefix is
   `slice(0, n)`.
+- `vector.set(index, value)` replaces an element and answers `Some` of what
+  was there. It writes through the shared storage, so it takes a `var self`
+  receiver like `push` and an alias observes it. An index that is not already
+  in the vector answers `None` and writes nothing — the same answer `get`
+  gives for the same index — so `set` never grows a vector; `push` does.
 - A character is a `String` of length 1: `text.chars()` takes a string apart
   into them, and `String.fromCodePoint(codePoint)` builds one from the number
   that names it, or an `Err` for a number that names none — one out of range,

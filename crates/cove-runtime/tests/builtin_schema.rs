@@ -174,6 +174,13 @@ static EXERCISES: &[Exercise] = &[
         name: "sorted",
         body: "  var items = Vector.of(2, 1)\n  items.sorted(by: fn(a, b) { a < b }).length()",
     },
+    // `set` takes a `var self` receiver, so its receiver is a `var` binding
+    // for the reason `push`'s is.
+    Exercise {
+        ty: "Vector",
+        name: "set",
+        body: "  var items = Vector.of(1, 2)\n  items.set(0, 9).unwrapOr(0)",
+    },
     Exercise {
         ty: "Vector",
         name: "contains",
@@ -1661,6 +1668,66 @@ fn a_vectors_slice_is_an_array() {
         "Vector.slice answers an Array",
         r#"  var items = Vector.of(1, 2, 3)
   if items.slice(0, 2) == [1, 2] { 1 } else { 0 }"#,
+        1,
+    );
+}
+
+// ------------------------------ what replacing an element answers
+//
+// The exercise above proves `set` dispatches; these prove what it answers
+// on an index nothing put there, that it writes through the shared storage,
+// and that it never grows the vector.
+
+/// `set` answers what the index held, and the vector holds the new value.
+#[test]
+fn set_replaces_an_element_and_answers_the_old_one() {
+    check_and_answer(
+        "Vector.set in range",
+        r#"  var items = Vector.of(1, 2, 3)
+  let was = items.set(1, 9).unwrapOr(0)
+  if items.toArray() == [1, 9, 3] { was } else { 0 }"#,
+        2,
+    );
+}
+
+/// An index that is not already in the vector answers `None` and writes
+/// nothing — which is what `get` answers for the same index, so a program
+/// has one rule about indices rather than two.
+#[test]
+fn set_out_of_range_answers_none_and_writes_nothing() {
+    check_and_answer(
+        "Vector.set out of range",
+        r#"  var items = Vector.of(1, 2)
+  let past = match items.set(2, 9) { Some(_) => false, None => true }
+  let below = match items.set(-1, 9) { Some(_) => false, None => true }
+  if past && below && items.toArray() == [1, 2] { 1 } else { 0 }"#,
+        1,
+    );
+}
+
+/// A `set` on an empty vector is out of range like any other, and a `set` at
+/// `length()` does not append: a vector grows by `push`.
+#[test]
+fn set_never_grows_the_vector() {
+    check_and_answer(
+        "Vector.set on an empty vector",
+        r#"  var items: Vector<Int> = Vector.of()
+  let answered = match items.set(0, 1) { Some(_) => false, None => true }
+  if answered && items.length() == 0 { 1 } else { 0 }"#,
+        1,
+    );
+}
+
+/// `set` writes through the shared storage, so an alias observes it — which
+/// is what `push` does and the reason `set` takes a `var self` receiver.
+#[test]
+fn an_alias_observes_a_set() {
+    check_and_answer(
+        "Vector.set seen through an alias",
+        r#"  var first = Vector.of(1, 2)
+  var second = first
+  let was = second.set(0, 7)
+  if first.toArray() == [7, 2] { was.unwrapOr(0) } else { 0 }"#,
         1,
     );
 }
