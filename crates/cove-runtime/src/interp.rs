@@ -38,7 +38,7 @@ use cove_syntax::ast::{
     PatternKind, Receiver, StmtKind, StrPart, StructDecl, Type, TypeKind, UnaryOp,
 };
 
-use crate::budget::{Budget, Cancellation, Stopped};
+use crate::budget::{Budget, Cancellation, Meter, Stopped};
 use crate::builtins::{self, Callable};
 use crate::error::RuntimeError;
 use crate::heap::{Collection, Heap, HeapStats, SlotRoots};
@@ -575,11 +575,12 @@ impl Tasking for Interpreter<'_> {
 ///
 /// The `Budget` is owned by the [`HostRegistry`] this interpreter borrows,
 /// not by `Interpreter` itself: a host installs it once with
-/// `HostRegistry::set_budget`, and every task thread reaches that one budget
-/// through `HostRegistry::with_budget` at its own safepoints. ADR 0008 draws
-/// a task's fuel from the run's budget, so there is exactly one authoritative
-/// count of what the run spent, whichever thread spent it. Call depth is the
-/// exception and is counted here, because a task has a stack of its own.
+/// `HostRegistry::set_budget`, and every task thread charges that one budget
+/// at its own safepoints, through a [`crate::budget::Meter`] taken from it
+/// where the run begins. ADR 0008 draws a task's fuel from the run's budget,
+/// so there is exactly one authoritative count of what the run spent,
+/// whichever thread spent it. Call depth is the exception and is counted
+/// here, because a task has a stack of its own.
 pub struct Interpreter<'a> {
     pub program: &'a Program,
     pub sources: &'a SourceMap,
@@ -588,6 +589,25 @@ pub struct Interpreter<'a> {
     /// thread everything it needs to run a body.
     runtime: &'a Runtime,
     depth: usize,
+    /// The run's budget, as this interpreter's safepoints charge it.
+    ///
+    /// `None` is a run with no budget installed, which is what an embedder
+    /// that installed none has, and what it has always meant here: no limit.
+    ///
+    /// Taken once, where the run begins, rather than reached at each
+    /// safepoint through [`HostRegistry::with_budget`]'s mutex — which every
+    /// call, every back edge and every `await` used to take, and which issue
+    /// #182 measured at 36% of `benches/call` on the other backend.
+    /// [`crate::budget::Meter`] is where the argument for the shape is, and
+    /// [`Interpreter::bind_budget`] is where this is filled in.
+    budget: Option<Meter>,
+    /// The host's `max_call_depth`, read off the budget when it was bound.
+    ///
+    /// It cannot change while a run lasts — a budget is installed before a
+    /// run begins and the shape of `invoke_within` is what stops it being
+    /// replaced during one — so every call asking for it was every call
+    /// taking the budget's lock for an answer that could not have moved.
+    call_depth_limit: Option<usize>,
     /// This task's own cancellation flag, when this interpreter is running a
     /// spawned task's body rather than the entry.
     ///
@@ -654,13 +674,24 @@ pub struct Interpreter<'a> {
 
 impl<'a> Interpreter<'a> {
     /// An interpreter for the entry of `runtime`'s run.
+    ///
+    /// The run's budget is bound here, which is the one lock this takes and
+    /// the last one a safepoint of this interpreter will be behind. It is
+    /// sound to bind it this early because a budget cannot be installed once
+    /// an interpreter exists: `HostRegistry::set_budget` needs
+    /// `&mut HostRegistry` and this borrows the registry shared for `'a`. The
+    /// one other way a budget is installed is `HostRegistry::begin_run`,
+    /// which is reached only through [`Interpreter::invoke_within`] and its
+    /// siblings, each of which rebinds.
     pub fn new(runtime: &'a Runtime) -> Self {
-        Interpreter {
+        let mut interpreter = Interpreter {
             program: runtime.program(),
             sources: runtime.sources(),
             hosts: runtime.hosts(),
             runtime,
             depth: 0,
+            budget: None,
+            call_depth_limit: None,
             cancellation: None,
             stops: Vec::new(),
             reentry_depth: 0,
@@ -670,7 +701,27 @@ impl<'a> Interpreter<'a> {
             heap: Heap::new(),
             method_key: std::cell::Cell::new((String::new(), String::new())),
             assertion_failure: None,
-        }
+        };
+        interpreter.bind_budget();
+        interpreter
+    }
+
+    /// Takes the run's budget, in the form every safepoint of this
+    /// interpreter will charge it, together with the call-depth limit that
+    /// comes off it.
+    ///
+    /// Called where a run begins and nowhere else, for the reason
+    /// [`crate::budget::Meter`] gives: a `Meter` names the accounting of the
+    /// run it was taken from, and `HostRegistry::begin_run` gives the budget
+    /// it installs fresh accounting. So [`Interpreter::new`] takes one, and
+    /// the two ways in that install a budget of their own take another
+    /// straight after installing it.
+    fn bind_budget(&mut self) {
+        self.budget = self.hosts.budget_meter();
+        self.call_depth_limit = self
+            .budget
+            .as_ref()
+            .and_then(|budget| budget.limits().max_call_depth);
     }
 
     /// What this run's heaps have done so far: allocation, collections, live
@@ -958,6 +1009,7 @@ impl<'a> Interpreter<'a> {
     ) -> Result<Value, RuntimeError> {
         crate::invoke::check(self.program, module, name, &args)?;
         self.hosts().begin_run(budget);
+        self.bind_budget();
         let outcome = self.enter_with(module, name, args);
         self.ended(outcome)
     }
@@ -975,6 +1027,7 @@ impl<'a> Interpreter<'a> {
         args: Vec<Rc<str>>,
     ) -> Result<Value, RuntimeError> {
         self.hosts().begin_run(budget);
+        self.bind_budget();
         let outcome = self.enter(module, name, args);
         self.ended(outcome)
     }
@@ -1355,12 +1408,10 @@ impl<'a> Interpreter<'a> {
     /// one function of it.
     fn charge_safepoint(&mut self, span: Span) -> Result<(), RuntimeError> {
         stopped_here(self.cancellation.as_ref(), &self.stops, span)?;
-        if let Some(Err(error)) = self.hosts.with_budget(|budget| {
-            budget
-                .safepoint(SAFEPOINT_FUEL)
-                .map_err(|stopped| budget.to_runtime_error(stopped))
-        }) {
-            return Err(error.at(span));
+        if let Some(budget) = &self.budget {
+            if let Err(stopped) = budget.safepoint(SAFEPOINT_FUEL) {
+                return Err(budget.to_runtime_error(stopped).at(span));
+            }
         }
         self.collect_if_due();
         Ok(())
@@ -1543,14 +1594,15 @@ impl<'a> Interpreter<'a> {
         // every other task: a shallow task must not be stopped because a
         // sibling is deep.
         let depth = self.depth + 1;
-        let hosts = self.hosts;
-        if let Some(Some(error)) =
-            hosts.with_budget(|budget| match budget.limits().max_call_depth {
-                Some(limit) if depth > limit => Some(budget.to_runtime_error(Stopped::CallDepth)),
-                _ => None,
-            })
-        {
-            return Err(error.at(span));
+        if let Some(limit) = self.call_depth_limit {
+            if depth > limit {
+                // There is a budget: the limit was read off one. The error
+                // names the value it was configured with, which is why it is
+                // built there rather than here.
+                if let Some(budget) = &self.budget {
+                    return Err(budget.to_runtime_error(Stopped::CallDepth).at(span));
+                }
+            }
         }
         // Every call is also a safepoint, so the fuel charge counts the call
         // itself.
@@ -4146,9 +4198,9 @@ impl Reentry for Callback<'_, '_> {
             return true;
         }
         self.interpreter
-            .hosts
-            .with_budget(|budget| budget.cancellation().is_cancelled())
-            .unwrap_or(false)
+            .budget
+            .as_ref()
+            .is_some_and(Meter::is_cancelled)
     }
 
     /// What the run's deadline leaves, read from the one budget that knows
@@ -4159,10 +4211,9 @@ impl Reentry for Callback<'_, '_> {
     /// so a host comparing the answer against zero is comparing against the
     /// only value that can mean "no time left".
     fn time_left(&self) -> Option<Duration> {
-        self.interpreter.hosts.with_budget(|budget| {
-            let deadline = budget.limits().deadline?;
-            Some(deadline.saturating_sub(budget.elapsed()))
-        })?
+        let budget = self.interpreter.budget.as_ref()?;
+        let deadline = budget.limits().deadline?;
+        Some(deadline.saturating_sub(budget.elapsed()))
     }
 
     /// The task whose stack this call is standing on, which is the task the

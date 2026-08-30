@@ -1340,3 +1340,88 @@ export fn main() -> Result<Int, Error> {
         );
     }
 }
+
+// ------------------------------------- the run's budget, charged by tasks
+
+/// The source both of the tests below run: four tasks doing identical,
+/// bounded work at the same time, on four threads, all charging the one
+/// budget ADR 0008 says the run has.
+const FOUR_TASKS: &str = "\
+fn work(n: Int) -> Int {
+  var total = 0
+  var i = 0
+  while i < 4000 {
+    total += i * n
+    i += 1
+  }
+  total
+}
+
+export fn main() -> Result<Int, Error> {
+  var total = 0
+  scope s {
+    let a = s.spawn { work(1) }
+    let b = s.spawn { work(2) }
+    let c = s.spawn { work(3) }
+    let d = s.spawn { work(4) }
+    total = a.await() + b.await() + c.await() + d.await()
+  }
+  Ok(total)
+}
+";
+
+/// **Concurrent tasks charge the run's budget without losing a charge.**
+///
+/// ADR 0008 draws a task's fuel from the run's budget rather than giving each
+/// task one of its own, so `fuel_spent` is the sum of what four threads did.
+/// The work each of them does is fixed, so the sum is fixed too — however the
+/// four are interleaved — and that is what makes this a test rather than a
+/// measurement: a counter that lost an update under contention would report a
+/// different total on a different afternoon.
+///
+/// Issue #182 is why it is written down. The budget's counters moved out from
+/// behind the registry's mutex and became atomics, and "the mutex was not
+/// protecting anything" is a claim about exactly this.
+#[test]
+fn four_tasks_charging_at_once_spend_the_same_fuel_every_time() {
+    for backend in [Backend::Ast, Backend::Vm] {
+        let first = go(FOUR_TASKS, Limits::default(), backend);
+        assert!(!first.stopped, "{backend:?}: {}", first.answer);
+        for _ in 0..7 {
+            let again = go(FOUR_TASKS, Limits::default(), backend);
+            assert_eq!(
+                again.fuel_spent, first.fuel_spent,
+                "{backend:?}: four tasks spent {} fuel and then {}",
+                first.fuel_spent, again.fuel_spent
+            );
+            assert_eq!(again.answer, first.answer, "{backend:?}");
+        }
+    }
+}
+
+/// **A fuel limit bounds the run and not one task of it.**
+///
+/// The same four tasks under a limit that one of them alone would not reach:
+/// the run stops, because the limit is the run's and every task spends it.
+/// A budget whose counter were per-thread, or one that lost charges under
+/// contention, would let this answer.
+#[test]
+fn four_tasks_at_once_are_stopped_by_the_run_s_fuel_limit() {
+    for backend in [Backend::Ast, Backend::Vm] {
+        let whole = go(FOUR_TASKS, Limits::default(), backend).fuel_spent;
+        // Half of what the four together spend is more than any one of them
+        // spends, so a limit here is one only the *run* reaches. ADR 0024
+        // makes a fuel limit non-portable between backends, which is why it
+        // is measured on each rather than written down.
+        let run = go(
+            FOUR_TASKS,
+            Limits {
+                fuel: Some(whole / 2),
+                ..Limits::default()
+            },
+            backend,
+        );
+        assert!(run.stopped, "{backend:?}: {}", run.answer);
+        assert_eq!(run.outcome, RunOutcome::Fuel, "{backend:?}");
+    }
+}

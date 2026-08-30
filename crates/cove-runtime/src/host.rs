@@ -28,7 +28,7 @@ use std::time::{Duration, Instant};
 
 use cove_sema::Capability;
 
-use crate::budget::{Budget, Cancellation};
+use crate::budget::{Budget, Cancellation, Meter};
 use crate::error::RuntimeError;
 use crate::schema::{
     Admits, Effect, Mismatch, ModuleSchema, OperationSchema, Part, ResourceSchema, TypeSchema,
@@ -730,16 +730,41 @@ impl HostRegistry {
 
     /// Runs `f` against the run's budget, if the host installed one.
     ///
-    /// This is how the interpreter charges its own safepoints — loop back
-    /// edges, calls, and `await` — and how a caller reads the counters after
-    /// a run. Every task thread reaches the one budget through here, so the
-    /// lock is held for the charge and nothing else.
-    pub fn with_budget<R>(&self, f: impl FnOnce(&mut Budget) -> R) -> Option<R> {
-        let mut budget = self
+    /// This is how a caller reads the counters after a run, how a host call
+    /// and a `spawn` are charged, and how a budget is looked at by anything
+    /// that has no [`Meter`] of its own. Every thread of a run reaches the one
+    /// budget through here, so the lock is held for the charge and nothing
+    /// else.
+    ///
+    /// It is *not* how a safepoint charges. That used to be exactly what this
+    /// was for, and issue #182 measured the mutex at 36% of `benches/call`
+    /// against `Vm::execute`'s 46%, because every call and every return is a
+    /// safepoint. [`HostRegistry::budget_meter`] is what a backend takes once
+    /// per run instead, and [`Meter`] is where the argument for it is.
+    pub fn with_budget<R>(&self, f: impl FnOnce(&Budget) -> R) -> Option<R> {
+        let budget = self
             .budget
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        budget.as_mut().map(f)
+        budget.as_ref().map(f)
+    }
+
+    /// The run's budget in the form a safepoint charges it, or `None` if the
+    /// host installed none.
+    ///
+    /// `None` means no budget at all, which is what an embedder that
+    /// installed none has, and what it has always meant here: no limit.
+    ///
+    /// This takes the lock once, and it is the last time a run touches it on
+    /// a per-instruction path: a [`Meter`] charges the same accounting over
+    /// atomics. A backend takes one where a run begins — see [`Meter`] for why
+    /// that is the only place it may be taken — and both of them do.
+    pub fn budget_meter(&self) -> Option<Meter> {
+        let budget = self
+            .budget
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        budget.as_ref().map(Budget::meter)
     }
 
     /// How many calls this run dispatched whose schema declares them
