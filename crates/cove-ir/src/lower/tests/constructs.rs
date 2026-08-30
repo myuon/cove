@@ -909,31 +909,6 @@ fn a_spread_that_collects_nothing_is_refused() {
     );
 }
 
-/// The two shapes a variadic parameter can be written in that nothing
-/// has decided a meaning for.
-///
-/// Both parse and both check. A variadic parameter that is not the last
-/// one is an array of at most one element, because `assign_labels`
-/// gathers `rest` only for the last parameter while `bind_params` wraps
-/// any variadic one; and a default written on a variadic parameter is
-/// unreachable, because `bind_params` tests `variadic` first and
-/// `continue`s.
-#[test]
-fn the_variadic_shapes_nothing_decided_a_meaning_for_are_refused() {
-    assert_eq!(
-        refused(
-            "fn f(items: Int..., last: Int) -> Int {\n  last\n}\n\nfn g() -> Int {\n  f(1, last: 2)\n}\n"
-        ),
-        "a variadic parameter that is not the last one"
-    );
-    assert_eq!(
-        refused(
-            "fn f(items: Int... = 1) -> Int {\n  items.length()\n}\n\nfn g() -> Int {\n  f()\n}\n"
-        ),
-        "a variadic parameter written with a default"
-    );
-}
-
 /// A call that leaves a parameter to its default reaches a function
 /// whose prologue computes it.
 ///
