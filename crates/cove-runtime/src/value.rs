@@ -8,10 +8,14 @@
 //!
 //! # What an embedding host should write
 //!
-//! A host builds a value through a constructor — [`Value::structure`],
-//! [`Value::enumeration`], [`Value::array`], [`Value::set`], [`Value::map`],
-//! [`Value::ok`], [`Value::err`], [`Value::some`], [`Value::none`],
-//! [`Value::error`] — and reads one through a reader: [`Value::field`],
+//! A host builds a value through a constructor — [`Value::unit`],
+//! [`Value::bool`], [`Value::int`], [`Value::float`], [`Value::duration`],
+//! [`Value::string`], [`Value::range_of`], [`Value::array`], [`Value::set`],
+//! [`Value::map`], [`Value::structure`], [`Value::enumeration`],
+//! [`Value::from_resource`], [`Value::host_fn`], [`Value::host_module`],
+//! [`Value::type_value`], [`Value::ok`], [`Value::err`], [`Value::some`],
+//! [`Value::none`], [`Value::error`] — and reads one through a reader:
+//! [`Value::field`],
 //! [`Value::fields`], [`Value::case`], [`Value::payload`], [`Value::items`],
 //! [`Value::elements`], [`Value::entries`], [`Value::declared_type`],
 //! [`Value::range`], [`Value::resource`], [`Value::host_op`],
@@ -1009,6 +1013,109 @@ impl Value {
     /// replaces it.
     pub fn map(entries: impl IntoIterator<Item = (MapKey, Value)>) -> Value {
         Value::Map(Rc::new(entries.into_iter().collect()))
+    }
+
+    /// `()`, the value a statement and a function with no result answer.
+    pub fn unit() -> Value {
+        Value::Unit
+    }
+
+    /// The `Bool` `b`.
+    pub fn bool(b: bool) -> Value {
+        Value::Bool(b)
+    }
+
+    /// The `Int` `n`.
+    ///
+    /// A full sixty-four bits, because an `Int` is one: issue #109 measured
+    /// the alternatives that are not, and NaN boxing and pointer tagging are
+    /// refused rather than deferred because neither can hold every `Int` and
+    /// every `Float` at once.
+    pub fn int(n: i64) -> Value {
+        Value::Int(n)
+    }
+
+    /// The `Float` `x`, including every NaN and both zeroes.
+    pub fn float(x: f64) -> Value {
+        Value::Float(x)
+    }
+
+    /// The `Duration` of `nanos` nanoseconds.
+    ///
+    /// Nanoseconds rather than a [`std::time::Duration`], for the reason
+    /// [`Value::as_duration_nanos`] gives on the way out: a Cove duration is
+    /// a *signed* count of them, and `-1s` is an ordinary value that
+    /// `std::time::Duration` cannot hold.
+    pub fn duration(nanos: i64) -> Value {
+        Value::Duration(nanos)
+    }
+
+    /// The `String` `text`.
+    ///
+    /// Named for the Cove type and not for Rust's, which is why it takes
+    /// anything a string can be made from rather than a `String`
+    /// specifically: `Value::string("hi")` copies the characters once and
+    /// says nothing about where they end up.
+    pub fn string(text: impl Into<Rc<str>>) -> Value {
+        Value::Str(text.into())
+    }
+
+    /// The range `start..end`, or `start..<end` when `inclusive_end` is
+    /// false.
+    ///
+    /// Both bounds as source writes them, rather than the normalised
+    /// half-open pair [`Value::range`] answers with: `1..3` and `1..<4` cover
+    /// the same integers and are still two different values, since `==`
+    /// compares the bounds a range was written with.
+    ///
+    /// The name is `range_of` and not `range` because the reader took
+    /// `range`, and the readers are what issue #195 shipped.
+    pub fn range_of(start: i64, end: i64, inclusive_end: bool) -> Value {
+        Value::Range {
+            start,
+            end,
+            inclusive_end,
+        }
+    }
+
+    /// A handle to a resource the host owns, such as a database connection.
+    ///
+    /// The companion of [`Value::resource`], and it takes the whole handle
+    /// because ADR 0013 decides that a handle *is* a name and every field of
+    /// it is part of that name. What it hides is the shared pointer, which is
+    /// there so a handle can cross into a task when its schema allows it —
+    /// pass either a [`ResourceHandle`] or the `Arc` that
+    /// [`ResourceHandle::new`](crate::host::ResourceHandle::new) answers.
+    ///
+    /// The name is `from_resource` and not `resource` because the reader took
+    /// `resource`.
+    pub fn from_resource(handle: impl Into<Arc<ResourceHandle>>) -> Value {
+        Value::Resource(handle.into())
+    }
+
+    /// A bound host operation, such as `console.println`.
+    ///
+    /// The companion of [`Value::host_op`]. Two names and not an
+    /// implementation: what they name is found in the registry at the call.
+    pub fn host_fn(module: impl Into<Rc<str>>, op: impl Into<Rc<str>>) -> Value {
+        Value::HostFn(Rc::new(HostFnValue {
+            module: module.into(),
+            op: op.into(),
+        }))
+    }
+
+    /// A bound host module, such as `console`.
+    pub fn host_module(name: impl Into<Rc<str>>) -> Value {
+        Value::HostModule(name.into())
+    }
+
+    /// A type used as a value, such as `Vector` in `Vector.of(1, 2)`.
+    ///
+    /// The name is `type_value` and not `type_name` because
+    /// [`Value::type_name`] answers the name of the type a value *is*, which
+    /// is a different question asked of every value rather than of this one.
+    pub fn type_value(name: impl Into<Rc<str>>) -> Value {
+        Value::Type(name.into())
     }
 
     /// Whether this is an `Ok`, the success case of a `Result`.
@@ -2352,5 +2459,55 @@ mod tests {
             captures: Vec::new(),
         }));
         assert_eq!(closure.arity(), Some(2));
+    }
+
+    /// Every scalar a host can build, built without naming a variant and read
+    /// back through the reader it mirrors.
+    ///
+    /// There was no way to build an `Int` at all until this: a host wrote
+    /// `Value::Int(3)` because there was nothing else to write, which is why
+    /// sealing the variants had to wait for the constructors. Each line pairs
+    /// a constructor with the reader ADR 0028 calls its mirror, so a
+    /// constructor that stopped agreeing with its reader fails here.
+    #[test]
+    fn every_scalar_has_a_constructor_that_mirrors_its_reader() {
+        assert!(Value::unit().is_unit());
+        assert_eq!(Value::bool(true).as_bool(), Some(true));
+        assert_eq!(Value::int(i64::MIN).as_int(), Some(i64::MIN));
+        assert_eq!(Value::float(-0.5).as_float(), Some(-0.5));
+        assert_eq!(
+            Value::duration(-1_000_000_000).as_duration_nanos(),
+            Some(-1_000_000_000)
+        );
+        assert_eq!(Value::string("hi").as_str(), Some("hi"));
+        assert_eq!(Value::string(String::from("hi")).as_str(), Some("hi"));
+
+        // `1..3` and `1..<4` cover the same integers and are still two
+        // different values, so the constructor takes the bounds as written
+        // and the reader answers the normalised pair.
+        let bounds = Value::range_of(1, 3, true).range().expect("a range");
+        assert_eq!((bounds.start, bounds.end), (1, 4));
+
+        assert_eq!(
+            Value::host_fn("console", "println").host_op(),
+            Some(("console", "println"))
+        );
+        assert_eq!(
+            Value::host_module("console").type_name(),
+            "host module `console`"
+        );
+        assert_eq!(Value::type_value("Vector").type_name(), "type `Vector`");
+
+        let handle = ResourceHandle {
+            module: "database".to_string(),
+            type_name: "Connection".to_string(),
+            id: 7,
+            task_safe: true,
+        };
+        let value = Value::from_resource(handle.clone());
+        assert!(value.resource().expect("a resource").names_same(&handle));
+        // The `Arc` a host already holds is accepted as it stands, so nothing
+        // has to clone a handle to build a value out of one.
+        assert!(Value::from_resource(Arc::new(handle)).resource().is_some());
     }
 }
