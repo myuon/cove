@@ -48,7 +48,7 @@ use crate::schema::TypeSchema;
 use crate::task::{self, ChildFailure, Task, TaskOutcome, TaskScope, Tasking, Transfer};
 use crate::trace::{RunOutcome, Timing, TraceEvent};
 use crate::value::{
-    Closure, ClosureBody, DynValue, EnumValue, HostFnValue, RangeBounds, StructValue, Value,
+    Closure, ClosureBody, DynValue, EnumValue, HostFnValue, RangeBounds, Repr, StructValue, Value,
 };
 
 /// How deep Cove calls may nest before the runtime reports a limit instead of
@@ -327,7 +327,7 @@ impl Place {
         let mut current: &Value = &root;
         for step in &self.steps {
             match current {
-                Value::Struct(value) => {
+                Value(Repr::Struct(value)) => {
                     current = value
                         .get(step)
                         .ok_or_else(|| no_field(&value.type_name, step, span))?;
@@ -343,7 +343,7 @@ impl Place {
         let mut current: &mut Value = &mut root;
         for step in &self.steps {
             match current {
-                Value::Struct(value) => {
+                Value(Repr::Struct(value)) => {
                     let type_name = value.type_name.clone();
                     // The one place a struct's field is written, and so the
                     // one place its shared storage becomes private again.
@@ -745,7 +745,7 @@ impl<'a> Interpreter<'a> {
     /// Every `Vector` a Cove program can reach is created here, which is what
     /// makes the heap's table of objects complete.
     pub fn allocate_vector(&mut self, elements: Vec<Value>) -> Value {
-        Value::Vector(self.heap.allocate(elements))
+        Value(Repr::Vector(self.heap.allocate(elements)))
     }
 
     /// The task this interpreter is running: the spawned task's id, or
@@ -1083,7 +1083,9 @@ impl<'a> Interpreter<'a> {
 
         let arguments = match decl.params.len() {
             0 => Vec::new(),
-            1 => vec![Value::Array(args.into_iter().map(Value::Str).collect())],
+            1 => vec![Value(Repr::Array(
+                args.into_iter().map(Value::string).collect(),
+            ))],
             other => {
                 return Err(RuntimeError::new(format!(
                     "entry `{module}.{name}` declares {other} parameters"
@@ -1157,7 +1159,7 @@ impl<'a> Interpreter<'a> {
                 // The host awaits the entry it chose, so an `async fn` entry
                 // hands back its value rather than a handle the host cannot
                 // settle.
-                Value::Task(task) => self.settle(&task, span),
+                Value(Repr::Task(task)) => self.settle(&task, span),
                 value => Ok(value),
             });
 
@@ -1352,7 +1354,7 @@ impl<'a> Interpreter<'a> {
             })
             .is_some()
         {
-            return Ok(Value::Type(format!("{owner}.{name}").into()));
+            return Ok(Value(Repr::Type(format!("{owner}.{name}").into())));
         }
         Err(self.no_export(owner, name, span).into())
     }
@@ -1519,11 +1521,11 @@ impl<'a> Interpreter<'a> {
             };
             fields.push((field.name.into(), value_of(&arg, field.name, arg.span)?));
         }
-        Ok(Value::Struct(Rc::new(StructValue {
+        Ok(Value(Repr::Struct(Rc::new(StructValue {
             type_name: format!("{module}.{}", declared.name).into(),
             fields,
             opaque: false,
-        })))
+        }))))
     }
 
     /// One case of an enum a host module declares.
@@ -1561,11 +1563,11 @@ pub(crate) fn host_enum_case(
             .at(span)
             .with_help(format!("known cases: {}", declared.cases.join(", "))));
         }
-        Ok(Value::Enum(Box::new(EnumValue {
+        Ok(Value(Repr::Enum(Box::new(EnumValue {
             type_name: format!("{module}.{}", declared.name).into(),
             case: case.into(),
             payload: crate::value::Payload::Empty,
-        })))
+        }))))
     }
 }
 
@@ -1620,7 +1622,7 @@ impl<'a> Interpreter<'a> {
             // where the language says concurrency begins; nothing may depend
             // on when an `async fn` body ran, only on the value `await`
             // produces, so a body that is never awaited has still run.
-            return Ok(Value::Task(Task::settled(result?)));
+            return Ok(Value(Repr::Task(Task::settled(result?))));
         }
         result
     }
@@ -1729,10 +1731,10 @@ impl<'a> Interpreter<'a> {
                 }
                 for arg in &rest {
                     match &arg.slot {
-                        ArgSlot::Value(Value::Array(values)) if arg.spread => {
+                        ArgSlot::Value(Value(Repr::Array(values))) if arg.spread => {
                             items.extend(values.iter().cloned());
                         }
-                        ArgSlot::Value(Value::Vector(storage)) if arg.spread => {
+                        ArgSlot::Value(Value(Repr::Vector(storage))) if arg.spread => {
                             items.extend(storage.elements.borrow().iter().cloned());
                         }
                         ArgSlot::Value(_) if arg.spread => {
@@ -1742,7 +1744,7 @@ impl<'a> Interpreter<'a> {
                     }
                 }
                 // A variadic parameter is an immutable `Array<T>` inside the body.
-                env.declare(name, Place::binding(Value::Array(items.into())));
+                env.declare(name, Place::binding(Value(Repr::Array(items.into()))));
                 continue;
             }
 
@@ -1811,7 +1813,7 @@ impl<'a> Interpreter<'a> {
         span: Span,
     ) -> Result<Value, RuntimeError> {
         match callee {
-            Value::Closure(closure) => {
+            Value(Repr::Closure(closure)) => {
                 let module = closure.module.clone();
                 // The oracle walks syntax, so a closure whose body is a
                 // lowered function is one it cannot run. Nothing produces
@@ -1849,7 +1851,7 @@ impl<'a> Interpreter<'a> {
                     span,
                 )
             }
-            Value::HostFn(host) => {
+            Value(Repr::HostFn(host)) => {
                 let values = plain_values(args, &format!("{}.{}", host.module, host.op))?;
                 self.call_host(&host.module, &host.op, values, span)
             }
@@ -1907,7 +1909,7 @@ impl<'a> Interpreter<'a> {
         }
         match &block.tail {
             Some(tail) => self.eval(env, tail),
-            None => Ok(Value::Unit),
+            None => Ok(Value(Repr::Unit)),
         }
     }
 
@@ -1916,11 +1918,11 @@ impl<'a> Interpreter<'a> {
     fn eval(&mut self, env: &mut Env, expr: &Expr) -> Eval {
         let span = expr.span;
         match &expr.kind {
-            ExprKind::Int(value) => Ok(Value::Int(*value)),
-            ExprKind::Float(value) => Ok(Value::Float(*value)),
-            ExprKind::Bool(value) => Ok(Value::Bool(*value)),
-            ExprKind::Duration(value) => Ok(Value::Duration(*value)),
-            ExprKind::Unit => Ok(Value::Unit),
+            ExprKind::Int(value) => Ok(Value(Repr::Int(*value))),
+            ExprKind::Float(value) => Ok(Value(Repr::Float(*value))),
+            ExprKind::Bool(value) => Ok(Value(Repr::Bool(*value))),
+            ExprKind::Duration(value) => Ok(Value(Repr::Duration(*value))),
+            ExprKind::Unit => Ok(Value(Repr::Unit)),
             ExprKind::Str(parts) => {
                 let mut text = String::new();
                 for part in parts {
@@ -1932,7 +1934,7 @@ impl<'a> Interpreter<'a> {
                         }
                     }
                 }
-                Ok(Value::Str(text.into()))
+                Ok(Value(Repr::Str(text.into())))
             }
             ExprKind::Ident(name) => self.eval_ident(env, name, span),
             ExprKind::ArrayLit(items) => {
@@ -1940,7 +1942,7 @@ impl<'a> Interpreter<'a> {
                 for item in items {
                     values.push(self.eval(env, item)?);
                 }
-                Ok(Value::Array(values.into()))
+                Ok(Value(Repr::Array(values.into())))
             }
             ExprKind::Field { base, name } => self.eval_field(env, base, &name.node, span),
             ExprKind::Call {
@@ -1958,10 +1960,10 @@ impl<'a> Interpreter<'a> {
                 BinaryOp::And | BinaryOp::Or => {
                     let left = expect_bool(self.eval(env, lhs)?, *op, span)?;
                     if (*op == BinaryOp::And && !left) || (*op == BinaryOp::Or && left) {
-                        return Ok(Value::Bool(left));
+                        return Ok(Value(Repr::Bool(left)));
                     }
                     let right = expect_bool(self.eval(env, rhs)?, *op, span)?;
-                    Ok(Value::Bool(right))
+                    Ok(Value(Repr::Bool(right)))
                 }
                 _ => {
                     let left = self.eval(env, lhs)?;
@@ -1984,20 +1986,24 @@ impl<'a> Interpreter<'a> {
                     }
                 };
                 place.write(span, new_value)?;
-                Ok(Value::Unit)
+                Ok(Value(Repr::Unit))
             }
             ExprKind::Try(inner) => {
                 let value = self.eval(env, inner)?;
                 match &value {
-                    Value::Enum(result) if &*result.type_name == RESULT.name => {
+                    Value(Repr::Enum(result)) if &*result.type_name == RESULT.name => {
                         match value.ok_payload() {
-                            Some(payload) => Ok(payload.first().cloned().unwrap_or(Value::Unit)),
+                            Some(payload) => {
+                                Ok(payload.first().cloned().unwrap_or(Value(Repr::Unit)))
+                            }
                             None => Err(Control::Return(value)),
                         }
                     }
-                    Value::Enum(option) if &*option.type_name == OPTION.name => {
+                    Value(Repr::Enum(option)) if &*option.type_name == OPTION.name => {
                         match value.some_payload() {
-                            Some(payload) => Ok(payload.first().cloned().unwrap_or(Value::Unit)),
+                            Some(payload) => {
+                                Ok(payload.first().cloned().unwrap_or(Value(Repr::Unit)))
+                            }
                             None => Err(Control::Return(Value::none())),
                         }
                     }
@@ -2011,7 +2017,7 @@ impl<'a> Interpreter<'a> {
                         // A task's value is observable only through `await`,
                         // so `?` cannot reach the `Result` inside one.
                         Err(match other {
-                            Value::Task(_) => {
+                            Value(Repr::Task(_)) => {
                                 error.with_help("settle the task first, as in `task.await()?`")
                             }
                             _ => error,
@@ -2033,7 +2039,7 @@ impl<'a> Interpreter<'a> {
                 else_branch,
             } => {
                 let test = self.eval(env, condition)?;
-                let Value::Bool(test) = test else {
+                let Value(Repr::Bool(test)) = test else {
                     return Err(RuntimeError::new(format!(
                         "an `if` condition must be a `Bool`, but found `{}`",
                         test.type_name()
@@ -2051,12 +2057,12 @@ impl<'a> Interpreter<'a> {
                     // the checker and another here.
                     Ok(match else_branch {
                         Some(_) => value,
-                        None => Value::Unit,
+                        None => Value(Repr::Unit),
                     })
                 } else {
                     match else_branch {
                         Some(branch) => self.eval(env, branch),
-                        None => Ok(Value::Unit),
+                        None => Ok(Value(Repr::Unit)),
                     }
                 }
             }
@@ -2108,11 +2114,11 @@ impl<'a> Interpreter<'a> {
                         Err(other) => return Err(other),
                     }
                 }
-                Ok(Value::Unit)
+                Ok(Value(Repr::Unit))
             }
             ExprKind::While { condition, body } => loop {
                 let test = self.eval(env, condition)?;
-                let Value::Bool(test) = test else {
+                let Value(Repr::Bool(test)) = test else {
                     return Err(RuntimeError::new(format!(
                         "a `while` condition must be a `Bool`, but found `{}`",
                         test.type_name()
@@ -2121,7 +2127,7 @@ impl<'a> Interpreter<'a> {
                     .into());
                 };
                 if !test {
-                    return Ok(Value::Unit);
+                    return Ok(Value(Repr::Unit));
                 }
                 // Once per iteration, at the back edge: this is the
                 // safepoint that bounds a non-terminating `while`, which is
@@ -2134,7 +2140,7 @@ impl<'a> Interpreter<'a> {
                     // evaluated for its effects alone. `while true` is no
                     // exception: nothing about the condition makes it a
                     // different form. See issue #87.
-                    Err(Control::Break) => return Ok(Value::Unit),
+                    Err(Control::Break) => return Ok(Value(Repr::Unit)),
                     Err(Control::Continue) => continue,
                     Err(other) => return Err(other),
                 }
@@ -2142,7 +2148,7 @@ impl<'a> Interpreter<'a> {
             ExprKind::Return(value) => {
                 let value = match value {
                     Some(expr) => self.eval(env, expr)?,
-                    None => Value::Unit,
+                    None => Value(Repr::Unit),
                 };
                 Err(Control::Return(value))
             }
@@ -2172,11 +2178,11 @@ impl<'a> Interpreter<'a> {
             } => {
                 let start = expect_int(self.eval(env, start)?, "a range bound", span)?;
                 let end = expect_int(self.eval(env, end)?, "a range bound", span)?;
-                Ok(Value::Range {
+                Ok(Value(Repr::Range {
                     start,
                     end,
                     inclusive_end: *inclusive_end,
-                })
+                }))
             }
         }
     }
@@ -2193,7 +2199,7 @@ impl<'a> Interpreter<'a> {
         let mut mentioned = BTreeSet::new();
         mention_block(&body, &mut mentioned);
         let captures = env.captures(&mentioned, span)?;
-        Ok(Value::Closure(Rc::new(Closure {
+        Ok(Value(Repr::Closure(Rc::new(Closure {
             is_async,
             arity: params.len(),
             body: ClosureBody::Tree {
@@ -2203,7 +2209,7 @@ impl<'a> Interpreter<'a> {
             },
             module: env.module.clone(),
             captures,
-        })))
+        }))))
     }
 
     // ---------------------------------------------------------------- tasks
@@ -2218,7 +2224,7 @@ impl<'a> Interpreter<'a> {
         env.push();
         env.declare(
             name.node.as_str().into(),
-            Place::binding(Value::TaskScope(scope.clone())),
+            Place::binding(Value(Repr::TaskScope(scope.clone()))),
         );
         let result = self.eval_block(env, body);
         env.pop();
@@ -2270,7 +2276,7 @@ impl<'a> Interpreter<'a> {
     /// `await expr`, and the postfix `expr.await()` that means the same thing.
     fn settle_value(&mut self, value: Value, span: Span) -> Result<Value, RuntimeError> {
         match value {
-            Value::Task(task) => self.settle(&task, span),
+            Value(Repr::Task(task)) => self.settle(&task, span),
             other => Err(RuntimeError::new(format!(
                 "`await` needs a task, but found `{}`",
                 other.type_name()
@@ -2313,7 +2319,7 @@ impl<'a> Interpreter<'a> {
         let arguments = self.eval_args(env, args, trailing)?;
         let mut values = plain_values(arguments, name)?;
         match (&receiver, name) {
-            (Value::TaskScope(scope), "spawn") => {
+            (Value(Repr::TaskScope(scope)), "spawn") => {
                 if values.len() != 1 {
                     return Err(RuntimeError::new(format!(
                         "`spawn` takes one trailing closure, but {} argument(s) were given",
@@ -2325,12 +2331,12 @@ impl<'a> Interpreter<'a> {
                 }
                 Ok(self.spawn(scope, values.remove(0), span)?)
             }
-            (Value::Task(task), "await") => {
+            (Value(Repr::Task(task)), "await") => {
                 expect_no_arguments("await", &values, span)?;
                 self.charge_safepoint(span)?;
                 Ok(self.settle(task, span)?)
             }
-            (Value::Task(task), "cancel") => {
+            (Value(Repr::Task(task)), "cancel") => {
                 expect_no_arguments("cancel", &values, span)?;
                 // Asking is all this does. A cancelled task stops at its next
                 // safepoint, and whether it stopped or had already finished is
@@ -2338,7 +2344,7 @@ impl<'a> Interpreter<'a> {
                 // `await` and leaving the scope do, and where `TaskCancelled`
                 // is traced.
                 task.cancel();
-                Ok(Value::Unit)
+                Ok(Value(Repr::Unit))
             }
             (_, "await") => {
                 self.charge_safepoint(span)?;
@@ -2367,7 +2373,7 @@ impl<'a> Interpreter<'a> {
         trailing: Option<&Expr>,
         span: Span,
     ) -> Eval {
-        let Value::Shared(cell) = receiver else {
+        let Value(Repr::Shared(cell)) = receiver else {
             unreachable!("only a `Shared` receiver reaches this dispatch");
         };
         if name != "lock" {
@@ -2391,7 +2397,7 @@ impl<'a> Interpreter<'a> {
             .into());
         }
         let body = values.remove(0);
-        let Value::Closure(closure) = &body else {
+        let Value(Repr::Closure(closure)) = &body else {
             return Err(RuntimeError::new(format!(
                 "`lock` takes the work to run as a closure, but found `{}`",
                 body.type_name()
@@ -2464,13 +2470,13 @@ impl<'a> Interpreter<'a> {
         // written: two modules may each declare a `Config`, and a value has
         // to say which one it is.
         if let Some((owner, _)) = self.find_struct(&module, name) {
-            return Ok(Value::Type(format!("{owner}.{name}").into()));
+            return Ok(Value(Repr::Type(format!("{owner}.{name}").into())));
         }
         if let Some((owner, _)) = self.find_enum(&module, name) {
-            return Ok(Value::Type(format!("{owner}.{name}").into()));
+            return Ok(Value(Repr::Type(format!("{owner}.{name}").into())));
         }
         if builtins::is_builtin_type(name) {
-            return Ok(Value::Type(name.into()));
+            return Ok(Value(Repr::Type(name.into())));
         }
         if let Some(owner) = self.imported_module(&module, name) {
             return Err(RuntimeError::new(format!("`{name}` is a module, not a value"))
@@ -2484,13 +2490,13 @@ impl<'a> Interpreter<'a> {
                 .into());
         }
         if self.is_host_module(&module, name) {
-            return Ok(Value::HostModule(name.into()));
+            return Ok(Value(Repr::HostModule(name.into())));
         }
         if let Some(host) = self.host_item(&module, name) {
-            return Ok(Value::HostFn(Rc::new(HostFnValue {
+            return Ok(Value(Repr::HostFn(Rc::new(HostFnValue {
                 module: host,
                 op: name.into(),
-            })));
+            }))));
         }
         Err(
             RuntimeError::new(format!("cannot find `{name}` in this scope"))
@@ -2511,12 +2517,12 @@ impl<'a> Interpreter<'a> {
                     // `http.fetch` names one of its operations. A type is not
                     // callable, so the two cannot be confused.
                     if self.hosts.host_type(head, name).is_some() {
-                        return Ok(Value::Type(format!("{head}.{name}").into()));
+                        return Ok(Value(Repr::Type(format!("{head}.{name}").into())));
                     }
-                    return Ok(Value::HostFn(Rc::new(HostFnValue {
+                    return Ok(Value(Repr::HostFn(Rc::new(HostFnValue {
                         module: head.as_str().into(),
                         op: name.into(),
-                    })));
+                    }))));
                 }
                 // `booking.create` and `booking.Status`: a module imported
                 // whole answers with the exported declaration it names.
@@ -2528,13 +2534,13 @@ impl<'a> Interpreter<'a> {
 
         let base_value = self.eval(env, base)?;
         match &base_value {
-            Value::Struct(value) => match value.get(name) {
+            Value(Repr::Struct(value)) => match value.get(name) {
                 Some(field) => Ok(field.clone()),
                 None => Err(no_field(&value.type_name, name, span).into()),
             },
             // `booking.Status.Confirmed`, once `booking.Status` named the
             // type: a case of an enum reached through its module.
-            Value::Type(type_name) => match type_name.rsplit_once('.') {
+            Value(Repr::Type(type_name)) => match type_name.rsplit_once('.') {
                 Some((owner, short)) => match self.find_enum(owner, short) {
                     Some((owner, decl)) => {
                         Ok(self.enum_case(&owner, &decl, name, Vec::new(), span)?)
@@ -2547,12 +2553,12 @@ impl<'a> Interpreter<'a> {
                 },
                 None => Err(no_field(type_name, name, span).into()),
             },
-            Value::HostModule(module) => match self.hosts.host_type(module, name) {
-                Some(_) => Ok(Value::Type(format!("{module}.{name}").into())),
-                None => Ok(Value::HostFn(Rc::new(HostFnValue {
+            Value(Repr::HostModule(module)) => match self.hosts.host_type(module, name) {
+                Some(_) => Ok(Value(Repr::Type(format!("{module}.{name}").into()))),
+                None => Ok(Value(Repr::HostFn(Rc::new(HostFnValue {
                     module: module.clone(),
                     op: name.into(),
-                }))),
+                })))),
             },
             other => Err(RuntimeError::new(format!(
                 "`{}` has no field `{name}`",
@@ -2882,10 +2888,10 @@ impl<'a> Interpreter<'a> {
         // the package. A handle is a name; the host owns what it names.
         let handle = match (&place, &temporary) {
             (Some(place), _) => place.with_ref(span, |value| match value {
-                Value::Resource(handle) => Some(handle.clone()),
+                Value(Repr::Resource(handle)) => Some(handle.clone()),
                 _ => None,
             })?,
-            (_, Some(Value::Resource(handle))) => Some(handle.clone()),
+            (_, Some(Value(Repr::Resource(handle)))) => Some(handle.clone()),
             _ => None,
         };
         if let Some(handle) = handle {
@@ -2965,8 +2971,10 @@ impl<'a> Interpreter<'a> {
         // than declared types, so they are recognized by what they are rather
         // than by a name built to compare against a literal.
         let is_shared = match (&place, &temporary) {
-            (Some(place), _) => place.with_ref(span, |value| matches!(value, Value::Shared(_)))?,
-            (_, Some(value)) => matches!(value, Value::Shared(_)),
+            (Some(place), _) => {
+                place.with_ref(span, |value| matches!(value, Value(Repr::Shared(_))))?
+            }
+            (_, Some(value)) => matches!(value, Value(Repr::Shared(_))),
             _ => unreachable!("a receiver is either a place or a temporary"),
         };
         if is_shared {
@@ -2984,9 +2992,9 @@ impl<'a> Interpreter<'a> {
         // `bookings.await()` means what `await bookings` means.
         let is_task = match (&place, &temporary) {
             (Some(place), _) => place.with_ref(span, |value| {
-                matches!(value, Value::Task(_) | Value::TaskScope(_))
+                matches!(value, Value(Repr::Task(_)) | Value(Repr::TaskScope(_)))
             })?,
-            (_, Some(value)) => matches!(value, Value::Task(_) | Value::TaskScope(_)),
+            (_, Some(value)) => matches!(value, Value(Repr::Task(_)) | Value(Repr::TaskScope(_))),
             _ => unreachable!("a receiver is either a place or a temporary"),
         };
         if name == "await" || is_task {
@@ -3039,7 +3047,7 @@ impl<'a> Interpreter<'a> {
             // uniqueness check counts the caller's own handle only once.
             if let Some(place) = &place {
                 return Ok(place.with_mut(span, |slot| match slot {
-                    Value::Vector(storage) => builtins::freeze(storage, span),
+                    Value(Repr::Vector(storage)) => builtins::freeze(storage, span),
                     other => Err(RuntimeError::new(format!(
                         "`{}` has no method `freeze`",
                         other.type_name()
@@ -3093,11 +3101,11 @@ impl<'a> Interpreter<'a> {
                 self.coerce(module, value, &field.ty),
             ));
         }
-        Ok(Value::Struct(Rc::new(StructValue {
+        Ok(Value(Repr::Struct(Rc::new(StructValue {
             type_name: format!("{module}.{}", decl.name.node).into(),
             fields,
             opaque: self.is_opaque(module, &decl.name.node),
-        })))
+        }))))
     }
 
     /// Whether `module` declared this struct `export opaque struct`, which
@@ -3180,7 +3188,7 @@ impl<'a> Interpreter<'a> {
             ExprKind::Field { base, name } => {
                 let base_place = self.resolve_place(env, base)?;
                 base_place.with_ref(expr.span, |value| match value {
-                    Value::Struct(value) => match value.get(&name.node) {
+                    Value(Repr::Struct(value)) => match value.get(&name.node) {
                         Some(_) => Ok(()),
                         None => Err(no_field(&value.type_name, &name.node, expr.span)),
                     },
@@ -3206,7 +3214,7 @@ impl<'a> Interpreter<'a> {
                     return Ok(None);
                 };
                 let is_field = base_place.with_ref(expr.span, |value| match value {
-                    Value::Struct(value) => value.get(&name.node).is_some(),
+                    Value(Repr::Struct(value)) => value.get(&name.node).is_some(),
                     _ => false,
                 })?;
                 Ok(is_field.then(|| base_place.field(name.node.as_str().into())))
@@ -3228,7 +3236,7 @@ impl<'a> Interpreter<'a> {
             PatternKind::Binding(name) => {
                 // `None` is a case, not a name to bind.
                 if name == NONE_CASE.name {
-                    if let Value::Enum(option) = value {
+                    if let Value(Repr::Enum(option)) = value {
                         if &*option.type_name == OPTION.name {
                             return Ok(&*option.case == NONE_CASE.name);
                         }
@@ -3242,7 +3250,7 @@ impl<'a> Interpreter<'a> {
                 Ok(value.eq_value(&literal))
             }
             PatternKind::Variant { path, payload } => {
-                let Value::Enum(subject) = value else {
+                let Value(Repr::Enum(subject)) = value else {
                     return Ok(false);
                 };
                 let Some(case) = path.last() else {
@@ -3302,12 +3310,12 @@ impl<'a> Interpreter<'a> {
     /// cycles" is not yet a case the MVP can exercise.
     fn snapshot(&mut self, value: &Value, span: Span) -> Result<Value, RuntimeError> {
         match value {
-            Value::Dyn(wrapped) => Ok(Value::Dyn(Rc::new(DynValue {
+            Value(Repr::Dyn(wrapped)) => Ok(Value(Repr::Dyn(Rc::new(DynValue {
                 trait_name: wrapped.trait_name.clone(),
                 value: self.snapshot(&wrapped.value, span)?,
-            }))),
-            Value::Struct(s) => self.dispatch_snapshot(&s.type_name, value.clone(), span),
-            Value::Enum(e) => self.dispatch_snapshot(&e.type_name, value.clone(), span),
+            })))),
+            Value(Repr::Struct(s)) => self.dispatch_snapshot(&s.type_name, value.clone(), span),
+            Value(Repr::Enum(e)) => self.dispatch_snapshot(&e.type_name, value.clone(), span),
             // Everything a conformance is not consulted about, which both
             // backends answer the same way and therefore answer in one
             // place.
@@ -3387,7 +3395,7 @@ impl Callable for Interpreter<'_> {
 
     fn arity(&self, callee: &Value) -> Option<usize> {
         match callee {
-            Value::Closure(closure) => Some(closure.arity),
+            Value(Repr::Closure(closure)) => Some(closure.arity),
             _ => None,
         }
     }
@@ -3405,7 +3413,7 @@ impl Callable for Interpreter<'_> {
 /// call binds against, and one place that reads both off the same
 /// declaration is one place they can be made to agree.
 fn declared_as_value(module: Rc<str>, decl: Arc<FnDecl>) -> Value {
-    Value::Closure(Rc::new(Closure {
+    Value(Repr::Closure(Rc::new(Closure {
         is_async: decl.is_async,
         arity: decl.params.len(),
         body: ClosureBody::Tree {
@@ -3415,7 +3423,7 @@ fn declared_as_value(module: Rc<str>, decl: Arc<FnDecl>) -> Value {
         },
         module,
         captures: Vec::new(),
-    }))
+    })))
 }
 
 // -------------------------------------------------------------- operators
@@ -3431,7 +3439,7 @@ fn declared_as_value(module: Rc<str>, decl: Arc<FnDecl>) -> Value {
 /// so one a `dyn Trait` can be holding. Traits are implemented for structs
 /// and enums; nothing else in the value domain can be behind a trait object.
 fn conformable(value: &Value) -> bool {
-    matches!(value, Value::Struct(_) | Value::Enum(_))
+    matches!(value, Value(Repr::Struct(_)) | Value(Repr::Enum(_)))
 }
 
 /// Wraps a concrete value as the `dyn Trait` value a written type asks for.
@@ -3449,13 +3457,13 @@ fn conformable(value: &Value) -> bool {
 /// answer a `dyn Display`, hand the body the same value — and it is why
 /// dispatch finds the concrete type exactly one step in.
 pub(crate) fn as_dyn(value: Value, trait_name: &Rc<str>) -> Value {
-    if matches!(value, Value::Dyn(_)) {
+    if matches!(value, Value(Repr::Dyn(_))) {
         return value;
     }
-    Value::Dyn(Rc::new(DynValue {
+    Value(Repr::Dyn(Rc::new(DynValue {
         trait_name: Rc::clone(trait_name),
         value,
-    }))
+    })))
 }
 
 /// Applies `each` to what an `Array` holds and to what an `Option` holds,
@@ -3474,12 +3482,12 @@ pub(crate) fn as_dyn(value: Value, trait_name: &Rc<str>) -> Value {
 /// option.
 pub(crate) fn coerce_inside(value: Value, mut each: impl FnMut(Value) -> Value) -> Value {
     match value {
-        Value::Array(items) => Value::Array(items.iter().cloned().map(each).collect()),
-        Value::Enum(mut option) if &*option.type_name == "Option" => {
+        Value(Repr::Array(items)) => Value(Repr::Array(items.iter().cloned().map(each).collect())),
+        Value(Repr::Enum(mut option)) if &*option.type_name == "Option" => {
             for item in &mut option.payload {
                 *item = each(item.clone());
             }
-            Value::Enum(option)
+            Value(Repr::Enum(option))
         }
         other => other,
     }
@@ -3502,7 +3510,7 @@ pub(crate) fn coerce_inside(value: Value, mut each: impl FnMut(Value) -> Value) 
 /// is the same answer.
 pub(crate) fn dyn_receiver(value: &Value) -> Option<Value> {
     match value {
-        Value::Dyn(object) => Some(object.value.clone()),
+        Value(Repr::Dyn(object)) => Some(object.value.clone()),
         _ => None,
     }
 }
@@ -3529,7 +3537,8 @@ pub(crate) fn binary(
             // everywhere else — including against a value whose type the
             // checker abstained about, which is where dropping it wholesale
             // turned an error into a silent `false`.
-            let objects = (matches!(lhs, Value::Dyn(_)) || matches!(rhs, Value::Dyn(_)))
+            let objects = (matches!(lhs, Value(Repr::Dyn(_)))
+                || matches!(rhs, Value(Repr::Dyn(_))))
                 && conformable(lhs.erased())
                 && conformable(rhs.erased());
             let (lhs, rhs) = (lhs.erased(), rhs.erased());
@@ -3543,7 +3552,11 @@ pub(crate) fn binary(
                 .with_rule("`==` means value equality between values of the same type."));
             }
             let equal = lhs.eq_value(rhs);
-            Ok(Value::Bool(if op == BinaryOp::Eq { equal } else { !equal }))
+            Ok(Value(Repr::Bool(if op == BinaryOp::Eq {
+                equal
+            } else {
+                !equal
+            })))
         }
         // `is` is narrower than `==`: same shared storage, not same value.
         // `Vector` is the one MVP type with storage of its own; everything
@@ -3566,14 +3579,16 @@ pub(crate) fn binary(
                 .with_rule("`is` compares identity between values of the same type."));
             }
             match (lhs, rhs) {
-                (Value::Vector(a), Value::Vector(b)) => Ok(Value::Bool(Rc::ptr_eq(a, b))),
+                (Value(Repr::Vector(a)), Value(Repr::Vector(b))) => {
+                    Ok(Value(Repr::Bool(Rc::ptr_eq(a, b))))
+                }
                 _ => Err(identity_not_available(lhs, span)),
             }
         }
         BinaryOp::And | BinaryOp::Or => unreachable!("short-circuited in `eval`"),
         BinaryOp::Add | BinaryOp::Sub | BinaryOp::Mul | BinaryOp::Div | BinaryOp::Rem => {
             match (&lhs, &rhs) {
-                (Value::Int(a), Value::Int(b)) => {
+                (Value(Repr::Int(a)), Value(Repr::Int(b))) => {
                     let (a, b) = (*a, *b);
                     let value = match op {
                         BinaryOp::Add => a.checked_add(b).ok_or_else(|| overflow("addition", span)),
@@ -3599,17 +3614,19 @@ pub(crate) fn binary(
                         }
                         _ => unreachable!("checked above"),
                     }?;
-                    Ok(Value::Int(value))
+                    Ok(Value(Repr::Int(value)))
                 }
-                (Value::Float(a), Value::Float(b)) => Ok(Value::Float(match op {
-                    BinaryOp::Add => a + b,
-                    BinaryOp::Sub => a - b,
-                    BinaryOp::Mul => a * b,
-                    BinaryOp::Div => a / b,
-                    BinaryOp::Rem => a % b,
-                    _ => unreachable!("checked above"),
-                })),
-                (Value::Duration(a), Value::Duration(b))
+                (Value(Repr::Float(a)), Value(Repr::Float(b))) => {
+                    Ok(Value(Repr::Float(match op {
+                        BinaryOp::Add => a + b,
+                        BinaryOp::Sub => a - b,
+                        BinaryOp::Mul => a * b,
+                        BinaryOp::Div => a / b,
+                        BinaryOp::Rem => a % b,
+                        _ => unreachable!("checked above"),
+                    })))
+                }
+                (Value(Repr::Duration(a)), Value(Repr::Duration(b)))
                     if matches!(op, BinaryOp::Add | BinaryOp::Sub) =>
                 {
                     let value = match op {
@@ -3617,9 +3634,9 @@ pub(crate) fn binary(
                         _ => a.checked_sub(*b),
                     }
                     .ok_or_else(|| overflow("duration arithmetic", span))?;
-                    Ok(Value::Duration(value))
+                    Ok(Value(Repr::Duration(value)))
                 }
-                (Value::Str(_), Value::Str(_)) if op == BinaryOp::Add => {
+                (Value(Repr::Str(_)), Value(Repr::Str(_))) if op == BinaryOp::Add => {
                     Err(RuntimeError::new("`+` is not defined for `String`")
                         .at(span)
                         .with_rule("There are no implicit string conversions.")
@@ -3630,39 +3647,39 @@ pub(crate) fn binary(
         }
         BinaryOp::Lt | BinaryOp::Le | BinaryOp::Gt | BinaryOp::Ge => {
             let ordering = match (&lhs, &rhs) {
-                (Value::Int(a), Value::Int(b)) => a.partial_cmp(b),
-                (Value::Float(a), Value::Float(b)) => a.partial_cmp(b),
-                (Value::Duration(a), Value::Duration(b)) => a.partial_cmp(b),
-                (Value::Str(a), Value::Str(b)) => a.partial_cmp(b),
+                (Value(Repr::Int(a)), Value(Repr::Int(b))) => a.partial_cmp(b),
+                (Value(Repr::Float(a)), Value(Repr::Float(b))) => a.partial_cmp(b),
+                (Value(Repr::Duration(a)), Value(Repr::Duration(b))) => a.partial_cmp(b),
+                (Value(Repr::Str(a)), Value(Repr::Str(b))) => a.partial_cmp(b),
                 _ => return Err(operator_type_error(op, &lhs, &rhs, span)),
             };
             let Some(ordering) = ordering else {
-                return Ok(Value::Bool(false));
+                return Ok(Value(Repr::Bool(false)));
             };
-            Ok(Value::Bool(match op {
+            Ok(Value(Repr::Bool(match op {
                 BinaryOp::Lt => ordering.is_lt(),
                 BinaryOp::Le => ordering.is_le(),
                 BinaryOp::Gt => ordering.is_gt(),
                 _ => ordering.is_ge(),
-            }))
+            })))
         }
     }
 }
 
 pub(crate) fn unary(op: UnaryOp, value: Value, span: Span) -> Result<Value, RuntimeError> {
     match (op, value) {
-        (UnaryOp::Not, Value::Bool(value)) => Ok(Value::Bool(!value)),
-        (UnaryOp::Neg, Value::Int(value)) => Ok(Value::Int(
+        (UnaryOp::Not, Value(Repr::Bool(value))) => Ok(Value(Repr::Bool(!value))),
+        (UnaryOp::Neg, Value(Repr::Int(value))) => Ok(Value(Repr::Int(
             value
                 .checked_neg()
                 .ok_or_else(|| overflow("negation", span))?,
-        )),
-        (UnaryOp::Neg, Value::Float(value)) => Ok(Value::Float(-value)),
-        (UnaryOp::Neg, Value::Duration(value)) => Ok(Value::Duration(
+        ))),
+        (UnaryOp::Neg, Value(Repr::Float(value))) => Ok(Value(Repr::Float(-value))),
+        (UnaryOp::Neg, Value(Repr::Duration(value))) => Ok(Value(Repr::Duration(
             value
                 .checked_neg()
                 .ok_or_else(|| overflow("negation", span))?,
-        )),
+        ))),
         (op, value) => Err(RuntimeError::new(format!(
             "`{}` is not defined for `{}`",
             match op {
@@ -3719,7 +3736,7 @@ pub(crate) fn enum_case(
         ))
         .at(span));
     }
-    Ok(Value::Enum(Box::new(EnumValue {
+    Ok(Value(Repr::Enum(Box::new(EnumValue {
         type_name: format!("{module}.{}", decl.name.node).into(),
         case: case.into(),
         // Drained rather than taken whole: the caller lent this vector and
@@ -3727,7 +3744,7 @@ pub(crate) fn enum_case(
         // draining iterator allocates nothing at all for the arities that
         // occur. See `crate::value::Payload` and `Vm::borrow_args`.
         payload: payload.drain(..).collect(),
-    })))
+    }))))
 }
 
 /// The cases and associated functions `Enum.name` could have meant.
@@ -3791,11 +3808,11 @@ fn init_map_entry(args: Vec<EvaluatedArg>, span: Span) -> Result<Value, RuntimeE
         };
         fields.push(((*field_name).into(), value_of(&arg, field_name, arg.span)?));
     }
-    Ok(Value::Struct(Rc::new(StructValue {
+    Ok(Value(Repr::Struct(Rc::new(StructValue {
         type_name: MAP_ENTRY.name.into(),
         fields,
         opaque: false,
-    })))
+    }))))
 }
 
 /// Matches call-site arguments to declared names.
@@ -4105,7 +4122,7 @@ fn run_task(
 /// run` reports and the same text the program would have printed, so a trace
 /// and a terminal say the same thing about the same failure.
 pub(crate) fn returned_error_message(value: &Value) -> Option<String> {
-    let Value::Enum(result) = value else {
+    let Value(Repr::Enum(result)) = value else {
         return None;
     };
     result.payload.first().map(ToString::to_string)
@@ -4166,7 +4183,7 @@ impl Callback<'_, '_> {
         // not a task, so settling it here is what `await` would have done at
         // the call site the host is standing in for.
         match result? {
-            Value::Task(task) => self.interpreter.settle(&task, span),
+            Value(Repr::Task(task)) => self.interpreter.settle(&task, span),
             other => Ok(other),
         }
     }
@@ -4349,31 +4366,31 @@ pub(crate) fn items_of(value: Value, span: Span) -> Result<Vec<Value>, RuntimeEr
     // Iteration reads a snapshot of the elements; rejecting structural
     // mutation during iteration is future work.
     match value {
-        Value::Array(items) => Ok(items.iter().cloned().collect()),
-        Value::Vector(storage) => Ok(storage.elements.borrow().clone()),
+        Value(Repr::Array(items)) => Ok(items.iter().cloned().collect()),
+        Value(Repr::Vector(storage)) => Ok(storage.elements.borrow().clone()),
         // An empty or reversed range such as `3..<0` iterates zero times.
-        Value::Range {
+        Value(Repr::Range {
             start,
             end,
             inclusive_end,
-        } => Ok(RangeBounds::of(start, end, inclusive_end).items()),
+        }) => Ok(RangeBounds::of(start, end, inclusive_end).items()),
         // A `Set` is `BTreeSet<MapKey>`-backed, so it iterates its
         // elements in ascending order, the same order `Display` shows.
-        Value::Set(items) => Ok(items.iter().map(|key| key.to_value()).collect()),
+        Value(Repr::Set(items)) => Ok(items.iter().map(|key| key.to_value()).collect()),
         // A `Map` iterates in ascending key order, matching its
         // `BTreeMap` storage. Each binding is a `MapEntry` carrying that
         // iteration's `key` and `value`, the same shape `Map.of` accepts.
-        Value::Map(entries) => Ok(entries
+        Value(Repr::Map(entries)) => Ok(entries
             .iter()
             .map(|(key, value)| {
-                Value::Struct(Rc::new(StructValue {
+                Value(Repr::Struct(Rc::new(StructValue {
                     type_name: MAP_ENTRY.name.into(),
                     fields: vec![
                         ("key".into(), key.to_value()),
                         ("value".into(), value.clone()),
                     ],
                     opaque: false,
-                }))
+                })))
             })
             .collect()),
         other => Err(RuntimeError::new(format!(
@@ -4486,7 +4503,7 @@ fn var_self_needs_place(method: &str, receiver: &Expr, span: Span) -> RuntimeErr
 
 fn expect_bool(value: Value, op: BinaryOp, span: Span) -> Result<bool, RuntimeError> {
     match value {
-        Value::Bool(value) => Ok(value),
+        Value(Repr::Bool(value)) => Ok(value),
         other => Err(RuntimeError::new(format!(
             "`{}` needs `Bool` operands, but found `{}`",
             operator_text(op),
@@ -4499,7 +4516,7 @@ fn expect_bool(value: Value, op: BinaryOp, span: Span) -> Result<bool, RuntimeEr
 
 fn expect_int(value: Value, what: &str, span: Span) -> Result<i64, RuntimeError> {
     match value {
-        Value::Int(value) => Ok(value),
+        Value(Repr::Int(value)) => Ok(value),
         other => Err(RuntimeError::new(format!(
             "{what} must be an `Int`, but found `{}`",
             other.type_name()
@@ -4807,7 +4824,7 @@ mod tests {
             &[],
             BTreeMap::new(),
         );
-        assert!(matches!(run.value(), Value::Int(7)));
+        assert!(matches!(run.value(), Value(Repr::Int(7))));
     }
 
     // -------------------------------------------------------- traits
@@ -4894,7 +4911,7 @@ fn renderAll(values: Array<dyn Display>) -> String {
             BTreeMap::new(),
         )
         .value();
-        let Value::Dyn(trait_object) = &value else {
+        let Value(Repr::Dyn(trait_object)) = &value else {
             panic!("expected a trait object, found {value:?}");
         };
         assert_eq!(&*trait_object.trait_name, "test.Display");
@@ -4940,22 +4957,22 @@ fn renderAll(values: Array<dyn Display>) -> String {
         )
         .value();
         let span = Span::new(cove_diag::FileId(0), 0, 0);
-        let error = binary(BinaryOp::Eq, object.clone(), Value::Int(1), span)
+        let error = binary(BinaryOp::Eq, object.clone(), Value(Repr::Int(1)), span)
             .expect_err("a trait object and an `Int` are not the same type");
         assert_eq!(error.message, "cannot compare `test.Booking` with `Int`");
         // Two trait objects over different concrete types keep answering
         // `false`, which is what dropping the guard was for.
-        let other = Value::Dyn(Rc::new(DynValue {
+        let other = Value(Repr::Dyn(Rc::new(DynValue {
             trait_name: "test.Display".into(),
-            value: Value::Struct(Rc::new(StructValue {
+            value: Value(Repr::Struct(Rc::new(StructValue {
                 type_name: "test.Receipt".into(),
-                fields: vec![("total".into(), Value::Int(2))],
+                fields: vec![("total".into(), Value(Repr::Int(2)))],
                 opaque: false,
-            })),
-        }));
+            }))),
+        })));
         let answer = binary(BinaryOp::Eq, object, other, span)
             .expect("two trait objects at one trait are comparable");
-        assert!(answer.eq_value(&Value::Bool(false)));
+        assert!(answer.eq_value(&Value(Repr::Bool(false))));
     }
 
     #[test]
@@ -7343,7 +7360,7 @@ export fn main() -> Result<Int, Error> {{
 
         let error = run_task_body("  let value = await load(false)?").value;
         match error {
-            Ok(Value::Enum(result)) => {
+            Ok(Value(Repr::Enum(result))) => {
                 assert_eq!(&*result.case, "Err");
                 assert_eq!(result.payload[0].to_string(), "boom");
             }

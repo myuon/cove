@@ -34,7 +34,7 @@ use crate::schema::{
     Admits, Effect, Mismatch, ModuleSchema, OperationSchema, Part, ResourceSchema, TypeSchema,
 };
 use crate::trace::{HostOutcome, NullSink, RecordedValue, RunOutcome, TraceEvent, TraceSink};
-use crate::value::Value;
+use crate::value::{Repr, Value};
 
 /// One host-provided module, such as `console` or `env`.
 ///
@@ -989,7 +989,7 @@ impl HostRegistry {
             // resource answered it, so a trace of a run holding two kinds of
             // handle does not read as one flat list of `query` calls.
             op: format!("{}.{op}", handle.type_name),
-            receiver: Some(Value::Resource(Arc::new(handle.clone()))),
+            receiver: Some(Value(Repr::Resource(Arc::new(handle.clone())))),
             owner: format!("`{qualified}`"),
             known: resource.operations.iter().map(|e| e.name).collect(),
         };
@@ -1317,7 +1317,7 @@ impl<O: Write + Send, E: Write + Send> HostApi for Console<O, E> {
             _ => unreachable!("checked by HostRegistry::call"),
         };
         match result {
-            Ok(()) => Ok(Value::ok(Value::Unit)),
+            Ok(()) => Ok(Value::ok(Value(Repr::Unit))),
             Err(e) => Ok(Value::err(Value::error(format!("console: {e}")))),
         }
     }
@@ -1379,11 +1379,11 @@ impl HostApi for Env {
     fn call(&self, op: &str, args: Vec<Value>) -> Result<Value, RuntimeError> {
         match op {
             "get" => {
-                let [Value::Str(name)] = args.as_slice() else {
+                let [Value(Repr::Str(name))] = args.as_slice() else {
                     unreachable!("checked by HostRegistry::call")
                 };
                 Ok(match self.vars.get(&**name) {
-                    Some(value) => Value::some(Value::Str(value.as_str().into())),
+                    Some(value) => Value::some(Value(Repr::Str(value.as_str().into()))),
                     None => Value::none(),
                 })
             }
@@ -1467,11 +1467,11 @@ impl HostApi for Documents {
     fn call(&self, op: &str, args: Vec<Value>) -> Result<Value, RuntimeError> {
         match op {
             "read" => {
-                let [Value::Str(name)] = args.as_slice() else {
+                let [Value(Repr::Str(name))] = args.as_slice() else {
                     unreachable!("checked by HostRegistry::call")
                 };
                 Ok(match self.read(name) {
-                    Ok(text) => Value::ok(Value::Str(text.into())),
+                    Ok(text) => Value::ok(Value(Repr::Str(text.into()))),
                     Err(message) => Value::err(Value::error(message)),
                 })
             }
@@ -1521,7 +1521,7 @@ mod tests {
     fn ok_str(value: Value) -> String {
         match value.ok_payload() {
             Some(payload) => match payload.first() {
-                Some(Value::Str(text)) => text.to_string(),
+                Some(Value(Repr::Str(text))) => text.to_string(),
                 other => panic!("expected `Ok(String)`, found {other:?}"),
             },
             None => panic!("expected `Ok(String)`, found {value}"),
@@ -1543,12 +1543,12 @@ mod tests {
         )]));
 
         let hit = documents
-            .call("read", vec![Value::Str("input".into())])
+            .call("read", vec![Value(Repr::Str("input".into()))])
             .expect("no runtime error");
         assert_eq!(ok_str(hit), "hello world");
 
         let miss = documents
-            .call("read", vec![Value::Str("missing".into())])
+            .call("read", vec![Value(Repr::Str("missing".into()))])
             .expect("no runtime error");
         assert_eq!(err_message(miss), "no document named `missing`");
     }
@@ -1560,7 +1560,7 @@ mod tests {
         let documents = Documents::rooted(dir.path().to_path_buf());
 
         let read = documents
-            .call("read", vec![Value::Str("input".into())])
+            .call("read", vec![Value(Repr::Str("input".into()))])
             .expect("no runtime error");
         assert_eq!(ok_str(read), "five little words here");
     }
@@ -1571,7 +1571,7 @@ mod tests {
         let documents = Documents::rooted(dir.path().to_path_buf());
 
         let read = documents
-            .call("read", vec![Value::Str("absent".into())])
+            .call("read", vec![Value(Repr::Str("absent".into()))])
             .expect("no runtime error");
         assert_eq!(err_message(read), "no document named `absent`");
     }
@@ -1582,7 +1582,7 @@ mod tests {
         let documents = Documents::rooted(dir.path().to_path_buf());
 
         let read = documents
-            .call("read", vec![Value::Str("..".into())])
+            .call("read", vec![Value(Repr::Str("..".into()))])
             .expect("no runtime error");
         assert_eq!(err_message(read), "no document named `..`");
     }
@@ -1593,7 +1593,7 @@ mod tests {
         let documents = Documents::rooted(dir.path().to_path_buf());
 
         let read = documents
-            .call("read", vec![Value::Str("a/b".into())])
+            .call("read", vec![Value(Repr::Str("a/b".into()))])
             .expect("no runtime error");
         assert_eq!(err_message(read), "no document named `a/b`");
     }
@@ -1604,7 +1604,7 @@ mod tests {
         let documents = Documents::rooted(dir.path().to_path_buf());
 
         let read = documents
-            .call("read", vec![Value::Str("".into())])
+            .call("read", vec![Value(Repr::Str("".into()))])
             .expect("no runtime error");
         assert_eq!(err_message(read), "no document named ``");
     }
@@ -1615,7 +1615,7 @@ mod tests {
         hosts.register(Box::new(Documents::in_memory(BTreeMap::new())));
 
         let error = hosts
-            .call("documents", "read", vec![Value::Str("input".into())])
+            .call("documents", "read", vec![Value(Repr::Str("input".into()))])
             .expect_err("the call should be rejected");
         assert!(error.message.contains("documents"), "{}", error.message);
     }
@@ -1629,7 +1629,7 @@ mod tests {
         )]))));
 
         let value = hosts
-            .call("documents", "read", vec![Value::Str("input".into())])
+            .call("documents", "read", vec![Value(Repr::Str("input".into()))])
             .expect("the call should be allowed");
         assert_eq!(ok_str(value), "hello world");
     }
@@ -1666,7 +1666,7 @@ mod tests {
     fn recorded_value(recorded: &RecordedValue) -> Value {
         match recorded {
             RecordedValue::Carried(transfer) => transfer.clone().into_value(),
-            RecordedValue::Opaque { shown, .. } => Value::Str(shown.as_str().into()),
+            RecordedValue::Opaque { shown, .. } => Value(Repr::Str(shown.as_str().into())),
         }
     }
 
@@ -1692,7 +1692,7 @@ mod tests {
         hosts.set_trace(Arc::new(sink.clone()));
 
         let error = hosts
-            .call("documents", "read", vec![Value::Str("input".into())])
+            .call("documents", "read", vec![Value(Repr::Str("input".into()))])
             .expect_err("the call should be stopped by the budget");
         assert!(error.rule.is_some(), "{error:?}");
 
@@ -1712,7 +1712,7 @@ mod tests {
         hosts.set_trace(Arc::new(sink.clone()));
 
         hosts
-            .call("documents", "read", vec![Value::Str("input".into())])
+            .call("documents", "read", vec![Value(Repr::Str("input".into()))])
             .expect("the call should be allowed");
 
         let events = sink.events();
@@ -1770,7 +1770,7 @@ mod tests {
 
         hosts.call("process", "args", Vec::new()).expect("granted");
         hosts
-            .call("process", "exit", vec![Value::Int(2)])
+            .call("process", "exit", vec![Value(Repr::Int(2))])
             .expect("granted");
 
         let events = sink.events();
@@ -1825,7 +1825,7 @@ mod tests {
         hosts.set_trace(Arc::new(sink.clone()));
 
         hosts
-            .call("documents", "read", vec![Value::Str("input".into())])
+            .call("documents", "read", vec![Value(Repr::Str("input".into()))])
             .expect("the call should be allowed");
 
         assert!(sink.0.events().is_empty(), "{:?}", sink.0.events());
@@ -1841,7 +1841,7 @@ mod tests {
         hosts.set_trace(Arc::new(sink.clone()));
 
         hosts
-            .call("documents", "read", vec![Value::Str("input".into())])
+            .call("documents", "read", vec![Value(Repr::Str("input".into()))])
             .expect_err("the call should be rejected");
 
         let events = sink.events();
@@ -1885,7 +1885,10 @@ mod tests {
             .call(
                 "documents",
                 "read",
-                vec![Value::Str("input".into()), Value::Str("extra".into())],
+                vec![
+                    Value(Repr::Str("input".into())),
+                    Value(Repr::Str("extra".into())),
+                ],
             )
             .expect_err("`documents.read` takes one argument");
         assert_eq!(
@@ -1920,7 +1923,11 @@ mod tests {
 
         for arity in 0..3 {
             hosts
-                .call("console", "println", vec![Value::Str("part".into()); arity])
+                .call(
+                    "console",
+                    "println",
+                    vec![Value(Repr::Str("part".into())); arity],
+                )
                 .unwrap_or_else(|e| panic!("arity {arity} should be accepted: {}", e.message));
         }
     }
@@ -1978,7 +1985,7 @@ mod tests {
             ("println", "1,ada"),
         ] {
             hosts
-                .call("console", op, vec![Value::Str(text.into())])
+                .call("console", op, vec![Value(Repr::Str(text.into()))])
                 .unwrap_or_else(|e| panic!("`console.{op}` should be allowed: {}", e.message));
         }
 
@@ -1999,7 +2006,10 @@ mod tests {
                 .call(
                     "console",
                     op,
-                    vec![Value::Str("two".into()), Value::Str("parts".into())],
+                    vec![
+                        Value(Repr::Str("two".into())),
+                        Value(Repr::Str("parts".into())),
+                    ],
                 )
                 .unwrap_or_else(|e| panic!("`console.{op}` should be allowed: {}", e.message));
         }
@@ -2020,10 +2030,18 @@ mod tests {
         let granted = registry_with_console(out.clone(), err.clone());
 
         granted
-            .call("console", "println", vec![Value::Str("record".into())])
+            .call(
+                "console",
+                "println",
+                vec![Value(Repr::Str("record".into()))],
+            )
             .expect("`console` grants the output stream");
         granted
-            .call("console", "eprintln", vec![Value::Str("warning".into())])
+            .call(
+                "console",
+                "eprintln",
+                vec![Value(Repr::Str("warning".into()))],
+            )
             .expect("`console` grants the diagnostic stream too");
         assert_eq!(out.written(), "record\n");
         assert_eq!(err.written(), "warning\n");
@@ -2032,7 +2050,7 @@ mod tests {
         ungranted.register(Box::new(Console::new(Shared::default(), Shared::default())));
         for op in ["println", "print", "eprintln", "eprint"] {
             let refused = ungranted
-                .call("console", op, vec![Value::Str("anything".into())])
+                .call("console", op, vec![Value(Repr::Str("anything".into()))])
                 .expect_err("a run granted nothing reaches neither stream");
             assert_eq!(
                 refused.denied_capability.as_deref(),
@@ -2068,7 +2086,7 @@ mod tests {
         }
 
         fn call(&self, _op: &str, _args: Vec<Value>) -> Result<Value, RuntimeError> {
-            Ok(Value::Str(self.answer.into()))
+            Ok(Value(Repr::Str(self.answer.into())))
         }
     }
 
@@ -2136,7 +2154,7 @@ mod tests {
             .call("duplicate", "ping", Vec::new())
             .expect("the call should be allowed")
         {
-            Value::Str(text) => assert_eq!(&*text, "first"),
+            Value(Repr::Str(text)) => assert_eq!(&*text, "first"),
             other => panic!("expected a Str, found {other:?}"),
         }
     }
@@ -2218,7 +2236,7 @@ mod tests {
         assert_eq!(hosts.irreversible_writes(), 0);
 
         hosts
-            .call("files", "exists", vec![Value::Str("a.txt".into())])
+            .call("files", "exists", vec![Value(Repr::Str("a.txt".into()))])
             .expect("the call should be allowed");
         assert_eq!(hosts.irreversible_writes(), 0);
 
@@ -2226,11 +2244,14 @@ mod tests {
             .call(
                 "files",
                 "write",
-                vec![Value::Str("a.txt".into()), Value::Str("x".into())],
+                vec![
+                    Value(Repr::Str("a.txt".into())),
+                    Value(Repr::Str("x".into())),
+                ],
             )
             .expect("the call should be allowed");
         hosts
-            .call("console", "println", vec![Value::Str("a".into())])
+            .call("console", "println", vec![Value(Repr::Str("a".into()))])
             .expect("the call should be allowed");
         assert_eq!(hosts.irreversible_writes(), 2);
     }
@@ -2246,7 +2267,10 @@ mod tests {
             .call(
                 "files",
                 "write",
-                vec![Value::Str("a.txt".into()), Value::Str("x".into())],
+                vec![
+                    Value(Repr::Str("a.txt".into())),
+                    Value(Repr::Str("x".into())),
+                ],
             )
             .expect_err("the call should be rejected");
         assert_eq!(hosts.irreversible_writes(), 0);
@@ -2260,7 +2284,7 @@ mod tests {
         hosts.set_trace(Arc::new(sink.clone()));
 
         hosts
-            .call("documents", "read", vec![Value::Str("input".into())])
+            .call("documents", "read", vec![Value(Repr::Str("input".into()))])
             .expect_err("the call should be rejected for the missing grant");
 
         let events = sink.events();
@@ -2468,7 +2492,7 @@ mod tests {
             Ok(match op {
                 // A handle naming a resource this module's schema does not
                 // declare: the value is well formed and the name is a lie.
-                "open" => Value::Resource(ResourceHandle::new(
+                "open" => Value(Repr::Resource(ResourceHandle::new(
                     "wayward",
                     if declared {
                         &WAYWARD_RESOURCES[0]
@@ -2476,16 +2500,20 @@ mod tests {
                         &UNDECLARED_RESOURCE
                     },
                     1,
-                )),
-                "list" => Value::ok(Value::Array(if declared {
-                    vec![Value::Str("what was declared".into())].into()
+                ))),
+                "list" => Value::ok(Value(Repr::Array(if declared {
+                    vec![Value(Repr::Str("what was declared".into()))].into()
                 } else {
-                    vec![Value::Str("what was declared".into()), Value::Int(3)].into()
-                })),
+                    vec![
+                        Value(Repr::Str("what was declared".into())),
+                        Value(Repr::Int(3)),
+                    ]
+                    .into()
+                }))),
                 // Declared as `Any`, so this one cannot disagree with itself.
-                "anything" => Value::Int(3),
-                _ if declared => Value::ok(Value::Str("what was declared".into())),
-                _ => Value::Int(3),
+                "anything" => Value(Repr::Int(3)),
+                _ if declared => Value::ok(Value(Repr::Str("what was declared".into()))),
+                _ => Value(Repr::Int(3)),
             })
         }
 
@@ -2498,8 +2526,8 @@ mod tests {
         ) -> Result<Value, RuntimeError> {
             self.calls.fetch_add(1, Ordering::Relaxed);
             Ok(match self.answer {
-                Answer::Declared => Value::ok(Value::Unit),
-                Answer::Undeclared => Value::ok(Value::Str("not the declared `Unit`".into())),
+                Answer::Declared => Value::ok(Value(Repr::Unit)),
+                Answer::Undeclared => Value::ok(Value(Repr::Str("not the declared `Unit`".into()))),
             })
         }
     }
@@ -2522,7 +2550,7 @@ mod tests {
         let (hosts, calls, sink) = registry_with_wayward(Answer::Declared);
 
         let value = hosts
-            .call("wayward", "read", vec![Value::Str("input".into())])
+            .call("wayward", "read", vec![Value(Repr::Str("input".into()))])
             .expect("a conforming call is dispatched");
 
         assert_eq!(ok_str(value), "what was declared");
@@ -2582,7 +2610,7 @@ mod tests {
         let opened = hosts
             .call("wayward", "open", Vec::new())
             .expect("a handle of the declared kind is admitted");
-        let Value::Resource(handle) = opened else {
+        let Value(Repr::Resource(handle)) = opened else {
             panic!("expected a resource handle, found {opened}");
         };
         assert_eq!(handle.qualified_type(), "wayward.Handle");
@@ -2590,7 +2618,7 @@ mod tests {
         let closed = hosts
             .call_resource(&handle, "close", Vec::new(), &mut NoReentry)
             .expect("the handle answers the operation its kind declares");
-        assert!(matches!(closed, Value::Enum(_)), "{closed}");
+        assert!(matches!(closed, Value(Repr::Enum(_))), "{closed}");
     }
 
     /// An operation the schema does not declare is refused at the boundary,
@@ -2601,7 +2629,7 @@ mod tests {
         let (hosts, calls, _) = registry_with_wayward(Answer::Declared);
 
         let error = hosts
-            .call("wayward", "write", vec![Value::Str("input".into())])
+            .call("wayward", "write", vec![Value(Repr::Str("input".into()))])
             .expect_err("an undeclared operation is refused");
 
         assert_eq!(
@@ -2649,7 +2677,7 @@ mod tests {
         let (hosts, calls, sink) = registry_with_wayward(Answer::Declared);
 
         let error = hosts
-            .call("wayward", "read", vec![Value::Int(3)])
+            .call("wayward", "read", vec![Value(Repr::Int(3))])
             .expect_err("an `Int` where a `String` was declared is refused");
 
         assert_eq!(
@@ -2679,9 +2707,9 @@ mod tests {
             .call(
                 "wayward",
                 "send",
-                vec![Value::Array(
-                    vec![Value::Str("one".into()), Value::Int(2)].into(),
-                )],
+                vec![Value(Repr::Array(
+                    vec![Value(Repr::Str("one".into())), Value(Repr::Int(2))].into(),
+                ))],
             )
             .expect_err("an `Int` among the declared strings is refused");
 
@@ -2703,7 +2731,7 @@ mod tests {
             .call(
                 "wayward",
                 "say",
-                vec![Value::Str("a".into()), Value::Str("b".into())],
+                vec![Value(Repr::Str("a".into())), Value(Repr::Str("b".into()))],
             )
             .expect("strings all the way along are admitted");
 
@@ -2711,7 +2739,7 @@ mod tests {
             .call(
                 "wayward",
                 "say",
-                vec![Value::Str("a".into()), Value::Int(2)],
+                vec![Value(Repr::Str("a".into())), Value(Repr::Int(2))],
             )
             .expect_err("an `Int` among the declared strings is refused");
         assert_eq!(
@@ -2727,7 +2755,11 @@ mod tests {
     fn an_argument_declared_any_admits_whatever_it_is_given() {
         let (hosts, calls, _) = registry_with_wayward(Answer::Declared);
 
-        for argument in [Value::Int(3), Value::Unit, Value::Str("text".into())] {
+        for argument in [
+            Value(Repr::Int(3)),
+            Value(Repr::Unit),
+            Value(Repr::Str("text".into())),
+        ] {
             hosts
                 .call("wayward", "bound", vec![argument])
                 .expect("`Any` admits everything");
@@ -2749,7 +2781,7 @@ mod tests {
         let (hosts, calls, sink) = registry_with_wayward(Answer::Undeclared);
 
         let error = hosts
-            .call("wayward", "read", vec![Value::Str("input".into())])
+            .call("wayward", "read", vec![Value(Repr::Str("input".into()))])
             .expect_err("a host that breaks its own schema is refused");
 
         assert_eq!(
@@ -2812,7 +2844,7 @@ mod tests {
                 .call("wayward", "anything", Vec::new())
                 .expect("`Any` admits everything");
 
-            assert!(matches!(value, Value::Int(3)), "{value}");
+            assert!(matches!(value, Value(Repr::Int(3))), "{value}");
         }
     }
 

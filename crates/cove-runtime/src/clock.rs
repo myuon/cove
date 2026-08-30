@@ -21,7 +21,7 @@ use crate::budget::Cancellation;
 use crate::error::RuntimeError;
 use crate::host::{HostApi, Reentry};
 use crate::schema::ModuleSchema;
-use crate::value::Value;
+use crate::value::{Repr, Value};
 
 /// How often a watchdog looks at the work it is bounding.
 ///
@@ -161,7 +161,7 @@ impl Clock {
             let _ = value;
             Value::err(Value::error(format!(
                 "clock: timed out after {}",
-                Value::Duration(nanos)
+                Value(Repr::Duration(nanos))
             )))
         };
         match &self.source {
@@ -175,7 +175,7 @@ impl Clock {
                     Ok(value) => Ok(Value::ok(value)),
                     // A body stopped by this bound reports the bound, not
                     // whatever the safepoint happened to say.
-                    Err(_) if stop.is_cancelled() => Ok(expired(Value::Unit)),
+                    Err(_) if stop.is_cancelled() => Ok(expired(Value(Repr::Unit))),
                     Err(error) => Err(error),
                 }
             }
@@ -218,11 +218,11 @@ impl Clock {
         }
         loop {
             if back.is_cancelled() {
-                return Ok(Value::ok(Value::Unit));
+                return Ok(Value::ok(Value(Repr::Unit)));
             }
             self.sleep(nanos);
             if back.is_cancelled() {
-                return Ok(Value::ok(Value::Unit));
+                return Ok(Value::ok(Value(Repr::Unit)));
             }
             let answered = back.call(body, Vec::new())?;
             // The body reports failure the way every Cove function does, and
@@ -232,7 +232,7 @@ impl Clock {
                 return Ok(answered);
             }
             if !self.is_real() {
-                return Ok(Value::ok(Value::Unit));
+                return Ok(Value::ok(Value(Repr::Unit)));
             }
         }
     }
@@ -248,7 +248,7 @@ impl Clock {
             }
             ClockSource::Virtual(time) => time.advance(nanos),
         }
-        Value::ok(Value::Unit)
+        Value::ok(Value(Repr::Unit))
     }
 }
 
@@ -265,13 +265,13 @@ impl HostApi for Clock {
     ) -> Result<Value, RuntimeError> {
         match op {
             "timeout" => {
-                let [Value::Duration(nanos), body] = args.as_slice() else {
+                let [Value(Repr::Duration(nanos)), body] = args.as_slice() else {
                     unreachable!("checked by HostRegistry::call")
                 };
                 self.timeout(*nanos, body, back)
             }
             "every" => {
-                let [Value::Duration(nanos), body] = args.as_slice() else {
+                let [Value(Repr::Duration(nanos)), body] = args.as_slice() else {
                     unreachable!("checked by HostRegistry::call")
                 };
                 self.every(*nanos, body, back)
@@ -282,9 +282,9 @@ impl HostApi for Clock {
 
     fn call(&self, op: &str, args: Vec<Value>) -> Result<Value, RuntimeError> {
         match op {
-            "now" => Ok(Value::Duration(self.now_nanos())),
+            "now" => Ok(Value(Repr::Duration(self.now_nanos()))),
             "sleep" => {
-                let [Value::Duration(nanos)] = args.as_slice() else {
+                let [Value(Repr::Duration(nanos))] = args.as_slice() else {
                     unreachable!("checked by HostRegistry::call")
                 };
                 Ok(self.sleep(*nanos))
@@ -342,7 +342,7 @@ mod tests {
 
     fn nanos(value: Value) -> i64 {
         match value {
-            Value::Duration(nanos) => nanos,
+            Value(Repr::Duration(nanos)) => nanos,
             other => panic!("expected a `Duration`, found {other}"),
         }
     }
@@ -361,7 +361,7 @@ mod tests {
     fn ok_int(value: Value) -> i64 {
         match value.ok_payload() {
             Some(payload) => match payload.first() {
-                Some(Value::Int(n)) => *n,
+                Some(Value(Repr::Int(n))) => *n,
                 other => panic!("expected `Ok(Int)`, found {other:?}"),
             },
             None => panic!("expected `Ok(...)`, found {value}"),
@@ -481,7 +481,7 @@ mod tests {
 
         let started = Instant::now();
         let slept = clock
-            .call("sleep", vec![Value::Duration(3_600_000_000_000)])
+            .call("sleep", vec![Value(Repr::Duration(3_600_000_000_000))])
             .unwrap();
         assert!(is_ok(&slept), "{slept}");
         assert_eq!(time.nanos(), 3_600_000_000_000);
@@ -491,7 +491,9 @@ mod tests {
     #[test]
     fn sleeping_a_negative_duration_is_an_error_on_either_clock() {
         for clock in [Clock::real(), Clock::virtual_clock(VirtualTime::new())] {
-            let slept = clock.call("sleep", vec![Value::Duration(-1)]).unwrap();
+            let slept = clock
+                .call("sleep", vec![Value(Repr::Duration(-1))])
+                .unwrap();
             assert_eq!(
                 err_message(slept),
                 "clock: a sleep duration must not be negative"
@@ -515,7 +517,7 @@ mod tests {
 
         let before = nanos(clock.call("now", Vec::new()).unwrap());
         let slept = clock
-            .call("sleep", vec![Value::Duration(1_000_000)])
+            .call("sleep", vec![Value(Repr::Duration(1_000_000))])
             .unwrap();
         assert!(is_ok(&slept), "{slept}");
         let after = nanos(clock.call("now", Vec::new()).unwrap());
@@ -543,7 +545,7 @@ mod tests {
         hosts.register(Box::new(Clock::virtual_clock(time.clone())));
 
         hosts
-            .call("clock", "sleep", vec![Value::Duration(250_000_000)])
+            .call("clock", "sleep", vec![Value(Repr::Duration(250_000_000))])
             .expect("the call should be allowed");
         let now = hosts
             .call("clock", "now", Vec::new())
@@ -554,12 +556,12 @@ mod tests {
     #[test]
     fn timeout_on_a_virtual_clock_answers_ok_when_the_body_does_not_oversleep() {
         let clock = Clock::virtual_clock(VirtualTime::new());
-        let mut back = StubReentry::new(|_stop| Ok(Value::Int(42)));
+        let mut back = StubReentry::new(|_stop| Ok(Value(Repr::Int(42))));
 
         let answer = clock
             .call_with(
                 "timeout",
-                vec![Value::Duration(1_000_000_000), Value::Unit],
+                vec![Value(Repr::Duration(1_000_000_000)), Value(Repr::Unit)],
                 &mut back,
             )
             .unwrap();
@@ -576,31 +578,34 @@ mod tests {
         let clock = Clock::virtual_clock(time.clone());
         let sleeper = Clock::virtual_clock(time);
         let mut back = StubReentry::new(move |_stop| {
-            sleeper.call("sleep", vec![Value::Duration(2_000_000_000)])
+            sleeper.call("sleep", vec![Value(Repr::Duration(2_000_000_000))])
         });
 
         let answer = clock
             .call_with(
                 "timeout",
-                vec![Value::Duration(1_000_000_000), Value::Unit],
+                vec![Value(Repr::Duration(1_000_000_000)), Value(Repr::Unit)],
                 &mut back,
             )
             .unwrap();
         assert_eq!(
             err_message(answer),
-            format!("clock: timed out after {}", Value::Duration(1_000_000_000))
+            format!(
+                "clock: timed out after {}",
+                Value(Repr::Duration(1_000_000_000))
+            )
         );
     }
 
     #[test]
     fn timeout_on_a_real_clock_answers_ok_when_the_body_finishes_before_the_bound() {
         let clock = Clock::real();
-        let mut back = StubReentry::new(|_stop| Ok(Value::Int(7)));
+        let mut back = StubReentry::new(|_stop| Ok(Value(Repr::Int(7))));
 
         let answer = clock
             .call_with(
                 "timeout",
-                vec![Value::Duration(200_000_000), Value::Unit],
+                vec![Value(Repr::Duration(200_000_000)), Value(Repr::Unit)],
                 &mut back,
             )
             .unwrap();
@@ -619,28 +624,35 @@ mod tests {
             while !stop.is_cancelled() {
                 std::thread::sleep(std::time::Duration::from_millis(1));
             }
-            Ok(Value::Unit)
+            Ok(Value(Repr::Unit))
         });
 
         let answer = clock
             .call_with(
                 "timeout",
-                vec![Value::Duration(5_000_000), Value::Unit],
+                vec![Value(Repr::Duration(5_000_000)), Value(Repr::Unit)],
                 &mut back,
             )
             .unwrap();
         assert_eq!(
             err_message(answer),
-            format!("clock: timed out after {}", Value::Duration(5_000_000))
+            format!(
+                "clock: timed out after {}",
+                Value(Repr::Duration(5_000_000))
+            )
         );
     }
 
     #[test]
     fn a_negative_timeout_bound_is_an_error_on_either_clock() {
         for clock in [Clock::real(), Clock::virtual_clock(VirtualTime::new())] {
-            let mut back = StubReentry::new(|_stop| Ok(Value::Unit));
+            let mut back = StubReentry::new(|_stop| Ok(Value(Repr::Unit)));
             let answer = clock
-                .call_with("timeout", vec![Value::Duration(-1), Value::Unit], &mut back)
+                .call_with(
+                    "timeout",
+                    vec![Value(Repr::Duration(-1)), Value(Repr::Unit)],
+                    &mut back,
+                )
                 .unwrap();
             assert_eq!(err_message(answer), "clock: a timeout must not be negative");
             assert_eq!(
@@ -653,9 +665,13 @@ mod tests {
     #[test]
     fn a_negative_timer_period_is_an_error_on_either_clock() {
         for clock in [Clock::real(), Clock::virtual_clock(VirtualTime::new())] {
-            let mut back = StubReentry::new(|_stop| Ok(Value::Unit));
+            let mut back = StubReentry::new(|_stop| Ok(Value(Repr::Unit)));
             let answer = clock
-                .call_with("every", vec![Value::Duration(-1), Value::Unit], &mut back)
+                .call_with(
+                    "every",
+                    vec![Value(Repr::Duration(-1)), Value(Repr::Unit)],
+                    &mut back,
+                )
                 .unwrap();
             assert_eq!(
                 err_message(answer),
@@ -674,12 +690,12 @@ mod tests {
     #[test]
     fn every_on_a_virtual_clock_fires_exactly_once() {
         let clock = Clock::virtual_clock(VirtualTime::new());
-        let mut back = StubReentry::new(|_stop| Ok(Value::ok(Value::Unit)));
+        let mut back = StubReentry::new(|_stop| Ok(Value::ok(Value(Repr::Unit))));
 
         let answer = clock
             .call_with(
                 "every",
-                vec![Value::Duration(1_000_000_000), Value::Unit],
+                vec![Value(Repr::Duration(1_000_000_000)), Value(Repr::Unit)],
                 &mut back,
             )
             .unwrap();
@@ -695,7 +711,7 @@ mod tests {
         let answer = clock
             .call_with(
                 "every",
-                vec![Value::Duration(1_000_000_000), Value::Unit],
+                vec![Value(Repr::Duration(1_000_000_000)), Value(Repr::Unit)],
                 &mut back,
             )
             .unwrap();
@@ -735,12 +751,16 @@ mod tests {
                 if rounds >= 3 {
                     raise.store(true, Ordering::Relaxed);
                 }
-                Ok(Value::ok(Value::Unit))
+                Ok(Value::ok(Value(Repr::Unit)))
             })
             .stopped_by(stop);
 
             let answer = clock
-                .call_with("every", vec![Value::Duration(0), Value::Unit], &mut back)
+                .call_with(
+                    "every",
+                    vec![Value(Repr::Duration(0)), Value(Repr::Unit)],
+                    &mut back,
+                )
                 .unwrap();
             assert!(is_ok(&answer), "{answer}");
             back.calls
@@ -764,14 +784,14 @@ mod tests {
             let inside = Clock::virtual_clock(time.clone());
             let mut back = StubReentry::new(move |_stop| {
                 inside.call("now", Vec::new())?;
-                inside.call("sleep", vec![Value::Duration(5)])?;
-                Ok(Value::ok(Value::Unit))
+                inside.call("sleep", vec![Value(Repr::Duration(5))])?;
+                Ok(Value::ok(Value(Repr::Unit)))
             });
 
             let answer = clock
                 .call_with(
                     "every",
-                    vec![Value::Duration(1_000_000_000), Value::Unit],
+                    vec![Value(Repr::Duration(1_000_000_000)), Value(Repr::Unit)],
                     &mut back,
                 )
                 .unwrap();
@@ -792,7 +812,7 @@ mod tests {
         let answer = clock
             .call_with(
                 "every",
-                vec![Value::Duration(1_000_000_000), Value::Unit],
+                vec![Value(Repr::Duration(1_000_000_000)), Value(Repr::Unit)],
                 &mut back,
             )
             .unwrap();

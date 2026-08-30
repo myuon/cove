@@ -38,7 +38,7 @@ use crate::runtime::Runtime;
 use crate::shared::SharedCell;
 use crate::trace::TraceEvent;
 use crate::value::{
-    Closure, ClosureBody, DynValue, EnumValue, HostFnValue, MapKey, StructValue, Value,
+    Closure, ClosureBody, DynValue, EnumValue, HostFnValue, MapKey, Repr, StructValue, Value,
 };
 
 /// What a task thread hands back to the task that spawned it: the value the
@@ -320,7 +320,7 @@ pub(crate) fn spawn_into<H: Tasking>(
         .at(span)
         .with_rule("Leaving a task scope waits for or cancels its child tasks."));
     }
-    if !matches!(body, Value::Closure(_)) {
+    if !matches!(body, Value(Repr::Closure(_))) {
         return Err(RuntimeError::new(format!(
             "`spawn` takes the work to run as a trailing closure, but found `{}`",
             body.type_name()
@@ -387,7 +387,7 @@ pub(crate) fn spawn_into<H: Tasking>(
         cancellation,
         thread,
     );
-    Ok(Value::Task(scope.adopt(task)))
+    Ok(Value(Repr::Task(scope.adopt(task))))
 }
 
 /// Waits for a task's thread, charging the time against this body's timings
@@ -546,7 +546,7 @@ pub(crate) fn finished(
 fn failure_of(value: &Value) -> Option<Value> {
     value
         .err_payload()
-        .map(|payload| payload.first().cloned().unwrap_or(Value::Unit))
+        .map(|payload| payload.first().cloned().unwrap_or(Value(Repr::Unit)))
 }
 
 fn awaiting_a_cancelled_task(task: &Task, span: Span) -> RuntimeError {
@@ -726,17 +726,17 @@ impl Transfer {
         match value {
             // Primitives, strings, and ranges are values; copying one is the
             // whole of transferring it.
-            Value::Unit => Ok(Transfer::Unit),
-            Value::Bool(b) => Ok(Transfer::Bool(*b)),
-            Value::Int(n) => Ok(Transfer::Int(*n)),
-            Value::Float(x) => Ok(Transfer::Float(*x)),
-            Value::Duration(ns) => Ok(Transfer::Duration(*ns)),
-            Value::Str(s) => Ok(Transfer::Str(s.to_string())),
-            Value::Range {
+            Value(Repr::Unit) => Ok(Transfer::Unit),
+            Value(Repr::Bool(b)) => Ok(Transfer::Bool(*b)),
+            Value(Repr::Int(n)) => Ok(Transfer::Int(*n)),
+            Value(Repr::Float(x)) => Ok(Transfer::Float(*x)),
+            Value(Repr::Duration(ns)) => Ok(Transfer::Duration(*ns)),
+            Value(Repr::Str(s)) => Ok(Transfer::Str(s.to_string())),
+            Value(Repr::Range {
                 start,
                 end,
                 inclusive_end,
-            } => Ok(Transfer::Range {
+            }) => Ok(Transfer::Range {
                 start: *start,
                 end: *end,
                 inclusive_end: *inclusive_end,
@@ -744,13 +744,13 @@ impl Transfer {
             // A vector is growable shared mutable storage, so it cannot cross
             // even through `let`: the `let` restricts this alias, not the
             // storage.
-            Value::Vector(_) => Err(NotTaskSafe {
+            Value(Repr::Vector(_)) => Err(NotTaskSafe {
                 path: path.to_string(),
                 type_name: value.type_name(),
             }),
             // `Array` and `Map` are immutable, so they cross exactly when
             // everything they contain does.
-            Value::Array(items) => {
+            Value(Repr::Array(items)) => {
                 let mut converted = Vec::with_capacity(items.len());
                 for (i, item) in items.iter().enumerate() {
                     converted.push(Transfer::convert(&format!("{path}[{i}]"), item)?);
@@ -760,8 +760,8 @@ impl Transfer {
             // A `Set` element is a `MapKey`: always `Bool`, `Int`, `Str`, or a
             // payload-free enum case, all of which are unconditionally
             // task-safe.
-            Value::Set(items) => Ok(Transfer::Set((**items).clone())),
-            Value::Map(entries) => {
+            Value(Repr::Set(items)) => Ok(Transfer::Set((**items).clone())),
+            Value(Repr::Map(entries)) => {
                 let mut converted = BTreeMap::new();
                 for (key, item) in entries.iter() {
                     converted.insert(
@@ -771,7 +771,7 @@ impl Transfer {
                 }
                 Ok(Transfer::Map(converted))
             }
-            Value::Struct(structure) => {
+            Value(Repr::Struct(structure)) => {
                 let mut fields = Vec::with_capacity(structure.fields.len());
                 for (name, field) in &structure.fields {
                     fields.push((
@@ -785,7 +785,7 @@ impl Transfer {
                     opaque: structure.opaque,
                 })
             }
-            Value::Enum(enumeration) => {
+            Value(Repr::Enum(enumeration)) => {
                 let mut payload = Vec::with_capacity(enumeration.payload.len());
                 for (i, item) in enumeration.payload.iter().enumerate() {
                     payload.push(Transfer::convert(
@@ -801,12 +801,12 @@ impl Transfer {
             }
             // A trait object is task-safe exactly when the value it holds is:
             // the wrapper adds a trait name, which is not state.
-            Value::Dyn(d) => Ok(Transfer::Dyn {
+            Value(Repr::Dyn(d)) => Ok(Transfer::Dyn {
                 trait_name: d.trait_name.to_string(),
                 value: Box::new(Transfer::convert(path, &d.value)?),
             }),
             // Closures are task-safe only when every capture is.
-            Value::Closure(closure) => {
+            Value(Repr::Closure(closure)) => {
                 let mut captures = Vec::with_capacity(closure.captures.len());
                 for (name, captured) in &closure.captures {
                     let capture_path = if path.is_empty() {
@@ -832,27 +832,29 @@ impl Transfer {
             // schema, which [`crate::host::HostRegistry::result_is_task_safe`]
             // reads; addressing the module is not itself a transfer of state,
             // and the grant check still happens at the call.
-            Value::HostModule(module) => Ok(Transfer::HostModule(module.to_string())),
-            Value::HostFn(host) => Ok(Transfer::HostFn {
+            Value(Repr::HostModule(module)) => Ok(Transfer::HostModule(module.to_string())),
+            Value(Repr::HostFn(host)) => Ok(Transfer::HostFn {
                 module: host.module.to_string(),
                 op: host.op.to_string(),
             }),
-            Value::Type(name) => Ok(Transfer::Type(name.to_string())),
+            Value(Repr::Type(name)) => Ok(Transfer::Type(name.to_string())),
             // "Host resources declare task-safety in their Host API schema."
             // The handle carries that declaration, so a resource the host
             // keeps to one task is refused here exactly like a vector.
-            Value::Resource(handle) if handle.task_safe => Ok(Transfer::Resource(handle.clone())),
-            Value::Resource(_) => Err(NotTaskSafe {
+            Value(Repr::Resource(handle)) if handle.task_safe => {
+                Ok(Transfer::Resource(handle.clone()))
+            }
+            Value(Repr::Resource(_)) => Err(NotTaskSafe {
                 path: path.to_string(),
                 type_name: value.type_name(),
             }),
             // A `Shared` is the one exception to the copy rule: it crosses by
             // sharing the cell, which is the reason the type exists.
-            Value::Shared(cell) => Ok(Transfer::Shared(cell.clone())),
+            Value(Repr::Shared(cell)) => Ok(Transfer::Shared(cell.clone())),
             // A scope and a handle belong to the task that holds them: a child
             // may not spawn into its parent's scope or await its siblings.
             // That keeps the scope's children a set its own body decides.
-            Value::TaskScope(_) | Value::Task(_) => Err(NotTaskSafe {
+            Value(Repr::TaskScope(_)) | Value(Repr::Task(_)) => Err(NotTaskSafe {
                 path: path.to_string(),
                 type_name: value.type_name(),
             }),
@@ -863,50 +865,50 @@ impl Transfer {
     /// [`Value`] again with no trace of having crossed.
     pub fn into_value(self) -> Value {
         match self {
-            Transfer::Unit => Value::Unit,
-            Transfer::Bool(b) => Value::Bool(b),
-            Transfer::Int(n) => Value::Int(n),
-            Transfer::Float(x) => Value::Float(x),
-            Transfer::Duration(ns) => Value::Duration(ns),
-            Transfer::Str(s) => Value::Str(s.into()),
-            Transfer::Array(items) => {
-                Value::Array(items.into_iter().map(Transfer::into_value).collect())
-            }
-            Transfer::Map(entries) => Value::Map(Rc::new(
+            Transfer::Unit => Value(Repr::Unit),
+            Transfer::Bool(b) => Value(Repr::Bool(b)),
+            Transfer::Int(n) => Value(Repr::Int(n)),
+            Transfer::Float(x) => Value(Repr::Float(x)),
+            Transfer::Duration(ns) => Value(Repr::Duration(ns)),
+            Transfer::Str(s) => Value(Repr::Str(s.into())),
+            Transfer::Array(items) => Value(Repr::Array(
+                items.into_iter().map(Transfer::into_value).collect(),
+            )),
+            Transfer::Map(entries) => Value(Repr::Map(Rc::new(
                 entries
                     .into_iter()
                     .map(|(key, value)| (key, value.into_value()))
                     .collect(),
-            )),
-            Transfer::Set(items) => Value::Set(Rc::new(items)),
+            ))),
+            Transfer::Set(items) => Value(Repr::Set(Rc::new(items))),
             Transfer::Struct {
                 type_name,
                 fields,
                 opaque,
-            } => Value::Struct(Rc::new(StructValue {
+            } => Value(Repr::Struct(Rc::new(StructValue {
                 type_name: type_name.into(),
                 fields: fields
                     .into_iter()
                     .map(|(name, value)| (name.into(), value.into_value()))
                     .collect(),
                 opaque,
-            })),
+            }))),
             Transfer::Enum {
                 type_name,
                 case,
                 payload,
-            } => Value::Enum(Box::new(EnumValue {
+            } => Value(Repr::Enum(Box::new(EnumValue {
                 type_name: type_name.into(),
                 case: case.into(),
                 payload: payload.into_iter().map(Transfer::into_value).collect(),
-            })),
-            Transfer::Dyn { trait_name, value } => Value::Dyn(Rc::new(DynValue {
+            }))),
+            Transfer::Dyn { trait_name, value } => Value(Repr::Dyn(Rc::new(DynValue {
                 trait_name: trait_name.into(),
                 value: value.into_value(),
-            })),
+            }))),
             Transfer::Closure(closure) => {
                 let closure = *closure;
-                Value::Closure(Rc::new(Closure {
+                Value(Repr::Closure(Rc::new(Closure {
                     is_async: closure.is_async,
                     arity: closure.arity,
                     body: closure.body,
@@ -916,25 +918,25 @@ impl Transfer {
                         .into_iter()
                         .map(|(name, value)| (name.into(), value.into_value()))
                         .collect(),
-                }))
+                })))
             }
-            Transfer::HostModule(module) => Value::HostModule(module.into()),
-            Transfer::HostFn { module, op } => Value::HostFn(Rc::new(HostFnValue {
+            Transfer::HostModule(module) => Value(Repr::HostModule(module.into())),
+            Transfer::HostFn { module, op } => Value(Repr::HostFn(Rc::new(HostFnValue {
                 module: module.into(),
                 op: op.into(),
-            })),
-            Transfer::Type(name) => Value::Type(name.into()),
+            }))),
+            Transfer::Type(name) => Value(Repr::Type(name.into())),
             Transfer::Range {
                 start,
                 end,
                 inclusive_end,
-            } => Value::Range {
+            } => Value(Repr::Range {
                 start,
                 end,
                 inclusive_end,
-            },
-            Transfer::Shared(cell) => Value::Shared(cell),
-            Transfer::Resource(handle) => Value::Resource(handle),
+            }),
+            Transfer::Shared(cell) => Value(Repr::Shared(cell)),
+            Transfer::Resource(handle) => Value(Repr::Resource(handle)),
         }
     }
 }
@@ -995,18 +997,18 @@ mod tests {
 
     #[test]
     fn converting_a_task_safe_value_and_back_preserves_it() {
-        let value = Value::Array(
+        let value = Value(Repr::Array(
             vec![
-                Value::Int(1),
-                Value::Str("two".into()),
-                Value::Struct(Rc::new(StructValue {
+                Value(Repr::Int(1)),
+                Value(Repr::Str("two".into())),
+                Value(Repr::Struct(Rc::new(StructValue {
                     type_name: "test.Point".into(),
-                    fields: vec![("x".into(), Value::Int(3))],
+                    fields: vec![("x".into(), Value(Repr::Int(3)))],
                     opaque: false,
-                })),
+                }))),
             ]
             .into(),
-        );
+        ));
         let crossed = Transfer::of(&value)
             .expect("an array of task-safe values may cross")
             .into_value();
@@ -1015,14 +1017,14 @@ mod tests {
 
     #[test]
     fn a_vector_reached_through_a_struct_is_named_by_its_path() {
-        let value = Value::Struct(Rc::new(StructValue {
+        let value = Value(Repr::Struct(Rc::new(StructValue {
             type_name: "test.Draft".into(),
             fields: vec![(
                 "guests".into(),
-                Value::Vector(VectorStorage::new(vec![Value::Int(1)])),
+                Value(Repr::Vector(VectorStorage::new(vec![Value(Repr::Int(1))]))),
             )],
             opaque: false,
-        }));
+        })));
         let found = Transfer::of(&value).expect_err("a vector may not cross");
         assert_eq!(found.path, ".guests");
         assert_eq!(found.type_name, "Vector");
@@ -1032,11 +1034,11 @@ mod tests {
     #[test]
     fn a_shared_crosses_by_sharing_rather_than_by_copying() {
         let cell = SharedCell::new(Transfer::Int(1));
-        let crossed = Transfer::of(&Value::Shared(cell.clone()))
+        let crossed = Transfer::of(&Value(Repr::Shared(cell.clone())))
             .expect("a `Shared` is task-safe")
             .into_value();
         match crossed {
-            Value::Shared(other) => assert!(Arc::ptr_eq(&cell, &other)),
+            Value(Repr::Shared(other)) => assert!(Arc::ptr_eq(&cell, &other)),
             other => panic!("expected a `Shared`, found {other}"),
         }
     }
@@ -1066,7 +1068,7 @@ mod tests {
     /// `Transfer::convert`, so the body is the emptiest one the AST allows.
     fn closure_value(module: &str, captures: Vec<(&str, Value)>) -> Value {
         let span = Span::new(FileId(0), 0, 0);
-        Value::Closure(Rc::new(Closure {
+        Value(Repr::Closure(Rc::new(Closure {
             is_async: false,
             arity: 0,
             body: ClosureBody::Tree {
@@ -1083,26 +1085,32 @@ mod tests {
                 .into_iter()
                 .map(|(name, value)| (name.into(), value))
                 .collect(),
-        }))
+        })))
     }
 
     #[test]
     fn an_array_of_structs_crosses_and_round_trips() {
-        let value = Value::Array(
+        let value = Value(Repr::Array(
             vec![
-                Value::Struct(Rc::new(StructValue {
+                Value(Repr::Struct(Rc::new(StructValue {
                     type_name: "test.Point".into(),
-                    fields: vec![("x".into(), Value::Int(1)), ("y".into(), Value::Int(2))],
+                    fields: vec![
+                        ("x".into(), Value(Repr::Int(1))),
+                        ("y".into(), Value(Repr::Int(2))),
+                    ],
                     opaque: false,
-                })),
-                Value::Struct(Rc::new(StructValue {
+                }))),
+                Value(Repr::Struct(Rc::new(StructValue {
                     type_name: "test.Point".into(),
-                    fields: vec![("x".into(), Value::Int(3)), ("y".into(), Value::Int(4))],
+                    fields: vec![
+                        ("x".into(), Value(Repr::Int(3))),
+                        ("y".into(), Value(Repr::Int(4))),
+                    ],
                     opaque: false,
-                })),
+                }))),
             ]
             .into(),
-        );
+        ));
         let crossed = Transfer::of(&value)
             .expect("an array of structs built only from Ints is task-safe")
             .into_value();
@@ -1117,17 +1125,17 @@ mod tests {
     /// the struct field.
     #[test]
     fn an_array_of_structs_is_refused_for_the_one_vector_it_holds() {
-        let value = Value::Array(
-            vec![Value::Struct(Rc::new(StructValue {
+        let value = Value(Repr::Array(
+            vec![Value(Repr::Struct(Rc::new(StructValue {
                 type_name: "test.Draft".into(),
                 fields: vec![(
                     "guests".into(),
-                    Value::Vector(VectorStorage::new(vec![Value::Int(1)])),
+                    Value(Repr::Vector(VectorStorage::new(vec![Value(Repr::Int(1))]))),
                 )],
                 opaque: false,
-            }))]
+            })))]
             .into(),
-        );
+        ));
         let found = Transfer::of(&value).expect_err("a vector nested in an array may not cross");
         assert_eq!(found.path, "[0].guests");
         assert_eq!(found.type_name, "Vector");
@@ -1135,11 +1143,11 @@ mod tests {
 
     #[test]
     fn an_enum_payload_that_is_task_safe_crosses_and_round_trips() {
-        let value = Value::Enum(Box::new(EnumValue {
+        let value = Value(Repr::Enum(Box::new(EnumValue {
             type_name: "test.Shape".into(),
             case: "Circle".into(),
-            payload: crate::value::Payload::One(Value::Int(4)),
-        }));
+            payload: crate::value::Payload::One(Value(Repr::Int(4))),
+        })));
         let crossed = Transfer::of(&value)
             .expect("an enum payload of Ints is task-safe")
             .into_value();
@@ -1151,11 +1159,13 @@ mod tests {
     /// case and the payload's position instead, `"{path}.{case}({i})"`.
     #[test]
     fn an_enum_payload_holding_a_vector_is_refused_by_its_case_and_index() {
-        let value = Value::Enum(Box::new(EnumValue {
+        let value = Value(Repr::Enum(Box::new(EnumValue {
             type_name: "test.Shape".into(),
             case: "Wrap".into(),
-            payload: crate::value::Payload::One(Value::Vector(VectorStorage::new(Vec::new()))),
-        }));
+            payload: crate::value::Payload::One(Value(Repr::Vector(
+                VectorStorage::new(Vec::new()),
+            ))),
+        })));
         let found = Transfer::of(&value).expect_err("a vector in an enum payload may not cross");
         assert_eq!(found.path, ".Wrap(0)");
         assert_eq!(found.type_name, "Vector");
@@ -1163,10 +1173,10 @@ mod tests {
 
     #[test]
     fn a_map_of_task_safe_values_crosses_and_round_trips() {
-        let value = Value::Map(Rc::new(BTreeMap::from([
-            (MapKey::Str("a".to_string()), Value::Int(1)),
-            (MapKey::Str("b".to_string()), Value::Int(2)),
-        ])));
+        let value = Value(Repr::Map(Rc::new(BTreeMap::from([
+            (MapKey::Str("a".to_string()), Value(Repr::Int(1))),
+            (MapKey::Str("b".to_string()), Value(Repr::Int(2))),
+        ]))));
         let crossed = Transfer::of(&value)
             .expect("a map of Ints is task-safe")
             .into_value();
@@ -1175,10 +1185,10 @@ mod tests {
 
     #[test]
     fn a_map_value_holding_a_vector_is_refused_naming_the_key() {
-        let value = Value::Map(Rc::new(BTreeMap::from([(
+        let value = Value(Repr::Map(Rc::new(BTreeMap::from([(
             MapKey::Str("widgets".to_string()),
-            Value::Vector(VectorStorage::new(Vec::new())),
-        )])));
+            Value(Repr::Vector(VectorStorage::new(Vec::new()))),
+        )]))));
         let found = Transfer::of(&value).expect_err("a vector held by a map entry may not cross");
         assert_eq!(found.path, "[widgets]");
         assert_eq!(found.type_name, "Vector");
@@ -1186,17 +1196,17 @@ mod tests {
 
     #[test]
     fn a_dyn_value_that_is_task_safe_crosses_keeping_its_trait_name() {
-        let value = Value::Dyn(Rc::new(DynValue {
+        let value = Value(Repr::Dyn(Rc::new(DynValue {
             trait_name: "render.Display".into(),
-            value: Value::Str("hi".into()),
-        }));
+            value: Value(Repr::Str("hi".into())),
+        })));
         let crossed = Transfer::of(&value)
             .expect("a `dyn Trait` wrapping a task-safe value is itself task-safe")
             .into_value();
         match crossed {
-            Value::Dyn(d) => {
+            Value(Repr::Dyn(d)) => {
                 assert_eq!(&*d.trait_name, "render.Display");
-                assert!(d.value.eq_value(&Value::Str("hi".into())));
+                assert!(d.value.eq_value(&Value(Repr::Str("hi".into()))));
             }
             other => panic!("expected a `Dyn`, found {other}"),
         }
@@ -1210,17 +1220,17 @@ mod tests {
     /// anywhere in it.
     #[test]
     fn a_dyn_wrapping_a_struct_with_a_vector_is_refused_at_the_fields_path() {
-        let value = Value::Dyn(Rc::new(DynValue {
+        let value = Value(Repr::Dyn(Rc::new(DynValue {
             trait_name: "render.Display".into(),
-            value: Value::Struct(Rc::new(StructValue {
+            value: Value(Repr::Struct(Rc::new(StructValue {
                 type_name: "test.Draft".into(),
                 fields: vec![(
                     "guests".into(),
-                    Value::Vector(VectorStorage::new(Vec::new())),
+                    Value(Repr::Vector(VectorStorage::new(Vec::new()))),
                 )],
                 opaque: false,
-            })),
-        }));
+            }))),
+        })));
         let found = Transfer::of(&value).expect_err("a vector inside a `Dyn` may not cross");
         assert_eq!(found.path, ".guests");
         assert_eq!(found.type_name, "Vector");
@@ -1230,16 +1240,21 @@ mod tests {
     fn a_closure_with_a_task_safe_capture_crosses_keeping_its_captures() {
         let value = closure_value(
             "test.mod",
-            vec![("count", Value::Int(1)), ("label", Value::Str("a".into()))],
+            vec![
+                ("count", Value(Repr::Int(1))),
+                ("label", Value(Repr::Str("a".into()))),
+            ],
         );
         let crossed = Transfer::of(&value)
             .expect("a closure whose captures are an Int and a String is task-safe")
             .into_value();
         match crossed {
-            Value::Closure(closure) => {
+            Value(Repr::Closure(closure)) => {
                 assert_eq!(closure.captures.len(), 2);
-                assert!(closure.captures[0].1.eq_value(&Value::Int(1)));
-                assert!(closure.captures[1].1.eq_value(&Value::Str("a".into())));
+                assert!(closure.captures[0].1.eq_value(&Value(Repr::Int(1))));
+                assert!(closure.captures[1]
+                    .1
+                    .eq_value(&Value(Repr::Str("a".into()))));
             }
             other => panic!("expected a `Closure`, found {other}"),
         }
@@ -1257,14 +1272,14 @@ mod tests {
             "test.mod",
             vec![(
                 "state",
-                Value::Struct(Rc::new(StructValue {
+                Value(Repr::Struct(Rc::new(StructValue {
                     type_name: "test.Draft".into(),
                     fields: vec![(
                         "guests".into(),
-                        Value::Vector(VectorStorage::new(Vec::new())),
+                        Value(Repr::Vector(VectorStorage::new(Vec::new()))),
                     )],
                     opaque: false,
-                })),
+                }))),
             )],
         );
         let outer = closure_value("test.mod", vec![("handler", inner)]);
@@ -1284,11 +1299,11 @@ mod tests {
     #[test]
     fn a_resource_handle_whose_schema_says_task_safe_crosses_naming_the_same_resource() {
         let handle = resource_handle("test", true, 7);
-        let crossed = Transfer::of(&Value::Resource(handle.clone()))
+        let crossed = Transfer::of(&Value(Repr::Resource(handle.clone())))
             .expect("a resource whose schema says task-safe may cross")
             .into_value();
         match crossed {
-            Value::Resource(other) => assert!(
+            Value(Repr::Resource(other)) => assert!(
                 Arc::ptr_eq(&handle, &other),
                 "a handle crosses by sharing its `Arc`, so both sides should name one resource: {handle} and {other}"
             ),
@@ -1299,7 +1314,7 @@ mod tests {
     #[test]
     fn a_resource_handle_whose_schema_says_not_task_safe_is_refused() {
         let handle = resource_handle("test", false, 7);
-        let found = Transfer::of(&Value::Resource(handle))
+        let found = Transfer::of(&Value(Repr::Resource(handle)))
             .expect_err("a resource whose schema says not task-safe may not cross");
         assert_eq!(found.type_name, "test.Connection");
     }
@@ -1313,7 +1328,7 @@ mod tests {
     #[test]
     fn a_files_reader_is_refused_at_a_task_boundary() {
         let handle = ResourceHandle::new("files", &cove_schema::hosts::FILES.resources[0], 1);
-        let found = Transfer::of(&Value::Resource(handle))
+        let found = Transfer::of(&Value(Repr::Resource(handle)))
             .expect_err("a `files.Reader` may not cross a task boundary");
         assert_eq!(found.type_name, "files.Reader");
         assert_eq!(
@@ -1357,14 +1372,14 @@ mod tests {
     #[test]
     fn a_shared_crosses_without_rechecking_what_it_already_holds() {
         let handle = resource_handle("test", false, 1);
-        Transfer::of(&Value::Resource(handle.clone()))
+        Transfer::of(&Value(Repr::Resource(handle.clone())))
             .expect_err("a task-unsafe resource handle is refused on its own");
         let cell = SharedCell::new(Transfer::Resource(handle));
-        let crossed = Transfer::of(&Value::Shared(cell.clone()))
+        let crossed = Transfer::of(&Value(Repr::Shared(cell.clone())))
             .expect("`Shared` crosses without walking its payload")
             .into_value();
         match crossed {
-            Value::Shared(other) => assert!(Arc::ptr_eq(&cell, &other)),
+            Value(Repr::Shared(other)) => assert!(Arc::ptr_eq(&cell, &other)),
             other => panic!("expected a `Shared`, found {other}"),
         }
     }

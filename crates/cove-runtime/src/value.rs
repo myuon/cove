@@ -23,17 +23,32 @@
 //! every shape that crosses the Host API boundary, and none of them says how
 //! the runtime holds one.
 //!
-//! **Matching on a variant is the thing that breaks.** [`Value`]'s variants
-//! are `pub`, so nothing prevents it, and every change to what a value *is*
-//! has therefore been a source break for the hosts that did: issue #104 moved
-//! a struct from a `Box` to an `Rc`, issue #109 put a bound host operation's
-//! two names behind one pointer to take every value in the program from forty
-//! bytes to twenty-four, issue #121 replaced a closure's parameter list with
-//! an arity, and issue #183 replaced an enum payload's `Vec<Value>` with
-//! [`Payload`]. Each was invisible through the constructors and visible
-//! through a `match`. The readers are issue #186's answer to that; what they
-//! promise, what borrowing them forecloses, and what they do with a wrong
-//! shape are stated once, on the `impl Value` block that holds them.
+//! A host that wants to be told *what kind* of value it has calls
+//! [`Value::view`] and matches [`ValueView`], which is exhaustive on purpose.
+//!
+//! **There is no variant to match, and that is the point.** [`Value`]'s
+//! variants were `pub` until ADR 0028, and every change to what a value *is*
+//! was therefore a source break for the hosts that matched one: issue #104
+//! moved a struct from a `Box` to an `Rc`, issue #109 put a bound host
+//! operation's two names behind one pointer to take every value in the
+//! program from forty bytes to twenty-four, issue #121 replaced a closure's
+//! parameter list with an arity, and issue #183 replaced an enum payload's
+//! `Vec<Value>` with [`Payload`]. Each was invisible through the constructors
+//! and visible through a `match`, and each was rescued individually — twice
+//! by luck and once by a hand-written `Deref` shim. Issue #196 asked whether
+//! that should keep being paid for; ADR 0028 decision 6 answers no, for every
+//! variant and not a chosen subset, because a partial seal leaves the API a
+//! mixture and makes "which half may I match on" a question every embedder
+//! has to hold in their head.
+//!
+//! What a host loses is the compile error that said *the language changed*,
+//! and [`ValueView`] gives exactly that back: after this a representation
+//! change is invisible and a new kind of Cove value is a compile error at
+//! every `match`, which is the right way round.
+//!
+//! The readers are issue #186's answer to the same question on the way out;
+//! what they promise, what borrowing them forecloses, and what they do with a
+//! wrong shape are stated once, on the `impl Value` block that holds them.
 
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
@@ -52,8 +67,45 @@ use crate::shared::SharedCell;
 use crate::task::{Task, TaskScope};
 
 /// A Cove value.
+///
+/// **An abstract type.** What it holds is private to this crate: a host
+/// builds one through a constructor, reads one through a reader, and
+/// classifies one through [`Value::view`]. ADR 0028 decision 6 is where that
+/// was decided and issue #196 is where it was asked. Every change to what a
+/// value *is* had been a source break for the hosts that matched on it, and
+/// the record is not that `pub` variants are survivable but that each change
+/// was individually rescued — twice by luck and once by a hand-written
+/// compatibility shim.
+///
+/// The one thing sealing takes away is the compile error a host got when a
+/// new variant arrived, and [`ValueView`] gives that back deliberately and
+/// exhaustively. What it does *not* give back is a compile error when the
+/// runtime moves a value from a `Box` to an `Rc`, which is the whole point:
+/// those two were the same error before, and they are unrelated events.
+#[derive(Clone)]
+pub struct Value(pub(crate) Repr);
+
+/// `Value` prints as the value it is, and not as a wrapper around one.
+///
+/// Forwarded rather than derived so that the newtype the seal is made of
+/// leaves no trace in a rendering: a `Debug` of an `Int` is `Int(3)`, exactly
+/// as it was when `Value` was the enum itself. Tests, traces and diagnostics
+/// all read this, and none of them should have to know.
+impl fmt::Debug for Value {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Debug::fmt(&self.0, f)
+    }
+}
+
+/// How this crate holds a value. Private, and it is the seal.
+///
+/// The variants are exactly what `Value`'s were, and this crate matches them
+/// exactly as it did — a pattern reads `Value(Repr::Int(n))` where it read
+/// `Value::Int(n)`, and that is the whole of the difference on this side of
+/// the boundary. Nothing outside the crate can name any of it, which is what
+/// ADR 0028 decision 0 means by representations that cannot fail to differ.
 #[derive(Clone, Debug)]
-pub enum Value {
+pub(crate) enum Repr {
     Unit,
     Bool(bool),
     Int(i64),
@@ -208,7 +260,7 @@ const _: () = assert!(
      representation, audited\""
 );
 
-/// The half-open bounds of a [`Value::Range`], widened to `i128` so that an
+/// The half-open bounds of a `Range` value, widened to `i128` so that an
 /// inclusive `i64::MAX` end cannot overflow.
 #[derive(Clone, Copy, Debug)]
 pub struct RangeBounds {
@@ -246,7 +298,7 @@ impl RangeBounds {
     /// The values the range yields, in order.
     pub fn items(self) -> Vec<Value> {
         (self.start..self.end)
-            .map(|n| Value::Int(n as i64))
+            .map(|n| Value(Repr::Int(n as i64)))
             .collect()
     }
 }
@@ -469,7 +521,8 @@ impl From<Vec<Value>> for Payload {
     }
 }
 
-/// The contents of a [`Value::Dyn`].
+/// The contents of a `dyn Trait` value, which [`Value::dyn_trait`] names
+/// and no other reader admits.
 #[derive(Clone, Debug)]
 pub struct DynValue {
     /// Fully qualified trait name, such as `render.Display`.
@@ -479,11 +532,11 @@ pub struct DynValue {
     pub value: Value,
 }
 
-/// The two names a [`Value::HostFn`] is: the host module the operation
+/// The two names a bound host operation is: the host module the operation
 /// belongs to, and the operation itself.
 ///
 /// Neither is the operation's implementation. A bound host operation is a
-/// name the same way [`Value::HostModule`] is, and what it names is looked up
+/// name the same way a bound host module is, and what it names is looked up
 /// through the registry at the call.
 #[derive(Clone, Debug)]
 pub struct HostFnValue {
@@ -691,12 +744,12 @@ impl MapKey {
         // through it, so a written `dyn Trait` and a lambda's inferred one
         // key as the same thing they compare as: the value they hold.
         match value.erased() {
-            Value::Unit => Ok(MapKey::Unit),
-            Value::Bool(b) => Ok(MapKey::Bool(*b)),
-            Value::Int(n) => Ok(MapKey::Int(*n)),
-            Value::Duration(ns) => Ok(MapKey::Duration(*ns)),
-            Value::Str(s) => Ok(MapKey::Str(s.to_string())),
-            Value::Enum(e) => {
+            Value(Repr::Unit) => Ok(MapKey::Unit),
+            Value(Repr::Bool(b)) => Ok(MapKey::Bool(*b)),
+            Value(Repr::Int(n)) => Ok(MapKey::Int(*n)),
+            Value(Repr::Duration(ns)) => Ok(MapKey::Duration(*ns)),
+            Value(Repr::Str(s)) => Ok(MapKey::Str(s.to_string())),
+            Value(Repr::Enum(e)) => {
                 let base = anchor
                     .map(str::to_string)
                     .unwrap_or_else(|| format!("{}.{}", short_name(&e.type_name), e.case));
@@ -710,7 +763,7 @@ impl MapKey {
                     payload,
                 ))
             }
-            Value::Struct(s) => {
+            Value(Repr::Struct(s)) => {
                 let base = anchor
                     .map(str::to_string)
                     .unwrap_or_else(|| short_name(&s.type_name).to_string());
@@ -721,7 +774,7 @@ impl MapKey {
                 }
                 Ok(MapKey::Struct(s.type_name.to_string(), fields, s.opaque))
             }
-            Value::Array(items) => {
+            Value(Repr::Array(items)) => {
                 let base = anchor.unwrap_or_default();
                 let mut converted = Vec::with_capacity(items.len());
                 for (i, item) in items.iter().enumerate() {
@@ -731,8 +784,8 @@ impl MapKey {
             }
             // A `Set`'s elements are already `MapKey`s by construction, so
             // this never fails.
-            Value::Set(items) => Ok(MapKey::Set((**items).clone())),
-            Value::Map(entries) => {
+            Value(Repr::Set(items)) => Ok(MapKey::Set((**items).clone())),
+            Value(Repr::Map(entries)) => {
                 let base = anchor.unwrap_or_default();
                 let mut converted = BTreeMap::new();
                 for (key, item) in entries.iter() {
@@ -741,16 +794,16 @@ impl MapKey {
                 }
                 Ok(MapKey::Map(converted))
             }
-            Value::Range {
+            Value(Repr::Range {
                 start,
                 end,
                 inclusive_end,
-            } => Ok(MapKey::Range {
+            }) => Ok(MapKey::Range {
                 start: *start,
                 end: *end,
                 inclusive_end: *inclusive_end,
             }),
-            Value::Float(_) => Err(InvalidKey {
+            Value(Repr::Float(_)) => Err(InvalidKey {
                 path: anchor.map(str::to_string).unwrap_or_default(),
                 type_name: "Float".to_string(),
             }),
@@ -765,41 +818,45 @@ impl MapKey {
     /// iteration, and `toArray()`.
     pub fn to_value(&self) -> Value {
         match self {
-            MapKey::Unit => Value::Unit,
-            MapKey::Bool(b) => Value::Bool(*b),
-            MapKey::Int(n) => Value::Int(*n),
-            MapKey::Duration(ns) => Value::Duration(*ns),
-            MapKey::Str(s) => Value::Str(s.as_str().into()),
-            MapKey::EnumCase(type_name, case, payload) => Value::Enum(Box::new(EnumValue {
+            MapKey::Unit => Value(Repr::Unit),
+            MapKey::Bool(b) => Value(Repr::Bool(*b)),
+            MapKey::Int(n) => Value(Repr::Int(*n)),
+            MapKey::Duration(ns) => Value(Repr::Duration(*ns)),
+            MapKey::Str(s) => Value(Repr::Str(s.as_str().into())),
+            MapKey::EnumCase(type_name, case, payload) => Value(Repr::Enum(Box::new(EnumValue {
                 type_name: type_name.as_str().into(),
                 case: case.as_str().into(),
                 payload: payload.iter().map(MapKey::to_value).collect(),
-            })),
-            MapKey::Struct(type_name, fields, opaque) => Value::Struct(Rc::new(StructValue {
-                type_name: type_name.as_str().into(),
-                fields: fields
-                    .iter()
-                    .map(|(name, key)| (name.as_str().into(), key.to_value()))
-                    .collect(),
-                opaque: *opaque,
-            })),
-            MapKey::Array(items) => Value::Array(items.iter().map(MapKey::to_value).collect()),
-            MapKey::Set(items) => Value::Set(Rc::new(items.clone())),
-            MapKey::Map(entries) => Value::Map(Rc::new(
+            }))),
+            MapKey::Struct(type_name, fields, opaque) => {
+                Value(Repr::Struct(Rc::new(StructValue {
+                    type_name: type_name.as_str().into(),
+                    fields: fields
+                        .iter()
+                        .map(|(name, key)| (name.as_str().into(), key.to_value()))
+                        .collect(),
+                    opaque: *opaque,
+                })))
+            }
+            MapKey::Array(items) => {
+                Value(Repr::Array(items.iter().map(MapKey::to_value).collect()))
+            }
+            MapKey::Set(items) => Value(Repr::Set(Rc::new(items.clone()))),
+            MapKey::Map(entries) => Value(Repr::Map(Rc::new(
                 entries
                     .iter()
                     .map(|(key, value)| (key.clone(), value.to_value()))
                     .collect(),
-            )),
+            ))),
             MapKey::Range {
                 start,
                 end,
                 inclusive_end,
-            } => Value::Range {
+            } => Value(Repr::Range {
                 start: *start,
                 end: *end,
                 inclusive_end: *inclusive_end,
-            },
+            }),
         }
     }
 }
@@ -875,56 +932,56 @@ impl Value {
     /// `Ok(value)`
     pub fn ok(value: Value) -> Value {
         BUILTIN_NAMES.with(|names| {
-            Value::Enum(Box::new(EnumValue {
+            Value(Repr::Enum(Box::new(EnumValue {
                 type_name: names.result.clone(),
                 case: names.ok.clone(),
                 payload: Payload::One(value),
-            }))
+            })))
         })
     }
 
     /// `Err(error)`
     pub fn err(error: Value) -> Value {
         BUILTIN_NAMES.with(|names| {
-            Value::Enum(Box::new(EnumValue {
+            Value(Repr::Enum(Box::new(EnumValue {
                 type_name: names.result.clone(),
                 case: names.err.clone(),
                 payload: Payload::One(error),
-            }))
+            })))
         })
     }
 
     /// `Some(value)`
     pub fn some(value: Value) -> Value {
         BUILTIN_NAMES.with(|names| {
-            Value::Enum(Box::new(EnumValue {
+            Value(Repr::Enum(Box::new(EnumValue {
                 type_name: names.option.clone(),
                 case: names.some.clone(),
                 payload: Payload::One(value),
-            }))
+            })))
         })
     }
 
     /// `None`
     pub fn none() -> Value {
         BUILTIN_NAMES.with(|names| {
-            Value::Enum(Box::new(EnumValue {
+            Value(Repr::Enum(Box::new(EnumValue {
                 type_name: names.option.clone(),
                 case: names.none.clone(),
                 payload: Payload::Empty,
-            }))
+            })))
         })
     }
 
     /// The builtin `Error` struct.
     pub fn error(message: impl Into<String>) -> Value {
-        let message = Value::Str(message.into().into());
+        let message = Value(Repr::Str(message.into().into()));
         BUILTIN_NAMES.with(|names| {
-            Value::Struct(Rc::new(StructValue {
+            Value(Repr::Struct(Rc::new(StructValue {
                 type_name: names.error.clone(),
                 fields: vec![(names.message.clone(), message)],
                 opaque: false,
-            }))
+            })))
         })
     }
 
@@ -948,14 +1005,14 @@ impl Value {
         type_name: impl Into<Rc<str>>,
         fields: impl IntoIterator<Item = (N, Value)>,
     ) -> Value {
-        Value::Struct(Rc::new(StructValue {
+        Value(Repr::Struct(Rc::new(StructValue {
             type_name: type_name.into(),
             fields: fields
                 .into_iter()
                 .map(|(name, value)| (name.into(), value))
                 .collect(),
             opaque: false,
-        }))
+        })))
     }
 
     /// A value of the declared enum type `type_name`, in the case `case`,
@@ -971,11 +1028,11 @@ impl Value {
         case: impl Into<Rc<str>>,
         payload: impl IntoIterator<Item = Value>,
     ) -> Value {
-        Value::Enum(Box::new(EnumValue {
+        Value(Repr::Enum(Box::new(EnumValue {
             type_name: type_name.into(),
             case: case.into(),
             payload: payload.into_iter().collect(),
-        }))
+        })))
     }
 
     /// An `Array` holding `items`, in order.
@@ -984,7 +1041,7 @@ impl Value {
     /// host that builds an array should not have to know that the elements are
     /// stored behind a shared pointer to a slice.
     pub fn array(items: impl IntoIterator<Item = Value>) -> Value {
-        Value::Array(items.into_iter().collect())
+        Value(Repr::Array(items.into_iter().collect()))
     }
 
     /// A `Set` holding `items`.
@@ -1002,7 +1059,7 @@ impl Value {
     /// builds, and the order the set iterates in is ascending key order
     /// whatever order they arrived in.
     pub fn set(items: impl IntoIterator<Item = MapKey>) -> Value {
-        Value::Set(Rc::new(items.into_iter().collect()))
+        Value(Repr::Set(Rc::new(items.into_iter().collect())))
     }
 
     /// A `Map` holding `entries`.
@@ -1012,17 +1069,17 @@ impl Value {
     /// an ordinary [`Value`]. A later entry under a key an earlier one used
     /// replaces it.
     pub fn map(entries: impl IntoIterator<Item = (MapKey, Value)>) -> Value {
-        Value::Map(Rc::new(entries.into_iter().collect()))
+        Value(Repr::Map(Rc::new(entries.into_iter().collect())))
     }
 
     /// `()`, the value a statement and a function with no result answer.
     pub fn unit() -> Value {
-        Value::Unit
+        Value(Repr::Unit)
     }
 
     /// The `Bool` `b`.
     pub fn bool(b: bool) -> Value {
-        Value::Bool(b)
+        Value(Repr::Bool(b))
     }
 
     /// The `Int` `n`.
@@ -1032,12 +1089,12 @@ impl Value {
     /// refused rather than deferred because neither can hold every `Int` and
     /// every `Float` at once.
     pub fn int(n: i64) -> Value {
-        Value::Int(n)
+        Value(Repr::Int(n))
     }
 
     /// The `Float` `x`, including every NaN and both zeroes.
     pub fn float(x: f64) -> Value {
-        Value::Float(x)
+        Value(Repr::Float(x))
     }
 
     /// The `Duration` of `nanos` nanoseconds.
@@ -1047,7 +1104,7 @@ impl Value {
     /// a *signed* count of them, and `-1s` is an ordinary value that
     /// `std::time::Duration` cannot hold.
     pub fn duration(nanos: i64) -> Value {
-        Value::Duration(nanos)
+        Value(Repr::Duration(nanos))
     }
 
     /// The `String` `text`.
@@ -1057,7 +1114,7 @@ impl Value {
     /// specifically: `Value::string("hi")` copies the characters once and
     /// says nothing about where they end up.
     pub fn string(text: impl Into<Rc<str>>) -> Value {
-        Value::Str(text.into())
+        Value(Repr::Str(text.into()))
     }
 
     /// The range `start..end`, or `start..<end` when `inclusive_end` is
@@ -1071,11 +1128,11 @@ impl Value {
     /// The name is `range_of` and not `range` because the reader took
     /// `range`, and the readers are what issue #195 shipped.
     pub fn range_of(start: i64, end: i64, inclusive_end: bool) -> Value {
-        Value::Range {
+        Value(Repr::Range {
             start,
             end,
             inclusive_end,
-        }
+        })
     }
 
     /// A handle to a resource the host owns, such as a database connection.
@@ -1090,7 +1147,7 @@ impl Value {
     /// The name is `from_resource` and not `resource` because the reader took
     /// `resource`.
     pub fn from_resource(handle: impl Into<Arc<ResourceHandle>>) -> Value {
-        Value::Resource(handle.into())
+        Value(Repr::Resource(handle.into()))
     }
 
     /// A bound host operation, such as `console.println`.
@@ -1098,15 +1155,15 @@ impl Value {
     /// The companion of [`Value::host_op`]. Two names and not an
     /// implementation: what they name is found in the registry at the call.
     pub fn host_fn(module: impl Into<Rc<str>>, op: impl Into<Rc<str>>) -> Value {
-        Value::HostFn(Rc::new(HostFnValue {
+        Value(Repr::HostFn(Rc::new(HostFnValue {
             module: module.into(),
             op: op.into(),
-        }))
+        })))
     }
 
     /// A bound host module, such as `console`.
     pub fn host_module(name: impl Into<Rc<str>>) -> Value {
-        Value::HostModule(name.into())
+        Value(Repr::HostModule(name.into()))
     }
 
     /// A type used as a value, such as `Vector` in `Vector.of(1, 2)`.
@@ -1115,7 +1172,7 @@ impl Value {
     /// [`Value::type_name`] answers the name of the type a value *is*, which
     /// is a different question asked of every value rather than of this one.
     pub fn type_value(name: impl Into<Rc<str>>) -> Value {
-        Value::Type(name.into())
+        Value(Repr::Type(name.into()))
     }
 
     /// Whether this is an `Ok`, the success case of a `Result`.
@@ -1159,7 +1216,7 @@ impl Value {
     /// The `message` a builtin `Error` carries, when this is one.
     pub fn error_message(&self) -> Option<&Value> {
         match self {
-            Value::Struct(value) if &*value.type_name == ERROR.name => {
+            Value(Repr::Struct(value)) if &*value.type_name == ERROR.name => {
                 value.get(MESSAGE_FIELD.name)
             }
             _ => None,
@@ -1172,7 +1229,9 @@ impl Value {
     /// case called `Ok`, and it is not this one.
     fn builtin_case(&self, schema: &BuiltinSchema, case: &CaseSchema) -> Option<&EnumValue> {
         match self {
-            Value::Enum(value) if &*value.type_name == schema.name && &*value.case == case.name => {
+            Value(Repr::Enum(value))
+                if &*value.type_name == schema.name && &*value.case == case.name =>
+            {
                 Some(value)
             }
             _ => None,
@@ -1192,20 +1251,26 @@ impl Value {
     /// are still built for the diagnostic, which happens once.
     pub fn same_type_as(&self, other: &Value) -> bool {
         match (self, other) {
-            (Value::Struct(left), Value::Struct(right)) => left.type_name == right.type_name,
-            (Value::Enum(left), Value::Enum(right)) => left.type_name == right.type_name,
-            (Value::Dyn(left), Value::Dyn(right)) => left.trait_name == right.trait_name,
-            (Value::Resource(left), Value::Resource(right)) => {
+            (Value(Repr::Struct(left)), Value(Repr::Struct(right))) => {
+                left.type_name == right.type_name
+            }
+            (Value(Repr::Enum(left)), Value(Repr::Enum(right))) => {
+                left.type_name == right.type_name
+            }
+            (Value(Repr::Dyn(left)), Value(Repr::Dyn(right))) => {
+                left.trait_name == right.trait_name
+            }
+            (Value(Repr::Resource(left)), Value(Repr::Resource(right))) => {
                 left.module == right.module && left.type_name == right.type_name
             }
-            (Value::HostModule(left), Value::HostModule(right)) => left == right,
-            (Value::HostFn(left), Value::HostFn(right)) => {
+            (Value(Repr::HostModule(left)), Value(Repr::HostModule(right))) => left == right,
+            (Value(Repr::HostFn(left)), Value(Repr::HostFn(right))) => {
                 left.module == right.module && left.op == right.op
             }
-            (Value::Type(left), Value::Type(right)) => left == right,
+            (Value(Repr::Type(left)), Value(Repr::Type(right))) => left == right,
             // Everything else is one type per variant, so the discriminants
             // answering the same is the whole of the question.
-            _ => std::mem::discriminant(self) == std::mem::discriminant(other),
+            _ => std::mem::discriminant(&self.0) == std::mem::discriminant(&other.0),
         }
     }
 
@@ -1218,38 +1283,38 @@ impl Value {
     /// built at all, and a declared one hands back the name it already holds.
     pub fn declared_type_name(&self) -> Option<&Rc<str>> {
         match self {
-            Value::Struct(value) => Some(&value.type_name),
-            Value::Enum(value) => Some(&value.type_name),
+            Value(Repr::Struct(value)) => Some(&value.type_name),
+            Value(Repr::Enum(value)) => Some(&value.type_name),
             _ => None,
         }
     }
 
     pub fn type_name(&self) -> String {
         match self {
-            Value::Unit => "Unit".into(),
-            Value::Bool(_) => "Bool".into(),
-            Value::Int(_) => "Int".into(),
-            Value::Float(_) => "Float".into(),
-            Value::Duration(_) => "Duration".into(),
-            Value::Str(_) => "String".into(),
-            Value::Array(_) => "Array".into(),
-            Value::Vector(_) => "Vector".into(),
-            Value::Map(_) => "Map".into(),
-            Value::Set(_) => "Set".into(),
-            Value::Struct(s) => s.type_name.to_string(),
-            Value::Enum(e) => e.type_name.to_string(),
-            Value::Closure(_) => "fn".into(),
-            Value::Dyn(d) => format!("dyn {}", d.trait_name),
-            Value::HostModule(m) => format!("host module `{m}`"),
-            Value::Resource(handle) => handle.qualified_type(),
-            Value::HostFn(host) => {
+            Value(Repr::Unit) => "Unit".into(),
+            Value(Repr::Bool(_)) => "Bool".into(),
+            Value(Repr::Int(_)) => "Int".into(),
+            Value(Repr::Float(_)) => "Float".into(),
+            Value(Repr::Duration(_)) => "Duration".into(),
+            Value(Repr::Str(_)) => "String".into(),
+            Value(Repr::Array(_)) => "Array".into(),
+            Value(Repr::Vector(_)) => "Vector".into(),
+            Value(Repr::Map(_)) => "Map".into(),
+            Value(Repr::Set(_)) => "Set".into(),
+            Value(Repr::Struct(s)) => s.type_name.to_string(),
+            Value(Repr::Enum(e)) => e.type_name.to_string(),
+            Value(Repr::Closure(_)) => "fn".into(),
+            Value(Repr::Dyn(d)) => format!("dyn {}", d.trait_name),
+            Value(Repr::HostModule(m)) => format!("host module `{m}`"),
+            Value(Repr::Resource(handle)) => handle.qualified_type(),
+            Value(Repr::HostFn(host)) => {
                 format!("host operation `{}.{}`", host.module, host.op)
             }
-            Value::Type(t) => format!("type `{t}`"),
-            Value::Range { .. } => "Range".into(),
-            Value::TaskScope(_) => "TaskScope".into(),
-            Value::Task(_) => "Task".into(),
-            Value::Shared(_) => "Shared".into(),
+            Value(Repr::Type(t)) => format!("type `{t}`"),
+            Value(Repr::Range { .. }) => "Range".into(),
+            Value(Repr::TaskScope(_)) => "TaskScope".into(),
+            Value(Repr::Task(_)) => "Task".into(),
+            Value(Repr::Shared(_)) => "Shared".into(),
         }
     }
 
@@ -1263,7 +1328,7 @@ impl Value {
     /// wrapper first.
     pub fn erased(&self) -> &Value {
         match self {
-            Value::Dyn(d) => d.value.erased(),
+            Value(Repr::Dyn(d)) => d.value.erased(),
             other => other,
         }
     }
@@ -1271,27 +1336,27 @@ impl Value {
     /// Value equality. Identity, when available, is explicit and separate.
     pub fn eq_value(&self, other: &Value) -> bool {
         match (self.erased(), other.erased()) {
-            (Value::Unit, Value::Unit) => true,
-            (Value::Bool(a), Value::Bool(b)) => a == b,
-            (Value::Int(a), Value::Int(b)) => a == b,
-            (Value::Float(a), Value::Float(b)) => a == b,
-            (Value::Duration(a), Value::Duration(b)) => a == b,
-            (Value::Str(a), Value::Str(b)) => a == b,
-            (Value::Array(a), Value::Array(b)) => {
+            (Value(Repr::Unit), Value(Repr::Unit)) => true,
+            (Value(Repr::Bool(a)), Value(Repr::Bool(b))) => a == b,
+            (Value(Repr::Int(a)), Value(Repr::Int(b))) => a == b,
+            (Value(Repr::Float(a)), Value(Repr::Float(b))) => a == b,
+            (Value(Repr::Duration(a)), Value(Repr::Duration(b))) => a == b,
+            (Value(Repr::Str(a)), Value(Repr::Str(b))) => a == b,
+            (Value(Repr::Array(a)), Value(Repr::Array(b))) => {
                 a.len() == b.len() && a.iter().zip(b.iter()).all(|(x, y)| x.eq_value(y))
             }
             // Both sides are `BTreeMap`s keyed the same way, so two maps with
             // the same keys line up entry-for-entry once both are in their
             // one true ascending order.
-            (Value::Map(a), Value::Map(b)) => {
+            (Value(Repr::Map(a)), Value(Repr::Map(b))) => {
                 a.len() == b.len()
                     && a.iter()
                         .zip(b.iter())
                         .all(|((ka, va), (kb, vb))| ka == kb && va.eq_value(vb))
             }
             // `BTreeSet<MapKey>` already compares as a set of keys.
-            (Value::Set(a), Value::Set(b)) => a == b,
-            (Value::Struct(a), Value::Struct(b)) => {
+            (Value(Repr::Set(a)), Value(Repr::Set(b))) => a == b,
+            (Value(Repr::Struct(a)), Value(Repr::Struct(b))) => {
                 a.type_name == b.type_name
                     && a.fields.len() == b.fields.len()
                     && a.fields
@@ -1299,7 +1364,7 @@ impl Value {
                         .zip(b.fields.iter())
                         .all(|((_, x), (_, y))| x.eq_value(y))
             }
-            (Value::Enum(a), Value::Enum(b)) => {
+            (Value(Repr::Enum(a)), Value(Repr::Enum(b))) => {
                 a.type_name == b.type_name
                     && a.case == b.case
                     && a.payload.len() == b.payload.len()
@@ -1312,26 +1377,26 @@ impl Value {
             // and `0..2` are distinct values even though they yield the same
             // integers.
             (
-                Value::Range {
+                Value(Repr::Range {
                     start: a,
                     end: b,
                     inclusive_end: a_inclusive,
-                },
-                Value::Range {
+                }),
+                Value(Repr::Range {
                     start: c,
                     end: d,
                     inclusive_end: b_inclusive,
-                },
+                }),
             ) => a == c && b == d && a_inclusive == b_inclusive,
             // Two handles are equal when they name the same resource. A
             // handle has no contents to compare, so naming the same thing is
             // the whole of being the same value.
-            (Value::Resource(a), Value::Resource(b)) => a.names_same(b),
+            (Value(Repr::Resource(a)), Value(Repr::Resource(b))) => a.names_same(b),
             // `==` means value equality regardless of mutability, so `Vector`
             // compares its current elements structurally, exactly like
             // `Array`. Storage identity — whether two handles are the same
             // growable buffer — is the separate question `is` answers.
-            (Value::Vector(a), Value::Vector(b)) => {
+            (Value(Repr::Vector(a)), Value(Repr::Vector(b))) => {
                 let a = a.elements.borrow();
                 let b = b.elements.borrow();
                 a.len() == b.len() && a.iter().zip(b.iter()).all(|(x, y)| x.eq_value(y))
@@ -1350,8 +1415,8 @@ impl Value {
 /// half: they let a host *read* the same shapes the same way.
 ///
 /// Only one half existed, and the missing half cost something every time the
-/// representation moved. Issue #104 made [`Value::Struct`] an
-/// `Rc<StructValue>`; issue #109 put [`Value::HostFn`]'s two names behind one
+/// representation moved. Issue #104 made `Value::Struct` an
+/// `Rc<StructValue>`; issue #109 put `Value::HostFn`'s two names behind one
 /// pointer and took every value in the program from forty bytes to
 /// twenty-four; issue #121 replaced a closure's parameter list with an arity;
 /// issue #183 replaced an enum payload's `Vec<Value>` with [`Payload`]. Every
@@ -1372,7 +1437,7 @@ impl Value {
 /// visible here; they cannot become values that are *computed* — unpacked
 /// from a tagged word, decoded lazily, or held under a lock — without these
 /// signatures changing. A reader that cloned would forbid none of that, and
-/// would charge every read for the possibility. [`Value::Vector`] is where
+/// would charge every read for the possibility. A `Vector` is where
 /// the line already falls, and it falls the same way for building: its
 /// elements are behind a `RefCell` because the language lets an alias write
 /// them, so there is no borrowing reader for one here and no constructor for
@@ -1400,7 +1465,7 @@ impl Value {
     /// The `Bool` this is.
     pub fn as_bool(&self) -> Option<bool> {
         match self.erased() {
-            Value::Bool(b) => Some(*b),
+            Value(Repr::Bool(b)) => Some(*b),
             _ => None,
         }
     }
@@ -1411,7 +1476,7 @@ impl Value {
     /// broken invariant rather than a wrap.
     pub fn as_int(&self) -> Option<i64> {
         match self.erased() {
-            Value::Int(n) => Some(*n),
+            Value(Repr::Int(n)) => Some(*n),
             _ => None,
         }
     }
@@ -1419,7 +1484,7 @@ impl Value {
     /// The `Float` this is.
     pub fn as_float(&self) -> Option<f64> {
         match self.erased() {
-            Value::Float(x) => Some(*x),
+            Value(Repr::Float(x)) => Some(*x),
             _ => None,
         }
     }
@@ -1431,7 +1496,7 @@ impl Value {
     /// `std::time::Duration` cannot hold it.
     pub fn as_duration_nanos(&self) -> Option<i64> {
         match self.erased() {
-            Value::Duration(ns) => Some(*ns),
+            Value(Repr::Duration(ns)) => Some(*ns),
             _ => None,
         }
     }
@@ -1439,14 +1504,14 @@ impl Value {
     /// The `String` this is.
     pub fn as_str(&self) -> Option<&str> {
         match self.erased() {
-            Value::Str(text) => Some(text),
+            Value(Repr::Str(text)) => Some(text),
             _ => None,
         }
     }
 
     /// Whether this is `()`.
     pub fn is_unit(&self) -> bool {
-        matches!(self.erased(), Value::Unit)
+        matches!(self.erased(), Value(Repr::Unit))
     }
 
     /// The declared type this value is of — `rules.policy.Decision`, or
@@ -1472,7 +1537,7 @@ impl Value {
     /// the same sentence with the name filled in.
     pub fn field(&self, name: &str) -> Option<&Value> {
         match self.erased() {
-            Value::Struct(value) => value.get(name),
+            Value(Repr::Struct(value)) => value.get(name),
             _ => None,
         }
     }
@@ -1492,7 +1557,7 @@ impl Value {
     /// module exported the value to.
     pub fn fields(&self) -> Option<impl Iterator<Item = (&str, &Value)> + '_> {
         match self.erased() {
-            Value::Struct(value) => Some(value.fields.iter().map(|(name, v)| (&**name, v))),
+            Value(Repr::Struct(value)) => Some(value.fields.iter().map(|(name, v)| (&**name, v))),
             _ => None,
         }
     }
@@ -1503,7 +1568,7 @@ impl Value {
     /// it; [`Value::declared_type`] is the other half of the name.
     pub fn case(&self) -> Option<&str> {
         match self.erased() {
-            Value::Enum(value) => Some(&value.case),
+            Value(Repr::Enum(value)) => Some(&value.case),
             _ => None,
         }
     }
@@ -1519,7 +1584,7 @@ impl Value {
     /// needs.
     pub fn payload(&self) -> Option<&[Value]> {
         match self.erased() {
-            Value::Enum(value) => Some(value.payload.as_slice()),
+            Value(Repr::Enum(value)) => Some(value.payload.as_slice()),
             _ => None,
         }
     }
@@ -1534,7 +1599,7 @@ impl Value {
     /// than a slice, which is what a part behind a cell can answer with.
     pub fn items(&self) -> Option<&[Value]> {
         match self.erased() {
-            Value::Array(items) => Some(items),
+            Value(Repr::Array(items)) => Some(items),
             _ => None,
         }
     }
@@ -1550,7 +1615,7 @@ impl Value {
     /// order a Cove program iterating the same set sees.
     pub fn elements(&self) -> Option<impl Iterator<Item = &MapKey> + '_> {
         match self.erased() {
-            Value::Set(items) => Some(items.iter()),
+            Value(Repr::Set(items)) => Some(items.iter()),
             _ => None,
         }
     }
@@ -1562,7 +1627,7 @@ impl Value {
     /// [`Value`].
     pub fn entries(&self) -> Option<impl Iterator<Item = (&MapKey, &Value)> + '_> {
         match self.erased() {
-            Value::Map(entries) => Some(entries.iter()),
+            Value(Repr::Map(entries)) => Some(entries.iter()),
             _ => None,
         }
     }
@@ -1576,11 +1641,11 @@ impl Value {
     /// that an inclusive `i64::MAX` end cannot overflow.
     pub fn range(&self) -> Option<RangeBounds> {
         match *self.erased() {
-            Value::Range {
+            Value(Repr::Range {
                 start,
                 end,
                 inclusive_end,
-            } => Some(RangeBounds::of(start, end, inclusive_end)),
+            }) => Some(RangeBounds::of(start, end, inclusive_end)),
             _ => None,
         }
     }
@@ -1594,7 +1659,7 @@ impl Value {
     /// that a handle can cross into a task when its schema allows it.
     pub fn resource(&self) -> Option<&ResourceHandle> {
         match self.erased() {
-            Value::Resource(handle) => Some(handle),
+            Value(Repr::Resource(handle)) => Some(handle),
             _ => None,
         }
     }
@@ -1603,14 +1668,14 @@ impl Value {
     /// `("console", "println")`.
     ///
     /// Two names and not an implementation: a bound host operation is a name
-    /// the way [`Value::HostModule`] is, and what it names is found in the
+    /// the way [`ValueView::HostModule`] is, and what it names is found in the
     /// registry at the call. This is the reader for the variant issue #109
     /// boxed to buy the sixteen bytes — a host that matched `Value::HostFn {
     /// module, op }` had to be rewritten, and one that had called this would
     /// not have noticed.
     pub fn host_op(&self) -> Option<(&str, &str)> {
         match self.erased() {
-            Value::HostFn(host) => Some((&host.module, &host.op)),
+            Value(Repr::HostFn(host)) => Some((&host.module, &host.op)),
             _ => None,
         }
     }
@@ -1626,7 +1691,7 @@ impl Value {
     /// is the whole of a closure a host has any business reading.
     pub fn arity(&self) -> Option<usize> {
         match self.erased() {
-            Value::Closure(closure) => Some(closure.arity),
+            Value(Repr::Closure(closure)) => Some(closure.arity),
             _ => None,
         }
     }
@@ -1649,7 +1714,7 @@ impl Value {
     /// race.
     pub fn vector_elements(&self) -> Option<Elements<'_>> {
         match self.erased() {
-            Value::Vector(storage) => Some(Elements(storage.elements.borrow())),
+            Value(Repr::Vector(storage)) => Some(Elements(storage.elements.borrow())),
             _ => None,
         }
     }
@@ -1664,7 +1729,7 @@ impl Value {
     /// the trait in a diagnostic asks for it.
     pub fn dyn_trait(&self) -> Option<&str> {
         match self {
-            Value::Dyn(d) => Some(&d.trait_name),
+            Value(Repr::Dyn(d)) => Some(&d.trait_name),
             _ => None,
         }
     }
@@ -1684,37 +1749,37 @@ impl Value {
     /// the reason [`Value::vector_elements`] gives.
     pub fn view(&self) -> ValueView<'_> {
         match self.erased() {
-            Value::Unit => ValueView::Unit,
-            Value::Bool(b) => ValueView::Bool(*b),
-            Value::Int(n) => ValueView::Int(*n),
-            Value::Float(x) => ValueView::Float(*x),
-            Value::Duration(ns) => ValueView::Duration(*ns),
-            Value::Str(text) => ValueView::Str(text),
-            Value::Array(items) => ValueView::Array(items),
-            Value::Vector(storage) => ValueView::Vector(Elements(storage.elements.borrow())),
-            Value::Map(entries) => ValueView::Map(Entries(entries)),
-            Value::Set(members) => ValueView::Set(Members(members)),
-            Value::Struct(value) => ValueView::Struct(StructView(value)),
-            Value::Enum(value) => ValueView::Enum(EnumView(value)),
-            Value::Closure(closure) => ValueView::Closure(ClosureView(closure)),
-            Value::HostModule(name) => ValueView::HostModule(name),
-            Value::HostFn(host) => ValueView::HostFn {
+            Value(Repr::Unit) => ValueView::Unit,
+            Value(Repr::Bool(b)) => ValueView::Bool(*b),
+            Value(Repr::Int(n)) => ValueView::Int(*n),
+            Value(Repr::Float(x)) => ValueView::Float(*x),
+            Value(Repr::Duration(ns)) => ValueView::Duration(*ns),
+            Value(Repr::Str(text)) => ValueView::Str(text),
+            Value(Repr::Array(items)) => ValueView::Array(items),
+            Value(Repr::Vector(storage)) => ValueView::Vector(Elements(storage.elements.borrow())),
+            Value(Repr::Map(entries)) => ValueView::Map(Entries(entries)),
+            Value(Repr::Set(members)) => ValueView::Set(Members(members)),
+            Value(Repr::Struct(value)) => ValueView::Struct(StructView(value)),
+            Value(Repr::Enum(value)) => ValueView::Enum(EnumView(value)),
+            Value(Repr::Closure(closure)) => ValueView::Closure(ClosureView(closure)),
+            Value(Repr::HostModule(name)) => ValueView::HostModule(name),
+            Value(Repr::HostFn(host)) => ValueView::HostFn {
                 module: &host.module,
                 op: &host.op,
             },
-            Value::Resource(handle) => ValueView::Resource(handle),
-            Value::Type(name) => ValueView::Type(name),
-            Value::Range {
+            Value(Repr::Resource(handle)) => ValueView::Resource(handle),
+            Value(Repr::Type(name)) => ValueView::Type(name),
+            Value(Repr::Range {
                 start,
                 end,
                 inclusive_end,
-            } => ValueView::Range(RangeBounds::of(*start, *end, *inclusive_end)),
-            Value::Task(task) => ValueView::Task(TaskView(task)),
-            Value::TaskScope(scope) => ValueView::TaskScope(TaskScopeView(scope)),
-            Value::Shared(_) => ValueView::Shared(SharedView(std::marker::PhantomData)),
+            }) => ValueView::Range(RangeBounds::of(*start, *end, *inclusive_end)),
+            Value(Repr::Task(task)) => ValueView::Task(TaskView(task)),
+            Value(Repr::TaskScope(scope)) => ValueView::TaskScope(TaskScopeView(scope)),
+            Value(Repr::Shared(_)) => ValueView::Shared(SharedView(std::marker::PhantomData)),
             // `erased` looks through every wrapper, including a wrapper
             // holding a wrapper, so control never arrives here.
-            Value::Dyn(_) => unreachable!("`Value::erased` answers no `dyn` wrapper"),
+            Value(Repr::Dyn(_)) => unreachable!("`Value::erased` answers no `dyn` wrapper"),
         }
     }
 }
@@ -2078,13 +2143,13 @@ pub struct SharedView<'a>(std::marker::PhantomData<&'a SharedCell>);
 impl fmt::Display for Value {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Value::Unit => f.write_str("()"),
-            Value::Bool(b) => write!(f, "{b}"),
-            Value::Int(i) => write!(f, "{i}"),
-            Value::Float(x) => write_float(f, *x),
-            Value::Duration(ns) => write_duration(f, *ns),
-            Value::Str(s) => f.write_str(s),
-            Value::Array(items) => {
+            Value(Repr::Unit) => f.write_str("()"),
+            Value(Repr::Bool(b)) => write!(f, "{b}"),
+            Value(Repr::Int(i)) => write!(f, "{i}"),
+            Value(Repr::Float(x)) => write_float(f, *x),
+            Value(Repr::Duration(ns)) => write_duration(f, *ns),
+            Value(Repr::Str(s)) => f.write_str(s),
+            Value(Repr::Array(items)) => {
                 f.write_str("[")?;
                 for (i, item) in items.iter().enumerate() {
                     if i > 0 {
@@ -2094,7 +2159,7 @@ impl fmt::Display for Value {
                 }
                 f.write_str("]")
             }
-            Value::Vector(storage) => {
+            Value(Repr::Vector(storage)) => {
                 f.write_str("[")?;
                 for (i, item) in storage.elements.borrow().iter().enumerate() {
                     if i > 0 {
@@ -2104,7 +2169,7 @@ impl fmt::Display for Value {
                 }
                 f.write_str("]")
             }
-            Value::Map(entries) => {
+            Value(Repr::Map(entries)) => {
                 f.write_str("{")?;
                 for (i, (k, v)) in entries.iter().enumerate() {
                     if i > 0 {
@@ -2114,7 +2179,7 @@ impl fmt::Display for Value {
                 }
                 f.write_str("}")
             }
-            Value::Set(items) => {
+            Value(Repr::Set(items)) => {
                 f.write_str("{")?;
                 for (i, item) in items.iter().enumerate() {
                     if i > 0 {
@@ -2124,10 +2189,10 @@ impl fmt::Display for Value {
                 }
                 f.write_str("}")
             }
-            Value::Struct(s) => {
+            Value(Repr::Struct(s)) => {
                 if &*s.type_name == ERROR.name {
                     return match s.get(MESSAGE_FIELD.name) {
-                        Some(Value::Str(m)) => f.write_str(m),
+                        Some(Value(Repr::Str(m))) => f.write_str(m),
                         _ => f.write_str(ERROR.name),
                     };
                 }
@@ -2149,7 +2214,7 @@ impl fmt::Display for Value {
                 }
                 f.write_str(")")
             }
-            Value::Enum(e) => {
+            Value(Repr::Enum(e)) => {
                 f.write_str(&e.case)?;
                 if !e.payload.is_empty() {
                     f.write_str("(")?;
@@ -2165,31 +2230,31 @@ impl fmt::Display for Value {
             }
             // A trait object shows the value it holds: the wrapper is a
             // representation, not something the program put there.
-            Value::Dyn(d) => write!(f, "{}", d.value),
-            Value::Closure(_) => f.write_str("<fn>"),
-            Value::HostModule(m) => write!(f, "<host module {m}>"),
+            Value(Repr::Dyn(d)) => write!(f, "{}", d.value),
+            Value(Repr::Closure(_)) => f.write_str("<fn>"),
+            Value(Repr::HostModule(m)) => write!(f, "<host module {m}>"),
             // A handle prints as what it names, identity included: two
             // connections are told apart by the number the host issued and
             // by nothing else.
-            Value::Resource(handle) => write!(f, "<{}>", handle),
-            Value::HostFn(host) => write!(f, "<host fn {}.{}>", host.module, host.op),
-            Value::Type(t) => write!(f, "<type {t}>"),
-            Value::Range {
+            Value(Repr::Resource(handle)) => write!(f, "<{}>", handle),
+            Value(Repr::HostFn(host)) => write!(f, "<host fn {}.{}>", host.module, host.op),
+            Value(Repr::Type(t)) => write!(f, "<type {t}>"),
+            Value(Repr::Range {
                 start,
                 end,
                 inclusive_end,
-            } => {
+            }) => {
                 let operator = if *inclusive_end { ".." } else { "..<" };
                 write!(f, "{start}{operator}{end}")
             }
-            Value::TaskScope(scope) => write!(f, "<task scope {}>", scope.name),
+            Value(Repr::TaskScope(scope)) => write!(f, "<task scope {}>", scope.name),
             // A task prints as a handle, never as the value it will produce:
             // that value is observable only through `await` or scope exit.
-            Value::Task(_) => f.write_str("<task>"),
+            Value(Repr::Task(_)) => f.write_str("<task>"),
             // A `Shared` prints as the handle it is. Showing what it holds
             // would be a read outside a `lock`, which is the one thing the
             // type exists to prevent.
-            Value::Shared(_) => f.write_str("<shared>"),
+            Value(Repr::Shared(_)) => f.write_str("<shared>"),
         }
     }
 }
@@ -2271,57 +2336,60 @@ mod tests {
 
     #[test]
     fn a_float_is_never_shown_as_an_int() {
-        assert_eq!(shown(Value::Float(4.0)), "4.0");
-        assert_eq!(shown(Value::Float(-4.0)), "-4.0");
-        assert_eq!(shown(Value::Float(1500.0)), "1500.0");
-        assert_eq!(shown(Value::Float(1.5)), "1.5");
-        assert_eq!(shown(Value::Float(0.25)), "0.25");
-        assert_eq!(shown(Value::Float(-0.75)), "-0.75");
-        assert_eq!(shown(Value::Float(0.02)), "0.02");
+        assert_eq!(shown(Value(Repr::Float(4.0))), "4.0");
+        assert_eq!(shown(Value(Repr::Float(-4.0))), "-4.0");
+        assert_eq!(shown(Value(Repr::Float(1500.0))), "1500.0");
+        assert_eq!(shown(Value(Repr::Float(1.5))), "1.5");
+        assert_eq!(shown(Value(Repr::Float(0.25))), "0.25");
+        assert_eq!(shown(Value(Repr::Float(-0.75))), "-0.75");
+        assert_eq!(shown(Value(Repr::Float(0.02))), "0.02");
     }
 
     #[test]
     fn float_edge_cases_are_explicit() {
-        assert_eq!(shown(Value::Float(0.0)), "0.0");
-        assert_eq!(shown(Value::Float(-0.0)), "-0.0");
-        assert_eq!(shown(Value::Float(f64::INFINITY)), "inf");
-        assert_eq!(shown(Value::Float(f64::NEG_INFINITY)), "-inf");
-        assert_eq!(shown(Value::Float(f64::NAN)), "NaN");
+        assert_eq!(shown(Value(Repr::Float(0.0))), "0.0");
+        assert_eq!(shown(Value(Repr::Float(-0.0))), "-0.0");
+        assert_eq!(shown(Value(Repr::Float(f64::INFINITY))), "inf");
+        assert_eq!(shown(Value(Repr::Float(f64::NEG_INFINITY))), "-inf");
+        assert_eq!(shown(Value(Repr::Float(f64::NAN))), "NaN");
     }
 
     #[test]
     fn a_duration_uses_the_largest_unit_that_divides_it() {
-        assert_eq!(shown(Value::Duration(0)), "0ns");
-        assert_eq!(shown(Value::Duration(1)), "1ns");
-        assert_eq!(shown(Value::Duration(1_000)), "1us");
-        assert_eq!(shown(Value::Duration(1_000_000)), "1ms");
-        assert_eq!(shown(Value::Duration(1_000_000_000)), "1s");
-        assert_eq!(shown(Value::Duration(60_000_000_000)), "1m");
-        assert_eq!(shown(Value::Duration(3_600_000_000_000)), "1h");
-        assert_eq!(shown(Value::Duration(500_000_000)), "500ms");
-        assert_eq!(shown(Value::Duration(1_500_000_000)), "1500ms");
-        assert_eq!(shown(Value::Duration(90_000_000_000)), "90s");
+        assert_eq!(shown(Value(Repr::Duration(0))), "0ns");
+        assert_eq!(shown(Value(Repr::Duration(1))), "1ns");
+        assert_eq!(shown(Value(Repr::Duration(1_000))), "1us");
+        assert_eq!(shown(Value(Repr::Duration(1_000_000))), "1ms");
+        assert_eq!(shown(Value(Repr::Duration(1_000_000_000))), "1s");
+        assert_eq!(shown(Value(Repr::Duration(60_000_000_000))), "1m");
+        assert_eq!(shown(Value(Repr::Duration(3_600_000_000_000))), "1h");
+        assert_eq!(shown(Value(Repr::Duration(500_000_000))), "500ms");
+        assert_eq!(shown(Value(Repr::Duration(1_500_000_000))), "1500ms");
+        assert_eq!(shown(Value(Repr::Duration(90_000_000_000))), "90s");
     }
 
     #[test]
     fn a_duration_no_larger_unit_divides_stays_in_nanoseconds() {
-        assert_eq!(shown(Value::Duration(1_001)), "1001ns");
-        assert_eq!(shown(Value::Duration(i64::MAX)), format!("{}ns", i64::MAX));
+        assert_eq!(shown(Value(Repr::Duration(1_001))), "1001ns");
+        assert_eq!(
+            shown(Value(Repr::Duration(i64::MAX))),
+            format!("{}ns", i64::MAX)
+        );
     }
 
     #[test]
     fn a_negative_duration_keeps_its_sign() {
-        assert_eq!(shown(Value::Duration(-3_600_000_000_000)), "-1h");
-        assert_eq!(shown(Value::Duration(-500_000_000)), "-500ms");
-        assert_eq!(shown(Value::Duration(-1)), "-1ns");
+        assert_eq!(shown(Value(Repr::Duration(-3_600_000_000_000))), "-1h");
+        assert_eq!(shown(Value(Repr::Duration(-500_000_000))), "-500ms");
+        assert_eq!(shown(Value(Repr::Duration(-1))), "-1ns");
     }
 
     fn range(start: i64, end: i64, inclusive_end: bool) -> Value {
-        Value::Range {
+        Value(Repr::Range {
             start,
             end,
             inclusive_end,
-        }
+        })
     }
 
     #[test]
@@ -2336,7 +2404,7 @@ mod tests {
         assert!(range(0, 3, false).eq_value(&range(0, 3, false)));
         assert!(!range(0, 3, false).eq_value(&range(0, 3, true)));
         assert!(!range(0, 3, false).eq_value(&range(1, 3, false)));
-        assert!(!range(0, 3, false).eq_value(&Value::Int(0)));
+        assert!(!range(0, 3, false).eq_value(&Value(Repr::Int(0))));
     }
 
     #[test]
@@ -2376,35 +2444,38 @@ mod tests {
     }
 
     fn payload_free_case(type_name: &str, case: &str) -> Value {
-        Value::Enum(Box::new(EnumValue {
+        Value(Repr::Enum(Box::new(EnumValue {
             type_name: type_name.into(),
             case: case.into(),
             payload: Payload::Empty,
-        }))
+        })))
     }
 
     fn point(x: i64, y: i64) -> Value {
-        Value::Struct(Rc::new(StructValue {
+        Value(Repr::Struct(Rc::new(StructValue {
             type_name: "test.Point".into(),
-            fields: vec![("x".into(), Value::Int(x)), ("y".into(), Value::Int(y))],
+            fields: vec![
+                ("x".into(), Value(Repr::Int(x))),
+                ("y".into(), Value(Repr::Int(y))),
+            ],
             opaque: false,
-        }))
+        })))
     }
 
     #[test]
     fn map_keys_accept_the_primitive_shapes() {
-        assert_eq!(MapKey::from_value(&Value::Unit), Ok(MapKey::Unit));
+        assert_eq!(MapKey::from_value(&Value(Repr::Unit)), Ok(MapKey::Unit));
         assert_eq!(
-            MapKey::from_value(&Value::Bool(true)),
+            MapKey::from_value(&Value(Repr::Bool(true))),
             Ok(MapKey::Bool(true))
         );
-        assert_eq!(MapKey::from_value(&Value::Int(7)), Ok(MapKey::Int(7)));
+        assert_eq!(MapKey::from_value(&Value(Repr::Int(7))), Ok(MapKey::Int(7)));
         assert_eq!(
-            MapKey::from_value(&Value::Duration(500)),
+            MapKey::from_value(&Value(Repr::Duration(500))),
             Ok(MapKey::Duration(500))
         );
         assert_eq!(
-            MapKey::from_value(&Value::Str("a".into())),
+            MapKey::from_value(&Value(Repr::Str("a".into()))),
             Ok(MapKey::Str("a".to_string()))
         );
         assert_eq!(
@@ -2422,11 +2493,11 @@ mod tests {
     #[test]
     fn a_range_is_a_valid_map_key() {
         assert_eq!(
-            MapKey::from_value(&Value::Range {
+            MapKey::from_value(&Value(Repr::Range {
                 start: 0,
                 end: 3,
                 inclusive_end: false,
-            }),
+            })),
             Ok(MapKey::Range {
                 start: 0,
                 end: 3,
@@ -2436,16 +2507,16 @@ mod tests {
         // `0..<3` and `0..2` are distinct keys, exactly as they are distinct
         // values: `eq_value` compares the bounds a range was written with.
         assert_ne!(
-            MapKey::from_value(&Value::Range {
+            MapKey::from_value(&Value(Repr::Range {
                 start: 0,
                 end: 3,
                 inclusive_end: false,
-            }),
-            MapKey::from_value(&Value::Range {
+            })),
+            MapKey::from_value(&Value(Repr::Range {
                 start: 0,
                 end: 2,
                 inclusive_end: true,
-            })
+            }))
         );
     }
 
@@ -2467,11 +2538,11 @@ mod tests {
 
     #[test]
     fn a_struct_nested_inside_a_struct_is_a_valid_key_when_every_field_is() {
-        let line = Value::Struct(Rc::new(StructValue {
+        let line = Value(Repr::Struct(Rc::new(StructValue {
             type_name: "test.Line".into(),
             fields: vec![("from".into(), point(0, 0)), ("to".into(), point(1, 1))],
             opaque: false,
-        }));
+        })));
         let key = MapKey::from_value(&line).expect("nested structs of Ints are a valid key");
         assert_eq!(
             key,
@@ -2508,11 +2579,11 @@ mod tests {
 
     #[test]
     fn an_enum_case_with_an_admissible_payload_is_a_valid_key() {
-        let value = Value::Enum(Box::new(EnumValue {
+        let value = Value(Repr::Enum(Box::new(EnumValue {
             type_name: "test.Colour".into(),
             case: "Named".into(),
-            payload: Payload::One(Value::Str("teal".into())),
-        }));
+            payload: Payload::One(Value(Repr::Str("teal".into()))),
+        })));
         assert_eq!(
             MapKey::from_value(&value),
             Ok(MapKey::EnumCase(
@@ -2525,7 +2596,9 @@ mod tests {
 
     #[test]
     fn an_array_built_only_from_admissible_elements_is_a_valid_key() {
-        let value = Value::Array(vec![Value::Int(1), Value::Int(2)].into());
+        let value = Value(Repr::Array(
+            vec![Value(Repr::Int(1)), Value(Repr::Int(2))].into(),
+        ));
         assert_eq!(
             MapKey::from_value(&value),
             Ok(MapKey::Array(vec![MapKey::Int(1), MapKey::Int(2)]))
@@ -2534,7 +2607,7 @@ mod tests {
 
     #[test]
     fn map_keys_reject_a_float_for_a_reason_distinct_from_mutability() {
-        let invalid = MapKey::from_value(&Value::Float(1.0)).unwrap_err();
+        let invalid = MapKey::from_value(&Value(Repr::Float(1.0))).unwrap_err();
         assert_eq!(invalid.type_name, "Float");
         assert!(invalid.path.is_empty());
         assert!(
@@ -2547,7 +2620,7 @@ mod tests {
     #[test]
     fn map_keys_reject_a_vector_naming_it_directly_at_the_root() {
         let invalid =
-            MapKey::from_value(&Value::Vector(VectorStorage::new(Vec::new()))).unwrap_err();
+            MapKey::from_value(&Value(Repr::Vector(VectorStorage::new(Vec::new())))).unwrap_err();
         assert_eq!(invalid.type_name, "Vector");
         assert!(invalid.path.is_empty());
         assert!(
@@ -2559,11 +2632,14 @@ mod tests {
 
     #[test]
     fn a_struct_containing_a_vector_is_rejected_naming_the_nested_field() {
-        let value = Value::Struct(Rc::new(StructValue {
+        let value = Value(Repr::Struct(Rc::new(StructValue {
             type_name: "test.Point".into(),
-            fields: vec![("tags".into(), Value::Vector(VectorStorage::new(Vec::new())))],
+            fields: vec![(
+                "tags".into(),
+                Value(Repr::Vector(VectorStorage::new(Vec::new()))),
+            )],
             opaque: false,
-        }));
+        })));
         let invalid = MapKey::from_value(&value).unwrap_err();
         assert_eq!(invalid.type_name, "Vector");
         assert_eq!(invalid.path, "Point.tags");
@@ -2600,7 +2676,10 @@ mod tests {
 
     #[test]
     fn a_set_is_a_valid_key_because_its_elements_are_already_map_keys() {
-        let inner = Value::Set(Rc::new(BTreeSet::from([MapKey::Int(1), MapKey::Int(2)])));
+        let inner = Value(Repr::Set(Rc::new(BTreeSet::from([
+            MapKey::Int(1),
+            MapKey::Int(2),
+        ]))));
         assert_eq!(
             MapKey::from_value(&inner),
             Ok(MapKey::Set(BTreeSet::from([
@@ -2612,10 +2691,10 @@ mod tests {
 
     #[test]
     fn a_map_is_a_valid_key_when_every_value_is_admissible() {
-        let inner = Value::Map(Rc::new(BTreeMap::from([(
+        let inner = Value(Repr::Map(Rc::new(BTreeMap::from([(
             MapKey::Str("a".to_string()),
-            Value::Int(1),
-        )])));
+            Value(Repr::Int(1)),
+        )]))));
         assert_eq!(
             MapKey::from_value(&inner),
             Ok(MapKey::Map(BTreeMap::from([(
@@ -2627,28 +2706,28 @@ mod tests {
 
     #[test]
     fn a_map_containing_an_inadmissible_value_is_rejected_naming_the_entry() {
-        let inner = Value::Map(Rc::new(BTreeMap::from([(
+        let inner = Value(Repr::Map(Rc::new(BTreeMap::from([(
             MapKey::Str("a".to_string()),
-            Value::Vector(VectorStorage::new(Vec::new())),
-        )])));
+            Value(Repr::Vector(VectorStorage::new(Vec::new()))),
+        )]))));
         let invalid = MapKey::from_value(&inner).unwrap_err();
         assert_eq!(invalid.type_name, "Vector");
         assert_eq!(invalid.path, "[a]");
     }
 
     fn map_of(pairs: Vec<(MapKey, Value)>) -> Value {
-        Value::Map(Rc::new(pairs.into_iter().collect()))
+        Value(Repr::Map(Rc::new(pairs.into_iter().collect())))
     }
 
     fn set_of(keys: Vec<MapKey>) -> Value {
-        Value::Set(Rc::new(keys.into_iter().collect()))
+        Value(Repr::Set(Rc::new(keys.into_iter().collect())))
     }
 
     #[test]
     fn maps_compare_structurally() {
-        let a = map_of(vec![(MapKey::Str("x".to_string()), Value::Int(1))]);
-        let b = map_of(vec![(MapKey::Str("x".to_string()), Value::Int(1))]);
-        let c = map_of(vec![(MapKey::Str("x".to_string()), Value::Int(2))]);
+        let a = map_of(vec![(MapKey::Str("x".to_string()), Value(Repr::Int(1)))]);
+        let b = map_of(vec![(MapKey::Str("x".to_string()), Value(Repr::Int(1)))]);
+        let c = map_of(vec![(MapKey::Str("x".to_string()), Value(Repr::Int(2)))]);
         assert!(a.eq_value(&b));
         assert!(!a.eq_value(&c));
     }
@@ -2668,10 +2747,19 @@ mod tests {
     /// is the separate question `is` answers, not `eq_value`.
     #[test]
     fn vectors_compare_structurally() {
-        let a = Value::Vector(VectorStorage::new(vec![Value::Int(1), Value::Int(2)]));
-        let b = Value::Vector(VectorStorage::new(vec![Value::Int(1), Value::Int(2)]));
-        let c = Value::Vector(VectorStorage::new(vec![Value::Int(1), Value::Int(3)]));
-        let d = Value::Vector(VectorStorage::new(vec![Value::Int(1)]));
+        let a = Value(Repr::Vector(VectorStorage::new(vec![
+            Value(Repr::Int(1)),
+            Value(Repr::Int(2)),
+        ])));
+        let b = Value(Repr::Vector(VectorStorage::new(vec![
+            Value(Repr::Int(1)),
+            Value(Repr::Int(2)),
+        ])));
+        let c = Value(Repr::Vector(VectorStorage::new(vec![
+            Value(Repr::Int(1)),
+            Value(Repr::Int(3)),
+        ])));
+        let d = Value(Repr::Vector(VectorStorage::new(vec![Value(Repr::Int(1))])));
         assert!(a.eq_value(&b));
         assert!(!a.eq_value(&c));
         assert!(!a.eq_value(&d));
@@ -2681,15 +2769,15 @@ mod tests {
     /// handle: `==` never asks the identity question.
     #[test]
     fn a_vector_equals_itself_structurally() {
-        let a = Value::Vector(VectorStorage::new(vec![Value::Int(1)]));
+        let a = Value(Repr::Vector(VectorStorage::new(vec![Value(Repr::Int(1))])));
         assert!(a.eq_value(&a.clone()));
     }
 
     #[test]
     fn a_map_shows_entries_in_ascending_key_order() {
         let value = map_of(vec![
-            (MapKey::Int(2), Value::Str("b".into())),
-            (MapKey::Int(1), Value::Str("a".into())),
+            (MapKey::Int(2), Value(Repr::Str("b".into()))),
+            (MapKey::Int(1), Value(Repr::Str("a".into()))),
         ]);
         assert_eq!(shown(value), "{1: a, 2: b}");
     }
@@ -2710,7 +2798,10 @@ mod tests {
     fn every_shape_a_constructor_builds_reads_back_through_a_reader() {
         let structure = Value::structure(
             "rules.policy.Decision",
-            [("policy", Value::Int(1)), ("findings", Value::array([]))],
+            [
+                ("policy", Value(Repr::Int(1))),
+                ("findings", Value::array([])),
+            ],
         );
         assert_eq!(structure.declared_type(), Some("rules.policy.Decision"));
         assert_eq!(structure.field("policy").and_then(Value::as_int), Some(1));
@@ -2728,7 +2819,7 @@ mod tests {
         let enumeration = Value::enumeration(
             "rules.policy.ReviewPolicy",
             "Require",
-            [Value::Int(2), Value::Str("large change".into())],
+            [Value(Repr::Int(2)), Value(Repr::Str("large change".into()))],
         );
         assert_eq!(
             enumeration.declared_type(),
@@ -2737,7 +2828,7 @@ mod tests {
         assert_eq!(enumeration.case(), Some("Require"));
         assert_eq!(enumeration.payload().map(<[Value]>::len), Some(2));
 
-        let array = Value::array([Value::Int(1), Value::Int(2)]);
+        let array = Value::array([Value(Repr::Int(1)), Value(Repr::Int(2))]);
         assert_eq!(
             array.items().map(|items| items.len()),
             Some(2),
@@ -2754,8 +2845,8 @@ mod tests {
         );
 
         let map = Value::map([
-            (MapKey::Int(2), Value::Str("b".into())),
-            (MapKey::Int(1), Value::Str("a".into())),
+            (MapKey::Int(2), Value(Repr::Str("b".into()))),
+            (MapKey::Int(1), Value(Repr::Str("a".into()))),
         ]);
         assert_eq!(
             map.entries()
@@ -2770,7 +2861,7 @@ mod tests {
         );
 
         assert_eq!(
-            Value::ok(Value::Int(1)).payload().map(<[Value]>::len),
+            Value::ok(Value(Repr::Int(1))).payload().map(<[Value]>::len),
             Some(1),
             "a builtin enum reads through the general reader as well as the four"
         );
@@ -2790,18 +2881,21 @@ mod tests {
     /// Every scalar reads back as the Rust value it was built from.
     #[test]
     fn a_scalar_reads_back_as_itself() {
-        assert_eq!(Value::Bool(true).as_bool(), Some(true));
-        assert_eq!(Value::Int(-7).as_int(), Some(-7));
-        assert_eq!(Value::Float(1.5).as_float(), Some(1.5));
-        assert_eq!(Value::Duration(-1_000).as_duration_nanos(), Some(-1_000));
-        assert_eq!(Value::Str("hello".into()).as_str(), Some("hello"));
-        assert!(Value::Unit.is_unit());
+        assert_eq!(Value(Repr::Bool(true)).as_bool(), Some(true));
+        assert_eq!(Value(Repr::Int(-7)).as_int(), Some(-7));
+        assert_eq!(Value(Repr::Float(1.5)).as_float(), Some(1.5));
         assert_eq!(
-            Value::Range {
+            Value(Repr::Duration(-1_000)).as_duration_nanos(),
+            Some(-1_000)
+        );
+        assert_eq!(Value(Repr::Str("hello".into())).as_str(), Some("hello"));
+        assert!(Value(Repr::Unit).is_unit());
+        assert_eq!(
+            Value(Repr::Range {
                 start: 1,
                 end: 3,
                 inclusive_end: true,
-            }
+            })
             .range()
             .map(|bounds| (bounds.start, bounds.end)),
             Some((1, 4)),
@@ -2813,7 +2907,7 @@ mod tests {
     /// convention `ok_payload` and `StructValue::get` already set.
     #[test]
     fn a_reader_asked_of_the_wrong_shape_answers_none() {
-        let value = Value::Int(1);
+        let value = Value(Repr::Int(1));
         assert_eq!(value.as_str(), None);
         assert_eq!(value.as_bool(), None);
         assert_eq!(value.declared_type(), None);
@@ -2832,7 +2926,7 @@ mod tests {
 
         // A `Vector` is not an `Array` and says so, because its elements are
         // behind a `RefCell` and nothing can hand out a slice of them.
-        let vector = Value::Vector(VectorStorage::new(vec![Value::Int(1)]));
+        let vector = Value(Repr::Vector(VectorStorage::new(vec![Value(Repr::Int(1))])));
         assert!(vector.items().is_none());
     }
 
@@ -2841,17 +2935,17 @@ mod tests {
     /// from a lambda's inferred one.
     #[test]
     fn a_reader_looks_through_a_trait_object() {
-        let wrapped = Value::Dyn(Rc::new(DynValue {
+        let wrapped = Value(Repr::Dyn(Rc::new(DynValue {
             trait_name: "render.Display".into(),
-            value: Value::structure("app.Point", [("x", Value::Int(1))]),
-        }));
+            value: Value::structure("app.Point", [("x", Value(Repr::Int(1)))]),
+        })));
         assert_eq!(wrapped.declared_type(), Some("app.Point"));
         assert_eq!(wrapped.field("x").and_then(Value::as_int), Some(1));
 
-        let wrapped_scalar = Value::Dyn(Rc::new(DynValue {
+        let wrapped_scalar = Value(Repr::Dyn(Rc::new(DynValue {
             trait_name: "render.Display".into(),
-            value: Value::Str("shown".into()),
-        }));
+            value: Value(Repr::Str("shown".into())),
+        })));
         assert_eq!(wrapped_scalar.as_str(), Some("shown"));
     }
 
@@ -2870,15 +2964,15 @@ mod tests {
     fn a_reader_hides_each_representation_change_that_was_a_source_break() {
         // #104: the struct behind an `Rc`, where a host once wrote
         // `let Value::Struct(s) = value` and bound a `&Box<StructValue>`.
-        let decision = Value::structure("app.Decision", [("reviewers", Value::Int(2))]);
+        let decision = Value::structure("app.Decision", [("reviewers", Value(Repr::Int(2)))]);
         assert_eq!(decision.field("reviewers").and_then(Value::as_int), Some(2));
 
         // #183: the payload at each of the three arities `Payload` holds, read
         // as one slice whichever it is.
         for (payload, len) in [
             (Vec::new(), 0),
-            (vec![Value::Int(1)], 1),
-            (vec![Value::Int(1), Value::Int(2)], 2),
+            (vec![Value(Repr::Int(1))], 1),
+            (vec![Value(Repr::Int(1)), Value(Repr::Int(2))], 2),
         ] {
             let value = Value::enumeration("app.Verdict", "Case", payload);
             assert_eq!(value.case(), Some("Case"));
@@ -2888,21 +2982,21 @@ mod tests {
         // #109: the two names of a bound host operation, which were inline
         // fields of the variant until they cost every value in the program
         // sixteen bytes.
-        let bound = Value::HostFn(Rc::new(HostFnValue {
+        let bound = Value(Repr::HostFn(Rc::new(HostFnValue {
             module: "console".into(),
             op: "println".into(),
-        }));
+        })));
         assert_eq!(bound.host_op(), Some(("console", "println")));
 
         // #121, the fourth of the same kind: a closure's parameter list became
         // a count, and a host only ever wanted the count.
-        let closure = Value::Closure(Rc::new(Closure {
+        let closure = Value(Repr::Closure(Rc::new(Closure {
             is_async: false,
             arity: 2,
             body: ClosureBody::Lowered(cove_ir::FunctionId(0)),
             module: "app".into(),
             captures: Vec::new(),
-        }));
+        })));
         assert_eq!(closure.arity(), Some(2));
     }
 
@@ -2925,18 +3019,18 @@ mod tests {
             Value::duration(1),
             Value::string("hi"),
             Value::array([Value::int(1)]),
-            Value::Vector(VectorStorage::new(vec![Value::int(1)])),
+            Value(Repr::Vector(VectorStorage::new(vec![Value::int(1)]))),
             Value::map([(MapKey::Int(1), Value::int(2))]),
             Value::set([MapKey::Int(1)]),
             Value::structure("app.Point", [("x", Value::int(1))]),
             Value::some(Value::int(1)),
-            Value::Closure(Rc::new(Closure {
+            Value(Repr::Closure(Rc::new(Closure {
                 is_async: true,
                 arity: 2,
                 body: ClosureBody::Lowered(cove_ir::FunctionId(0)),
                 module: "app".into(),
                 captures: Vec::new(),
-            })),
+            }))),
             Value::host_module("console"),
             Value::host_fn("console", "println"),
             Value::from_resource(ResourceHandle {
@@ -2947,9 +3041,9 @@ mod tests {
             }),
             Value::type_value("Vector"),
             Value::range_of(1, 3, false),
-            Value::Task(task),
-            Value::TaskScope(scope),
-            Value::Shared(cell),
+            Value(Repr::Task(task)),
+            Value(Repr::TaskScope(scope)),
+            Value(Repr::Shared(cell)),
         ];
         let mut seen = 0;
         for value in &kinds {
@@ -3005,10 +3099,10 @@ mod tests {
     /// why the trait name is a reader instead.
     #[test]
     fn a_view_looks_through_a_trait_object() {
-        let wrapped = Value::Dyn(Rc::new(DynValue {
+        let wrapped = Value(Repr::Dyn(Rc::new(DynValue {
             trait_name: "render.Display".into(),
             value: Value::structure("app.Point", [("x", Value::int(1))]),
-        }));
+        })));
         let ValueView::Struct(value) = wrapped.view() else {
             panic!("a wrapped struct views as a struct, not as a wrapper");
         };
@@ -3018,10 +3112,10 @@ mod tests {
 
         // Twice over: `erased` looks through a wrapper holding a wrapper, so
         // `view` never has one to answer.
-        let twice = Value::Dyn(Rc::new(DynValue {
+        let twice = Value(Repr::Dyn(Rc::new(DynValue {
             trait_name: "render.Display".into(),
             value: wrapped,
-        }));
+        })));
         assert!(matches!(twice.view(), ValueView::Struct(_)));
     }
 
@@ -3036,13 +3130,13 @@ mod tests {
     #[test]
     fn a_view_changes_no_reference_count() {
         let storage = VectorStorage::new(vec![Value::int(1)]);
-        let vector = Value::Vector(storage.clone());
+        let vector = Value(Repr::Vector(storage.clone()));
         let fields = Rc::new(StructValue {
             type_name: "app.Point".into(),
             fields: vec![("x".into(), Value::int(1))],
             opaque: false,
         });
-        let structure = Value::Struct(fields.clone());
+        let structure = Value(Repr::Struct(fields.clone()));
 
         let before = (Rc::strong_count(&storage), Rc::strong_count(&fields));
         let views = (vector.view(), structure.view(), vector.vector_elements());

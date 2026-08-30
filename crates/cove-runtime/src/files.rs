@@ -38,7 +38,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use crate::error::RuntimeError;
 use crate::host::{HostApi, Reentry, ResourceHandle};
 use crate::schema::ModuleSchema;
-use crate::value::Value;
+use crate::value::{Repr, Value};
 
 /// The most of one line this host will read.
 ///
@@ -324,11 +324,11 @@ impl Files {
                 form,
             },
         );
-        Ok(Value::Resource(ResourceHandle::new(
+        Ok(Value(Repr::Resource(ResourceHandle::new(
             "files",
             &SCHEMA.resources[0],
             id,
-        )))
+        ))))
     }
 
     /// Creates or truncates `path` and issues the handle that names the
@@ -373,11 +373,11 @@ impl Files {
                 form,
             },
         );
-        Ok(Value::Resource(ResourceHandle::new(
+        Ok(Value(Repr::Resource(ResourceHandle::new(
             "files",
             &SCHEMA.resources[1],
             id,
-        )))
+        ))))
     }
 
     /// Writes `text` through the writer `state` names.
@@ -713,28 +713,37 @@ impl HostApi for Files {
         match op {
             "read" => {
                 let path = one_path(op, &args)?;
-                Ok(result(self.read(&path).map(|text| Value::Str(text.into()))))
+                Ok(result(
+                    self.read(&path).map(|text| Value(Repr::Str(text.into()))),
+                ))
             }
             "write" => {
-                let [Value::Str(path), Value::Str(contents)] = args.as_slice() else {
+                let [Value(Repr::Str(path)), Value(Repr::Str(contents))] = args.as_slice() else {
                     unreachable!("checked by HostRegistry::call")
                 };
                 let (path, contents) = (path.to_string(), contents.to_string());
-                Ok(result(self.write(&path, &contents).map(|()| Value::Unit)))
+                Ok(result(
+                    self.write(&path, &contents).map(|()| Value(Repr::Unit)),
+                ))
             }
             "exists" => {
                 let path = one_path(op, &args)?;
-                Ok(Value::Bool(self.exists(&path)))
+                Ok(Value(Repr::Bool(self.exists(&path))))
             }
             "list" => {
                 let path = one_path(op, &args)?;
                 Ok(result(self.list(&path).map(|names| {
-                    Value::Array(names.into_iter().map(|n| Value::Str(n.into())).collect())
+                    Value(Repr::Array(
+                        names
+                            .into_iter()
+                            .map(|n| Value(Repr::Str(n.into())))
+                            .collect(),
+                    ))
                 })))
             }
             "delete" => {
                 let path = one_path(op, &args)?;
-                Ok(result(self.delete(&path).map(|()| Value::Unit)))
+                Ok(result(self.delete(&path).map(|()| Value(Repr::Unit))))
             }
             "open" => {
                 let path = one_path(op, &args)?;
@@ -768,19 +777,19 @@ impl HostApi for Files {
                         return Err(closed(handle, op));
                     };
                     Ok(result(read_line(state).map(|line| match line {
-                        Some(text) => Value::some(Value::Str(text.into())),
+                        Some(text) => Value::some(Value(Repr::Str(text.into()))),
                         None => Value::none(),
                     })))
                 }
                 "close" => match self.readers().remove(&handle.id) {
-                    Some(_) => Ok(Value::ok(Value::Unit)),
+                    Some(_) => Ok(Value::ok(Value(Repr::Unit))),
                     None => Err(closed(handle, op)),
                 },
                 _ => unreachable!("checked by HostRegistry::call_resource"),
             },
             "Writer" => match op {
                 "write" | "writeLine" => {
-                    let [Value::Str(text)] = args.as_slice() else {
+                    let [Value(Repr::Str(text))] = args.as_slice() else {
                         unreachable!("checked by HostRegistry::call_resource")
                     };
                     let mut written = text.to_string();
@@ -792,7 +801,8 @@ impl HostApi for Files {
                         return Err(closed(handle, op));
                     };
                     Ok(result(
-                        self.write_through(state, &written).map(|()| Value::Unit),
+                        self.write_through(state, &written)
+                            .map(|()| Value(Repr::Unit)),
                     ))
                 }
                 // The entry goes whether or not the flush succeeds: the file
@@ -803,7 +813,7 @@ impl HostApi for Files {
                     let Some(mut state) = self.writers().remove(&handle.id) else {
                         return Err(closed(handle, op));
                     };
-                    Ok(result(flush(&mut state).map(|()| Value::Unit)))
+                    Ok(result(flush(&mut state).map(|()| Value(Repr::Unit))))
                 }
                 _ => unreachable!("checked by HostRegistry::call_resource"),
             },
@@ -815,7 +825,7 @@ impl HostApi for Files {
 /// The single `String` path argument of `op`.
 fn one_path(op: &str, args: &[Value]) -> Result<String, RuntimeError> {
     match args {
-        [Value::Str(path)] => Ok(path.to_string()),
+        [Value(Repr::Str(path))] => Ok(path.to_string()),
         _ => Err(RuntimeError::new(format!(
             "`files.{op}` takes one `String` argument"
         ))),
@@ -860,7 +870,7 @@ mod tests {
 
     fn ok_value(value: Value) -> Value {
         match value.ok_payload() {
-            Some(payload) => payload.first().cloned().unwrap_or(Value::Unit),
+            Some(payload) => payload.first().cloned().unwrap_or(Value(Repr::Unit)),
             None => panic!("expected `Ok(...)`, found {value}"),
         }
     }
@@ -874,26 +884,26 @@ mod tests {
 
     fn strings(value: Value) -> Vec<String> {
         match value {
-            Value::Array(items) => items.iter().map(ToString::to_string).collect(),
+            Value(Repr::Array(items)) => items.iter().map(ToString::to_string).collect(),
             other => panic!("expected an `Array`, found {other}"),
         }
     }
 
     fn is_true(value: Value) -> bool {
         match value {
-            Value::Bool(b) => b,
+            Value(Repr::Bool(b)) => b,
             other => panic!("expected a `Bool`, found {other}"),
         }
     }
 
     fn str_arg(text: &str) -> Value {
-        Value::Str(text.into())
+        Value(Repr::Str(text.into()))
     }
 
     /// The handle `open` or `create` answered with.
     fn handle(value: Value) -> Arc<ResourceHandle> {
         match ok_value(value) {
-            Value::Resource(handle) => handle,
+            Value(Repr::Resource(handle)) => handle,
             other => panic!("expected a resource handle, found {other}"),
         }
     }

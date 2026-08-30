@@ -23,7 +23,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use crate::error::RuntimeError;
 use crate::host::HostApi;
 use crate::schema::ModuleSchema;
-use crate::value::Value;
+use crate::value::{Repr, Value};
 
 /// What a program asked a fake process to do, shared between the host and
 /// whoever inspects it.
@@ -144,7 +144,7 @@ impl Process {
                 if recorded.exit.is_none() {
                     recorded.exit = Some(code);
                 }
-                Value::Unit
+                Value(Repr::Unit)
             }
         }
     }
@@ -212,34 +212,35 @@ impl HostApi for Process {
 
     fn call(&self, op: &str, args: Vec<Value>) -> Result<Value, RuntimeError> {
         match op {
-            "args" => Ok(Value::Array(
+            "args" => Ok(Value(Repr::Array(
                 self.args
                     .iter()
-                    .map(|a| Value::Str(a.as_str().into()))
+                    .map(|a| Value(Repr::Str(a.as_str().into())))
                     .collect(),
-            )),
+            ))),
             "exit" => {
-                let [Value::Int(code)] = args.as_slice() else {
+                let [Value(Repr::Int(code))] = args.as_slice() else {
                     unreachable!("checked by HostRegistry::call")
                 };
                 Ok(self.exit(*code))
             }
             "run" => {
-                let [Value::Str(program), Value::Array(arguments)] = args.as_slice() else {
+                let [Value(Repr::Str(program)), Value(Repr::Array(arguments))] = args.as_slice()
+                else {
                     unreachable!("checked by HostRegistry::call")
                 };
                 let mut collected = Vec::with_capacity(arguments.len());
                 for argument in arguments.iter() {
                     // The boundary followed `Array<String>` all the way down,
                     // so every element is one.
-                    let Value::Str(argument) = argument else {
+                    let Value(Repr::Str(argument)) = argument else {
                         unreachable!("checked by HostRegistry::call")
                     };
                     collected.push(argument.to_string());
                 }
                 let program = program.to_string();
                 Ok(match self.run(&program, collected) {
-                    Ok(output) => Value::ok(Value::Str(output.into())),
+                    Ok(output) => Value::ok(Value(Repr::Str(output.into()))),
                     Err(message) => Value::err(Value::error(message)),
                 })
             }
@@ -254,23 +255,28 @@ mod tests {
     use crate::host::{Grants, HostRegistry};
 
     fn str_arg(text: &str) -> Value {
-        Value::Str(text.into())
+        Value(Repr::Str(text.into()))
     }
 
     fn array_arg(items: &[&str]) -> Value {
-        Value::Array(items.iter().map(|s| Value::Str((*s).into())).collect())
+        Value(Repr::Array(
+            items
+                .iter()
+                .map(|s| Value(Repr::Str((*s).into())))
+                .collect(),
+        ))
     }
 
     fn strings(value: Value) -> Vec<String> {
         match value {
-            Value::Array(items) => items.iter().map(ToString::to_string).collect(),
+            Value(Repr::Array(items)) => items.iter().map(ToString::to_string).collect(),
             other => panic!("expected an `Array`, found {other}"),
         }
     }
 
     fn ok_value(value: Value) -> Value {
         match value.ok_payload() {
-            Some(payload) => payload.first().cloned().unwrap_or(Value::Unit),
+            Some(payload) => payload.first().cloned().unwrap_or(Value(Repr::Unit)),
             None => panic!("expected `Ok(...)`, found {value}"),
         }
     }
@@ -313,8 +319,8 @@ mod tests {
         let (process, log) = fake(BTreeMap::new());
         assert_eq!(log.exit_code(), None);
 
-        let exited = process.call("exit", vec![Value::Int(3)]).unwrap();
-        assert!(matches!(exited, Value::Unit), "{exited}");
+        let exited = process.call("exit", vec![Value(Repr::Int(3))]).unwrap();
+        assert!(matches!(exited, Value(Repr::Unit)), "{exited}");
         assert_eq!(log.exit_code(), Some(3));
     }
 
@@ -325,8 +331,8 @@ mod tests {
     fn only_the_first_exit_is_recorded() {
         let (process, log) = fake(BTreeMap::new());
 
-        process.call("exit", vec![Value::Int(3)]).unwrap();
-        process.call("exit", vec![Value::Int(0)]).unwrap();
+        process.call("exit", vec![Value(Repr::Int(3))]).unwrap();
+        process.call("exit", vec![Value(Repr::Int(0))]).unwrap();
         assert_eq!(log.exit_code(), Some(3));
     }
 
@@ -487,7 +493,7 @@ mod tests {
         assert_eq!(strings(args), ["one"]);
 
         hosts
-            .call("process", "exit", vec![Value::Int(2)])
+            .call("process", "exit", vec![Value(Repr::Int(2))])
             .expect("the call should be allowed");
         assert_eq!(log.exit_code(), Some(2));
     }

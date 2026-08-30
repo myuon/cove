@@ -28,7 +28,7 @@ use cove_schema::builtins::{
 
 use crate::error::RuntimeError;
 use crate::shared::SharedCell;
-use crate::value::{InvalidKey, MapKey, RangeBounds, Value, VectorStorage};
+use crate::value::{InvalidKey, MapKey, RangeBounds, Repr, Value, VectorStorage};
 
 /// Type names a program may write as a namespace, such as `Vector.of`.
 ///
@@ -117,17 +117,17 @@ pub fn snapshot(
     span: Span,
 ) -> Result<Value, RuntimeError> {
     match value {
-        Value::Unit
-        | Value::Bool(_)
-        | Value::Int(_)
-        | Value::Float(_)
-        | Value::Duration(_)
-        | Value::Str(_)
-        | Value::Array(_)
-        | Value::Map(_)
-        | Value::Set(_)
-        | Value::Range { .. } => Ok(value.clone()),
-        Value::Vector(storage) => {
+        Value(Repr::Unit)
+        | Value(Repr::Bool(_))
+        | Value(Repr::Int(_))
+        | Value(Repr::Float(_))
+        | Value(Repr::Duration(_))
+        | Value(Repr::Str(_))
+        | Value(Repr::Array(_))
+        | Value(Repr::Map(_))
+        | Value(Repr::Set(_))
+        | Value(Repr::Range { .. }) => Ok(value.clone()),
+        Value(Repr::Vector(storage)) => {
             check_live(storage, "snapshot", span)?;
             let elements = storage.elements.borrow().clone();
             let mut snapshotted = Vec::with_capacity(elements.len());
@@ -207,11 +207,11 @@ pub fn call_assertion(
     let args = expect_args(name, args, schema.arity(), span)?;
     match name {
         "assert" => {
-            let Value::Bool(holds) = &args[0] else {
+            let Value(Repr::Bool(holds)) = &args[0] else {
                 return Err(declared_type_error(schema, 0, &args[0], span));
             };
             if *holds {
-                return Ok(Value::ok(Value::Unit));
+                return Ok(Value::ok(Value(Repr::Unit)));
             }
             Ok(assertion_failure(format!(
                 "assertion failed: `{}`",
@@ -232,7 +232,7 @@ pub fn call_assertion(
                 .with_rule("`==` means value equality between values of the same type."));
             }
             if args[0].eq_value(&args[1]) {
-                return Ok(Value::ok(Value::Unit));
+                return Ok(Value::ok(Value(Repr::Unit)));
             }
             Ok(assertion_failure(format!(
                 "assertion failed: `{}` is `{}`, expected `{}`",
@@ -298,9 +298,9 @@ pub fn call_constructor(
         // `Shared` is the one constructor that can refuse its payload: what
         // it wraps must be task-safe, since a `Shared` is reachable from
         // every task it was given to.
-        "Shared" => Value::Shared(SharedCell::wrap(&value, span)?),
+        "Shared" => Value(Repr::Shared(SharedCell::wrap(&value, span)?)),
         "Error" => match value {
-            Value::Str(message) => Value::error(message.to_string()),
+            Value(Repr::Str(message)) => Value::error(message.to_string()),
             other => {
                 return Err(declared_type_error(schema, 0, &other, span));
             }
@@ -328,7 +328,7 @@ pub fn call_associated(
         ("Map", "of") => {
             let mut map: BTreeMap<MapKey, Value> = BTreeMap::new();
             for arg in args.drain(..) {
-                let Value::Struct(entry) = &arg else {
+                let Value(Repr::Struct(entry)) = &arg else {
                     return Err(expects_map_entry(&arg, span));
                 };
                 if &*entry.type_name != MAP_ENTRY.name {
@@ -345,7 +345,7 @@ pub fn call_associated(
                     .clone();
                 map.insert(key, value);
             }
-            Ok(Value::Map(Rc::new(map)))
+            Ok(Value(Repr::Map(Rc::new(map))))
         }
         // `Set.of` rejects a duplicate element for the same reason `Map.of`
         // rejects a duplicate key.
@@ -357,7 +357,7 @@ pub fn call_associated(
                     return Err(duplicate_key_error("Set.of", "element", &key, span));
                 }
             }
-            Ok(Value::Set(Rc::new(set)))
+            Ok(Value(Repr::Set(Rc::new(set))))
         }
         // `Duration.millis(n)` and its five neighbours: the six duration
         // literal suffixes as functions, so a count a program computed
@@ -374,21 +374,21 @@ pub fn call_associated(
             let factor = duration_unit(unit).expect("the guard just asked");
             let what = format!("Duration.{unit}");
             let args = expect_args(&what, args, 1, span)?;
-            let Value::Int(count) = &args[0] else {
+            let Value(Repr::Int(count)) = &args[0] else {
                 return Err(type_error(&what, "count", "Int", &args[0], span));
             };
             let nanos = count
                 .checked_mul(factor)
                 .ok_or_else(|| crate::interp::overflow("duration arithmetic", span))?;
-            Ok(Value::Duration(nanos))
+            Ok(Value(Repr::Duration(nanos)))
         }
         ("Int", "parse") => {
             let args = expect_args("Int.parse", args, 1, span)?;
-            let Value::Str(text) = &args[0] else {
+            let Value(Repr::Str(text)) = &args[0] else {
                 return Err(type_error("Int.parse", "text", "String", &args[0], span));
             };
             Ok(match text.parse::<i64>() {
-                Ok(value) => Value::ok(Value::Int(value)),
+                Ok(value) => Value::ok(Value(Repr::Int(value))),
                 Err(_) => Value::err(Value::error(format!("`{text}` is not an Int"))),
             })
         }
@@ -401,7 +401,7 @@ pub fn call_associated(
         // separators, exactly as `parse::<i64>` above does.
         ("Int", "parseRadix") => {
             let args = expect_args("Int.parseRadix", args, 2, span)?;
-            let Value::Str(text) = &args[0] else {
+            let Value(Repr::Str(text)) = &args[0] else {
                 return Err(type_error(
                     "Int.parseRadix",
                     "text",
@@ -410,14 +410,14 @@ pub fn call_associated(
                     span,
                 ));
             };
-            let Value::Int(radix) = &args[1] else {
+            let Value(Repr::Int(radix)) = &args[1] else {
                 return Err(type_error("Int.parseRadix", "radix", "Int", &args[1], span));
             };
             let Some(radix) = (2..=36).contains(radix).then_some(*radix as u32) else {
                 return Err(radix_error(*radix, span));
             };
             Ok(match i64::from_str_radix(text, radix) {
-                Ok(value) => Value::ok(Value::Int(value)),
+                Ok(value) => Value::ok(Value(Repr::Int(value))),
                 Err(_) => Value::err(Value::error(format!(
                     "`{text}` is not an Int in radix {radix}"
                 ))),
@@ -429,7 +429,7 @@ pub fn call_associated(
         // no `Character` type for it to answer instead.
         ("String", "fromCodePoint") => {
             let args = expect_args("String.fromCodePoint", args, 1, span)?;
-            let Value::Int(code_point) = &args[0] else {
+            let Value(Repr::Int(code_point)) = &args[0] else {
                 return Err(type_error(
                     "String.fromCodePoint",
                     "codePoint",
@@ -447,11 +447,11 @@ pub fn call_associated(
         // not a new choice made here.
         ("Float", "parse") => {
             let args = expect_args("Float.parse", args, 1, span)?;
-            let Value::Str(text) = &args[0] else {
+            let Value(Repr::Str(text)) = &args[0] else {
                 return Err(type_error("Float.parse", "text", "String", &args[0], span));
             };
             Ok(match text.parse::<f64>() {
-                Ok(value) => Value::ok(Value::Float(value)),
+                Ok(value) => Value::ok(Value(Repr::Float(value))),
                 Err(_) => Value::err(Value::error(format!("`{text}` is not a Float"))),
             })
         }
@@ -481,22 +481,22 @@ pub fn call_method(
         }
     }
     match receiver {
-        Value::Array(items) => match name {
+        Value(Repr::Array(items)) => match name {
             "get" => Ok(index_of("Array.get", args, span)?
                 .and_then(|i| items.get(i).cloned())
                 .map(Value::some)
                 .unwrap_or_else(Value::none)),
             "length" => {
                 expect_args(name, args, 0, span)?;
-                Ok(Value::Int(items.len() as i64))
+                Ok(Value(Repr::Int(items.len() as i64)))
             }
             "isEmpty" => {
                 expect_args(name, args, 0, span)?;
-                Ok(Value::Bool(items.is_empty()))
+                Ok(Value(Repr::Bool(items.is_empty())))
             }
             "contains" => contains("Array.contains", items, args, span),
             "indexOf" => index_of_element("Array.indexOf", items, args, span),
-            "slice" => Ok(Value::Array(slice("Array.slice", items, args, span)?)),
+            "slice" => Ok(Value(Repr::Array(slice("Array.slice", items, args, span)?))),
             // `Vector.toArray` run backwards: a growable copy of these
             // elements that nothing else holds a handle to, so a `freeze()`
             // on it is the O(1) one. The elements are cloned as they are
@@ -513,13 +513,13 @@ pub fn call_method(
             }
             _ => Err(no_method("Array", name, span)),
         },
-        Value::Vector(storage) => {
+        Value(Repr::Vector(storage)) => {
             check_live(storage, name, span)?;
             match name {
                 "push" => {
                     let args = expect_args("push", args, 1, span)?;
                     storage.elements.borrow_mut().push(args.remove(0));
-                    Ok(Value::Unit)
+                    Ok(Value(Repr::Unit))
                 }
                 // Replaces the element at `index` and answers what was
                 // there, or answers `None` and writes nothing when `index`
@@ -584,15 +584,15 @@ pub fn call_method(
                 }
                 "slice" => {
                     let sliced = slice("Vector.slice", &storage.elements.borrow(), args, span)?;
-                    Ok(Value::Array(sliced))
+                    Ok(Value(Repr::Array(sliced)))
                 }
                 "length" => {
                     expect_args(name, args, 0, span)?;
-                    Ok(Value::Int(storage.len() as i64))
+                    Ok(Value(Repr::Int(storage.len() as i64)))
                 }
                 "isEmpty" => {
                     expect_args(name, args, 0, span)?;
-                    Ok(Value::Bool(storage.is_empty()))
+                    Ok(Value(Repr::Bool(storage.is_empty())))
                 }
                 "freeze" => {
                     expect_args("freeze", args, 0, span)?;
@@ -600,9 +600,9 @@ pub fn call_method(
                 }
                 "toArray" => {
                     expect_args("toArray", args, 0, span)?;
-                    Ok(Value::Array(
+                    Ok(Value(Repr::Array(
                         storage.elements.borrow().iter().cloned().collect(),
-                    ))
+                    )))
                 }
                 "map" | "filter" | "fold" | "sorted" => {
                     // The elements come out here, before the first callback,
@@ -616,7 +616,7 @@ pub fn call_method(
                 _ => Err(no_method("Vector", name, span)),
             }
         }
-        Value::Map(entries) => match name {
+        Value(Repr::Map(entries)) => match name {
             "get" => {
                 let args = expect_args("Map.get", args, 1, span)?;
                 let key = to_map_key("Map.get", "map key", &args[0], span)?;
@@ -629,25 +629,27 @@ pub fn call_method(
             "contains" => {
                 let args = expect_args("Map.contains", args, 1, span)?;
                 let key = to_map_key("Map.contains", "map key", &args[0], span)?;
-                Ok(Value::Bool(entries.contains_key(&key)))
+                Ok(Value(Repr::Bool(entries.contains_key(&key))))
             }
             "length" => {
                 expect_args(name, args, 0, span)?;
-                Ok(Value::Int(entries.len() as i64))
+                Ok(Value(Repr::Int(entries.len() as i64)))
             }
             "isEmpty" => {
                 expect_args(name, args, 0, span)?;
-                Ok(Value::Bool(entries.is_empty()))
+                Ok(Value(Repr::Bool(entries.is_empty())))
             }
             // Ascending key order, matching the `BTreeMap` storage and the
             // order `for` iterates.
             "keys" => {
                 expect_args(name, args, 0, span)?;
-                Ok(Value::Array(entries.keys().map(MapKey::to_value).collect()))
+                Ok(Value(Repr::Array(
+                    entries.keys().map(MapKey::to_value).collect(),
+                )))
             }
             "values" => {
                 expect_args(name, args, 0, span)?;
-                Ok(Value::Array(entries.values().cloned().collect()))
+                Ok(Value(Repr::Array(entries.values().cloned().collect())))
             }
             // `Map` is immutable, so `inserted`/`removed` return a new map
             // rather than write through `entries`; the past-participle names
@@ -658,73 +660,77 @@ pub fn call_method(
                 let key = to_map_key("Map.inserted", "map key", &args[0], span)?;
                 let mut next = (**entries).clone();
                 next.insert(key, value);
-                Ok(Value::Map(Rc::new(next)))
+                Ok(Value(Repr::Map(Rc::new(next))))
             }
             "removed" => {
                 let args = expect_args("Map.removed", args, 1, span)?;
                 let key = to_map_key("Map.removed", "map key", &args[0], span)?;
                 let mut next = (**entries).clone();
                 next.remove(&key);
-                Ok(Value::Map(Rc::new(next)))
+                Ok(Value(Repr::Map(Rc::new(next))))
             }
             _ => Err(no_method("Map", name, span)),
         },
-        Value::Set(items) => match name {
+        Value(Repr::Set(items)) => match name {
             "contains" => {
                 let args = expect_args("Set.contains", args, 1, span)?;
                 let key = to_map_key("Set.contains", "set element", &args[0], span)?;
-                Ok(Value::Bool(items.contains(&key)))
+                Ok(Value(Repr::Bool(items.contains(&key))))
             }
             "length" => {
                 expect_args(name, args, 0, span)?;
-                Ok(Value::Int(items.len() as i64))
+                Ok(Value(Repr::Int(items.len() as i64)))
             }
             "isEmpty" => {
                 expect_args(name, args, 0, span)?;
-                Ok(Value::Bool(items.is_empty()))
+                Ok(Value(Repr::Bool(items.is_empty())))
             }
             "toArray" => {
                 expect_args(name, args, 0, span)?;
-                Ok(Value::Array(items.iter().map(MapKey::to_value).collect()))
+                Ok(Value(Repr::Array(
+                    items.iter().map(MapKey::to_value).collect(),
+                )))
             }
             "inserted" => {
                 let args = expect_args("Set.inserted", args, 1, span)?;
                 let key = to_map_key("Set.inserted", "set element", &args[0], span)?;
                 let mut next = (**items).clone();
                 next.insert(key);
-                Ok(Value::Set(Rc::new(next)))
+                Ok(Value(Repr::Set(Rc::new(next))))
             }
             "removed" => {
                 let args = expect_args("Set.removed", args, 1, span)?;
                 let key = to_map_key("Set.removed", "set element", &args[0], span)?;
                 let mut next = (**items).clone();
                 next.remove(&key);
-                Ok(Value::Set(Rc::new(next)))
+                Ok(Value(Repr::Set(Rc::new(next))))
             }
             _ => Err(no_method("Set", name, span)),
         },
-        Value::Str(text) => match name {
+        Value(Repr::Str(text)) => match name {
             "length" => {
                 expect_args(name, args, 0, span)?;
-                Ok(Value::Int(text.chars().count() as i64))
+                Ok(Value(Repr::Int(text.chars().count() as i64)))
             }
             "isEmpty" => {
                 expect_args(name, args, 0, span)?;
-                Ok(Value::Bool(text.is_empty()))
+                Ok(Value(Repr::Bool(text.is_empty())))
             }
             "words" => {
                 expect_args(name, args, 0, span)?;
-                Ok(Value::Array(
+                Ok(Value(Repr::Array(
                     text.split_ascii_whitespace()
-                        .map(|w| Value::Str(w.into()))
+                        .map(|w| Value(Repr::Str(w.into())))
                         .collect(),
-                ))
+                )))
             }
             "chars" => {
                 expect_args(name, args, 0, span)?;
-                Ok(Value::Array(
-                    text.chars().map(|c| Value::Str(one_character(c))).collect(),
-                ))
+                Ok(Value(Repr::Array(
+                    text.chars()
+                        .map(|c| Value(Repr::Str(one_character(c))))
+                        .collect(),
+                )))
             }
             "split" => {
                 let args = expect_args("String.split", args, 1, span)?;
@@ -737,15 +743,15 @@ pub fn call_method(
                         span,
                     ));
                 }
-                Ok(Value::Array(
+                Ok(Value(Repr::Array(
                     text.split(separator)
-                        .map(|part| Value::Str(part.into()))
+                        .map(|part| Value(Repr::Str(part.into())))
                         .collect(),
-                ))
+                )))
             }
             "join" => {
                 let args = expect_args("String.join", args, 1, span)?;
-                let Value::Array(parts) = &args[0] else {
+                let Value(Repr::Array(parts)) = &args[0] else {
                     return Err(type_error(
                         "String.join",
                         "parts",
@@ -761,44 +767,44 @@ pub fn call_method(
                     }
                     joined.push_str(expect_str("String.join", "parts", part, span)?);
                 }
-                Ok(Value::Str(joined.into()))
+                Ok(Value(Repr::Str(joined.into())))
             }
             "slice" => {
                 let args = expect_args("String.slice", args, 2, span)?;
-                let Value::Int(from) = &args[0] else {
+                let Value(Repr::Int(from)) = &args[0] else {
                     return Err(type_error("String.slice", "from", "Int", &args[0], span));
                 };
-                let Value::Int(to) = &args[1] else {
+                let Value(Repr::Int(to)) = &args[1] else {
                     return Err(type_error("String.slice", "to", "Int", &args[1], span));
                 };
                 let chars: Vec<char> = text.chars().collect();
                 let len = chars.len() as i64;
                 let from = (*from).clamp(0, len) as usize;
                 let to = (*to).clamp(0, len) as usize;
-                Ok(Value::Str(if to <= from {
+                Ok(Value(Repr::Str(if to <= from {
                     "".into()
                 } else {
                     chars[from..to].iter().collect::<String>().into()
-                }))
+                })))
             }
             "trim" => {
                 expect_args(name, args, 0, span)?;
-                Ok(Value::Str(text.trim().into()))
+                Ok(Value(Repr::Str(text.trim().into())))
             }
             "contains" => {
                 let args = expect_args("String.contains", args, 1, span)?;
                 let needle = expect_str("String.contains", "text", &args[0], span)?;
-                Ok(Value::Bool(text.contains(needle)))
+                Ok(Value(Repr::Bool(text.contains(needle))))
             }
             "startsWith" => {
                 let args = expect_args("String.startsWith", args, 1, span)?;
                 let prefix = expect_str("String.startsWith", "prefix", &args[0], span)?;
-                Ok(Value::Bool(text.starts_with(prefix)))
+                Ok(Value(Repr::Bool(text.starts_with(prefix))))
             }
             "endsWith" => {
                 let args = expect_args("String.endsWith", args, 1, span)?;
                 let suffix = expect_str("String.endsWith", "suffix", &args[0], span)?;
-                Ok(Value::Bool(text.ends_with(suffix)))
+                Ok(Value(Repr::Bool(text.ends_with(suffix))))
             }
             "indexOf" => {
                 let args = expect_args("String.indexOf", args, 1, span)?;
@@ -808,7 +814,7 @@ pub fn call_method(
                     // are counted to convert that into the character index
                     // `length()` already counts in.
                     Some(byte_index) => {
-                        Value::some(Value::Int(text[..byte_index].chars().count() as i64))
+                        Value::some(Value(Repr::Int(text[..byte_index].chars().count() as i64)))
                     }
                     None => Value::none(),
                 })
@@ -825,53 +831,53 @@ pub fn call_method(
                     ));
                 }
                 let new = expect_str("String.replace", "new", &args[1], span)?;
-                Ok(Value::Str(text.replace(old, new).into()))
+                Ok(Value(Repr::Str(text.replace(old, new).into())))
             }
             "toUpper" => {
                 expect_args(name, args, 0, span)?;
-                Ok(Value::Str(text.to_uppercase().into()))
+                Ok(Value(Repr::Str(text.to_uppercase().into())))
             }
             "toLower" => {
                 expect_args(name, args, 0, span)?;
-                Ok(Value::Str(text.to_lowercase().into()))
+                Ok(Value(Repr::Str(text.to_lowercase().into())))
             }
             _ => Err(no_method("String", name, span)),
         },
-        Value::Range {
+        Value(Repr::Range {
             start,
             end,
             inclusive_end,
-        } => {
+        }) => {
             let bounds = RangeBounds::of(*start, *end, *inclusive_end);
             match name {
                 "length" => {
                     expect_args(name, args, 0, span)?;
-                    Ok(Value::Int(bounds.len()))
+                    Ok(Value(Repr::Int(bounds.len())))
                 }
                 "isEmpty" => {
                     expect_args(name, args, 0, span)?;
-                    Ok(Value::Bool(bounds.is_empty()))
+                    Ok(Value(Repr::Bool(bounds.is_empty())))
                 }
                 "contains" => {
                     let args = expect_args("contains", args, 1, span)?;
-                    let Value::Int(value) = &args[0] else {
+                    let Value(Repr::Int(value)) = &args[0] else {
                         return Err(type_error("Range.contains", "value", "Int", &args[0], span));
                     };
-                    Ok(Value::Bool(bounds.contains(*value)))
+                    Ok(Value(Repr::Bool(bounds.contains(*value))))
                 }
                 _ => Err(no_method("Range", name, span)),
             }
         }
-        Value::Enum(value) if &*value.type_name == OPTION.name => {
+        Value(Repr::Enum(value)) if &*value.type_name == OPTION.name => {
             let some = &*value.case == SOME_CASE.name;
             match name {
                 "isSome" => {
                     expect_args(name, args, 0, span)?;
-                    Ok(Value::Bool(some))
+                    Ok(Value(Repr::Bool(some)))
                 }
                 "isNone" => {
                     expect_args(name, args, 0, span)?;
-                    Ok(Value::Bool(!some))
+                    Ok(Value(Repr::Bool(!some)))
                 }
                 "unwrapOr" => {
                     let args = expect_args("unwrapOr", args, 1, span)?;
@@ -883,16 +889,16 @@ pub fn call_method(
                 _ => Err(no_method("Option", name, span)),
             }
         }
-        Value::Enum(value) if &*value.type_name == RESULT.name => {
+        Value(Repr::Enum(value)) if &*value.type_name == RESULT.name => {
             let ok = &*value.case == OK_CASE.name;
             match name {
                 "isOk" => {
                     expect_args(name, args, 0, span)?;
-                    Ok(Value::Bool(ok))
+                    Ok(Value(Repr::Bool(ok)))
                 }
                 "isError" => {
                     expect_args(name, args, 0, span)?;
-                    Ok(Value::Bool(!ok))
+                    Ok(Value(Repr::Bool(!ok)))
                 }
                 // `Option.unwrapOr` above, with `Ok` where it has `Some`.
                 // The error an `Err` carries is dropped rather than passed
@@ -912,7 +918,7 @@ pub fn call_method(
                     if ok {
                         return Ok(receiver.clone());
                     }
-                    let error = value.payload.first().cloned().unwrap_or(Value::Unit);
+                    let error = value.payload.first().cloned().unwrap_or(Value(Repr::Unit));
                     // The Language Card writes `mapError { ... }` with a trailing
                     // closure that may ignore the error it replaces. `args` is
                     // empty here — the callback was removed from it — so it is
@@ -926,70 +932,72 @@ pub fn call_method(
                 _ => Err(no_method("Result", name, span)),
             }
         }
-        Value::Int(n) => match name {
+        Value(Repr::Int(n)) => match name {
             "toFloat" => {
                 expect_args(name, args, 0, span)?;
-                Ok(Value::Float(*n as f64))
+                Ok(Value(Repr::Float(*n as f64)))
             }
             "abs" => {
                 expect_args(name, args, 0, span)?;
-                Ok(Value::Int(
+                Ok(Value(Repr::Int(
                     n.checked_abs()
                         .ok_or_else(|| crate::interp::overflow("abs", span))?,
-                ))
+                )))
             }
             "min" => {
                 let args = expect_args("Int.min", args, 1, span)?;
-                let Value::Int(other) = &args[0] else {
+                let Value(Repr::Int(other)) = &args[0] else {
                     return Err(type_error("Int.min", "other", "Int", &args[0], span));
                 };
-                Ok(Value::Int((*n).min(*other)))
+                Ok(Value(Repr::Int((*n).min(*other))))
             }
             "max" => {
                 let args = expect_args("Int.max", args, 1, span)?;
-                let Value::Int(other) = &args[0] else {
+                let Value(Repr::Int(other)) = &args[0] else {
                     return Err(type_error("Int.max", "other", "Int", &args[0], span));
                 };
-                Ok(Value::Int((*n).max(*other)))
+                Ok(Value(Repr::Int((*n).max(*other))))
             }
             _ => Err(no_method("Int", name, span)),
         },
-        Value::Float(x) => match name {
+        Value(Repr::Float(x)) => match name {
             "toInt" => {
                 expect_args(name, args, 0, span)?;
                 Ok(float_to_int(*x))
             }
             "round" => {
                 expect_args(name, args, 0, span)?;
-                Ok(Value::Float(x.round()))
+                Ok(Value(Repr::Float(x.round())))
             }
             "abs" => {
                 expect_args(name, args, 0, span)?;
-                Ok(Value::Float(x.abs()))
+                Ok(Value(Repr::Float(x.abs())))
             }
             "min" => {
                 let args = expect_args("Float.min", args, 1, span)?;
-                let Value::Float(other) = &args[0] else {
+                let Value(Repr::Float(other)) = &args[0] else {
                     return Err(type_error("Float.min", "other", "Float", &args[0], span));
                 };
-                Ok(Value::Float(x.min(*other)))
+                Ok(Value(Repr::Float(x.min(*other))))
             }
             "max" => {
                 let args = expect_args("Float.max", args, 1, span)?;
-                let Value::Float(other) = &args[0] else {
+                let Value(Repr::Float(other)) = &args[0] else {
                     return Err(type_error("Float.max", "other", "Float", &args[0], span));
                 };
-                Ok(Value::Float(x.max(*other)))
+                Ok(Value(Repr::Float(x.max(*other))))
             }
             "format" => {
                 let args = expect_args("Float.format", args, 1, span)?;
-                let Value::Int(digits) = &args[0] else {
+                let Value(Repr::Int(digits)) = &args[0] else {
                     return Err(type_error("Float.format", "digits", "Int", &args[0], span));
                 };
                 if !(0..=17).contains(digits) {
                     return Err(format_digits_error(*digits, span));
                 }
-                Ok(Value::Str(format!("{:.*}", *digits as usize, x).into()))
+                Ok(Value(Repr::Str(
+                    format!("{:.*}", *digits as usize, x).into(),
+                )))
             }
             _ => Err(no_method("Float", name, span)),
         },
@@ -999,10 +1007,10 @@ pub fn call_method(
         // `(-1500ms).seconds()` is -1, and `d.seconds()` is
         // `d.nanos() / 1_000_000_000` whichever way a program asks. None can
         // fail: dividing a count that fits leaves a count that fits.
-        Value::Duration(ns) => match duration_unit(name) {
+        Value(Repr::Duration(ns)) => match duration_unit(name) {
             Some(factor) => {
                 expect_args(name, args, 0, span)?;
-                Ok(Value::Int(ns / factor))
+                Ok(Value(Repr::Int(ns / factor)))
             }
             None => Err(no_method("Duration", name, span)),
         },
@@ -1101,7 +1109,7 @@ fn walk_with(
                 args.push(item);
                 mapped.push(host.call_value(&transform, args, span)?);
             }
-            Ok(Value::Array(mapped.into()))
+            Ok(Value(Repr::Array(mapped.into())))
         }
         "filter" => {
             let args = expect_args(&method, args, 1, span)?;
@@ -1115,7 +1123,7 @@ fn walk_with(
                     kept.push(item);
                 }
             }
-            Ok(Value::Array(kept.into()))
+            Ok(Value(Repr::Array(kept.into())))
         }
         "fold" => {
             let args = expect_args(&method, args, 2, span)?;
@@ -1128,7 +1136,7 @@ fn walk_with(
                 // slice of something the caller still owns. What is left
                 // behind is never read: the next statement either overwrites
                 // it or leaves the loop with an error.
-                args.push(std::mem::replace(&mut total, Value::Unit));
+                args.push(std::mem::replace(&mut total, Value(Repr::Unit)));
                 args.push(item);
                 total = host.call_value(&step, args, span)?;
             }
@@ -1138,9 +1146,9 @@ fn walk_with(
             let args = expect_args(&method, args, 1, span)?;
             let by = args.remove(0);
             expect_callback(host, &method, "by", "fn(T, T) -> Bool", 2, &by, span)?;
-            Ok(Value::Array(
+            Ok(Value(Repr::Array(
                 merge_sort(host, &method, elements, &by, args, span)?.into(),
-            ))
+            )))
         }
         // Only the four names above are routed here, and the shared table is
         // what says which four. Answering the way an unknown method is
@@ -1254,7 +1262,7 @@ fn callback_bool(
     span: Span,
 ) -> Result<bool, RuntimeError> {
     match value {
-        Value::Bool(answer) => Ok(*answer),
+        Value(Repr::Bool(answer)) => Ok(*answer),
         other => Err(RuntimeError::new(format!(
             "`{method}` expects `{parameter}` to answer a `Bool`, but found `{}`",
             other.type_name()
@@ -1284,7 +1292,7 @@ pub fn freeze(storage: &Rc<VectorStorage>, span: Span) -> Result<Value, RuntimeE
     }
     let elements = storage.elements.take();
     *storage.frozen.borrow_mut() = true;
-    Ok(Value::Array(elements.into()))
+    Ok(Value(Repr::Array(elements.into())))
 }
 
 /// A vector consumed by `freeze()` is no longer usable.
@@ -1317,9 +1325,9 @@ fn contains(
     span: Span,
 ) -> Result<Value, RuntimeError> {
     let args = expect_args(method, args, 1, span)?;
-    Ok(Value::Bool(
+    Ok(Value(Repr::Bool(
         items.iter().any(|item| item.eq_value(&args[0])),
-    ))
+    )))
 }
 
 /// `indexOf(element)` on a sequence: the first position holding a value `==`
@@ -1339,7 +1347,7 @@ fn index_of_element(
     Ok(items
         .iter()
         .position(|item| item.eq_value(&args[0]))
-        .map(|at| Value::some(Value::Int(at as i64)))
+        .map(|at| Value::some(Value(Repr::Int(at as i64))))
         .unwrap_or_else(Value::none))
 }
 
@@ -1361,7 +1369,7 @@ fn slice(
         return Err(arity_error(method, 2, args.len(), span));
     }
     let bound = |at: usize, parameter: &str| match &args[at] {
-        Value::Int(index) => Ok((*index).clamp(0, items.len() as i64) as usize),
+        Value(Repr::Int(index)) => Ok((*index).clamp(0, items.len() as i64) as usize),
         other => Err(type_error(method, parameter, "Int", other, span)),
     };
     let from = bound(0, "from")?;
@@ -1377,8 +1385,8 @@ fn index_of(method: &str, args: &[Value], span: Span) -> Result<Option<usize>, R
         return Err(arity_error(method, 1, args.len(), span));
     }
     match &args[0] {
-        Value::Int(i) if *i >= 0 => Ok(Some(*i as usize)),
-        Value::Int(_) => Ok(None),
+        Value(Repr::Int(i)) if *i >= 0 => Ok(Some(*i as usize)),
+        Value(Repr::Int(_)) => Ok(None),
         other => Err(type_error(method, "index", "Int", other, span)),
     }
 }
@@ -1440,7 +1448,7 @@ fn float_to_int(x: f64) -> Value {
             "`Float.toInt` cannot convert `{x}`, which is outside Int's range"
         )));
     }
-    Value::ok(Value::Int(truncated as i64))
+    Value::ok(Value(Repr::Int(truncated as i64)))
 }
 
 /// `String.fromCodePoint`: the one-character `String` a code point names, and
@@ -1462,7 +1470,7 @@ fn from_code_point(code_point: i64) -> Value {
         )));
     }
     match u32::try_from(code_point).ok().and_then(char::from_u32) {
-        Some(character) => Value::ok(Value::Str(one_character(character))),
+        Some(character) => Value::ok(Value(Repr::Str(one_character(character)))),
         None => Value::err(Value::error(format!(
             "`{code_point}` is not a Unicode code point"
         ))),
@@ -1530,7 +1538,7 @@ fn expect_str<'a>(
     span: Span,
 ) -> Result<&'a str, RuntimeError> {
     match value {
-        Value::Str(text) => Ok(text),
+        Value(Repr::Str(text)) => Ok(text),
         other => Err(type_error(method, parameter, "String", other, span)),
     }
 }
