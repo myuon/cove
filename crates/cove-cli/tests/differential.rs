@@ -20,9 +20,14 @@
 //! 0012 ranks the oracle above a backend and a backend that disagrees with
 //! the oracle is wrong.
 //!
-//! Two assertions make this a ratchet rather than a report: everything that
-//! lowers agrees, and the number of cases that lower never falls below
-//! [`LOWERED_FLOOR`].
+//! Three assertions make this a ratchet rather than a report: everything
+//! that lowers agrees; the number of cases that lower never falls below
+//! [`LOWERED_FLOOR`]; and the refusals are exactly the ones
+//! [`REGISTERED_REFUSALS`] names. The last is there because the first two
+//! are about a count, and a count cannot tell a new refusal from an old one
+//! — a language feature the checker accepts and the lowering refuses widens
+//! the gap ADR 0022 documents without lowering the number of cases that
+//! lower, and may raise it.
 //!
 //! # A case is a program, not a package
 //!
@@ -535,7 +540,53 @@ use cove_sema::resolve::Program as Checked;
 /// `examples/life/options.cove` as the default `--ticks`, pinned by a
 /// `test fn` that says why, rather than in [`smaller_workload`] — a case
 /// whose own default is what a test can afford needs no second size.
-const LOWERED_FLOOR: usize = 96;
+///
+/// 96 to 97: one case, no construct, and nothing about the VM at all.
+/// `tests/e2e:flow_break_ends_line` was written for a parser fix — a `break`
+/// and a `return` end at the end of the line they are written on — and it
+/// lowered on the day it was written, because a statement boundary is
+/// decided before anything reaches the lowering. The corpus grew by two in
+/// the same stretch and this is the one that counts: `fail_variadic_shape`
+/// is the other, and it pins two new check-time diagnostics, so it does not
+/// check and there is nothing in it to run.
+const LOWERED_FLOOR: usize = 97;
+
+/// Every refusal the corpus is allowed to hold: the case, and the construct
+/// the lowering named when it refused it.
+///
+/// [`LOWERED_FLOOR`] is a ratchet on a *number*, and a number cannot say
+/// which construct a case was refused for. That leaves it blind in the
+/// direction this project is most likely to move: a language feature the
+/// checker accepts and the lowering refuses arrives as a *new* refusal
+/// beside the old ones, and the count of what lowers does not fall — it
+/// rises, if the feature also brought a case that lowers. ADR 0022 calls
+/// that gap the real cost of making the VM the default, so the floor says
+/// coverage never falls and this says the gap never widens without somebody
+/// deciding that it should.
+///
+/// Adding a line here is that decision, and it is meant to be an awkward
+/// one: what reaches this list has passed `cove check` and then been refused
+/// by the backend every `cove` command runs, so a Cove program that is right
+/// in every way the checker can see does not run. The construct is written
+/// out rather than referred to, because the words the lowering chose are
+/// what a user is shown.
+///
+/// Removing a line is the same act in the other direction, and it happens in
+/// the change that lowers the construct, beside the floor rising.
+///
+/// Kept sorted, and compared as a whole rather than as a bound: a refusal
+/// that disappears fails this too, because a construct that quietly stopped
+/// being refused is a coverage claim nobody wrote down.
+const REGISTERED_REFUSALS: &[(&str, &str)] = &[
+    (
+        "tests/e2e/backend_ast:backend_ast",
+        "a function declared inside a function body",
+    ),
+    (
+        "tests/e2e/backend_unsupported:backend_unsupported",
+        "a function declared inside a function body",
+    ),
+];
 
 // ------------------------------------------------------------------ the test
 
@@ -568,6 +619,22 @@ fn both_backends_agree_wherever_the_lowering_reaches() {
         "the lowering covered {} case(s), which is below the floor of {LOWERED_FLOOR}; \
          coverage may rise but never fall\n\n{summary}",
         report.lowered.len()
+    );
+
+    let mut refused: Vec<(&str, &str)> = report
+        .refused
+        .iter()
+        .map(|(case, what)| (case.as_str(), what.as_str()))
+        .collect();
+    refused.sort_unstable();
+    let mut registered = REGISTERED_REFUSALS.to_vec();
+    registered.sort_unstable();
+    assert_eq!(
+        refused, registered,
+        "the refusals the corpus holds are not the ones `REGISTERED_REFUSALS` \
+         registers; a construct the checker accepts and the default backend \
+         refuses is registered by somebody who decided to, or it is not \
+         refused at all\n{summary}"
     );
 }
 
