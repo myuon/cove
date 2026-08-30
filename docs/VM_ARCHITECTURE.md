@@ -1860,8 +1860,107 @@ before it could be claimed; the site is `Interpreter::call_target`'s own
 
 What is left on the call path is two acquisitions a turn, one at the call and
 one at the return, and they are still the largest single cost `benches/call`
-has. That is a target rather than a finding, and "The cliffs" below says what
-it would take.
+has. That was a target rather than a finding when this section was written.
+The section below is what became of it.
+
+### The other two acquisitions are gone, and the counters are atomics
+
+[Issue #182](https://github.com/myuon/cove/issues/182) asked what the mutex was
+protecting, and the answer was: nothing that needed a mutex. Per safepoint a
+`Budget` adds to `fuel_spent`, reads the run's cancellation, compares against a
+fuel limit fixed before the run began, and every `DEADLINE_CHECK_INTERVAL`th
+time reads a clock that started before the run began. The cancellation was
+already an atomic flag. `limits` and `started_at` are immutable for a run.
+`fuel_spent` and the deadline tick were plain integers *because the struct
+holding them was reached by `&mut`*, and for no other reason.
+
+So they are `AtomicU64`s now, `Budget::safepoint` takes `&self`, and the whole
+of the accounting lives in one `Arc<Accounting>` that every thread of the run
+shares. `crate::budget::Meter` is the handle onto it: a backend takes one where
+a run begins — `Vm::new`, `Interpreter::new`, and again in `invoke_within` and
+`run_entry_within` after the budget they were handed is installed — and charges
+through it at every safepoint after that with no lock at all.
+`HostRegistry::with_budget` still exists and still locks; what is left behind it
+is installing a budget, reading the counters back for `--stats`, and the two
+charges that are not per-instruction (a host call, a spawn).
+
+**Nothing about the schedule moves.** `SAFEPOINT_INTERVAL`, `BACK_EDGE_FUEL`,
+`SAFEPOINT_FUEL` and `DEADLINE_CHECK_INTERVAL` are unchanged, which matters
+because ADR 0024 states each stop as a bound in those constants' arithmetic. The
+order of the three questions inside a safepoint is unchanged, so which stop is
+reported is unchanged. Fuel is still counted before anything can refuse, which
+is ADR 0024's "pending fuel is never lost". A Host call is still a stop point
+for all three flags and for the deadline and `max_host_calls`, which is the
+other half of the same decision — issue #120 found real faults in both of those
+and `crates/cove-runtime/tests/responsiveness.rs` still measures them.
+
+**The VM, medians of fifteen against a baseline recorded at `6d53791`, with the
+95% percentile-bootstrap interval on the median shift:**
+
+| bench       | at `6d53791` | with this |      shift |     95% interval |
+| ----------- | -----------: | --------: | ---------: | ---------------: |
+| `call`      |       236 ms |    153 ms | **-35.1%** | -35.5% to -34.2% |
+| `method`    |       812 ms |    646 ms | **-20.4%** | -20.9% to -20.2% |
+| `pure`      |      2.37 ms |   1.35 ms | **-43.2%** | -44.1% to -41.2% |
+| `field`     |       432 ms |    423 ms |  **-2.0%** |   -2.4% to -0.9% |
+| `arith`     |      86.0 ms |   77.8 ms |  **-9.6%** |  -10.1% to -9.2% |
+| `arrayget`  |       666 ms |    652 ms |  **-2.2%** |   -2.7% to -1.6% |
+| `chars`     |       818 ms |    805 ms |  **-1.6%** |   -2.2% to -0.9% |
+| `hostheavy` |      3.80 ms |   3.89 ms |  **+2.4%** |     0.7% to 3.8% |
+
+**The interpreter, the same run:**
+
+| bench       | at `6d53791` | with this |      shift |     95% interval |
+| ----------- | -----------: | --------: | ---------: | ---------------: |
+| `call`      |      1531 ms |   1368 ms | **-10.7%** | -10.9% to -10.3% |
+| `method`    |      2780 ms |   2589 ms |  **-6.9%** |   -7.4% to -6.6% |
+| `pure`      |      15.5 ms |   14.1 ms |  **-9.4%** |   -9.8% to -8.4% |
+| `field`     |       829 ms |    778 ms |  **-6.1%** |   -6.3% to -4.2% |
+| `arith`     |       429 ms |    363 ms | **-15.4%** | -16.4% to -15.1% |
+| `arrayget`  |      1492 ms |   1431 ms |  **-4.1%** |   -4.5% to -3.4% |
+| `chars`     |      1916 ms |   1880 ms |  **-1.9%** |   -2.1% to -0.9% |
+| `hostheavy` |      4.94 ms |   4.86 ms |  **-1.7%** |   -2.7% to -0.8% |
+
+Four readings.
+
+**`call` captured 35.1% of the ablation's 40.3% ceiling, and `pure` more than
+that.** The ceiling was measured by removing the lock *and the accounting*
+together, and the accounting is still here — a `fetch_add`, two compares, and
+the branch that picks one safepoint in sixty-four to read a clock at. What the
+gap between 35.1% and 40.3% prices is that remainder, which is the honest
+reading of a partial capture and is why this section does not claim the whole
+of it.
+
+**`field` moved 2.0%, where the ceiling was 5.8%.** `field`'s loop calls
+nothing, so the two acquisitions a call and a return cost were never its to
+save; what it has is back edges, and a back edge already waited for
+`BACK_EDGE_FUEL` to gather. That the interval excludes zero at all is the
+useful part, and the size of it is inside the band this document records for
+layout alone.
+
+**The interpreter moved as much as the VM did, and it was not the target.**
+Nothing about the tree walk changed except which side of the lock its
+`charge_safepoint` and its `max_call_depth` read are on, and `arith` on the AST
+backend is 15.4% faster for it. That is the same lock, at the same
+schedule, on a backend that charges a fixed amount per safepoint rather than in
+blocks — so it takes the lock *more* often per unit of work, and it is the row
+that shows the acquisition's own cost most plainly.
+
+**`hostheavy` on the VM went the other way, 2.4% slower with an interval of
+0.7% to 3.8%.** It is the one benchmark dominated by the path that still locks,
+so there is nothing here for it to win, and `host.rs` gained a method — which
+[#179](https://github.com/myuon/cove/issues/179) says is enough on its own to
+move a benchmark that never executes it. `startup` on the interpreter is the
+other row that moved the wrong way, 2.8% with an interval of 1.5% to 6.1%, and
+it times a process from `exec` to exit with a few milliseconds of Cove in it.
+An interval says a difference is real; it does not say the difference is the
+change. Both are recorded rather than explained away, and they are the rows a
+reader should be most suspicious of.
+
+The whole run is nineteen rows: fifteen improvements, two inside the noise, the
+two above. The widest interval that did not clear zero is `startup` on the VM at
+-3.4% to +1.9%, so a regression larger than that anywhere in the suite would
+have been seen.
 
 ### The profiler, the trace, and `--stats` itself
 
@@ -2076,6 +2175,38 @@ million turns.
 Ordered by cost rather than by the order the issue names them, because what
 the table is for is the distance between two neighbours.
 
+**That table was recorded before [#182](https://github.com/myuon/cove/issues/182)
+removed the budget's mutex from the safepoint, and every row of it moved.** The
+same command on the build that removed it:
+
+| row            |   median |     min |     max | vs base | instructions | per turn | ns/turn |
+| -------------- | -------: | ------: | ------: | ------: | -----------: | -------: | ------: |
+| `conv_local`   |  84.2 ms |   83.3  |   88.3  |   1.00× |   35,142,879 |     17.6 |    42.1 |
+| `conv_var`     | 113.3 ms |  112.0  |  115.4  |   1.35× |   39,142,890 |     19.6 |    56.7 |
+| `conv_static`  | 153.5 ms |  152.0  |  158.0  |   1.82× |   37,142,877 |     18.6 |    76.8 |
+| `conv_generic` | 185.7 ms |  184.1  |  210.1  |   2.21× |   41,142,877 |     20.6 |    92.8 |
+| `conv_fnvalue` | 225.8 ms |  224.3  |  228.1  |   2.68× |   43,142,879 |     21.6 |   112.9 |
+| `conv_closure` | 226.1 ms |  223.4  |  226.6  |   2.69× |   43,142,879 |     21.6 |   113.0 |
+| `conv_capture` | 275.0 ms |  273.4  |  282.9  |   3.27× |   53,142,883 |     26.6 |   137.5 |
+| `conv_fresh`   | 700.0 ms |  693.3  |  716.1  |   8.31× |   47,142,877 |     23.6 |   350.0 |
+| `conv_host`    | 2418 ms  | 2373    | 2427    |  28.72× |   51,142,877 |     25.6 |  1209.2 |
+
+Every instruction count is identical, which is the check that nothing about
+what these rows *do* changed. What changed is the constant under every call and
+every return.
+
+The prose below is written against the recorded run and is left as written,
+because it is about representation and the questions it answers do not move:
+what a `var` root costs, what reaching a function through a value costs, what a
+capture costs, what a Host callback costs. Two of its *numbers* now read
+differently and are worth re-reading rather than patching. The boundary
+decomposition inverts — two crossings are 16.0 ns a turn against the
+indirection's 20.2, where they were 21.4 against 16.3 — and its closing
+sentence, that both "are smaller than the lock at the same call", is no longer
+a sentence about anything, because there is no lock at the call. Re-reading the
+matrix against the new constant is its own exercise and belongs to whoever asks
+the next question of it.
+
 ### What each row runs, rather than what it costs
 
 The counts below come from a scratch build and their wall times must not be
@@ -2133,34 +2264,28 @@ for a reason about representation rather than about work. Four of the eight
 gaps qualify, and the largest of them is not about representation at all,
 which is the result this whole exercise turns on.
 
-**A call costs 2.53× a loop turn, for one more instruction, and the reason is
-the budget's lock.** `conv_static` runs 18.6 instructions a turn against
-`conv_local`'s 17.6 and takes 71.8 ns longer. Nothing about representation
-changed between the two rows: the argument is a scalar slot, the answer comes
-back on the scalar stack, and the count says so by not moving. What happens is
-two safepoints, and each is an acquisition of the mutex the run's `Budget`
-lives behind. The ablation above puts 40.3% of `benches/call` there and the
-profile puts 36% there, and one of the three acquisitions has since been
-removed, which is where `call`'s 16.6% came from.
+**A call cost 2.53× a loop turn, for one more instruction, and the reason was
+the budget's lock — which is gone.** `conv_static` ran 18.6 instructions a turn
+against `conv_local`'s 17.6 and took 71.8 ns longer. Nothing about
+representation changed between the two rows: the argument is a scalar slot, the
+answer comes back on the scalar stack, and the count says so by not moving.
+What happened was two safepoints, and each was an acquisition of the mutex the
+run's `Budget` lived behind. The ablation above put 40.3% of `benches/call`
+there and the profile put 36% there.
 
-This is the largest cliff in the matrix that anything could be done about, and
-what it would take is written down rather than done. `Budget::safepoint`
-needs, per safepoint, to add to `fuel_spent`, to read the run's cancellation,
-to compare against a fuel limit, and — every `DEADLINE_CHECK_INTERVAL`th time,
-or every time when no fuel limit is set — to read the clock. Of those, the
-cancellation is already an atomic flag a `Vm` could hold a clone of, `limits`
-and `started_at` are immutable for the run, and `fuel_spent` and
-`safepoints_since_deadline_check` are counters that could be `AtomicU64`. So
-the lock is not protecting anything that needs a lock; it is protecting a
-struct that happens to be `&mut`. Making `Budget::safepoint` take `&self` over
-atomics would remove the acquisition without changing the schedule, which is
-the property that matters — the schedule is what ADR 0024 and
-`crates/cove-runtime/tests/responsiveness.rs` fix, and a change that moved it
-would be a different proposal needing a different ADR. The ceiling is the
-ablation's 40.3% on `call` and 5.8% on `field`. **This belongs to
-[#182](https://github.com/myuon/cove/issues/182)**, split out of #116 when it
-closed — #116's calling convention was required to cover "fuel, cancellation,
-trace", and this is what covering them costs at every call and every return.
+This was the largest cliff in the matrix that anything could be done about, and
+[#182](https://github.com/myuon/cove/issues/182) is where it was done: the
+budget's counters are atomics, `Budget::safepoint` takes `&self`, a backend
+takes a `Meter` where a run begins and charges through it with no lock, and the
+schedule ADR 0024 and `crates/cove-runtime/tests/responsiveness.rs` fix is
+untouched. `benches/call` is 35.1% faster for it and `benches/pure` is
+43.2%; "The other two acquisitions are gone, and the counters are atomics"
+above is the measurement, including what it did *not* capture of the 40.3%
+ceiling and why. The isolated pair says the same thing without a benchmark
+around it: `conv_static` against `conv_local` was 2.53× and 71.8 ns a turn, and
+is 1.82× and 34.7 ns, on the same 18.6 instructions a turn against 17.6. So the
+per-call constant is less than half what it was, and what is left of it is the
+accounting itself — a `fetch_add` and two compares.
 
 **A local rooted for a `var` argument costs 1.30×, and the whole of it is
 representation.** `conv_var` is `conv_local` with one line added *outside* the
@@ -2284,9 +2409,10 @@ doc comment says so. The instruction counts say where what remains is. The
 three rows run 21.1, 23.1 and 30.2 instructions a character, at 19.3, 18.7 and
 20.8 ns an instruction — a per-instruction cost that barely moves. So a method
 now costs the instructions a call is, plus the per-call constant "The cliffs"
-prices at 71.8 ns and attributes to the budget's mutex rather than to the
-convention or to the receiver. The receiver half of #99 is answered; what is
-left of it is the cliff [#182](https://github.com/myuon/cove/issues/182) owns.
+priced at 71.8 ns and attributed to the budget's mutex rather than to the
+convention or to the receiver. The receiver half of #99 is answered; what was
+left of it was the cliff [#182](https://github.com/myuon/cove/issues/182)
+owned, and that mutex is gone — the same constant is 34.7 ns now.
 
 **What has not changed is that fuel does not track what is expensive.** The
 issue observed `arith` at 32 M fuel/s against this loop's 7.5 M, on the AST
@@ -2318,12 +2444,13 @@ Three more since, all from issue #123. That the instrumentation the dispatch
 path carries is nearly free and that a switch to turn it off would not be:
 the counter is worth under two percent on the benchmark most sensitive to it,
 and a runtime flag around it recovers none of that, because the branch costs
-what the increment costs. That the largest cost on a call path is not the
+what the increment costs. That the largest cost on a call path was not the
 frame, the arguments or the representation but the mutex the run's `Budget`
-lives behind — 40.3% of `benches/call`, of which one acquisition in three has
-been removed for 16.6%. And that a boundary instruction is cheap: two
-crossings are 21.4 ns a turn and allocate nothing at all, which is the answer
-to a question this document had been asking in the other direction.
+lived behind — 40.3% of `benches/call`, of which one acquisition in three was
+removed for 16.6% and the other two for 35.1% more. And that a boundary
+instruction is cheap: two crossings are 16.0 ns a turn and allocate nothing at
+all, which is the answer to a question this document had been asking in the
+other direction.
 
 One more since, from issue #99 rather than #123, and it is a question closed
 rather than a change taken. What a struct receiver costs a loop: it doubled the
@@ -2331,9 +2458,9 @@ loop it was in when a receiver was a `Box` copied per call, and it adds 27% a
 call now that `Value::Struct` is an `Rc`, at a per-instruction cost within 11%
 of the same loop with no call in it. "What a character costs, and what a
 receiver costs on top of it" is the measurement; the residue is the per-call
-constant the matrix already priced and
-[#182](https://github.com/myuon/cove/issues/182) now owns, and is not about
-receivers.
+constant the matrix already priced, which
+[#182](https://github.com/myuon/cove/issues/182) has since removed the largest
+part of, and is not about receivers.
 
 **Settled by evidence that was missing.** What a trace says. It was the last
 of issue #111's three blockers and it was a gap rather than a suspicion: the
@@ -2389,16 +2516,25 @@ rather than assumed, under "Collection is non-moving" above.
 Everything in that first group is downstream of the same allocation sites. That
 makes them the next measurement whether or not a VM-owned heap is ever built.
 
-Beside them, and separately, four cliffs the calling-convention matrix
-measured: the two mutex acquisitions still on every call
-([#182](https://github.com/myuon/cove/issues/182)), a `var`-rooted local that
-cannot live on the scalar stack and a closure's captures that cannot either
-(both [#162](https://github.com/myuon/cove/issues/162)), and the Host boundary
-at twenty-seven times a loop turn (#184 and #183). "The cliffs" above says what
+Beside them, and separately, three cliffs the calling-convention matrix
+measured and has not answered: a `var`-rooted local that cannot live on the
+scalar stack and a closure's captures that cannot either (both
+[#162](https://github.com/myuon/cove/issues/162)), and the Host boundary at
+twenty-nine times a loop turn (#184 and #183). "The cliffs" above says what
 each would take. None is fixed, and the reason is this document's own history:
 each is a change to what a slot, a capture, a closure or a payload *is*, and
 changing those one at a time against their immediate parent is what
 [#126](https://github.com/myuon/cove/issues/126) is.
+
+The fourth of them — the mutex on every call and every return
+([#182](https://github.com/myuon/cove/issues/182)) — is the one that is done,
+and it is worth saying why it went first. It was the largest of the four and
+the only one that was not a change to what anything *is*: a `Meter` charges the
+same accounting on the same schedule and no slot, capture or payload moved. It
+also had to go first for #162 to be measurable. A frame layout compared on
+`benches/call` or `benches/pure` against a baseline that still took the lock
+would have been credited with removing it; with the lock gone, what those two
+benchmarks now measure of a calling convention is the calling convention.
 
 One measurement constraint applies to all of them and did not exist when most
 of this document was written.

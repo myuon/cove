@@ -200,7 +200,7 @@ use cove_ir::{
 use cove_schema::builtins::{free_builtin, FreeBuiltinKind, MAP_ENTRY, NONE_CASE, OPTION, RESULT};
 use cove_syntax::ast::{BinaryOp, EnumDecl, UnaryOp};
 
-use crate::budget::{Budget, Cancellation, Stopped};
+use crate::budget::{Budget, Cancellation, Meter, Stopped};
 use crate::builtins::{self, Callable};
 use crate::error::RuntimeError;
 use crate::heap::{Collection, Heap, HeapStats, Roots};
@@ -252,7 +252,7 @@ pub const SAFEPOINT_INTERVAL: u64 = 1024;
 /// spent against.
 ///
 /// A back edge is where a loop can be stopped, so one is checked at every one
-/// of them — but *checking* takes a lock the tasks share, and `benches/arith`
+/// of them — but *checking* took a lock the tasks share, and `benches/arith`
 /// takes two million back edges, which was 13% of its run.
 ///
 /// So a back edge checks only once this much fuel has gathered, and every
@@ -260,11 +260,18 @@ pub const SAFEPOINT_INTERVAL: u64 = 1024;
 /// deadline, its fuel, and the stop flags of every bounded call this thread is
 /// inside. What that costs is granularity: a loop notices a stop within this
 /// much fuel plus the one turn that crosses it, rather than within one
-/// iteration. What it buys is that a tight loop does not lock a mutex per turn
-/// and does not walk a list per turn either. The number is small enough that
-/// the difference is not one a program can be written to observe, and
-/// [`SAFEPOINT_INTERVAL`] still bounds a straight line that has no back edge
-/// at all.
+/// iteration. What it buys is that a tight loop does not walk a list per turn
+/// and does not charge the shared budget per turn either. The number is small
+/// enough that the difference is not one a program can be written to observe,
+/// and [`SAFEPOINT_INTERVAL`] still bounds a straight line that has no back
+/// edge at all.
+///
+/// The lock this was first measured against is gone — issue #182 made the
+/// budget's counters atomics, and [`crate::budget::Meter`] is where that is
+/// argued — and the constant is unchanged, because it is not a tuning knob.
+/// ADR 0024 states each stop as a bound in the backend's own fuel and names
+/// this as the arithmetic of one, so moving it would move the language and
+/// not just the speed.
 pub const BACK_EDGE_FUEL: u64 = 64;
 
 /// One call in progress.
@@ -638,12 +645,27 @@ pub struct Vm<'a> {
     /// many reasons and this moves for one, which is what makes it the figure
     /// a change to the lowering is judged by.
     instructions: u64,
-    /// The host's `max_call_depth`, once a call has asked for it.
+    /// The run's budget, as this VM's safepoints charge it.
     ///
-    /// `None` is "not asked yet"; `Some(None)` is "asked, and there is no
-    /// limit". [`Vm::host_call_depth_limit`] is where the distinction is
-    /// made and why the answer may be kept.
-    call_depth_limit: Option<Option<usize>>,
+    /// `None` is a run with no budget installed, which is what an embedder
+    /// that installed none has, and what it has always meant here: no limit.
+    ///
+    /// Taken once, where the run begins, rather than fetched at each
+    /// safepoint through [`HostRegistry::with_budget`]'s mutex. That mutex
+    /// was 36% of `benches/call` — every call and every return is a safepoint
+    /// — and it was protecting counters that wanted to be atomics;
+    /// [`crate::budget::Meter`] is where the whole of that argument is, and
+    /// [`Vm::bind_budget`] is where this is filled in.
+    budget: Option<Meter>,
+    /// The host's `max_call_depth`, read off the budget when it was bound.
+    ///
+    /// Flattened out of the budget rather than asked for per call, because it
+    /// cannot change while a run lasts and every call would otherwise ask.
+    /// PR #144 established that and cached it behind an
+    /// `Option<Option<usize>>` meaning "not asked yet" and "asked, no limit";
+    /// there is nothing left to be lazy about now that the budget is bound
+    /// where a run starts, so this is the limit or the absence of one.
+    call_depth_limit: Option<usize>,
     /// This task's own cancellation flag, when this VM is running a spawned
     /// task's body rather than the entry.
     ///
@@ -714,8 +736,16 @@ pub struct Vm<'a> {
 impl<'a> Vm<'a> {
     /// A VM for `program`, running against `runtime` and calling through
     /// `hosts`.
+    ///
+    /// The run's budget is bound here, which is the one lock this takes and
+    /// the last one a safepoint of this VM will be behind. It is sound to
+    /// bind it this early because a budget cannot be installed once a VM
+    /// exists: `HostRegistry::set_budget` needs `&mut HostRegistry` and this
+    /// borrows the registry shared for `'a`. The one other way a budget is
+    /// installed is `HostRegistry::begin_run`, which is reached only through
+    /// [`Vm::invoke_within`] and its siblings, each of which rebinds.
     pub fn new(runtime: &'a Runtime, hosts: &'a HostRegistry, program: &'a Arc<Program>) -> Self {
-        Vm {
+        let mut vm = Vm {
             runtime,
             hosts,
             program,
@@ -730,6 +760,7 @@ impl<'a> Vm<'a> {
             heap: Heap::new(),
             fuel: 0,
             instructions: 0,
+            budget: None,
             call_depth_limit: None,
             cancellation: None,
             task: ENTRY_TASK,
@@ -739,7 +770,26 @@ impl<'a> Vm<'a> {
             timings: Vec::new(),
             wait: Duration::ZERO,
             assertion_failure: None,
-        }
+        };
+        vm.bind_budget();
+        vm
+    }
+
+    /// Takes the run's budget, in the form every safepoint of this VM will
+    /// charge it, together with the call-depth limit that comes off it.
+    ///
+    /// Called where a run begins and nowhere else, for the reason
+    /// [`crate::budget::Meter`] gives: a `Meter` names the accounting of the
+    /// run it was taken from, and `HostRegistry::begin_run` gives the budget
+    /// it installs fresh accounting. So [`Vm::new`] takes one, and the two
+    /// ways in that install a budget of their own take another straight
+    /// after installing it.
+    fn bind_budget(&mut self) {
+        self.budget = self.hosts.budget_meter();
+        self.call_depth_limit = self
+            .budget
+            .as_ref()
+            .and_then(|budget| budget.limits().max_call_depth);
     }
 
     /// A VM for the body of the spawned task `id`, which stops when
@@ -977,6 +1027,7 @@ impl<'a> Vm<'a> {
     ) -> Result<Value, RuntimeError> {
         crate::invoke::check(self.runtime.program(), module, name, &args)?;
         self.hosts.begin_run(budget);
+        self.bind_budget();
         self.invoke_checked(module, name, args)
     }
 
@@ -992,6 +1043,7 @@ impl<'a> Vm<'a> {
         args: Vec<Rc<str>>,
     ) -> Result<Value, RuntimeError> {
         self.hosts.begin_run(budget);
+        self.bind_budget();
         let outcome = self.invoke_entry(module, name, args);
         self.ended(outcome)
     }
@@ -2603,7 +2655,8 @@ impl<'a> Vm<'a> {
     /// One safepoint is paid twice: [`Vm::enter`] takes one because a call
     /// is one, and [`Vm::execute`] takes one on entering the frame it was
     /// handed. A safepoint spends the fuel standing and asks the budget, so
-    /// asking twice in a row costs a lock and changes no answer.
+    /// asking twice in a row charges zero fuel the second time and changes no
+    /// answer.
     fn call_from_host(
         &mut self,
         callee: &Value,
@@ -2676,52 +2729,17 @@ impl<'a> Vm<'a> {
             .with_rule("Recursion depth is a runtime control, not a proof obligation."));
         }
         let depth = self.frames.len() + 1;
-        if let Some(limit) = self.host_call_depth_limit() {
+        if let Some(limit) = self.call_depth_limit {
             if depth > limit {
-                if let Some(error) = self
-                    .hosts
-                    .with_budget(|budget| budget.to_runtime_error(Stopped::CallDepth))
-                {
-                    return Err(error.at(span));
+                // There is a budget: the limit was read off one. The error
+                // names the value it was configured with, which is why it is
+                // built there rather than here.
+                if let Some(budget) = &self.budget {
+                    return Err(budget.to_runtime_error(Stopped::CallDepth).at(span));
                 }
             }
         }
         self.safepoint(span)
-    }
-
-    /// The host's own `max_call_depth`, read once and remembered.
-    ///
-    /// A limit belongs to the [`crate::budget::Budget`] a run was given, and
-    /// a `Budget` is installed with `HostRegistry::set_budget` before the run
-    /// begins and cannot be replaced while it lasts: setting one needs
-    /// `&mut HostRegistry`, and a [`Vm`] holds the registry by shared
-    /// reference for as long as it exists. So the answer is fixed for the
-    /// whole run, and asking for it is what [`Vm::enter`] did through the
-    /// budget's mutex at every call.
-    ///
-    /// That cost `benches/call` 16.7% and `benches/method` 9.4% — measured by
-    /// removing the question entirely, which is the ceiling this recovers —
-    /// for a number that could not have changed since the last call asked.
-    /// Issue #123 is where the whole of the safepoint's locking is measured;
-    /// this is the part of it that was buying nothing.
-    ///
-    /// The lock is still taken the first time, rather than in [`Vm::new`],
-    /// because a `Vm` is public and nothing about its construction promises
-    /// that a budget has been installed yet. `None` from `with_budget` means
-    /// no budget at all, which is what an embedder that installed none has,
-    /// and what it has always meant here: no limit.
-    fn host_call_depth_limit(&mut self) -> Option<usize> {
-        match self.call_depth_limit {
-            Some(limit) => limit,
-            None => {
-                let limit = self
-                    .hosts
-                    .with_budget(|budget| budget.limits().max_call_depth)
-                    .flatten();
-                self.call_depth_limit = Some(limit);
-                limit
-            }
-        }
     }
 
     /// Pops the running frame and hands `answer` back to whoever called it.
@@ -3043,19 +3061,19 @@ impl<'a> Vm<'a> {
     fn spend_pending_fuel(&mut self) {
         let fuel = std::mem::take(&mut self.fuel);
         if fuel != 0 {
-            self.hosts.with_budget(|budget| budget.spend(fuel));
+            if let Some(budget) = &self.budget {
+                budget.spend(fuel);
+            }
         }
     }
 
     fn safepoint(&mut self, span: Span) -> Result<(), RuntimeError> {
         stopped_here(self.cancellation.as_ref(), &self.stops, span)?;
         let fuel = std::mem::take(&mut self.fuel);
-        if let Some(Err(error)) = self.hosts.with_budget(|budget| {
-            budget
-                .safepoint(fuel)
-                .map_err(|stopped| budget.to_runtime_error(stopped))
-        }) {
-            return Err(error.at(span));
+        if let Some(budget) = &self.budget {
+            if let Err(stopped) = budget.safepoint(fuel) {
+                return Err(budget.to_runtime_error(stopped).at(span));
+            }
         }
         self.collect_if_due();
         Ok(())
@@ -3663,19 +3681,15 @@ impl Reentry for Callback<'_, '_> {
         if self.vm.stops.iter().any(Cancellation::is_cancelled) {
             return true;
         }
-        self.vm
-            .hosts
-            .with_budget(|budget| budget.cancellation().is_cancelled())
-            .unwrap_or(false)
+        self.vm.budget.as_ref().is_some_and(Meter::is_cancelled)
     }
 
     /// What the run's deadline leaves, read from the one budget that knows
     /// when the run started.
     fn time_left(&self) -> Option<Duration> {
-        self.vm.hosts.with_budget(|budget| {
-            let deadline = budget.limits().deadline?;
-            Some(deadline.saturating_sub(budget.elapsed()))
-        })?
+        let budget = self.vm.budget.as_ref()?;
+        let deadline = budget.limits().deadline?;
+        Some(deadline.saturating_sub(budget.elapsed()))
     }
 
     /// The task the boundary records the call against: this VM's own, which

@@ -23,7 +23,7 @@ pub mod trace;
 pub mod value;
 pub mod vm;
 
-pub use budget::{Budget, Cancellation, Limits, Stopped};
+pub use budget::{Budget, Cancellation, Limits, Meter, Stopped};
 pub use clock::{Clock, VirtualTime};
 pub use database::Database;
 pub use error::RuntimeError;
