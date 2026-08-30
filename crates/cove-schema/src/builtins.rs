@@ -888,11 +888,20 @@ const SLICE: MethodSchema = MethodSchema {
 // draws that line and these stand on the same side of it.
 //
 // Each **takes the elements once, before it calls anything**. A `Vector`
-// shares its storage, so a callback can reach the very vector being walked
-// and push onto it; the elements are copied out first, so what is walked and
-// what comes back are both settled before the first call. That is
-// `cove_ir::Inst::IterItems`' rule — a `for` asks once and walks a snapshot —
-// applied where the same question arises, and not a second answer to it.
+// shares its storage, so the walk has to settle what it walks rather than
+// read the receiver as it goes; the elements are copied out first, so what
+// is walked and what comes back are both settled before the first call.
+// That is `cove_ir::Inst::IterItems`' rule — a `for` asks once and walks a
+// snapshot — applied where the same question arises, and not a second
+// answer to it.
+//
+// A callback cannot currently reach the receiver to test that: a closure
+// captures a copy of each binding and a captured binding is a read-only
+// place, so `items.push(..)` inside a callback is refused by the checker.
+// The rule is checked through a `for` loop over the same vector, which is
+// expressible and does walk it live. Whether a callback should be able to
+// mutate its receiver at all is issue #190 and is not decided; if it ever
+// can, this rule is what says what it would see.
 //
 // Each **visits every element exactly once, front to back**, in the
 // receiver's own order.
