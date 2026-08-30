@@ -221,7 +221,9 @@ fn scent(world: World, creature: Creature) -> Option<Heading> {
 /// The creatures this one can see: near, not hidden, nearest first.
 ///
 /// Bounded twice over -- by `sightRange()` and then by `sightLimit()` -- so
-/// what a creature is told does not grow with the population.
+/// what a creature is told does not grow with the population. The second
+/// bound is `slice(0, n)`, which clamps rather than refuses, so a world with
+/// fewer creatures than the limit needs no case of its own.
 fn sightings(world: World, creature: Creature) -> Array<Sighting> {
   let visible = world.creatures.filter(fn(other) {
     other.id != creature.id && !other.hidden &&
@@ -240,7 +242,7 @@ fn sightings(world: World, creature: Creature) -> Array<Sighting> {
       a.away < b.away
     }
   })
-  take(visible, sightLimit())
+  visible.slice(0, sightLimit())
 }
 
 /// The four cells around a creature, in heading order.
@@ -311,7 +313,7 @@ export fn resolve(world: World, intents: Array<Intent>) -> Turn {
           if !inside(world, target) {
             result = ActionResult.Refused("a step {heading.name()} from {creature.at.x},{creature.at.y} leaves the world")
           } else if standsHere(world, target) ||
-            has(claims, cellIndex(world, target)) {
+            claims.contains(cellIndex(world, target)) {
             result = ActionResult.Blocked(heading)
           } else {
             standing = target
@@ -336,7 +338,7 @@ export fn resolve(world: World, intents: Array<Intent>) -> Turn {
           match reachable(world, creature, target) {
             Some(victim) => if isShelter(victim.at) {
               result = ActionResult.Refused("creature {victim.id} is in the thicket at {victim.at.x},{victim.at.y}")
-            } else if has(hunted, victim.id) {
+            } else if hunted.contains(victim.id) {
               result = ActionResult.Refused(
                 "creature {victim.id} was taken by an earlier hunter this tick",
               )
@@ -403,7 +405,7 @@ export fn resolve(world: World, intents: Array<Intent>) -> Turn {
   let acted = after.freeze()
   var deaths = 0
   for creature in acted {
-    if creature.energy < 1 || holds(taken, creature.id) {
+    if creature.energy < 1 || taken.contains(creature.id) {
       deaths += 1
       changes.push(
         Delta(cell: cellIndex(world, creature.at), change: carcass()),
@@ -411,7 +413,7 @@ export fn resolve(world: World, intents: Array<Intent>) -> Turn {
     }
   }
   let survivors = acted.filter(fn(creature) {
-    creature.energy > 0 && !holds(taken, creature.id)
+    creature.energy > 0 && !taken.contains(creature.id)
   }).sorted(by: fn(a: Creature, b: Creature) {
     a.id < b.id
   })
@@ -444,10 +446,20 @@ struct Growth {
 /// Grows `sprouts()` cells the generator names, applies `changes`, and
 /// answers the grid that leaves.
 ///
-/// The changes are sorted by cell and walked once beside the grid, rather
-/// than searched for cell by cell: a tick makes at most one change per
-/// creature, and a scan per cell would be the population times the grid for
-/// what a merge does in the sum of them.
+/// The grid is copied into a `Vector` and each change is written where it
+/// happened, which is what `set` is for. The copy is what an immutable
+/// `World` costs and is not a workaround: `world.food` is an `Array` and the
+/// next world needs another one, so a tick pays for the whole grid whatever
+/// it does to it. What `set` removes is the *search* -- this used to sort the
+/// deltas by cell and merge them against the grid in one pass, and a merge is
+/// the shape a program reaches for when it cannot address a cell.
+///
+/// The clamp is one `map` at the end rather than a bound applied per change,
+/// so a cell that a carcass fills past `maxFood()` and a meal then empties
+/// lands where the sum of its changes says. Every level a `Delta` names is a
+/// cell the grid has, so no `set` here answers `None`; if one did, the change
+/// would be dropped and the rest of the tick would go on, which is what a
+/// world that refuses a bad move already does.
 fn sprout(world: World, changes: Vector<Delta>, seed: Int) -> Growth {
   var generator = seed
   var deltas = changes
@@ -456,26 +468,17 @@ fn sprout(world: World, changes: Vector<Delta>, seed: Int) -> Growth {
     generator = drawn.seed
     deltas.push(Delta(cell: drawn.value, change: 1))
   }
-  let ordered = deltas.sorted(by: fn(a: Delta, b: Delta) {
-    a.cell < b.cell
-  })
   var levels = Vector.of()
-  var at = 0
-  for index in 0..<world.food.length() {
-    var level = world.food.get(index).unwrapOr(0)
-    while at < ordered.length() && cellOf(ordered, at) == index {
-      level += changeOf(ordered, at)
-      at += 1
-    }
-    if level < 0 {
-      level = 0
-    }
-    if level > maxFood() {
-      level = maxFood()
-    }
+  for level in world.food {
     levels.push(level)
   }
-  Growth(seed: generator, food: levels.freeze())
+  for delta in deltas {
+    let standing = levels.get(delta.cell).unwrapOr(0)
+    levels.set(delta.cell, standing + delta.change)
+  }
+  Growth(seed: generator, food: levels.map(fn(level: Int) {
+    level.max(0).min(maxFood())
+  }))
 }
 
 /// The state hash: one number that is the whole world.
@@ -652,41 +655,22 @@ fn bounty(victim: Creature) -> Int {
 }
 
 /// A free cell beside `at` for a newborn, in heading order.
+///
+/// `claims` is an ordinary parameter, so what arrives is a copy of the handle
+/// -- and a copy of a `Vector` is an alias. `claims.contains(...)` therefore
+/// answers about what the resolution loop has pushed by the time it is asked,
+/// and not about what the vector held when the call was written. Two newborns
+/// would be laid in one cell if it did not, and `aCopyOfAVectorIsAnAlias` in
+/// `world_test.cove` is where that rule is pinned rather than relied on.
 fn nursery(world: World, at: Cell, claims: Vector<Int>) -> Option<Cell> {
   for heading in headings() {
     let target = stepFrom(at, heading)
     if inside(world, target) && !standsHere(world, target) &&
-      !has(claims, cellIndex(world, target)) {
+      !claims.contains(cellIndex(world, target)) {
       return Some(target)
     }
   }
   None
-}
-
-/// Whether `value` is one of the numbers pushed onto `numbers` so far.
-///
-/// `numbers` is an ordinary parameter, so what arrives is a copy of the
-/// handle -- and a copy of a `Vector` is an alias. This reads what the
-/// resolution loop has pushed by the time it asks, and not what the vector
-/// held when the call was written. The tick would resolve two creatures onto
-/// one cell, and two hunters onto one prey, if it did not.
-fn has(numbers: Vector<Int>, value: Int) -> Bool {
-  for number in numbers {
-    if number == value {
-      return true
-    }
-  }
-  false
-}
-
-/// Whether `id` is one of these numbers.
-fn holds(ids: Array<Int>, id: Int) -> Bool {
-  for held in ids {
-    if held == id {
-      return true
-    }
-  }
-  false
 }
 
 /// The intent at this position, or one no creature answers to.
@@ -695,31 +679,6 @@ fn holds(ids: Array<Int>, id: Int) -> Bool {
 /// rule that refuses an intent naming somebody else.
 fn intentAt(intents: Array<Intent>, at: Int) -> Intent {
   intents.get(at).unwrapOr(Intent(id: 0, decision: Decision.Rest))
-}
-
-/// Which cell the delta at this position changes.
-fn cellOf(deltas: Array<Delta>, at: Int) -> Int {
-  deltas.get(at).unwrapOr(Delta(cell: -1, change: 0)).cell
-}
-
-/// By how much the delta at this position changes it.
-fn changeOf(deltas: Array<Delta>, at: Int) -> Int {
-  deltas.get(at).unwrapOr(Delta(cell: -1, change: 0)).change
-}
-
-/// The first `count` of these sightings.
-fn take(sightings: Array<Sighting>, count: Int) -> Array<Sighting> {
-  if sightings.length() <= count {
-    return sightings
-  }
-  var kept = Vector.of()
-  for index in 0..<count {
-    match sightings.get(index) {
-      Some(sighting) => kept.push(sighting)
-      None => ()
-    }
-  }
-  kept.freeze()
 }
 
 /// The first free cell at or after `start`, scanning the grid in order.
