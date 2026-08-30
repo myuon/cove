@@ -857,7 +857,7 @@ fn method_value(case: &str) -> Value {
     Value::Enum(Box::new(EnumValue {
         type_name: "http.Method".into(),
         case: case.into(),
-        payload: Vec::new(),
+        payload: crate::value::Payload::Empty,
     }))
 }
 
@@ -1569,7 +1569,7 @@ mod tests {
                     Value::Enum(Box::new(EnumValue {
                         type_name: "http.Method".into(),
                         case: method.into(),
-                        payload: Vec::new(),
+                        payload: crate::value::Payload::Empty,
                     })),
                 ),
                 ("path".into(), Value::Str(path.into())),
@@ -1964,7 +1964,7 @@ mod tests {
         let payload = Value::Enum(Box::new(EnumValue {
             type_name: "demo.Color".into(),
             case: "Red".into(),
-            payload: Vec::new(),
+            payload: crate::value::Payload::Empty,
         }));
         let answer = http.call("json", vec![Value::Int(200), payload]).unwrap();
         assert_eq!(response_body(answer), "\"Red\"");
@@ -2141,7 +2141,7 @@ mod tests {
         let Value::Enum(result) = opened else {
             panic!("expected `Ok(...)`");
         };
-        let Some(Value::Resource(handle)) = result.payload.into_iter().next() else {
+        let Some(Value::Resource(handle)) = result.payload.into_vec().into_iter().next() else {
             panic!("`listen` should answer a handle");
         };
         let port = match http

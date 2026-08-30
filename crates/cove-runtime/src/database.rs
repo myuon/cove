@@ -351,7 +351,7 @@ mod tests {
         let Value::Enum(result) = opened else {
             panic!("expected `Ok(...)`");
         };
-        let Some(Value::Resource(handle)) = result.payload.into_iter().next() else {
+        let Some(Value::Resource(handle)) = result.payload.into_vec().into_iter().next() else {
             panic!("`connect` answers with a handle");
         };
         assert_eq!(handle.qualified_type(), "database.Connection");

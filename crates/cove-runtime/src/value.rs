@@ -70,6 +70,11 @@ pub enum Value {
     /// [`Rc::make_mut`], which is what keeps the copy private.
     Struct(Rc<StructValue>),
     /// An enum value, including `Option` and `Result`.
+    ///
+    /// One allocation, not two: the box is the whole of it, because
+    /// [`Payload`] holds the arities an ordinary program builds inside the
+    /// [`EnumValue`] rather than in a vector beside it. Issue #183 is why,
+    /// and `benches/arrayget` is where it shows.
     Enum(Box<EnumValue>),
     /// A callback is an ordinary handle value.
     Closure(Rc<Closure>),
@@ -282,7 +287,157 @@ pub struct EnumValue {
     /// Fully qualified type name, or `Option` / `Result` for the builtins.
     pub type_name: Rc<str>,
     pub case: Rc<str>,
-    pub payload: Vec<Value>,
+    pub payload: Payload,
+}
+
+/// What an enum case carries, held inline for the arities that occur.
+///
+/// This was a `Vec<Value>` until [issue
+/// #183](https://github.com/myuon/cove/issues/183). A `Value::Enum` is a
+/// `Box<EnumValue>`, so a `Some(x)` cost *two* allocations: the box for the
+/// struct, and a vector for a payload of one. Almost every enum case an
+/// ordinary program builds carries zero or one value — `Option` and `Result`
+/// are the two the language builds constantly, and `benches/arrayget`'s
+/// comment says why: an `Option` is how every indexed read answers. Holding
+/// the common arities in the box that already exists makes `Some(x)` one
+/// allocation instead of two.
+///
+/// It is an enum rather than a `Box<[Value]>` because a boxed slice still
+/// allocates for one element, and rather than a general small-vector because
+/// there are exactly two shapes worth naming: no payload, and one. Two or
+/// more is a `Box<[Value]>` rather than a `Vec` because a payload is never
+/// grown after the case is built — the length is the case declaration's, and
+/// nothing in this workspace pushes onto one.
+///
+/// **This reads as a slice.** [`std::ops::Deref`] and [`std::ops::DerefMut`]
+/// to `[Value]`, and `IntoIterator` on `&Payload` and `&mut Payload`, so
+/// `payload.len()`, `payload[0]`, `payload.first()`, `for item in &payload`
+/// and matching `&*payload` against `[inner]` all mean what they meant. [`fmt::Debug`] is
+/// written by hand to print as the list it reads as, so a `Debug` rendering
+/// of an enum value is the one it always was.
+///
+/// An embedder that built one by naming the field writes `payload:
+/// Payload::One(value)` or `payload: values.into()` where it wrote `payload:
+/// vec![value]`; one that goes through [`Value::enumeration`],
+/// [`Value::some`] or [`Value::ok`] writes nothing new, because those take
+/// what they took.
+#[derive(Clone, Default)]
+pub enum Payload {
+    /// A case with no payload, such as `None`.
+    #[default]
+    Empty,
+    /// A case carrying exactly one value, such as `Some(x)` or `Err(e)`.
+    One(Value),
+    /// A case carrying two or more.
+    Many(Box<[Value]>),
+}
+
+impl Payload {
+    /// The payload as a slice, which is what every reader wants of one.
+    pub fn as_slice(&self) -> &[Value] {
+        match self {
+            Payload::Empty => &[],
+            Payload::One(value) => std::slice::from_ref(value),
+            Payload::Many(values) => values,
+        }
+    }
+
+    /// The payload as a mutable slice.
+    pub fn as_mut_slice(&mut self) -> &mut [Value] {
+        match self {
+            Payload::Empty => &mut [],
+            Payload::One(value) => std::slice::from_mut(value),
+            Payload::Many(values) => values,
+        }
+    }
+
+    /// The payload as an owned vector, for a caller that needs one.
+    ///
+    /// This allocates, which is the thing the type exists to avoid, so it is
+    /// here for the callers that genuinely take ownership rather than as the
+    /// way to read one.
+    pub fn into_vec(self) -> Vec<Value> {
+        match self {
+            Payload::Empty => Vec::new(),
+            Payload::One(value) => vec![value],
+            Payload::Many(values) => values.into_vec(),
+        }
+    }
+}
+
+impl std::ops::Deref for Payload {
+    type Target = [Value];
+
+    fn deref(&self) -> &[Value] {
+        self.as_slice()
+    }
+}
+
+impl std::ops::DerefMut for Payload {
+    fn deref_mut(&mut self) -> &mut [Value] {
+        self.as_mut_slice()
+    }
+}
+
+impl<'a> IntoIterator for &'a Payload {
+    type Item = &'a Value;
+    type IntoIter = std::slice::Iter<'a, Value>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.as_slice().iter()
+    }
+}
+
+impl<'a> IntoIterator for &'a mut Payload {
+    type Item = &'a mut Value;
+    type IntoIter = std::slice::IterMut<'a, Value>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.as_mut_slice().iter_mut()
+    }
+}
+
+/// Prints as the list a payload reads as, rather than as the variant that
+/// happens to be holding it.
+///
+/// Deliberate: the arity a payload is stored at is an implementation detail
+/// of this type, and a `Debug` rendering that named it would make the same
+/// enum value print two ways depending on how many values it carries.
+impl fmt::Debug for Payload {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_list().entries(self.as_slice()).finish()
+    }
+}
+
+impl FromIterator<Value> for Payload {
+    fn from_iter<I: IntoIterator<Item = Value>>(values: I) -> Payload {
+        let mut values = values.into_iter();
+        let Some(first) = values.next() else {
+            return Payload::Empty;
+        };
+        let Some(second) = values.next() else {
+            return Payload::One(first);
+        };
+        let mut rest = Vec::with_capacity(2 + values.size_hint().0);
+        rest.push(first);
+        rest.push(second);
+        rest.extend(values);
+        Payload::Many(rest.into_boxed_slice())
+    }
+}
+
+impl From<Vec<Value>> for Payload {
+    fn from(mut values: Vec<Value>) -> Payload {
+        match values.len() {
+            0 => Payload::Empty,
+            1 => Payload::One(
+                values
+                    .pop()
+                    .expect("a vector of length one has a last element"),
+            ),
+            _ => Payload::Many(values.into_boxed_slice()),
+        }
+    }
 }
 
 /// The contents of a [`Value::Dyn`].
@@ -650,7 +805,7 @@ impl Value {
         Value::Enum(Box::new(EnumValue {
             type_name: Value::builtin_name(RESULT.name),
             case: Value::builtin_name(OK_CASE.name),
-            payload: vec![value],
+            payload: Payload::One(value),
         }))
     }
 
@@ -684,7 +839,7 @@ impl Value {
         Value::Enum(Box::new(EnumValue {
             type_name: Value::builtin_name(RESULT.name),
             case: Value::builtin_name(ERR_CASE.name),
-            payload: vec![error],
+            payload: Payload::One(error),
         }))
     }
 
@@ -693,7 +848,7 @@ impl Value {
         Value::Enum(Box::new(EnumValue {
             type_name: Value::builtin_name(OPTION.name),
             case: Value::builtin_name(SOME_CASE.name),
-            payload: vec![value],
+            payload: Payload::One(value),
         }))
     }
 
@@ -702,7 +857,7 @@ impl Value {
         Value::Enum(Box::new(EnumValue {
             type_name: Value::builtin_name(OPTION.name),
             case: Value::builtin_name(NONE_CASE.name),
-            payload: Vec::new(),
+            payload: Payload::Empty,
         }))
     }
 
@@ -1199,6 +1354,26 @@ fn write_duration(f: &mut fmt::Formatter<'_>, ns: i64) -> fmt::Result {
 mod tests {
     use super::*;
 
+    /// Inlining the common arities cost an `EnumValue` nothing at all.
+    ///
+    /// A `Payload` is three variants, one of them a whole [`Value`], and it
+    /// is still twenty-four bytes — the width of the `Vec` it replaced —
+    /// because `Value`'s discriminant lives in a `bool` niche with room to
+    /// spare and `Payload`'s fits beside it. So `Some(x)` lost an allocation
+    /// and gained no width, and `Marker::visit`'s
+    /// `size_of::<EnumValue>()` charge means what it meant.
+    ///
+    /// Asserted rather than remembered because it is not obvious and because
+    /// a future variant of either enum could take it away silently: a
+    /// `Payload` wider than a `Vec` makes every enum value's box bigger, and
+    /// this is the only place that would say so.
+    #[test]
+    fn a_payload_is_no_wider_than_the_vector_it_replaced() {
+        assert_eq!(size_of::<Payload>(), size_of::<Vec<Value>>());
+        assert_eq!(size_of::<Payload>(), 24);
+        assert_eq!(size_of::<EnumValue>(), 56);
+    }
+
     fn shown(value: Value) -> String {
         value.to_string()
     }
@@ -1313,7 +1488,7 @@ mod tests {
         Value::Enum(Box::new(EnumValue {
             type_name: type_name.into(),
             case: case.into(),
-            payload: Vec::new(),
+            payload: Payload::Empty,
         }))
     }
 
@@ -1445,7 +1620,7 @@ mod tests {
         let value = Value::Enum(Box::new(EnumValue {
             type_name: "test.Colour".into(),
             case: "Named".into(),
-            payload: vec![Value::Str("teal".into())],
+            payload: Payload::One(Value::Str("teal".into())),
         }));
         assert_eq!(
             MapKey::from_value(&value),

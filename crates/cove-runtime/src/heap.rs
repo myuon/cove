@@ -752,7 +752,12 @@ impl Scan {
                 }
             }
             // An `Enum` is `Box`ed, so it is owned by exactly one value and
-            // no two paths reach the same one.
+            // no two paths reach the same one. That is still true of the
+            // payload issue #183 moved inside the box: a `value::Payload`
+            // owns its values outright, whether they sit in the `EnumValue`
+            // or in the slice a longer one points at, so walking it yields
+            // each reference exactly once — which is the property this
+            // module's documentation says the whole accounting rests on.
             Value::Enum(enumeration) => {
                 for item in &enumeration.payload {
                     self.count(item);
@@ -896,10 +901,20 @@ impl Marker<'_> {
             }
             // An `Enum` is `Box`ed, so it is owned by exactly one value and
             // no two paths reach the same one.
+            //
+            // Its payload is a `value::Payload`, which since issue #183
+            // holds the arities that occur — none and one — inside the
+            // `EnumValue` itself and allocates only from two upwards. So the
+            // slots are charged by asking the payload where they live rather
+            // than by counting them: an inline slot is already inside the
+            // `size_of::<EnumValue>()` charged above, and charging it again
+            // would say a `Some(x)` costs a `Value` more than it does.
             Value::Enum(enumeration) => {
                 self.bytes += size_of::<crate::value::EnumValue>() as u64;
+                if let crate::value::Payload::Many(items) = &enumeration.payload {
+                    self.bytes += (items.len() * size_of::<Value>()) as u64;
+                }
                 for item in &enumeration.payload {
-                    self.bytes += size_of::<Value>() as u64;
                     self.visit(item);
                 }
             }
@@ -1249,6 +1264,86 @@ mod tests {
         let after = heap.collect(&roots).live_bytes;
         assert!(before > 0);
         assert_eq!(after, 0, "live bytes should fall to nothing: {before}");
+    }
+
+    /// An object an enum case carries is reachable through the case, on both
+    /// arms of `value::Payload`.
+    ///
+    /// There was no test here that built a `Value::Enum` at all, which is
+    /// how a payload's representation could have changed under
+    /// `Scan::count` and `Marker::visit` with nothing failing. Issue #183
+    /// changed it — a payload of one now lives inside the `EnumValue`
+    /// instead of in a vector beside it, and a payload of two or more in a
+    /// boxed slice — so both arms are built here and the sweep is asked
+    /// about each. Sweeping empties a vector's elements, so a wrong answer
+    /// in either walker is a handle that is still there with its contents
+    /// gone.
+    #[test]
+    fn an_object_an_enum_case_carries_is_reachable_through_the_case() {
+        for arity in [1usize, 3] {
+            let mut roots = SlotRoots::new();
+            let mut heap = Heap::new();
+            let held = heap.allocate(vec![Value::Int(7)]);
+            let mut payload: Vec<Value> = vec![Value::Vector(held.clone())];
+            payload.resize(arity, Value::Unit);
+            let _slot = root(
+                &mut roots,
+                Value::Enum(Box::new(crate::value::EnumValue {
+                    type_name: "test.Carrier".into(),
+                    case: "Holds".into(),
+                    payload: payload.into(),
+                })),
+            );
+            let weak = Rc::downgrade(&held);
+            drop(held);
+
+            let collected = heap.collect(&roots);
+            let survivor = weak
+                .upgrade()
+                .expect("the enum case still holds the vector");
+            assert!(
+                survivor
+                    .elements
+                    .borrow()
+                    .first()
+                    .is_some_and(|element| element.eq_value(&Value::Int(7))),
+                "the sweep emptied a vector an enum case of arity {arity} \
+                 still reaches: {collected:?}"
+            );
+            assert_eq!(collected.freed_objects, 0);
+        }
+    }
+
+    /// A payload of one is charged as the storage it is, and a payload of
+    /// three as the storage *it* is.
+    ///
+    /// `Marker::visit` charges `size_of::<EnumValue>()` for the case and
+    /// then, since issue #183, the payload slots only when they are a
+    /// `Payload::Many` — because a `Payload::One`'s slot is already inside
+    /// the `EnumValue` it just charged, and charging it again would say a
+    /// `Some(x)` costs a `Value` more than it does. Nothing else in this
+    /// suite reads an enum's byte contribution, and the differential suite
+    /// strips `live_bytes` from what it compares, so this is the only place
+    /// the arithmetic is stated.
+    #[test]
+    fn an_enum_case_charges_the_payload_it_actually_allocated() {
+        let bytes_for = |arity: usize| {
+            let mut roots = SlotRoots::new();
+            let mut heap = Heap::new();
+            let _slot = root(
+                &mut roots,
+                Value::Enum(Box::new(crate::value::EnumValue {
+                    type_name: "test.Carrier".into(),
+                    case: "Holds".into(),
+                    payload: vec![Value::Int(1); arity].into(),
+                })),
+            );
+            heap.collect(&roots).live_bytes
+        };
+        let case = size_of::<crate::value::EnumValue>() as u64;
+        assert_eq!(bytes_for(0), case);
+        assert_eq!(bytes_for(1), case);
+        assert_eq!(bytes_for(3), case + 3 * size_of::<Value>() as u64);
     }
 
     /// `Marker::visit`'s struct arm has no `walked` guard, unlike every other

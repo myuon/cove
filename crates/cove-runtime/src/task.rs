@@ -1138,7 +1138,7 @@ mod tests {
         let value = Value::Enum(Box::new(EnumValue {
             type_name: "test.Shape".into(),
             case: "Circle".into(),
-            payload: vec![Value::Int(4)],
+            payload: crate::value::Payload::One(Value::Int(4)),
         }));
         let crossed = Transfer::of(&value)
             .expect("an enum payload of Ints is task-safe")
@@ -1154,7 +1154,7 @@ mod tests {
         let value = Value::Enum(Box::new(EnumValue {
             type_name: "test.Shape".into(),
             case: "Wrap".into(),
-            payload: vec![Value::Vector(VectorStorage::new(Vec::new()))],
+            payload: crate::value::Payload::One(Value::Vector(VectorStorage::new(Vec::new()))),
         }));
         let found = Transfer::of(&value).expect_err("a vector in an enum payload may not cross");
         assert_eq!(found.path, ".Wrap(0)");
