@@ -147,6 +147,13 @@ jobs:
       # optimized harness looks for an optimized one. The debug build above
       # stays, because the dogfooding steps run against the binary this
       # commit builds and that is what they have always meant.
+      #
+      # `--release`, not the workspace's `bench-stable` profile. That profile
+      # exists only to hold a recorded negative result (issue #179: one
+      # codegen unit per crate did not reduce layout sensitivity and cost 44%
+      # to 96% more build time), and selecting it here would spend that build
+      # time on a step that asserts no number. `[profile.release]` is left at
+      # Cargo's defaults for the same reason this step is one iteration.
       - name: Build cove-bench
         run: cargo build --release -p cove-cli -p cove-bench
 

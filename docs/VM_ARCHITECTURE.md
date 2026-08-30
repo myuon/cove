@@ -2377,6 +2377,186 @@ distribution-free statement about a median exists on fewer. CI still runs
 `--iterations 1` and is unaffected: it asserts correctness, never a number, and
 a series of one costs it exactly what it cost before.
 
+### What `codegen-units = 1` was measured to be worth, and why the answer is nothing
+
+The two sections above blame layout, and
+[issue #179](https://github.com/myuon/cove/issues/179) names the fix its
+reasoning implies: give the workspace a profile with `codegen-units = 1`, so
+that a crate is one codegen unit and a module boundary stops being a place
+rustc can decide to lay code out differently across. Option 2 of that issue
+adds it as a *bench-only* profile — `[profile.bench-stable]`, `inherits =
+"release"`, `codegen-units = 1`, nothing else, and no LTO, which was always
+meant to be a separate measurement — so that `[profile.release]` stays at
+Cargo's defaults and CI keeps the 137-second pipeline it was cut to.
+
+It was built, and the control #179 asks for was run under it. **It does not
+work, and the round is recorded here because a measured negative result is
+worth more than the hypothesis it replaces.**
+
+#### What was run
+
+The same control as the section above: the current commit, built twice, the
+second time with **one `Inst` variant added that no lowering emits, no program
+reaches, and `Vm::execute` matches only with an `unreachable!` body**. Both
+profiles got that pair, so there are four binaries; all four are byte-identical
+across a reboot and across `-j 16`, `-j 4` and `-j 2`, so nothing below is
+nondeterministic codegen. `fuel_spent` is identical on every row of all four —
+every benchmark ran exactly the instructions it ran before.
+
+Six `cove-bench --iterations 15` suites and six `--matrix --iterations 15`
+runs, one machine, one sitting, arranged so each variant run is **bracketed**
+by a run of its own base binary before and after it. Every figure below is the
+variant against the mean of its two brackets, which is the only way to state
+one at all — for the reason the next subsection gives.
+
+#### The result
+
+| row | release (`codegen-units = 16`) | bench-stable (`codegen-units = 1`) |
+| --- | ---: | ---: |
+| `arith` (VM) | **−1.00%** | **−6.01%** |
+| `conv_var` | +2.18% | −6.78% |
+| `conv_local` | +2.55% | −6.40% |
+| `call` (VM) | +1.12% | −5.19% |
+| `field` (VM) | −3.51% | −2.79% |
+| `method` (VM) | −3.44% | −2.01% |
+| `chars` (VM) | +0.65% (AST) | −2.15% |
+| `pure` (VM) | −3.87% | −5.70% |
+| **largest \|shift\| over 24–27 rows** | **3.87%** | **6.78%** |
+| **band width** | **6.42 pp** | **9.53 pp** |
+
+**The spurious shift is larger under `bench-stable`, not smaller.** Where the
+default profile spread its 24 rows over 6.4 percentage points, one codegen unit
+per crate spread 27 rows over 9.5, and the row #179 leads with — `arith` on the
+VM — moved six times further under the profile that was supposed to hold it
+still. The shape differs too, and the mechanism is legible: at 16 codegen units
+a dead variant perturbs the unit it lands in and leaves the others alone, so the
+shifts are small and mixed in sign; at one unit per crate it relays out the
+whole crate at once, so nearly every row moves the same way together.
+
+#### The control did not reproduce, and that is the more important finding
+
+The section above records **+23.5% on `arith`** and **+11.6% on `conv_var`**
+from exactly this control under exactly this default profile. This round, under
+the same profile, the same kind of never-executed `Inst` variant moved `arith`
+by **−1.00%** and `conv_var` by **+2.18%**.
+
+So there was no +23.5% here to shrink. That does not make the earlier
+measurement wrong — it was taken, and its instruction counts were checked, the
+same way this one was. What it means is that **one dead variant is a single
+draw from the layout distribution, not a measurement of it.** Two draws of the
+same experiment, at different commits, returned +23.5% and −1.00%. A control
+built from one perturbation can therefore say that layout sensitivity exists;
+it cannot size it, and it cannot be used to score a profile against another,
+which is what this round tried to do with it.
+
+#### And the machine moved as much as the code did
+
+Each arm's base binary was run twice, roughly forty minutes apart, with nothing
+else on the machine. The same binary disagreed with itself by:
+
+| | release | bench-stable |
+| --- | ---: | ---: |
+| `pure` (VM) | **−7.40%** | −6.57% |
+| `field` (VM) | +4.93% | −1.19% (AST: −5.31%) |
+| `method` (VM) | +3.24% | −1.05% |
+| `arrayget` (VM) | +2.58% | +3.22% |
+| largest \|shift\| | **7.40%** | 6.57% |
+
+**The null is the size of the signal.** A binary compared against itself moved
+up to 7.4%, which is more than either arm's variant moved against its bracket.
+So neither arm's number above is separable from drift, and the honest statement
+about `codegen-units = 1` is not "it is worse" but "**it is not better, and
+this machine cannot currently resolve a difference smaller than about 7% between
+two runs of anything, including one binary and itself.**"
+
+That is a prerequisite result. Until the same-binary null is brought under a
+percent or so, no layout experiment on this workspace can measure a layout
+effect, because the thing being measured is smaller than the ruler.
+
+#### What run-to-run spread says, and where the profile does help
+
+Within a single run the harness's own quartiles are small and the two profiles
+are the same: **median per-row IQR 1.09% of the median under `bench-stable`,
+1.13% under release.** The profile buys nothing there either.
+
+The one place it does help is the fastest rows, where a fixed cost is a larger
+fraction of a short run: the **largest** per-row IQR across the timed rows is
+**2.12% under `bench-stable` against 11.83% under release**, and `pure` on the
+VM — the row that carries most of that — goes from 6.08% to 1.40%. So one
+codegen unit does make a short benchmark's series tighter. It just does not
+make two *builds* comparable, which is the entire thing #179 wanted.
+
+This is also the clearest illustration of the rule the harness's own comparison
+already states: an interval built from within-run samples can be narrow on both
+sides and still be measuring a difference that is not the change. Under
+`bench-stable`, `arith`/VM's comparison against its base reads
+**−6.49% [−7.43, −5.84], "improvement"** — a confident, narrow interval, on a
+benchmark whose only difference from its baseline is an enum variant it cannot
+reach.
+
+#### What it costs
+
+Both binaries, `-j 4`, this machine:
+
+| | release | bench-stable | |
+| --- | ---: | ---: | ---: |
+| from scratch, deps included | 34.2 s | 49.2 s | **+44%** |
+| rebuild after a `vm.rs` edit | 17.2 s | 33.7 s | **+96%** |
+| total CPU, from scratch | 120.3 s | 94.1 s | −22% |
+
+The CPU column is the interesting one: one codegen unit does *less* total work
+and still takes longer, because it cannot spread that work across cores. The
+penalty is serialization, so it gets worse on a wider machine, not better.
+
+#### The recommendation, and what CI does
+
+**Do not adopt `bench-stable` as the baseline for implementation comparisons.**
+It costs 44% to 96% more build time, it does not narrow the cross-build band,
+and on this round's evidence it widens it. The profile stays defined so this
+measurement can be reproduced and so the next person does not have to build it
+again to find out; nothing in the workspace selects it.
+
+`.github/workflows/ci.yml` is untouched and unaffected. It builds `--release`
+and runs `cove-bench --iterations 1`, both deliberately, and a profile no step
+names costs it nothing.
+
+#### What this changes about how to read a measurement
+
+The rule the section above states — **a cross-build absolute is not evidence on
+this workspace** — is not narrowed by any of this. `bench-stable` does not earn
+back cross-build absolutes and nothing here suggests a profile that would.
+
+It is **widened**, in a direction that section did not reach. That rule is about
+two builds. This round shows the weaker claim fails too: *a same-build absolute
+taken forty minutes later is not evidence either*, because one binary moved 7.4%
+against itself with nothing changed at all. So:
+
+- **Bracket, do not pair.** A variant run must have a run of its base binary
+  before it *and* after it, and the figure quoted is the variant against the
+  mean of the two. A single base-then-variant pair cannot tell a change from the
+  half-hour that passed between them. Every number in this section is bracketed;
+  the sections above that quote a base run once should be read as the weaker
+  evidence they are.
+- **Quote the null beside the signal.** The two brackets' disagreement with each
+  other is the measurement's own error bar, it costs one extra run, and where it
+  is as large as the effect — as it is here — that is the result.
+- **One perturbation does not size a band.** +23.5% and −1.00% are the same
+  experiment at two commits. Sizing layout sensitivity needs several distinct
+  dead variants per profile, interleaved with base runs, not one.
+
+#### If the LTO question is asked later
+
+Thin LTO was deliberately excluded so that two changes would not land in one
+measurement, and it should stay excluded until the design above is fixed —
+running it now would produce another single-draw number of the kind this round
+has just shown is uninterpretable. What it would take: at least five *distinct*
+never-executed perturbations per profile, each bracketed by base runs, with the
+same-binary null reported per row, and the profiles compared on the **spread of
+the perturbations** rather than on any one of them. That is roughly six hours of
+wall time per profile on this machine, and the first thing it should establish
+is whether the ±7% same-binary drift can be brought down at all — because if it
+cannot, the experiment cannot resolve anything smaller and should not be run.
+
 ## The calling-convention matrix
 
 Issue #123's second half asks what the typed three-stack convention costs at

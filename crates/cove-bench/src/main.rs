@@ -121,6 +121,16 @@
 //! ./target/release/cove-bench --iterations 15 --baseline /tmp/base.jsonl
 //! ```
 //!
+//! **Bracket the variant, do not pair it.** Run the base binary, then the
+//! variant, then the base binary *again*, and quote the variant against the
+//! mean of the two base runs. A single base-then-variant pair cannot tell the
+//! change from the time that passed between them: on the machine
+//! `docs/VM_ARCHITECTURE.md`'s tables were taken on, one unmodified binary
+//! disagreed with itself by 7.4% over forty minutes with nothing changed at
+//! all. The two base runs' disagreement with each other is the measurement's
+//! own error bar, it costs one extra run, and it should be quoted beside the
+//! result -- where it is as large as the effect, that is the result.
+//!
 //! Nothing about this makes a comparison across two machines, two build
 //! profiles, or two busy afternoons meaningful. It compares the samples it is
 //! given; whether they were taken on a quiet machine is the reader's to
@@ -168,6 +178,17 @@
 //! ./target/release/cove-bench --iterations 1      # what CI runs, for correctness
 //! ./target/release/cove-bench --iterations 15     # a real local measurement
 //! ```
+//!
+//! **`--release` is the profile to measure under.** The workspace also defines
+//! `[profile.bench-stable]`, which is `release` with `codegen-units = 1`, and
+//! it is *not* the one to reach for: it was added to test whether one codegen
+//! unit per crate would stop module boundaries being a performance variable
+//! ([issue #179](https://github.com/myuon/cove/issues/179)), it was measured
+//! against a never-executed `Inst` variant, and it did not -- the spurious
+//! shift came out larger under it than under plain `release`, for 44% to 96%
+//! more build time. `docs/VM_ARCHITECTURE.md`, "What `codegen-units = 1` was
+//! measured to be worth", is the round. It stays defined so that result can be
+//! reproduced; nothing selects it.
 //!
 //! Optimized in both cases. The benchmarks are sized to be measurable in an
 //! optimized build, so an unoptimized one does not run them uniformly slower
