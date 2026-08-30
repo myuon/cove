@@ -16,22 +16,28 @@
 //! a real status line for these tests to pass, which is the half of issue
 //! #145 a table of canned answers cannot vouch for.
 //!
-//! The last test here is the other thing a fake cannot show: that a run's
-//! deadline reaches a program sitting inside `http.Server.handle` with a real
-//! socket and no client. A fake listener returns of its own accord when its
-//! queue is empty, so a program serving against one would stop whether or not
-//! the run's controls reached the host at all.
+//! The other thing a fake cannot show is that a bound reaches a program that
+//! is *waiting*, and two tests here are about that. A run's deadline has to
+//! reach a program sitting inside `http.Server.handle` with a real socket and
+//! no client: a fake listener returns of its own accord when its queue is
+//! empty, so a program serving against one would stop whether or not the
+//! run's controls reached the host at all. And a `clock.timeout` has to reach
+//! a program sitting inside `http.fetch` with a real socket and a server that
+//! has gone quiet — issue #170, where the flag was raised on time and nothing
+//! in the client was reading it. Both assert on how long the run took, since
+//! the wrong implementation reaches the right answer eventually.
 
 use std::io::{BufRead, BufReader, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use cove_diag::SourceMap;
 use cove_runtime::budget::{Budget, Limits};
+use cove_runtime::clock::Clock;
 use cove_runtime::host::{Console, Grants, HostRegistry};
 use cove_runtime::http::Http;
 use cove_runtime::interp::Interpreter;
@@ -231,9 +237,14 @@ fn run_under(name: &str, source: &str, limits: Limits) -> (Result<Value, String>
     let package = cove_sema::package::load(dir.path(), &mut sources).expect("the package loads");
     let program = cove_sema::resolve::resolve(&package).expect("the package resolves");
 
-    let mut hosts = HostRegistry::new(Grants::new(["http", "console"]));
+    let mut hosts = HostRegistry::new(Grants::new(["http", "console", "clock"]));
     hosts.register(Box::new(Console::new(std::io::sink(), std::io::sink())));
     hosts.register(Box::new(Http::real()));
+    // A real clock, because `clock.timeout` on a virtual one judges afterwards
+    // by how far the body moved time and a `fetch` moves it not at all. The
+    // bound these tests are about is the one that raises a flag on a thread
+    // while the host is waiting, and only the real clock has that.
+    hosts.register(Box::new(Clock::real()));
     hosts.set_budget(Budget::new(limits));
 
     let runtime = Runtime::new(Arc::new(program), Arc::new(sources), Arc::new(hosts));
@@ -340,5 +351,94 @@ fn a_program_is_told_when_no_server_answered_at_all() {
     assert!(
         message.starts_with(&format!("http: cannot connect to 127.0.0.1:{port}")),
         "{message}"
+    );
+}
+
+/// The program `examples/covecheck` writes around each of its fetches, with
+/// the URL it is given: one `clock.timeout` around one `http.fetch`, and the
+/// three outcomes told apart rather than collapsed into a message.
+const BOUNDED_FETCH: &str = r#"use clock
+use http
+
+/// Fetches one URL under a bound, and answers which of the three happened.
+export fn main() -> Result<String, Error> {
+  let answer: Result<Result<http.Response, Error>, Error> = clock.timeout(300ms) {
+    http.fetch("THE_URL")
+  }
+
+  match answer {
+    Ok(fetched) => match fetched {
+      Ok(response) => Ok("answered {response.status}")
+      Err(error) => Ok("unanswered {error.message}")
+    }
+    Err(error) => Ok("bounded {error.message}")
+  }
+}
+"#;
+
+/// Binds loopback, reads one request, and then says nothing until it is told
+/// to hang up.
+///
+/// A server that answers nothing is the only one that can show this bug: the
+/// client has to be *inside* its read, with the connection open and the
+/// request sent, when the bound is raised. The connection is held rather than
+/// dropped, because dropping it is an end-of-file and would end the client's
+/// read for a reason that has nothing to do with the bound.
+fn stall_once(hung_up: Arc<AtomicBool>) -> (u16, std::thread::JoinHandle<()>) {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("loopback is available");
+    let port = listener
+        .local_addr()
+        .expect("a bound socket has an address")
+        .port();
+    let thread = std::thread::spawn(move || {
+        let (stream, _) = listener.accept().expect("the program connects");
+        read_request(&stream);
+        while !hung_up.load(Ordering::Relaxed) {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        drop(stream);
+    });
+    (port, thread)
+}
+
+/// A `clock.timeout` around a `fetch` cuts the fetch short.
+///
+/// This is issue #170 end to end, and nothing here stands in for anything:
+/// the bound is written in Cove, the flag is raised by the real clock's own
+/// watchdog thread on a thread of its own, and the client is a real socket
+/// waiting on a real server that has decided to say nothing. Before this
+/// change the client folded the run's deadline into one socket timeout and
+/// then blocked, so the flag had nobody reading it and the program was told
+/// about its 300ms bound thirty seconds later, when `READ_TIMEOUT` expired.
+///
+/// The assertion is therefore about *when* and not only about *what*: the old
+/// client produced this same answer, eventually. Five seconds is the line,
+/// which is more than sixteen times the bound — room for a loaded machine to
+/// be slow in — and a sixth of the thirty seconds the unfixed client takes.
+#[test]
+fn a_clock_timeout_cuts_short_a_fetch_waiting_on_a_silent_server() {
+    let hung_up = Arc::new(AtomicBool::new(false));
+    let (port, server) = stall_once(Arc::clone(&hung_up));
+    let bound = Duration::from_millis(300);
+
+    let source = BOUNDED_FETCH.replace("THE_URL", &format!("http://127.0.0.1:{port}/health"));
+    let (ran, took) = run_under("fetch-timeout", &source, Limits::default());
+
+    hung_up.store(true, Ordering::Relaxed);
+    server.join().expect("the server thread finishes");
+
+    let value = ran.expect("the program ran without a runtime error");
+    assert_eq!(
+        outcome(&value),
+        Ok("bounded clock: timed out after 300ms".to_string()),
+        "the bound the program wrote is what it is told about"
+    );
+    assert!(
+        took >= bound,
+        "the fetch ended before the bound that was supposed to end it, after {took:?}"
+    );
+    assert!(
+        took < Duration::from_secs(5),
+        "the fetch waited on `READ_TIMEOUT` rather than on its `clock.timeout`, for {took:?}"
     );
 }
