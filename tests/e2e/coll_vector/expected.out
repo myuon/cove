@@ -11,8 +11,15 @@ set answers what was there Some(1)
 the alias observes the replacement [100, 2, 3, 4, 5]
 out of range None None unchanged [100, 2, 3, 4, 5]
 set never grows the vector None 5
+pop Some(4) [1, 2, 3]
+remove Some(1) [2, 3]
+out of range None None [2, 3]
+an alias observes the shrink Some(3) [2] [2]
+a stale position Some(2) Some(1) Some(10)
+a walk that empties as it goes 6 []
 contains true false
 indexOf Some(0) None
 slice [100, 2] [100, 2, 3, 4, 5]
 empty [] true
 empty answers false None None
+empty shrinks to nothing None None

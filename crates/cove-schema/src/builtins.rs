@@ -1021,6 +1021,9 @@ const SORTED: MethodSchema = MethodSchema {
 /// order and the membership of a sequence, and `map`, `filter`, `fold`, and
 /// `sorted` are the four it walks with a closure. All seven are declared
 /// once above, because a `Vector` has the same seven.
+///
+/// `toVector` is the one direction `Vector` does not answer for itself, and
+/// it is the inverse of `Vector.toArray`.
 pub const ARRAY: BuiltinSchema = BuiltinSchema {
     name: "Array",
     parameters: &["T"],
@@ -1048,6 +1051,43 @@ pub const ARRAY: BuiltinSchema = BuiltinSchema {
         FILTER,
         FOLD,
         SORTED,
+        // `toVector() -> Vector<T>`: a fresh growable copy of these
+        // elements.
+        //
+        // This is `Vector.toArray` run backwards, down to the spelling, and
+        // it is the beginning of the round trip the other two already have
+        // the middle and the end of: an immutable `Array` is the state, a
+        // `Vector` is the scratch, and `freeze()` or `toArray()` puts it
+        // back. It answers a vector nothing else holds a handle to, so the
+        // `freeze()` at the end of that trip is the O(1) one.
+        //
+        // **It is on `Array` and not on `Vector`.** A `Vector` already
+        // answers an independent vector, and that answer is called
+        // `snapshot()`; a second name for it is the drift the shared
+        // constants exist to prevent.
+        //
+        // It copies the elements as they are, which is `toArray`'s rule and
+        // deliberately not `snapshot`'s. A struct element is the field-wise
+        // shallow copy an assignment makes, and a `Vector` element stays the
+        // same handle, so `items.toVector()` separates the sequence and
+        // nothing inside it. A program that wants the deep copy asks for it
+        // by name.
+        //
+        // There is no bad argument, no empty-receiver question — an empty
+        // array answers an empty vector — and the copy is O(n) either way,
+        // so what this buys is an expression where a `for`/`push` loop was.
+        // The `...` spread is not that expression: it fills a *declared*
+        // function's variadic parameter and nothing else, so `Vector.of` —
+        // an associated function of a builtin — collects nothing from one,
+        // and `cove_ir` refuses to lower a `...` written there.
+        MethodSchema {
+            name: "toVector",
+            generics: &[],
+            params: &[],
+            variadic: false,
+            result: BuiltinType::Vector(&BuiltinType::Param("T")),
+            mutating: false,
+        },
         SNAPSHOT,
     ],
     associated: &[],
@@ -1058,16 +1098,57 @@ pub const ARRAY: BuiltinSchema = BuiltinSchema {
 /// `Vector<T>`: the growable sequence, and the one builtin with a mutable
 /// graph of its own.
 ///
-/// `push`, `set`, and `freeze` are the language's only `var self` methods:
-/// one appends, one replaces, and the third consumes locally unique storage
-/// and hands back an `Array` in O(1). `toArray` is the copying alternative,
-/// for a caller that cannot give the storage up.
+/// `push`, `set`, `pop`, `remove`, and `freeze` are the language's only
+/// `var self` methods: one appends, one replaces, two take an element back
+/// out, and the last consumes locally unique storage and hands back an
+/// `Array` in O(1). `toArray` is the copying alternative, for a caller that
+/// cannot give the storage up.
+///
+/// # The name of a mutation, and the name of an answer
+///
+/// A method that writes through the receiver is spelled as an imperative
+/// verb — `push`, `set`, `pop`, `remove` — and a method that answers a new
+/// collection is spelled as a past participle: `Map.inserted`,
+/// `Set.removed`, and every sequence's `sorted`. That is why removal here is
+/// `remove` and not `removed`, which is `Set`'s **non**-mutating answer and
+/// would say the opposite of what this does. The parameter is `index` for
+/// the same reason, because `get(index)` and `set(index, value)` already
+/// call it that.
+///
+/// # There is no `clear`
+///
+/// Emptying a vector is `pop` in a loop, or — for scratch state that is
+/// rebuilt each time round, which is what the examples write — rebinding
+/// `var items = Vector.of()`, which costs nothing and hands back storage
+/// nothing else can be holding. What a `clear` would add over those is a
+/// bulk write *through* an alias, and a program that empties a vector
+/// somebody else is holding is the case worth making a caller spell out.
+///
+/// It is also the only one of the three shrinking operations with nothing to
+/// answer, so it is the only one that would need a decision of its own —
+/// `Unit`, or the count it discarded — where `pop` and `remove` inherit
+/// `get`'s answer whole. An operation whose only argument is convenience and
+/// whose only question is new is the one to leave out.
+///
+/// # What a removal costs
+///
+/// `push`, `set`, and `pop` are O(1). `remove(index)` is O(n - index),
+/// because the elements after `index` move down one; that is written down
+/// for the reason `set` being O(1) is.
 ///
 /// `contains`, `indexOf`, `slice`, `map`, `filter`, `fold`, and `sorted` are
 /// the same seven an `Array` has, and the four that produce a sequence
 /// answer an `Array` here too: `v.sorted(by:)` is `v.toArray().sorted(by:)`
-/// and writes nothing through the handle, so an alias sees no change and a
-/// callback that pushes cannot disturb the walk.
+/// and writes nothing through the handle, so an alias sees no change and no
+/// walk can be disturbed by what happens during it.
+///
+/// Removal is checked against that rather than assumed under it, because a
+/// walk that shrinks its own receiver is the case that would have found it
+/// wrong. The check is written as a `for` rather than as a callback: a
+/// closure captures a copy of each binding it reads and a captured binding
+/// is a read-only place, so `items.pop()` inside a `filter` callback is
+/// refused by the checker, and `for`, which walks the elements it asked for
+/// once, is where the question can be asked at all.
 pub const VECTOR: BuiltinSchema = BuiltinSchema {
     name: "Vector",
     parameters: &["T"],
@@ -1140,6 +1221,61 @@ pub const VECTOR: BuiltinSchema = BuiltinSchema {
                     ty: BuiltinType::Param("T"),
                 },
             ],
+            variadic: false,
+            result: BuiltinType::Option(&BuiltinType::Param("T")),
+            mutating: true,
+        },
+        // `pop() -> Option<T>`: takes the last element out and answers it,
+        // or answers `None` and writes nothing when there is no last
+        // element.
+        //
+        // The empty answer is not a decision of its own. `pop` is
+        // `remove(length() - 1)`, and on an empty vector that index is `-1`,
+        // which `get`, `set` and `remove` all answer `None` for; so the one
+        // rule about indices covers this too, rather than a second rule
+        // about emptiness sitting beside it.
+        //
+        // It is a mutation and so it is an imperative verb, like `push` and
+        // `set` and unlike `Set.removed`. It writes through the shared
+        // storage, so an alias observes the shrink, and it needs the
+        // caller's own place at the call site for the reason `push` does.
+        //
+        // **Removal makes a promise about indices that replacement does
+        // not.** After `v.set(3, x)` every index still names what it named;
+        // after `v.pop()` the index `length() - 1` names nothing, and after
+        // `v.remove(3)` every index above 3 names what the one above it
+        // named. A cursor, a stored index, or an `indexOf` result computed
+        // earlier is stale afterwards. That is what makes these different
+        // operations from `set` rather than more of it.
+        MethodSchema {
+            name: "pop",
+            generics: &[],
+            params: &[],
+            variadic: false,
+            result: BuiltinType::Option(&BuiltinType::Param("T")),
+            mutating: true,
+        },
+        // `remove(index: Int) -> Option<T>`: takes the element at `index`
+        // out, moves everything after it down one, and answers what was
+        // there.
+        //
+        // **An index that is not already in the vector answers `None` and
+        // removes nothing**, which is `get`'s answer and `set`'s: a negative
+        // index, an index at or past `length()`, and a `remove` on an empty
+        // vector are one case with one answer. `Some(removed)` is what
+        // `v.get(index)` would have answered a moment before.
+        //
+        // It is `remove` and not `removed` because it writes through the
+        // receiver; the parameter is `index` and not `at` because `get` and
+        // `set` already named it. Both are the vocabulary rather than a
+        // choice made here — see this type's own documentation.
+        MethodSchema {
+            name: "remove",
+            generics: &[],
+            params: &[ParamSchema {
+                name: "index",
+                ty: BuiltinType::Int,
+            }],
             variadic: false,
             result: BuiltinType::Option(&BuiltinType::Param("T")),
             mutating: true,
@@ -2399,11 +2535,16 @@ mod tests {
         assert_eq!(read, built);
     }
 
-    /// `push`, `set`, and `freeze` are the language's only `var self`
-    /// methods, and the call site asks by name because it has no receiver
-    /// type yet.
+    /// `push`, `set`, `pop`, `remove`, and `freeze` are the language's only
+    /// `var self` methods, and the call site asks by name because it has no
+    /// receiver type yet.
+    ///
+    /// Every one of them is an imperative verb, which is the half of the
+    /// naming rule this can state: a past participle in this list would be a
+    /// name that says it answers a new collection while writing through the
+    /// receiver.
     #[test]
-    fn push_set_and_freeze_are_the_mutating_methods() {
+    fn the_mutating_methods_are_the_ones_that_write_through_the_receiver() {
         let mut mutating: Vec<&str> = BUILTINS
             .iter()
             .flat_map(|entry| entry.methods)
@@ -2411,11 +2552,64 @@ mod tests {
             .map(|method| method.name)
             .collect();
         mutating.sort_unstable();
-        assert_eq!(mutating, ["freeze", "push", "set"]);
+        assert_eq!(mutating, ["freeze", "pop", "push", "remove", "set"]);
         assert!(is_mutating_method("push"));
         assert!(is_mutating_method("set"));
+        assert!(is_mutating_method("pop"));
+        assert!(is_mutating_method("remove"));
         assert!(!is_mutating_method("get"));
         assert!(!is_mutating_method("toArray"));
+        // The past participles answer a new collection and write through
+        // nothing, so none of them is here — `Vector.remove` and
+        // `Set.removed` are two operations and the names say which is which.
+        assert!(!is_mutating_method("removed"));
+        assert!(!is_mutating_method("inserted"));
+        assert!(!is_mutating_method("sorted"));
+    }
+
+    /// The round trip a program makes between the immutable sequence and the
+    /// mutable one is spelled in two names, one per direction.
+    #[test]
+    fn a_sequence_converts_to_the_other_kind_in_one_name_each_way() {
+        assert_eq!(
+            ARRAY.method("toVector").unwrap().signature(),
+            "toVector() -> Vector<T>"
+        );
+        assert_eq!(
+            VECTOR.method("toArray").unwrap().signature(),
+            "toArray() -> Array<T>"
+        );
+        // Neither type answers its own kind: an independent `Vector` from a
+        // `Vector` is `snapshot()`, and an `Array` is already immutable.
+        assert!(VECTOR.method("toVector").is_none());
+        assert!(ARRAY.method("toArray").is_none());
+    }
+
+    /// What a vector answers when an element is taken out of it, and what it
+    /// answers when there is none to take.
+    #[test]
+    fn a_vector_shrinks_by_the_same_rule_about_indices_that_it_reads_by() {
+        assert_eq!(
+            VECTOR.method("pop").unwrap().signature(),
+            "pop() -> Option<T>"
+        );
+        assert_eq!(
+            VECTOR.method("remove").unwrap().signature(),
+            "remove(index: Int) -> Option<T>"
+        );
+        // `get`, `set`, `pop` and `remove` all answer an `Option<T>`, which
+        // is the one rule about indices written four times rather than four
+        // rules.
+        for name in ["get", "set", "pop", "remove"] {
+            assert_eq!(
+                VECTOR.method(name).unwrap().result,
+                BuiltinType::Option(&BuiltinType::Param("T")),
+                "`{name}`"
+            );
+        }
+        // There is no `clear`: see this type's own documentation for why the
+        // one operation with nothing to answer is the one left out.
+        assert!(VECTOR.method("clear").is_none());
     }
 
     /// A type parameter a signature names is either one the receiver binds or

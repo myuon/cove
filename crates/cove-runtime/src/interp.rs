@@ -2942,16 +2942,37 @@ impl<'a> Interpreter<'a> {
             return self.call_task_method(env, receiver_value, name, args, trailing, span);
         }
 
-        // `push`, `set`, and `freeze` take a `var self` receiver, and that
-        // the receiver is a place — and a writable one — is `cove-sema`'s to
-        // say (ADR 0021). What is left is a `push` or a `set` on something
-        // that is no place at all, which has nowhere to write *to*: refusing
-        // is not a language rule but the last thing this evaluator can do
-        // with an argument it was not given. `freeze` is not here because it
-        // has an answer for a temporary — the temporary holds the only
-        // handle to its own storage, so freezing it writes nowhere.
-        if matches!(name, "push" | "set") && place.is_none() {
-            return Err(var_self_needs_place(name, receiver, span).into());
+        // Every `var self` method takes a receiver that is a place — and a
+        // writable one — and that is `cove-sema`'s to say (ADR 0021). What
+        // is left is one of them called on something that is no place at
+        // all, which has nowhere to write *to*: refusing is not a language
+        // rule but the last thing this evaluator can do with an argument it
+        // was not given. `freeze` is the exception, because it has an answer
+        // for a temporary — the temporary holds the only handle to its own
+        // storage, so freezing it writes nowhere.
+        //
+        // Which names those are is the shared table's to say, and asking it
+        // is what makes a mutating method the table gains arrive here with
+        // the rule already applied. It is the same question `cove-sema`'s
+        // `mutating_method` asks of a builtin receiver, in the same two
+        // parts.
+        //
+        // The *receiver's* type is asked and not the name alone, because a
+        // name is not enough: `pop` is a mutating method of a `Vector` and
+        // no method of an `Array` at all, so `[1].pop()` is told the second
+        // rather than told to find a place for a method it does not have. A
+        // receiver that is no builtin — a struct with no such method, a host
+        // resource — falls through to the dispatch below, which is what
+        // names it.
+        if name != "freeze" && place.is_none() {
+            let is_var_self = temporary.as_ref().is_some_and(|value| {
+                cove_schema::builtins::builtin(&value.type_name())
+                    .and_then(|schema| schema.method(name))
+                    .is_some_and(|method| method.mutating)
+            });
+            if is_var_self {
+                return Err(var_self_needs_place(name, receiver, span).into());
+            }
         }
 
         let args = self.eval_args(env, args, trailing)?;
@@ -5583,6 +5604,28 @@ export fn main() -> Result<Unit, Error> {
         );
     }
 
+    /// Every `var self` method the table declares is refused on a temporary,
+    /// and the guard asks the shared table rather than a list written here.
+    #[test]
+    fn every_var_self_method_on_a_temporary_is_rejected() {
+        for call in ["push(2)", "set(0, 2)", "pop()", "remove(0)"] {
+            let source = format!(
+                "
+export fn main() -> Result<Unit, Error> {{
+  Vector.of(1).{call}
+  Ok(())
+}}
+"
+            );
+            let error = run_entry_of(&source, "main", &[]).error();
+            assert!(
+                error.message.contains("is not a place"),
+                "`{call}`: {}",
+                error.message
+            );
+        }
+    }
+
     // ------------------------------------------------------------- rule 5
 
     const TRY: &str = r#"
@@ -6278,6 +6321,10 @@ export fn main() -> Result<Unit, Error> {
         );
     }
 
+    /// `pop` is a `Vector`'s mutating method and no method of an `Array` at
+    /// all, so the receiver's type answers this rather than the name: an
+    /// `Array` asked for one is told it has no such method, not told to find
+    /// a place for a `var self` receiver it would never need.
     #[test]
     fn a_method_that_does_not_exist_names_the_receiver_type() {
         let error = error_of("  let x = [1].pop()");

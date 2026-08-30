@@ -1,6 +1,7 @@
 use console.println
 
-/// Prints `Array` construction, access, and iteration.
+/// Prints `Array` construction, access, iteration, and the growable copy
+/// `toVector` answers.
 export fn main(args: Array<String>) -> Result<Unit, Error> {
   let items = [10, 20, 30]
   println("literal {items}")?
@@ -31,6 +32,17 @@ export fn main(args: Array<String>) -> Result<Unit, Error> {
   println(
     "empty answers {empty.contains(1)} {empty.indexOf(1)} {empty.slice(0, 3)}",
   )?
+
+  // `toVector` is `Vector.toArray` run backwards, and it is on `Array` only:
+  // an independent vector from a vector is `snapshot()`. It answers a vector
+  // nothing else holds a handle to, so growing it leaves the array alone and
+  // the `freeze()` that ends the round trip is the O(1) one. An empty array
+  // answers an empty vector; there is no argument here to be wrong.
+  var growable = items.toVector()
+  growable.push(40)
+  println("toVector {growable} left the array alone {items}")?
+  println("and its storage is unshared, so freeze takes it {growable.freeze()}")?
+  println("an empty array answers an empty vector {empty.toVector()}")?
 
   println("process arguments {args} {args.length()}")?
   println("first argument {args.get(0).unwrapOr("<none>")}")?

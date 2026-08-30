@@ -123,6 +123,27 @@ Assignment and ordinary argument passing perform field-wise shallow copies.
   receiver like `push` and an alias observes it. An index that is not already
   in the vector answers `None` and writes nothing — the same answer `get`
   gives for the same index — so `set` never grows a vector; `push` does.
+- `vector.pop()` takes the last element out and `vector.remove(index)` takes
+  the one at `index` out, moving everything after it down one. Both answer
+  `Some` of what they took and both write through the shared storage, like
+  `push` and `set`. An index that is not already in the vector — and a `pop`
+  on an empty vector, which is that same index — answers `None` and removes
+  nothing. `push`, `set`, and `pop` are O(1); `remove(index)` is O(n - index).
+  There is no `clear`: `pop` in a loop empties a vector, and scratch state is
+  usually rebound with `var items = Vector.of()` instead.
+- A method that writes through the receiver is an imperative verb — `push`,
+  `set`, `pop`, `remove`, `freeze` — and a method that answers a new
+  collection is a past participle: `inserted`, `removed`, `sorted`. So
+  `vector.remove(0)` shrinks the vector and `set.removed(0)` answers a new
+  set, and the name says which.
+- Removal moves the indices that replacement leaves alone: after
+  `vector.set(3, x)` every index still names what it named, and after a `pop`
+  or a `remove` an index held across the call — a cursor, an earlier
+  `indexOf` — may name something else.
+- `array.toVector()` copies an array into a fresh vector, which is
+  `vector.toArray()` run the other way. It is on `Array` only: an independent
+  vector from a vector is `snapshot()`. Nothing else holds a handle to the
+  result, so `freeze()` on it is the O(1) one.
 - A character is a `String` of length 1: `text.chars()` takes a string apart
   into them, and `String.fromCodePoint(codePoint)` builds one from the number
   that names it, or an `Err` for a number that names none — one out of range,

@@ -11,5 +11,8 @@ slice clamped [10, 20, 30] reversed []
 iterated total 60
 empty [] true 0
 empty answers false None []
+toVector [10, 20, 30, 40] left the array alone [10, 20, 30]
+and its storage is unshared, so freeze takes it [10, 20, 30, 40]
+an empty array answers an empty vector []
 process arguments [alpha, beta gamma] 2
 first argument alpha

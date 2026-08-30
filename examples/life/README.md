@@ -192,10 +192,7 @@ It now copies the grid into a `Vector` and writes each change where it
 happened:
 
 ```cove
-var levels = Vector.of()
-for level in world.food {
-  levels.push(level)
-}
+var levels = world.food.toVector()
 for delta in deltas {
   let standing = levels.get(delta.cell).unwrapOr(0)
   levels.set(delta.cell, standing + delta.change)
@@ -238,6 +235,16 @@ That is not a change in what a tick computes — the levels are the same and the
 state hash is unchanged, tick for tick — but it is a change in what the code
 says: the levels are summed first and bounded once, rather than bounded on the
 way past.
+
+**The copy itself now has a name.** The first line above used to be a `for`
+that pushed the grid into an empty `Vector` one cell at a time, which was the
+last piece of this rebuild still written as a loop, and issue #178 was filed
+from it: `Vector.toArray` had no inverse, so the one operation with no name
+was the one that starts the pattern. `Array.toVector` is that inverse. It
+changes nothing about the cost — the copy was O(cells) as a loop and is
+O(cells) as a builtin — and it is not what would close #154; what it changes
+is that the beginning, the middle and the end of the round trip are now three
+names instead of two names and a loop.
 
 ## Isolation: what a refusal is for
 
