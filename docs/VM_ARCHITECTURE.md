@@ -1200,6 +1200,93 @@ row the fixed baseline does not contain cannot be compared against it, and
 this round's whole discipline is that every figure is measured against
 `8638f0e`.
 
+### The row that gap named, and the allocation it found
+
+[#193](https://github.com/myuon/cove/issues/193) is that row and the thing it
+found. `benches/callback` is `examples/life`'s `population()` reduced to the
+mechanism — a helper that builds a closure over one capture and hands it to
+`filter` — sized to make the same 2,000,000 entries into a body that
+`benches/call` makes through the call instruction. It was committed and a
+baseline recorded with it present *before* anything on the path it measures
+was touched, which is the discipline the paragraph above declined to break.
+
+What it prices is a route nothing else in the suite reaches:
+`builtins::walk_with` re-entering the evaluator. `map`, `filter`, `fold` and
+`sorted` were allocating a `Vec<Value>` for each element they visited — the
+same shape #184 removed from the builtin path, on the one path #184's pool
+did not reach. It reaches it now by being handed one level further down: the
+callback's arguments go in the vector `Vm::borrow_args` already lent the
+builtin, which is empty the moment the callback has been taken out of it, so
+`Callable::call_value` drains it and gives it back rather than consuming one
+per element.
+
+**The allocation count is the result, and it is exact.** With a counting
+global allocator (`scripts/ablate/instrument.patch`'s, applied to
+`cove-bench`), `cove-bench --iterations 1` on this machine:
+
+| row | before | after |
+| --- | ---: | ---: |
+| `callback`, VM | 2,500,119 allocations / 121,510,938 bytes | 500,119 / 73,510,938 |
+| `callback`, AST | 22,125,128 / 1,723,320,934 | 20,125,128 / 1,675,320,934 |
+| every other row, both backends | — | identical to the digit |
+
+Two million fewer on each backend, which is one per element, and 48,000,000
+fewer bytes, which is `size_of::<Value>()` times two million. The VM's row
+allocates a fifth of what it did. The AST backend loses the same two million
+out of twenty-two, because a slot there carries a label and a span beside its
+value and one vector per call is still built for that.
+
+**Timing, as within-build ratios, because #179 says an absolute is not
+evidence here.** `cove-bench --iterations 15`, one session, base binary run
+first and again last:
+
+| ratio, VM | base | after | base re-run |
+| --- | ---: | ---: | ---: |
+| `callback ÷ call` | 2.412 | **1.792** | 2.385 |
+| `callback ÷ arith` | 4.548 | **3.423** | 4.539 |
+| `arrayget ÷ arith` | 4.968 | 4.989 | 4.929 |
+| `chars ÷ arith` | 6.674 | 6.644 | 6.705 |
+
+The two base columns are the same binary an hour apart and they bracket the
+drift at about 1%; the ratio this change is about moves 25%. The two rows
+below it are the control: neither runs a callback, and neither ratio moves.
+Per invocation, the VM went from 192.2 ns to 144.0 ns with the base re-run at
+190.3 ns — about 48 ns, which is a `malloc` and a `free`. The AST backend
+moved `callback ÷ call` from 1.067 to 1.025 with the re-run at 1.071, and
+717.8 ns against 752.2 and 754.2 ns per invocation.
+
+Read as raw deltas against the recorded base, the same run says `callback`/VM
+−25.11% [−25.63, −24.48] and `callback`/AST −4.58% [−4.88, −4.08], which
+agrees. What the raw deltas also say, and what the ratios are here to
+discount, is `pure`/VM +10.14% [+8.57, +10.92] on a 1.4 ms row that runs
+`fib(20)` and reaches no builtin at all — and −5.28% on the next build, and
+−3.99% on the base binary re-run. That is the layout band, on the smallest
+row in the suite, behaving exactly as the section below predicts.
+
+Every `fuel_spent` figure is identical across all four builds, on every row
+and both backends, which is the check that nothing about what these
+benchmarks *do* changed.
+
+**And the other half of #183, measured the same way.** `Value::builtin_name`
+was a thread-local `RefCell<Vec<(&str, Rc<str>)>>` scanned by string compare,
+twice per `Some` — so a `Some(x)` paid two thread-local accesses, two
+`RefCell` borrows and two linear walks to answer with the same two `Rc`s as
+last time. The names are eight fields of a thread-local struct now, reached
+once per construction. It changes no allocation count (the eight `Rc<str>`
+are made once per thread either way, only eagerly rather than one at a time),
+so what it buys is work removed rather than memory, and the within-build
+ratios are the only thing that can say how much:
+
+| ratio, VM | without | with | the two base runs |
+| --- | ---: | ---: | ---: |
+| `arrayget ÷ arith` | 4.989 | **4.593** | 4.968, 4.929 |
+| `chars ÷ arith` | 6.644 | **6.336** | 6.674, 6.705 |
+
+About −8% and −5% on the two rows that build an `Option` per turn, against an
+`arith` that builds none. On the AST backend the same two ratios move 0.6% and
+2.5% in opposite directions, which is nothing: the lookup it removes is a
+smaller share of a tree walk's per-operation cost.
+
 ## The slice, and the gate
 
 The smallest end-to-end thing worth measuring is `benches/arith` running with
