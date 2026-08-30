@@ -36,13 +36,13 @@
 //!
 //! ADR 0011 is explicit that the roots are the interpreter's own structures
 //! rather than a machine stack, so there are no stack maps here. What those
-//! structures are is not the same on both backends, so [`Roots`] is a trait
+//! structures are is not the same on both backends, so `Roots` is a trait
 //! rather than a list: it names something that can *drive* a walk of one
 //! task's roots, and each backend describes its own.
 //!
 //! The two descriptions have nothing in common but the values they yield.
 //! Every binding the interpreter creates is a [`crate::interp`] `Place`,
-//! whose slot is an `Rc<RefCell<Value>>` registered in a [`SlotRoots`] list
+//! whose slot is an `Rc<RefCell<Value>>` registered in a `SlotRoots` list
 //! with the same push-and-truncate discipline the environment chain already
 //! has; the collector borrows each cell as it walks, so what it sees is what
 //! the slot holds now rather than what it held when the binding was made. The
@@ -191,7 +191,7 @@ const GROWTH_FACTOR: u64 = 2;
 /// Yielding *too few* is safe in the same accounting, and is the reason the
 /// VM need not walk its constant pool: an unseen reference is a shortfall,
 /// and a shortfall is a root.
-pub trait Roots {
+pub(crate) trait Roots {
     /// Calls `visit` once for every value this task holds directly.
     fn walk(&self, visit: &mut dyn FnMut(&Value));
 }
@@ -211,35 +211,30 @@ type Slot = Rc<RefCell<Value>>;
 /// exactly. There is one list per interpreter and one interpreter per task, so
 /// this *is* a task's roots — nothing has to be sliced out of a larger set.
 #[derive(Default)]
-pub struct SlotRoots {
+pub(crate) struct SlotRoots {
     slots: Vec<Slot>,
 }
 
 impl SlotRoots {
     /// An empty root set.
-    pub fn new() -> SlotRoots {
+    pub(crate) fn new() -> SlotRoots {
         SlotRoots::default()
     }
 
     /// How many slots are registered. A caller records this before entering a
     /// scope and hands it back to [`SlotRoots::truncate`] on the way out.
-    pub fn len(&self) -> usize {
+    pub(crate) fn len(&self) -> usize {
         self.slots.len()
     }
 
-    /// Whether no binding is registered at all.
-    pub fn is_empty(&self) -> bool {
-        self.slots.is_empty()
-    }
-
     /// Registers one binding's slot.
-    pub fn push(&mut self, slot: Slot) {
+    pub(crate) fn push(&mut self, slot: Slot) {
         self.slots.push(slot);
     }
 
     /// Drops every slot registered after `len`, which is what leaving a block
     /// or a call does.
-    pub fn truncate(&mut self, len: usize) {
+    pub(crate) fn truncate(&mut self, len: usize) {
         self.slots.truncate(len);
     }
 }
@@ -284,8 +279,9 @@ pub struct Collection {
     pub freed_bytes: u64,
     /// Objects still live after the sweep.
     pub live_objects: u64,
-    /// Bytes the live set holds, by the accounting [`Heap::live_bytes`]
-    /// describes.
+    /// Bytes the live set holds: every string, array, map, set, struct, enum
+    /// case and closure the live objects and the roots reach, with each
+    /// shared allocation counted once.
     pub live_bytes: u64,
     /// How long the program was stopped for this collection.
     pub pause: Duration,
@@ -340,7 +336,7 @@ impl HeapStats {
 /// is what makes that a language rule rather than an approximation: a vector
 /// may not cross a task boundary, so no two tasks ever hold the same one, and
 /// a task can collect without waiting for any other task to reach a safepoint.
-pub struct Heap {
+pub(crate) struct Heap {
     /// Every object this task has allocated and not yet lost, keyed by the
     /// address the object was allocated at. The address is stable while the
     /// `Weak` lives, so it identifies the object even after `Rc` has already
@@ -353,7 +349,7 @@ pub struct Heap {
 
 impl Heap {
     /// An empty heap.
-    pub fn new() -> Heap {
+    pub(crate) fn new() -> Heap {
         Heap {
             objects: HashMap::new(),
             allocations_since_collection: 0,
@@ -363,13 +359,13 @@ impl Heap {
     }
 
     /// This heap's totals so far.
-    pub fn stats(&self) -> HeapStats {
+    pub(crate) fn stats(&self) -> HeapStats {
         self.stats
     }
 
     /// Whether the heap is tracking no object at all, which is what a program
     /// that never made a vector looks like.
-    pub fn is_empty(&self) -> bool {
+    pub(crate) fn is_empty(&self) -> bool {
         self.objects.is_empty()
     }
 
@@ -380,7 +376,7 @@ impl Heap {
     /// counters rather than reading them keeps a second fold from counting the
     /// same allocation twice. The live figures describe the heap right now and
     /// are not counters, so they are left alone.
-    pub fn take_stats(&mut self) -> HeapStats {
+    pub(crate) fn take_stats(&mut self) -> HeapStats {
         let taken = self.stats;
         self.stats = HeapStats {
             live_bytes: self.stats.live_bytes,
@@ -396,7 +392,7 @@ impl Heap {
     /// The returned `Rc` is the program's handle; the heap keeps only a
     /// `Weak`, so the value's lifetime is still `Rc`'s to decide until a cycle
     /// takes that decision away from it.
-    pub fn allocate(&mut self, elements: Vec<Value>) -> Rc<VectorStorage> {
+    pub(crate) fn allocate(&mut self, elements: Vec<Value>) -> Rc<VectorStorage> {
         let storage = VectorStorage::new(elements);
         self.stats.allocated_objects += 1;
         self.stats.allocated_bytes += object_bytes(&storage);
@@ -408,26 +404,15 @@ impl Heap {
 
     /// Whether enough has been allocated since the last collection to be worth
     /// another one.
-    pub fn should_collect(&self) -> bool {
+    pub(crate) fn should_collect(&self) -> bool {
         self.allocations_since_collection >= self.next_collection_at
-    }
-
-    /// Bytes live as of the most recent collection.
-    ///
-    /// This counts the whole live set, not only the objects the heap manages:
-    /// every string, array, map, set, struct, enum case, and closure the live
-    /// objects and the roots reach, with each shared allocation counted once.
-    /// It is the storage the runtime holds for the program's values, and the
-    /// figure the memory budget is checked against.
-    pub fn live_bytes(&self) -> u64 {
-        self.stats.live_bytes
     }
 
     /// Marks from the roots and sweeps what is not marked.
     ///
     /// `roots` is walked twice and never consumed: see [`Roots`] for what a
     /// walk owes, and for why the two backends describe theirs differently.
-    pub fn collect(&mut self, roots: &dyn Roots) -> Collection {
+    pub(crate) fn collect(&mut self, roots: &dyn Roots) -> Collection {
         let started = Instant::now();
 
         // An object `Rc` already reclaimed leaves a dead `Weak` behind. Drop
