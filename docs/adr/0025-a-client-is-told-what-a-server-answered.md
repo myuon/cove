@@ -2,7 +2,7 @@
 
 - Status: Accepted
 - Date: 2026-08-30
-- Implemented by: [PR #167](https://github.com/myuon/cove/pull/167), closing
+- Implemented by: [PR #169](https://github.com/myuon/cove/pull/169), closing
   [issue #145](https://github.com/myuon/cove/issues/145)
 - Implementation status: complete — `http.fetch` is declared
   `fetch(String) -> Result<http.Response, Error>` in `cove_schema::hosts::HTTP`,
