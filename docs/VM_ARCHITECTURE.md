@@ -1943,6 +1943,68 @@ cold match arms, [#126](https://github.com/myuon/cove/issues/126)'s spills, the
 calling convention's unattributed 8 ms on `arith`, and now this — and it is the
 first where the moved benchmark provably does not run the changed code at all.
 
+### How to read a measurement, now that the harness reports a spread
+
+Everything above was read by eye. `cove-bench` reported `{min, mean, max}`, a
+reader compared three numbers against a band held in memory, and the sentence
+a refactor wants to write — "no statistically meaningful regression" — was not
+a number this repository could produce. [Issue #179](https://github.com/myuon/cove/issues/179)
+names that as its third item and it is now done, so the discipline the rest of
+this section describes has a tool rather than only a habit.
+
+**Every wall-time series now reports its quartiles and its own samples.** The
+`wall_ns` object gained `p25`, `median`, `p75` and `iqr` beside the three
+fields it always had, and a `samples` array holding every timing the run took.
+The median rather than the mean because a wall-time series has a floor and no
+ceiling: the failure mode is a sample that is too *large*, and the mean is the
+statistic that moves furthest when one arrives. The interquartile range rather
+than `max - min` because the range grows with the sample count — a longer
+series has more chances to catch one bad run — and the middle half does not.
+`crates/cove-bench/src/stats.rs` argues both at length, including what was
+checked about the shape of these distributions and what that check cannot
+settle.
+
+**`--baseline <path>` compares this run against a recorded one.** The baseline
+format is the harness's own output, so recording one is `cove-bench > file`.
+For each row present in both, it prints the shift between the medians and a
+95% percentile-bootstrap interval around it, and reads a verdict off the
+interval: an interval excluding zero cleared the noise, one containing zero did
+not.
+
+That last case is the one this document has needed and been unable to state.
+When the interval contains zero, **the interval's width is the honest bound**,
+and it is what a "no regression" sentence should quote — not the shift, and
+certainly not a claim that the change had no effect. It is the same move the
+section above makes in prose when it says the honest bound on issue #160's cost
+is "less than what adding a function to `vm.rs` costs benchmarks that cannot
+call it"; the difference is that the harness now computes that bound instead of
+a reader estimating it.
+
+**Compare against a fixed commit, not the parent.** Unchanged, and the reason
+is still #126: three changes each individually inside the noise summed to 19%.
+`--baseline` is what makes it cheap — record the suite once on the commit being
+measured against, keep the file, and pass it to every run after.
+
+**The ±6% band is per benchmark and the harness now measures it rather than
+recalling it.** This section established the band on `arith` by observing
+benchmarks move on code they cannot execute, which is why `field`, `pure` and
+`call` are the discriminating cases. That band was a remembered number applied
+globally. A comparison's interval is derived from the two series being
+compared, so a benchmark that is quiet gets a narrow interval and one that is
+noisy gets a wide one, without anybody choosing a threshold. What the recorded
+±6% is still needed for is the thing no run-to-run spread can see: layout
+sensitivity is *systematic* between two builds, not noise within one, so two
+tight series can disagree by 6% with both intervals narrow and neither wrong.
+**An interval says the difference is real. It does not say the difference is
+the change.** That distinction is what the rest of this section is about.
+
+**Six samples is the floor, fifteen is the practice.** `--iterations` is the
+sample count — there is no second flag — and below six samples a side the
+harness reports the shift and refuses to call it, because no 95%
+distribution-free statement about a median exists on fewer. CI still runs
+`--iterations 1` and is unaffected: it asserts correctness, never a number, and
+a series of one costs it exactly what it cost before.
+
 ## The calling-convention matrix
 
 Issue #123's second half asks what the typed three-stack convention costs at

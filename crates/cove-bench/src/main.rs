@@ -42,17 +42,36 @@
 //! One JSON object per line on stdout, in the order the benchmarks ran:
 //!
 //! ```text
-//! {"benchmark":"benches","kind":"lowering","backend":"vm","iterations":<u32>,"wall_ns":{"min":<u64>,"mean":<u64>,"max":<u64>},"functions":<usize>,"ok":<bool>}
-//! {"benchmark":"pure","kind":"interpreter","backend":"ast","iterations":<u32>,"wall_ns":{"min":<u64>,"mean":<u64>,"max":<u64>},"fuel_spent":<u64>,"fuel_per_sec":<f64>,"heap_peak_bytes":{"min":<u64>,"mean":<u64>,"max":<u64>},"host_calls":<u64>,"irreversible_writes":<u64>,"ok":<bool>}
+//! {"benchmark":"benches","kind":"lowering","backend":"vm","iterations":<u32>,"wall_ns":<series>,"functions":<usize>,"ok":<bool>}
+//! {"benchmark":"pure","kind":"interpreter","backend":"ast","iterations":<u32>,"wall_ns":<series>,"fuel_spent":<u64>,"fuel_per_sec":<f64>,"heap_peak_bytes":<summary>,"host_calls":<u64>,"irreversible_writes":<u64>,"ok":<bool>}
 //! {"benchmark":"pure","kind":"vm","backend":"vm", ...the same fields...}
 //! {"benchmark":"pure","kind":"trace_overhead","backend":"ast","untraced_wall_ns":<u64>,"traced_wall_ns":<u64>,"overhead_ratio":<f64>}
 //! {"benchmark":"pure","kind":"trace_overhead","backend":"vm", ...the same fields...}
 //! {"benchmark":"hostheavy", ...the same four lines...}
 //! ... and the same four for each of `arith`, `arrayget`, `field`, `method`,
 //! `call`, and `chars`
-//! {"benchmark":"startup","kind":"process","backend":"ast","iterations":<u32>,"wall_ns":{"min":<u64>,"mean":<u64>,"max":<u64>},"ok":<bool>}
+//! {"benchmark":"startup","kind":"process","backend":"ast","iterations":<u32>,"wall_ns":<series>,"ok":<bool>}
 //! {"benchmark":"startup","kind":"process","backend":"vm", ...the same fields...}
 //! ```
+//!
+//! where `<summary>` and `<series>` are
+//!
+//! ```text
+//! <summary> = {"min":<u64>,"mean":<u64>,"max":<u64>,"p25":<f64>,"median":<f64>,"p75":<f64>,"iqr":<f64>}
+//! <series>  = {...the same fields...,"samples":[<u64>, ...]}
+//! ```
+//!
+//! `min`, `mean` and `max` are the three ADR 0012 named and they still mean
+//! what they meant. The quartiles are what
+//! [issue #179](https://github.com/myuon/cove/issues/179) asks for: a spread
+//! a regression claim can be stated against instead of a band the reader is
+//! expected to remember. `crates/cove-bench/src/stats.rs` says why the median
+//! and the interquartile range rather than the mean and a standard deviation.
+//!
+//! `samples` is every timing the run took, on the wall-time series alone. It
+//! is what turns a recorded run into a baseline: a summary can only be
+//! compared against another summary by arithmetic that invents the spread it
+//! needs, and the samples do not have to be invented.
 //!
 //! A benchmark the lowering refuses reports that instead of its `vm` lines:
 //!
@@ -68,7 +87,49 @@
 //! `ok` is `false` when a benchmark's entry returned `Err`, a backend itself
 //! failed, the lowering was refused, or (for `startup`) the spawned process
 //! exited non-zero. A caller comparing two backends, or either against a
-//! recorded baseline, should refuse numbers from a run that is not `ok`.
+//! recorded baseline, should refuse numbers from a run that is not `ok`; this
+//! harness's own `--baseline` does, and compares no row that is not `ok`.
+//!
+//! # Comparing against a recorded run
+//!
+//! `--baseline <path>` reads a file of the output above and adds one line per
+//! row it recognizes:
+//!
+//! ```text
+//! {"benchmark":"field","kind":"comparison","of":"vm","backend":"vm","baseline_median_ns":<f64>,"median_ns":<f64>,"delta_pct":<f64>,"ci_low_pct":<f64|null>,"ci_high_pct":<f64|null>,"confidence":0.95,"verdict":"<verdict>"}
+//! ```
+//!
+//! `kind` is `comparison` rather than the kind of the row compared, again so
+//! that a reader filtering on `kind` keeps finding what it was finding; `of`
+//! is the kind this line is about. The verdict is one of `regression`,
+//! `improvement`, `inside the noise`, or `underpowered`, and it is read off
+//! the interval: an interval that excludes zero cleared the noise and one
+//! that contains it did not. A summary of the whole comparison goes to
+//! stderr, so stdout stays one JSON object per line.
+//!
+//! **The baseline is a fixed commit, not the parent.** That is the discipline
+//! [issue #126](https://github.com/myuon/cove/issues/126) exists to enforce:
+//! three changes each individually inside the noise summed to a 19%
+//! regression, and only a comparison against a commit far enough back could
+//! have seen it.
+//!
+//! ```text
+//! git worktree add /tmp/base <the fixed commit>
+//! cargo build --release -p cove-cli -p cove-bench   # in /tmp/base
+//! /tmp/base/target/release/cove-bench --iterations 15 > /tmp/base.jsonl
+//! cargo build --release -p cove-cli -p cove-bench   # here
+//! ./target/release/cove-bench --iterations 15 --baseline /tmp/base.jsonl
+//! ```
+//!
+//! Nothing about this makes a comparison across two machines, two build
+//! profiles, or two busy afternoons meaningful. It compares the samples it is
+//! given; whether they were taken on a quiet machine is the reader's to
+//! answer, and it is the assumption every table in
+//! `docs/VM_ARCHITECTURE.md` rests on.
+//!
+//! A regression verdict does not fail the process. ADR 0012's argument for
+//! gating no wall-clock number in CI is unaffected by this: the exit code
+//! still reports correctness alone.
 //!
 //! # The mechanism benchmarks
 //!
@@ -95,15 +156,24 @@
 //! ```text
 //! cargo build --release --workspace
 //! ./target/release/cove-bench --iterations 1      # what CI runs, for correctness
-//! ./target/release/cove-bench --iterations 200    # a real local measurement
+//! ./target/release/cove-bench --iterations 15     # a real local measurement
 //! ```
 //!
 //! Optimized in both cases. The benchmarks are sized to be measurable in an
 //! optimized build, so an unoptimized one does not run them uniformly slower
 //! in some way that could be divided back out — it runs them for minutes.
 //!
+//! **`--iterations` is how many samples a benchmark's series has**, and there
+//! is deliberately no second flag beside it: the runs the spread is computed
+//! over and the runs the harness performs are the same runs. So a run at
+//! `--iterations 1` reports a series of one, whose median is its only sample
+//! and whose interquartile range is zero — which is exactly what CI wants and
+//! costs it nothing, and is why it stays at one. Six is the fewest samples
+//! any comparison here will draw a conclusion from, and
+//! `docs/VM_ARCHITECTURE.md` takes its tables at fifteen.
+//!
 //! Reading one backend against the other is what the output is arranged for:
-//! the two `wall_ns` means of one benchmark are the comparison, and the
+//! the two `wall_ns` medians of one benchmark are the comparison, and the
 //! `fuel_spent` beside them is not, because ADR 0019 makes fuel
 //! backend-specific and says so.
 
@@ -123,6 +193,10 @@ use cove_runtime::{
 };
 use cove_sema::package::Package;
 use cove_sema::resolve::Program;
+
+mod stats;
+
+use stats::{Baseline, Comparison, Stats, Verdict};
 
 /// How many times each benchmark runs when `--iterations` is not given.
 ///
@@ -153,6 +227,17 @@ fn main() -> ExitCode {
 fn bench() -> ExitCode {
     let iterations = parse_iterations();
 
+    // Read before anything is measured, so a baseline that does not exist or
+    // that a build too old to record its samples produced is a failure before
+    // the machine has spent minutes on a run nobody can read.
+    let baseline = match load_baseline() {
+        Ok(baseline) => baseline,
+        Err(message) => {
+            eprintln!("cove-bench: {message}");
+            return ExitCode::FAILURE;
+        }
+    };
+
     let (sources, package, program) = match load_benches() {
         Ok(loaded) => loaded,
         Err(message) => {
@@ -164,17 +249,33 @@ fn bench() -> ExitCode {
     let program = Arc::new(program);
 
     if std::env::args().any(|argument| argument == "--matrix") {
+        if baseline.is_some() {
+            eprintln!(
+                "cove-bench: `--baseline` compares the benchmark suite, not `--matrix`; ignoring it"
+            );
+        }
         return matrix(&package, &program, &sources, iterations);
     }
 
     let mut ok = true;
+    let mut compared: Vec<Compared> = Vec::new();
 
     // One lowering of the whole package, timed on its own, because that is
     // both what `cove run --backend vm` does and the only honest place to put
     // a cost that is paid once per program rather than once per run.
     let lowered = bench_lowering(&program, iterations);
     match &lowered {
-        Ok(report) => println!("{}", report.to_json()),
+        Ok(report) => {
+            println!("{}", report.to_json());
+            compare(
+                baseline.as_ref(),
+                &mut compared,
+                "benches",
+                "lowering",
+                "vm",
+                &report.wall_ns,
+            );
+        }
         Err(why) => eprintln!("cove-bench: the VM cannot run `benches/`: {why}"),
     }
 
@@ -206,6 +307,20 @@ fn bench() -> ExitCode {
                 Ok(report) => {
                     ok &= report.ok;
                     println!("{}", report.to_json());
+                    // A run that did not pass is not a measurement of
+                    // anything, so it is not compared: the module docs say a
+                    // caller should refuse numbers from a run that is not
+                    // `ok`, and this is that caller.
+                    if report.ok {
+                        compare(
+                            baseline.as_ref(),
+                            &mut compared,
+                            name,
+                            backend.kind(),
+                            &backend.to_string(),
+                            &report.wall_ns,
+                        );
+                    }
                 }
                 Err(message) => {
                     eprintln!("cove-bench: benchmark `{name}` on {backend}: {message}");
@@ -231,12 +346,26 @@ fn bench() -> ExitCode {
             Ok(report) => {
                 ok &= report.ok;
                 println!("{}", report.to_json());
+                if report.ok {
+                    compare(
+                        baseline.as_ref(),
+                        &mut compared,
+                        "startup",
+                        "process",
+                        &backend.to_string(),
+                        &report.wall_ns,
+                    );
+                }
             }
             Err(message) => {
                 eprintln!("cove-bench: startup on {backend}: {message}");
                 ok = false;
             }
         }
+    }
+
+    if baseline.is_some() {
+        summarize(&compared);
     }
 
     if ok {
@@ -296,7 +425,7 @@ impl LoweringReport {
         format!(
             "{{\"benchmark\":\"benches\",\"kind\":\"lowering\",\"backend\":\"vm\",\"iterations\":{},\"wall_ns\":{},\"functions\":{},\"ok\":true}}",
             self.iterations,
-            self.wall_ns.to_json(),
+            self.wall_ns.to_json_with_samples(),
             self.functions,
         )
     }
@@ -388,6 +517,152 @@ fn parse_iterations() -> u32 {
         i += 1;
     }
     DEFAULT_ITERATIONS
+}
+
+// ------------------------------------------------------- comparing two runs
+
+/// Reads `--baseline <path>`, if it was given.
+///
+/// A previous run's own JSON output is the baseline format, which is what
+/// makes the fixed-commit discipline
+/// [issue #126](https://github.com/myuon/cove/issues/126) argues for a
+/// two-command exercise: record the suite once on the commit being measured
+/// against, keep the file, and pass it to every run afterwards. Three changes
+/// each individually inside the noise summed to 19% there, and no comparison
+/// against the parent alone could have seen it.
+fn load_baseline() -> Result<Option<Baseline>, String> {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let mut i = 0;
+    while i < args.len() {
+        if args[i] == "--baseline" {
+            let path = args
+                .get(i + 1)
+                .ok_or_else(|| "`--baseline` needs a path to a recorded run".to_string())?;
+            let text = std::fs::read_to_string(path)
+                .map_err(|e| format!("cannot read the baseline `{path}`: {e}"))?;
+            let baseline = Baseline::parse(&text)
+                .map_err(|why| format!("`{path}` is not a baseline: {why}"))?;
+            eprintln!(
+                "cove-bench: comparing against `{path}`, which has {} rows",
+                baseline.len()
+            );
+            return Ok(Some(baseline));
+        }
+        i += 1;
+    }
+    Ok(None)
+}
+
+/// One row that had a baseline to be read against.
+struct Compared {
+    /// How the row is named in the summary: the benchmark and the backend.
+    row: String,
+    comparison: Comparison,
+}
+
+/// Emits the comparison for one row, when there is a baseline and it has the
+/// row.
+///
+/// A row the baseline does not have produces nothing at all. It is not an
+/// error -- benchmarks get added, and the VM learns to run ones it used to
+/// refuse -- but it is also not a comparison, and a line saying "no change"
+/// for a row that was never measured before would be the worst of both.
+fn compare(
+    baseline: Option<&Baseline>,
+    compared: &mut Vec<Compared>,
+    benchmark: &str,
+    kind: &str,
+    backend: &str,
+    current: &Stats,
+) {
+    let Some(baseline) = baseline else {
+        return;
+    };
+    let Some(recorded) = baseline.samples(benchmark, kind, backend) else {
+        return;
+    };
+    let comparison = Comparison::of(recorded, current.samples());
+    println!("{}", comparison.to_json(benchmark, kind, backend));
+    compared.push(Compared {
+        row: format!("{benchmark}/{backend}"),
+        comparison,
+    });
+}
+
+/// Ends a compared run with the sentence the JSON above is the evidence for.
+///
+/// On stderr, because stdout is the machine-readable stream and a reader
+/// piping it into a file should not find prose in it. This asserts nothing
+/// and fails nothing: ADR 0012 argues that wall-clock numbers are not gated,
+/// and a verdict computed here is one for a person to act on rather than a
+/// threshold this process enforces. The exit code still reflects correctness
+/// alone.
+fn summarize(compared: &[Compared]) {
+    if compared.is_empty() {
+        eprintln!("cove-bench: no row of this run had a counterpart in the baseline");
+        return;
+    }
+
+    let count = |wanted: Verdict| {
+        compared
+            .iter()
+            .filter(|row| row.comparison.verdict == wanted)
+            .count()
+    };
+    eprintln!(
+        "cove-bench: {} rows compared: {} regression(s), {} improvement(s), {} inside the noise, {} underpowered",
+        compared.len(),
+        count(Verdict::Regression),
+        count(Verdict::Improvement),
+        count(Verdict::InsideTheNoise),
+        count(Verdict::Underpowered),
+    );
+
+    for row in compared {
+        if matches!(
+            row.comparison.verdict,
+            Verdict::Regression | Verdict::Improvement
+        ) {
+            eprintln!(
+                "cove-bench:   {} {:+.2}% [{:+.2}, {:+.2}] -- {}",
+                row.row,
+                row.comparison.delta_pct,
+                row.comparison.low_pct,
+                row.comparison.high_pct,
+                row.comparison.verdict.as_str(),
+            );
+        }
+    }
+
+    // The widest interval that did not clear zero is the honest bound on what
+    // this run could be hiding, and it is the number a "no meaningful
+    // regression" sentence should quote. Without it the sentence claims the
+    // change had no effect, which is not what an interval containing zero
+    // says.
+    let widest = compared
+        .iter()
+        .filter(|row| row.comparison.verdict == Verdict::InsideTheNoise)
+        .max_by(|a, b| {
+            let width = |row: &Compared| row.comparison.high_pct - row.comparison.low_pct;
+            width(a)
+                .partial_cmp(&width(b))
+                .expect("an interval that cleared the floor is not NaN")
+        });
+    if let Some(widest) = widest {
+        eprintln!(
+            "cove-bench: the widest interval that did not clear zero is {} [{:+.2}, {:+.2}]; \
+a regression larger than that would have been seen",
+            widest.row, widest.comparison.low_pct, widest.comparison.high_pct,
+        );
+    }
+    if count(Verdict::Underpowered) > 0 {
+        eprintln!(
+            "cove-bench: an underpowered row has fewer than {} samples on one side; \
+`--iterations {}` or more is what makes it a claim",
+            stats::MIN_SAMPLES,
+            stats::MIN_SAMPLES,
+        );
+    }
 }
 
 // ------------------------------------------------ the calling-convention matrix
@@ -499,7 +774,7 @@ instructions per turn   ns/turn  what"
         }
         samples.sort_unstable();
 
-        let median = median_ns(&samples) / 1e6;
+        let median = stats::quantile(&samples, 0.5) / 1e6;
         let min = samples[0] as f64 / 1e6;
         let max = samples[samples.len() - 1] as f64 / 1e6;
         if index == 0 {
@@ -531,22 +806,6 @@ instructions per turn   ns/turn  what"
         ExitCode::SUCCESS
     } else {
         ExitCode::FAILURE
-    }
-}
-
-/// The median of a sorted series, in nanoseconds.
-///
-/// The median rather than the mean, because a wall-time series has a floor
-/// and no ceiling: one descheduled run moves a mean and does not move this.
-/// The minimum and maximum are printed beside it so the shape of the series
-/// is visible rather than summarized away -- issue #123 asks for a
-/// distribution and this is the smallest honest one.
-fn median_ns(sorted: &[u64]) -> f64 {
-    let n = sorted.len();
-    if n % 2 == 1 {
-        sorted[n / 2] as f64
-    } else {
-        (sorted[n / 2 - 1] as f64 + sorted[n / 2] as f64) / 2.0
     }
 }
 
@@ -732,31 +991,6 @@ fn entry_err_message(value: &Value) -> Option<String> {
     )
 }
 
-/// The minimum, mean, and maximum of a series of samples -- enough to see
-/// whether a run was stable without carrying every sample into the report.
-struct Stats {
-    min: u64,
-    mean: u64,
-    max: u64,
-}
-
-impl Stats {
-    fn of(samples: &[u64]) -> Stats {
-        let min = *samples.iter().min().expect("at least one sample");
-        let max = *samples.iter().max().expect("at least one sample");
-        let sum: u128 = samples.iter().map(|&n| u128::from(n)).sum();
-        let mean = (sum / samples.len() as u128) as u64;
-        Stats { min, mean, max }
-    }
-
-    fn to_json(&self) -> String {
-        format!(
-            "{{\"min\":{},\"mean\":{},\"max\":{}}}",
-            self.min, self.mean, self.max
-        )
-    }
-}
-
 /// One benchmark's execution report on one backend: wall time, fuel spent,
 /// and the heap's peak live bytes.
 ///
@@ -786,7 +1020,7 @@ impl ExecutionReport {
             self.backend.kind(),
             self.backend,
             self.iterations,
-            self.wall_ns.to_json(),
+            self.wall_ns.to_json_with_samples(),
             self.fuel_spent,
             self.fuel_per_sec,
             self.heap_peak_bytes.to_json(),
@@ -838,8 +1072,8 @@ fn bench_execution(
     }
 
     let wall = Stats::of(&wall_ns);
-    let fuel_per_sec = if wall.mean > 0 {
-        fuel_spent as f64 / (wall.mean as f64 / 1e9)
+    let fuel_per_sec = if wall.mean() > 0 {
+        fuel_spent as f64 / (wall.mean() as f64 / 1e9)
     } else {
         0.0
     };
@@ -926,8 +1160,8 @@ fn bench_trace_overhead(
         traced.push(m.wall.as_nanos() as u64);
     }
 
-    let untraced_mean = Stats::of(&untraced).mean;
-    let traced_mean = Stats::of(&traced).mean;
+    let untraced_mean = Stats::of(&untraced).mean();
+    let traced_mean = Stats::of(&traced).mean();
     let overhead_ratio = if untraced_mean > 0 {
         traced_mean as f64 / untraced_mean as f64
     } else {
@@ -958,7 +1192,7 @@ impl StartupReport {
             "{{\"benchmark\":\"startup\",\"kind\":\"process\",\"backend\":\"{}\",\"iterations\":{},\"wall_ns\":{},\"ok\":{}}}",
             self.backend,
             self.iterations,
-            self.wall_ns.to_json(),
+            self.wall_ns.to_json_with_samples(),
             self.ok
         )
     }
