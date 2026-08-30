@@ -162,7 +162,12 @@ wire protocol the standard library cannot; TLS in the `http` host, where an
 suspension or for a cache, which is why `cove trace` still ends its summary
 with what it cannot tell you; and native code generation, still ADR 0002's open
 decision, which [ADR 0012](docs/adr/0012-performance-gate-and-native-backend.md)
-has since attached five gates to.
+has since attached five gates to. What one of this repository's benchmark
+numbers is evidence of — a ratio within one build and an exact count, but not
+a wall-clock absolute compared across two builds — is
+[ADR 0029](docs/adr/0029-a-benchmark-number-is-evidence-within-one-build.md),
+which supersedes ADR 0012's account of how the harness runs without touching
+any of its gates.
 
 `examples/cq/` is the first program here large enough to say what any of that
 costs. It reads 100,000 JSON Lines records, parses and validates each into a

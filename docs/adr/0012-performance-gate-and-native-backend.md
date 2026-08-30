@@ -15,6 +15,16 @@
   above the oracle above a backend, the five gates, and the reasons this ADR
   gives for not compiling anything: ADR 0019 does not cross gate 1 and does not
   claim to
+- Superseded in part by
+  [ADR 0029](0029-a-benchmark-number-is-evidence-within-one-build.md), which
+  replaces four statements about how the harness is run and what its numbers
+  are evidence of: that **CI runs `cove-bench --iterations 3`**, that **wall
+  time and process startup are reported as `{min, mean, max}`**, that
+  `./target/debug/cove-bench` **is "a repeatable local measurement"**, and that
+  comparing against a recorded baseline is **"a same-machine,
+  same-build-profile exercise"**. The five gates, their statuses, the ranking
+  of the specification above the oracle above a backend, and the decision that
+  CI asserts no threshold are untouched
 - Implemented by: PR #34
 - Implementation status: complete — `crates/cove-bench`, the `benches/`
   package, and the CI step that runs it all exist, and gates 2 and 3 are met.
