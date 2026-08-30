@@ -46,3 +46,7 @@ allow = ["console", "files", "http", "clock"]
 entry = "codegen.statusCodes"
 allow = ["files"]
 generates = "httpstatus/status_code.cove"
+
+[run.reviewPolicy]
+entry = "rules.main"
+allow = ["console"]

@@ -335,6 +335,7 @@ mod tests {
                 "cqSample",
                 "hello",
                 "restricted",
+                "reviewPolicy",
                 "server",
                 "statusCodes",
                 "tasks",

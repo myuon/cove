@@ -1,0 +1,126 @@
+/// A pull request with `labels` and `filesTouched`, and defaults elsewhere.
+///
+/// The two fields these tests are about are the two the caller supplies; the
+/// other eight are here so that a test reads as the question it asks rather
+/// than as ten fields of which two matter.
+fn withLabels(
+  labels: Array<String>,
+  filesTouched: Array<String>,
+) -> PullRequest {
+  PullRequest(
+    id: "pr-0",
+    title: "",
+    author: "nobody",
+    targetBranch: "main",
+    changedLines: 0,
+    filesTouched: filesTouched,
+    labels: labels,
+    approvals: 0,
+    isDraft: false,
+    hasTests: true,
+  )
+}
+
+/// A label written twice is carried once, because the question asked of the
+/// labels is membership and a set is what answers that.
+test fn labelSetCarriesEachLabelOnce() -> Result<Unit, Error> {
+  let pr = withLabels(["docs", "docs", "migration"], [])
+  assertEqual(pr.labelSet().length(), 2)?
+  assert(pr.labelled("migration"))?
+  assert(!pr.labelled("breaking-change"))?
+  Ok(())
+}
+
+/// A pull request with no labels answers the empty set rather than failing to
+/// have one, so a rule that asks about labels needs no special case for the
+/// ordinary pull request that carries none.
+test fn labelSetOfNoLabelsIsEmpty() -> Result<Unit, Error> {
+  let pr = withLabels([], [])
+  assert(pr.labelSet().isEmpty())?
+  assert(!pr.labelled("docs"))?
+  Ok(())
+}
+
+/// `touches` asks about a prefix and not about a whole path, so a rule guards
+/// a directory by naming it once.
+test fn touchesMatchesAPrefixOfAPath() -> Result<Unit, Error> {
+  let pr = withLabels([], ["src/wire.rs", "auth/keys.yaml"])
+  assert(pr.touches("auth/"))?
+  assert(pr.touches("src/"))?
+  assert(!pr.touches("billing/"))?
+  Ok(())
+}
+
+/// A prefix nothing starts with is not found, including in a pull request
+/// that touches no files at all.
+test fn touchesFindsNothingInAnEmptyChange() -> Result<Unit, Error> {
+  assert(!withLabels([], []).touches("auth/"))?
+  Ok(())
+}
+
+/// Only a blocking finding stops a change; the other two levels are ordered
+/// below it and neither of them stops anything.
+test fn onlyBlockingStops() -> Result<Unit, Error> {
+  assert(Severity.Blocking.stops())?
+  assert(!Severity.Required.stops())?
+  assert(!Severity.Advisory.stops())?
+  assert(Severity.Blocking.rank() > Severity.Required.rank())?
+  assert(Severity.Required.rank() > Severity.Advisory.rank())?
+  Ok(())
+}
+
+/// A policy answers three things about itself, and a `Normal` answers all
+/// three: no reviewers and a reason that says there was none, rather than an
+/// empty string a caller has to interpret.
+test fn everyPolicyAnswersNameReviewersAndReason() -> Result<Unit, Error> {
+  assertEqual(ReviewPolicy.Normal.name(), "normal")?
+  assertEqual(ReviewPolicy.Normal.reviewers(), 0)?
+  assertEqual(ReviewPolicy.Normal.reason(), "none")?
+
+  let asked = ReviewPolicy.Require(Requirement(reviewers: 3, reason: "label:x"))
+  assertEqual(asked.name(), "require")?
+  assertEqual(asked.reviewers(), 3)?
+  assertEqual(asked.reason(), "label:x")?
+
+  let stopped = ReviewPolicy.Block("guarded_path:auth/")
+  assertEqual(stopped.name(), "block")?
+  assertEqual(stopped.reviewers(), 0)?
+  assertEqual(stopped.reason(), "guarded_path:auth/")?
+  Ok(())
+}
+
+/// A decision with no findings says so in a word, because an empty trail
+/// printed as an empty string reads as a trail that failed to print.
+test fn aDecisionWithNoFindingsTrailsClean() -> Result<Unit, Error> {
+  let decision = Decision(policy: ReviewPolicy.Normal, findings: [])
+  assertEqual(decision.trail(), "clean")?
+  assertEqual(decision.line(), "normal reviewers=0 because=none")?
+  Ok(())
+}
+
+/// A trail names each finding's rule and the level it was made at, in the
+/// order the findings stand in.
+test fn aTrailNamesEachRuleAndItsLevel() -> Result<Unit, Error> {
+  let decision = Decision(
+    policy: ReviewPolicy.Require(Requirement(
+      reviewers: 2,
+      reason: "large_change",
+    )),
+    findings: [
+      Finding(
+        rule: "size",
+        severity: Severity.Required,
+        reason: "large_change",
+        reviewers: 2,
+      ),
+      Finding(
+        rule: "draft",
+        severity: Severity.Advisory,
+        reason: "draft",
+        reviewers: 0,
+      ),
+    ],
+  )
+  assertEqual(decision.trail(), "size:required,draft:advisory")?
+  Ok(())
+}

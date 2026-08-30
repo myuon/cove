@@ -518,6 +518,48 @@ fn traits_reports_both_forms_of_dispatch() {
     );
 }
 
+/// `rules` weighs six rules against six pull requests and prints what the
+/// policy makes of each.
+///
+/// The catalog's own lines are half of what this pins: three of the six rules
+/// implement `Rule.describes` and three take the trait's default, so the
+/// first six lines are a defaulted trait method answering in output rather
+/// than in a doc comment. The six after them are one per arm of the policy —
+/// nothing found, reviewers asked for, a block, a block waived down to
+/// reviewers, an advisory that changes nothing, and two rules asking at once
+/// where the heavier decides.
+///
+/// What the Rust half of this example does with the same rules is in
+/// `examples/rules/host/`, which `cargo test --workspace` runs and which no
+/// `[run.<name>]` could reach: it calls a host module of its own.
+#[test]
+fn rules_decides_every_sample_pull_request() {
+    let ran = run("rules.main", &["console"], Fakes::default());
+
+    assert!(ok(&ran.value).eq_value(&Value::Unit), "{}", ran.value);
+    assert_eq!(
+        ran.console,
+        [
+            "catalog",
+            "  size: over 1000 changed lines wants 2 reviewers",
+            "  guarded-path: 3 guarded prefixes, waived by `security-reviewed`",
+            "  tested: no description",
+            "  draft: no description",
+            "  branch: no description",
+            "  label: 3 weighted labels",
+            "decisions",
+            "  pr-1001 normal reviewers=0 because=none trail=clean",
+            "  pr-1002 require reviewers=2 because=large_change trail=size:required",
+            "  pr-1003 block reviewers=0 because=guarded_path:auth/ trail=guarded-path:blocking",
+            "  pr-1004 require reviewers=2 because=guarded_path_waived:auth/ trail=guarded-path:required",
+            "  pr-1005 normal reviewers=0 because=none trail=draft:advisory",
+            "  pr-1006 require reviewers=3 because=label:breaking-change trail=branch:required,label:required",
+        ],
+        "{:?}",
+        ran.console
+    );
+}
+
 /// `restricted` reaches the console only through `text.report`, and reaches
 /// the document through the one capability the host granted.
 #[test]

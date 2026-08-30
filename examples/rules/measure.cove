@@ -1,0 +1,33 @@
+use rules.engine.decide
+use rules.fixtures.sample
+use rules.policy.Decision
+
+/// Decides one of the samples, named by its position, and makes no Host API
+/// call at all.
+///
+/// A control rather than a feature. `rules.embedded.decideRequest` fetches its
+/// pull request through the Host API and reports the decision back through it;
+/// this reaches the same `decide` over a pull request the package already
+/// holds. The difference between the two, invoked the same number of times on
+/// the same machine, is what the boundary costs, and
+/// `examples/rules/README.md` is where that number is.
+///
+/// It takes its argument as text for the same reason `decideRequest` does:
+/// an entry may take one `Array<String>` and nothing else.
+export fn decideSample(args: Array<String>) -> Result<Decision, Error> {
+  let at = Int.parse(args.get(0).unwrapOr("0"))?
+  match sample(at) {
+    Some(pr) => Ok(decide(pr))
+    None => Err(Error("there is no sample at {at}"))
+  }
+}
+
+/// Answers immediately, having done nothing.
+///
+/// The other control: what one invocation costs before the program it invokes
+/// does anything. Finding the entry, building the `Array<String>` of
+/// arguments, entering the frame, and answering is all this measures, and
+/// every other number in the README stands on top of it.
+export fn floor(args: Array<String>) -> Result<Int, Error> {
+  Ok(args.length())
+}
