@@ -9,6 +9,12 @@ members = [
   "crates/cove-runtime",
   "crates/cove-cli",
   "crates/cove-bench",
+  # The embedding half of `examples/rules`: a Rust host that compiles the
+  # rule package once and invokes it many times. It is a workspace member so
+  # that `cargo test --workspace` runs its tests and `cargo clippy` sees it,
+  # which is what keeps an example of the embedding API from rotting against
+  # the API it is an example of.
+  "examples/rules/host",
 ]
 
 [workspace.package]

@@ -1,0 +1,17 @@
+[package]
+name = "cove-rules"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "cove-rules-measure"
+path = "src/main.rs"
+
+[dependencies]
+cove-diag.workspace = true
+cove-ir.workspace = true
+cove-runtime.workspace = true
+cove-schema.workspace = true
+cove-sema.workspace = true
+cove-syntax.workspace = true
