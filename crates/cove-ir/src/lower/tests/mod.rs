@@ -33,7 +33,8 @@ use cove_syntax::ast::{Arg, Expr, ExprKind};
 
 use crate::{Const, ConstId, FunctionId, Inst, Program, SlotKind};
 
-use super::{arguments_in_order, stack_shape, Args};
+use super::validate::stack_shape;
+use super::{arguments_in_order, Args};
 
 /// Checks one module of source the way `cove run` checks a package:
 /// parse, resolve, and type-check.
