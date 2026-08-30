@@ -613,7 +613,9 @@ mod tests {
     fn the_report_carries_the_series_in_the_order_it_was_taken() {
         let stats = Stats::of(&[30, 10, 20]);
         assert!(
-            stats.to_json_with_samples().contains("\"samples\":[30,10,20]"),
+            stats
+                .to_json_with_samples()
+                .contains("\"samples\":[30,10,20]"),
             "{}",
             stats.to_json_with_samples()
         );

@@ -129,13 +129,26 @@
 //!
 //! **Bracket the variant, do not pair it.** Run the base binary, then the
 //! variant, then the base binary *again*, and quote the variant against the
-//! mean of the two base runs. A single base-then-variant pair cannot tell the
-//! change from the time that passed between them: on the machine
-//! `docs/VM_ARCHITECTURE.md`'s tables were taken on, one unmodified binary
-//! disagreed with itself by 7.4% over forty minutes with nothing changed at
-//! all. The two base runs' disagreement with each other is the measurement's
-//! own error bar, it costs one extra run, and it should be quoted beside the
-//! result -- where it is as large as the effect, that is the result.
+//! mean of the two base runs. The two base runs' disagreement with each other
+//! is the measurement's own error bar, it costs one extra run, and it should
+//! be quoted beside the result -- where it is as large as the effect, that is
+//! the result.
+//!
+//! **Compare one row against itself. Never the largest row of the suite.**
+//! Twenty-two suites in which nothing under test changed, measured for
+//! [issue #205](https://github.com/myuon/cove/issues/205), put a single row's
+//! disagreement with itself at 0.5% to 0.8% in the middle and 2% to 3% at the
+//! 90th percentile. The *largest* disagreement over the suite's twenty-one
+//! rows is a different statistic with a different distribution: on that same
+//! null its median is about 4% and it reaches 15%.
+//! `docs/VM_ARCHITECTURE.md`'s earlier "7.4% against itself" was that
+//! statistic, so it is not the error bar for any row and no row should be read
+//! against it.
+//!
+//! **Two rows are not evidence at the few-percent level, and never were.**
+//! `benches`/`lowering` times a 0.13 ms lowering and `startup` times a
+//! spawned process; between them they carry the suite's largest null shift
+//! two thirds of the time. Read the execution rows.
 //!
 //! Nothing about this makes a comparison across two machines, two build
 //! profiles, or two busy afternoons meaningful. It compares the samples it is
@@ -183,6 +196,7 @@
 //! cargo build --release --workspace
 //! ./target/release/cove-bench --iterations 1      # what CI runs, for correctness
 //! ./target/release/cove-bench --iterations 15     # a real local measurement
+//! ./target/release/cove-bench --iterations 15 --sample-order blocked
 //! ```
 //!
 //! **`--release` is the profile to measure under.** The workspace also defines
@@ -208,6 +222,17 @@
 //! costs it nothing, and is why it stays at one. Six is the fewest samples
 //! any comparison here will draw a conclusion from, and
 //! `docs/VM_ARCHITECTURE.md` takes its tables at fifteen.
+//!
+//! **`--sample-order` is when those samples are taken**, and the default is
+//! `round-robin`: one sample of every row, then a second of every row, so
+//! that each row's series is spread over the whole suite rather than taken at
+//! one instant of it. `blocked` is the order this harness used before
+//! [issue #205](https://github.com/myuon/cove/issues/205) — every sample of a
+//! row before the next row starts — and it is kept so the round that changed
+//! the default can be reproduced. Neither costs more than the other: the
+//! suite takes the same 564 seconds, runs the same runs, and reports the same
+//! fields. At `--iterations 1` the two are the same sequence, so CI is
+//! unaffected.
 //!
 //! Reading one backend against the other is what the output is arranged for:
 //! the two `wall_ns` medians of one benchmark are the comparison, and the
@@ -263,34 +288,51 @@ const BENCHMARKS: [&str; 9] = [
 /// The order the suite takes its samples in.
 ///
 /// This changes nothing about *what* is measured -- the same rows run the
-/// same number of times either way, and every row's report is the same shape
-/// -- only *when* each sample is taken. It exists because that turned out to
-/// be the largest lever this harness has over its own run-to-run
-/// disagreement; `docs/VM_ARCHITECTURE.md`, "What the measurement itself
-/// costs", is the round that measured it.
+/// same number of times either way, each row's report is the same shape, and
+/// a whole suite takes the same 564 seconds under either -- only *when* each
+/// sample is taken. `docs/VM_ARCHITECTURE.md`, "What the measurement itself
+/// costs", is the round that measured which one to prefer, and by how little.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum SampleOrder {
     /// Every sample of one row, then every sample of the next.
     ///
-    /// The order this harness used until issue #205, and the reason a short
-    /// row was unreliable: `pure` on the VM runs in about 1.4 ms, so fifteen
-    /// samples of it are twenty milliseconds of measurement taken in one
-    /// instant of a suite that lasts nine and a half minutes. Whatever the
-    /// machine was doing in that instant is the whole of the row's answer.
+    /// The order this harness used until [issue
+    /// #205](https://github.com/myuon/cove/issues/205), and the reason a short
+    /// row was the least reliable thing in the suite: `pure` on the VM runs in
+    /// about 1.4 ms, so fifteen samples of it are twenty milliseconds of
+    /// measurement taken at one instant of a suite that lasts nine and a half
+    /// minutes. Whatever the machine was doing in that instant is the whole of
+    /// that row's answer, and nothing in the row's own spread can say so.
+    ///
+    /// Kept because the round that replaced it was run against it, and a
+    /// result nobody can reproduce is a result nobody can check.
     Blocked,
     /// One sample of every row, then a second of every row, and so on.
     ///
     /// The same total work, rearranged so that each row's series is spread
     /// over the whole suite instead of one instant of it. A machine that
     /// drifts over the suite then drifts *through* every row's series rather
-    /// than between one row's series and another's, and the median of a
-    /// series spread that way is a summary of the session rather than of a
-    /// moment in it.
+    /// than between one row's series and another's, so the median of a series
+    /// is a summary of the session rather than of a moment in it, and the
+    /// interquartile range beside it starts including the drift instead of
+    /// being blind to it.
     RoundRobin,
 }
 
 /// The order a run uses when `--sample-order` is not given.
-const DEFAULT_SAMPLE_ORDER: SampleOrder = SampleOrder::Blocked;
+///
+/// Round-robin, on this evidence: five suites an arm, interleaved on one
+/// machine, one unmodified binary against itself. Over the eighteen rows the
+/// order actually governs, the median disagreement between two suites fell
+/// from 0.61% to 0.45% and its 90th percentile from 1.97% to 1.67%, thirteen
+/// of eighteen rows improved, and the suite took the same time. That is a
+/// quarter of the noise and not a fix; it is the default because it costs
+/// nothing, not because it settles anything.
+///
+/// A run at `--iterations 1` -- which is what CI does -- takes exactly the
+/// same samples in exactly the same sequence under either order, because one
+/// pass over the rows *is* one sample of each.
+const DEFAULT_SAMPLE_ORDER: SampleOrder = SampleOrder::RoundRobin;
 
 fn main() -> ExitCode {
     // The benchmarks run Cove entries, so they run on the stack the runtime
@@ -1359,7 +1401,15 @@ fn bench_trace_overhead(
 
     let mut untraced = Vec::with_capacity(iterations as usize);
     for _ in 0..iterations {
-        let m = run_once(program, sources, module, entry, allow, Arc::new(NullSink), ir);
+        let m = run_once(
+            program,
+            sources,
+            module,
+            entry,
+            allow,
+            Arc::new(NullSink),
+            ir,
+        );
         untraced.push(m.wall.as_nanos() as u64);
     }
 
