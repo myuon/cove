@@ -221,16 +221,17 @@ impl<'a, 'l> Body<'a, 'l> {
         let decl = declared.decl;
         let what = declared.name.clone();
 
-        for (at, param) in decl.params.iter().enumerate() {
-            reject_parameter(param, at + 1 == decl.params.len())?;
+        for param in &decl.params {
+            reject_parameter(param)?;
         }
         let names: Vec<&str> = decl
             .params
             .iter()
             .map(|param| param.name.node.as_str())
             .collect();
-        // `reject_parameter` has already refused a variadic parameter that
-        // is not the last one, so the last one is the only one there can be.
+        // `cove::type::variadic_position` has already refused a variadic
+        // parameter that is not the last one, so the last one is the only
+        // one there can be.
         let variadic = decl.params.last().is_some_and(|param| param.variadic);
         let assigned = arguments_in_order(&names, args, &what, variadic, span)?;
 

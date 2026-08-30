@@ -781,10 +781,10 @@ fn a_variadic_parameter_given_nothing_is_an_empty_array() {
 ///
 /// `items: Int...` is an `Array<Int>` inside the body, and `params=[value]`
 /// is what says the lowering read that rather than the `Int` the checker
-/// recorded: `record_signature` stores a variadic parameter as what it
-/// was *written* as, which is the element type, so asking the signature
-/// here would have numbered the slot in the scalar stack and the callee
-/// would have loaded a word where an array was pushed.
+/// recorded. `cove_sema::facts::Signature::params` answers what a *call*
+/// supplies, which for a variadic parameter is its element type, so asking
+/// the signature here would have numbered the slot in the scalar stack and
+/// the callee would have loaded a word where an array was pushed.
 #[test]
 fn a_variadic_parameter_of_ints_is_still_a_value_slot() {
     assert_eq!(
@@ -906,31 +906,6 @@ fn a_spread_that_collects_nothing_is_refused() {
             "{VARIADIC}\nfn f() -> Int {{\n  join(\"-\", items: ...[\"a\"])\n}}\n"
         )),
         "a `...` spread argument to `join`, which collects nothing"
-    );
-}
-
-/// The two shapes a variadic parameter can be written in that nothing
-/// has decided a meaning for.
-///
-/// Both parse and both check. A variadic parameter that is not the last
-/// one is an array of at most one element, because `assign_labels`
-/// gathers `rest` only for the last parameter while `bind_params` wraps
-/// any variadic one; and a default written on a variadic parameter is
-/// unreachable, because `bind_params` tests `variadic` first and
-/// `continue`s.
-#[test]
-fn the_variadic_shapes_nothing_decided_a_meaning_for_are_refused() {
-    assert_eq!(
-        refused(
-            "fn f(items: Int..., last: Int) -> Int {\n  last\n}\n\nfn g() -> Int {\n  f(1, last: 2)\n}\n"
-        ),
-        "a variadic parameter that is not the last one"
-    );
-    assert_eq!(
-        refused(
-            "fn f(items: Int... = 1) -> Int {\n  items.length()\n}\n\nfn g() -> Int {\n  f()\n}\n"
-        ),
-        "a variadic parameter written with a default"
     );
 }
 

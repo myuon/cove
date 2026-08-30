@@ -76,7 +76,29 @@ impl<'a> Lowering<'a> {
         let mut params: Vec<SlotKind> = Vec::with_capacity(decl_params.len());
         let mut slots: Vec<u32> = Vec::with_capacity(decl_params.len());
         for (at, param) in decl_params.iter().enumerate() {
-            reject_parameter(param, at + 1 == decl_params.len())?;
+            reject_parameter(param)?;
+            if param.variadic {
+                // A closure's parameters are a function type's, and a
+                // function type in Cove names a fixed list of them — which
+                // is the same rule `cove::type::variadic_as_value` states
+                // for a variadic host operation used as a value. So there is
+                // no variadic calling convention here to lower to: an
+                // `Inst::CallValue` supplies a count and every argument
+                // travels on the value stack, with nothing to say which of
+                // them a collector should have taken.
+                //
+                // The checker types such a parameter as its element type and
+                // says nothing, while `Interpreter::bind_params` wraps it in
+                // an `Array` like any other variadic slot, so the two
+                // backends answered `1` and `[1]` for the same closure.
+                // Refusing is what a backend may do when the oracle has not
+                // decided (ADR 0019); deciding it is issue #118's neighbour
+                // and not this pass's.
+                return Err(Unsupported::new(
+                    format!("a closure's variadic parameter `{}`", param.name.node),
+                    param.span,
+                ));
+            }
             if param.is_var {
                 // A `var` parameter names the caller's storage, and a call
                 // through a value has no way to hand one over: every
@@ -290,7 +312,7 @@ impl<'a> Lowering<'a> {
         }
         let mut kinds: Vec<SlotKind> = Vec::with_capacity(decl.params.len());
         for (at, param) in decl.params.iter().enumerate() {
-            reject_parameter(param, at + 1 == decl.params.len())?;
+            reject_parameter(param)?;
             // A variadic parameter is one ordinary value slot holding the
             // `Array<T>` the call site collected, which is what
             // `bind_params` declares one as — `env.declare(name,
@@ -492,47 +514,26 @@ fn param_names(params: &[Param]) -> Vec<Arc<str>> {
 /// Refuses a parameter the IR has no shape for.
 ///
 /// A variadic parameter has one, and it is an ordinary value slot holding
-/// the `Array<T>` the call site collected — see [`Body::call_declared`]. The
-/// two shapes it can be written in that nothing has decided a meaning for
-/// are refused here instead.
+/// the `Array<T>` the call site collected — see [`Body::call_declared`]. Two
+/// shapes it used to be refused in are gone from here: standing anywhere but
+/// last, and written with a default. Neither had a meaning anybody chose, and
+/// [ADR 0021] makes both the checker's to decide, so `cove::type::
+/// variadic_position` and `cove::type::variadic_default` refuse them before
+/// either backend is handed anything. A backend refusing what the oracle
+/// already refuses is a rule stated twice.
 ///
-/// **Not the last parameter.** `Interpreter::assign_labels` gathers the
-/// left-over arguments into `rest` only when the *last* parameter is
-/// variadic, while `bind_params` wraps *any* variadic parameter's one slot
-/// in an `Array`. So a variadic parameter written anywhere else is an array
-/// of at most one element, which is a shape nobody meant and which the
-/// parser and the checker both let through. Refusing says so rather than
-/// picking one of the two readings.
-///
-/// **Written with a default.** `bind_params` tests `param.variadic` before
-/// it looks at `param.default` and then `continue`s, and the checker's
-/// `match_arguments` does the same, so a default on a variadic parameter is
-/// dead code that neither of them can ever reach. `parse_param` accepts
-/// `items: T... = x` all the same. Lowering it would mean lowering a
-/// construct whose meaning is an accident of the order two `if`s are
-/// written in.
-pub(super) fn reject_parameter(param: &Param, is_last: bool) -> Result<(), Unsupported> {
+/// [ADR 0021]: https://github.com/myuon/cove/blob/main/docs/adr/0021-places-are-a-static-fact.md
+pub(super) fn reject_parameter(param: &Param) -> Result<(), Unsupported> {
     if param.is_var && param.variadic {
         // A variadic parameter is bound to an `Array` the call site
         // collected, which is storage the caller never named, so there is
         // nothing for a `var` to alias. `bind_params` binds one immutably
         // and never reads `is_var` for it, so the two markings written
-        // together mean nothing rather than something this declines.
+        // together mean nothing rather than something this declines. The
+        // checker settles this one no further than that: `param_sig` drops
+        // the `var`, which is a decision rather than a gap, so the marking
+        // has a meaning and it is "nothing".
         return Err(Unsupported::new("a `var` variadic parameter", param.span));
-    }
-    if param.variadic {
-        if !is_last {
-            return Err(Unsupported::new(
-                "a variadic parameter that is not the last one",
-                param.span,
-            ));
-        }
-        if param.default.is_some() {
-            return Err(Unsupported::new(
-                "a variadic parameter written with a default",
-                param.span,
-            ));
-        }
     }
     if let Some(ty) = &param.ty {
         reject_dyn(ty, "a `dyn` parameter")?;
