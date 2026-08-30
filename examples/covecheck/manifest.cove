@@ -1,0 +1,158 @@
+use cq.json.Json
+use cq.json.field
+use cq.json.parse
+
+/// One endpoint a run asks about, and what its answer has to look like.
+///
+/// Every condition is optional except the two that say which endpoint this
+/// is. A check that writes none of them still says something -- that the
+/// endpoint answers at all -- and that is the check most manifests start
+/// with.
+export struct Check {
+  name: String
+  url: String
+  expect: Option<String>
+  reject: Option<String>
+  maxLength: Option<Int>
+}
+
+/// Every check of one run, in the order the manifest wrote them.
+///
+/// The order is part of the manifest rather than an accident of it: it is
+/// what the report comes back in, whatever order the checks finish in.
+export struct Manifest {
+  checks: Array<Check>
+}
+
+/// Reads a manifest out of the text of one file.
+///
+/// `source` is the file's name and appears in every message, because a
+/// manifest that will not load is the first thing a person meets and the
+/// message is the whole of what they get. There is no line number in it: the
+/// manifest is one JSON document rather than a record per line, so what is
+/// wrong is a path through that document and not a place in the file.
+export fn readManifest(
+  source: String,
+  text: String,
+) -> Result<Manifest, Error> {
+  let document = match parse(text) {
+    Ok(value) => value
+    Err(detail) => return Err(Error("{source}: {detail.message}"))
+  }
+  let listed = match field(document, "checks") {
+    Some(value) => value
+    None => return Err(Error("{source}: this manifest has no `checks` field"))
+  }
+  let items = match listed {
+    Json.Items(values) => values
+    other => return Err(Error(
+      "{source}: `checks` must be an array, and is {describe(other)}",
+    ))
+  }
+  if items.isEmpty() {
+    return Err(Error("{source}: `checks` is empty, so there is nothing to do"))
+  }
+  var checks = Vector.of()
+  for at in 0..<items.length() {
+    let entry = items.get(at).unwrapOr(Json.Null)
+    match checkFrom(entry) {
+      Ok(check) => checks.push(check)
+      Err(error) => return Err(Error(
+        "{source}: check {at + 1}: {error.message}",
+      ))
+    }
+  }
+  Ok(Manifest(checks: checks.freeze()))
+}
+
+/// Reads one entry of the `checks` array.
+fn checkFrom(entry: Json) -> Result<Check, Error> {
+  Ok(Check(name: text(entry, "name")?, url: url(entry)?, expect: optionalText(entry, "expect")?, reject: optionalText(entry, "reject")?, maxLength: optionalCount(entry, "maxLength")?))
+}
+
+/// Reads the `url` field, and refuses a scheme this program cannot fetch.
+///
+/// The `http` host speaks `http://` and nothing else, so an `https://` URL is
+/// refused here rather than left to fail once per run against a host that
+/// would have said the same thing later and one check at a time.
+fn url(entry: Json) -> Result<String, Error> {
+  let written = text(entry, "url")?
+  if !written.startsWith("http://") {
+    return Err(Error(
+      "`url` is `{written}`, and this checker fetches `http://` only",
+    ))
+  }
+  Ok(written)
+}
+
+/// Reads the required string field `name`.
+fn text(entry: Json, name: String) -> Result<String, Error> {
+  match required(entry, name)? {
+    Json.Text(value) => Ok(value)
+    other => Err(wrongType(name, "a string", other))
+  }
+}
+
+/// Reads the string field `name`, which the entry may leave out.
+fn optionalText(entry: Json, name: String) -> Result<Option<String>, Error> {
+  let written = match field(entry, name) {
+    Some(value) => value
+    None => return Ok(None)
+  }
+  match written {
+    Json.Text(value) => Ok(Some(value))
+    other => Err(wrongType(name, "a string", other))
+  }
+}
+
+/// Reads the whole-number field `name`, which the entry may leave out.
+///
+/// JSON has one number type, so `4096` and `4096.0` arrive identically and
+/// both are this field; `4096.5` is not, because a bound on a count of
+/// characters is a count.
+fn optionalCount(entry: Json, name: String) -> Result<Option<Int>, Error> {
+  let written = match field(entry, name) {
+    Some(value) => value
+    None => return Ok(None)
+  }
+  let number = match written {
+    Json.Number(value) => value
+    other => return Err(wrongType(name, "a number", other))
+  }
+  let whole = match number.toInt() {
+    Ok(rounded) => rounded
+    Err(error) => return Err(Error("`{name}` is {number}: {error.message}"))
+  }
+  if whole.toFloat() != number {
+    return Err(Error("`{name}` is {number}, which is not a whole number"))
+  }
+  if whole < 0 {
+    return Err(Error("`{name}` is {whole}, and a bound cannot be negative"))
+  }
+  Ok(Some(whole))
+}
+
+/// The field `name`, or the error that says it is missing.
+fn required(entry: Json, name: String) -> Result<Json, Error> {
+  match field(entry, name) {
+    Some(value) => Ok(value)
+    None => Err(Error("this check has no `{name}` field"))
+  }
+}
+
+/// The error for a field that is there and is the wrong kind of thing.
+fn wrongType(name: String, expected: String, found: Json) -> Error {
+  Error("`{name}` must be {expected}, and is {describe(found)}")
+}
+
+/// What kind of thing a value is, for a message that has to name it.
+fn describe(value: Json) -> String {
+  match value {
+    Json.Null => "null"
+    Json.Bool(_) => "a boolean"
+    Json.Number(_) => "a number"
+    Json.Text(_) => "a string"
+    Json.Items(_) => "an array"
+    Json.Fields(_) => "an object"
+  }
+}

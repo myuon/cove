@@ -1,0 +1,33 @@
+use clock
+use console.println
+use files
+
+/// Checks every endpoint one manifest names, and reports what it found.
+///
+/// The whole run is inside one `clock.timeout`, so a run that will not finish
+/// stops instead of hanging: leaving the bound cancels the window still in
+/// flight, and the checks it held have no verdicts because a cancelled task
+/// has no value to await. That is the honest report of a stopped run. ADR
+/// 0024 makes a stop a bound rather than a point -- a cancelled check stops
+/// within a fixed amount of further work, not at the next instruction -- so
+/// how far each one got is not something this program can say and does not
+/// try to.
+export async fn main(arguments: Array<String>) -> Result<Unit, Error> {
+  if wantsHelp(arguments) {
+    println(usage())?
+    return Ok(())
+  }
+  let options = readOptions(arguments)?
+  let manifest = readManifest(options.manifest, files.read(options.manifest)?)?
+
+  let bounded: Result<Run, Error> = clock.timeout(runBound()) {
+    await runAll(manifest.checks, options.plan)
+  }
+  let run = bounded?
+
+  println(report(options.format, options.manifest, run))?
+  if run.tally.failed > 0 || skipped(run) > 0 {
+    return Err(Error("covecheck: {run.tally.failed} check(s) failed and {skipped(run)} were not tried"))
+  }
+  Ok(())
+}

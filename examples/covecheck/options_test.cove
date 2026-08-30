@@ -1,0 +1,94 @@
+/// The message `readOptions` refused `arguments` with, or what it made of
+/// them when it did not refuse.
+fn optionsRefusal(arguments: Array<String>) -> String {
+  match readOptions(arguments) {
+    Ok(options) => "read `{options.manifest}` at {options.plan.concurrency} at a time"
+    Err(error) => error.message
+  }
+}
+
+/// A command line that names nothing but a manifest is a run, and the
+/// defaults are what the usage text says they are.
+test fn takesAManifestAndNothingElse() -> Result<Unit, Error> {
+  let options = readOptions(["checks.json"])?
+  assertEqual(options.manifest, "checks.json")?
+  assertEqual(options.plan.concurrency, 4)?
+  assert(options.plan.stopAfter.isNone())?
+  assertEqual(options.format.name(), "text")?
+  Ok(())
+}
+
+/// Each option is read into the plan or the format it decides.
+test fn readsEveryOption() -> Result<Unit, Error> {
+  let options = readOptions(["checks.json", "--concurrency", "8", "--stop-after", "2", "--format", "json"])?
+  assertEqual(options.plan.concurrency, 8)?
+  assertEqual(options.plan.stopAfter.unwrapOr(0), 2)?
+  assertEqual(options.format.name(), "json")?
+  Ok(())
+}
+
+/// An option may come before the manifest as well as after it, because a
+/// person types them in whichever order they thought of them.
+test fn takesTheManifestInEitherPosition() -> Result<Unit, Error> {
+  assertEqual(
+    optionsRefusal(["--concurrency", "2", "checks.json"]),
+    "read `checks.json` at 2 at a time",
+  )?
+  Ok(())
+}
+
+/// A run with no checks in flight is a run that does nothing, so `0` is
+/// refused rather than read as "no limit".
+test fn refusesAConcurrencyOfNone() -> Result<Unit, Error> {
+  assertEqual(
+    optionsRefusal(["checks.json", "--concurrency", "0"]),
+    "`--concurrency` cannot be 0; a run needs one check at a time",
+  )?
+  Ok(())
+}
+
+/// A count that is not one says which option and what was written, and an
+/// option with no value after it says the command line ended.
+test fn refusesACountThatIsNotOne() -> Result<Unit, Error> {
+  assertEqual(
+    optionsRefusal(["checks.json", "--stop-after", "some"]),
+    "`--stop-after` cannot be `some`, which is not a whole number",
+  )?
+  assertEqual(
+    optionsRefusal(["checks.json", "--concurrency", "--format", "json"]),
+    "`--concurrency` needs a value, and `--format` is another option",
+  )?
+  assertEqual(
+    optionsRefusal(["checks.json", "--concurrency"]),
+    "`--concurrency` needs a value, and the command line ended",
+  )?
+  Ok(())
+}
+
+/// A command line that names no manifest, an option this program does not
+/// have, or two manifests is refused, and each says which.
+test fn refusesACommandLineItCannotRun() -> Result<Unit, Error> {
+  assertEqual(
+    optionsRefusal(["--concurrency", "2"]),
+    "no manifest was named; run with `--help`",
+  )?
+  assertEqual(
+    optionsRefusal(["checks.json", "--retries", "2"]),
+    "`--retries` is not an option; run with `--help`",
+  )?
+  assertEqual(
+    optionsRefusal(["checks.json", "other.json"]),
+    "`other.json` is a second manifest; `covecheck` reads one file",
+  )?
+  Ok(())
+}
+
+/// An empty command line asks for the usage text rather than being a run with
+/// nothing to do, and so does either spelling of `--help`.
+test fn readsAnEmptyCommandLineAsAskingForHelp() -> Result<Unit, Error> {
+  assert(wantsHelp([]))?
+  assert(wantsHelp(["--help"]))?
+  assert(wantsHelp(["checks.json", "-h"]))?
+  assert(!wantsHelp(["checks.json"]))?
+  Ok(())
+}

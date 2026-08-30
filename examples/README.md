@@ -3,10 +3,10 @@
 These programs are executable design tests for Cove. The syntax is still
 provisional.
 
-All nine run today; asynchronous execution is no longer what blocks any of
+All ten run today; asynchronous execution is no longer what blocks any of
 them -- tasks run on threads.
 
-What a run of the last three does depends on the hosts it was given, and
+What a run of four of them does depends on the hosts it was given, and
 `cove run` gives it the real ones. `cove run server` binds port 8080 and
 serves until it is interrupted. `cove run callbacks` gets no further than its
 first line: `cove run` installs the denied `database`, so `database.connect`
@@ -15,8 +15,10 @@ fetches `http://127.0.0.1:8080/bookings` and `/prices`, so on its own it
 reports a connection error; run `server` first and it has something to reach,
 though `server` routes only `/health`, so what comes back is a pair of 404s
 rather than bookings and prices. The two are not written to compose.
+`cove run covecheck -- checks.json` is in the same position and says so more
+usefully, because saying which endpoints did not answer is what it is for.
 
-`crates/cove-cli/tests/examples.rs` runs every one of the nine against
+`crates/cove-cli/tests/examples.rs` runs every one of the ten against
 deterministic fake hosts instead -- a listener with a scripted queue of
 requests, a `fetch` with recorded answers, a clock that moves only when
 something moves it, and a database of canned rows -- which is where their
@@ -61,6 +63,7 @@ Together they test the core product hypotheses:
 | `values/` | Struct copies, Vector aliases, immutable Arrays, and freeze |
 | `traits/` | Nominal traits, generic bounds, and both dispatch forms |
 | `callbacks/` | Routers, middleware, events, timers, retries, and task-safe captures |
+| `covecheck/` | A concurrent HTTP checker: bounded concurrency, a shared tally, per-check and whole-run bounds, and a report whose order does not depend on its scheduler. [Its own README](covecheck/README.md) argues that last part |
 | `cq/` | A whole practical program: streaming JSON Lines and CSV transformation, typed records, actionable diagnostics, and measured throughput. [Its own README](cq/README.md) records what it found |
 | `text/` | Not a program: the module `restricted/` imports, for `export` and capabilities across a boundary, and the package's own `test fn` declarations |
 | `codegen/` | `cove generate`: a capability-controlled generator that reads `files/status_codes.txt` |
@@ -75,7 +78,7 @@ A module may name another module's exported declarations with `use`, so
 required capabilities are derived from the package's call graph, not one
 module's.
 The first implementation milestone, making `hello/` run, is done, and so is
-the one that follows it: all nine programs now have defined behavior in
+the one that follows it: all ten programs now have defined behavior in
 both diagnostics and execution, whether that behavior is a clean run, like
 `hello`'s, or a documented refusal, like `callbacks`' immediate stop when
 `database.connect` finds no real database behind `cove run` to connect to.

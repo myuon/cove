@@ -940,3 +940,265 @@ fn cq_reads_back_the_sample_it_generated() {
         read.console
     );
 }
+
+// ------------------------------------------------------------- covecheck
+
+// Two of what `covecheck` does have no test here, and the reason is the same
+// for both: the fakes cannot produce the condition.
+//
+// A per-check `clock.timeout` fires on a virtual clock only when the body it
+// bounds advances that clock, and what a check's body does is fetch, which
+// does not. `clock.timeout`'s own behaviour is pinned exactly by the unit
+// tests in `crates/cove-runtime/src/clock.rs`, which drive it with a clock
+// they move themselves.
+//
+// Cancellation is the same shape of gap for a different reason: it is
+// reachable here only through the whole-run deadline, which needs the clock
+// to move as well, and what a cancelled check had done by the time the stop
+// reached it is a race no golden file can pin. `--stop-after` is the
+// deterministic member of that family and is what the tests below record
+// instead.
+
+/// The manifest every `covecheck` test below reads.
+///
+/// Four checks, one per outcome the program can report, and each one's
+/// conditions are what decide which: `health` is satisfied, `prices` asks for
+/// text the body does not hold, `docs` bounds a body the answer overruns, and
+/// `metrics` names an endpoint no answer is recorded for.
+const CHECKS: &str = concat!(
+    r#"{"checks":["#,
+    r#"{"name":"health","url":"http://127.0.0.1:8080/health","#,
+    r#""expect":"\"status\":\"ok\"","maxLength":256},"#,
+    r#"{"name":"prices","url":"http://127.0.0.1:8080/prices","expect":"EUR"},"#,
+    r#"{"name":"docs","url":"http://127.0.0.1:8080/docs","maxLength":8},"#,
+    r#"{"name":"metrics","url":"http://127.0.0.1:8080/metrics"}"#,
+    r#"]}"#,
+);
+
+/// What the endpoints of [`CHECKS`] answer, except `/metrics`, which nothing
+/// answers for.
+fn endpoints() -> BTreeMap<String, String> {
+    BTreeMap::from([
+        (
+            "http://127.0.0.1:8080/health".to_string(),
+            r#"{"status":"ok"}"#.to_string(),
+        ),
+        (
+            "http://127.0.0.1:8080/prices".to_string(),
+            r#"{"currency":"USD"}"#.to_string(),
+        ),
+        (
+            "http://127.0.0.1:8080/docs".to_string(),
+            "far more than eight characters".to_string(),
+        ),
+    ])
+}
+
+/// One `covecheck` run over [`CHECKS`], against the answers `bodies` records.
+fn covecheck(arguments: &[&str], bodies: BTreeMap<String, String>) -> Ran {
+    run(
+        "covecheck.main",
+        &["console", "files", "http", "clock"],
+        Fakes {
+            args: arguments
+                .iter()
+                .map(|argument| argument.to_string())
+                .collect(),
+            files: BTreeMap::from([("checks.json".to_string(), CHECKS.to_string())]),
+            bodies,
+            ..Fakes::default()
+        },
+    )
+}
+
+/// `covecheck` reports one line per check, in the manifest's order, with each
+/// of the four outcomes standing for a different reason.
+///
+/// This is the assertion the program is arranged to make possible. Four
+/// checks run at once on threads of their own and settle in whatever order
+/// the scheduler settles them in; nothing they do reaches the console, and
+/// the report is written once at the end by the task that read the manifest,
+/// so the console is a golden file rather than an interleaving.
+#[test]
+fn covecheck_reports_every_outcome_in_manifest_order() {
+    let ran = covecheck(&["checks.json"], endpoints());
+
+    assert_eq!(
+        err(&ran.value),
+        "covecheck: 3 check(s) failed and 0 were not tried"
+    );
+    assert_eq!(
+        ran.console,
+        [
+            "checks.json: 4 check(s)",
+            "  ok          health                  15 character(s)",
+            "  failed      prices                  the body does not contain `EUR`",
+            "  failed      docs                    the body is 30 character(s), over the bound of 8",
+            "  unchecked   metrics                 http: no recorded answer for `http://127.0.0.1:8080/metrics`",
+            "1 passed, 3 failed, 0 skipped",
+        ],
+        "{:?}",
+        ran.console
+    );
+}
+
+/// The concurrency bounds how many checks are in flight and changes nothing
+/// else: every window size over one manifest reports the same run.
+#[test]
+fn covecheck_reports_the_same_run_at_every_concurrency() {
+    let one = covecheck(&["checks.json", "--concurrency", "1"], endpoints());
+    let some = covecheck(&["checks.json", "--concurrency", "3"], endpoints());
+    let plenty = covecheck(&["checks.json", "--concurrency", "40"], endpoints());
+
+    assert_eq!(some.console, one.console, "{:?}", some.console);
+    assert_eq!(plenty.console, one.console, "{:?}", plenty.console);
+}
+
+/// A run whose every check passes answers `Ok` and says so.
+#[test]
+fn covecheck_answers_ok_when_every_endpoint_is_healthy() {
+    let mut bodies = endpoints();
+    bodies.insert(
+        "http://127.0.0.1:8080/prices".to_string(),
+        r#"{"currency":"EUR"}"#.to_string(),
+    );
+    bodies.insert(
+        "http://127.0.0.1:8080/docs".to_string(),
+        "short".to_string(),
+    );
+    bodies.insert(
+        "http://127.0.0.1:8080/metrics".to_string(),
+        "up 1".to_string(),
+    );
+
+    let ran = covecheck(&["checks.json"], bodies);
+
+    assert!(ok(&ran.value).eq_value(&Value::Unit), "{}", ran.value);
+    assert_eq!(
+        *ran.console.last().expect("a summary line"),
+        "4 passed, 0 failed, 0 skipped"
+    );
+}
+
+/// A body over the bound its check wrote down fails on the bound, and the
+/// message says by how much rather than that something was wrong.
+///
+/// The bound is the program's and not the host's: `http.fetch` answers a
+/// whole `String` and there is no way to ask it for less, so what this bounds
+/// is what the checker will accept and not what the run will hold. Issue #145
+/// is that gap.
+#[test]
+fn covecheck_bounds_the_body_a_check_will_accept() {
+    let mut bodies = endpoints();
+    bodies.insert(
+        "http://127.0.0.1:8080/docs".to_string(),
+        "nine char".to_string(),
+    );
+    let over = covecheck(&["checks.json"], bodies.clone());
+    assert!(
+        over.console.iter().any(|line| line
+            == "  failed      docs                    the body is 9 character(s), over the bound of 8"),
+        "{:?}",
+        over.console
+    );
+
+    bodies.insert(
+        "http://127.0.0.1:8080/docs".to_string(),
+        "exactly8".to_string(),
+    );
+    let inside = covecheck(&["checks.json"], bodies);
+    assert!(
+        inside
+            .console
+            .iter()
+            .any(|line| line == "  ok          docs                    8 character(s)"),
+        "{:?}",
+        inside.console
+    );
+}
+
+/// A failure budget stops the run starting further checks, and the ones it
+/// never started are reported as skipped rather than left out of the report.
+///
+/// This is the deterministic member of the stopping family. Where a run gives
+/// up is decided between windows, once every task of the last one has
+/// settled, so two runs over one manifest stop in the same place. Cancelling
+/// a check already in flight is the other member and has no golden file here:
+/// ADR 0024 makes a stop a bound rather than a point, so how far a cancelled
+/// check got is the scheduler's answer.
+#[test]
+fn covecheck_stops_starting_checks_once_enough_have_failed() {
+    let ran = covecheck(
+        &["checks.json", "--concurrency", "2", "--stop-after", "1"],
+        endpoints(),
+    );
+
+    assert_eq!(
+        err(&ran.value),
+        "covecheck: 1 check(s) failed and 2 were not tried"
+    );
+    assert_eq!(
+        ran.console,
+        [
+            "checks.json: 4 check(s)",
+            "  ok          health                  15 character(s)",
+            "  failed      prices                  the body does not contain `EUR`",
+            "  skipped     docs                    the run had already given up",
+            "  skipped     metrics                 the run had already given up",
+            "1 passed, 1 failed, 2 skipped",
+        ],
+        "{:?}",
+        ran.console
+    );
+}
+
+/// The JSON report is the same run for another program to read, on one line,
+/// with its object fields in `Map` order so two runs write the same bytes.
+#[test]
+fn covecheck_writes_the_same_run_as_json() {
+    let ran = covecheck(&["checks.json", "--format", "json"], endpoints());
+
+    assert_eq!(
+        ran.console,
+        [concat!(
+            r#"{"checks":["#,
+            r#"{"detail":"15 character(s)","name":"health","outcome":"ok","#,
+            r#""url":"http://127.0.0.1:8080/health"},"#,
+            r#"{"detail":"the body does not contain `EUR`","name":"prices","#,
+            r#""outcome":"failed","url":"http://127.0.0.1:8080/prices"},"#,
+            r#"{"detail":"the body is 30 character(s), over the bound of 8","#,
+            r#""name":"docs","outcome":"failed","#,
+            r#""url":"http://127.0.0.1:8080/docs"},"#,
+            r#"{"detail":"http: no recorded answer for `http://127.0.0.1:8080/metrics`","#,
+            r#""name":"metrics","outcome":"unchecked","#,
+            r#""url":"http://127.0.0.1:8080/metrics"}"#,
+            r#"],"failed":3,"manifest":"checks.json","passed":1,"skipped":0}"#,
+        )],
+        "{:?}",
+        ran.console
+    );
+}
+
+/// A manifest that will not load stops the run before a single request is
+/// made, and the message names the file, the check, and the field.
+#[test]
+fn covecheck_refuses_a_manifest_before_it_fetches_anything() {
+    let ran = run(
+        "covecheck.main",
+        &["console", "files", "http", "clock"],
+        Fakes {
+            args: vec!["checks.json".to_string()],
+            files: BTreeMap::from([(
+                "checks.json".to_string(),
+                r#"{"checks":[{"name":"a","url":"https://a/"}]}"#.to_string(),
+            )]),
+            ..Fakes::default()
+        },
+    );
+
+    assert_eq!(
+        err(&ran.value),
+        "checks.json: check 1: `url` is `https://a/`, and this checker fetches `http://` only"
+    );
+    assert!(ran.console.is_empty(), "{:?}", ran.console);
+}

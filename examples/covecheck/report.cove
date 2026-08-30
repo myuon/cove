@@ -1,0 +1,98 @@
+use cq.json.Json
+use cq.json.render
+
+/// Which of the two reports a run writes.
+export enum Format {
+  Text
+  Json
+}
+
+impl Format {
+  /// The word this format is asked for by.
+  export fn name(self) -> String {
+    match self {
+      Format.Text => "text"
+      Format.Json => "json"
+    }
+  }
+}
+
+/// The format `name` asks for, or the error that names the two there are.
+export fn formatNamed(name: String) -> Result<Format, Error> {
+  match name {
+    "text" => Ok(Format.Text)
+    "json" => Ok(Format.Json)
+    other => Err(Error(
+      "`{other}` is not a report format; there are `text` and `json`",
+    ))
+  }
+}
+
+/// The report `format` asks for, as the whole text of it.
+///
+/// Both reports are built and returned rather than printed, so the thing a
+/// test asserts on is the thing a person reads. Neither is written by a task:
+/// a run's tasks share one console and what order their lines would arrive in
+/// is the scheduler's answer, so the report is written once, at the end, by
+/// the one thing that knows the manifest's order.
+export fn report(format: Format, source: String, run: Run) -> String {
+  match format {
+    Format.Text => textReport(source, run)
+    Format.Json => jsonReport(source, run)
+  }
+}
+
+/// How many of a run's checks were never tried.
+///
+/// The difference between the checks there were and the checks that started,
+/// which is the one number the array of verdicts does not carry on its own.
+export fn skipped(run: Run) -> Int {
+  run.verdicts.length() - run.tally.started
+}
+
+/// The report a person reads.
+fn textReport(source: String, run: Run) -> String {
+  var lines = Vector.of()
+  lines.push("{source}: {run.verdicts.length()} check(s)")
+  for verdict in run.verdicts {
+    lines.push("  {padded(verdict.outcome.label(), 12)}{padded(verdict.name, 24)}{verdict.outcome.detail()}")
+  }
+  lines.push("{run.tally.passed} passed, {run.tally.failed} failed, {skipped(run)} skipped")
+  "\n".join(lines.freeze())
+}
+
+/// The report another program reads.
+///
+/// `cq.json`'s renderer writes an object's fields in `Map` order, which is
+/// ascending by key, so two runs over the same manifest write the same bytes
+/// and a diff of two reports is a diff of two runs.
+fn jsonReport(source: String, run: Run) -> String {
+  var checks = Vector.of()
+  for verdict in run.verdicts {
+    checks.push(verdictJson(verdict))
+  }
+  render(Json.Fields(Map.of(MapEntry(key: "manifest", value: Json.Text(source)), MapEntry(key: "checks", value: Json.Items(checks.freeze())), MapEntry(key: "passed", value: count(run.tally.passed)), MapEntry(key: "failed", value: count(run.tally.failed)), MapEntry(key: "skipped", value: count(skipped(run))))))
+}
+
+/// One verdict, as the JSON report writes it.
+fn verdictJson(verdict: Verdict) -> Json {
+  Json.Fields(Map.of(MapEntry(key: "name", value: Json.Text(verdict.name)), MapEntry(key: "url", value: Json.Text(verdict.url)), MapEntry(key: "outcome", value: Json.Text(verdict.outcome.label())), MapEntry(key: "detail", value: Json.Text(verdict.outcome.detail()))))
+}
+
+/// A count, as the one number type JSON has.
+fn count(value: Int) -> Json {
+  Json.Number(value.toFloat())
+}
+
+/// `text` padded on the right to `width` characters, for a column of names.
+///
+/// A name longer than the column overflows it rather than being cut, because
+/// a report that shortened the name would be hiding the one thing the line is
+/// about.
+fn padded(text: String, width: Int) -> String {
+  var padding = ""
+  for i in text.length()..<width {
+    padding = "{padding} "
+  }
+  "{text}{padding}"
+}

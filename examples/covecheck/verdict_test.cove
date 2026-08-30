@@ -1,0 +1,84 @@
+/// A check with the conditions given, over an endpoint nothing fetches.
+fn checking(
+  expect: Option<String>,
+  reject: Option<String>,
+  maxLength: Option<Int>,
+) -> Check {
+  Check(
+    name: "under-test",
+    url: "http://a/",
+    expect: expect,
+    reject: reject,
+    maxLength: maxLength,
+  )
+}
+
+/// A body that satisfies every condition passes, and the outcome carries what
+/// the report shows for it: how much body there was.
+test fn passesABodyThatSatisfiesEveryCondition() -> Result<Unit, Error> {
+  let outcome = judge(
+    checking(Some("ok"), Some("error"), Some(16)),
+    "\{\"status\":\"ok\"\}",
+  )
+  assert(outcome.ok())?
+  assertEqual(outcome.label(), "ok")?
+  assertEqual(outcome.detail(), "15 character(s)")?
+  Ok(())
+}
+
+/// A check that names no condition still says something: that a body arrived.
+test fn passesAnyBodyWhenTheCheckAsksForNothing() -> Result<Unit, Error> {
+  assert(judge(checking(None, None, None), "").ok())?
+  Ok(())
+}
+
+/// Each condition names itself when it breaks, and the text it was given, so
+/// a report says what to go and look at rather than that something is wrong.
+test fn namesTheConditionThatBroke() -> Result<Unit, Error> {
+  assertEqual(
+    judge(checking(Some("ok"), None, None), "down").detail(),
+    "the body does not contain `ok`",
+  )?
+  assertEqual(
+    judge(checking(None, Some("stack trace"), None), "a stack trace").detail(),
+    "the body contains `stack trace`",
+  )?
+  assertEqual(
+    judge(checking(None, None, Some(3)), "four").detail(),
+    "the body is 4 character(s), over the bound of 3",
+  )?
+  Ok(())
+}
+
+/// A bound is a bound and not a limit to stay under: a body of exactly the
+/// bound is inside it.
+test fn acceptsABodyOfExactlyTheBound() -> Result<Unit, Error> {
+  assert(judge(checking(None, None, Some(4)), "four").ok())?
+  assert(!judge(checking(None, None, Some(3)), "four").ok())?
+  Ok(())
+}
+
+/// A body that breaks more than one condition reports the first in the
+/// written order and stops, so two runs over one body give one reason.
+test fn reportsTheFirstBrokenConditionAndNoMore() -> Result<Unit, Error> {
+  assertEqual(
+    judge(checking(Some("ok"), Some("down"), Some(2)), "down").detail(),
+    "the body is 4 character(s), over the bound of 2",
+  )?
+  assertEqual(
+    judge(checking(Some("ok"), Some("down"), Some(8)), "down").detail(),
+    "the body does not contain `ok`",
+  )?
+  Ok(())
+}
+
+/// Only a passing check is one a run may end successfully on, and a skipped
+/// one is not: the run stopped because enough had already gone wrong.
+test fn treatsEveryOutcomeButPassedAsSomethingToReport(
+) -> Result<Unit, Error> {
+  assert(Outcome.Passed(0).ok())?
+  assert(!Outcome.Failed("no").ok())?
+  assert(!Outcome.Unchecked("no").ok())?
+  assert(!Outcome.Skipped.ok())?
+  Ok(())
+}

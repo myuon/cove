@@ -1,0 +1,198 @@
+/// A check over the endpoint `name`, asking only that it answer.
+///
+/// `cove test` grants the fake `http`, which has no recorded answer for any
+/// URL, so every check below is `unchecked` and the message names the URL
+/// that was asked for. That is what makes these tests about the runner: the
+/// verdict a check comes back with says which endpoint it belongs to, so a
+/// window that scrambled its results would say so.
+fn checkFor(name: String) -> Check {
+  Check(
+    name: name,
+    url: "http://127.0.0.1:9/{name}",
+    expect: None,
+    reject: None,
+    maxLength: None,
+  )
+}
+
+/// Six checks named `a` to `f`.
+fn six() -> Array<Check> {
+  [
+    checkFor("a"),
+    checkFor("b"),
+    checkFor("c"),
+    checkFor("d"),
+    checkFor("e"),
+    checkFor("f"),
+  ]
+}
+
+/// Each verdict of `run` as `<name>=<the endpoint its detail names>`.
+///
+/// Pairing the two is the whole point: the name comes from the manifest and
+/// the URL comes from the host's answer, so a run that returned the right
+/// verdicts against the wrong checks reads differently here.
+fn paired(run: Run) -> String {
+  var parts = Vector.of()
+  for verdict in run.verdicts {
+    parts.push("{verdict.name}={verdict.outcome.detail()}")
+  }
+  " ".join(parts.freeze())
+}
+
+/// What every check answers when nothing has recorded an answer for it.
+fn unanswered(name: String) -> String {
+  "{name}=http: no recorded answer for `http://127.0.0.1:9/{name}`"
+}
+
+/// A plan with a concurrency and no failure budget.
+fn windows(concurrency: Int) -> Plan {
+  Plan(concurrency: concurrency, stopAfter: None)
+}
+
+/// A run answers one verdict per check, in the order the manifest wrote them,
+/// and each verdict belongs to its own check.
+///
+/// This is the property the whole design is arranged around. The checks run
+/// at once and settle in whatever order the scheduler settles them in; the
+/// window is awaited in the order it was spawned, so the array that comes
+/// back is the manifest's.
+test fn answersInManifestOrderHoweverChecksSettle() -> Result<Unit, Error> {
+  let run = await runAll(six(), windows(3))
+  assertEqual(
+    paired(run),
+    "{unanswered("a")} {unanswered("b")} {unanswered("c")} {unanswered("d")} {unanswered("e")} {unanswered("f")}",
+  )?
+  Ok(())
+}
+
+/// The concurrency decides how many checks are in flight and nothing else: a
+/// run of one at a time and a run of six at once report the same thing.
+///
+/// A window bigger than the manifest is the manifest, and a window of one is
+/// the sequential run, so both edges are here as well as the middle.
+test fn reportsTheSameRunAtEveryConcurrency() -> Result<Unit, Error> {
+  let one = await runAll(six(), windows(1))
+  let three = await runAll(six(), windows(3))
+  let plenty = await runAll(six(), windows(60))
+  assertEqual(paired(three), paired(one))?
+  assertEqual(paired(plenty), paired(one))?
+  Ok(())
+}
+
+/// Every check that ran is counted once, by the tasks themselves, and the
+/// totals do not depend on which order they landed in.
+test fn countsEveryCheckThatRanExactlyOnce() -> Result<Unit, Error> {
+  let run = await runAll(six(), windows(4))
+  assertEqual(run.tally.started, 6)?
+  assertEqual(run.tally.passed, 0)?
+  assertEqual(run.tally.failed, 6)?
+  assertEqual(skipped(run), 0)?
+  Ok(())
+}
+
+/// A failure budget stops the run starting further checks, and the checks it
+/// never started are reported as skipped rather than left out.
+///
+/// The budget is read between windows, so where a run stops is decided by the
+/// concurrency: two at a time and a budget of one gives up after the first
+/// window of two, which is two failures and four checks never tried. That is
+/// a bound on the work rather than on the failures, and it is the bound a
+/// window can keep -- a budget read inside a task would make each verdict
+/// depend on which sibling finished first.
+test fn stopsStartingChecksOnceEnoughHaveFailed() -> Result<Unit, Error> {
+  let run = await runAll(six(), Plan(concurrency: 2, stopAfter: Some(1)))
+  assertEqual(run.tally.started, 2)?
+  assertEqual(skipped(run), 4)?
+  assertEqual(run.verdicts.length(), 6)?
+  assertEqual(
+    report(Format.Text, "checks.json", run),
+    "checks.json: 6 check(s)\n  unchecked   a                       http: no recorded answer for `http://127.0.0.1:9/a`\n  unchecked   b                       http: no recorded answer for `http://127.0.0.1:9/b`\n  skipped     c                       the run had already given up\n  skipped     d                       the run had already given up\n  skipped     e                       the run had already given up\n  skipped     f                       the run had already given up\n0 passed, 2 failed, 4 skipped",
+  )?
+  Ok(())
+}
+
+/// A budget no run reaches leaves the run exactly as it was.
+test fn runsEveryCheckWhenTheBudgetIsNeverSpent() -> Result<Unit, Error> {
+  let run = await runAll(six(), Plan(concurrency: 2, stopAfter: Some(99)))
+  assertEqual(run.tally.started, 6)?
+  assertEqual(skipped(run), 0)?
+  Ok(())
+}
+
+/// Turns a cancelled loop is allowed to have taken.
+struct Turns {
+  taken: Int
+}
+
+impl Turns {
+  /// Records one turn.
+  fn take(var self) {
+    self.taken += 1
+  }
+}
+
+/// How many turns the loops below are written to take.
+fn rounds() -> Int {
+  10000
+}
+
+/// Runs a bounded loop on a task, counting its turns into `turns`, and
+/// cancels it or waits for it.
+///
+/// It answers nothing, and it has to. A `scope` in a function the checker
+/// settled as answering an `Int` or a `Bool` is the one shape the lowering
+/// refuses and will go on refusing -- such a function returns on the scalar
+/// stack, and a child's failure leaving the scope has no stack to travel on
+/// -- so the first draft of this, which answered the count, ran on the
+/// interpreter and failed on the VM. The count comes out of the cell instead.
+fn counting(turns: Shared<Turns>, stop: Bool) {
+  scope work {
+    let task = work.spawn {
+      var at = 0
+      while at < rounds() {
+        turns.lock(fn(var it) {
+          it.take()
+        })
+        at += 1
+      }
+    }
+    if stop {
+      task.cancel()
+    } else {
+      task.await()
+    }
+  }
+}
+
+/// A task nobody stops runs the whole of its loop, and a cancelled one runs
+/// somewhere between none of it and all of it.
+///
+/// The second assertion is `<=` and not `<`, and that is the point rather
+/// than a weak test. [ADR 0024](../../docs/adr/0024-a-stop-is-a-bound-not-a-point.md)
+/// makes a stop a bound and not a point: a cancelled loop stops within a
+/// fixed amount of further work after the cancellation becomes true, and
+/// whether the cancellation becomes true before the thread has started, in
+/// the middle, or after the loop has already finished is the scheduler's
+/// answer and not the program's. A test that asserted a count would be a test
+/// that failed at random, so this asserts the bound that is true and says
+/// what it gives up.
+test fn aCancelledLoopStopsWithinItsOwnBound() -> Result<Unit, Error> {
+  let whole = Shared(Turns(taken: 0))
+  counting(whole, false)
+  assertEqual(
+    whole.lock(fn(it) {
+      it.taken
+    }),
+    rounds(),
+  )?
+
+  let stopped = Shared(Turns(taken: 0))
+  counting(stopped, true)
+  assert(
+    stopped.lock(fn(it) {
+      it.taken
+    }) <= rounds(),
+  )?
+  Ok(())
+}
