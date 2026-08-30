@@ -176,6 +176,30 @@ impl Budget {
         self.cancellation.clone()
     }
 
+    /// Starts this budget over, for the run that is about to begin.
+    ///
+    /// Every count goes back to zero and the deadline clock starts again from
+    /// now. That is the answer to the one question a per-invocation limit
+    /// raises that a per-run one does not: a `Budget` starts its clock when it
+    /// is built, and a budget built to bound an invocation that has not begun
+    /// would spend its deadline waiting for its turn. The deadline runs from
+    /// the invocation, so this is called as the invocation is entered and
+    /// nowhere else — [`crate::host::HostRegistry::begin_run`] is the only
+    /// caller.
+    ///
+    /// The [`Cancellation`] is *not* reset, and that is not an oversight. A
+    /// flag somebody raised stays raised: the handle is shared, whoever
+    /// cancelled did so on purpose, and a run that quietly un-cancelled itself
+    /// as it started would be a stop this crate promised and did not make.
+    /// A caller that wants a fresh flag builds a fresh budget with one.
+    pub(crate) fn restart(&mut self) {
+        self.started_at = Instant::now();
+        self.fuel_spent = 0;
+        self.host_calls = 0;
+        self.safepoints_since_deadline_check = 0;
+        self.live_tasks = 0;
+    }
+
     /// The limits this budget was constructed with.
     pub fn limits(&self) -> &Limits {
         &self.limits
