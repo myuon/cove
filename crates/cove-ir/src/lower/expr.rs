@@ -22,10 +22,10 @@ use cove_syntax::ast::{
 use crate::{BinaryOp, Const, Inst, Scalar, SlotKind, UnaryOp, Unsupported};
 
 use super::body::{binary_op, branch_on, int_result, Body, Depth, LoopFrame, Position};
+use super::call::Args;
 use super::convention::store_slot;
 use super::index::{dyn_shape, reject_dyn, Instance, LambdaSite};
 use super::scan::mentioned_names;
-use super::Args;
 
 /// Which kind of `for` header a loop is walking.
 #[derive(Clone, Copy)]
