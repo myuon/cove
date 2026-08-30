@@ -71,6 +71,15 @@ the fields and the labeled constructor they synthesize (see Opaque structs,
 below). `test fn` sits where `export` sits and excludes it.
 `impl Trait for Type` is the only way a conformance is declared.
 
+A declaration's parameters are written rather than inferred, and each may
+carry a `var` marking, a default, or a `...` that makes it variadic. A
+variadic parameter is the **last** one its declaration writes, because it
+collects every argument the parameters before it did not take, and it is
+written **without a default**, because a variadic parameter given no
+arguments is already the empty `Array<T>` and there is nothing left for a
+default to answer. `cove check` decides both:
+`cove::type::variadic_position` and `cove::type::variadic_default`.
+
 Declaration-level errors: `cove::resolve::duplicate_declaration`,
 `cove::resolve::unknown_trait`, `cove::resolve::unknown_impl_type`,
 `cove::resolve::foreign_inherent_impl`, `cove::resolve::duplicate_conformance`,
@@ -80,7 +89,8 @@ Declaration-level errors: `cove::resolve::duplicate_declaration`,
 `cove::resolve::unknown_use`, `cove::resolve::private_declaration`,
 `cove::resolve::import_cycle`, `cove::resolve::module_shadows_host`,
 `cove::parse::opaque_not_exported`, `cove::parse::opaque_not_a_struct`,
-`cove::type::missing_parameter_type`, `cove::type::conformance_signature`,
+`cove::type::missing_parameter_type`, `cove::type::variadic_position`,
+`cove::type::variadic_default`, `cove::type::conformance_signature`,
 `cove::type::test`, `cove::type::entry`, and the
 `cove::resolve::missing_doc` warning.
 

@@ -1,0 +1,27 @@
+use console.println
+
+/// Writes a variadic parameter somewhere other than last.
+///
+/// The interpreter's two functions disagreed about what that means, so it
+/// never meant anything: `assign_labels` gathers the left-over arguments
+/// only for the last parameter, while `bind_params` wraps any variadic slot
+/// in an `Array`, and `items` came out an array of at most one element.
+export fn head(items: Int..., tail: String) -> Int {
+  items.length()
+}
+
+/// Writes a default on a variadic parameter.
+///
+/// Nothing could ever read it: both `bind_params` and the checker's
+/// `match_arguments` test `variadic` before `default` and move on, so the
+/// expression was checked, could carry side effects, and was unreachable.
+export fn counted(items: Int... = 1) -> Int {
+  items.length()
+}
+
+/// Never runs. This case lives in its own package so that check-time failure
+/// cannot take down every other case.
+export fn main() -> Result<Unit, Error> {
+  println("{head(1, "x")} {counted()}")?
+  Ok(())
+}

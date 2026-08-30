@@ -1,0 +1,15 @@
+error[cove::type::variadic_default]: parameter `items` is variadic, so it cannot have a default
+  --> <e2e>/fail_variadic_shape/main/main.cove:18:19
+   |
+18 | export fn counted(items: Int... = 1) -> Int {
+   |                   ^^^^^^^^^^^^^^^^^
+  rule: A variadic parameter given no arguments is an empty `Array<T>`, so there is nothing left for a default to answer.
+  help: remove the `= ...`; a call that passes nothing already gives `items` an empty array
+error[cove::type::variadic_position]: parameter `items` is variadic, so it must be the last one
+ --> <e2e>/fail_variadic_shape/main/main.cove:9:16
+  |
+9 | export fn head(items: Int..., tail: String) -> Int {
+  |                ^^^^^^^^^^^^^
+  rule: A variadic parameter is the last one its declaration writes: it collects every argument the parameters before it did not take.
+  help: move `items` to the end of the parameter list
+2 error(s)

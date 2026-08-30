@@ -39,7 +39,9 @@ export fn main(args: Array<String>) -> Result<Unit, Error> {
 - Calls support static argument labels: `request(url: endpoint, timeout: 5s)`.
   Labels are parameter names, so they appear in declaration order.
 - Struct initialization uses synthesized labeled calls: `User(name: "A")`.
-- A variadic `items: T...` is an immutable `Array<T>` inside the function.
+- A variadic `items: T...` is an immutable `Array<T>` inside the function. It
+  is the declaration's last parameter and takes no default: given no
+  arguments it is already the empty array.
 - Blocks and control-flow forms are expressions.
 - Structs are product types; enums are tagged unions. Both may have methods
   and associated functions in an `impl` block.

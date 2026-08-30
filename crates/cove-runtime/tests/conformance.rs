@@ -680,6 +680,16 @@ static REJECTIONS: &[Rejection] = &[
         code: "cove::type::missing_parameter_type",
     },
     Rejection {
+        section: "Declarations",
+        source: "/// Declares a variadic parameter that is not the last one.\nexport fn probe(items: Int..., tail: Int) -> Int {\n  tail\n}\n",
+        code: "cove::type::variadic_position",
+    },
+    Rejection {
+        section: "Declarations",
+        source: "/// Declares a variadic parameter with a default.\nexport fn probe(items: Int... = 1) -> Int {\n  items.length()\n}\n",
+        code: "cove::type::variadic_default",
+    },
+    Rejection {
         section: "`match`",
         source: "enum Status {\n  Pending\n  Active\n}\n\n/// Leaves a case of an enum uncovered.\nexport fn probe() -> Int {\n  match Status.Pending {\n    Status.Pending => 1\n  }\n}\n",
         code: "cove::resolve::non_exhaustive_match",

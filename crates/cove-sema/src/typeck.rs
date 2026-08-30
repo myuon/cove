@@ -260,6 +260,17 @@
 //! about a place: labeled arguments appear in declaration order, and
 //! [`LABEL_ORDER`] is what says so.
 //!
+//! Two more are facts about a *declaration* rather than about a call, and
+//! ADR 0021's rule reaches them by the same test — the parameter list is
+//! structure this pass already walks to build a signature. A variadic
+//! parameter is the last one its declaration writes ([`VARIADIC_POSITION`])
+//! and is not written with a default ([`VARIADIC_DEFAULT`]).
+//! `Checker::check_variadic_shape` is where both are decided. Unlike the
+//! five above, these two are wording of this pass's own, because there was
+//! no behaviour to keep: `Interpreter::assign_labels` and `bind_params`
+//! disagreed about what a non-last variadic parameter binds, and nothing in
+//! either backend could ever reach a variadic parameter's default.
+//!
 //! Two things bound it, and both are abstentions rather than gaps in the
 //! rule. A name this pass did not bind is not a place and is not reported as
 //! one — see `Checker::not_a_place`. And a receiver whose type is an
@@ -419,6 +430,11 @@ pub const TASK_SAFETY: &str = "cove::type::task_safety";
 /// A declaration's parameter has no written type. Unlike a lambda's, it has
 /// no expected type at a call site to infer from.
 pub const MISSING_PARAMETER_TYPE: &str = "cove::type::missing_parameter_type";
+/// A variadic parameter stands somewhere other than last in its
+/// declaration's parameter list.
+pub const VARIADIC_POSITION: &str = "cove::type::variadic_position";
+/// A variadic parameter is written with a default.
+pub const VARIADIC_DEFAULT: &str = "cove::type::variadic_default";
 /// A host operation whose schema declares its result `Any`, so the checker
 /// can prove nothing about the value it produced (note).
 pub const UNCONSTRAINED_RESULT: &str = "cove::type::unconstrained_result";
@@ -2059,6 +2075,7 @@ impl<'a> Checker<'a> {
     /// conformance.
     fn trait_method_sig(&mut self, method: &TraitMethod) -> FnSig {
         let outer = std::mem::take(&mut self.type_params);
+        self.check_variadic_shape(&method.params);
         let params = method
             .params
             .iter()
@@ -2296,6 +2313,7 @@ impl<'a> Checker<'a> {
                 );
             }
         }
+        self.check_variadic_shape(&decl.params);
 
         let params = decl
             .params
@@ -2351,6 +2369,77 @@ impl<'a> Checker<'a> {
             // `Place::binding(_, false)` `bind_params` builds for one.
             is_var: param.is_var && !param.variadic,
             span: param.span,
+        }
+    }
+
+    /// Refuses the two shapes a variadic parameter can be written in that
+    /// nothing gave a meaning to.
+    ///
+    /// Where a parameter stands in the list, and whether it was written with
+    /// a default, are read off the parameter list this pass already walks to
+    /// build a [`ParamSig`] — which is what [ADR 0021] says makes them the
+    /// checker's to decide rather than a backend's.
+    ///
+    /// **Standing anywhere but last.** A variadic parameter is the `Array<T>`
+    /// of the arguments no earlier parameter took, so a parameter after it
+    /// could only be filled by an argument it had already collected. The two
+    /// evaluators disagreed about which: `Interpreter::assign_labels`
+    /// gathers the left-over arguments only when the *last* parameter is
+    /// variadic, while `bind_params` wraps *any* variadic slot in an
+    /// `Array`, so `fn f(items: Int..., tail: String)` bound `items` to an
+    /// array of at most one element. Neither reading was chosen, and the
+    /// rule that makes the least language is that there is nothing here to
+    /// read.
+    ///
+    /// **Written with a default.** A variadic parameter given no arguments
+    /// is the empty `Array<T>`, which is already the whole answer to what
+    /// omitting it means. A default would be a second answer to that
+    /// question, and it is one nothing can reach: `bind_params` tests
+    /// `variadic` before `default` and `continue`s, and
+    /// [`Checker::match_arguments`] does the same, so the expression was
+    /// checked, could carry side effects a reader expects, and was
+    /// unreachable by construction.
+    ///
+    /// [ADR 0021]: https://github.com/myuon/cove/blob/main/docs/adr/0021-places-are-a-static-fact.md
+    fn check_variadic_shape(&mut self, params: &[Param]) {
+        for (index, param) in params.iter().enumerate() {
+            if !param.variadic {
+                continue;
+            }
+            if index + 1 != params.len() {
+                self.diagnostics.push(
+                    Diagnostic::error(
+                        VARIADIC_POSITION,
+                        format!(
+                            "parameter `{}` is variadic, so it must be the last one",
+                            param.name.node
+                        ),
+                    )
+                    .at(param.span)
+                    .rule("A variadic parameter is the last one its declaration writes: it collects every argument the parameters before it did not take.")
+                    .help(format!(
+                        "move `{}` to the end of the parameter list",
+                        param.name.node
+                    )),
+                );
+            }
+            if param.default.is_some() {
+                self.diagnostics.push(
+                    Diagnostic::error(
+                        VARIADIC_DEFAULT,
+                        format!(
+                            "parameter `{}` is variadic, so it cannot have a default",
+                            param.name.node
+                        ),
+                    )
+                    .at(param.span)
+                    .rule("A variadic parameter given no arguments is an empty `Array<T>`, so there is nothing left for a default to answer.")
+                    .help(format!(
+                        "remove the `= ...`; a call that passes nothing already gives `{}` an empty array",
+                        param.name.node
+                    )),
+                );
+            }
         }
     }
 
