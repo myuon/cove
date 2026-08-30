@@ -157,19 +157,26 @@ async fn runWindow(
 /// which is the same shape of news as an endpoint that refused the
 /// connection: both are runs that learned nothing about the service rather
 /// than runs that learned something bad.
+///
+/// An endpoint that answered is the other case, and it reaches `judge`
+/// whatever it answered. A `404` is not an `Err` here -- `http.fetch` hands
+/// back the `http.Response` the server sent, status and all -- so this
+/// function no longer has to guess from a message which of the two happened,
+/// and the judgement of a status is where the judgement of a body already
+/// was.
 async fn runCheck(check: Check, tally: Shared<Tally>) -> Verdict {
   tally.lock(fn(var counts) {
     counts.start()
   })
 
-  let answer: Result<Result<String, Error>, Error> = clock.timeout(
+  let answer: Result<Result<http.Response, Error>, Error> = clock.timeout(
     checkBound(check),
   ) {
     http.fetch(check.url)
   }
   let outcome = match answer {
     Ok(fetched) => match fetched {
-      Ok(body) => judge(check, body)
+      Ok(response) => judge(check, response)
       Err(error) => Outcome.Unchecked(error.message)
     }
     Err(error) => Outcome.Unchecked(error.message)

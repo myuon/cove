@@ -13,14 +13,16 @@ first line: `cove run` installs the denied `database`, so `database.connect`
 refuses and says so, because there is still no real one. `cove run tasks`
 fetches `http://127.0.0.1:8080/bookings` and `/prices`, so on its own it
 reports a connection error; run `server` first and it has something to reach,
-though `server` routes only `/health`, so what comes back is a pair of 404s
-rather than bookings and prices. The two are not written to compose.
+though `server` routes only `/health`, so what comes back is a 404 and the
+dashboard says the endpoint answered 404 rather than rendering an error page
+as a panel. The two are not written to compose.
 `cove run covecheck -- checks.json` is in the same position and says so more
-usefully, because saying which endpoints did not answer is what it is for.
+usefully, because saying which endpoints answered wrongly and which did not
+answer at all is what it is for.
 
 `crates/cove-cli/tests/examples.rs` runs every one of the twelve against
 deterministic fake hosts instead -- a listener with a scripted queue of
-requests, a `fetch` with recorded answers, a clock that moves only when
+requests, a `fetch` with recorded responses, a clock that moves only when
 something moves it, and a database of canned rows -- which is where their
 behavior is actually pinned.
 

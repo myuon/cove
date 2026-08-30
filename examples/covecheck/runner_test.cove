@@ -9,6 +9,7 @@ fn checkFor(name: String) -> Check {
   Check(
     name: name,
     url: "http://127.0.0.1:9/{name}",
+    expectStatus: None,
     expect: None,
     reject: None,
     maxLength: None,
@@ -22,6 +23,7 @@ fn checkWaiting(name: String, milliseconds: Int) -> Check {
   Check(
     name: name,
     url: "http://127.0.0.1:9/{name}",
+    expectStatus: None,
     expect: None,
     reject: None,
     maxLength: None,

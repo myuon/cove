@@ -10,6 +10,13 @@ use cq.json.parse
 /// endpoint answers at all -- and that is the check most manifests start
 /// with.
 ///
+/// `expectStatus` is the condition every check has whether or not it writes
+/// one. A check that leaves it out expects a success, which is any status
+/// from 200 to 299, and a check that writes one expects that number exactly.
+/// There is no way to say "any status at all", because a checker that
+/// accepted any status would not be checking the thing an HTTP endpoint most
+/// often gets wrong.
+///
 /// `timeoutMs` is not one of the conditions, and it is a separate field for
 /// the same reason it is a separate paragraph: a condition says what an
 /// answer has to look like, and this says how long an answer has to arrive
@@ -19,6 +26,7 @@ use cq.json.parse
 export struct Check {
   name: String
   url: String
+  expectStatus: Option<Int>
   expect: Option<String>
   reject: Option<String>
   maxLength: Option<Int>
@@ -76,7 +84,32 @@ export fn readManifest(
 
 /// Reads one entry of the `checks` array.
 fn checkFrom(entry: Json) -> Result<Check, Error> {
-  Ok(Check(name: text(entry, "name")?, url: url(entry)?, expect: optionalText(entry, "expect")?, reject: optionalText(entry, "reject")?, maxLength: optionalCount(entry, "maxLength")?, timeoutMs: timeout(entry)?))
+  Ok(Check(name: text(entry, "name")?, url: url(entry)?, expectStatus: status(entry)?, expect: optionalText(entry, "expect")?, reject: optionalText(entry, "reject")?, maxLength: optionalCount(entry, "maxLength")?, timeoutMs: timeout(entry)?))
+}
+
+/// Reads the `expectStatus` field, which is a status and not just a count.
+///
+/// The count is `optionalCount`'s, so a fraction and a negative number are
+/// refused there as they are for every other number a check may write. What
+/// this adds is the range, and the range is what makes the field worth having
+/// its own reader: `expectStatus: 20` and `expectStatus: 4004` are typing
+/// mistakes for `200` and `404`, and a checker that took them would wait for
+/// an answer that cannot arrive and report the endpoint as broken. HTTP
+/// numbers its statuses from 100 to 599 and this refuses everything outside
+/// that, which is a bound on the notation rather than a list of the statuses
+/// this program knows: a check may name a `418` or a status invented next
+/// year, because what an endpoint answers is the endpoint's business.
+fn status(entry: Json) -> Result<Option<Int>, Error> {
+  let written = optionalCount(entry, "expectStatus")?
+  match written {
+    Some(code) => {
+      if code < 100 || code > 599 {
+        return Err(Error("`expectStatus` is {code}, and an HTTP status is between 100 and 599"))
+      }
+    }
+    None => ()
+  }
+  Ok(written)
 }
 
 /// Reads the `url` field, and refuses a scheme this program cannot fetch.
@@ -115,10 +148,10 @@ fn optionalText(entry: Json, name: String) -> Result<Option<String>, Error> {
 ///
 /// JSON has one number type, so `4096` and `4096.0` arrive identically and
 /// both are this field; `4096.5` is not, because neither a count of
-/// characters nor a count of milliseconds is a fraction of one. It reads
-/// every count a check may write, and whatever a particular field will not
-/// take beyond being a count is that field's own question rather than this
-/// one's.
+/// characters nor a count of milliseconds nor a status is a fraction of one.
+/// It reads every whole number a check may write, and whatever a particular
+/// field will not take beyond being one is that field's own question rather
+/// than this one's.
 fn optionalCount(entry: Json, name: String) -> Result<Option<Int>, Error> {
   let number = match field(entry, name) {
     None => return Ok(None)

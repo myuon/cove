@@ -11,7 +11,7 @@
 //! So every one of them is run here, against the fakes its capabilities name:
 //! a console that is a buffer, an environment the test writes, a fixed set of
 //! documents and files, a listener with a scripted queue of requests, a
-//! `fetch` with recorded answers, a clock that moves only when something
+//! `fetch` with recorded responses, a clock that moves only when something
 //! moves it, and a database of canned rows. Cove code cannot tell any of them
 //! from the real thing, and every one of them is deterministic, which is what
 //! lets these be assertions rather than smoke tests.
@@ -37,7 +37,7 @@ use cove_runtime::clock::{Clock, VirtualTime};
 use cove_runtime::database::Database;
 use cove_runtime::files::Files;
 use cove_runtime::host::{Console, Documents, Env, Grants, HostRegistry};
-use cove_runtime::http::{Http, ScriptedRequest};
+use cove_runtime::http::{Http, RecordedResponse, ScriptedRequest};
 use cove_runtime::interp::Interpreter;
 use cove_runtime::process::{Process, ProcessLog};
 use cove_runtime::runtime::Runtime;
@@ -86,8 +86,10 @@ struct Fakes {
     documents: BTreeMap<String, String>,
     /// What `files.read` answers, by path.
     files: BTreeMap<String, String>,
-    /// What `http.fetch` answers, by URL.
-    bodies: BTreeMap<String, String>,
+    /// What `http.fetch` answers, by URL: a status and a body, since that is
+    /// what an `http.Response` is and a fake that recorded only bodies could
+    /// not produce a server that answered badly.
+    answers: BTreeMap<String, RecordedResponse>,
     /// What a listener hands the program, in order.
     requests: Vec<ScriptedRequest>,
     /// What a connection answers, by query text.
@@ -146,7 +148,7 @@ fn run(entry: &str, allow: &[&str], fakes: Fakes) -> Ran {
 
     let console = Buffer::default();
     let diagnostics = Buffer::default();
-    let http = Http::recorded(fakes.bodies, fakes.requests);
+    let http = Http::recorded(fakes.answers, fakes.requests);
     let served = http.served();
     let files = Files::in_memory(fakes.files);
     let tree = files.tree();
@@ -234,14 +236,14 @@ fn the_dashboard_loads_both_inputs_within_its_timeout() {
         "tasks.loadDashboard",
         &["http", "clock"],
         Fakes {
-            bodies: BTreeMap::from([
+            answers: BTreeMap::from([
                 (
                     "http://127.0.0.1:8080/bookings".to_string(),
-                    "[\"b-1\"]".to_string(),
+                    RecordedResponse::ok("[\"b-1\"]"),
                 ),
                 (
                     "http://127.0.0.1:8080/prices".to_string(),
-                    "[\"p-1\"]".to_string(),
+                    RecordedResponse::ok("[\"p-1\"]"),
                 ),
             ]),
             ..Fakes::default()
@@ -300,9 +302,9 @@ fn the_dashboard_reports_an_awaited_failure_as_the_bodys_own_value() {
         "tasks.loadDashboard",
         &["http", "clock"],
         Fakes {
-            bodies: BTreeMap::from([(
+            answers: BTreeMap::from([(
                 "http://127.0.0.1:8080/prices".to_string(),
-                "[\"p-1\"]".to_string(),
+                RecordedResponse::ok("[\"p-1\"]"),
             )]),
             ..Fakes::default()
         },
@@ -1007,16 +1009,24 @@ fn cq_reads_back_the_sample_it_generated() {
 
 /// The manifest every `covecheck` test below reads.
 ///
-/// Four checks, one per outcome the program can report, and each one's
-/// conditions are what decide which: `health` is satisfied, `prices` asks for
-/// text the body does not hold, `docs` bounds a body the answer overruns, and
-/// `metrics` names an endpoint no answer is recorded for.
+/// Five checks, and each one's conditions are what decide the outcome it
+/// reports: `health` is satisfied, `prices` asks for text the body does not
+/// hold, `docs` bounds a body the answer overruns, `admin` names the status
+/// `403` and gets it, and `metrics` names an endpoint no answer is recorded
+/// for.
+///
+/// `admin` is the one this manifest could not have written before issue #145.
+/// `http.fetch` answered a body or a message, so a check for an endpoint that
+/// is *supposed* to refuse had no way to say so and would have been reported
+/// `unchecked` — indistinguishable from the endpoint being unreachable, which
+/// is what `metrics` is here to be. The two are next to each other in the
+/// report for that reason.
 ///
 /// `health` also names a wait of its own, which decides none of that and is
 /// here for what it proves instead: a `timeoutMs` is read, is built into the
 /// `Duration` that check's fetch is bounded by, and changes nothing about a
 /// run that answers inside it. A check with no `timeoutMs` is bounded by the
-/// program's default, and the three below are what say the field is optional
+/// program's default, and the four below are what say the field is optional
 /// in the run as well as in the reader.
 const CHECKS: &str = concat!(
     r#"{"checks":["#,
@@ -1024,31 +1034,36 @@ const CHECKS: &str = concat!(
     r#""expect":"\"status\":\"ok\"","maxLength":256,"timeoutMs":2000},"#,
     r#"{"name":"prices","url":"http://127.0.0.1:8080/prices","expect":"EUR"},"#,
     r#"{"name":"docs","url":"http://127.0.0.1:8080/docs","maxLength":8},"#,
+    r#"{"name":"admin","url":"http://127.0.0.1:8080/admin","expectStatus":403},"#,
     r#"{"name":"metrics","url":"http://127.0.0.1:8080/metrics"}"#,
     r#"]}"#,
 );
 
 /// What the endpoints of [`CHECKS`] answer, except `/metrics`, which nothing
 /// answers for.
-fn endpoints() -> BTreeMap<String, String> {
+fn endpoints() -> BTreeMap<String, RecordedResponse> {
     BTreeMap::from([
         (
             "http://127.0.0.1:8080/health".to_string(),
-            r#"{"status":"ok"}"#.to_string(),
+            RecordedResponse::ok(r#"{"status":"ok"}"#),
         ),
         (
             "http://127.0.0.1:8080/prices".to_string(),
-            r#"{"currency":"USD"}"#.to_string(),
+            RecordedResponse::ok(r#"{"currency":"USD"}"#),
         ),
         (
             "http://127.0.0.1:8080/docs".to_string(),
-            "far more than eight characters".to_string(),
+            RecordedResponse::ok("far more than eight characters"),
+        ),
+        (
+            "http://127.0.0.1:8080/admin".to_string(),
+            RecordedResponse::new(403, "forbidden"),
         ),
     ])
 }
 
 /// One `covecheck` run over [`CHECKS`], against the answers `bodies` records.
-fn covecheck(arguments: &[&str], bodies: BTreeMap<String, String>) -> Ran {
+fn covecheck(arguments: &[&str], bodies: BTreeMap<String, RecordedResponse>) -> Ran {
     run(
         "covecheck.main",
         &["console", "files", "http", "clock"],
@@ -1058,7 +1073,7 @@ fn covecheck(arguments: &[&str], bodies: BTreeMap<String, String>) -> Ran {
                 .map(|argument| argument.to_string())
                 .collect(),
             files: BTreeMap::from([("checks.json".to_string(), CHECKS.to_string())]),
-            bodies,
+            answers: bodies,
             ..Fakes::default()
         },
     )
@@ -1067,11 +1082,17 @@ fn covecheck(arguments: &[&str], bodies: BTreeMap<String, String>) -> Ran {
 /// `covecheck` reports one line per check, in the manifest's order, with each
 /// of the four outcomes standing for a different reason.
 ///
-/// This is the assertion the program is arranged to make possible. Four
-/// checks run at once on threads of their own and settle in whatever order
+/// This is the assertion the program is arranged to make possible. Five
+/// checks run in windows on threads of their own and settle in whatever order
 /// the scheduler settles them in; nothing they do reaches the console, and
 /// the report is written once at the end by the task that read the manifest,
 /// so the console is a golden file rather than an interleaving.
+///
+/// The last two lines are the ones issue #145 is about. `admin` answered
+/// `403` and that is what its check asked for, so it passed; `metrics` was
+/// never reached at all, so nothing was learned about it. Before `http.fetch`
+/// answered an `http.Response` both of those were an `Err` and both would
+/// have read `unchecked`.
 #[test]
 fn covecheck_reports_every_outcome_in_manifest_order() {
     let ran = covecheck(&["checks.json"], endpoints());
@@ -1083,15 +1104,57 @@ fn covecheck_reports_every_outcome_in_manifest_order() {
     assert_eq!(
         ran.console,
         [
-            "checks.json: 4 check(s)",
+            "checks.json: 5 check(s)",
             "  ok          health                  15 character(s)",
             "  failed      prices                  the body does not contain `EUR`",
             "  failed      docs                    the body is 30 character(s), over the bound of 8",
+            "  ok          admin                   9 character(s)",
             "  unchecked   metrics                 http: no recorded answer for `http://127.0.0.1:8080/metrics`",
-            "1 passed, 3 failed, 0 skipped",
+            "2 passed, 3 failed, 0 skipped",
         ],
         "{:?}",
         ran.console
+    );
+}
+
+/// A status the check did not expect and a connection that was never made are
+/// two different verdicts, which is the whole of issue #145.
+///
+/// The same manifest is run twice against the same endpoint, `/admin`, whose
+/// check expects `403`. Once the fake answers `200`, and once it answers
+/// nothing at all. Both used to be an `Err` out of `http.fetch` and so both
+/// used to be `unchecked` carrying whatever prose the host had written; a
+/// program that wanted to tell them apart would have had to match on that
+/// prose, which is not an interface.
+///
+/// Now the first is `failed`, because a service answered and answered wrongly
+/// and that is a fact about the service, and the second is `unchecked`,
+/// because this run learned nothing.
+#[test]
+fn covecheck_tells_a_wrong_status_from_an_endpoint_it_never_reached() {
+    let mut answered = endpoints();
+    answered.insert(
+        "http://127.0.0.1:8080/admin".to_string(),
+        RecordedResponse::ok("welcome"),
+    );
+    let wrong_status = covecheck(&["checks.json"], answered);
+    assert!(
+        wrong_status.console.iter().any(|line| {
+            line
+            == "  failed      admin                   the status is 200, and the check expects 403"
+        }),
+        "{:?}",
+        wrong_status.console
+    );
+
+    let mut unreachable = endpoints();
+    unreachable.remove("http://127.0.0.1:8080/admin");
+    let never_reached = covecheck(&["checks.json"], unreachable);
+    assert!(
+        never_reached.console.iter().any(|line| line
+            == "  unchecked   admin                   http: no recorded answer for `http://127.0.0.1:8080/admin`"),
+        "{:?}",
+        never_reached.console
     );
 }
 
@@ -1130,7 +1193,7 @@ fn covecheck_takes_its_bounds_from_the_manifest_and_the_command_line() {
                 "checks.json".to_string(),
                 CHECKS.replace(r#","timeoutMs":2000"#, ""),
             )]),
-            bodies: endpoints(),
+            answers: endpoints(),
             ..Fakes::default()
         },
     );
@@ -1152,15 +1215,15 @@ fn covecheck_answers_ok_when_every_endpoint_is_healthy() {
     let mut bodies = endpoints();
     bodies.insert(
         "http://127.0.0.1:8080/prices".to_string(),
-        r#"{"currency":"EUR"}"#.to_string(),
+        RecordedResponse::ok(r#"{"currency":"EUR"}"#),
     );
     bodies.insert(
         "http://127.0.0.1:8080/docs".to_string(),
-        "short".to_string(),
+        RecordedResponse::ok("short"),
     );
     bodies.insert(
         "http://127.0.0.1:8080/metrics".to_string(),
-        "up 1".to_string(),
+        RecordedResponse::ok("up 1"),
     );
 
     let ran = covecheck(&["checks.json"], bodies);
@@ -1168,7 +1231,7 @@ fn covecheck_answers_ok_when_every_endpoint_is_healthy() {
     assert!(ok(&ran.value).eq_value(&Value::Unit), "{}", ran.value);
     assert_eq!(
         *ran.console.last().expect("a summary line"),
-        "4 passed, 0 failed, 0 skipped"
+        "5 passed, 0 failed, 0 skipped"
     );
 }
 
@@ -1176,15 +1239,17 @@ fn covecheck_answers_ok_when_every_endpoint_is_healthy() {
 /// message says by how much rather than that something was wrong.
 ///
 /// The bound is the program's and not the host's: `http.fetch` answers a
-/// whole `String` and there is no way to ask it for less, so what this bounds
-/// is what the checker will accept and not what the run will hold. Issue #145
-/// is that gap.
+/// whole body and there is no way to ask it for less, so what this bounds is
+/// what the checker will accept and not what the run will hold. The host has
+/// a bound of its own, one mebibyte, and it is a constant rather than
+/// something a caller passes -- ADR 0018's reason, which is that a caller
+/// cannot say how large an answer it has not seen yet should be.
 #[test]
 fn covecheck_bounds_the_body_a_check_will_accept() {
     let mut bodies = endpoints();
     bodies.insert(
         "http://127.0.0.1:8080/docs".to_string(),
-        "nine char".to_string(),
+        RecordedResponse::ok("nine char"),
     );
     let over = covecheck(&["checks.json"], bodies.clone());
     assert!(
@@ -1196,7 +1261,7 @@ fn covecheck_bounds_the_body_a_check_will_accept() {
 
     bodies.insert(
         "http://127.0.0.1:8080/docs".to_string(),
-        "exactly8".to_string(),
+        RecordedResponse::ok("exactly8"),
     );
     let inside = covecheck(&["checks.json"], bodies);
     assert!(
@@ -1227,17 +1292,18 @@ fn covecheck_stops_starting_checks_once_enough_have_failed() {
 
     assert_eq!(
         err(&ran.value),
-        "covecheck: 1 check(s) failed and 2 were not tried"
+        "covecheck: 1 check(s) failed and 3 were not tried"
     );
     assert_eq!(
         ran.console,
         [
-            "checks.json: 4 check(s)",
+            "checks.json: 5 check(s)",
             "  ok          health                  15 character(s)",
             "  failed      prices                  the body does not contain `EUR`",
             "  skipped     docs                    the run had already given up",
+            "  skipped     admin                   the run had already given up",
             "  skipped     metrics                 the run had already given up",
-            "1 passed, 1 failed, 2 skipped",
+            "1 passed, 1 failed, 3 skipped",
         ],
         "{:?}",
         ran.console
@@ -1261,10 +1327,12 @@ fn covecheck_writes_the_same_run_as_json() {
             r#"{"detail":"the body is 30 character(s), over the bound of 8","#,
             r#""name":"docs","outcome":"failed","#,
             r#""url":"http://127.0.0.1:8080/docs"},"#,
+            r#"{"detail":"9 character(s)","name":"admin","outcome":"ok","#,
+            r#""url":"http://127.0.0.1:8080/admin"},"#,
             r#"{"detail":"http: no recorded answer for `http://127.0.0.1:8080/metrics`","#,
             r#""name":"metrics","outcome":"unchecked","#,
             r#""url":"http://127.0.0.1:8080/metrics"}"#,
-            r#"],"failed":3,"manifest":"checks.json","passed":1,"skipped":0}"#,
+            r#"],"failed":3,"manifest":"checks.json","passed":2,"skipped":0}"#,
         )],
         "{:?}",
         ran.console

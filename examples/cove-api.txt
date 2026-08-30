@@ -4,7 +4,7 @@
 # against the interface the current source derives, so check it in and let a
 # reviewer read the difference. Do not edit it by hand.
 cove-api 1
-hash fnv1a64:94eeab687ffb2b6c
+hash fnv1a64:c464e69420a0aa93
 
 module callbacks
   /// Task-safe application dependencies captured by request handlers.
@@ -77,6 +77,13 @@ module covecheck
   /// endpoint answers at all -- and that is the check most manifests start
   /// with.
   ///
+  /// `expectStatus` is the condition every check has whether or not it writes
+  /// one. A check that leaves it out expects a success, which is any status
+  /// from 200 to 299, and a check that writes one expects that number exactly.
+  /// There is no way to say "any status at all", because a checker that
+  /// accepted any status would not be checking the thing an HTTP endpoint most
+  /// often gets wrong.
+  ///
   /// `timeoutMs` is not one of the conditions, and it is a separate field for
   /// the same reason it is a separate paragraph: a condition says what an
   /// answer has to look like, and this says how long an answer has to arrive
@@ -86,6 +93,7 @@ module covecheck
   export struct Check
     field name: String
     field url: String
+    field expectStatus: Option<Int>
     field expect: Option<String>
     field reject: Option<String>
     field maxLength: Option<Int>
@@ -106,15 +114,19 @@ module covecheck
   ///
   /// The two ways of failing are kept apart because they are different news. A
   /// `Failed` endpoint answered and said the wrong thing, which is a fact about
-  /// the service; an `Unchecked` one produced no body to look at, so this run
-  /// learned nothing about it and reports that rather than a verdict it did not
-  /// reach.
+  /// the service; an `Unchecked` one produced no response to look at, so this
+  /// run learned nothing about it and reports that rather than a verdict it did
+  /// not reach.
   ///
-  /// `Unchecked` covers two things at once because the `http` host gives a
-  /// client one answer for both: `fetch` produces an `Err` for a connection it
-  /// could not make and an `Err` for a status outside 200-299, and which it was
-  /// survives only in the prose of the message. That is also why no check here
-  /// names an expected status. Issue #145 is that gap.
+  /// `Unchecked` used to cover two things at once, because the `http` host gave
+  /// a client one answer for both: `fetch` produced an `Err` for a connection
+  /// it could not make and an `Err` for a status outside 200-299, and which it
+  /// was survived only in the prose of the message. Issue #145 closed that.
+  /// `fetch` answers an `http.Response`, so a status is a fact this program
+  /// reads rather than a message it would have had to match on, and the two
+  /// have separated: a refused connection is `Unchecked` and a `404` is
+  /// `Failed`, because the second is a service that answered and said the
+  /// wrong thing.
   export enum Outcome
     case Passed(Int)
     case Failed(String)
@@ -158,15 +170,23 @@ module covecheck
     field outcome: Outcome
   /// The format `name` asks for, or the error that names the two there are.
   export fn formatNamed(name: String) -> Result<Format, Error>
-  /// Judges `body` against everything `check` asked of it.
+  /// Judges `answer` against everything `check` asked of it.
   ///
   /// The conditions are tried in a written order and the first one that breaks
-  /// is the whole answer, so two runs over the same body report the same
+  /// is the whole answer, so two runs over the same response report the same
   /// reason. Reporting every broken condition would be more information and
-  /// less of an answer: the length is checked first because a body that is too
-  /// large is a fact about the endpoint that the text conditions would then
-  /// describe at length.
-  export fn judge(check: Check, body: String) -> Outcome
+  /// less of an answer.
+  ///
+  /// The status is first, and it is first for a stronger version of the reason
+  /// the length comes before the text: a body that arrived with the wrong
+  /// status is not the body the check is about. An endpoint answering `404`
+  /// sends an error page, and every text condition would then report something
+  /// true about that page and nothing about the service, so a run would say
+  /// "the body does not contain `harbour-loft`" where what happened is that the
+  /// route is gone. The length is next, because a body that is too large is a
+  /// fact about the endpoint that the text conditions would otherwise describe
+  /// at length.
+  export fn judge(check: Check, answer: http.Response) -> Outcome
   /// Checks every endpoint one manifest names, and reports what it found.
   ///
   /// The whole run is inside one `clock.timeout`, so a run that will not finish
@@ -1268,6 +1288,14 @@ module tasks
   /// The two fetches run on threads of their own, and `clock.timeout` bounds the
   /// wait for both together: a body it stops does not finish, and the error
   /// names the bound rather than whatever the stopped body was doing.
+  ///
+  /// `http.fetch` answers an `http.Response`, so each task's value is a status
+  /// and a body, and `panelOf` is what turns one into the other. A dashboard
+  /// renders what its endpoints said and has nothing to say about a `404`
+  /// except that the panel is not there, which is why the status is checked
+  /// once, in one place, rather than judged: a program that judged a status
+  /// against conditions a manifest wrote down would be a checker, and
+  /// `examples/covecheck` is that program.
   export async fn loadDashboard() -> Result<Dashboard, Error>
     requires clock, http
 
