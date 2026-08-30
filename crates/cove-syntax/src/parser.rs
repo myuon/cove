@@ -32,6 +32,19 @@
 //! expression) while an operator at the *start* of a line does not (`a` /
 //! `+ b` is two statements).
 //!
+//! # Keywords whose operand is optional
+//!
+//! `break` and `return` take an operand or take none, and `continue` never
+//! takes one. For those, a line break is decisive rather than optional: the
+//! operand must *begin* on the keyword's own line, so a `break` written alone
+//! on its line is a `break` with no operand and the next line is the next
+//! statement. This is the same rule Go states as inserting a semicolon after
+//! `break`, `continue`, and `return` at the end of a line, and it holds
+//! inside a group as well, unlike rule 4 — a keyword that is already complete
+//! has nothing for the next line to finish. An operand that starts on the
+//! keyword's line may still run over onto further lines, so `return f(` /
+//! `a,` / `)` is one `return`.
+//!
 //! # The nesting limit
 //!
 //! Recursive descent spends native stack per level of nesting, so the parser
@@ -280,11 +293,19 @@ const NEWLINE_OPERATOR_RULE: &str = "A newline ends a statement when the express
 ///
 /// This is the first half of the newline rule: a line break only ends a
 /// statement when the line so far reads as a complete expression.
+///
+/// `break`, `continue`, and `return` end an expression on their own, because
+/// an operand of theirs has to begin on their own line (see
+/// [`Parser::at_operand`]). One of them at the end of a line is therefore
+/// finished, and the line break after it ends the statement instead of
+/// letting an operator on the next line continue it.
 fn ends_expression(kind: &TokenKind) -> bool {
     matches!(
         kind,
         TokenKind::Ident(_)
-            | TokenKind::Keyword(Keyword::SelfValue)
+            | TokenKind::Keyword(
+                Keyword::SelfValue | Keyword::Break | Keyword::Continue | Keyword::Return
+            )
             | TokenKind::Int(_)
             | TokenKind::Float(_)
             | TokenKind::Bool(_)
@@ -2080,7 +2101,7 @@ impl Parser<'_> {
             TokenKind::Keyword(Keyword::Scope) => self.parse_scope(),
             TokenKind::Keyword(Keyword::Return) => {
                 self.bump();
-                let value = if self.can_start_expr() {
+                let value = if self.at_operand() {
                     Some(Box::new(self.parse_expr()?))
                 } else {
                     None
@@ -2089,7 +2110,7 @@ impl Parser<'_> {
             }
             TokenKind::Keyword(Keyword::Break) => {
                 self.bump();
-                let value = if self.can_start_expr() {
+                let value = if self.at_operand() {
                     Some(Box::new(self.parse_expr()?))
                 } else {
                     None
@@ -2103,6 +2124,29 @@ impl Parser<'_> {
             TokenKind::Keyword(Keyword::Fn | Keyword::Async) => self.parse_lambda(),
             _ => Err(self.expected_expression()),
         }
+    }
+
+    /// Whether the operand of a keyword that takes an optional one — `break`
+    /// or `return` — begins at the cursor.
+    ///
+    /// The operand must *start* on the keyword's own line. A line break
+    /// between the keyword and the next token ends the statement, exactly as
+    /// Go inserts a semicolon after `break`, `continue`, and `return` at the
+    /// end of a line. Without this, a `break` alone on its line reaches across
+    /// the line ending and takes the statement after it as its operand, which
+    /// nothing downstream complains about, because a `break` operand is
+    /// discarded — and then the formatter writes the misreading back into the
+    /// source, where it is no longer visible as a mistake.
+    ///
+    /// Only the operand's *first* token is constrained, so an operand that
+    /// opens on the keyword's line may run over as many further lines as it
+    /// likes: `return f(` / `a,` / `)` is one `return` with one operand.
+    ///
+    /// This holds inside `(`, `[`, and `<` groups too, unlike the rest of the
+    /// newline rule, because a keyword whose operand is optional needs no
+    /// grouping to be complete: there is nothing for the next line to finish.
+    fn at_operand(&self) -> bool {
+        !self.tokens[self.pos].preceded_by_newline && self.can_start_expr()
     }
 
     fn can_start_expr(&self) -> bool {
@@ -3466,6 +3510,125 @@ mod tests {
         for arm in arms {
             assert!(matches!(arm.body.kind, ExprKind::Str(_)));
         }
+    }
+
+    /// A `break` alone on its line has no operand, so the statement written
+    /// under it is a statement of its own rather than something the `break`
+    /// evaluates and throws away.
+    #[test]
+    fn a_newline_ends_a_break_that_has_no_operand() {
+        let statements = body_stmts("break\nseen = 99");
+        assert_eq!(statements.len(), 2);
+        assert!(matches!(
+            stmt_expr(&statements[0]).kind,
+            ExprKind::Break(None)
+        ));
+        assert!(matches!(
+            stmt_expr(&statements[1]).kind,
+            ExprKind::Assign { .. }
+        ));
+    }
+
+    /// The same for `return`, which differs only in that its swallowed
+    /// operand sometimes failed to type-check and so was sometimes caught.
+    #[test]
+    fn a_newline_ends_a_return_that_has_no_operand() {
+        let statements = body_stmts("return\nanswer = 99");
+        assert_eq!(statements.len(), 2);
+        assert!(matches!(
+            stmt_expr(&statements[0]).kind,
+            ExprKind::Return(None)
+        ));
+        assert!(matches!(
+            stmt_expr(&statements[1]).kind,
+            ExprKind::Assign { .. }
+        ));
+    }
+
+    /// An operator on the line under a bare `break`, `continue`, or `return`
+    /// does not continue it either: the keyword is already a whole
+    /// expression, so the newline ends the statement.
+    #[test]
+    fn a_newline_ends_a_bare_keyword_before_an_operator() {
+        for (source, keyword) in [
+            ("break\n-1", "break"),
+            ("continue\n-1", "continue"),
+            ("return\n-1", "return"),
+        ] {
+            let statements = body_stmts(source);
+            assert_eq!(statements.len(), 2, "`{keyword}` swallowed the next line");
+            assert!(matches!(
+                stmt_expr(&statements[1]).kind,
+                ExprKind::Unary {
+                    op: UnaryOp::Neg,
+                    ..
+                }
+            ));
+        }
+    }
+
+    /// The rule constrains only where the operand *starts*. One that opens on
+    /// the keyword's own line may run over as many further lines as it likes.
+    #[test]
+    fn an_operand_that_starts_on_the_keyword_line_may_span_lines() {
+        let statements = body_stmts("return someCall(\n  a,\n  b,\n)");
+        assert_eq!(statements.len(), 1);
+        let ExprKind::Return(Some(value)) = &stmt_expr(&statements[0]).kind else {
+            panic!("expected a `return` with an operand");
+        };
+        let ExprKind::Call { args, .. } = &value.kind else {
+            panic!("expected a call");
+        };
+        assert_eq!(args.len(), 2);
+
+        let broken = body_stmts("break someCall(\n  a,\n  b,\n)");
+        assert_eq!(broken.len(), 1);
+        let ExprKind::Break(Some(value)) = &stmt_expr(&broken[0]).kind else {
+            panic!("expected a `break` with an operand");
+        };
+        assert!(matches!(value.kind, ExprKind::Call { .. }));
+    }
+
+    /// An operand on the keyword's own line still belongs to it, which is the
+    /// half of the rule that must not regress.
+    #[test]
+    fn an_operand_on_the_same_line_still_belongs_to_the_keyword() {
+        let broken = body_stmts("break value");
+        assert_eq!(broken.len(), 1);
+        assert!(matches!(
+            stmt_expr(&broken[0]).kind,
+            ExprKind::Break(Some(_))
+        ));
+
+        let returned = body_stmts("return value");
+        assert_eq!(returned.len(), 1);
+        assert!(matches!(
+            stmt_expr(&returned[0]).kind,
+            ExprKind::Return(Some(_))
+        ));
+    }
+
+    /// A group suspends the newline rule for expressions that a further line
+    /// could finish. A keyword whose operand is optional is already finished,
+    /// so it ends at the line ending inside `(` as well.
+    #[test]
+    fn a_group_does_not_let_a_keyword_reach_the_next_line() {
+        let statements = body_stmts("let f = fn() {\n  break\n  seen = 99\n}");
+        assert_eq!(statements.len(), 1);
+        let StmtKind::Let { value, .. } = &statements[0].kind else {
+            panic!("expected a binding");
+        };
+        let ExprKind::Lambda { body, .. } = &value.kind else {
+            panic!("expected a lambda");
+        };
+        assert_eq!(body.statements.len(), 1);
+        assert!(matches!(
+            body.statements[0].kind,
+            StmtKind::Expr(Expr {
+                kind: ExprKind::Break(None),
+                ..
+            })
+        ));
     }
 
     /// A line that starts with `.` continues the expression before it, so a

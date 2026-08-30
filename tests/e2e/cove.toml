@@ -104,6 +104,10 @@ allow = ["console"]
 entry = "flow_break_continue.main"
 allow = ["console"]
 
+[run.flow_break_ends_line]
+entry = "flow_break_ends_line.main"
+allow = ["console"]
+
 [run.flow_if]
 entry = "flow_if.main"
 allow = ["console"]

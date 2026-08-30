@@ -1,0 +1,58 @@
+use console.println
+
+/// Adds its three arguments, so that a `return` below has something to call
+/// over more lines than fit on one.
+fn joined(first: Int, second: Int, third: Int) -> Int {
+  first + second + third
+}
+
+/// Returns through an operand too wide for one line. The operand *begins* on
+/// the `return`'s own line, so it is the `return`'s operand however many
+/// further lines it runs over.
+fn overSeveralLines(numberTheCallerAlreadyHas: Int) -> Int {
+  return joined(
+    numberTheCallerAlreadyHas,
+    numberTheCallerAlreadyHas + 1,
+    numberTheCallerAlreadyHas + 2,
+  )
+}
+
+/// Returns before the assignment written below it. That assignment is a
+/// statement of its own, not the operand of the `return`, so the caller sees
+/// 7 rather than 99.
+fn stopEarly(var answer: Int) {
+  answer = 7
+  return
+  answer = 99
+}
+
+/// Shows that `break` and `return` end at the end of their line: a statement
+/// on the next line is the next statement, not the keyword's operand. An
+/// operand written on the keyword's own line still belongs to it, and a
+/// `break` that carries one still parses.
+export fn main() -> Result<Unit, Error> {
+  var seen = 0
+  while true {
+    seen += 1
+    break
+    seen = 99
+  }
+  println("seen is {seen}")?
+
+  var counted = 0
+  for value in [1, 2, 3] {
+    counted += value
+    if value == 2 {
+      break value
+    }
+  }
+  println("counted is {counted}")?
+
+  var answer = 0
+  stopEarly(var answer)
+  println("answer is {answer}")?
+
+  println("an operand may span lines: {overSeveralLines(10)}")?
+
+  Ok(())
+}

@@ -2648,6 +2648,33 @@ fn control(items: Array<Int>) -> Int {
         );
     }
 
+    /// A `break` or `return` alone on its line keeps the line to itself. The
+    /// formatter used to write the statement under such a keyword back as its
+    /// operand, because that is how the parser had read it, which turned a
+    /// misreading into what the source said.
+    #[test]
+    fn keeps_a_bare_break_or_return_on_its_own_line() {
+        formatted(
+            "
+fn stops(items: Array<Int>) -> Int {
+  var seen = 0
+  while true {
+    seen += 1
+    break
+    seen = 99
+  }
+
+  for item in items {
+    break item
+  }
+
+  return
+  seen = 99
+}
+",
+        );
+    }
+
     #[test]
     fn writes_match_arms_one_per_line() {
         reformats(

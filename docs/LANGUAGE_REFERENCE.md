@@ -113,6 +113,22 @@ statement is one of:
   function: its own return type, its own type parameters, and its own loop
   and `return` context, nested inside the enclosing scope for name lookup.
 
+Statements end at the end of a line: Cove has no `;`. A line break ends a
+statement when the line so far reads as a complete expression and continuing
+it would be optional, so an operator that carries an expression onto the next
+line stays at the end of the line it continues — `a +` then `b` is one
+expression, `a` then `+ b` is two statements — and a line that begins with
+`.` continues the chain above it. A line break inside `(`, `[`, or `<` never
+ends a statement, which is what lets an argument list span lines; a `{ }`
+block is not such a group, and its statements do end at line ends.
+
+`break`, `continue`, and `return` end at the end of their line whatever
+encloses them, groups included. An operand belongs to a `break` or a `return`
+only when it **begins** on the keyword's own line, so a `break` written alone
+on a line has no operand and the line under it is the next statement, while an
+operand that opens on the keyword's line may run over as many further lines as
+it needs.
+
 A **block** is an expression. Its type and value are its tail's; a block with
 no tail is `()`. It pushes a scope on entry and pops it on exit, whichever way
 it leaves.
