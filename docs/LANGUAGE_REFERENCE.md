@@ -336,6 +336,16 @@ Where resolution cannot tell which enum a bare case name belongs to — two
 enums in scope declaring the same case — it abstains, and a `match` with no
 arm for the value is a run-time failure instead.
 
+An arm is a duplicate when an earlier arm matches every value it would, which
+is a question about the whole pattern and not about the case it names: a
+sub-pattern that binds or is `_` covers its case, and one that does not covers
+only what it matches. `Some(other)` after `Some(value)` is a duplicate;
+`Some(other)` after `Some(Json.Text(value))` is not, and neither is
+`Some(Json.Text(a))` after `Some(Json.Number(b))`. Coverage is decided one arm
+against one earlier arm, so arms that only together leave a later one nothing
+are not reported — that is exhaustiveness over a payload, which nothing
+proves.
+
 ### Loops
 
 ```cove
