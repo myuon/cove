@@ -2882,7 +2882,13 @@ fn check_match_arms(match_expr: &Expr, arms: &[MatchArm], walk: &mut BodyWalk) {
 
     if let Some(target) = resolve_target_enum(arms, enums) {
         let valid_cases = target.case_names();
+        // Which case each arm names, for exhaustiveness. A case an arm
+        // names is covered whatever its sub-patterns are, which is what
+        // this pass has always answered and is not what changes below.
         let mut seen: BTreeMap<&str, Span> = BTreeMap::new();
+        // Every arm that could still be reached when it was read, for
+        // [`pattern_covers`] to compare a later arm against.
+        let mut reachable: Vec<&Pattern> = Vec::new();
         for arm in arms {
             let PatternKind::Variant { path, .. } = &arm.pattern.kind else {
                 continue;
@@ -2908,22 +2914,30 @@ fn check_match_arms(match_expr: &Expr, arms: &[MatchArm], walk: &mut BodyWalk) {
                 );
                 continue;
             }
-            if let Some(first_span) = seen.get(case_name.node.as_str()) {
+            let covering = reachable
+                .iter()
+                .find(|earlier| pattern_covers(earlier, &arm.pattern));
+            if let Some(covering) = covering {
                 walk.errors.push(
                     Diagnostic::error(
                         "cove::resolve::duplicate_match_arm",
-                        format!("`{}` is already covered by an earlier arm", case_name.node),
+                        format!(
+                            "this `{}` arm is already covered by an earlier arm",
+                            case_name.node
+                        ),
                     )
                     .at(arm.pattern.span)
                     .label(
-                        *first_span,
-                        format!("`{}` first matched here", case_name.node),
+                        covering.span,
+                        "this earlier arm matches every value it would",
                     )
-                    .rule("Each enum case may be matched by at most one arm."),
+                    .rule("A `match` arm must match some value no earlier arm matches."),
                 );
             } else {
-                seen.insert(case_name.node.as_str(), arm.pattern.span);
+                reachable.push(&arm.pattern);
             }
+            seen.entry(case_name.node.as_str())
+                .or_insert(arm.pattern.span);
         }
 
         if !has_catch_all {
@@ -3067,6 +3081,114 @@ fn literal_bool_value(pattern: &Pattern) -> Option<bool> {
         ExprKind::Bool(value) => Some(value),
         _ => None,
     }
+}
+
+/// Whether `earlier` matches every value `later` matches.
+///
+/// This is the question behind `cove::resolve::duplicate_match_arm`. A
+/// second `None =>` after a first is dead code the author did not mean to
+/// write, and so is a second `Some(other)` after a first, because a binding
+/// sub-pattern is a catch-all for its case. `Some(Json.Text(value))` is
+/// not: it matches only a `Some` holding a `Json.Text`, so the arm after it
+/// is reachable. Naming the case is therefore not the test — covering every
+/// value the later arm would take is — and the test recurses, because a
+/// sub-pattern covers a sub-pattern by the same rule.
+///
+/// The rules are the two backends' matching rules, read as a question about
+/// patterns rather than about a value:
+///
+/// - `_` and a binding match everything, so either covers anything, and
+///   only they cover a binding.
+/// - A variant pattern covers one naming the same case whose sub-patterns
+///   it covers one for one. A pattern that writes fewer sub-patterns than
+///   another tests fewer payload slots, and a slot it does not test is one
+///   it matches, so the missing ones read as `_`.
+/// - A literal covers an equal literal.
+///
+/// The case is compared by its last path segment, which is what the arm
+/// loop above compares and what the lowering tests.
+///
+/// Two answers here are deliberately "no" rather than a guess. A literal
+/// pattern is a literal token *or* a `-` applied to any expression, and
+/// what `-n` matches depends on what the enclosing scope holds each time
+/// the arm is tried, so two of them are not the same pattern in any sense
+/// this can decide; and a `Float` literal is left alone because equality is
+/// not the relation to refuse a program on there.
+///
+/// This compares one arm against one earlier arm, never against several
+/// together. `Some(other)` after `Some(Json.Text(t))` and
+/// `Some(Json.Number(n))` is unreachable only if `Json` declares no third
+/// case, and that is exhaustiveness over the payload, which this pass does
+/// not prove.
+fn pattern_covers(earlier: &Pattern, later: &Pattern) -> bool {
+    match (&earlier.kind, &later.kind) {
+        (PatternKind::Wildcard | PatternKind::Binding(_), _) => true,
+        (_, PatternKind::Wildcard | PatternKind::Binding(_)) => false,
+        (PatternKind::Literal(earlier), PatternKind::Literal(later)) => {
+            same_literal(earlier, later)
+        }
+        (
+            PatternKind::Variant {
+                path: earlier_path,
+                payload: earlier_payload,
+            },
+            PatternKind::Variant {
+                path: later_path,
+                payload: later_payload,
+            },
+        ) => {
+            let earlier_case = earlier_path.last().expect("a variant path is never empty");
+            let later_case = later_path.last().expect("a variant path is never empty");
+            earlier_case.node == later_case.node
+                && (0..earlier_payload.len().max(later_payload.len()))
+                    .all(|slot| covers_slot(earlier_payload.get(slot), later_payload.get(slot)))
+        }
+        _ => false,
+    }
+}
+
+/// [`pattern_covers`] for one payload slot, where either side may not have
+/// written a sub-pattern for it. A slot a pattern does not test is one it
+/// matches, so an absent sub-pattern reads as `_`.
+fn covers_slot(earlier: Option<&Pattern>, later: Option<&Pattern>) -> bool {
+    match (earlier, later) {
+        (None, _) => true,
+        (Some(earlier), None) => is_catch_all(earlier),
+        (Some(earlier), Some(later)) => pattern_covers(earlier, later),
+    }
+}
+
+/// Whether two literal patterns are the same literal, for the token forms
+/// where that is a question about the program rather than about what the
+/// enclosing scope holds when the arm is tried. Everything else — a
+/// `Float`, a `-` applied to an expression, an interpolated string —
+/// answers `false`; see [`pattern_covers`].
+fn same_literal(earlier: &Expr, later: &Expr) -> bool {
+    match (&earlier.kind, &later.kind) {
+        (ExprKind::Int(earlier), ExprKind::Int(later)) => earlier == later,
+        (ExprKind::Bool(earlier), ExprKind::Bool(later)) => earlier == later,
+        (ExprKind::Duration(earlier), ExprKind::Duration(later)) => earlier == later,
+        (ExprKind::Str(earlier), ExprKind::Str(later)) => {
+            match (plain_text(earlier), plain_text(later)) {
+                (Some(earlier), Some(later)) => earlier == later,
+                _ => false,
+            }
+        }
+        _ => false,
+    }
+}
+
+/// The text of a string literal that interpolates nothing, or `None` when
+/// it does interpolate: what an interpolation produces is not known here.
+fn plain_text(parts: &[StrPart]) -> Option<String> {
+    let mut text = String::new();
+    for part in parts {
+        match part {
+            StrPart::Text(chunk) => text.push_str(chunk),
+            StrPart::Interpolation(_) => return None,
+        }
+    }
+    Some(text)
 }
 
 fn is_catch_all(pattern: &Pattern) -> bool {
@@ -5854,6 +5976,73 @@ export struct Booking {
                LogLevel.Debug => \"first\"\n    \
                LogLevel.Debug => \"second\"\n    \
                LogLevel.Info => \"info\"\n  \
+               }\n}\n"],
+        );
+        let package = package_of(module);
+        let errs = resolve(&package).unwrap_err();
+        assert!(errs
+            .iter()
+            .any(|d| d.code == "cove::resolve::duplicate_match_arm"));
+    }
+
+    /// Two arms naming one case are not duplicates when their sub-patterns
+    /// disagree: `Some(Json.Text(value))` matches only a `Some` holding a
+    /// `Json.Text`, so the `Some(other)` after it is reachable, and both
+    /// arms bind. Only a sub-pattern that matches everything makes the case
+    /// covered.
+    #[test]
+    fn a_narrower_sub_pattern_does_not_cover_its_whole_case() {
+        let module = module_from_sources(
+            "nested_sub_pattern",
+            &["enum Json {\n  Text(String)\n  Number(Int)\n}\n\n\
+               fn describe(entry: Option<Json>) -> String {\n  \
+               match entry {\n    \
+               None => \"none\"\n    \
+               Some(Json.Text(value)) => value\n    \
+               Some(other) => \"other\"\n  \
+               }\n}\n"],
+        );
+        let package = package_of(module);
+        let program = resolve(&package).expect("resolves: the arms do not overlap");
+        assert!(!program
+            .notices
+            .iter()
+            .any(|d| d.code == "cove::resolve::unreachable_match_arm"));
+    }
+
+    /// A binding sub-pattern *is* a catch-all for its case, so a second
+    /// `Some` arm after one is the dead code the rule exists to catch.
+    #[test]
+    fn a_binding_sub_pattern_covers_its_whole_case() {
+        let module = module_from_sources(
+            "binding_sub_pattern",
+            &["fn describe(entry: Option<Int>) -> String {\n  \
+               match entry {\n    \
+               None => \"none\"\n    \
+               Some(first) => \"first\"\n    \
+               Some(second) => \"second\"\n  \
+               }\n}\n"],
+        );
+        let package = package_of(module);
+        let errs = resolve(&package).unwrap_err();
+        assert!(errs
+            .iter()
+            .any(|d| d.code == "cove::resolve::duplicate_match_arm"));
+    }
+
+    /// The distinction recurses: two arms whose sub-patterns are themselves
+    /// the same pattern are still a duplicate, however deep the agreement
+    /// goes.
+    #[test]
+    fn identical_sub_patterns_are_still_a_duplicate() {
+        let module = module_from_sources(
+            "identical_sub_pattern",
+            &["enum Json {\n  Text(String)\n  Number(Int)\n}\n\n\
+               fn describe(entry: Option<Json>) -> String {\n  \
+               match entry {\n    \
+               None => \"none\"\n    \
+               Some(Json.Text(first)) => first\n    \
+               Some(Json.Text(second)) => second\n  \
                }\n}\n"],
         );
         let package = package_of(module);

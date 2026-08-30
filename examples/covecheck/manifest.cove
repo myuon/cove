@@ -95,13 +95,10 @@ fn text(entry: Json, name: String) -> Result<String, Error> {
 
 /// Reads the string field `name`, which the entry may leave out.
 fn optionalText(entry: Json, name: String) -> Result<Option<String>, Error> {
-  let written = match field(entry, name) {
-    Some(value) => value
-    None => return Ok(None)
-  }
-  match written {
-    Json.Text(value) => Ok(Some(value))
-    other => Err(wrongType(name, "a string", other))
+  match field(entry, name) {
+    None => Ok(None)
+    Some(Json.Text(value)) => Ok(Some(value))
+    Some(other) => Err(wrongType(name, "a string", other))
   }
 }
 
@@ -111,13 +108,10 @@ fn optionalText(entry: Json, name: String) -> Result<Option<String>, Error> {
 /// both are this field; `4096.5` is not, because a bound on a count of
 /// characters is a count.
 fn optionalCount(entry: Json, name: String) -> Result<Option<Int>, Error> {
-  let written = match field(entry, name) {
-    Some(value) => value
+  let number = match field(entry, name) {
     None => return Ok(None)
-  }
-  let number = match written {
-    Json.Number(value) => value
-    other => return Err(wrongType(name, "a number", other))
+    Some(Json.Number(value)) => value
+    Some(other) => return Err(wrongType(name, "a number", other))
   }
   let whole = match number.toInt() {
     Ok(rounded) => rounded
