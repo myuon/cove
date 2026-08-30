@@ -475,6 +475,9 @@ pub fn call_method(
                 expect_args(name, args, 0, span)?;
                 Ok(Value::Bool(items.is_empty()))
             }
+            "contains" => contains("Array.contains", items, args, span),
+            "indexOf" => index_of_element("Array.indexOf", items, args, span),
+            "slice" => Ok(Value::Array(slice("Array.slice", items, &args, span)?)),
             "map" | "filter" | "fold" | "sorted" => {
                 walk_with(host, "Array", items.to_vec(), name, args, span)
             }
@@ -492,6 +495,14 @@ pub fn call_method(
                     .and_then(|i| storage.elements.borrow().get(i).cloned())
                     .map(Value::some)
                     .unwrap_or_else(Value::none)),
+                "contains" => contains("Vector.contains", &storage.elements.borrow(), args, span),
+                "indexOf" => {
+                    index_of_element("Vector.indexOf", &storage.elements.borrow(), args, span)
+                }
+                "slice" => {
+                    let sliced = slice("Vector.slice", &storage.elements.borrow(), &args, span)?;
+                    Ok(Value::Array(sliced))
+                }
                 "length" => {
                     expect_args(name, args, 0, span)?;
                     Ok(Value::Int(storage.len() as i64))
@@ -1175,6 +1186,74 @@ pub fn check_live(
         .with_help("use the `Array` that `freeze()` returned, or build a new vector"));
     }
     Ok(())
+}
+
+/// `contains(element)` on a sequence: whether any element is `==` to it.
+///
+/// Equality is [`Value::eq_value`], the same one `==` is and the same one
+/// `Map` and `Set` are keyed by, so a sequence answers membership exactly as
+/// a comparison of the two values would. An empty receiver answers `false`,
+/// and no argument can be refused: every value has an equality.
+fn contains(
+    method: &str,
+    items: &[Value],
+    args: Vec<Value>,
+    span: Span,
+) -> Result<Value, RuntimeError> {
+    let args = expect_args(method, args, 1, span)?;
+    Ok(Value::Bool(
+        items.iter().any(|item| item.eq_value(&args[0])),
+    ))
+}
+
+/// `indexOf(element)` on a sequence: the first position holding a value `==`
+/// to it, or `None`.
+///
+/// The same equality [`contains`] uses, so the two cannot disagree about
+/// whether an element is there. An empty receiver and an element that is not
+/// in the sequence both answer `None`, which is what `String.indexOf` and
+/// `Array.get` answer a question with no position to name.
+fn index_of_element(
+    method: &str,
+    items: &[Value],
+    args: Vec<Value>,
+    span: Span,
+) -> Result<Value, RuntimeError> {
+    let args = expect_args(method, args, 1, span)?;
+    Ok(items
+        .iter()
+        .position(|item| item.eq_value(&args[0]))
+        .map(|at| Value::some(Value::Int(at as i64)))
+        .unwrap_or_else(Value::none))
+}
+
+/// `slice(from, to)` on a sequence: the elements at `from..<to`.
+///
+/// Both bounds are clamped into `0..len` and a `to` at or below `from`
+/// answers nothing, which is `String.slice`'s rule applied where the same
+/// question arises rather than a second answer to it. So no argument can
+/// stop the run: this refuses only a bound that is not an `Int` at all,
+/// which is the receiver being called wrongly rather than an index being out
+/// of range.
+fn slice(
+    method: &str,
+    items: &[Value],
+    args: &[Value],
+    span: Span,
+) -> Result<Rc<[Value]>, RuntimeError> {
+    if args.len() != 2 {
+        return Err(arity_error(method, 2, args.len(), span));
+    }
+    let bound = |at: usize, parameter: &str| match &args[at] {
+        Value::Int(index) => Ok((*index).clamp(0, items.len() as i64) as usize),
+        other => Err(type_error(method, parameter, "Int", other, span)),
+    };
+    let from = bound(0, "from")?;
+    let to = bound(1, "to")?;
+    if to <= from {
+        return Ok(Rc::from([]));
+    }
+    Ok(Rc::from(&items[from..to]))
 }
 
 fn index_of(method: &str, args: &[Value], span: Span) -> Result<Option<usize>, RuntimeError> {

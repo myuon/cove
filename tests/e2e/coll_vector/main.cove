@@ -24,7 +24,14 @@ export fn main() -> Result<Unit, Error> {
   println("get {first.get(0)} {first.get(99)}")?
   println("length {first.length()} isEmpty {first.isEmpty()}")?
 
-  var empty = Vector.of()
+  // Membership, position, and a part of the sequence: the same three an
+  // `Array` answers, and `slice` answers an `Array` from a `Vector` too.
+  println("contains {first.contains(1)} {first.contains(99)}")?
+  println("indexOf {first.indexOf(1)} {first.indexOf(99)}")?
+  println("slice {first.slice(0, 2)} {first.slice(-5, 99)}")?
+
+  var empty: Vector<Int> = Vector.of()
   println("empty {empty} {empty.isEmpty()}")?
+  println("empty answers {empty.contains(1)} {empty.indexOf(1)}")?
   Ok(())
 }

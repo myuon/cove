@@ -79,6 +79,21 @@ static EXERCISES: &[Exercise] = &[
     },
     Exercise {
         ty: "Array",
+        name: "contains",
+        body: "  let items = [1, 2]\n  let has = items.contains(2)\n  0",
+    },
+    Exercise {
+        ty: "Array",
+        name: "indexOf",
+        body: "  let items = [1, 2]\n  items.indexOf(2).unwrapOr(0)",
+    },
+    Exercise {
+        ty: "Array",
+        name: "slice",
+        body: "  let items = [1, 2, 3]\n  items.slice(0, 2).length()",
+    },
+    Exercise {
+        ty: "Array",
         name: "map",
         body: "  let items = [1, 2]\n  items.map(fn(n) { n * 10 }).length()",
     },
@@ -158,6 +173,21 @@ static EXERCISES: &[Exercise] = &[
         ty: "Vector",
         name: "sorted",
         body: "  var items = Vector.of(2, 1)\n  items.sorted(by: fn(a, b) { a < b }).length()",
+    },
+    Exercise {
+        ty: "Vector",
+        name: "contains",
+        body: "  var items = Vector.of(1, 2)\n  let has = items.contains(2)\n  0",
+    },
+    Exercise {
+        ty: "Vector",
+        name: "indexOf",
+        body: "  var items = Vector.of(1, 2)\n  items.indexOf(2).unwrapOr(0)",
+    },
+    Exercise {
+        ty: "Vector",
+        name: "slice",
+        body: "  var items = Vector.of(1, 2, 3)\n  items.slice(1, 3).length()",
     },
     Exercise {
         ty: "Map",
@@ -1527,6 +1557,110 @@ fn a_duration_smaller_than_its_unit_reads_as_zero() {
     check_and_answer(
         "Duration read in a larger unit",
         r#"  if 1ms.hours() == 0 && 0s.nanos() == 0 { 1 } else { 0 }"#,
+        1,
+    );
+}
+
+// -------------------------- what a sequence answers about itself
+//
+// The exercises above prove `contains`, `indexOf` and `slice` dispatch;
+// these prove what each answers where a program is most likely to be
+// surprised — on an empty receiver, and on a value that is not there.
+
+/// Membership is `==`'s equality, which is structural, so a value equal to
+/// an element is in the sequence whether or not it is the one that was put
+/// there. Nested arrays are the deepest structure a body with no
+/// declarations can build here; `==` on them is the same `eq_value` a struct
+/// would be compared with.
+#[test]
+fn contains_compares_values_and_not_identity() {
+    check_and_answer(
+        "Array.contains on equal values",
+        r#"  let rows = [[1, 2], [3, 4]]
+  if rows.contains([3, 4]) && !rows.contains([3, 5]) { 1 } else { 0 }"#,
+        1,
+    );
+}
+
+/// An empty sequence holds nothing and has nothing at a position, which is
+/// `false` and `None` rather than a stopped run.
+#[test]
+fn an_empty_sequence_contains_nothing_and_indexes_nothing() {
+    check_and_answer(
+        "contains and indexOf on an empty sequence",
+        r#"  let empty: Array<Int> = []
+  let nowhere = match empty.indexOf(1) { Some(_) => false, None => true }
+  if !empty.contains(1) && nowhere { 1 } else { 0 }"#,
+        1,
+    );
+}
+
+/// A value that is not there has no position, which is the same `None` an
+/// empty receiver answers.
+#[test]
+fn index_of_a_value_that_is_not_there_is_none() {
+    check_and_answer(
+        "Array.indexOf of a value that is not there",
+        r#"  let items = [10, 20]
+  match items.indexOf(30) { Some(_) => 0, None => 1 }"#,
+        1,
+    );
+}
+
+/// `indexOf` answers the first of several equal elements, which is what
+/// makes it and `contains` one question rather than two.
+#[test]
+fn index_of_answers_the_first_occurrence() {
+    check_and_answer(
+        "Array.indexOf with a repeated element",
+        "  let items = [10, 20, 10]\n  items.indexOf(10).unwrapOr(9)",
+        0,
+    );
+}
+
+/// Both bounds are clamped into `0..length()`, exactly as `String.slice`
+/// clamps, so no bound can stop the program.
+#[test]
+fn slice_bounds_outside_are_clamped() {
+    check_and_answer(
+        "Array.slice with bounds outside",
+        r#"  let items = [1, 2]
+  if items.slice(-5, 100) == [1, 2] { 1 } else { 0 }"#,
+        1,
+    );
+}
+
+/// A `to` at or below `from` is the empty array, never an error.
+#[test]
+fn slice_to_at_or_below_from_is_empty() {
+    check_and_answer(
+        "Array.slice with a reversed pair",
+        r#"  let items = [1, 2, 3]
+  let empty: Array<Int> = []
+  if items.slice(2, 1) == empty && items.slice(1, 1) == empty { 1 } else { 0 }"#,
+        1,
+    );
+}
+
+/// An empty receiver answers an empty array whatever the bounds are.
+#[test]
+fn slicing_an_empty_sequence_answers_an_empty_array() {
+    check_and_answer(
+        "Array.slice on an empty sequence",
+        r#"  let empty: Array<Int> = []
+  if empty.slice(0, 4) == empty { 1 } else { 0 }"#,
+        1,
+    );
+}
+
+/// A part of either sequence is an `Array`, so a `Vector`'s slice is a
+/// finished sequence rather than a second handle to go on appending to.
+#[test]
+fn a_vectors_slice_is_an_array() {
+    check_and_answer(
+        "Vector.slice answers an Array",
+        r#"  var items = Vector.of(1, 2, 3)
+  if items.slice(0, 2) == [1, 2] { 1 } else { 0 }"#,
         1,
     );
 }

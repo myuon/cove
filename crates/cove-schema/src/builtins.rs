@@ -760,6 +760,116 @@ const IS_EMPTY: MethodSchema = MethodSchema {
     mutating: false,
 };
 
+// ------------------------------- the questions an ordered sequence answers
+//
+// `contains`, `indexOf` and `slice` are three questions a program asks a
+// sequence constantly that `get`, `length` and the four higher-order
+// operations below do not answer: whether a value is in there, where it is,
+// and what a part of it is. They are declared once here for the same reason
+// the four are — an `Array` and a `Vector` are one sequence with two storage
+// rules, and a shared constant is what stops one name from becoming two
+// signatures.
+//
+// # Where each belongs, and why the answer is not "on everything"
+//
+// `contains` goes on every collection, because membership is a question
+// every collection can answer. `Map` and `Set` already answered it of a key
+// and an element, and `String` answers it of a substring; this is the same
+// question asked of a sequence's elements, so it is the same word.
+//
+// `indexOf` and `slice` go on the ordered types only — `String`, which
+// already has both, and now `Array` and `Vector`. A position is a fact only
+// where order is. A `Map` and a `Set` do keep their entries in ascending key
+// order, but that is the collection's own storage rule rather than an
+// ordering a caller chose, and `toArray()` is the operation that says "this
+// ordering is mine now"; slicing or indexing what it answers is how a
+// program means it.
+//
+// # What each answers where a caller might not expect one
+//
+// An empty receiver answers `false`, `None`, and `[]`. None of the three is
+// a mistake to ask on an empty sequence, and none of them makes a caller
+// check the length first.
+
+/// `contains(element: T) -> Bool`, whether the receiver holds a value equal
+/// to `element`.
+///
+/// Equality is `==`'s, which is structural: an `Array<Point>` answers `true`
+/// for a `Point` with equal fields whether or not it is the one that was put
+/// in, exactly as `==` on the two would. An empty receiver answers `false`,
+/// and there is no argument this can refuse — every value has an equality.
+///
+/// `Set.contains` is this same constant, so the one operation reads the same
+/// on either. What differs is under the signature rather than in it: a `Set`
+/// may only hold values that can be keys, so it compares keys, and a
+/// sequence holds anything, so it compares values.
+const CONTAINS: MethodSchema = MethodSchema {
+    name: "contains",
+    generics: &[],
+    params: &[ParamSchema {
+        name: "element",
+        ty: BuiltinType::Param("T"),
+    }],
+    variadic: false,
+    result: BuiltinType::Bool,
+    mutating: false,
+};
+
+/// `indexOf(element: T) -> Option<Int>`: the position of the **first**
+/// element equal to `element`, or `None`.
+///
+/// `None` is the not-found answer and the empty-receiver answer both, which
+/// is `String.indexOf`'s rule and `Array.get`'s: a question about a position
+/// that is not there answers a value the caller opens rather than stopping
+/// the run. Equality is [`CONTAINS`]'s, so `items.contains(x)` and
+/// `items.indexOf(x)` are one question asked two ways and cannot disagree.
+const INDEX_OF: MethodSchema = MethodSchema {
+    name: "indexOf",
+    generics: &[],
+    params: &[ParamSchema {
+        name: "element",
+        ty: BuiltinType::Param("T"),
+    }],
+    variadic: false,
+    result: BuiltinType::Option(&BuiltinType::Int),
+    mutating: false,
+};
+
+/// `slice(from: Int, to: Int) -> Array<T>`: the elements at indices `from`
+/// up to but not including `to`.
+///
+/// This is `String.slice` on a sequence, down to the spelling and down to
+/// what it does with an argument nobody would write on purpose. **Both
+/// bounds are clamped into `0..length()`, and a `to` at or below `from`
+/// answers `[]`** — so a negative bound, a bound past the end, and a
+/// reversed pair are each answered rather than refused, and no argument can
+/// stop a program. A prefix is `slice(0, n)` and a suffix is
+/// `slice(n, items.length())`. There is no `take`/`drop` pair beside this:
+/// two spellings of "part of a sequence" is what declaring these three
+/// together was for avoiding, and `String` had already chosen this one.
+///
+/// It answers an `Array` from either receiver, which is the rule `map`,
+/// `filter`, `fold` and `sorted` already follow and for their reason: a part
+/// of a sequence is a finished sequence rather than a second handle to go on
+/// appending to.
+const SLICE: MethodSchema = MethodSchema {
+    name: "slice",
+    generics: &[],
+    params: &[
+        ParamSchema {
+            name: "from",
+            ty: BuiltinType::Int,
+        },
+        ParamSchema {
+            name: "to",
+            ty: BuiltinType::Int,
+        },
+    ],
+    variadic: false,
+    result: BuiltinType::Array(&BuiltinType::Param("T")),
+    mutating: false,
+};
+
 // ------------------------------- the higher-order methods a sequence shares
 //
 // `Array<T>` and `Vector<T>` both bind one parameter and both call it `T`,
@@ -907,8 +1017,10 @@ const SORTED: MethodSchema = MethodSchema {
 /// `get` answers an `Option` rather than trapping, so an index outside the
 /// array is a value the caller has to open rather than a stopped program.
 ///
-/// `map`, `filter`, `fold`, and `sorted` are the four it walks with a
-/// closure, declared once above because a `Vector` has the same four.
+/// `contains`, `indexOf`, and `slice` are the three questions about the
+/// order and the membership of a sequence, and `map`, `filter`, `fold`, and
+/// `sorted` are the four it walks with a closure. All seven are declared
+/// once above, because a `Vector` has the same seven.
 pub const ARRAY: BuiltinSchema = BuiltinSchema {
     name: "Array",
     parameters: &["T"],
@@ -929,6 +1041,9 @@ pub const ARRAY: BuiltinSchema = BuiltinSchema {
         },
         LENGTH,
         IS_EMPTY,
+        CONTAINS,
+        INDEX_OF,
+        SLICE,
         MAP_EACH,
         FILTER,
         FOLD,
@@ -948,10 +1063,11 @@ pub const ARRAY: BuiltinSchema = BuiltinSchema {
 /// `Array` in O(1). `toArray` is the copying alternative, for a caller that
 /// cannot give the storage up.
 ///
-/// `map`, `filter`, `fold`, and `sorted` are the same four an `Array` has,
-/// and each answers an `Array` here too: `v.sorted(by:)` is
-/// `v.toArray().sorted(by:)` and writes nothing through the handle, so an
-/// alias sees no change and a callback that pushes cannot disturb the walk.
+/// `contains`, `indexOf`, `slice`, `map`, `filter`, `fold`, and `sorted` are
+/// the same seven an `Array` has, and the four that produce a sequence
+/// answer an `Array` here too: `v.sorted(by:)` is `v.toArray().sorted(by:)`
+/// and writes nothing through the handle, so an alias sees no change and a
+/// callback that pushes cannot disturb the walk.
 pub const VECTOR: BuiltinSchema = BuiltinSchema {
     name: "Vector",
     parameters: &["T"],
@@ -972,6 +1088,9 @@ pub const VECTOR: BuiltinSchema = BuiltinSchema {
         },
         LENGTH,
         IS_EMPTY,
+        CONTAINS,
+        INDEX_OF,
+        SLICE,
         MAP_EACH,
         FILTER,
         FOLD,
@@ -1150,6 +1269,13 @@ pub const MAP_ENTRY: BuiltinSchema = BuiltinSchema {
 // --------------------------------------------------------------------- Set
 
 /// `Set<T>`: an immutable set, kept in ascending element order.
+///
+/// `contains` is the very declaration `Array` and `Vector` answer membership
+/// with, shared rather than restated, because it is the same question about
+/// a different container — [`ARRAY`] says the rest of it. There is no
+/// `indexOf` or `slice` here: the ascending order is how a set is stored
+/// rather than an order a caller chose, and `toArray()` is where a program
+/// says it wants that order to be its own.
 pub const SET: BuiltinSchema = BuiltinSchema {
     name: "Set",
     parameters: &["T"],
@@ -1167,17 +1293,7 @@ pub const SET: BuiltinSchema = BuiltinSchema {
             result: BuiltinType::Array(&BuiltinType::Param("T")),
             mutating: false,
         },
-        MethodSchema {
-            name: "contains",
-            generics: &[],
-            params: &[ParamSchema {
-                name: "element",
-                ty: BuiltinType::Param("T"),
-            }],
-            variadic: false,
-            result: BuiltinType::Bool,
-            mutating: false,
-        },
+        CONTAINS,
         MethodSchema {
             name: "inserted",
             generics: &[],
@@ -2122,19 +2238,51 @@ mod tests {
         );
     }
 
-    /// The four higher-order methods are one declaration each, reached
-    /// through either sequence.
+    /// Every method both sequences declare is one declaration, reached
+    /// through either.
     ///
-    /// A `Vector` that walked with a different signature than an `Array` is
-    /// the drift this shares a constant to prevent, and comparing the two
-    /// tables is what makes the sharing a fact rather than an intention.
+    /// A `Vector` that answered a question with a different signature than
+    /// an `Array` is the drift these share constants to prevent, and
+    /// comparing the two tables entry for entry is what makes the sharing a
+    /// fact rather than an intention. It is stated over *every* shared name
+    /// rather than over a list written here, so a method added to one and
+    /// then to the other with a slip in it fails this without anybody
+    /// remembering to extend it.
     #[test]
-    fn a_sequence_walks_with_the_same_four_signatures_whichever_it_is() {
-        for name in ["map", "filter", "fold", "sorted"] {
-            let array = ARRAY.method(name).expect("`Array` walks");
-            let vector = VECTOR.method(name).expect("`Vector` walks");
+    fn a_sequence_answers_with_the_same_signature_whichever_it_is() {
+        let shared: Vec<&str> = ARRAY
+            .methods
+            .iter()
+            .filter(|method| VECTOR.method(method.name).is_some())
+            .map(|method| method.name)
+            .collect();
+        assert_eq!(
+            shared,
+            [
+                "get", "length", "isEmpty", "contains", "indexOf", "slice", "map", "filter",
+                "fold", "sorted", "snapshot"
+            ]
+        );
+        for name in shared {
+            let array = ARRAY.method(name).expect("`Array` declares it");
+            let vector = VECTOR.method(name).expect("`Vector` declares it");
             assert_eq!(array, vector, "`{name}`");
         }
+        // `Set` answers membership with the sequences' own declaration,
+        // because it is the sequences' own question.
+        assert_eq!(SET.method("contains"), ARRAY.method("contains"));
+        assert_eq!(
+            ARRAY.method("contains").unwrap().signature(),
+            "contains(element: T) -> Bool"
+        );
+        assert_eq!(
+            ARRAY.method("indexOf").unwrap().signature(),
+            "indexOf(element: T) -> Option<Int>"
+        );
+        assert_eq!(
+            VECTOR.method("slice").unwrap().signature(),
+            "slice(from: Int, to: Int) -> Array<T>"
+        );
         assert_eq!(
             ARRAY.method("sorted").unwrap().signature(),
             "sorted(by: fn(T, T) -> Bool) -> Array<T>"

@@ -8813,6 +8813,55 @@ fn run() -> Counter {
         assert_eq!(error.message, "expected `Bool`, found `Int`");
     }
 
+    // -------------------- membership, position, and part of a sequence
+
+    /// `contains`, `indexOf`, and `slice` read the same on either sequence,
+    /// and each answers what the shared table says.
+    ///
+    /// The element parameter is where these are got wrong: it is the
+    /// receiver's own `T`, so a `contains` of the wrong type is a mismatch
+    /// rather than a `false`, which is the whole reason a sequence's
+    /// membership is checked and a `Map`'s `Any` key would not be.
+    #[test]
+    fn a_sequence_answers_membership_position_and_a_part_of_itself() {
+        for receiver in ["let items = [1, 2]", "var items = Vector.of(1, 2)"] {
+            accepts_body(&format!(
+                "  {receiver}\n  \
+                 let held: Bool = items.contains(1)\n  \
+                 let at: Option<Int> = items.indexOf(2)\n  \
+                 let first: Array<Int> = items.slice(0, 1)"
+            ));
+            let error = rejects_body(&format!("  {receiver}\n  let n = items.contains(\"1\")"));
+            assert_eq!(error.code, MISMATCH);
+            assert_eq!(error.message, "expected `Int`, found `String`");
+            let error = rejects_body(&format!("  {receiver}\n  let n: Int = items.indexOf(1)"));
+            assert_eq!(error.message, "expected `Int`, found `Option<Int>`");
+            let error = rejects_body(&format!("  {receiver}\n  let n = items.slice(0)"));
+            assert_eq!(error.code, MISSING_ARGUMENT);
+        }
+    }
+
+    /// A `Set` answers membership and nothing about a position, because a
+    /// set has none to answer about.
+    ///
+    /// The ascending order a `Set` and a `Map` are stored in is the
+    /// collection's, not a caller's: `toArray()` is where a program takes
+    /// that ordering as its own, and what it answers has both.
+    #[test]
+    fn an_unordered_collection_answers_membership_and_not_a_position() {
+        accepts_body("  let seen = Set.of(1, 2)\n  let held: Bool = seen.contains(1)");
+        accepts_body(
+            "  let seen = Set.of(1, 2)\n  let at: Option<Int> = seen.toArray().indexOf(1)",
+        );
+        let error = rejects_body("  let seen = Set.of(1, 2)\n  let n = seen.indexOf(1)");
+        assert_eq!(error.code, UNKNOWN_METHOD);
+        assert_eq!(error.message, "`Set` has no method `indexOf`");
+        let error = rejects_body(
+            "  let ages = Map.of(MapEntry(key: \"a\", value: 1))\n  let n = ages.slice(0, 1)",
+        );
+        assert_eq!(error.message, "`Map` has no method `slice`");
+    }
+
     // ------------------------------------ building and reading a duration
 
     /// A `Duration` is built from a number in any of the six units a literal

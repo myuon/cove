@@ -104,6 +104,18 @@ Assignment and ordinary argument passing perform field-wise shallow copies.
 - `Array<T>` is fixed-length and immutable; `[1, 2]` is an array.
 - `Vector<T>` is growable and mutable; `Vector.of(1, 2)` constructs one.
 - `Array`, `Vector`, `String`, and ranges all answer `length()`.
+- `contains(element)` answers whether a collection holds a value equal to
+  `element`, under `==`. `Array`, `Vector`, `Map`, `Set`, and `String` all
+  answer it, and an empty receiver answers `false`.
+- `indexOf(element)` answers the first position holding such a value, or
+  `None` when there is none and when the receiver is empty. `slice(from, to)`
+  answers the elements at `from` up to but not including `to`, as an `Array`.
+  Both are on the ordered types — `Array`, `Vector`, and `String` — and not on
+  `Map` or `Set`, whose ascending order is storage rather than an order a
+  caller chose; `toArray()` is where a program takes that order as its own.
+- `slice` clamps both bounds into `0..length()` and answers nothing when `to`
+  is at or below `from`, so no argument to it can stop a program. A prefix is
+  `slice(0, n)`.
 - A character is a `String` of length 1: `text.chars()` takes a string apart
   into them, and `String.fromCodePoint(codePoint)` builds one from the number
   that names it, or an `Err` for a number that names none — one out of range,
