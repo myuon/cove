@@ -1894,6 +1894,55 @@ make no Host call between them. `hostheavy` is the one benchmark whose
 `--stats` time should not be read as its production time, and the figure that
 should be is the 14.2 ms above.
 
+### A change to `vm.rs` moved a benchmark that cannot execute it
+
+[Issue #179](https://github.com/myuon/cove/issues/179) says that the workspace
+has no `[profile.release]`, so release builds with `codegen-units = 16` and no
+LTO, and rustc partitions codegen units by module — which makes where code
+lives a performance variable independent of what it does. That was reasoned
+from the build configuration. It has since been observed directly, and the
+instance is worth recording because it is cleaner than the ones that suggested
+it.
+
+Measuring [issue #160](https://github.com/myuon/cove/issues/160) meant building
+one variant of `Vm`: a private method added to `vm.rs` and called from
+`Vm::call_host` and `Vm::call_resource`, and nowhere else. Two `cove-bench
+--iterations 15` runs of the unmodified build bracket one of the variant, all
+three from the same session on the same machine:
+
+| bench       | base | variant | base again | variant vs base | Host calls |
+| ----------- | ---: | ------: | ---------: | --------------: | ---------: |
+| `field`     |  432.40 ms | 457.91 ms | 433.63 ms | **+5.9%** | none |
+| `method`    |  821.18 ms | 846.96 ms | 813.43 ms | +3.1% | none |
+| `arith`     |   88.35 ms |  86.18 ms |  88.10 ms | −2.5% | none |
+| `chars`     |  818.09 ms | 828.10 ms | 808.97 ms | +1.2% | none |
+| `call`      |  239.51 ms | 240.35 ms | 238.92 ms | +0.4% | none |
+| `pure`      |    2.34 ms |   2.32 ms |   2.30 ms | −0.7% | none |
+| `hostloop`  |  663.54 ms | 666.07 ms | 643.22 ms | +0.4% | 1,000,000 |
+| `hostheavy` |    3.79 ms |   4.07 ms |   3.82 ms | +7.4% | 4,001 |
+
+**`field` is 5.9% slower on a code path it never reaches.** It makes no Host
+call, so it never executes the added method, and it runs the same 47,428,595
+instructions in all three builds. The two unmodified runs agree with each other
+to 0.3%, so the machine did not move under them. What moved is the layout of a
+module `field` spends its whole run inside.
+
+The consequence for reading the two host benchmarks is the point. The change
+is *about* Host calls, and the only two rows that make any are inside a band
+that rows making none demonstrate is at least ±6% wide. So the honest bound on
+what the change costs is "less than what adding a function to `vm.rs` costs
+benchmarks that cannot call it", and no number smaller than that is available
+from this build configuration. `hostloop`'s 1,000,000 Host calls put the
+change's own cost at +2.5 ns a call against the two baselines' own 20 ns of
+disagreement; `benches/convention`'s `conv_host`, corrected by its `conv_fresh`
+control, puts it at +47 ns against a boundary that costs 887. Both are small
+and neither is resolved.
+
+This is the fourth time layout has been the answer — [#114](https://github.com/myuon/cove/issues/114)'s
+cold match arms, [#126](https://github.com/myuon/cove/issues/126)'s spills, the
+calling convention's unattributed 8 ms on `arith`, and now this — and it is the
+first where the moved benchmark provably does not run the changed code at all.
+
 ## The calling-convention matrix
 
 Issue #123's second half asks what the typed three-stack convention costs at
@@ -2118,6 +2167,59 @@ this document's own history says what happens when those are changed one at a
 time against their immediate parent. #116 and #109 are where they are decided
 together, and both now have a measured ceiling to decide against.
 
+## What a character costs, and what a receiver costs on top of it
+
+[Issue #99](https://github.com/myuon/cove/issues/99) measured `examples/cq`
+before any of the work above and reported two findings in one sentence:
+per-character text processing costs about 1.4 µs, and a struct method call
+doubles it. Both were the AST interpreter's, on a runtime where
+`Value::Struct` was a `Box` and a non-mutating method copied its receiver.
+
+Re-measured on the machine and build every table above was taken on, over the
+same shape: 1,984,000 characters through `chars.get(i).unwrapOr("")` and one
+comparison, with the length reached by the same route as the character, so the
+three rows differ in that route and in nothing else. Medians of five runs of
+`cove run --stats`; the first row is `benches/chars`.
+
+| how the character is reached  |      AST |       VM | per char, VM | #99, then |
+| ----------------------------- | -------: | -------: | -----------: | --------: |
+| a local `Array<String>`       | 1,750 ms |   808 ms |      0.41 µs |   1.35 µs |
+| the same through a field      | 2,412 ms |   856 ms |      0.43 µs |   1.87 µs |
+| the same through a method     | 5,015 ms | 1,246 ms |      0.63 µs |   2.70 µs |
+
+**A character costs 0.41 µs on the backend `cove run` uses, where it cost
+1.35.** ADR 0022 made the VM the default, so the number the issue's headline
+names is now 3.3× smaller than the number it names.
+
+**A method call adds 54% where it doubled, and a field adds 6% where it added
+38%.** Two calls a character is what the third row runs, so 54% over two calls
+is 27% a call, and the mechanism the issue named for it is gone: `Value::Struct`
+became an `Rc<StructValue>` under issue #104 for exactly this reason, and its
+doc comment says so. The instruction counts say where what remains is. The
+three rows run 21.1, 23.1 and 30.2 instructions a character, at 19.3, 18.7 and
+20.8 ns an instruction — a per-instruction cost that barely moves. So a method
+now costs the instructions a call is, plus the per-call constant "The cliffs"
+prices at 71.8 ns and attributes to the budget's mutex rather than to the
+convention or to the receiver. The receiver half of #99 is answered; what is
+left of it is the cliff #116 already owns.
+
+**What has not changed is that fuel does not track what is expensive.** The
+issue observed `arith` at 32 M fuel/s against this loop's 7.5 M, on the AST
+interpreter, and that ratio is intact there: 46.9 M against 11.5 M. On the VM
+the gap is *wider*, 367 M against 61 M, because the arithmetic loop is what the
+typed slots made cheap and a heap `Rc<str>` per character is what they did not
+touch. `fuel_per_sec` is a rate of charging and not a rate of work, and this is
+the sharpest case of it in the suite.
+
+The application the issue was written about moved with the floor.
+`cq revenue-summary` over a generated 100,000-record, 17 MB input costs 29.1 s
+on the VM and 81.6 s on the interpreter, against the 90.8 s
+`examples/cq/README.md` recorded and the 112 s the issue's text quotes: about
+3,400 records a second where it was about 900. What has not moved is the shape
+of the answer — the work is still per-character interpretation, and the
+remaining `Option` per index and `Rc<str>` per character are the two the "open"
+list below still names.
+
 ## What is settled and what is open
 
 **Settled by measurement.** Typed scalar slots, the calling convention,
@@ -2137,6 +2239,15 @@ lives behind — 40.3% of `benches/call`, of which one acquisition in three has
 been removed for 16.6%. And that a boundary instruction is cheap: two
 crossings are 21.4 ns a turn and allocate nothing at all, which is the answer
 to a question this document had been asking in the other direction.
+
+One more since, from issue #99 rather than #123, and it is a question closed
+rather than a change taken. What a struct receiver costs a loop: it doubled the
+loop it was in when a receiver was a `Box` copied per call, and it adds 27% a
+call now that `Value::Struct` is an `Rc`, at a per-instruction cost within 11%
+of the same loop with no call in it. "What a character costs, and what a
+receiver costs on top of it" is the measurement; the residue is the per-call
+constant the matrix already priced and #116 already owns, and is not about
+receivers.
 
 **Settled by evidence that was missing.** What a trace says. It was the last
 of issue #111's three blockers and it was a gap rather than a suspicion: the
@@ -2168,7 +2279,10 @@ measurement can move that either.
 **Open, and what would settle each.** The inline representation of `Option`,
 `Result`, and small enum payloads — settled by building one and measuring
 `arrayget` and `chars`, and now `benches/convention`'s `conv_host` too, which
-pays for the `Result` a Host operation answers with two million times. The
+pays for the `Result` a Host operation answers with two million times. That one
+now has a size as well as a benchmark: `chars` runs at a sixth of `arith`'s
+fuel rate, and the two things it does that `arith` does not are the `Option`
+per index and the `Rc<str>` per character. The
 argument vector allocated per builtin call — the same benchmarks, the same
 way. The closure value at four allocations, which the matrix added to that
 list. The heap layout the VM owns — settled by what is still allocating once
