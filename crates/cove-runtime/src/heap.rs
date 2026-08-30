@@ -752,7 +752,12 @@ impl Scan {
                 }
             }
             // An `Enum` is `Box`ed, so it is owned by exactly one value and
-            // no two paths reach the same one.
+            // no two paths reach the same one. That is still true of the
+            // payload issue #183 moved inside the box: a `value::Payload`
+            // owns its values outright, whether they sit in the `EnumValue`
+            // or in the slice a longer one points at, so walking it yields
+            // each reference exactly once — which is the property this
+            // module's documentation says the whole accounting rests on.
             Value::Enum(enumeration) => {
                 for item in &enumeration.payload {
                     self.count(item);
@@ -896,10 +901,20 @@ impl Marker<'_> {
             }
             // An `Enum` is `Box`ed, so it is owned by exactly one value and
             // no two paths reach the same one.
+            //
+            // Its payload is a `value::Payload`, which since issue #183
+            // holds the arities that occur — none and one — inside the
+            // `EnumValue` itself and allocates only from two upwards. So the
+            // slots are charged by asking the payload where they live rather
+            // than by counting them: an inline slot is already inside the
+            // `size_of::<EnumValue>()` charged above, and charging it again
+            // would say a `Some(x)` costs a `Value` more than it does.
             Value::Enum(enumeration) => {
                 self.bytes += size_of::<crate::value::EnumValue>() as u64;
+                if let crate::value::Payload::Many(items) = &enumeration.payload {
+                    self.bytes += (items.len() * size_of::<Value>()) as u64;
+                }
                 for item in &enumeration.payload {
-                    self.bytes += size_of::<Value>() as u64;
                     self.visit(item);
                 }
             }

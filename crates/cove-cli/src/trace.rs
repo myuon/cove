@@ -492,7 +492,7 @@ fn decode_value(json: &Json) -> Result<Recorded, String> {
                     Value::Enum(Box::new(cove_runtime::value::EnumValue {
                         type_name: name.into(),
                         case: case.into(),
-                        payload: values,
+                        payload: values.into(),
                     })),
                     shown,
                 ),

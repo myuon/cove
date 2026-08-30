@@ -1564,7 +1564,7 @@ pub(crate) fn host_enum_case(
         Ok(Value::Enum(Box::new(EnumValue {
             type_name: format!("{module}.{}", declared.name).into(),
             case: case.into(),
-            payload: Vec::new(),
+            payload: crate::value::Payload::Empty,
         })))
     }
 }
@@ -3707,7 +3707,7 @@ pub(crate) fn enum_case(
     Ok(Value::Enum(Box::new(EnumValue {
         type_name: format!("{module}.{}", decl.name.node).into(),
         case: case.into(),
-        payload,
+        payload: payload.into(),
     })))
 }
 
