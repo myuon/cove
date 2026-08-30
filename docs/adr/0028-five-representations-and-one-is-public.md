@@ -723,7 +723,8 @@ not replacing its decision. Its actual decision — that only the checker's
 answer about a slot's type decides its representation — is the premise
 decision 1 is built on, not something decision 1 contradicts.
 
-**ADR 0013.** Untouched, and this is the near miss worth naming precisely.
+**[ADR 0013](0013-host-resource-handles.md).** Untouched, and this is the near
+miss worth naming precisely.
 ADR 0013 decided that "a resource handle is a name" and that
 "`Value::Resource(Arc<ResourceHandle>)` is the whole of the representation,
 and every field of it is part of the name". Sealing means an embedder can no
@@ -737,16 +738,19 @@ hosts, which #195 deliberately left alone — is code this ADR requires to
 change. Describing code is not deciding it, so there is nothing to supersede,
 and the migration is named in Costs instead.
 
-**ADR 0011 and the collector.** Untouched. Precise, non-moving, per task, with
+**[ADR 0011](0011-garbage-collection.md) and the collector.** Untouched.
+Precise, non-moving, per task, with
 the reference-count shortfall rule rooting what a Rust local holds. Decision 8
 adds an obligation to the *representations* rather than changing the
 collector's decision.
 
-**ADR 0006.** Untouched, and relied on. "Dynamic dispatch is the first place
+**[ADR 0006](0006-traits-and-dispatch.md).** Untouched, and relied on.
+"Dynamic dispatch is the first place
 where a Cove value's runtime representation depends on its static type" is the
 sentence decision 3 turns into a witness word.
 
-**ADR 0012.** Untouched. The specification ranks above the oracle ranks above a
+**[ADR 0012](0012-performance-gate-and-native-backend.md).** Untouched. The
+specification ranks above the oracle ranks above a
 backend, and decision 5's "the interpreter keeps evaluating into `Value`" is
 what keeps the oracle readable, which is most of what makes it useful.
 
