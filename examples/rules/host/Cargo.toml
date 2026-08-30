@@ -8,6 +8,10 @@ license.workspace = true
 name = "cove-rules-measure"
 path = "src/main.rs"
 
+[[bin]]
+name = "cove-rules-check"
+path = "src/bin/check.rs"
+
 [dependencies]
 cove-diag.workspace = true
 cove-ir.workspace = true

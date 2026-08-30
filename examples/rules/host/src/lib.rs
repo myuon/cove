@@ -65,7 +65,7 @@ use std::time::{Duration, Instant};
 use cove_diag::{render, SourceMap};
 use cove_ir::lower::Lowered;
 use cove_runtime::interp::Interpreter;
-use cove_runtime::value::StructValue;
+use cove_runtime::value::{MapKey, StructValue};
 use cove_runtime::{
     Budget, Effect, FieldSchema, Grants, HostApi, HostRegistry, HostType, Limits, ModuleSchema,
     OperationSchema, RecordedValue, Runtime, RuntimeError, TraceEvent, TraceSink, TypeSchema,
@@ -86,11 +86,18 @@ use cove_sema::{Compiler, Config};
 /// site to it. Nothing about the module is written down a second time, which
 /// is the whole reason the two ends cannot disagree.
 ///
-/// `PullRequest` carries ten fields and `labels` is an `Array<String>` rather
-/// than a set, because [`HostType`] has no `Set`: the Cove side converts where
-/// it asks a membership question. That is a limitation of the schema
-/// vocabulary -- issue #153 -- and is recorded in `examples/rules/README.md`
-/// rather than worked around silently.
+/// `PullRequest` carries ten fields and each is declared as the shape it is,
+/// `labels: Set<String>` included. It was an `Array<String>` until issue #153,
+/// not because a pull request's labels are a sequence but because [`HostType`]
+/// had no `Set` to say otherwise, and the Cove side carried a loop that turned
+/// one into the other wherever a rule asked a membership question. A schema
+/// that cannot say what a field is makes the program say it instead.
+///
+/// Nothing here is checked by writing it down twice: the boundary holds a
+/// value to this table, and
+/// `the_schema_declares_only_types_a_value_could_have` holds the table itself
+/// to `ModuleSchema::validate`, which is the one thing a `HostType` can now
+/// say and no value satisfy.
 pub const REVIEWS: ModuleSchema = ModuleSchema {
     name: "reviews",
     capability: "reviews",
@@ -153,7 +160,7 @@ pub const REVIEWS: ModuleSchema = ModuleSchema {
             },
             FieldSchema {
                 name: "labels",
-                ty: HostType::Array(&HostType::String),
+                ty: HostType::Set(&HostType::String),
             },
             FieldSchema {
                 name: "approvals",
@@ -328,7 +335,7 @@ impl PullRequest {
             ),
             ("changedLines", Value::Int(self.changed_lines)),
             ("filesTouched", strings(&self.files_touched)),
-            ("labels", strings(&self.labels)),
+            ("labels", label_set(&self.labels)),
             ("approvals", Value::Int(self.approvals)),
             ("isDraft", Value::Bool(self.is_draft)),
             ("hasTests", Value::Bool(self.has_tests)),
@@ -339,6 +346,18 @@ impl PullRequest {
 /// `texts` as the Cove `Array<String>` both declarations admit.
 fn strings(texts: &[String]) -> Value {
     Value::array(texts.iter().map(|t| Value::Str(t.as_str().into())))
+}
+
+/// `labels` as the Cove `Set<String>` both declarations admit.
+///
+/// A `Set`'s elements are `MapKey`s rather than `Value`s, which is Cove's
+/// own restriction on what may be a key showing through: a host writes the key
+/// it means. Nothing is walked or de-duplicated here that the set does not do
+/// itself, which is the whole difference from what this used to be -- an
+/// `Array<String>` the Cove side turned into a `Set` on every membership
+/// question, because a Host API schema had no `Set` to declare one with.
+fn label_set(labels: &[String]) -> Value {
+    Value::set(labels.iter().map(|label| MapKey::Str(label.clone())))
 }
 
 /// What a review policy demands, as the application receives it.
@@ -915,6 +934,43 @@ impl Session<'_> {
         Decision::of(&value)
     }
 
+    /// Decides `pr` the same way, bounded by `limits` for this request and no
+    /// other.
+    ///
+    /// This is what an application that runs somebody else's rules calls. A
+    /// rule package is not the application's code: it can loop, and an
+    /// application would rather be told which request went wrong than stop
+    /// serving. `invoke_within` installs a `Budget` built from `limits` as the
+    /// invocation is entered, so the fuel, the deadline and the host-call
+    /// limit are this request's -- and the next request gets its own, on the
+    /// same `Vm`, with none of the 168 allocations that rebuilding a backend
+    /// per request costs.
+    ///
+    /// The deadline runs from here rather than from wherever the `Limits` were
+    /// written, which is what makes a per-request deadline mean the request.
+    ///
+    /// A failure comes back as the message it came back as; nothing about a
+    /// stopped invocation damages the session, exactly as for a host that
+    /// failed.
+    pub fn evaluate_within(
+        &mut self,
+        limits: Limits,
+        module: &str,
+        entry: &str,
+        pr: &PullRequest,
+    ) -> Result<Decision, String> {
+        let value = match &mut self.backend {
+            Backend::Ast(interpreter) => {
+                interpreter.invoke_within(Budget::new(limits), module, entry, vec![pr.to_policy()])
+            }
+            Backend::Vm(vm) => {
+                vm.invoke_within(Budget::new(limits), module, entry, vec![pr.to_policy()])
+            }
+        }
+        .map_err(|error| error.message)?;
+        Decision::of(&value)
+    }
+
     /// The same decision the other way: `module.entry` is run with the
     /// request identifier as its one process argument, fetches the pull
     /// request through `reviews.pull`, and reports the answer through
@@ -923,6 +979,33 @@ impl Session<'_> {
         let value = self
             .run(module, entry, &[request])
             .map_err(|error| error.message)?;
+        Decision::from_cove(&value)
+    }
+
+    /// The boundary route, bounded by `limits` for this request and no other.
+    ///
+    /// The counterpart of [`Session::evaluate_within`] for the way in that
+    /// makes host calls, and the reason it is here as well as that one: ADR
+    /// 0024 says `max_host_calls` is the control that bounds *effects*
+    /// exactly, where fuel bounds work only to within a straight line. An
+    /// application that wants to cap what one request may do to the outside
+    /// world sets it, and until issue #152 it could only set it for the life
+    /// of the session.
+    pub fn decide_within(
+        &mut self,
+        limits: Limits,
+        module: &str,
+        entry: &str,
+        request: &str,
+    ) -> Result<Decision, String> {
+        let args: Vec<Rc<str>> = vec![request.into()];
+        let value = match &mut self.backend {
+            Backend::Ast(interpreter) => {
+                interpreter.run_entry_within(Budget::new(limits), module, entry, args)
+            }
+            Backend::Vm(vm) => vm.run_entry_within(Budget::new(limits), module, entry, args),
+        }
+        .map_err(|error| error.message)?;
         Decision::from_cove(&value)
     }
 
@@ -1008,15 +1091,21 @@ pub struct Embedding {
 /// makes every call into the module a refusal, which is one of the cases the
 /// tests beside this file pin.
 ///
-/// The budget is installed once, on the registry, and that has a consequence
-/// this example ran into and records rather than routes around. A `Budget` is
-/// cumulative over the registry, `set_budget` needs `&mut HostRegistry`, and
-/// a `Vm` holds the registry by shared reference for as long as it exists. So
-/// a limit imposed here is a limit over *every* invocation the session makes,
-/// and an embedder that wants a fuel limit per invocation has to build a new
-/// registry, a new `Runtime` and a new backend for each one -- which is
-/// exactly what compiling once and invoking many times is for not doing.
-/// Issue #152 is the gap, and `examples/rules/README.md` says what it costs.
+/// `limits` is what bounds the *session*: it is installed on the registry
+/// before anything runs, and every invocation the session makes spends out of
+/// the one budget. That is what an application wants for the limits that are
+/// about the process rather than about a request.
+///
+/// It is no longer the only choice, which it was when this example was
+/// written. A limit that belongs to one request is what a rule engine actually
+/// wants -- a rule package is somebody else's code, and an application running
+/// one wants to be told when a rule loops rather than to stop serving -- and
+/// [`Session::evaluate_within`] is that: the same compiled package, the same
+/// `Vm`, and a `Budget` per invocation. Issue #152 was the gap, and
+/// `examples/rules/README.md` says what it used to cost.
+///
+/// Pass [`Limits::default`] here for a session that is bounded per request and
+/// not otherwise, which is what the cases beside this file do.
 pub fn embedding(reviews: Reviews, grants: &[&str], limits: Limits) -> Embedding {
     embedding_traced(reviews, grants, limits, true)
 }

@@ -3,10 +3,7 @@
 /// The two fields these tests are about are the two the caller supplies; the
 /// other eight are here so that a test reads as the question it asks rather
 /// than as ten fields of which two matter.
-fn withLabels(
-  labels: Array<String>,
-  filesTouched: Array<String>,
-) -> PullRequest {
+fn withLabels(labels: Set<String>, filesTouched: Array<String>) -> PullRequest {
   PullRequest(
     id: "pr-0",
     title: "",
@@ -21,11 +18,18 @@ fn withLabels(
   )
 }
 
-/// A label written twice is carried once, because the question asked of the
-/// labels is membership and a set is what answers that.
-test fn labelSetCarriesEachLabelOnce() -> Result<Unit, Error> {
-  let pr = withLabels(["docs", "docs", "migration"], [])
-  assertEqual(pr.labelSet().length(), 2)?
+/// The labels answer membership, which is the only question a rule asks of
+/// them.
+///
+/// They are a `Set` because that is the question. The field was an
+/// `Array<String>` with a `labelSet` beside it that walked it into a set on
+/// every ask, and the loop was not about review policy: a Host API schema
+/// could not declare a `Set`, so the host handed over the shape it could and
+/// the program converted. It can, so there is nothing between the field and
+/// the question.
+test fn labelsAnswerMembership() -> Result<Unit, Error> {
+  let pr = withLabels(Set.of("docs", "migration"), [])
+  assertEqual(pr.labels.length(), 2)?
   assert(pr.labelled("migration"))?
   assert(!pr.labelled("breaking-change"))?
   Ok(())
@@ -34,9 +38,9 @@ test fn labelSetCarriesEachLabelOnce() -> Result<Unit, Error> {
 /// A pull request with no labels answers the empty set rather than failing to
 /// have one, so a rule that asks about labels needs no special case for the
 /// ordinary pull request that carries none.
-test fn labelSetOfNoLabelsIsEmpty() -> Result<Unit, Error> {
-  let pr = withLabels([], [])
-  assert(pr.labelSet().isEmpty())?
+test fn noLabelsIsTheEmptySet() -> Result<Unit, Error> {
+  let pr = withLabels(Set.of(), [])
+  assert(pr.labels.isEmpty())?
   assert(!pr.labelled("docs"))?
   Ok(())
 }
@@ -44,7 +48,7 @@ test fn labelSetOfNoLabelsIsEmpty() -> Result<Unit, Error> {
 /// `touches` asks about a prefix and not about a whole path, so a rule guards
 /// a directory by naming it once.
 test fn touchesMatchesAPrefixOfAPath() -> Result<Unit, Error> {
-  let pr = withLabels([], ["src/wire.rs", "auth/keys.yaml"])
+  let pr = withLabels(Set.of(), ["src/wire.rs", "auth/keys.yaml"])
   assert(pr.touches("auth/"))?
   assert(pr.touches("src/"))?
   assert(!pr.touches("billing/"))?
@@ -54,7 +58,7 @@ test fn touchesMatchesAPrefixOfAPath() -> Result<Unit, Error> {
 /// A prefix nothing starts with is not found, including in a pull request
 /// that touches no files at all.
 test fn touchesFindsNothingInAnEmptyChange() -> Result<Unit, Error> {
-  assert(!withLabels([], []).touches("auth/"))?
+  assert(!withLabels(Set.of(), []).touches("auth/"))?
   Ok(())
 }
 

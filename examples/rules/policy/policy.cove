@@ -59,31 +59,23 @@ export struct PullRequest {
   targetBranch: String
   changedLines: Int
   filesTouched: Array<String>
-  labels: Array<String>
+  labels: Set<String>
   approvals: Int
   isDraft: Bool
   hasTests: Bool
 }
 
 impl PullRequest {
-  /// The labels as a set, which is what a membership question wants.
-  ///
-  /// The field itself stays an `Array`, because that is the shape a host can
-  /// hand one over in -- a Host API schema has no `Set`, which is issue #153
-  /// -- and the conversion lives here rather than at the boundary so that the
-  /// embedded caller and the fixtures below reach it by the same route.
-  export fn labelSet(self) -> Set<String> {
-    var found: Set<String> = Set.of()
-    for label in self.labels {
-      found = found.inserted(label)
-    }
-
-    found
-  }
-
   /// Whether this pull request carries `label`.
+  ///
+  /// One question and one call, because `labels` is the shape the question
+  /// wants. It was an `Array<String>` with a `labelSet` beside it that walked
+  /// it into a `Set` on every ask, and that loop was not about review policy:
+  /// it was here because a Host API schema could not say `Set` and the host
+  /// therefore could not hand one over. It can (issue #153), so the field is
+  /// what it always meant and the conversion is gone.
   export fn labelled(self, label: String) -> Bool {
-    self.labelSet().contains(label)
+    self.labels.contains(label)
   }
 
   /// Whether any file this pull request touches sits under `prefix`.
