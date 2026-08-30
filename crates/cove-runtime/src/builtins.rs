@@ -58,10 +58,24 @@ pub trait Callable {
     fn allocate_vector(&mut self, elements: Vec<Value>) -> Value;
 
     /// Calls a closure value with already evaluated arguments.
+    ///
+    /// **The arguments are taken out of `args`, which is left empty.** The
+    /// vector belongs to the caller and comes back to it, capacity and all,
+    /// which is what lets a per-element callback be invoked without
+    /// allocating a vector per element: `walk_with` hands the same one
+    /// down for the whole walk. Issue #193 is the cost that made that worth
+    /// arranging — `map`, `filter`, `fold` and `sorted` built and dropped a
+    /// `Vec<Value>` for every element they visited, which is the same shape
+    /// [`crate::vm::Vm`]'s own argument vectors had before #184 and on the
+    /// one path that scheme could not reach.
+    ///
+    /// A caller that fails partway is still handed back a vector it may
+    /// reuse: an implementation drains what it was given before it runs
+    /// anything, so `args` is empty whether the call answered or raised.
     fn call_value(
         &mut self,
         callee: &Value,
-        args: Vec<Value>,
+        args: &mut Vec<Value>,
         span: Span,
     ) -> Result<Value, RuntimeError>;
 
@@ -900,12 +914,14 @@ pub fn call_method(
                     }
                     let error = value.payload.first().cloned().unwrap_or(Value::Unit);
                     // The Language Card writes `mapError { ... }` with a trailing
-                    // closure that may ignore the error it replaces.
-                    let arguments = match host.arity(&callback) {
-                        Some(0) => Vec::new(),
-                        _ => vec![error],
-                    };
-                    Ok(Value::err(host.call_value(&callback, arguments, span)?))
+                    // closure that may ignore the error it replaces. `args` is
+                    // empty here — the callback was removed from it — so it is
+                    // the argument list rather than a second vector built to
+                    // hold at most one value.
+                    if host.arity(&callback) != Some(0) {
+                        args.push(error);
+                    }
+                    Ok(Value::err(host.call_value(&callback, args, span)?))
                 }
                 _ => Err(no_method("Result", name, span)),
             }
@@ -1038,6 +1054,26 @@ fn duration_unit(name: &str) -> Option<i64> {
 /// to the side and returned only on success, so no half-built array and no
 /// half-sorted sequence is ever reachable, and no receiver is written
 /// through on any path.
+///
+/// # The argument list is `args`, once, for the whole walk
+///
+/// Each of the four takes its callback out of `args` first, which leaves
+/// that vector empty with its capacity intact — so it is what every
+/// invocation of the callback is handed, filled and drained again per
+/// element rather than allocated per element. That is issue #193: `map`
+/// built a `vec![item]` for each element it visited, `filter` a
+/// `vec![item.clone()]`, `fold` a `vec![total, item]`, and `sorted` one per
+/// comparison, which for `examples/life`'s `population()` is an allocation
+/// per creature per tick.
+///
+/// It costs nothing to arrange because `args` is already a vector the caller
+/// lends: on the VM it is [`crate::vm::Vm::borrow_args`]'s, pooled since
+/// #184, so the lending scheme that could not reach the callback path now
+/// reaches it by being handed one level further down. A slice would not do
+/// here for the same reason it would not do there — `map` moves its element
+/// into the call and `fold` moves the accumulator through every one of them,
+/// and the callback re-enters the evaluator and may push onto the very stack
+/// a slice would point into.
 fn walk_with(
     host: &mut dyn Callable,
     type_name: &str,
@@ -1062,7 +1098,8 @@ fn walk_with(
             )?;
             let mut mapped = Vec::with_capacity(elements.len());
             for item in elements {
-                mapped.push(host.call_value(&transform, vec![item], span)?);
+                args.push(item);
+                mapped.push(host.call_value(&transform, args, span)?);
             }
             Ok(Value::Array(mapped.into()))
         }
@@ -1072,7 +1109,8 @@ fn walk_with(
             expect_callback(host, &method, "keep", "fn(T) -> Bool", 1, &keep, span)?;
             let mut kept = Vec::new();
             for item in elements {
-                let verdict = host.call_value(&keep, vec![item.clone()], span)?;
+                args.push(item.clone());
+                let verdict = host.call_value(&keep, args, span)?;
                 if callback_bool(&method, "keep", &verdict, span)? {
                     kept.push(item);
                 }
@@ -1085,7 +1123,14 @@ fn walk_with(
             let mut total = args.remove(0);
             expect_callback(host, &method, "step", "fn(R, T) -> R", 2, &step, span)?;
             for item in elements {
-                total = host.call_value(&step, vec![total, item], span)?;
+                // The accumulator is *moved* through every call, which is
+                // half of why the argument list is a vector rather than a
+                // slice of something the caller still owns. What is left
+                // behind is never read: the next statement either overwrites
+                // it or leaves the loop with an error.
+                args.push(std::mem::replace(&mut total, Value::Unit));
+                args.push(item);
+                total = host.call_value(&step, args, span)?;
             }
             Ok(total)
         }
@@ -1094,7 +1139,7 @@ fn walk_with(
             let by = args.remove(0);
             expect_callback(host, &method, "by", "fn(T, T) -> Bool", 2, &by, span)?;
             Ok(Value::Array(
-                merge_sort(host, &method, elements, &by, span)?.into(),
+                merge_sort(host, &method, elements, &by, args, span)?.into(),
             ))
         }
         // Only the four names above are routed here, and the shared table is
@@ -1131,6 +1176,7 @@ fn merge_sort(
     method: &str,
     elements: Vec<Value>,
     by: &Value,
+    args: &mut Vec<Value>,
     span: Span,
 ) -> Result<Vec<Value>, RuntimeError> {
     let len = elements.len();
@@ -1145,8 +1191,9 @@ fn merge_sort(
             let end = (start + width * 2).min(len);
             let (mut left, mut right) = (start, middle);
             while left < middle && right < end {
-                let verdict =
-                    host.call_value(by, vec![source[right].clone(), source[left].clone()], span)?;
+                args.push(source[right].clone());
+                args.push(source[left].clone());
+                let verdict = host.call_value(by, args, span)?;
                 if callback_bool(method, "by", &verdict, span)? {
                     merged.push(source[right].clone());
                     right += 1;

@@ -3356,14 +3356,25 @@ impl Callable for Interpreter<'_> {
         Interpreter::snapshot(self, value, span)
     }
 
+    /// The caller's vector is drained rather than consumed, so that a
+    /// higher-order builtin can hand the same one down for every element it
+    /// walks. See [`crate::builtins::Callable::call_value`] for why, and
+    /// `builtins::walk_with` for what pays for it.
+    ///
+    /// One vector is still built per call here, because a slot carries a
+    /// label and a span beside its value and the interpreter binds
+    /// parameters out of that shape. It is one of the several this backend
+    /// builds per call — an `Env`, the parameter names, the label
+    /// assignment — rather than the only one, which is why the tree walk
+    /// moves less on this than the VM does.
     fn call_value(
         &mut self,
         callee: &Value,
-        args: Vec<Value>,
+        args: &mut Vec<Value>,
         span: Span,
     ) -> Result<Value, RuntimeError> {
         let args = args
-            .into_iter()
+            .drain(..)
             .map(|value| EvaluatedArg {
                 label: None,
                 spread: false,

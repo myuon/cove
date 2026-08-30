@@ -2891,10 +2891,20 @@ impl<'a> Vm<'a> {
     /// handed. A safepoint spends the fuel standing and asks the budget, so
     /// asking twice in a row charges zero fuel the second time and changes no
     /// answer.
+    /// # What it does with `args`
+    ///
+    /// It empties it. The values are pushed onto the value stack, which is
+    /// where a call's arguments belong, and the vector itself goes back to
+    /// whoever lent it — which is what lets `builtins::walk_with` invoke a
+    /// callback once per element without a vector per element. A caller with
+    /// a vector of its own may pass `&mut` to one and find it empty
+    /// afterwards; [`Reentry`] still takes an owned one, because it is the
+    /// boundary an embedder writes against, the same reason
+    /// [`crate::host::HostModule::call`] kept its own in #184.
     fn call_from_host(
         &mut self,
         callee: &Value,
-        args: Vec<Value>,
+        args: &mut Vec<Value>,
         span: Span,
     ) -> Result<Value, RuntimeError> {
         let Ok(argc) = u16::try_from(args.len()) else {
@@ -2931,14 +2941,12 @@ impl<'a> Vm<'a> {
     fn run_callback(
         &mut self,
         callee: &Value,
-        args: Vec<Value>,
+        args: &mut Vec<Value>,
         argc: u16,
         span: Span,
     ) -> Result<Value, RuntimeError> {
         let floor = self.frames.len();
-        for value in args {
-            self.stack.push(value);
-        }
+        self.stack.append(args);
         // The resumption point is never read: `leave` answers at the floor
         // rather than resuming an instruction, because the instruction this
         // frame would return into is one no loop fetched.
@@ -3888,9 +3896,9 @@ impl Reentry for Callback<'_, '_> {
     /// The span is the host call's own, so a failure inside the callback
     /// that has no span of its own points at the call that ran it rather
     /// than at nothing.
-    fn call(&mut self, callee: &Value, args: Vec<Value>) -> Result<Value, RuntimeError> {
+    fn call(&mut self, callee: &Value, mut args: Vec<Value>) -> Result<Value, RuntimeError> {
         let span = self.span;
-        self.vm.call_from_host(callee, args, span)
+        self.vm.call_from_host(callee, &mut args, span)
     }
 
     fn call_until(
@@ -3993,7 +4001,7 @@ fn run_task(
 ) -> TaskOutcome {
     let mut vm = Vm::for_task(runtime, runtime.hosts(), program, id, cancellation.clone());
     vm.timings.push(Timing::start());
-    let result = vm.call_from_host(&body.into_value(), Vec::new(), span);
+    let result = vm.call_from_host(&body.into_value(), &mut Vec::new(), span);
     // A body that raised abandoned whatever it had open, and this thread is
     // ending, so the scopes go the way they go at the end of a run.
     vm.close_scopes_above(0);
@@ -4030,12 +4038,19 @@ impl Callable for Vm<'_> {
         builtins::snapshot(self, value, span)
     }
 
-    /// A higher-order builtin's callback — `Result.mapError`'s, today — run
-    /// through the same re-entrant loop a host callback is.
+    /// A higher-order builtin's callback — `map`, `filter`, `fold`,
+    /// `sorted`, and `Result.mapError` — run through the same re-entrant
+    /// loop a host callback is.
+    ///
+    /// The arguments are drained onto the value stack, which is where a
+    /// call's arguments go, so the caller's vector is empty and reusable
+    /// when this answers. Nothing here allocates: `builtins::walk_with`
+    /// hands down the vector `Vm::borrow_args` already lent it, so a
+    /// callback invoked once per element costs no vector at all.
     fn call_value(
         &mut self,
         callee: &Value,
-        args: Vec<Value>,
+        args: &mut Vec<Value>,
         span: Span,
     ) -> Result<Value, RuntimeError> {
         self.call_from_host(callee, args, span)

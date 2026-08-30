@@ -2,11 +2,25 @@ use super::*;
 
 // ------------------------------------------------------------ benches
 
-/// ADR 0012's benchmark package is the target, and six of its eight
-/// entries lower.
+/// ADR 0012's benchmark package is the target, and seven of its entries
+/// lower.
+///
+/// `callback` is here because it is the one entry whose body reaches the
+/// evaluator from inside a builtin: `filter` over a closure. A lowering that
+/// refused it would leave issue #193's row measurable on one backend only,
+/// and a benchmark that runs on one backend cannot be read against the
+/// other.
 #[test]
-fn six_of_the_eight_bench_entries_lower_and_validate() {
-    for name in ["pure", "hostheavy", "arith", "arrayget", "call", "chars"] {
+fn seven_of_the_bench_entries_lower_and_validate() {
+    for name in [
+        "pure",
+        "hostheavy",
+        "arith",
+        "arrayget",
+        "call",
+        "chars",
+        "callback",
+    ] {
         let program = match lower(&bench(name)) {
             Ok(program) => program,
             Err(why) => panic!("`benches/{name}` lowers, but stopped at {why}"),

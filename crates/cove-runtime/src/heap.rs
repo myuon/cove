@@ -1346,6 +1346,93 @@ mod tests {
         assert_eq!(bytes_for(3), case + 3 * size_of::<Value>() as u64);
     }
 
+    /// A closure is charged for its own header, its capture names, and one
+    /// `Value` per capture — once, however many live paths reach it.
+    ///
+    /// Nothing in this suite built a `Value::Closure` at all, which is how
+    /// its byte arithmetic could have gone wrong in either walker with
+    /// nothing failing. `tests/differential`'s `same_heap` does not close
+    /// that gap: it compares the two backends against each other, so an
+    /// absolute error made identically by both — and both backends reach
+    /// this one function — passes it. So the figure is stated here,
+    /// absolutely, the way
+    /// `an_enum_case_charges_the_payload_it_actually_allocated` states the
+    /// enum's.
+    ///
+    /// Two roots rather than one because the closure arm's `walked` guard is
+    /// what keeps a shared closure from being charged twice, and a guard
+    /// nothing exercises is a guard that can be lost by accident.
+    #[test]
+    fn a_closure_charges_its_captures_once_however_many_paths_reach_it() {
+        let mut roots = SlotRoots::new();
+        let mut heap = Heap::new();
+        let closure = Rc::new(crate::value::Closure {
+            is_async: false,
+            arity: 1,
+            body: crate::value::ClosureBody::Lowered(cove_ir::FunctionId(0)),
+            module: "test".into(),
+            captures: vec![
+                ("species".into(), Value::Int(7)),
+                ("world".into(), Value::Unit),
+            ],
+        });
+        let _a = root(&mut roots, Value::Closure(Rc::clone(&closure)));
+        let _b = root(&mut roots, Value::Closure(Rc::clone(&closure)));
+        // The same reason the struct test below drops its local: an unrooted
+        // binding is a temporary, and the shortfall rule would rightly treat
+        // it as a third live path.
+        drop(closure);
+
+        let expected = size_of::<crate::value::Closure>() as u64
+            + ("species".len() + size_of::<Value>()) as u64
+            + ("world".len() + size_of::<Value>()) as u64;
+        assert_eq!(
+            heap.collect(&roots).live_bytes,
+            expected,
+            "a closure reached from two roots should be charged once, for its \
+             header and its captures"
+        );
+    }
+
+    /// An object a closure captured is reachable through the capture.
+    ///
+    /// `Scan::count`'s closure arm is what says so, and the sweep is what
+    /// asks: a wrong answer there is a `Vector` handle the program still
+    /// holds with its elements emptied out from under it. This is the shape
+    /// `examples/life`'s `population()` has — a closure over one captured
+    /// value, handed to `filter` — with the capture made collectable so that
+    /// there is something for the collector to get wrong.
+    #[test]
+    fn an_object_a_closure_captured_is_reachable_through_the_capture() {
+        let mut roots = SlotRoots::new();
+        let mut heap = Heap::new();
+        let held = heap.allocate(vec![Value::Int(7)]);
+        let _slot = root(
+            &mut roots,
+            Value::Closure(Rc::new(crate::value::Closure {
+                is_async: false,
+                arity: 1,
+                body: crate::value::ClosureBody::Lowered(cove_ir::FunctionId(0)),
+                module: "test".into(),
+                captures: vec![("held".into(), Value::Vector(held.clone()))],
+            })),
+        );
+        let weak = Rc::downgrade(&held);
+        drop(held);
+
+        let collected = heap.collect(&roots);
+        let survivor = weak.upgrade().expect("the closure still holds the vector");
+        assert!(
+            survivor
+                .elements
+                .borrow()
+                .first()
+                .is_some_and(|element| element.eq_value(&Value::Int(7))),
+            "the sweep emptied a vector a closure capture still reaches: {collected:?}"
+        );
+        assert_eq!(collected.freed_objects, 0);
+    }
+
     /// `Marker::visit`'s struct arm has no `walked` guard, unlike every other
     /// container it walks, so a struct reached from two live roots has its
     /// header and its field names added to `live_bytes` twice. That

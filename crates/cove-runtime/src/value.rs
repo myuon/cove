@@ -815,6 +815,49 @@ impl fmt::Display for MapKey {
     }
 }
 
+/// The eight builtin names, made once per thread and handed out by
+/// reference count.
+///
+/// `Option` and `Result` are built constantly — every `Array.get`, every
+/// `?`, every fallible builtin — and issue #104 stopped each one allocating
+/// two `Rc<str>` by keeping the strings in a thread-local list and scanning
+/// it for the one asked for. The strings never changed, but the scan stayed:
+/// a `Some(x)` cost two thread-local accesses, two `RefCell` borrows, and
+/// two linear walks comparing string contents. This is the same idea with
+/// the lookup taken out — the names are fields, so a constructor reaches the
+/// thread-local once and clones two `Rc`s out of it. Issue #193 records it
+/// as the other half of #183, which took the payload's allocation and left
+/// this.
+///
+/// Per thread rather than global, for #104's reason: `Rc` is not shareable
+/// across threads, and ADR 0008 gives each task a thread.
+struct BuiltinNames {
+    result: Rc<str>,
+    ok: Rc<str>,
+    err: Rc<str>,
+    option: Rc<str>,
+    some: Rc<str>,
+    none: Rc<str>,
+    error: Rc<str>,
+    message: Rc<str>,
+}
+
+thread_local! {
+    /// Built on the first `Ok`, `Err`, `Some`, `None` or `Error` this thread
+    /// makes, which is the same eight allocations #104's list made lazily,
+    /// paid once rather than one name at a time.
+    static BUILTIN_NAMES: BuiltinNames = BuiltinNames {
+        result: Rc::from(RESULT.name),
+        ok: Rc::from(OK_CASE.name),
+        err: Rc::from(ERR_CASE.name),
+        option: Rc::from(OPTION.name),
+        some: Rc::from(SOME_CASE.name),
+        none: Rc::from(NONE_CASE.name),
+        error: Rc::from(ERROR.name),
+        message: Rc::from(MESSAGE_FIELD.name),
+    };
+}
+
 /// The builtin `Option`, `Result`, and `Error` values, built and read through
 /// the one description of what they are made of.
 ///
@@ -827,75 +870,58 @@ impl fmt::Display for MapKey {
 impl Value {
     /// `Ok(value)`
     pub fn ok(value: Value) -> Value {
-        Value::Enum(Box::new(EnumValue {
-            type_name: Value::builtin_name(RESULT.name),
-            case: Value::builtin_name(OK_CASE.name),
-            payload: Payload::One(value),
-        }))
-    }
-
-    /// The shared string `name`, made once per thread.
-    ///
-    /// `Option` and `Result` are built constantly -- every `Array.get`, every
-    /// `?`, every fallible builtin -- and each one turned two `&'static str`
-    /// into two freshly allocated `Rc<str>`. The strings are the same six
-    /// names every time, so they are made once and handed out by reference
-    /// count instead (issue #104). Per thread rather than global, because
-    /// `Rc` is not shareable across threads.
-    fn builtin_name(name: &'static str) -> Rc<str> {
-        thread_local! {
-            static NAMES: RefCell<Vec<(&'static str, Rc<str>)>> = const { RefCell::new(Vec::new()) };
-        }
-        NAMES.with(|names| {
-            let mut names = names.borrow_mut();
-            // The list is the six builtin enum and struct names, so a scan is
-            // shorter than hashing the string would be.
-            if let Some((_, shared)) = names.iter().find(|(known, _)| *known == name) {
-                return shared.clone();
-            }
-            let shared: Rc<str> = Rc::from(name);
-            names.push((name, shared.clone()));
-            shared
+        BUILTIN_NAMES.with(|names| {
+            Value::Enum(Box::new(EnumValue {
+                type_name: names.result.clone(),
+                case: names.ok.clone(),
+                payload: Payload::One(value),
+            }))
         })
     }
 
     /// `Err(error)`
     pub fn err(error: Value) -> Value {
-        Value::Enum(Box::new(EnumValue {
-            type_name: Value::builtin_name(RESULT.name),
-            case: Value::builtin_name(ERR_CASE.name),
-            payload: Payload::One(error),
-        }))
+        BUILTIN_NAMES.with(|names| {
+            Value::Enum(Box::new(EnumValue {
+                type_name: names.result.clone(),
+                case: names.err.clone(),
+                payload: Payload::One(error),
+            }))
+        })
     }
 
     /// `Some(value)`
     pub fn some(value: Value) -> Value {
-        Value::Enum(Box::new(EnumValue {
-            type_name: Value::builtin_name(OPTION.name),
-            case: Value::builtin_name(SOME_CASE.name),
-            payload: Payload::One(value),
-        }))
+        BUILTIN_NAMES.with(|names| {
+            Value::Enum(Box::new(EnumValue {
+                type_name: names.option.clone(),
+                case: names.some.clone(),
+                payload: Payload::One(value),
+            }))
+        })
     }
 
     /// `None`
     pub fn none() -> Value {
-        Value::Enum(Box::new(EnumValue {
-            type_name: Value::builtin_name(OPTION.name),
-            case: Value::builtin_name(NONE_CASE.name),
-            payload: Payload::Empty,
-        }))
+        BUILTIN_NAMES.with(|names| {
+            Value::Enum(Box::new(EnumValue {
+                type_name: names.option.clone(),
+                case: names.none.clone(),
+                payload: Payload::Empty,
+            }))
+        })
     }
 
     /// The builtin `Error` struct.
     pub fn error(message: impl Into<String>) -> Value {
-        Value::Struct(Rc::new(StructValue {
-            type_name: Value::builtin_name(ERROR.name),
-            fields: vec![(
-                Value::builtin_name(MESSAGE_FIELD.name),
-                Value::Str(message.into().into()),
-            )],
-            opaque: false,
-        }))
+        let message = Value::Str(message.into().into());
+        BUILTIN_NAMES.with(|names| {
+            Value::Struct(Rc::new(StructValue {
+                type_name: names.error.clone(),
+                fields: vec![(names.message.clone(), message)],
+                opaque: false,
+            }))
+        })
     }
 
     /// A value of the declared struct type `type_name`, carrying `fields` in

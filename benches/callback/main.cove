@@ -1,0 +1,52 @@
+/// How many of `items` fall in one residue class.
+///
+/// This is the shape `examples/life`'s `population()` has, reduced to the
+/// mechanism: a small helper that builds a closure over one captured value in
+/// its own body and hands it to `filter`, which invokes that closure once per
+/// element. `creatureNamed`, `hash`, `sightings` and `examples/covecheck`'s
+/// `runCheck` are the same shape, and none of them writes a closure literal
+/// inside a loop -- the loop is `filter`'s own walk, one level down.
+fn matching(items: Array<Int>, wanted: Int) -> Int {
+  items.filter(fn(item) {
+    item % 8 == wanted
+  }).length()
+}
+
+/// The baseline loop, with one callback invocation per element of a
+/// thirty-two element array.
+///
+/// 62,500 turns of 32 elements is the same 2,000,000 invocations the other
+/// mechanism benchmarks make, so this row is read beside `call`: that one
+/// enters a declared function 2,000,000 times through the call instruction,
+/// and this one enters a closure 2,000,000 times through the higher-order
+/// builtin path -- `builtins::walk_with` and `Callable::call_value` -- which
+/// is a different route into the same kind of body. The difference between
+/// the two rows is what re-entering the evaluator from inside a builtin
+/// costs, and that is the only route by which `map`, `filter`, `fold` and
+/// `sorted` run any Cove code at all.
+///
+/// The array is built once, outside the loop, because what is measured is
+/// the per-element callback and not the construction of a sequence to walk.
+/// It is built by pushing onto a `Vector` and freezing it, which is how
+/// `examples/life` builds the `Array<Creature>` its own `filter` walks.
+/// What a turn pays besides its thirty-two callbacks is what the real shape
+/// pays: one closure built, one `filter` entered, and one array of the four
+/// elements it kept.
+export fn main() -> Result<Unit, Error> {
+  var scratch = Vector.of()
+  var n = 0
+  while n < 32 {
+    scratch.push(n)
+    n += 1
+  }
+  let items = scratch.freeze()
+
+  var total = 0
+  var round = 0
+  while round < 62500 {
+    total += matching(items, round % 8)
+    round += 1
+  }
+  assertEqual(total, 250000)?
+  Ok(())
+}
