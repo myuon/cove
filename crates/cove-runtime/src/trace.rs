@@ -22,7 +22,7 @@
 //! that changes silently breaks whatever reads it:
 //!
 //! ```text
-//! {"event":"trace_header","version":<u32>,"values":"full"|"redacted","entry":<string>,"args":[<string>...]}
+//! {"event":"trace_header","version":<u32>,"backend":"ast"|"vm","values":"full"|"redacted","entry":<string>,"args":[<string>...]}
 //! {"event":"task_spawned","id":<u64>,"parent":<u64|null>,"scope":<string>}
 //! {"event":"task_completed","id":<u64>,"cpu_ns":<u64>}
 //! {"event":"task_cancelled","id":<u64>}
@@ -102,7 +102,59 @@ use crate::value::Value;
 /// a reader that met a `run_ended` it had never heard of would report a broken
 /// line rather than an old file — so the version says what changed and a
 /// version 1 trace is refused for its version.
-pub const TRACE_FORMAT_VERSION: u32 = 2;
+///
+/// Version 3 added [`TraceHeader::backend`], so a file says which of ADR
+/// 0019's two backends wrote it and `cove replay` reads that rather than
+/// guessing it. ADR 0026 is the decision. A version 2 trace is refused for
+/// its version, exactly as a version 1 one is: this reader has always read
+/// one version, and a version 2 file is precisely a file that cannot answer
+/// the question a version 3 replay asks first.
+pub const TRACE_FORMAT_VERSION: u32 = 3;
+
+/// Which of ADR 0019's two backends produced a recording.
+///
+/// A trace is written by `cove run --trace`, by a built binary, and by a
+/// benchmark, and all three run a program on one of two evaluators. The
+/// header names which, so that `cove replay` can run the recording on the
+/// backend that made it without inferring anything, and can say so when it
+/// was told to do otherwise. ADR 0026 is the decision and its reasoning.
+///
+/// A closed set rather than free text, spelled with the two names
+/// `--backend` accepts, so a reader that meets a third name refuses the file
+/// rather than carrying a string it cannot act on.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RecordingBackend {
+    /// The tree-walking interpreter, which ADR 0012 keeps as the oracle.
+    Ast,
+    /// The dedicated VM of ADR 0019, which ADR 0022 made the default.
+    Vm,
+}
+
+impl RecordingBackend {
+    /// The name this backend is written under in a trace header, which is
+    /// also the name `--backend` accepts for it.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            RecordingBackend::Ast => "ast",
+            RecordingBackend::Vm => "vm",
+        }
+    }
+
+    /// Parses the name [`RecordingBackend::as_str`] produces.
+    pub fn parse(text: &str) -> Option<RecordingBackend> {
+        match text {
+            "ast" => Some(RecordingBackend::Ast),
+            "vm" => Some(RecordingBackend::Vm),
+            _ => None,
+        }
+    }
+}
+
+impl std::fmt::Display for RecordingBackend {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
 
 /// How much of a host call's arguments and results a trace records.
 ///
@@ -145,9 +197,13 @@ impl ValueCapture {
 ///
 /// The entry and its arguments are here because a replay needs them and no
 /// event carries them: `cove replay` starts the same entry with the same
-/// arguments, and refuses a trace recorded from a different one.
+/// arguments, and refuses a trace recorded from a different one. The backend
+/// is here for the same reason read one step further: a replay wants to be
+/// the run it replays, and which evaluator ran is part of what that run was.
 #[derive(Clone, Debug)]
 pub struct TraceHeader {
+    /// Which backend ran the program this trace recorded.
+    pub backend: RecordingBackend,
     /// How much of each host call's values the trace carries.
     pub values: ValueCapture,
     /// The qualified entry function the run started, such as
@@ -485,8 +541,8 @@ pub struct JsonlSink<W: Write + Send> {
 
 impl<W: Write + Send> JsonlSink<W> {
     /// Writes trace lines to `writer`, starting with the header line that
-    /// declares the format version, the value capture mode, and the entry the
-    /// run started.
+    /// declares the format version, the backend that is about to run, the
+    /// value capture mode, and the entry the run started.
     pub fn new(mut writer: W, header: TraceHeader) -> Self {
         let args = header
             .args
@@ -498,7 +554,8 @@ impl<W: Write + Send> JsonlSink<W> {
         // fail the run it is observing.
         let _ = writeln!(
             writer,
-            "{{\"event\":\"trace_header\",\"version\":{TRACE_FORMAT_VERSION},\"values\":{},\"entry\":{},\"args\":[{args}]}}",
+            "{{\"event\":\"trace_header\",\"version\":{TRACE_FORMAT_VERSION},\"backend\":{},\"values\":{},\"entry\":{},\"args\":[{args}]}}",
+            json_string(header.backend.as_str()),
             json_string(header.values.as_str()),
             json_string(&header.entry),
         );
@@ -847,6 +904,7 @@ mod tests {
 
     fn header(values: ValueCapture) -> TraceHeader {
         TraceHeader {
+            backend: RecordingBackend::Vm,
             values,
             entry: "hello.main".to_string(),
             args: Vec::new(),
@@ -893,10 +951,11 @@ mod tests {
     }
 
     #[test]
-    fn the_first_line_declares_the_version_the_mode_the_entry_and_the_arguments() {
+    fn the_first_line_declares_the_version_the_backend_the_mode_the_entry_and_the_arguments() {
         let sink = JsonlSink::new(
             Buffer(Vec::new()),
             TraceHeader {
+                backend: RecordingBackend::Vm,
                 values: ValueCapture::Full,
                 entry: "restricted.main".to_string(),
                 args: vec!["one".to_string(), "two".to_string()],
@@ -904,8 +963,41 @@ mod tests {
         );
         assert_eq!(
             String::from_utf8(sink.writer.into_inner().unwrap().0).unwrap(),
-            "{\"event\":\"trace_header\",\"version\":2,\"values\":\"full\",\"entry\":\"restricted.main\",\"args\":[\"one\",\"two\"]}\n"
+            "{\"event\":\"trace_header\",\"version\":3,\"backend\":\"vm\",\"values\":\"full\",\"entry\":\"restricted.main\",\"args\":[\"one\",\"two\"]}\n"
         );
+    }
+
+    /// The other backend, written the same way.
+    ///
+    /// ADR 0026's point is that the field distinguishes two recordings, so a
+    /// test that only ever saw one of the two names would not be testing the
+    /// distinction. The oracle is the half that has to be asked for on the
+    /// command line, and it is the half worth pinning here.
+    #[test]
+    fn a_recording_made_on_the_oracle_says_so_in_its_header() {
+        let sink = JsonlSink::new(
+            Buffer(Vec::new()),
+            TraceHeader {
+                backend: RecordingBackend::Ast,
+                values: ValueCapture::Full,
+                entry: "restricted.main".to_string(),
+                args: Vec::new(),
+            },
+        );
+        assert_eq!(
+            String::from_utf8(sink.writer.into_inner().unwrap().0).unwrap(),
+            "{\"event\":\"trace_header\",\"version\":3,\"backend\":\"ast\",\"values\":\"full\",\"entry\":\"restricted.main\",\"args\":[]}\n"
+        );
+    }
+
+    /// The two spellings a header writes are the two `--backend` accepts, and
+    /// each parses back to what wrote it.
+    #[test]
+    fn a_recording_backend_round_trips_through_its_name() {
+        for backend in [RecordingBackend::Ast, RecordingBackend::Vm] {
+            assert_eq!(RecordingBackend::parse(backend.as_str()), Some(backend));
+        }
+        assert_eq!(RecordingBackend::parse("jit"), None);
     }
 
     #[test]

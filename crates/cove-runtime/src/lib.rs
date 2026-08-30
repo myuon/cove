@@ -44,8 +44,9 @@ pub use schema::{
 pub use shared::SharedCell;
 pub use task::Transfer;
 pub use trace::{
-    create_trace_file, value_to_json, HostOutcome, JsonlSink, NullSink, RecordedValue, RunOutcome,
-    TraceEvent, TraceHeader, TraceSink, ValueCapture, TRACE_FORMAT_VERSION,
+    create_trace_file, value_to_json, HostOutcome, JsonlSink, NullSink, RecordedValue,
+    RecordingBackend, RunOutcome, TraceEvent, TraceHeader, TraceSink, ValueCapture,
+    TRACE_FORMAT_VERSION,
 };
 pub use value::Value;
 pub use vm::Vm;

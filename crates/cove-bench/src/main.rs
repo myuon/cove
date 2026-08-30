@@ -118,8 +118,8 @@ use cove_runtime::interp::Interpreter;
 use cove_runtime::vm::Vm;
 use cove_runtime::{
     Budget, Cancellation, Clock, Console, Database, Documents, Env, Files, Grants, HeapStats,
-    HostRegistry, JsonlSink, Limits, NullSink, Process, ProcessLog, Runtime, TraceHeader,
-    TraceSink, Value, ValueCapture, VirtualTime,
+    HostRegistry, JsonlSink, Limits, NullSink, Process, ProcessLog, RecordingBackend, Runtime,
+    TraceHeader, TraceSink, Value, ValueCapture, VirtualTime,
 };
 use cove_sema::package::Package;
 use cove_sema::resolve::Program;
@@ -911,6 +911,12 @@ fn bench_trace_overhead(
     let mut traced = Vec::with_capacity(iterations as usize);
     for _ in 0..iterations {
         let header = TraceHeader {
+            // The backend this measurement is of, which is the one the
+            // recording would have been made on had it been kept.
+            backend: match backend {
+                Backend::Ast => RecordingBackend::Ast,
+                Backend::Vm => RecordingBackend::Vm,
+            },
             values: ValueCapture::Redacted,
             entry: format!("{module}.{entry}"),
             args: Vec::new(),

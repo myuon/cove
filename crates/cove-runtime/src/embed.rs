@@ -46,7 +46,8 @@ use crate::runtime::Runtime;
 use crate::trace::create_trace_file;
 use crate::vm::Vm;
 use crate::{
-    Budget, Cancellation, JsonlSink, Limits, NullSink, TraceHeader, TraceSink, Value, ValueCapture,
+    Budget, Cancellation, JsonlSink, Limits, NullSink, RecordingBackend, TraceHeader, TraceSink,
+    Value, ValueCapture,
 };
 
 /// The hosts a run is given, and the directories they are confined to.
@@ -419,6 +420,14 @@ impl Embedded {
     /// Opens the trace destination the `[run.<name>]` table named.
     fn sink(&self, program_args: &[String]) -> Result<Arc<dyn TraceSink>, Failure> {
         let header = TraceHeader {
+            // The backend `cove build` chose, which is the backend this
+            // binary is about to run on: a built binary embeds one evaluator
+            // and has no flag to change it, so what it records is what it
+            // ran.
+            backend: match self.backend {
+                EmbeddedBackend::Ast => RecordingBackend::Ast,
+                EmbeddedBackend::Vm => RecordingBackend::Vm,
+            },
             values: ValueCapture::Full,
             entry: self.run.entry.to_string(),
             args: program_args.to_vec(),

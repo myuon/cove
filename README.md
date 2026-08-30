@@ -116,7 +116,10 @@ with no second thread and no scheduler. `cove trace` reads a recorded
 trace back and summarises it, and `cove replay` runs an entry again with every
 host answering from the trace -- reproducing a resource handle by handing back
 the recorded name -- and reports a divergence when the program asks for
-something the trace does not have. The `console`, `env`, `documents`, `clock`,
+something the trace does not have. A trace names the backend that recorded it,
+so a replay runs on that backend unless `--backend` says otherwise, and says
+which of the two situations it is in
+([ADR 0026](docs/adr/0026-a-trace-names-the-backend-that-recorded-it.md)). The `console`, `env`, `documents`, `clock`,
 `files`, and `process` hosts each ship a real and a fake implementation;
 `console` writes on two streams under the one capability -- `println` and
 `print` carry what a program produces, `eprintln` and `eprint` what it has to

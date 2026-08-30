@@ -15,8 +15,8 @@ use cove_runtime::host::HostRegistry;
 use cove_runtime::interp::Interpreter;
 use cove_runtime::vm::Vm;
 use cove_runtime::{
-    create_trace_file, Budget, Cancellation, HeapStats, JsonlSink, Limits, NullSink, Runtime,
-    TraceEvent, TraceHeader, TraceSink, ValueCapture,
+    create_trace_file, Budget, Cancellation, HeapStats, JsonlSink, Limits, NullSink,
+    RecordingBackend, Runtime, TraceEvent, TraceHeader, TraceSink, ValueCapture,
 };
 use cove_sema::capability::open_reasons;
 use cove_sema::config::RunConfig;
@@ -137,11 +137,13 @@ program's own computation runs for real; only the Host API boundary is canned,
 so no host is called and nothing outside the process changes. A replay exits
 non-zero when it diverges: the program asked for a call the trace does not
 have, asked for a different one, or stopped before using them all.
-`--backend <ast|vm>` chooses which backend replays it, defaulting to the VM as
-`cove run` does, so an ordinary recording is replayed on the backend that made
-it. A trace does not record which backend recorded it, so the summary and
-every divergence report name the backend the replay ran on and say that the
-file does not name the other; ADR 0023 is why.
+`--backend <ast|vm>` chooses which backend replays it, defaulting since ADR
+0026 to the one the trace says recorded it rather than to `cove run`'s
+default, so an ordinary replay is a same-backend replay and is one by reading
+the file. Naming the flag replays across backends deliberately, which stays
+supported; the summary and every divergence report then say so, because a
+divergence found across backends could be the two backends' rather than the
+program's.
 
 `cove run` flags (may appear in any position after <name>; everything after a
 literal `--` is a program argument, even if it looks like a flag):
@@ -1181,7 +1183,12 @@ pub(crate) fn execute_entry(
         .trace
         .or_else(|| run.trace.as_deref().map(TraceTarget::from_flag));
     let wait_total = WaitTotal::default();
+    // The backend goes in the header because this is the one place that
+    // knows both that a trace is being written and which evaluator is about
+    // to write it; ADR 0026 is why a file says so rather than a reader
+    // guessing.
     let header = TraceHeader {
+        backend: flags.backend.recording(),
         values: flags.trace_values,
         entry: run.entry.clone(),
         args: flags.program_args.clone(),
@@ -1423,6 +1430,32 @@ impl Backend {
             _ => None,
         }
     }
+
+    /// This backend as a trace header names it.
+    ///
+    /// Two enums for two backends, because the crates draw the line
+    /// elsewhere: `cove_runtime` records without knowing what a command-line
+    /// flag is, and this one is a flag's parsed value. They share the two
+    /// spellings rather than the type, and this is the one function that
+    /// joins them.
+    pub(crate) fn recording(self) -> RecordingBackend {
+        match self {
+            Backend::Ast => RecordingBackend::Ast,
+            Backend::Vm => RecordingBackend::Vm,
+        }
+    }
+
+    /// The backend that wrote a recording, as the flag that could have named
+    /// it.
+    ///
+    /// The inverse of [`Backend::recording`], and what makes `cove replay`'s
+    /// default a reading of the file rather than an inference about it.
+    pub(crate) fn of_recording(backend: RecordingBackend) -> Backend {
+        match backend {
+            RecordingBackend::Ast => Backend::Ast,
+            RecordingBackend::Vm => Backend::Vm,
+        }
+    }
 }
 
 /// Splits `--backend <ast|vm>` out of a command's arguments, leaving the rest
@@ -1435,7 +1468,25 @@ impl Backend {
 /// unknown one is refused with are one thing rather than several that could
 /// drift.
 pub(crate) fn split_backend(args: &[String]) -> Result<(Backend, Vec<String>), CliError> {
-    let mut backend = Backend::default_for_a_run();
+    let (backend, rest) = split_backend_if_named(args)?;
+    Ok((backend.unwrap_or_else(Backend::default_for_a_run), rest))
+}
+
+/// The same split, answering `None` for a command that was given no
+/// `--backend`.
+///
+/// `cove replay` is the one command with somewhere better than
+/// [`Backend::default_for_a_run`] to look when nobody named a backend: since
+/// ADR 0026 the trace says which backend wrote it, and a replay of it should
+/// be that backend. Whether the flag was written is therefore a question
+/// that command has to be able to ask, and it asks it here rather than by
+/// scanning the arguments a second time — the value `--backend` accepts and
+/// the sentence an unknown one is refused with stay in one place, which is
+/// the whole point of this function.
+pub(crate) fn split_backend_if_named(
+    args: &[String],
+) -> Result<(Option<Backend>, Vec<String>), CliError> {
+    let mut backend = None;
     let mut rest = Vec::new();
     let mut i = 0;
     while i < args.len() {
@@ -1443,11 +1494,11 @@ pub(crate) fn split_backend(args: &[String]) -> Result<(Backend, Vec<String>), C
             let value = args.get(i + 1).ok_or_else(|| {
                 CliError::Message("`--backend` needs a value: `ast` or `vm`".to_string())
             })?;
-            backend = Backend::parse(value).ok_or_else(|| {
+            backend = Some(Backend::parse(value).ok_or_else(|| {
                 CliError::Message(format!(
                     "`--backend` must be `ast` or `vm`, found `{value}`"
                 ))
-            })?;
+            })?);
             i += 2;
             continue;
         }
@@ -2267,6 +2318,47 @@ module auth
                 panic!("an unknown backend should be refused with a message");
             };
             assert_eq!(message, expected);
+        }
+    }
+
+    /// The same split, asked whether the flag was written at all.
+    ///
+    /// `cove replay` needs the difference between "the VM, because nobody
+    /// said" and "the VM, because somebody said": since ADR 0026 the first
+    /// one is answered by the trace and the second one overrides it. The two
+    /// answers must come from one parser, or an unknown value would be
+    /// refused with two sentences.
+    #[test]
+    fn the_shared_backend_flag_says_whether_it_was_written() {
+        let args =
+            |args: &[&str]| -> Vec<String> { args.iter().map(|arg| (*arg).to_string()).collect() };
+        let Ok((backend, rest)) = split_backend_if_named(&args(&["t.jsonl", "restricted"])) else {
+            panic!("no flag is not an error");
+        };
+        assert_eq!(backend, None);
+        assert_eq!(rest, ["t.jsonl", "restricted"]);
+
+        let Ok((backend, _)) =
+            split_backend_if_named(&args(&["--backend", "vm", "t.jsonl", "restricted"]))
+        else {
+            panic!("the flag parses");
+        };
+        assert_eq!(backend, Some(Backend::Vm));
+
+        let Err(CliError::Message(message)) = split_backend_if_named(&args(&["--backend", "jit"]))
+        else {
+            panic!("an unknown backend should be refused with a message");
+        };
+        assert_eq!(message, "`--backend` must be `ast` or `vm`, found `jit`");
+    }
+
+    /// A backend and the name a trace header writes it under are the same two
+    /// things named twice, and the two crates that name them agree.
+    #[test]
+    fn a_backend_survives_the_trip_through_a_trace_header() {
+        for backend in [Backend::Ast, Backend::Vm] {
+            assert_eq!(Backend::of_recording(backend.recording()), backend);
+            assert_eq!(backend.recording().as_str(), backend.to_string());
         }
     }
 
