@@ -6463,9 +6463,9 @@ impl<'a> Checker<'a> {
     ///
     /// A variadic parameter is recorded as what it was written as rather
     /// than as the `Array<T>` the body sees, because a call supplies the
-    /// element and the array is what the callee makes of them. Nothing that
-    /// reads this lowers a variadic call today, so the distinction costs
-    /// nothing to state correctly and would cost something to state wrongly.
+    /// element and the array is what the callee makes of them. Which of the
+    /// two questions [`Signature::params`] answers is stated on the field
+    /// itself, where a consumer reads it, rather than only here.
     ///
     /// Recording is not deciding: this is called before the walk and read by
     /// nothing during it, so no diagnostic depends on it.

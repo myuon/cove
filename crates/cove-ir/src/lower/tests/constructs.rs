@@ -781,10 +781,10 @@ fn a_variadic_parameter_given_nothing_is_an_empty_array() {
 ///
 /// `items: Int...` is an `Array<Int>` inside the body, and `params=[value]`
 /// is what says the lowering read that rather than the `Int` the checker
-/// recorded: `record_signature` stores a variadic parameter as what it
-/// was *written* as, which is the element type, so asking the signature
-/// here would have numbered the slot in the scalar stack and the callee
-/// would have loaded a word where an array was pushed.
+/// recorded. `cove_sema::facts::Signature::params` answers what a *call*
+/// supplies, which for a variadic parameter is its element type, so asking
+/// the signature here would have numbered the slot in the scalar stack and
+/// the callee would have loaded a word where an array was pushed.
 #[test]
 fn a_variadic_parameter_of_ints_is_still_a_value_slot() {
     assert_eq!(

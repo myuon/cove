@@ -127,6 +127,27 @@ pub struct Signature {
     /// The type of `self`, for a method, and nothing for a free function.
     pub receiver: Option<Ty>,
     /// The declared parameters, in declaration order, receiver excluded.
+    ///
+    /// # Which question this answers
+    ///
+    /// **What a call supplies**, not what the callee's binding holds. The
+    /// two are the same type for every parameter shape but one, and the
+    /// exception is worth stating because a consumer that reads this field
+    /// as the second question gets a wrong answer silently.
+    ///
+    /// A variadic parameter is recorded as its **element** type, because a
+    /// call site passes elements: `fn count(items: Int...)` records `Int`
+    /// here. Inside the body `items` is the `Array<Int>` the callee made of
+    /// them, and nothing in this struct says so. A consumer that needs the
+    /// binding's type reads `variadic` off the declaration's own `Param` and
+    /// wraps — which is what `cove_ir::lower` does, pinned by its
+    /// `a_variadic_parameter_of_ints_is_still_a_value_slot`, after having
+    /// first asked this field and been told `Int`.
+    ///
+    /// A `var` parameter needs no such note: it names the caller's storage,
+    /// and the type of that storage is the type recorded here. What a `var`
+    /// changes is where the binding lives, not what it holds, and this
+    /// struct records no marking at all.
     pub params: Vec<Ty>,
     /// What a call to this declaration answers.
     pub ret: Ty,
