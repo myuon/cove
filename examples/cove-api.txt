@@ -4,7 +4,7 @@
 # against the interface the current source derives, so check it in and let a
 # reviewer read the difference. Do not edit it by hand.
 cove-api 1
-hash fnv1a64:84a6c8cdb4695a17
+hash fnv1a64:94eeab687ffb2b6c
 
 module callbacks
   /// Task-safe application dependencies captured by request handlers.
@@ -69,18 +69,27 @@ module config
     requires env
 
 module covecheck
-  /// One endpoint a run asks about, and what its answer has to look like.
+  /// One endpoint a run asks about, what its answer has to look like, and how
+  /// long the run waits for one.
   ///
   /// Every condition is optional except the two that say which endpoint this
   /// is. A check that writes none of them still says something -- that the
   /// endpoint answers at all -- and that is the check most manifests start
   /// with.
+  ///
+  /// `timeoutMs` is not one of the conditions, and it is a separate field for
+  /// the same reason it is a separate paragraph: a condition says what an
+  /// answer has to look like, and this says how long an answer has to arrive
+  /// in before the run stops waiting for one. A check that leaves it out is
+  /// bounded by the default every other check is, which is what the `Option`
+  /// says and is why there is no number here meaning "no bound".
   export struct Check
     field name: String
     field url: String
     field expect: Option<String>
     field reject: Option<String>
     field maxLength: Option<Int>
+    field timeoutMs: Option<Int>
   /// Which of the two reports a run writes.
   export enum Format
     case Text
@@ -168,6 +177,12 @@ module covecheck
   /// within a fixed amount of further work, not at the next instruction -- so
   /// how far each one got is not something this program can say and does not
   /// try to.
+  ///
+  /// The bound is `options.deadline`, which is the number of seconds `--timeout`
+  /// named or the `30s` `runBound` answers when it named none, and nothing here
+  /// can tell which of the two it was holding: a bound a person typed and a
+  /// bound the program wrote down are one `Duration` by the time they get this
+  /// far.
   export async fn main(arguments: Array<String>) -> Result<Unit, Error>
     requires clock, console, files, http
   /// Reads a manifest out of the text of one file.
@@ -195,11 +210,14 @@ module covecheck
   /// way -- and what it buys is a report that reads the same twice.
   export async fn runAll(checks: Array<Check>, plan: Plan) -> Run
     requires clock, http
-  /// How long a whole run may take.
+  /// How long a whole run may take when the command line named no deadline.
   ///
-  /// The same constant for the same reason, and it bounds the run rather than
-  /// the check: a hundred checks that each finish just inside `checkBound` is a
-  /// run nobody waited for.
+  /// The same kind of literal for the same reason, and it bounds the run rather
+  /// than the check: a hundred checks that each finish just inside their own
+  /// bound is a run nobody waited for. `--timeout` replaces it with
+  /// `Duration.seconds` of the number a person typed, which is the same
+  /// argument one level up -- a bound that came from outside the program and a
+  /// bound written in it are one type.
   export fn runBound() -> Duration
   /// How many of a run's checks were never tried.
   ///

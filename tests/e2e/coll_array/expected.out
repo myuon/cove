@@ -3,7 +3,13 @@ length 3 isEmpty false
 in range Some(10) Some(30)
 out of range None None
 unwrapOr 0
+contains true false
+indexOf Some(1) None
+indexOf answers the first Some(0)
+slice [10, 20] [20, 30]
+slice clamped [10, 20, 30] reversed []
 iterated total 60
 empty [] true 0
+empty answers false None []
 process arguments [alpha, beta gamma] 2
 first argument alpha

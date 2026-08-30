@@ -12,6 +12,20 @@ fn checkFor(name: String) -> Check {
     expect: None,
     reject: None,
     maxLength: None,
+    timeoutMs: None,
+  )
+}
+
+/// The same check, waiting `milliseconds` for its answer instead of the
+/// default.
+fn checkWaiting(name: String, milliseconds: Int) -> Check {
+  Check(
+    name: name,
+    url: "http://127.0.0.1:9/{name}",
+    expect: None,
+    reject: None,
+    maxLength: None,
+    timeoutMs: Some(milliseconds),
   )
 }
 
@@ -117,6 +131,27 @@ test fn runsEveryCheckWhenTheBudgetIsNeverSpent() -> Result<Unit, Error> {
   let run = await runAll(six(), Plan(concurrency: 2, stopAfter: Some(99)))
   assertEqual(run.tally.started, 6)?
   assertEqual(skipped(run), 0)?
+  Ok(())
+}
+
+/// A check is bounded by the wait it wrote down, and one that wrote none is
+/// bounded by the default.
+///
+/// This is what a manifest can now say and could not before, and it is
+/// asserted on the bound rather than on a run because a bound that fired
+/// would be a race: a virtual clock moves when something moves it and a fetch
+/// does not, so what a test can pin here is which `Duration` the check is
+/// given and not what happens when it runs out.
+///
+/// It is read back with `millis()` rather than compared against a literal
+/// written twice, which is the half of issue #146 that scalar multiplication
+/// could not have given this program: a timeout that can be configured is a
+/// timeout that has to be reportable, and the same six names build one and
+/// read one.
+test fn boundsEachCheckByTheWaitItAskedFor() -> Result<Unit, Error> {
+  assertEqual(checkBound(checkWaiting("a", 250)).millis(), 250)?
+  assertEqual(checkBound(checkFor("b")).millis(), defaultCheckBound().millis())?
+  assertEqual(defaultCheckBound().seconds(), 5)?
   Ok(())
 }
 

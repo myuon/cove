@@ -1,6 +1,7 @@
 use console.println
 
-/// Prints `Vector` construction, mutation, aliasing, and `toArray`.
+/// Prints `Vector` construction, mutation, replacement, aliasing, and
+/// `toArray`.
 export fn main() -> Result<Unit, Error> {
   var first = Vector.of(1, 2)
   println("of {first} length {first.length()}")?
@@ -24,7 +25,27 @@ export fn main() -> Result<Unit, Error> {
   println("get {first.get(0)} {first.get(99)}")?
   println("length {first.length()} isEmpty {first.isEmpty()}")?
 
-  var empty = Vector.of()
+  // `set` replaces and answers what was there, and it writes through the
+  // shared storage the way `push` does, so the alias sees it. An index that
+  // is not already in the vector answers `None` and writes nothing, which is
+  // exactly what `get` answers for the same index.
+  println("set answers what was there {first.set(0, 100)}")?
+  println("the alias observes the replacement {second}")?
+  println(
+    "out of range {first.set(99, 0)} {first.set(-1, 0)} unchanged {first}",
+  )?
+  println("set never grows the vector {first.set(first.length(), 0)} {first.length()}")?
+
+  // Membership, position, and a part of the sequence: the same three an
+  // `Array` answers, and `slice` answers an `Array` from a `Vector` too.
+  println("contains {first.contains(100)} {first.contains(99)}")?
+  println("indexOf {first.indexOf(100)} {first.indexOf(99)}")?
+  println("slice {first.slice(0, 2)} {first.slice(-5, 99)}")?
+
+  var empty: Vector<Int> = Vector.of()
   println("empty {empty} {empty.isEmpty()}")?
+  println(
+    "empty answers {empty.contains(1)} {empty.indexOf(1)} {empty.set(0, 1)}",
+  )?
   Ok(())
 }

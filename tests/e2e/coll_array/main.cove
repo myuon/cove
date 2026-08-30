@@ -9,6 +9,17 @@ export fn main(args: Array<String>) -> Result<Unit, Error> {
   println("out of range {items.get(3)} {items.get(-1)}")?
   println("unwrapOr {items.get(9).unwrapOr(0)}")?
 
+  // Membership, position, and a part of the sequence. `contains` uses `==`,
+  // so it compares values; `indexOf` answers the first position or `None`;
+  // `slice` clamps both bounds into `0..length()` the way `String.slice`
+  // does, so no argument here can stop the run.
+  println("contains {items.contains(20)} {items.contains(99)}")?
+  println("indexOf {items.indexOf(20)} {items.indexOf(99)}")?
+  let repeated = [1, 2, 1]
+  println("indexOf answers the first {repeated.indexOf(1)}")?
+  println("slice {items.slice(0, 2)} {items.slice(1, 3)}")?
+  println("slice clamped {items.slice(-5, 99)} reversed {items.slice(2, 1)}")?
+
   var total = 0
   for item in items {
     total += item
@@ -17,6 +28,9 @@ export fn main(args: Array<String>) -> Result<Unit, Error> {
 
   let empty: Array<Int> = []
   println("empty {empty} {empty.isEmpty()} {empty.length()}")?
+  println(
+    "empty answers {empty.contains(1)} {empty.indexOf(1)} {empty.slice(0, 3)}",
+  )?
 
   println("process arguments {args} {args.length()}")?
   println("first argument {args.get(0).unwrapOr("<none>")}")?

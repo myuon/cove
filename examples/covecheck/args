@@ -1,3 +1,5 @@
 checks.json
 --concurrency
 2
+--timeout
+20

@@ -72,7 +72,14 @@ $ cove run covecheck -- checks.json --format json
 | --- | --- |
 | `--concurrency <n>` | how many checks may be in flight at once, default 4 |
 | `--stop-after <n>` | start no more checks once this many have failed |
+| `--timeout <n>` | stop the whole run after this many seconds, default 30 |
 | `--format text\|json` | which report to write, default `text` |
+
+`--timeout` is the whole-run deadline and not a per-check one; a check bounds
+its own wait in the manifest instead. Both are refused at zero — a run
+or a check given no time at all can only run out of it — and both are refused
+negative, so the smallest run anybody can ask for is one second and the
+smallest wait a check can ask for is one millisecond.
 
 The exit status is the run's verdict: a run every check passed answers `Ok`,
 and one with a failure or a check it never tried answers `Err` and says how
@@ -87,24 +94,37 @@ many of each.
       "name": "health",
       "url": "http://127.0.0.1:8080/health",
       "expect": "\"status\":\"ok\"",
-      "maxLength": 256
+      "maxLength": 256,
+      "timeoutMs": 500
     }
   ]
 }
 ```
 
-`name` and `url` are required; the three conditions are not, and a check that
-writes none of them still says something — that the endpoint answers at all.
+`name` and `url` are required; the three conditions and the wait are not, and
+a check that writes none of them still says something — that the endpoint
+answers at all.
 
 | field | what it asks |
 | --- | --- |
 | `expect` | the body must contain this text |
 | `reject` | the body must not contain this text |
 | `maxLength` | the body must be no longer than this many characters |
+| `timeoutMs` | the answer must arrive within this many milliseconds |
 
-The conditions are tried in that order and the first one that breaks is the
-whole answer, so two runs over one body report the same reason. Reporting
-every broken condition would be more information and less of an answer.
+The three conditions are tried in the order the table lists them and the first
+one that breaks is the whole answer, so two runs over one body report the same
+reason. Reporting every broken condition would be more information and less of
+an answer.
+
+`timeoutMs` is the odd one out of the four and is listed last for that reason.
+The other three are conditions on an answer that arrived; this one bounds how
+long the run waits for one to arrive at all, and a check that overruns it is
+`unchecked` rather than `failed` — the same news as an endpoint that refused
+the connection, because both are runs that learned nothing about the service.
+A check that leaves it out is bounded by the program's own 5 seconds, which is
+why the field is optional rather than a number that means "no bound": there is
+no way to write a check that waits forever, and there should not be.
 
 A manifest that will not load stops the run before a request is made, and the
 message names the file, the check, and the field:
@@ -127,8 +147,11 @@ does not write. This is the second cross-example import in `examples/`, after
 
 ## What a check cannot say, and why
 
-Two things a health checker obviously wants are missing, and neither is
-missing because the program declined to do them.
+One thing a health checker obviously wants is missing, and it is not missing
+because the program declined to do it. A second was missing when this program
+was written and is not any more; it is still here, as what it was and what
+closed it, because the thing that closed it was a change to the language that
+this example is the argument for.
 
 **An expected status.** `http.fetch` is declared
 `fetch(String) -> Result<String, Error>`: the whole of what a client learns is
@@ -139,15 +162,53 @@ program cannot tell "the connection was refused" from "the server answered
 `unchecked` outcome covering both, and why no check names a status.
 **[Issue #145](https://github.com/myuon/cove/issues/145)** is that gap.
 
-**A per-check timeout.** Every check *is* bounded — `runCheck` wraps its fetch
-in `clock.timeout(checkBound())` and `main` wraps the whole run in
-`clock.timeout(runBound())` — but the bounds are constants the program writes
-down, and the manifest cannot carry one. `Duration` has no constructor and no
-multiplication, so there is no expression that turns a number a manifest holds
-into the `Duration` a host call takes. Writing the timeout as a sum of
-`1ms`, `2ms`, `4ms`, ... would have worked and would have been a workaround
-rather than a program. **[Issue #146](https://github.com/myuon/cove/issues/146)**
-is that gap.
+**A per-check timeout, which was the second gap and is now closed.** Every
+check has always been bounded — `runCheck` wraps its fetch in
+`clock.timeout(checkBound(check))` and `main` wraps the whole run in
+`clock.timeout(options.deadline)` — but when this program was written both of
+those bounds were constants written in `runner.cove`, and neither the manifest
+nor the command line could carry one. `Duration` had no associated function,
+and the reference gives it `+` and `-` and not `*`, so there was no expression
+that turned a number arriving from outside the program into the `Duration` a
+host call takes. Writing the timeout as a sum of `1ms`, `2ms`, `4ms`, ... would
+have worked and would have been a workaround rather than a program.
+**[Issue #146](https://github.com/myuon/cove/issues/146)** was that gap, and it
+was filed from here.
+
+It named two shapes and the language took the first: **an associated function
+per literal suffix**, `Duration.nanos`, `micros`, `millis`, `seconds`,
+`minutes` and `hours`, with the same six names reading a `Duration` back as an
+`Int`. The other shape was scalar multiplication, `Duration * Int`, which is a
+smaller change and would have been enough to *set* a bound. It is not enough
+for this program, because there is no expression made of `*` that answers how
+many milliseconds a `Duration` is: `options_test.cove` could then assert the
+deadline it had just read only by running out of it, and a message that named
+a check's own timeout would have had to carry the number alongside the
+`Duration` and trust the two to stay in step. A bound that can be configured
+is a bound that has to be reportable, and the direction that reads is the one
+that decided the shape.
+
+What closing it bought is two bounds that come from outside the source.
+`timeoutMs` in a check becomes `Duration.millis` of itself, and `--timeout n`
+becomes `Duration.seconds` of what was typed. Neither replaced a literal with
+a computation: `defaultCheckBound()` is still `5s` and `runBound()` is still
+`30s`, and they are still functions with names. That is the point rather than
+an oversight — `clock.timeout` cannot tell a literal from a built `Duration`,
+so the bound a person configured and the bound the program decided on their
+behalf are one value of one type, and `checkBound` is one `match` over an
+`Option` because it has nothing else to reconcile.
+
+The numbers that are not bounds are refused where they are read rather than
+where they are used. A `timeoutMs` that is negative or a fraction of a
+millisecond is refused by the same reader that refuses those for `maxLength`,
+because being a count is the same question for both; a `timeoutMs` of `0` gets
+past that reader and is refused by the field's own rule, since a check allowed
+no time at all would come back `unchecked` however healthy its endpoint, which
+is what `--concurrency 0` and `--timeout 0` are refused for as well. A count
+so large that its nanoseconds do not fit an `Int` is *not* refused: it stops
+the run inside `Duration.millis`, which is where every duration that overruns
+an `Int` stops, and a copy of the language's limit written into `manifest.cove`
+would be a second one to keep true.
 
 `maxLength` is a third thing that is smaller than it sounds. The bound is the
 program's, not the host's: `fetch` answers a whole `String` and there is no
@@ -230,7 +291,8 @@ deterministic for the reason above: the decision is taken at a point where
 every task in flight has already settled.
 
 The whole-run deadline is the other, and it is the one that cancels. `main`
-wraps the run in `clock.timeout(runBound())`; a run that overruns leaves the
+wraps the run in `clock.timeout(options.deadline)` — `--timeout n` seconds, or
+the `30s` `runBound()` answers when nobody said; a run that overruns leaves the
 window's scope early, and leaving a scope early cancels its children. What
 this program then reports is that the bound was exceeded — and nothing about
 how far each cancelled check got, because
@@ -285,20 +347,28 @@ what keeps the console out of the tasks.
 
 Three places, and they check different things.
 
-`cove test` runs the 31 `test fn` declarations in this directory, on whichever
+`cove test` runs the 35 `test fn` declarations in this directory, on whichever
 backend it was asked for. Most are about the parts that touch nothing — the
 manifest, the judgement, the command line, the two reports — and five are
 about the runner, over the fake `http` that has no recorded answer for any
 URL. That fake is what makes those five tests about *the runner*: every
 verdict carries the URL the host was asked for, so a window that paired its
-results with the wrong checks would say so.
+results with the wrong checks would say so. A sixth is about the runner and
+reaches nothing at all, because which `Duration` a check is bounded by is
+decided before a request is made: it asserts the bound each check is given and
+not what happens when one expires, which is the scheduler's and the clock's
+answer rather than this program's.
 
 `crates/cove-cli/tests/examples.rs` runs the whole program against a fake
 `http` seeded with bodies, which is the only way to reach a passing check, a
-text mismatch, and a body over its bound in one run. It is also where the two
-things the fakes *cannot* produce are written down: a timeout, which needs
-something to move the virtual clock and a fetch does not, and a cancellation,
-which is a race by ADR 0024's own account.
+text mismatch, and a body over its bound in one run. Its manifest carries a
+`timeoutMs` and one of its runs passes `--timeout`, so the path both numbers
+take from outside the program to a `clock.timeout` is walked there, and the
+assertion is that a run inside its bounds reports what a run with no bounds
+written down reports. It is also where the two things the fakes *cannot*
+produce are written down: a timeout firing, which needs something to move the
+virtual clock and a fetch does not, and a cancellation, which is a race by ADR
+0024's own account.
 
 `crates/cove-cli/tests/differential.rs` runs it on both backends and compares
 the console, the answer, the filesystem and the trace. Its `http` fake has no

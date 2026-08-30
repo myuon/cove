@@ -4,7 +4,8 @@
       "name": "health",
       "url": "http://127.0.0.1:8080/health",
       "expect": "\"status\":\"ok\"",
-      "maxLength": 256
+      "maxLength": 256,
+      "timeoutMs": 500
     },
     {
       "name": "bookings",

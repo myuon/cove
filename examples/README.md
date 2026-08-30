@@ -74,9 +74,13 @@ whether the program is right. Its world is a struct of immutable arrays, so
 `let earlier = world` is a snapshot and nothing had to be written to make it
 one; its resolution loop hands a `Vector` to a helper and relies on the copy
 being an alias. `examples/life/README.md` records both, along with what ten
-thousand ticks cost and what they leave on the heap, and the two collection
-gaps the program hit on the way ([#154](https://github.com/myuon/cove/issues/154),
-[#155](https://github.com/myuon/cove/issues/155)).
+thousand ticks cost and what they leave on the heap. It is also where the two
+collection gaps the program found ([#154](https://github.com/myuon/cove/issues/154),
+[#155](https://github.com/myuon/cove/issues/155)) are argued now that the
+language has closed them: `contains`, `indexOf` and `slice` removed three
+helpers outright, and `Vector.set` removed the merge from the grid rebuild
+without removing the copy — which turned out to be the more interesting of
+the two findings.
 
 Together they test the core product hypotheses:
 

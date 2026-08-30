@@ -104,10 +104,34 @@ Assignment and ordinary argument passing perform field-wise shallow copies.
 - `Array<T>` is fixed-length and immutable; `[1, 2]` is an array.
 - `Vector<T>` is growable and mutable; `Vector.of(1, 2)` constructs one.
 - `Array`, `Vector`, `String`, and ranges all answer `length()`.
+- `contains(element)` answers whether a collection holds a value equal to
+  `element`, under `==`. `Array`, `Vector`, `Map`, `Set`, and `String` all
+  answer it, and an empty receiver answers `false`.
+- `indexOf(element)` answers the first position holding such a value, or
+  `None` when there is none and when the receiver is empty. `slice(from, to)`
+  answers the elements at `from` up to but not including `to`, as an `Array`.
+  Both are on the ordered types — `Array`, `Vector`, and `String` — and not on
+  `Map` or `Set`, whose ascending order is storage rather than an order a
+  caller chose; `toArray()` is where a program takes that order as its own.
+- `slice` clamps both bounds into `0..length()` and answers nothing when `to`
+  is at or below `from`, so no argument to it can stop a program. A prefix is
+  `slice(0, n)`.
+- `vector.set(index, value)` replaces an element and answers `Some` of what
+  was there. It writes through the shared storage, so it takes a `var self`
+  receiver like `push` and an alias observes it. An index that is not already
+  in the vector answers `None` and writes nothing — the same answer `get`
+  gives for the same index — so `set` never grows a vector; `push` does.
 - A character is a `String` of length 1: `text.chars()` takes a string apart
   into them, and `String.fromCodePoint(codePoint)` builds one from the number
   that names it, or an `Err` for a number that names none — one out of range,
   or a surrogate half. There is no `Character` type.
+- A `Duration` is a signed count of nanoseconds. `500ms` writes one, and
+  `Duration.millis(n)` builds one from a number the program computed — one
+  associated function per literal suffix, so `Duration.seconds(1)` is `1s`:
+  `nanos`, `micros`, `millis`, `seconds`, `minutes`, `hours`. The same six
+  read one back, as `d.millis()`, truncated toward zero. A negative count is a
+  negative duration; a count whose nanoseconds do not fit stops the run, like
+  every other integer overflow.
 - `Int.parse(text)` reads a decimal number and `Int.parseRadix(text, radix)`
   reads one in a radix from 2 to 36. Text that is not a number answers `Err`;
   a radix outside 2 to 36 stops the run, because it is the call that is wrong

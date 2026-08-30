@@ -8,3 +8,10 @@ separators 1500ms
 sum 1500ms
 difference 500ms
 comparison true true
+built 250ms
+built per unit 1ns 1us 1ms
+built per unit 1s 1m 1h
+a builder equals its literal true
+negative -2m
+read 1500 1 1500000000
+read toward zero -1 0

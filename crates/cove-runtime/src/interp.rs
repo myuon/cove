@@ -2859,13 +2859,15 @@ impl<'a> Interpreter<'a> {
             return self.call_task_method(env, receiver_value, name, args, trailing, span);
         }
 
-        // `push` and `freeze` take a `var self` receiver, and that the
-        // receiver is a place — and a writable one — is `cove-sema`'s to say
-        // (ADR 0021). What is left is a `push` on something that is no place
-        // at all, which has nowhere to push *to*: refusing is not a language
-        // rule but the last thing this evaluator can do with an argument it
-        // was not given.
-        if name == "push" && place.is_none() {
+        // `push`, `set`, and `freeze` take a `var self` receiver, and that
+        // the receiver is a place — and a writable one — is `cove-sema`'s to
+        // say (ADR 0021). What is left is a `push` or a `set` on something
+        // that is no place at all, which has nowhere to write *to*: refusing
+        // is not a language rule but the last thing this evaluator can do
+        // with an argument it was not given. `freeze` is not here because it
+        // has an answer for a temporary — the temporary holds the only
+        // handle to its own storage, so freezing it writes nowhere.
+        if matches!(name, "push" | "set") && place.is_none() {
             return Err(var_self_needs_place(name, receiver, span).into());
         }
 
