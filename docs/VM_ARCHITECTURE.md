@@ -217,10 +217,14 @@ walk cannot reach is refused rather than converted.
 
 ### What a place is
 
-A place is an index into the value stack together with the field positions to
-walk from what stands there — `bump(var total)` builds one naming `total`'s
-slot with no path, and `bump(var c.hits)` builds one naming `c`'s slot with
-one step on the end. Reading through it clones what it names, which is the
+A place is one slot — which stack, and where in it — together with the field
+positions to walk from what stands there. `bump(var total)` builds one naming
+`total`'s slot with no path, and `bump(var c.hits)` builds one naming `c`'s
+slot with one step on the end. A slot of the *scalar* stack can be the root,
+and then there is no path and there can never be one, because neither `Int`
+nor `Bool` has a field; the place carries which of the two words it names,
+because that stack keeps no tag and a read through the place has to put one
+back. Reading through it clones what it names, which is the
 value-semantics rule; writing through it calls `Rc::make_mut` at every struct
 step, which is what makes sharing a copied struct unobservable and is the same
 call the interpreter's `Place::with_mut` makes at the same steps.
@@ -274,16 +278,24 @@ will hand it; so the bound would have to be checked at run time, and a program
 that exceeded it would fail on this backend and answer on the oracle. That is
 the one difference between the two that is not allowed to exist.
 
-One binding has to move for any of this to work. `bump(var total: Int)` roots
-a place at `total`, and a place cannot address the scalar stack, so a binding
-a place is rooted at is kept on the value stack even where the checker settled
-it as `Int`. The lowering walks a body once before it emits anything and
-collects the names used as the root of a `var` argument or of a `freeze`
-receiver; a binding of one of those names is a value slot. It is a set of
-names rather than of bindings, so it over-approximates across shadowing —
-`bump(var total)` written anywhere in a body puts every `total` the body
-declares on the value stack. That costs a slot its representation and can cost
-nothing else, because both representations hold the same value.
+**No binding has to move for any of this to work, and one used to.** This
+paragraph read the other way until
+[ADR 0027](adr/0027-a-place-and-a-capture-name-a-slot.md). A place could only
+name the value stack, so a binding a place was rooted at was kept there even
+where the checker had settled it as `Int` — and the lowering walked every body
+once before it emitted anything to find out which bindings those were. It
+collected *names*, not bindings, so it over-approximated across shadowing:
+`bump(var total)` written anywhere in a body put every `total` the body
+declared on the value stack.
+
+What that cost was not the conversion at the place. It was a conversion on
+every read and every write of the binding, for the whole of the body, whether
+or not the place was ever built — 1.30× on `benches/convention`'s `conv_var`
+row, whose one `root(var v)` is written *outside* the loop it is measured
+against. "The cliffs" below is where that was attributed, and
+`Inst::PlaceScalar` is what removed it: the place names the slot where the
+binding already is. The pre-pass is deleted, and with it the only place in the
+lowering where a name rather than a binding decided a layout fact.
 
 `freeze` is the case the place model is really needed for. It consumes
 uniquely owned storage, so `builtins::freeze` counts the handles and refuses
@@ -2160,6 +2172,61 @@ cold match arms, [#126](https://github.com/myuon/cove/issues/126)'s spills, the
 calling convention's unattributed 8 ms on `arith`, and now this — and it is the
 first where the moved benchmark provably does not run the changed code at all.
 
+### The layout band is much wider than it was thought to be
+
+The section above bounds the band at "at least ±6%", from a build whose added
+method `field` never executes. Issue #162's work needed a bound it could state
+a design against, so it built the control the earlier measurement could not:
+**the base commit, with one `Inst` variant added that is never emitted, never
+executed, and reachable from no program.** The variant is matched in
+`Vm::execute`'s dispatch group with an `unreachable!` body and in `validate`
+with a bound check; nothing else differs from `2c19429`, and every benchmark
+runs the same instructions it ran before.
+
+`cove-bench --matrix --iterations 15` and `cove-bench --iterations 15`, base
+binary and control binary, interleaved on one machine in one sitting:
+
+| row / bench | base | control | control vs base | instructions |
+| --- | ---: | ---: | ---: | ---: |
+| `arith` (VM) | 80.53 ms | 99.46 ms | **+23.5%** | identical |
+| `conv_var` | 112.64 ms | 125.73 ms | **+11.6%** | identical |
+| `conv_local` | 86.32 ms | 91.87 ms | **+6.4%** | identical |
+| `chars` (VM) | 566.31 ms | 578.37 ms | +2.1% | identical |
+| `conv_host` | 2336.32 ms | 2410.71 ms | +3.2% | identical |
+| `field` (VM) | 425.27 ms | 430.13 ms | +1.1% | identical |
+| `method` (VM) | 651.16 ms | 653.84 ms | +0.4% | identical |
+| `call` (VM) | 154.79 ms | 152.69 ms | −1.4% | identical |
+| every AST row | — | — | −0.2% to +3.7% | identical |
+
+**`arith` on the VM is 23.5% slower for a variant no program can reach.** That
+is four times the ±6% the section above records and it is on the benchmark
+this document has most often read a few percent off. The machine did not move
+under it: the AST rows, which share the binary and none of the code, span
+−0.2% to +3.7%, and a third run of the base binary agrees with the first two
+to 1.4% on `conv_local`.
+
+Three things follow, and they are the reading rules for anything measured on
+this workspace until it has a `[profile.release]`:
+
+- **A cross-build absolute is not evidence.** Not for a regression and not for
+  an improvement. Two builds that differ by one enum variant differ by 23.5% on
+  a benchmark neither of them changed.
+- **A within-build ratio is.** Two rows of one matrix run in one binary share
+  whatever layout that binary has. `conv_var ÷ conv_local` is 1.30× on the
+  base, 1.37× on the control, and 1.00× after ADR 0027 — and the middle column
+  is what says the third number is a change and not a build.
+- **An instruction count is.** `--stats` counts what ran. #126 proved a count
+  is not *sufficient* — three changes with identical counts summed to 19%
+  slower — but a count that moved when it should not have, or did not move
+  when it should have, is still the cheapest way to catch a mistake, and it is
+  the only figure here that no rebuild can touch.
+
+What this does not say is that the band is noise. It is a real cost paid by a
+real build; a user running that binary is 23.5% slower on that program. What
+it says is that the cost belongs to the *arrangement of the code*, which this
+workspace does not control and does not measure, and so cannot be attributed
+to a design being compared against another.
+
 ### How to read a measurement, now that the harness reports a spread
 
 Everything above was read by eye. `cove-bench` reported `{min, mean, max}`, a
@@ -2401,11 +2468,19 @@ help. It collects the *names* used as the root of a `var` argument before it
 emits anything, so `root(var v)` written anywhere in a body demotes every `v`
 the body declares; but here there is one `v` and it really is the one that is
 rooted. What would fix this is a place that can name a scalar slot, which is a
-change to what a place is. **This belongs to
+change to what a place is. **This belonged to
 [#162](https://github.com/myuon/cove/issues/162)**, which inherited it from
 #116 and is where one slot identity for parameters, locals, temporaries,
 scalars, references and places is decided. The size of the prize is the 30% in
 this row.
+
+**It was taken in full.** `Inst::PlaceScalar` names a slot of the scalar stack
+and the pre-pass is deleted; `conv_var` now runs `conv_local`'s instructions
+exactly — 35,142,890 against 35,142,879, which is 17.6 a turn against 17.6 —
+and is **1.00×** of it in the same binary, where it was 1.30×.
+[ADR 0027](adr/0027-a-place-and-a-capture-name-a-slot.md) is the decision and
+"The layout band is much wider than it was thought to be" below is why the
+ratio is stated and the absolute is not.
 
 **Reaching a function through a value costs 1.32× reaching it directly, and a
 lambda costs nothing over a declaration.** `conv_fnvalue` and `conv_closure`
@@ -2439,9 +2514,32 @@ capture and the answer all cross. `drop_in_place<Value>` and `Value::clone`
 are 10.5% of the run. A closure's captures are value slots by construction —
 the call copies them out of the closure into the frame's value window — so a
 captured `Int` has no scalar representation available to it at all. **This
-belongs to [#162](https://github.com/myuon/cove/issues/162)** as well, beside
+belonged to [#162](https://github.com/myuon/cove/issues/162)** as well, beside
 the typed frame layout: a capture area numbered like the two stacks it sits
 between would remove the crossing, and the prize is the 16%.
+
+**About half of it was taken, and what is left is not a capture cost.**
+`Function::captures` pairs each capture's name with the stack its slot is in,
+the call fills each capture into the slot its own kind names, and
+`Inst::LoadCapture` is gone — a capture is read by the `load-scalar` or the
+`load` every other binding of that kind is read by. `conv_capture` runs one
+instruction a turn fewer, 25.6 against 26.6, and is **1.11×** of
+`conv_closure` in the same binary where it was 1.20×. The four instructions a
+turn that remain are two of work — the read and the addition that `+ zero`
+*is* — and two of the general convention: a closure's parameter arrives on the
+value stack and its answer leaves on it, because nothing at a `call-value`
+knows which function it will enter. Neither is a capture, and `conv_closure`
+does not pay them only because its body hands the parameter straight back.
+
+The conversion is not gone, it has moved: what a closure holds is
+`(name, Value)` pairs on both backends, because a host reads them and because
+one lambda is one function however many specialisations of the body around it
+are lowered, so a scalar capture is converted **once per call in place of once
+per read**. ADR 0027 is where the soundness of that is argued, and there is a
+test on each side of the boundary for the case that makes it necessary — a
+declaration reached both directly and through a value, whose two
+`make-closure` sites disagree about the representation the capture had where
+it stood.
 
 **A Host callback costs 27×, and two thirds of it is allocation.** This is the
 cliff by an order of magnitude and it is the only row in the matrix that
@@ -2484,6 +2582,105 @@ baseline rather than against the one before it. `conv_host` fell from
 three; "Both were taken, and this is what they were worth" above has the
 whole table and says which row moved for which reason, and which rows moved
 for no reason anybody here can name.
+
+## One slot identity, and what the two cliffs it owned were worth
+
+[ADR 0027](adr/0027-a-place-and-a-capture-name-a-slot.md) is the decision and
+issue [#162](https://github.com/myuon/cove/issues/162) is where it was asked
+for. In one sentence: **a place names a slot rather than a stack, and a
+capture takes the slot its own kind names.** Nothing about a slot's role —
+parameter, local, temporary, capture, or the root of an alias — decides which
+stack it lives in any more; only the checker's answer about its type does.
+
+### What was measured, and against what
+
+Every figure below is from one machine in one sitting, with three binaries
+interleaved so that the machine is a control on itself:
+
+- **base** — `origin/main` at `2c19429`, built once and kept;
+- **control** — the same commit with one `Inst` variant added that is never
+  emitted and never executed, which is the layout band made visible (see
+  "The layout band is much wider than it was thought to be" above);
+- **after** — this change.
+
+The base binary was re-run three times across the session and agreed with
+itself to 1.4% on `conv_local` and to 5.5% on the slowest AST row, so the
+machine held. The control moved `arith` on the VM by 23.5% and `conv_local` by
+6.4% for no behaviour at all, so **the cross-build absolutes below are
+recorded and are not the evidence.** The evidence is the two columns after
+them.
+
+### The matrix
+
+`cove-bench --matrix --iterations 15`, VM backend, medians:
+
+| row | base | control | after | after ÷ base | instructions/turn, base → after |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| `conv_local`   |   86.32 ms |   91.87 ms |   92.76 ms | +7.5% | 17.6 → 17.6 |
+| `conv_var`     |  112.64 ms |  125.73 ms |   92.36 ms | **−18.0%** | 19.6 → **17.6** |
+| `conv_static`  |  155.36 ms |  155.21 ms |  160.53 ms | +3.3% | 18.6 → 18.6 |
+| `conv_generic` |  184.72 ms |  189.35 ms |  193.41 ms | +4.7% | 20.6 → 20.6 |
+| `conv_fnvalue` |  225.36 ms |  233.99 ms |  238.61 ms | +5.9% | 21.6 → 21.6 |
+| `conv_closure` |  226.73 ms |  234.02 ms |  240.03 ms | +5.9% | 21.6 → 21.6 |
+| `conv_capture` |  279.66 ms |  279.66 ms |  265.51 ms | **−5.1%** | 26.6 → **25.6** |
+| `conv_fresh`   |  622.34 ms |  629.78 ms |  621.31 ms | −0.2% | 23.6 → **24.6** |
+| `conv_host`    | 2336.32 ms | 2410.71 ms | 2313.52 ms | −1.0% | 25.6 → **26.6** |
+
+### The two ratios that are the result
+
+| | base | control | after |
+| --- | ---: | ---: | ---: |
+| `conv_var` ÷ `conv_local` | 1.30× | 1.37× | **1.00×** |
+| `conv_capture` ÷ `conv_closure` | 1.23× | 1.20× | **1.11×** |
+
+**The `var`-rooted local is not a cliff any more; it is not a cost at all.**
+`conv_var` and `conv_local` were always the same loop written twice, differing
+in one line placed outside it, and they now run the same instructions — 17.6 a
+turn each — and the same time. The 30% the assessment named was the whole of
+what the representation was costing, and the whole of it is gone.
+
+**Half of the captured scalar is gone and the other half is not a capture.**
+`conv_capture` runs one instruction a turn fewer and is 1.11× of
+`conv_closure`. The four instructions a turn that remain over `conv_closure`
+are the read and the addition that `+ zero` *is*, plus the two the general
+convention imposes on any closure body that does arithmetic: the parameter
+arrives on the value stack and the answer leaves on it, because nothing at a
+`call-value` knows which function it will enter. `conv_closure` escapes those
+two only by handing its parameter straight back.
+
+### The one row that went the other way, and why it was accepted
+
+`conv_fresh` and `conv_host` each run **one more** instruction a turn. Both
+build a closure per turn that captures the loop's `i` — a scalar — and whose
+body does nothing with it but answer it. The capture is a word now, so
+answering it is a `scalar-to-value` where before the capture was already a
+value and answering it was nothing. That is the shape a capture's kind
+following its *binding* rather than its *use* gets wrong, and ADR 0027 names
+it under "What is not decided here". Neither row's wall time moved outside the
+band, and the rows the trade is for moved the way it was made for.
+
+### The suite
+
+`cove-bench --iterations 15 --baseline`, VM rows, against a base run taken in
+the same session, with the control build's own movement beside it:
+
+| bench | control vs base | after vs base | instructions |
+| --- | ---: | ---: | ---: |
+| `arith` | **+23.5%** | +4.5% | identical |
+| `chars` | +2.1% | +4.5% | identical |
+| `field` | +1.1% | +2.6% | identical |
+| `method` | +0.4% | +2.6% | identical |
+| `pure` | +2.8% | +2.8% | identical |
+| `call` | −1.4% | +1.8% | identical |
+| `arrayget` | +1.6% | +0.8% | identical |
+| `hostheavy` | +0.6% | −1.0% | identical |
+| `startup` | −2.3% | −0.6% | n/a |
+
+Not one of these benchmarks builds a place or reads a capture, and every one
+of them runs exactly the instructions it ran before — every `fuel_spent`
+figure is identical between the two builds. The control column is what these
+numbers are worth: a build that changed nothing moved `arith` five times as
+far as this change did.
 
 ## What a character costs, and what a receiver costs on top of it
 
@@ -2594,8 +2791,12 @@ lost the fuel it had gathered since its last safepoint.
 64 bits with overflow a broken invariant, and no measurement can move it,
 because it was never a question about speed. And the root set: it is the value
 stack up to its length and the open task scopes, which follows from the two
-stacks being numbered separately and from a place being an index, and no
-measurement can move that either.
+stacks being numbered separately and from a place being a slot number rather
+than a reference, and no measurement can move that either. ADR 0027 gave a
+place a second stack to be rooted in and did not change that sentence: a place
+rooted at a scalar slot reaches an `i64`, so it reaches nothing, and one rooted
+at a value slot reaches what the value window already yields — which is also
+why it must not be walked a second time.
 
 **Open, and what would settle each.** Everything below was #109's or #116's
 until both closed. Each is now a narrower issue carrying the measurement that
@@ -2649,14 +2850,24 @@ Everything in that first group is downstream of the same allocation sites. That
 makes them the next measurement whether or not a VM-owned heap is ever built.
 
 Beside them, and separately, three cliffs the calling-convention matrix
-measured and has not answered: a `var`-rooted local that cannot live on the
-scalar stack and a closure's captures that cannot either (both
-[#162](https://github.com/myuon/cove/issues/162)), and the Host boundary at
-twenty-nine times a loop turn (#184 and #183). "The cliffs" above says what
-each would take. None is fixed, and the reason is this document's own history:
-each is a change to what a slot, a capture, a closure or a payload *is*, and
-changing those one at a time against their immediate parent is what
-[#126](https://github.com/myuon/cove/issues/126) is.
+measured. Two were [#162](https://github.com/myuon/cove/issues/162)'s — a
+`var`-rooted local that could not live on the scalar stack and a closure's
+captures that could not either — and both are **answered**: a place names a
+slot rather than a stack and a capture takes the slot its own kind names, which
+is [ADR 0027](adr/0027-a-place-and-a-capture-name-a-slot.md) and which "One
+slot identity, and what the two cliffs it owned were worth" above measures. The
+first is gone entirely and the second is roughly halved, with the remainder
+belonging to the general `call-value` convention rather than to a capture. The
+third — the Host boundary at twenty-nine times a loop turn (#184 and #183) — is
+not, and "The cliffs" above says what it would take.
+
+What is still open of #162 is its *title*: there are three stacks, three bases
+per frame and three counts on a call, and a single physical frame is neither
+built nor refused. ADR 0027's "What is not decided here" is the list. What the
+two cliffs turned out to say about it is worth recording, because it was not
+what anybody expected: **neither of them needed one physical stack.** Both were
+a slot's *role* deciding its representation, and both were fixed by taking that
+decision away from the role and leaving it with the checker.
 
 The fourth of them — the mutex on every call and every return
 ([#182](https://github.com/myuon/cove/issues/182)) — is the one that is done,
