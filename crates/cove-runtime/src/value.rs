@@ -3121,12 +3121,22 @@ mod tests {
 
     /// Viewing a value shares nothing new.
     ///
-    /// The collector infers a root by comparing the references it can see
-    /// against `Rc::strong_count`, so a view that cloned an `Rc` would add a
-    /// reference no walk can see and turn a dead object into a live one — a
-    /// leak — while one that a walk *could* see twice would conceal the
-    /// shortfall that makes a Rust local a root, which is a use-after-free.
-    /// A view borrows and copies scalars, and this is what says so.
+    /// ADR 0028 decision 8 separates three multiplicities and a view has to
+    /// leave all three alone. It does, because it clones nothing: no `Rc`
+    /// count changes, so the shortfall rule that makes a Rust local a root
+    /// answers exactly what it answered before; no root storage location is
+    /// yielded, so `Roots::walk` still reports each reference once; and the
+    /// graph `Marker::visit` expands is the same graph, since a view adds no
+    /// edge to it. A view that cloned an `Rc` would add a reference no walk
+    /// can see and keep a dead object alive; one a walk could see twice would
+    /// conceal the very shortfall the collector's soundness rests on. This is
+    /// what says neither happens.
+    ///
+    /// The `Vector` guard holds a shared `RefCell` borrow rather than a
+    /// reference, which is a different question and is answered the same way:
+    /// `Marker::visit` borrows the elements shared, and the sweep clears them
+    /// through `try_borrow_mut`, so an outstanding guard cannot make either
+    /// panic.
     #[test]
     fn a_view_changes_no_reference_count() {
         let storage = VectorStorage::new(vec![Value::int(1)]);

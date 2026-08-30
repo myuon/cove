@@ -1768,8 +1768,9 @@ way.
 Issue #116 asked that no representation be chosen without a measurement and an
 audit. This is the audit, and the measurement it turned out to need.
 
-`cove_runtime::Value` is a twenty-two-variant enum and `needs_drop::<Value>()`
-is true. It was 40 bytes — the number the top of this document reads the
+`cove_runtime::Value` holds twenty-two variants and `needs_drop::<Value>()`
+is true. (It was a `pub` enum when this was audited; since ADR 0028 it is a
+newtype over a private one, which changes none of the widths below.) It was 40 bytes — the number the top of this document reads the
 prototype's cost through. The audit's first question was what made it 40, and
 the answer needed no cleverness to read: an enum is as wide as its widest
 variant, and exactly one variant was wide.
@@ -2935,10 +2936,14 @@ build site; and #183's `Payload` carries a hand-written `Deref<Target =
 [Value]>` and `From<Vec<Value>>` for exactly this reason, which is why it
 touched no test and no example. The readers are what makes the next one not
 need a shim — and they draw their own line, since `Value::payload` answering a
-`&[Value]` is a promise that a payload stays contiguous. What is still exposed
-is the `pub` variants themselves: nothing stops a host matching on one, and
-sealing them is a larger promise than adding readers was, which is the half of
-#186 that stayed open. The heap layout the VM
+`&[Value]` is a promise that a payload stays contiguous. The variants were still exposed when that was
+written — nothing stopped a host matching on one, and sealing them is a larger
+promise than adding readers was, which is the half of #186 that stayed open.
+[#196](https://github.com/myuon/cove/issues/196) asked the question and
+ADR 0028 decision 6 answered it: `Value` is now an abstract type, all
+twenty-two variants sealed, and the exhaustive match a host loses comes back
+as `ValueView`, which changes when the *language* gains a kind of value and
+not when the runtime moves one. The heap layout the VM
 owns — **not filed**, because it is settled by what is still allocating once
 the three above are gone, and that is exactly the evidence it does not have
 yet; this paragraph is its record. A moving collector — also not filed, not yet
