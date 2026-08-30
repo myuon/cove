@@ -58,18 +58,6 @@ use super::validate::{stack_shape, Shape};
 pub(super) struct Binding<'a> {
     pub(super) name: Option<&'a str>,
     pub(super) slot: u32,
-    /// Which of this function's captures this binding is, for the bindings
-    /// that are one.
-    ///
-    /// A capture is an ordinary value slot, so this changes nothing about
-    /// how it is reached; what it changes is which instruction says so.
-    /// [`Inst::LoadCapture`] carries the index into
-    /// [`Function::captures`] rather than the slot number the index works
-    /// out to, because the layout is a fact about the closure and the
-    /// capture list is what states it.
-    ///
-    /// [`Function::captures`]: crate::Function::captures
-    pub(super) capture: Option<u32>,
     /// Which stack the slot lives in, decided when it was declared and never
     /// revisited: a binding's type does not change, so neither does where it
     /// is kept.
@@ -598,22 +586,7 @@ impl<'a, 'l> Body<'a, 'l> {
 
     /// Lets `name` reach a slot [`Body::allocate`] already reserved.
     pub(super) fn declare_at(&mut self, name: Option<&'a str>, kind: SlotKind, slot: u32) {
-        self.live.push(Binding {
-            name,
-            slot,
-            capture: None,
-            kind,
-        });
-    }
-
-    /// Lets `name` reach the slot holding capture `index`.
-    pub(super) fn declare_capture_at(&mut self, name: &'a str, index: u32, slot: u32) {
-        self.live.push(Binding {
-            name: Some(name),
-            slot,
-            capture: Some(index),
-            kind: SlotKind::Value,
-        });
+        self.live.push(Binding { name, slot, kind });
     }
 
     /// Where a scope begins, to be handed back to [`Body::release`] when it

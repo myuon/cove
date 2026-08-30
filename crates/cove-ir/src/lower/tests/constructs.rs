@@ -39,14 +39,20 @@ fn a_lambda_is_a_function_over_the_values_it_captured() {
     );
     assert_eq!(
         listing(source, "<closure 0>"),
-        "fn m.<closure 0> arity=1 frame=2/0 params=[value] captures=[by] -> value\n\
+        // `by` is a scalar capture: the call put it in scalar slot 0 out
+        // of the closure it entered through, so the body reads it with a
+        // `load-scalar` and the addition consumes it with no boundary
+        // instruction at all. This listing read `capture 0` and a
+        // `value-to-scalar` beside it until issue #162, and that second
+        // instruction ran on every read of the capture rather than once per
+        // call.
+        "fn m.<closure 0> arity=1 frame=1/1 params=[value] captures=[by] -> value\n\
          \x20  0  load 0\n\
          \x20  1  value-to-scalar\n\
-         \x20  2  capture 0\n\
-         \x20  3  value-to-scalar\n\
-         \x20  4  int Add\n\
-         \x20  5  scalar-to-value Int\n\
-         \x20  6  return\n"
+         \x20  2  load-scalar 0\n\
+         \x20  3  int Add\n\
+         \x20  4  scalar-to-value Int\n\
+         \x20  5  return\n"
     );
 }
 
@@ -166,22 +172,31 @@ fn a_nested_lambda_captures_out_of_the_captures_it_stands_in() {
                   fn(b: Int) {\n    fn() {\n      a + b\n    }\n  }\n}\n";
     assert_eq!(
         listing(source, "<closure 0>"),
-        "fn m.<closure 0> arity=1 frame=2/0 params=[value] captures=[a] -> value\n\
-         \x20  0  capture 0\n\
-         \x20  1  load 0\n\
-         \x20  2  make-closure m.<closure 1> captures=2\n\
-         \x20  3  return\n"
+        // `a` reaches this body in scalar slot 0, so handing it on to the
+        // inner lambda is the crossing every `make-closure` performs: a
+        // capture travels as a `Value` because a closure holds
+        // `(name, Value)` pairs on both backends, and the call that enters
+        // `<closure 1>` is what puts it back in a scalar slot there.
+        "fn m.<closure 0> arity=1 frame=1/1 params=[value] captures=[a] -> value\n\
+         \x20  0  load-scalar 0\n\
+         \x20  1  scalar-to-value Int\n\
+         \x20  2  load 0\n\
+         \x20  3  make-closure m.<closure 1> captures=2\n\
+         \x20  4  return\n"
     );
     assert_eq!(
         listing(source, "<closure 1>"),
-        "fn m.<closure 1> arity=0 frame=2/0 captures=[a, b] -> value\n\
-         \x20  0  capture 0\n\
-         \x20  1  value-to-scalar\n\
-         \x20  2  capture 1\n\
-         \x20  3  value-to-scalar\n\
-         \x20  4  int Add\n\
-         \x20  5  scalar-to-value Int\n\
-         \x20  6  return\n"
+        // `a` was a scalar slot where this lambda was written and `b` a
+        // value one, so the two captures land on different stacks — which is
+        // the layout `Function::capture_kinds` states and the call fills in
+        // with one counter per stack.
+        "fn m.<closure 1> arity=0 frame=1/1 captures=[a, b] -> value\n\
+         \x20  0  load-scalar 0\n\
+         \x20  1  load 0\n\
+         \x20  2  value-to-scalar\n\
+         \x20  3  int Add\n\
+         \x20  4  scalar-to-value Int\n\
+         \x20  5  return\n"
     );
 }
 
@@ -1721,5 +1736,68 @@ fn a_return_ends_the_function_where_it_is_written() {
          \x20  5  return-scalar\n\
          \x20  6  load-scalar 0\n\
          \x20  7  return-scalar\n"
+    );
+}
+
+/// One lambda, two lowerings of the body around it, and one set of capture
+/// slots between them.
+///
+/// A declaration reached both directly and through a value is lowered twice
+/// — its own convention, where an `Int` parameter is a scalar slot, and the
+/// general one, where every argument travels on the value stack — while the
+/// lambda inside it is numbered by its syntactic site and so stays *one*
+/// function. So the two `make-closure` sites disagree about the
+/// representation the capture had where it stood, and this is the listing
+/// that shows the disagreement: `adder` under its own convention pushes
+/// `load-scalar 0` and `scalar-to-value Int`, and `adder` as a value pushes
+/// `load 0` alone.
+///
+/// What travels is a `Value` on both roads, so the closure's list is the
+/// same either way and the call is what puts the capture in the slot
+/// `Function::capture_kinds` names — here a scalar one, read by
+/// `load-scalar 0` with no boundary instruction beside it. The checker's
+/// type is the same on both roads, so the conversion the call makes cannot
+/// fail; a disagreement costs a conversion and cannot cost an answer.
+/// `crates/cove-runtime/src/vm/tests/closures.rs` runs the same program on
+/// both backends and compares the answers.
+#[test]
+fn one_lambda_reached_from_two_conventions_keeps_one_capture_layout() {
+    let source = "fn adder(by: Int) -> fn(Int) -> Int {\n  fn(n: Int) {\n    n + by\n  }\n}\n\nexport fn main() -> Int {\n  let direct = adder(3)\n  let indirect: fn(Int) -> fn(Int) -> Int = adder\n  let viaValue = indirect(30)\n  direct(1) + viaValue(1)\n}\n";
+    assert_eq!(
+        specialisation(source, "adder", 1),
+        "fn m.adder arity=1 frame=0/1 params=[Int] -> value\n\
+         \x20  0  load-scalar 0\n\
+         \x20  1  scalar-to-value Int\n\
+         \x20  2  make-closure m.<closure 0> captures=1\n\
+         \x20  3  return\n"
+    );
+    assert_eq!(
+        listing(source, "<closure 0>"),
+        "fn m.<closure 0> arity=1 frame=1/1 params=[value] captures=[by] -> value\n\
+         \x20  0  load 0\n\
+         \x20  1  value-to-scalar\n\
+         \x20  2  load-scalar 0\n\
+         \x20  3  int Add\n\
+         \x20  4  scalar-to-value Int\n\
+         \x20  5  return\n"
+    );
+    // The second lowering of the same declaration, under the convention a
+    // `call-value` calls: `by` is a value slot here, so the capture is
+    // pushed with no conversion and the call that enters `<closure 0>` is
+    // where it becomes a word.
+    let program = lower(&checked(source)).expect("the program lowers");
+    validate(&program).expect("the lowering holds the VM's invariants");
+    let as_value = program
+        .functions
+        .iter()
+        .position(|function| &*function.name == "adder" && function.params == [SlotKind::Value])
+        .map(|index| FunctionId(index as u32))
+        .expect("`adder` was lowered under the general convention too");
+    assert_eq!(
+        crate::render(&program, as_value),
+        "fn m.adder arity=1 frame=1/0 params=[value] -> value\n\
+         \x20  0  load 0\n\
+         \x20  1  make-closure m.<closure 0> captures=1\n\
+         \x20  2  return\n"
     );
 }

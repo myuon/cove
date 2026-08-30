@@ -359,6 +359,27 @@ fn a_scalar_var_place_is_written_through_across_a_collection() {
     same_heap(&ast, &vm);
 }
 
+/// A closure over a scalar and a reference, called across a collection.
+///
+/// Issue #162 put a capture the checker settled as `Int` or `Bool` in the
+/// scalar window rather than the value one, so the frame the call opens no
+/// longer holds a root for it — which is right, because an `i64` reaches
+/// nothing. What still has to hold is everything either side of that: the
+/// closure itself holds `(name, Value)` pairs and is walked as one value, its
+/// reference capture is still a root of the frame that reads it, and the
+/// answer and the heap are the oracle's.
+#[test]
+fn a_closure_over_a_scalar_and_a_reference_survives_a_collection() {
+    let (ast, vm) = heaps_of(&format!(
+        "use console.println\n\nexport fn main() -> Result<Unit, Error> {{\n  let step = 2\n  let label = \"n\"\n  let f: fn(Int) -> String = fn(k) {{\n    \"{{label}}{{k + step}}\"\n  }}\n  var seen = \"\"\n  var turn = 0\n  while turn < 4 {{\n{}    seen = \"{{seen}}{{f(turn)}}\"\n    turn += 1\n  }}\n  println(\"{{seen}}\")?\n  Ok(())\n}}\n",
+        churn(60)
+    ));
+    assert_eq!(vm.output, "n2n3n4n5\n");
+    assert_eq!(ast.output, vm.output);
+    assert!(vm.freed() > 0, "{:?}", vm.collections());
+    same_heap(&ast, &vm);
+}
+
 /// A host running a Cove body re-entrantly takes the closure off the
 /// stack into a vector of its own, so while the body runs the closure and
 /// everything it captured are held only by the host — where no root set

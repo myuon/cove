@@ -300,8 +300,8 @@ pub struct Function {
     /// one entry per name, and `crate::lower` walks the same bindings in the
     /// same order. What differs is *when*. There, a capture's position is a
     /// run-time fact — the list is built as the closure is created — and
-    /// here it is decided when the lambda is lowered, which is what lets
-    /// [`Inst::LoadCapture`] be an index.
+    /// here it is decided when the lambda is lowered, which is what lets a
+    /// capture be an ordinary slot the body loads by number.
     ///
     /// The names are kept although nothing reads one to find a capture:
     /// `cove_runtime::value::Closure::captures` is a list of `(name, value)`
@@ -309,24 +309,54 @@ pub struct Function {
     /// so the pairs have to be rebuildable. They are also what a listing
     /// shows.
     ///
-    /// The values themselves live in the first value slots after the
-    /// parameters that arrived on the value stack —
-    /// `capture_base .. capture_base + captures.len()` — put there by the
-    /// call that entered this body, out of the closure it was called
-    /// through. That is why every function a closure can be made of takes
-    /// its arguments on the value stack: the captures follow them there, and
-    /// a scalar parameter would leave a hole between the two.
+    /// The values themselves live in the frame slots [`Function::capture_kinds`]
+    /// gives them, put there by the call that entered this body, out of the
+    /// closure it was called through.
     pub captures: Vec<Arc<str>>,
-    /// Where this function's captures begin among its value slots, which is
-    /// how many of its parameters arrived on the value stack.
+    /// Which stack each capture takes its slot in, in the same order.
     ///
-    /// The same number as `arity` for every closure but one, and written out
-    /// rather than derived because [`Inst::LoadCapture`] reads it on a path
-    /// that should not count anything. The exception is the closure
-    /// `Shared::lock` is given a `var` parameter: that parameter names the
-    /// cell's contents rather than receiving a copy of them, so it arrives on
-    /// the place stack and takes no value slot, and the captures begin one
-    /// slot earlier than `arity` would say. See [`Inst::Lock`].
+    /// A capture is a frame slot like any other, and issue #162 is where that
+    /// became true of its *representation* as well as of its numbering. A
+    /// capture the checker settled as `Int` or `Bool` takes a scalar slot, so
+    /// a body that reads it reads it with an [`Inst::LoadScalar`] and the
+    /// arithmetic that consumes it needs no boundary instruction at all.
+    ///
+    /// It could not before, and the cost was measured:
+    /// `benches/convention`'s `conv_capture` row ran five boundary
+    /// instructions a turn against `conv_closure`'s two, because the
+    /// parameter, the capture *and* the answer all crossed, and cost 1.20x
+    /// of it.
+    ///
+    /// The layout is dense within each stack and in this order: the value
+    /// captures fill `capture_base ..` and the scalar captures fill `0 ..`,
+    /// which they can because a function a closure is made of takes no
+    /// scalar argument — `crate::lower::validate` refuses one that does, and
+    /// that refusal is what makes `0` a static number here.
+    ///
+    /// **What travels is still a `Value`.** The closure holds
+    /// `(name, Value)` pairs whichever backend built it, because a host reads
+    /// them and because `crate::lower` numbers one lambda per syntactic site
+    /// however many specialisations of the body around it are lowered — so a
+    /// capture's representation *at the site* is not a fact the callee may
+    /// rely on. What the callee states is where the value lands, and the call
+    /// converts it there. The type is the checker's either way, so the
+    /// conversion cannot fail.
+    ///
+    /// Never [`SlotKind::Place`]: a closure captures the value a place names
+    /// and never the place. [`Inst::PlaceLocal`] is where that is argued.
+    pub capture_kinds: Vec<SlotKind>,
+    /// Where this function's *value* captures begin among its value slots,
+    /// which is how many of its parameters arrived on the value stack.
+    ///
+    /// The same number as `arity` for every closure but one. The exception is
+    /// the closure `Shared::lock` is given a `var` parameter: that parameter
+    /// names the cell's contents rather than receiving a copy of them, so it
+    /// arrives on the place stack and takes no value slot, and the captures
+    /// begin one slot earlier than `arity` would say. See [`Inst::Lock`].
+    ///
+    /// There is no second field for where the scalar captures begin, because
+    /// the answer is always zero: `validate` refuses a function a closure is
+    /// made of that takes any argument on the scalar stack.
     pub capture_base: u32,
     /// The names source gave this function's parameters, for a function a
     /// closure value can be made of, and empty for every other.
@@ -572,18 +602,6 @@ pub enum Inst {
     StoreLocal(u32),
     /// Pushes one of this call's captures.
     ///
-    /// A capture is a value slot like any other — the call that entered this
-    /// body copied it out of the closure into
-    /// [`Function::capture_base`]` + index`, which is where the captures
-    /// stand because a closure's arguments travel on the value stack and so
-    /// its value parameters fill exactly the slots below them. This could
-    /// therefore have been a [`Inst::LoadLocal`] of that number, and it is
-    /// not, for two reasons that are the same reason: the layout is a fact
-    /// about the closure rather than about the body, and it is
-    /// [`Function::captures`] that states it. A listing reads `capture 0`
-    /// rather than `load 3`, and `crate::lower::validate` can check an index
-    /// against the capture list instead of against the frame.
-    LoadCapture(u32),
     /// Builds a closure over the top `captures` values, in the order
     /// [`Function::captures`] names them, and pushes it.
     ///
@@ -1359,7 +1377,6 @@ fn render_inst(program: &Program, inst: Inst) -> String {
         Inst::Const(id) => format!("const {:?}", program.constant(id)),
         Inst::LoadLocal(slot) => format!("load {slot}"),
         Inst::StoreLocal(slot) => format!("store {slot}"),
-        Inst::LoadCapture(index) => format!("capture {index}"),
         Inst::Pop => "pop".to_string(),
         Inst::Dup => "dup".to_string(),
         Inst::Unary(op) => format!("unary {op:?}"),

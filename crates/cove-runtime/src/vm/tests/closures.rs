@@ -38,6 +38,84 @@ fn a_capture_is_the_value_the_binding_held_when_the_closure_was_written() {
     );
 }
 
+/// A capture the checker settled as `Bool` takes a scalar slot too, and the
+/// call puts the tag back where the closure's list had one.
+///
+/// `Function::capture_kinds` is what says which stack a capture lands in,
+/// and the value that travels is a `Value` either way — so this is the test
+/// that a `Bool` capture comes back a `Bool` and not an `Int`, which the two
+/// renderings would disagree about.
+#[test]
+fn a_bool_capture_lands_in_a_scalar_slot_and_keeps_its_tag() {
+    assert_eq!(
+        agree(
+            "export fn main() -> String {\n  let on = true\n  let f: fn() -> Bool = fn() {\n    on\n  }\n  \"{f()} {f()}\"\n}\n"
+        )
+        .value(),
+        "Str(\"true true\")"
+    );
+}
+
+/// Captures of both kinds in one closure land on their own stacks, in the
+/// order the closure lists them, and the body reads each where it was put.
+///
+/// The two counters `Vm::enter_value_call` fills the frame with are what
+/// this exercises: the value captures are dense from `capture_base` and the
+/// scalar ones dense from scalar slot 0, whatever order the two are
+/// interleaved in.
+#[test]
+fn a_closure_over_a_scalar_and_a_value_fills_both_windows() {
+    assert_eq!(
+        agree(
+            "export fn main() -> String {\n  let n = 2\n  let label = \"x\"\n  let flag = true\n  let other = \"y\"\n  let f: fn(Int) -> String = fn(k) {\n    \"{label}{other}{n + k} {flag}\"\n  }\n  \"{f(1)} {f(10)}\"\n}\n"
+        )
+        .value(),
+        "Str(\"xy3 true xy12 true\")"
+    );
+}
+
+/// One lambda, two lowerings of the body around it, and one set of capture
+/// slots between them.
+///
+/// `crate::lower` numbers a lambda by its syntactic site, so a declaration
+/// reached both directly and through a value lowers *two* specialisations of
+/// itself — its own convention, where an `Int` parameter is a scalar slot,
+/// and the general one, where every argument is a value — while the lambda
+/// inside it stays one function with one `capture_kinds`. So the two
+/// `make-closure` sites can disagree about the representation the capture
+/// had where it stood, and the callee's answer is the one that counts.
+///
+/// That is sound because what travels is a `Value` on both roads and the
+/// checker's type is the same on both, so a disagreement costs a conversion
+/// and cannot cost an answer. This is the program that has both roads in it.
+#[test]
+fn one_lambda_reached_from_two_specialisations_of_its_body_agrees_with_itself() {
+    assert_eq!(
+        agree(
+            "fn adder(by: Int) -> fn(Int) -> Int {\n  fn(n: Int) {\n    n + by\n  }\n}\n\nexport fn main() -> Int {\n  let direct = adder(3)\n  let indirect: fn(Int) -> fn(Int) -> Int = adder\n  let viaValue = indirect(30)\n  direct(1) + viaValue(1)\n}\n"
+        )
+        .value(),
+        "Int(35)"
+    );
+}
+
+/// A closure over a `var` parameter of a settled scalar type captures the
+/// value the place named, and that value is a capture like any other.
+///
+/// The read is a `place-read`, which answers a `Value` whatever stack the
+/// place is rooted at, so the capture's kind is the value stack — which is
+/// what `Body::lambda` records for a `SlotKind::Place` binding.
+#[test]
+fn a_capture_read_through_a_place_is_a_value_capture() {
+    assert_eq!(
+        agree(
+            "fn watch(var n: Int) -> Int {\n  let f: fn(Int) -> Int = fn(k) {\n    n + k\n  }\n  n += 100\n  f(1) + n\n}\n\nexport fn main() -> Int {\n  var x = 7\n  watch(var x)\n}\n"
+        )
+        .value(),
+        "Int(115)"
+    );
+}
+
 /// A closure is a value: it is bound, passed, returned, and called, and
 /// each of those is the same value on both backends.
 #[test]

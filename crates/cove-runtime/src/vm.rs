@@ -144,6 +144,15 @@
 //! slots, the captures are copied in behind them, and the frame is opened
 //! the way any other call opens one.
 //!
+//! A capture takes the slot its own kind names, which is the second half of
+//! what issue #162 settled about one slot identity. What a closure *holds* is
+//! a list of `(name, Value)` pairs, because a host reads them and because a
+//! lambda is one function however many specialisations of the body around it
+//! are lowered; where a capture *lands* is `cove_ir::Function::capture_kinds`,
+//! so one the checker settled as `Int` or `Bool` becomes a word of the scalar
+//! window at the call and is read from there with no boundary instruction at
+//! all. The conversion happens once per call in place of once per read.
+//!
 //! A host that receives such a closure can run it, which is what
 //! `Vm::call_from_host` is: the dispatch loop, entered again on the stacks
 //! as they stand, with fuel, cancellation, the depth limit and the trace all
@@ -535,8 +544,12 @@ struct OpenScope {
 ///   contribution. Every frame's slots and every frame's operands are in this
 ///   one vector, so `stack[..stack.len()]` is all of them at once: there is
 ///   nothing to slice per frame and nothing to skip inside a frame. A
-///   closure's captures are value slots, copied into the frame's window by
-///   the call that entered the body, so they are in it already.
+///   closure's *value* captures are copied into that window by the call that
+///   entered the body, so they are in it already; a capture the checker
+///   settled as `Int` or `Bool` goes into the scalar window instead and is a
+///   root nowhere, which is right for the reason `scalars` is not a root.
+///   Either way the closure itself holds the value, and the closure is
+///   reached from the slot that holds it.
 /// - `scopes` — **a root**. An `OpenScope` holds an `Rc<TaskScope>`, and a
 ///   scope owns the tasks spawned into it, whose settled values are Cove
 ///   values of this task's heap. A scope's *value* is also an ordinary slot
@@ -1372,18 +1385,6 @@ impl<'a> Vm<'a> {
                 Inst::StoreLocal(slot) => {
                     let value = self.pop();
                     self.stack[frame.base + slot as usize] = value;
-                }
-                Inst::LoadCapture(index) => {
-                    // A capture is a value slot: the call that entered this
-                    // body copied it out of the closure into
-                    // `capture_base + index`, which is where the captures
-                    // stand because a closure's arguments travel on the value
-                    // stack and so its value parameters fill exactly the
-                    // slots below them. `cove_ir::lower::validate` checked
-                    // both halves of that, so neither is asked about here.
-                    let slot = frame.base + (running.capture_base + index) as usize;
-                    let value = self.stack[slot].clone();
-                    self.stack.push(value);
                 }
                 Inst::Pop => {
                     self.pop();
@@ -2448,14 +2449,36 @@ impl<'a> Vm<'a> {
             self.async_frames.push(self.frames.len());
         }
         let base = self.stack.len() - argc as usize;
-        for (_, value) in &closure.captures {
-            self.stack.push(value.clone());
-        }
-        self.stack
-            .resize(base + callee.value_frame_size as usize, Value::Unit);
         let scalar_base = self.scalars.len();
         self.scalars
             .resize(scalar_base + callee.scalar_frame_size as usize, 0);
+        // Each capture goes into the slot its own kind names, which is the
+        // whole of what issue #162 changed about one. A closure holds
+        // `(name, Value)` pairs on both backends because a host reads them,
+        // so this is the one point at which a capture the checker settled as
+        // `Int` or `Bool` takes the representation its arithmetic wants —
+        // once per call, in place of once per read.
+        //
+        // The two counters are the layout `cove_ir::Function::capture_kinds`
+        // states and `cove_ir::lower::validate` checked: the value captures
+        // are dense from `capture_base`, which is where these pushes land
+        // because the arguments filled everything below it, and the scalar
+        // captures are dense from scalar slot 0, which they can be because a
+        // function a closure is made of takes no scalar argument.
+        let mut next_scalar = scalar_base;
+        for ((_, value), kind) in closure.captures.iter().zip(&callee.capture_kinds) {
+            match kind {
+                SlotKind::Scalar(_) => {
+                    self.scalars[next_scalar] = promised_scalar(value);
+                    next_scalar += 1;
+                }
+                // `validate` refuses a capture in a place slot, so the
+                // remaining kind is the value stack.
+                _ => self.stack.push(value.clone()),
+            }
+        }
+        self.stack
+            .resize(base + callee.value_frame_size as usize, Value::Unit);
         let place_base = self.places.len() - place_argc as usize;
         // Almost no closure has a place slot: `Inst::Lock`'s is the one whose
         // parameter can name storage rather than hold a value. So this is

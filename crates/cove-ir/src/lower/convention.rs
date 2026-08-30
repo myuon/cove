@@ -65,6 +65,7 @@ impl<'a> Lowering<'a> {
         let decl_body = site.body;
         let captures: Vec<Arc<str>> = site.captures.iter().map(|name| Arc::from(*name)).collect();
         let capture_names: Vec<&'a str> = site.captures.clone();
+        let capture_kinds: Vec<SlotKind> = site.capture_kinds.clone();
         let aliases = site.aliases_first_param;
         let is_async = site.is_async;
 
@@ -129,14 +130,19 @@ impl<'a> Lowering<'a> {
             params.push(SlotKind::Value);
             slots.push(body.allocate(SlotKind::Value));
         }
-        // Numbered after the parameters, because that is where the call
-        // copies them out of the closure.
-        let capture_slots: Vec<u32> = capture_names
+        // Each capture takes a slot of the stack its own kind names, dense
+        // within that stack and in this order — which is exactly the order
+        // the call fills them in, walking the closure's list with one
+        // counter per stack. The value captures land after the value
+        // parameters, because that is where the call pushes them; the scalar
+        // captures land at 0, because a function a closure is made of takes
+        // no scalar argument and `validate` refuses one that does.
+        let capture_slots: Vec<u32> = capture_kinds
             .iter()
-            .map(|_| body.allocate(SlotKind::Value))
+            .map(|kind| body.allocate(*kind))
             .collect();
         for (index, name) in capture_names.iter().enumerate() {
-            body.declare_capture_at(name, index as u32, capture_slots[index]);
+            body.declare_at(Some(name), capture_kinds[index], capture_slots[index]);
         }
         for (at, param) in decl_params.iter().enumerate() {
             body.declare_at(Some(param.name.node.as_str()), params[at], slots[at]);
@@ -172,6 +178,7 @@ impl<'a> Lowering<'a> {
             // body produced.
             answers_a_task: is_async,
             captures,
+            capture_kinds,
             capture_base,
             param_names: param_names(decl_params),
             block_fuel: block_fuel(&finished.code),
@@ -407,6 +414,7 @@ impl<'a> Lowering<'a> {
             // `Interpreter::eval_ident` builds one with `captures:
             // Vec::new()`, because a declaration reads no environment.
             captures: Vec::new(),
+            capture_kinds: Vec::new(),
             capture_base,
             // Only a function that can become a closure value is ever called
             // with a count of the caller's choosing, so only that one can
