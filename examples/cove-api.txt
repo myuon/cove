@@ -4,7 +4,7 @@
 # against the interface the current source derives, so check it in and let a
 # reviewer read the difference. Do not edit it by hand.
 cove-api 1
-hash fnv1a64:ff326f85a7002547
+hash fnv1a64:ad6c89cf2e4cce8a
 
 module callbacks
   /// Task-safe application dependencies captured by request handlers.
@@ -540,6 +540,372 @@ module restricted
   /// the console capability without naming a host module for it.
   export fn main() -> Result<Unit, Error>
     requires console, documents
+
+module rules
+  /// Decides one of the samples, named by its position, and makes no Host API
+  /// call at all.
+  ///
+  /// A control rather than a feature. `rules.embedded.decideRequest` fetches its
+  /// pull request through the Host API and reports the decision back through it;
+  /// this reaches the same `decide` over a pull request the package already
+  /// holds. The difference between the two, invoked the same number of times on
+  /// the same machine, is what the boundary costs, and
+  /// `examples/rules/README.md` is where that number is.
+  ///
+  /// It takes its argument as text for the same reason `decideRequest` does:
+  /// an entry may take one `Array<String>` and nothing else.
+  export fn decideSample(args: Array<String>) -> Result<Decision, Error>
+    capability-open
+  /// Answers immediately, having done nothing.
+  ///
+  /// The other control: what one invocation costs before the program it invokes
+  /// does anything. Finding the entry, building the `Array<String>` of
+  /// arguments, entering the frame, and answering is all this measures, and
+  /// every other number in the README stands on top of it.
+  export fn floor(args: Array<String>) -> Result<Int, Error>
+  /// Prints the catalog, and then what it decides about every sample.
+  ///
+  /// This entry exists so that the rule package is a program somebody can run
+  /// and read the output of, and so that it joins the differential corpus that
+  /// runs every `[run.<name>]` on both backends and compares the answers. The
+  /// embedding this example is really about does not call `main` at all: it
+  /// calls `rules.embedded.decideRequest`, one pull request at a time, from
+  /// Rust. See `examples/rules/README.md`.
+  export fn main() -> Result<Unit, Error>
+    requires console
+    capability-open
+
+module rules.catalog
+  /// Asks which branch the change is aimed at.
+  export struct BranchRule
+    field protected: String
+    field reviewers: Int
+    conforms rules.catalog.Rule
+    /// What this rule found in `pr`, or `None` when it found nothing.
+    export fn appraise(self, pr: PullRequest) -> Option<Finding>
+    /// One line saying what this rule is looking for.
+    ///
+    /// Defaulted, because a rule whose name says it all should not have to
+    /// write this out, and because a default body is the thing this example is
+    /// here to exercise: `describes` is dispatched dynamically like the other
+    /// two and is implemented by only three of the six rules below.
+    export fn describes(self) -> String
+    /// The name this rule is recorded under, which is what a finding carries
+    /// back to whoever has to act on it.
+    export fn name(self) -> String
+  /// Asks whether the change is still a draft.
+  export struct DraftRule
+    conforms rules.catalog.Rule
+    /// What this rule found in `pr`, or `None` when it found nothing.
+    export fn appraise(self, pr: PullRequest) -> Option<Finding>
+    /// One line saying what this rule is looking for.
+    ///
+    /// Defaulted, because a rule whose name says it all should not have to
+    /// write this out, and because a default body is the thing this example is
+    /// here to exercise: `describes` is dispatched dynamically like the other
+    /// two and is implemented by only three of the six rules below.
+    export fn describes(self) -> String
+    /// The name this rule is recorded under, which is what a finding carries
+    /// back to whoever has to act on it.
+    export fn name(self) -> String
+  /// Asks whether the change reaches a directory the repository guards.
+  ///
+  /// The guarded prefixes are a `Set` and not an `Array` because the question
+  /// asked of them is membership by prefix rather than order, and because the
+  /// set is written once and read for every pull request afterwards.
+  export struct GuardedPathRule
+    field prefixes: Set<String>
+    field waiver: String
+    conforms rules.catalog.Rule
+    /// What this rule found in `pr`, or `None` when it found nothing.
+    export fn appraise(self, pr: PullRequest) -> Option<Finding>
+    /// One line saying what this rule is looking for.
+    ///
+    /// Defaulted, because a rule whose name says it all should not have to
+    /// write this out, and because a default body is the thing this example is
+    /// here to exercise: `describes` is dispatched dynamically like the other
+    /// two and is implemented by only three of the six rules below.
+    export fn describes(self) -> String
+    /// The name this rule is recorded under, which is what a finding carries
+    /// back to whoever has to act on it.
+    export fn name(self) -> String
+  /// Asks what the labels on the change are worth.
+  ///
+  /// A `Map` from label to the reviewers that label costs. The heaviest label a
+  /// pull request carries is the one that answers; they do not add, for the
+  /// reason `Severity` gives.
+  export struct LabelRule
+    field weights: Map<String, Int>
+    conforms rules.catalog.Rule
+    /// What this rule found in `pr`, or `None` when it found nothing.
+    export fn appraise(self, pr: PullRequest) -> Option<Finding>
+    /// One line saying what this rule is looking for.
+    ///
+    /// Defaulted, because a rule whose name says it all should not have to
+    /// write this out, and because a default body is the thing this example is
+    /// here to exercise: `describes` is dispatched dynamically like the other
+    /// two and is implemented by only three of the six rules below.
+    export fn describes(self) -> String
+    /// The name this rule is recorded under, which is what a finding carries
+    /// back to whoever has to act on it.
+    export fn name(self) -> String
+  /// One question a review policy asks about one pull request.
+  ///
+  /// A rule answers `None` when it has nothing to say, which is the ordinary
+  /// case: most rules are silent about most pull requests, and a rule that had
+  /// to answer with a "nothing found" finding would make the engine filter what
+  /// it should never have been handed.
+  export trait Rule
+    fn name(self) -> String
+    fn appraise(self, pr: PullRequest) -> Option<Finding>
+    fn describes(self) -> String (default)
+  /// Asks how large the change is.
+  export struct SizeRule
+    field threshold: Int
+    field reviewers: Int
+    conforms rules.catalog.Rule
+    /// What this rule found in `pr`, or `None` when it found nothing.
+    export fn appraise(self, pr: PullRequest) -> Option<Finding>
+    /// One line saying what this rule is looking for.
+    ///
+    /// Defaulted, because a rule whose name says it all should not have to
+    /// write this out, and because a default body is the thing this example is
+    /// here to exercise: `describes` is dispatched dynamically like the other
+    /// two and is implemented by only three of the six rules below.
+    export fn describes(self) -> String
+    /// The name this rule is recorded under, which is what a finding carries
+    /// back to whoever has to act on it.
+    export fn name(self) -> String
+  /// Asks whether a change of any size arrived without tests.
+  export struct TestedRule
+    field floor: Int
+    conforms rules.catalog.Rule
+    /// What this rule found in `pr`, or `None` when it found nothing.
+    export fn appraise(self, pr: PullRequest) -> Option<Finding>
+    /// One line saying what this rule is looking for.
+    ///
+    /// Defaulted, because a rule whose name says it all should not have to
+    /// write this out, and because a default body is the thing this example is
+    /// here to exercise: `describes` is dispatched dynamically like the other
+    /// two and is implemented by only three of the six rules below.
+    export fn describes(self) -> String
+    /// The name this rule is recorded under, which is what a finding carries
+    /// back to whoever has to act on it.
+    export fn name(self) -> String
+  /// Asks one rule about one pull request without dispatching dynamically.
+  ///
+  /// `rules.engine.appraise` walks an `Array<dyn Rule>` and therefore dispatches
+  /// through a `dyn`; this is the same call written against a bounded type
+  /// parameter, so the two dispatch forms stand side by side in one package.
+  /// The tests below call both and assert they answer the same thing.
+  export fn ask<R: Rule>(rule: R, pr: PullRequest) -> Option<Finding>
+    capability-open
+  /// The catalog this package ships, in the order its findings are weighed.
+  ///
+  /// The array is written out here rather than assembled from configuration
+  /// because a rule is code: every one of the six is a type with a body, the
+  /// checker knows all six implement `Rule`, and the only thing chosen at run
+  /// time is which of them had something to say. An engine that loaded rules
+  /// from a file would have to decide what to do about a rule it could not
+  /// understand, and this one never has to.
+  export fn standard() -> Array<dyn Rule>
+
+module rules.embedded
+  /// Decides the one pull request the host names, and reports the decision back
+  /// to it.
+  ///
+  /// This is the function the Rust host in `examples/rules/host/` invokes, once
+  /// per application request, against a module it compiled and lowered once.
+  /// Everything about it is shaped by what an embedding can and cannot do
+  /// today, and each of those is worth stating rather than leaving to be
+  /// inferred from the code.
+  ///
+  /// The request identifier arrives as a process argument, because
+  /// `Vm::run_entry` and `Interpreter::run_entry` take `Vec<Rc<str>>` and
+  /// nothing else: there is no public way to call an exported Cove function
+  /// with a Rust-built argument, which is issue #150. So the pull request
+  /// itself cannot be passed in, and comes back through `reviews.pull` instead
+  /// -- which is the Host API boundary, and is therefore also the thing whose
+  /// cost the embedding measures.
+  ///
+  /// The decision leaves by both routes at once, on purpose. It is returned, so
+  /// the host reads a typed `rules.policy.Decision` out of the run's answer, and
+  /// it is also handed to `reviews.record`, so the same decision crosses the
+  /// boundary in the other direction under the request identifier that started
+  /// it. The two are what a trace links: every `HostCall` event this run writes
+  /// carries the identifier, because both calls were given it.
+  export fn decideRequest(args: Array<String>) -> Result<Decision, Error>
+    requires reviews
+    capability-open
+  /// Fetches the pull request the host holds under `requestId`, and answers
+  /// nothing else.
+  ///
+  /// The embedding invokes this on its own as the control that separates what
+  /// the boundary costs from what the rules cost: it makes the same inbound
+  /// call and the same conversion as `decideRequest` and then weighs nothing.
+  export fn pullOnly(args: Array<String>) -> Result<PullRequest, Error>
+    requires reviews
+
+module rules.engine
+  /// The decision `catalog` reaches about `pr`.
+  ///
+  /// Split from `decide` so that a test can ask one rule, or three, without
+  /// having to arrange a pull request that the other five stay quiet about.
+  export fn appraise(pr: PullRequest, catalog: Array<dyn Rule>) -> Decision
+    capability-open
+  /// The decision the shipped catalog reaches about `pr`.
+  ///
+  /// This is the one function an embedding calls. It takes a pull request and
+  /// answers a decision, and everything between the two is this package's
+  /// business: which rules exist, in what order they are weighed, and how their
+  /// findings become one policy.
+  export fn decide(pr: PullRequest) -> Decision
+    capability-open
+  /// Every finding the catalog has about `pr`, most serious first.
+  ///
+  /// `sorted(by:)` is stable, so rules that answered at the same severity keep
+  /// the order the catalog put them in. That is what makes the trail a decision
+  /// prints reproducible: the catalog is written down, so the order is too.
+  export fn findings(pr: PullRequest, catalog: Array<dyn Rule>) -> Array<Finding>
+    capability-open
+  /// The one policy `found` argues for.
+  ///
+  /// Three cases and they are tried in this order for a reason. A blocking
+  /// finding decides on its own, whatever else was found, because a block is
+  /// not a quantity that other findings can outweigh. Otherwise the reviewers
+  /// asked for are the most any one finding asked for, and the reason is that
+  /// finding's, because a reason assembled out of six of them is a sentence
+  /// nobody reads.
+  export fn policyFor(found: Array<Finding>) -> ReviewPolicy
+
+module rules.fixtures
+  /// A small change with tests, on an ordinary branch: nothing to say.
+  export fn clean() -> PullRequest
+  /// A draft nobody has asked for review on yet: advisory only.
+  export fn draft() -> PullRequest
+  /// A change that reaches a guarded directory without a waiver: blocked.
+  export fn guarded() -> PullRequest
+  /// A change aimed at the protected branch, carrying the heaviest label.
+  export fn labelled() -> PullRequest
+  /// A change over the size threshold, with tests: reviewers, and why.
+  export fn large() -> PullRequest
+  /// The sample at `at`, counting from zero, or `None` when there is none.
+  ///
+  /// Written as a chain of comparisons rather than as `samples().get(at)`,
+  /// and the reason is the measurement in `examples/rules/host/`. The control
+  /// it runs against the embedded entry has to build exactly one pull request,
+  /// because the invocation it is a control on receives exactly one; going
+  /// through `samples()` would build all six and charge the control for five
+  /// pull requests the host never sent.
+  export fn sample(at: Int) -> Option<PullRequest>
+  /// The pull requests this package is demonstrated and tested on.
+  ///
+  /// Written down in Cove rather than read from a file, and the reason is the
+  /// embedding this example exists for: `examples/rules/host/` builds the same
+  /// six records in Rust and hands them across the Host API boundary, and the
+  /// test that pins the two paths against each other needs one of them to be
+  /// somewhere a Cove test can reach. A JSON file would have put a parser
+  /// between the fixture and the assertion, and this package has no opinion
+  /// about JSON.
+  ///
+  /// Each of the six reaches a different arm of the policy, which is what makes
+  /// `rules.main`'s output worth reading rather than six copies of `normal`.
+  export fn samples() -> Array<PullRequest>
+  /// The same guarded directory, with the waiver label: reviewers instead.
+  export fn waived() -> PullRequest
+
+module rules.policy
+  /// A policy, and every finding that argued for it.
+  ///
+  /// The findings ride along because a decision nobody can account for is one
+  /// nobody can argue with. `ReviewPolicy` is what a caller acts on; the
+  /// findings are what it shows the author.
+  export struct Decision
+    field policy: ReviewPolicy
+    field findings: Array<Finding>
+    /// This decision as one line, for a console or a log.
+    export fn line(self) -> String
+    /// The rules that argued for this decision, in the order they were weighed,
+    /// as one comma-separated list.
+    export fn trail(self) -> String
+  /// One thing a rule noticed about one pull request.
+  ///
+  /// A finding names the rule that made it, so a decision can be read back to
+  /// the rule that caused it without the engine keeping a second table of which
+  /// answer came from where.
+  export struct Finding
+    field rule: String
+    field severity: Severity
+    field reason: String
+    field reviewers: Int
+  /// A pull request, as a review policy requires one to be.
+  ///
+  /// Ten fields and not one of them optional. The engine never asks whether a
+  /// field was supplied, which is the point of writing the type down: whoever
+  /// hands a pull request in decides once, at the boundary, what to do about a
+  /// record that is missing something. Past this struct there is no such
+  /// record.
+  export struct PullRequest
+    field id: String
+    field title: String
+    field author: String
+    field targetBranch: String
+    field changedLines: Int
+    field filesTouched: Array<String>
+    field labels: Array<String>
+    field approvals: Int
+    field isDraft: Bool
+    field hasTests: Bool
+    /// The labels as a set, which is what a membership question wants.
+    ///
+    /// The field itself stays an `Array`, because that is the shape a host can
+    /// hand one over in -- a Host API schema has no `Set`, which is issue #153
+    /// -- and the conversion lives here rather than at the boundary so that the
+    /// embedded caller and the fixtures below reach it by the same route.
+    export fn labelSet(self) -> Set<String>
+    /// Whether this pull request carries `label`.
+    export fn labelled(self, label: String) -> Bool
+    /// Whether any file this pull request touches sits under `prefix`.
+    export fn touches(self, prefix: String) -> Bool
+  /// What a `ReviewPolicy.Require` asks for.
+  ///
+  /// A struct rather than two positional payload values, because an enum case's
+  /// payload is positional in Cove and `Require(2, "large_change")` says less at
+  /// the call site than the two labels do.
+  export struct Requirement
+    field reviewers: Int
+    field reason: String
+  /// What a review policy demands of one pull request.
+  export enum ReviewPolicy
+    case Normal
+    case Require(Requirement)
+    case Block(String)
+    /// This policy's name, which is the word a host records.
+    export fn name(self) -> String
+    /// Why this policy was reached, in the words a decision record carries.
+    export fn reason(self) -> String
+    /// How many reviewers this policy asks for, which is none unless it is
+    /// asking for reviewers.
+    export fn reviewers(self) -> Int
+  /// How much attention one finding asks for.
+  ///
+  /// Three named levels rather than a number, because what the engine answers
+  /// with is a decision about kind and not about degree. Two advisory findings
+  /// do not add up to a required one, and no quantity of required ones becomes
+  /// a block; a number would invite exactly that arithmetic and then have to
+  /// document that it means nothing.
+  export enum Severity
+    case Advisory
+    case Required
+    case Blocking
+    /// This level's name, as a decision record spells it.
+    export fn name(self) -> String
+    /// Where this level sits against the other two, ascending.
+    ///
+    /// Ordering is the whole of what this means. Nothing sums these.
+    export fn rank(self) -> Int
+    /// Whether a finding at this level stops the change.
+    export fn stops(self) -> Bool
 
 module server
   /// JSON body returned by the health endpoint.

@@ -1,0 +1,221 @@
+use rules.policy.Finding
+use rules.policy.PullRequest
+use rules.policy.Severity
+
+/// One question a review policy asks about one pull request.
+///
+/// A rule answers `None` when it has nothing to say, which is the ordinary
+/// case: most rules are silent about most pull requests, and a rule that had
+/// to answer with a "nothing found" finding would make the engine filter what
+/// it should never have been handed.
+export trait Rule {
+  /// The name this rule is recorded under, which is what a finding carries
+  /// back to whoever has to act on it.
+  fn name(self) -> String
+
+  /// What this rule found in `pr`, or `None` when it found nothing.
+  fn appraise(self, pr: PullRequest) -> Option<Finding>
+
+  /// One line saying what this rule is looking for.
+  ///
+  /// Defaulted, because a rule whose name says it all should not have to
+  /// write this out, and because a default body is the thing this example is
+  /// here to exercise: `describes` is dispatched dynamically like the other
+  /// two and is implemented by only three of the six rules below.
+  fn describes(self) -> String {
+    "{self.name()}: no description"
+  }
+}
+
+/// Asks how large the change is.
+export struct SizeRule {
+  threshold: Int
+  reviewers: Int
+}
+
+impl Rule for SizeRule {
+  fn name(self) -> String {
+    "size"
+  }
+
+  fn appraise(self, pr: PullRequest) -> Option<Finding> {
+    if pr.changedLines <= self.threshold {
+      return None
+    }
+
+    Some(Finding(rule: self.name(), severity: Severity.Required, reason: "large_change", reviewers: self.reviewers))
+  }
+
+  fn describes(self) -> String {
+    "size: over {self.threshold} changed lines wants {self.reviewers} reviewers"
+  }
+}
+
+/// Asks whether the change reaches a directory the repository guards.
+///
+/// The guarded prefixes are a `Set` and not an `Array` because the question
+/// asked of them is membership by prefix rather than order, and because the
+/// set is written once and read for every pull request afterwards.
+export struct GuardedPathRule {
+  prefixes: Set<String>
+  waiver: String
+}
+
+impl Rule for GuardedPathRule {
+  fn name(self) -> String {
+    "guarded-path"
+  }
+
+  fn appraise(self, pr: PullRequest) -> Option<Finding> {
+    for prefix in self.prefixes {
+      if pr.touches(prefix) {
+        if pr.labelled(self.waiver) {
+          return Some(Finding(rule: self.name(), severity: Severity.Required, reason: "guarded_path_waived:{prefix}", reviewers: 2))
+        }
+
+        return Some(Finding(rule: self.name(), severity: Severity.Blocking, reason: "guarded_path:{prefix}", reviewers: 0))
+      }
+    }
+
+    None
+  }
+
+  fn describes(self) -> String {
+    "guarded-path: {self.prefixes.length()} guarded prefixes, waived by `{self.waiver}`"
+  }
+}
+
+/// Asks whether a change of any size arrived without tests.
+export struct TestedRule {
+  floor: Int
+}
+
+impl Rule for TestedRule {
+  fn name(self) -> String {
+    "tested"
+  }
+
+  fn appraise(self, pr: PullRequest) -> Option<Finding> {
+    if pr.hasTests {
+      return None
+    }
+
+    if pr.changedLines < self.floor {
+      return None
+    }
+
+    Some(Finding(rule: self.name(), severity: Severity.Required, reason: "no_tests", reviewers: 1))
+  }
+}
+
+/// Asks whether the change is still a draft.
+export struct DraftRule { }
+
+impl Rule for DraftRule {
+  fn name(self) -> String {
+    "draft"
+  }
+
+  fn appraise(self, pr: PullRequest) -> Option<Finding> {
+    if pr.isDraft {
+      return Some(Finding(rule: self.name(), severity: Severity.Advisory, reason: "draft", reviewers: 0))
+    }
+
+    None
+  }
+}
+
+/// Asks which branch the change is aimed at.
+export struct BranchRule {
+  protected: String
+  reviewers: Int
+}
+
+impl Rule for BranchRule {
+  fn name(self) -> String {
+    "branch"
+  }
+
+  fn appraise(self, pr: PullRequest) -> Option<Finding> {
+    if pr.targetBranch != self.protected {
+      return None
+    }
+
+    Some(Finding(rule: self.name(), severity: Severity.Required, reason: "protected_branch:{self.protected}", reviewers: self.reviewers))
+  }
+}
+
+/// Asks what the labels on the change are worth.
+///
+/// A `Map` from label to the reviewers that label costs. The heaviest label a
+/// pull request carries is the one that answers; they do not add, for the
+/// reason `Severity` gives.
+export struct LabelRule {
+  weights: Map<String, Int>
+}
+
+impl Rule for LabelRule {
+  fn name(self) -> String {
+    "label"
+  }
+
+  fn appraise(self, pr: PullRequest) -> Option<Finding> {
+    var heaviest = 0
+    var chosen = ""
+    for label in pr.labels {
+      let weight = self.weights.get(label).unwrapOr(0)
+      if weight > heaviest {
+        heaviest = weight
+        chosen = label
+      }
+    }
+
+    if heaviest == 0 {
+      return None
+    }
+
+    Some(Finding(rule: self.name(), severity: Severity.Required, reason: "label:{chosen}", reviewers: heaviest))
+  }
+
+  fn describes(self) -> String {
+    "label: {self.weights.length()} weighted labels"
+  }
+}
+
+/// The catalog this package ships, in the order its findings are weighed.
+///
+/// The array is written out here rather than assembled from configuration
+/// because a rule is code: every one of the six is a type with a body, the
+/// checker knows all six implement `Rule`, and the only thing chosen at run
+/// time is which of them had something to say. An engine that loaded rules
+/// from a file would have to decide what to do about a rule it could not
+/// understand, and this one never has to.
+export fn standard() -> Array<dyn Rule> {
+  [
+    SizeRule(threshold: 1000, reviewers: 2),
+    GuardedPathRule(
+      prefixes: Set.of("infra/", "auth/", "billing/"),
+      waiver: "security-reviewed",
+    ),
+    TestedRule(floor: 50),
+    DraftRule(),
+    BranchRule(protected: "release", reviewers: 2),
+    LabelRule(
+      weights: Map.of(
+        MapEntry(key: "breaking-change", value: 3),
+        MapEntry(key: "migration", value: 2),
+        MapEntry(key: "docs", value: 0),
+      ),
+    ),
+  ]
+}
+
+/// Asks one rule about one pull request without dispatching dynamically.
+///
+/// `rules.engine.appraise` walks an `Array<dyn Rule>` and therefore dispatches
+/// through a `dyn`; this is the same call written against a bounded type
+/// parameter, so the two dispatch forms stand side by side in one package.
+/// The tests below call both and assert they answer the same thing.
+export fn ask<R: Rule>(rule: R, pr: PullRequest) -> Option<Finding> {
+  rule.appraise(pr)
+}

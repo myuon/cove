@@ -1,0 +1,66 @@
+use reviews
+use rules.engine.decide
+use rules.policy.Decision
+use rules.policy.PullRequest
+
+/// Decides the one pull request the host names, and reports the decision back
+/// to it.
+///
+/// This is the function the Rust host in `examples/rules/host/` invokes, once
+/// per application request, against a module it compiled and lowered once.
+/// Everything about it is shaped by what an embedding can and cannot do
+/// today, and each of those is worth stating rather than leaving to be
+/// inferred from the code.
+///
+/// The request identifier arrives as a process argument, because
+/// `Vm::run_entry` and `Interpreter::run_entry` take `Vec<Rc<str>>` and
+/// nothing else: there is no public way to call an exported Cove function
+/// with a Rust-built argument, which is issue #150. So the pull request
+/// itself cannot be passed in, and comes back through `reviews.pull` instead
+/// -- which is the Host API boundary, and is therefore also the thing whose
+/// cost the embedding measures.
+///
+/// The decision leaves by both routes at once, on purpose. It is returned, so
+/// the host reads a typed `rules.policy.Decision` out of the run's answer, and
+/// it is also handed to `reviews.record`, so the same decision crosses the
+/// boundary in the other direction under the request identifier that started
+/// it. The two are what a trace links: every `HostCall` event this run writes
+/// carries the identifier, because both calls were given it.
+export fn decideRequest(args: Array<String>) -> Result<Decision, Error> {
+  let requestId = args.get(0).unwrapOr("")
+  let decision = decide(pullRequest(requestId)?)
+  reviews.record(
+    requestId,
+    decision.policy.name(),
+    decision.policy.reviewers(),
+    decision.trail(),
+  )?
+  Ok(decision)
+}
+
+/// Fetches the pull request the host holds under `requestId`, and answers
+/// nothing else.
+///
+/// The embedding invokes this on its own as the control that separates what
+/// the boundary costs from what the rules cost: it makes the same inbound
+/// call and the same conversion as `decideRequest` and then weighs nothing.
+export fn pullOnly(args: Array<String>) -> Result<PullRequest, Error> {
+  pullRequest(args.get(0).unwrapOr(""))
+}
+
+/// One pull request, converted from what the host declared into what this
+/// package declared.
+///
+/// The two types are not the same type and could not be. `reviews.PullRequest`
+/// is a `cove_schema::TypeSchema` the embedder wrote in Rust, and
+/// `rules.policy.PullRequest` is a struct this package declared; a Host API
+/// schema has no way to name a type a Cove package owns. So the ten fields
+/// are written out once, here, where a field the host stops sending is a
+/// check-time error at the line that reads it.
+///
+/// `labels` crosses as an `Array` and becomes a `Set` only where a rule asks
+/// a membership question, because `HostType` has no `Set` either.
+fn pullRequest(requestId: String) -> Result<PullRequest, Error> {
+  let supplied = reviews.pull(requestId)?
+  Ok(PullRequest(id: supplied.id, title: supplied.title, author: supplied.author, targetBranch: supplied.targetBranch, changedLines: supplied.changedLines, filesTouched: supplied.filesTouched, labels: supplied.labels, approvals: supplied.approvals, isDraft: supplied.isDraft, hasTests: supplied.hasTests))
+}

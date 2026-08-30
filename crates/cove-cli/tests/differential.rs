@@ -491,7 +491,30 @@ use cove_sema::resolve::Program as Checked;
 /// and the corpus is what checks it: a checker whose output depended on which
 /// endpoint answered first would disagree with itself here long before it
 /// disagreed across backends.
-const LOWERED_FLOOR: usize = 94;
+///
+/// 94 to 95: one case, `examples:reviewPolicy`, and no construct again --
+/// and this time the absence is the finding rather than an aside. The case is
+/// `examples/rules`, the embedded review-policy engine issue #90 asks for,
+/// and it is written the way the language card says to write Cove rather
+/// than the way a program that had to stay inside the lowering would be. Six
+/// rules behind a `dyn Rule` whose third method is a default the trait
+/// supplies and three of the six override; the same call written again
+/// through a bounded type parameter, so the two dispatch forms stand in one
+/// package; `Set` and `Map` as a rule's own state; `sorted(by:)` over a
+/// comparison of an enum's rank, then `fold` and `filter` over closures; and
+/// `match` on an enum case carrying a struct. Every one of them lowered on
+/// the day it was written and nothing had to be avoided.
+///
+/// That is worth recording because ADR 0022 makes the VM what a `cove`
+/// command runs a program on, so a construct the lowering refuses is a
+/// construct most users cannot use. A program written to a domain rather
+/// than to a backend is the only kind of evidence that can say the refusals
+/// are gone; the corpus is 125 cases now, and this is the second entry in a
+/// row whose case was shaped by what an example needed rather than by what
+/// would lower. `covecheck` above drove the task constructs together;
+/// this one drives the dispatch, collection and pattern constructs together,
+/// and neither had to be written around anything.
+const LOWERED_FLOOR: usize = 95;
 
 // ------------------------------------------------------------------ the test
 

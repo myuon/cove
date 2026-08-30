@@ -1,0 +1,148 @@
+use rules.fixtures.clean
+use rules.fixtures.draft
+use rules.fixtures.guarded
+use rules.fixtures.labelled
+use rules.fixtures.large
+use rules.fixtures.waived
+
+/// What a rule answered, as one line, so an assertion pins the whole finding
+/// rather than one field of it.
+fn told(answer: Option<Finding>) -> String {
+  match answer {
+    Some(found) => "{found.rule}/{found.severity.name()}/{found.reason}/{found.reviewers}"
+    None => "nothing"
+  }
+}
+
+/// The same question, asked through a `dyn Rule` rather than through a
+/// bounded type parameter.
+///
+/// This is the dynamic half of the pair `ask` is the static half of. The
+/// parameter is written `dyn Rule`, so the concrete rule is wrapped at the
+/// call site and the method is found from the value's own type.
+fn throughDyn(rule: dyn Rule, pr: PullRequest) -> Option<Finding> {
+  rule.appraise(pr)
+}
+
+/// A change over the threshold costs the reviewers the rule was built with,
+/// and one under it costs nothing.
+test fn sizeAsksForReviewersOnlyOverItsThreshold() -> Result<Unit, Error> {
+  let rule = SizeRule(threshold: 1000, reviewers: 2)
+  assertEqual(told(ask(rule, large())), "size/required/large_change/2")?
+  assertEqual(told(ask(rule, clean())), "nothing")?
+  Ok(())
+}
+
+/// Static and dynamic dispatch reach the same implementation, so a rule
+/// answers the same thing however it was asked.
+///
+/// This is worth an assertion rather than an assumption: `ask` resolves the
+/// method through the bound on its type parameter and `throughDyn` resolves
+/// it at run time from the value, and the two paths are separately lowered.
+test fn bothDispatchFormsReachTheSameRule() -> Result<Unit, Error> {
+  let rule = SizeRule(threshold: 1000, reviewers: 2)
+  assertEqual(told(ask(rule, large())), told(throughDyn(rule, large())))?
+  assertEqual(told(ask(rule, clean())), told(throughDyn(rule, clean())))?
+  Ok(())
+}
+
+/// A guarded directory blocks the change, and names which prefix did it, so
+/// the author is not left to guess which of the three they touched.
+test fn aGuardedPathBlocksAndNamesThePrefix() -> Result<Unit, Error> {
+  let rule = GuardedPathRule(
+    prefixes: Set.of("infra/", "auth/", "billing/"),
+    waiver: "security-reviewed",
+  )
+  assertEqual(
+    told(ask(rule, guarded())),
+    "guarded-path/blocking/guarded_path:auth//0",
+  )?
+  Ok(())
+}
+
+/// The waiver label turns a block into a request for reviewers rather than
+/// into silence: the guarded directory was still touched.
+test fn theWaiverLabelDowngradesAGuardedPath() -> Result<Unit, Error> {
+  let rule = GuardedPathRule(
+    prefixes: Set.of("infra/", "auth/", "billing/"),
+    waiver: "security-reviewed",
+  )
+  assertEqual(
+    told(ask(rule, waived())),
+    "guarded-path/required/guarded_path_waived:auth//2",
+  )?
+  Ok(())
+}
+
+/// A change with tests is never asked for more of them, and a change small
+/// enough is not asked either, because the floor is what stops this rule
+/// firing on every one-line fix.
+test fn testsAreAskedForOnlyAboveTheFloor() -> Result<Unit, Error> {
+  assertEqual(told(ask(TestedRule(floor: 50), large())), "nothing")?
+  assertEqual(told(ask(TestedRule(floor: 50), guarded())), "nothing")?
+  assertEqual(
+    told(ask(TestedRule(floor: 10), guarded())),
+    "tested/required/no_tests/1",
+  )?
+  Ok(())
+}
+
+/// A draft is worth saying and worth nothing else: an advisory finding asks
+/// for no reviewers.
+test fn aDraftIsAdvisoryAndCostsNothing() -> Result<Unit, Error> {
+  assertEqual(told(ask(DraftRule(), draft())), "draft/advisory/draft/0")?
+  assertEqual(told(ask(DraftRule(), clean())), "nothing")?
+  Ok(())
+}
+
+/// The protected branch is matched by name and nothing else.
+test fn theProtectedBranchIsMatchedByName() -> Result<Unit, Error> {
+  let rule = BranchRule(protected: "release", reviewers: 2)
+  assertEqual(
+    told(ask(rule, labelled())),
+    "branch/required/protected_branch:release/2",
+  )?
+  assertEqual(told(ask(rule, large())), "nothing")?
+  Ok(())
+}
+
+/// The heaviest label answers, and the others do not add to it.
+test fn theHeaviestLabelAnswersAlone() -> Result<Unit, Error> {
+  let rule = LabelRule(
+    weights: Map.of(
+      MapEntry(key: "breaking-change", value: 3),
+      MapEntry(key: "migration", value: 2),
+      MapEntry(key: "docs", value: 0),
+    ),
+  )
+  assertEqual(
+    told(ask(rule, labelled())),
+    "label/required/label:breaking-change/3",
+  )?
+  Ok(())
+}
+
+/// A label weighted zero is a label the rule has heard of and does not
+/// charge for, which is different from one it has never heard of only in
+/// that somebody wrote it down.
+test fn aLabelWeightedZeroCostsNothing() -> Result<Unit, Error> {
+  let rule = LabelRule(weights: Map.of(MapEntry(key: "docs", value: 0)))
+  assertEqual(told(ask(rule, clean())), "nothing")?
+  Ok(())
+}
+
+/// Three of the six rules describe themselves and three take the trait's
+/// default, which is what the default is for.
+test fn theCatalogDescribesItself() -> Result<Unit, Error> {
+  var lines = Vector.of()
+  for rule in standard() {
+    lines.push(rule.describes())
+  }
+
+  assertEqual(lines.length(), 6)?
+  assertEqual(
+    "\n".join(lines.freeze()),
+    "size: over 1000 changed lines wants 2 reviewers\nguarded-path: 3 guarded prefixes, waived by `security-reviewed`\ntested: no description\ndraft: no description\nbranch: no description\nlabel: 3 weighted labels",
+  )?
+  Ok(())
+}
