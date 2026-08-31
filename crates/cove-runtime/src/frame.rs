@@ -326,7 +326,11 @@ pub fn admits(program: &Program, module: &str, name: &str) -> Result<FunctionId,
 /// One function's shape and instructions, and the functions it calls.
 fn admits_function(program: &Program, id: FunctionId) -> Result<Vec<FunctionId>, Refused> {
     let function = program.function(id);
-    let named = format!("`{}.{}`", function.module, function.name);
+    // Built where a refusal is built and not before it. `admits` runs once
+    // per run, so this is not a hot path — but it is a `format!` per function
+    // of the program on the way into every run that is *not* refused, and a
+    // refusal is the only reader it has.
+    let named = || format!("`{}.{}`", function.module, function.name);
     let mut calls = Vec::new();
     for (pc, inst) in function.code.iter().enumerate() {
         let span = function.span_at(pc);
@@ -351,10 +355,10 @@ fn admits_function(program: &Program, id: FunctionId) -> Result<Vec<FunctionId>,
             Inst::Const(id) => match program.constant(*id) {
                 Const::Unit | Const::Bool(_) | Const::Int(_) | Const::Float(_) => {}
                 Const::Str(_) | Const::Name(_) => {
-                    return Err(Refused::new(format!("a string in {named}"), span))
+                    return Err(Refused::new(format!("a string in {}", named()), span))
                 }
                 Const::Duration(_) => {
-                    return Err(Refused::new(format!("a `Duration` in {named}"), span))
+                    return Err(Refused::new(format!("a `Duration` in {}", named()), span))
                 }
             },
             // The rest of the closed boundary list. See the module docs.
@@ -376,7 +380,7 @@ fn admits_function(program: &Program, id: FunctionId) -> Result<Vec<FunctionId>,
                 // has to look.
                 if *value_argc != 0 || *place_argc != 0 {
                     return Err(Refused::new(
-                        format!("a call in {named} that passes a general value"),
+                        format!("a call in {} that passes a general value", named()),
                         span,
                     ));
                 }
@@ -384,7 +388,7 @@ fn admits_function(program: &Program, id: FunctionId) -> Result<Vec<FunctionId>,
             }
             other => {
                 return Err(Refused::new(
-                    format!("{} in {named}", describe(other)),
+                    format!("{} in {}", describe(other), named()),
                     span,
                 ))
             }
@@ -401,38 +405,38 @@ fn admits_function(program: &Program, id: FunctionId) -> Result<Vec<FunctionId>,
     // instruction in it is admitted.
     if function.value_frame_size != 0 {
         return Err(Refused::new(
-            format!("{named}, which holds a general value in a frame slot"),
+            format!("{}, which holds a general value in a frame slot", named()),
             function.span,
         ));
     }
     if function.place_frame_size != 0 {
         return Err(Refused::new(
-            format!("{named}, which takes a `var` parameter"),
+            format!("{}, which takes a `var` parameter", named()),
             function.span,
         ));
     }
     if !function.captures.is_empty() {
         return Err(Refused::new(
-            format!("{named}, which is a closure"),
+            format!("{}, which is a closure", named()),
             function.span,
         ));
     }
     if function.answers_a_task {
         return Err(Refused::new(
-            format!("{named}, which is `async`"),
+            format!("{}, which is `async`", named()),
             function.span,
         ));
     }
     if function.has_receiver {
         return Err(Refused::new(
-            format!("{named}, which takes a receiver"),
+            format!("{}, which takes a receiver", named()),
             function.span,
         ));
     }
     for kind in &function.params {
         if !matches!(kind, SlotKind::Scalar(_)) {
             return Err(Refused::new(
-                format!("{named}, whose parameters are not all `Int` or `Bool`"),
+                format!("{}, whose parameters are not all `Int` or `Bool`", named()),
                 function.span,
             ));
         }
