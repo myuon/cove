@@ -3891,6 +3891,9 @@ nothing below is predicted from what is:
   owes, and it is one thing rather than two: the same absence is why the frame
   map is derived at run time from two frame sizes instead of being lowered as
   one numbering.
+  *Done, in "A struct's reference map is a property of the type" below — and
+  it was two things rather than one. The frame map is still derived, and that
+  section says why the per-field kind did not and could not close it.*
 - **A `set-field` whose target type is known statically.** The field-position
   table is per field-name constant, so two admitted structs that put the same
   field name at different positions refuse the function that writes it. A
@@ -4054,7 +4057,82 @@ parameter beside a scalar slot. It is Phase D's, as its own piece of work.
 
 ### The measurement
 
-PLACEHOLDER_MEASUREMENT
+Six `cove-bench --iterations 15` suites, six processes of one binary, quiet
+machine; **each ratio is the two rows of one run**, and the figure quoted is
+the median of the six. Instruction counts are exact and are printed by
+`the_frame_executes_exactly_the_instructions_the_vm_executes`, which asserts
+they are equal on both backends before printing them.
+
+| row | instructions | VM | mixed frame | frame ÷ VM | band over six |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| `pure` | — | 1.50 ms | 1.34 ms | 0.894× | 8.1 pt |
+| `arith` | 31,142,877 | 98.86 ms | 105.29 ms | **1.065×** | 6.7 pt |
+| `call` | 37,142,877 | 177.24 ms | 166.28 ms | 0.935× | 5.3 pt |
+| `field` | 47,428,595 | 483.27 ms | 207.59 ms | **0.428×** | 2.3 pt |
+| `method` | 59,428,598 | 720.64 ms | 359.42 ms | **0.495×** | 5.0 pt |
+
+The counts are Phase B's, to the instruction, and so is the allocation
+behaviour: 2,000,001 traced objects on `field` and on `method`, none at all on
+`arith` and `call`, and zero Rust allocations for ten thousand extra calls and
+returns under `tests/frame_allocation.rs`. **Nothing about what these programs
+do changed. Only where one fact is read from did.**
+
+Per instruction, which the equal counts make available:
+
+| row | VM | mixed frame |
+| --- | ---: | ---: |
+| `arith` | 3.17 ns | **3.38 ns** — still the only row where the frame is slower |
+| `call` | 4.77 ns | 4.48 ns |
+| `field` | 10.19 ns | 4.38 ns |
+| `method` | 12.13 ns | 6.05 ns |
+
+And the per-call prize, both pairs being two rows of one run:
+
+| | VM | mixed frame | saved per call |
+| --- | ---: | ---: | ---: |
+| frame of scalars — `call` − `arith`, 2,000,000 calls | 39.2 ns | 30.5 ns | **8.7 ns** |
+| frame with a reference — `method` − `field`, 4,000,000 calls | 59.3 ns | 38.0 ns | **21.3 ns** |
+
+**The bands are wider than Phase B's** — 2.3 to 8.1 points against 0.2 to 1.4 —
+and the reason is a process rather than a row. One of the six suites is the
+high end of `arith`, `call`, `field` and `method` at once, which is the
+process-level effect "The reservation is a measurement fix" describes and is
+exactly why the number quoted is a median of six rather than a suite. `pure`'s
+8.1 points is 8.1 points of a 1.5 ms row.
+
+**`arith` did not stop being slower than the VM, and this change could not have
+made it so.** `benches/arith` executes no `get-field-at` at all, so the only
+thing Phase C touched is absent from it. The negative result Phase B recorded
+stands as recorded: a frame with no reference in it pays the bitmap a bit per
+word pushed and gets nothing back, and it is 6.5% slower than the `Vm` here.
+
+#### Whether the static map is what moved `field`, which is an indication
+
+`field` reads 0.428× where Phase B read 0.489–0.491×, and `method` 0.495×
+where Phase B read 0.546–0.555×. **That comparison crosses a build, so it is an
+indication and not a measurement**, for the reason ADR 0029 and
+[#179](https://github.com/myuon/cove/issues/179) give and the reason Phase B
+could not price the bitmap alone: the control for "the same backend that asks
+the object instead" is a different binary.
+
+What can be said is the shape of it. Against Phase B's recorded absolutes, in
+the same rows:
+
+| row | field reads per turn | frame, Phase B | frame, Phase C | change |
+| --- | ---: | ---: | ---: | ---: |
+| `field` | 2 | 234.0 ms | 207.59 ms | **−11.3%** |
+| `method` | 2, both behind a call | 384.5 ms | 359.42 ms | **−6.5%** |
+| `arith` | 0 | 109.3 ms | 105.29 ms | −3.7% |
+| `call` | 0 | 169.2 ms | 166.28 ms | −1.7% |
+| `pure` | 0 | 1.33 ms | 1.34 ms | +0.8% |
+
+`arith`'s −3.7% is the size of the term a rebuild moves on its own, since
+nothing in this change can reach that row. The two rows that read fields moved
+three times and twice that. That is consistent with what was removed — an
+object-table index, a layout id and a `Vec::contains` over the layout's
+reference list, replaced by one indexed load, on every `get-field-at` — and it
+is not proof of it. The `Vm` rows moved by −0.1% to +3.0% across the same two
+builds, which is the other half of the same caveat.
 
 ### What Phase C did not do, and what Phase D owes
 
