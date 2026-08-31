@@ -678,12 +678,71 @@ fn crosses_as_a_string(operands: &Operands, pc: usize) -> bool {
     operands.top(pc, 1).as_deref() == Some(&[Kind::Str])
 }
 
+/// Where a refusal found while walking one function goes: back to the
+/// caller right away, or into a collection that lets the walk keep going.
+///
+/// [`admits`] wants the first shape -- a run either starts or it does not,
+/// and the first refusal reached is the whole answer -- and [`refusals`]
+/// wants the second: everything else the same function, and everything
+/// reachable from it, would also refuse, which stopping at the first can
+/// never show because it ends the walk before reaching any of it. Both are
+/// answered by the one `match` inside [`walk_function`], so the two cannot
+/// come to name two different sets of refusals by drifting apart.
+trait Sink {
+    /// Records one refusal. `Err` propagates out of [`walk_function`]
+    /// immediately, exactly as if the refusal itself had been returned
+    /// there; `Ok(())` lets the walk carry on to the next instruction.
+    fn refuse(&mut self, refused: Refused) -> Result<(), Refused>;
+}
+
+/// [`admits`]'s own sink: the first refusal found is the answer, and the
+/// walk goes no further.
+struct StopAtFirst;
+
+impl Sink for StopAtFirst {
+    fn refuse(&mut self, refused: Refused) -> Result<(), Refused> {
+        Err(refused)
+    }
+}
+
+/// [`refusals`]'s sink: every refusal reached is kept, and none of them
+/// stops the walk.
+#[derive(Default)]
+struct Accumulate {
+    found: Vec<Refused>,
+}
+
+impl Sink for Accumulate {
+    fn refuse(&mut self, refused: Refused) -> Result<(), Refused> {
+        self.found.push(refused);
+        Ok(())
+    }
+}
+
 /// One function's shape and instructions, and the functions it calls.
+///
+/// A thin, unconditional wrapper over [`walk_function`] with a
+/// [`StopAtFirst`] sink: this keeps `admits`'s own call site, its
+/// behaviour and its cost exactly what they were before [`refusals`]
+/// existed, because nothing here changed except the name of the function
+/// that does the work.
 fn admits_function(
     program: &Program,
     id: FunctionId,
     structs: &[Vec<Part>],
     fields: &[Option<u32>],
+) -> Result<Vec<FunctionId>, Refused> {
+    walk_function(program, id, structs, fields, &mut StopAtFirst)
+}
+
+/// One function's shape and instructions, and the functions it calls --
+/// generalised over where a refusal goes. See [`Sink`].
+fn walk_function<S: Sink>(
+    program: &Program,
+    id: FunctionId,
+    structs: &[Vec<Part>],
+    fields: &[Option<u32>],
+    sink: &mut S,
 ) -> Result<Vec<FunctionId>, Refused> {
     let function = program.function(id);
     // Built where a refusal is built and not before it. `admits` runs once
@@ -740,14 +799,14 @@ fn admits_function(
                     .top(pc, 1)
                     .is_some_and(|kinds| kinds.iter().all(|kind| kind.is_reference()))
                 {
-                    return Err(Refused::new(
+                    sink.refuse(Refused::new(
                         format!(
                             "a general value slot in {} that the 8-byte frame cannot show holds \
                              a heap object",
                             named()
                         ),
                         span,
-                    ));
+                    ))?;
                 }
             }
             // A constant is a word here rather than a `Value`, for the five
@@ -760,9 +819,11 @@ fn admits_function(
             // built. See `FrameVm::new` and `Kind::Str`.
             Inst::Const(id) => match program.constant(*id) {
                 Const::Unit | Const::Bool(_) | Const::Int(_) | Const::Float(_) | Const::Str(_) => {}
-                Const::Name(_) => return Err(Refused::new(format!("a name in {}", named()), span)),
+                Const::Name(_) => {
+                    sink.refuse(Refused::new(format!("a name in {}", named()), span))?
+                }
                 Const::Duration(_) => {
-                    return Err(Refused::new(format!("a `Duration` in {}", named()), span))
+                    sink.refuse(Refused::new(format!("a `Duration` in {}", named()), span))?
                 }
             },
             // **The type says what its words are, and this asks whether the
@@ -791,7 +852,7 @@ fn admits_function(
                         .eq(declared.iter().copied())
                 });
                 if !agrees {
-                    return Err(Refused::new(
+                    sink.refuse(Refused::new(
                         format!(
                             "building `{}` in {} out of words the 8-byte frame cannot show are \
                              what the type's fields are",
@@ -799,19 +860,19 @@ fn admits_function(
                             named()
                         ),
                         span,
-                    ));
+                    ))?;
                 }
             }
             Inst::SetField(id) => {
                 if fields[id.0 as usize].is_none() {
-                    return Err(Refused::new(
+                    sink.refuse(Refused::new(
                         format!(
                             "a write to `.{}` in {}, which names no field of one settled struct",
                             const_name(program, *id),
                             named()
                         ),
                         span,
-                    ));
+                    ))?;
                 }
             }
             // The boundary. A `make-builtin` is admitted where the words its
@@ -820,14 +881,14 @@ fn admits_function(
             // really is one.
             Inst::MakeBuiltin { argc, .. } => {
                 if operands.boundary(pc, *argc as usize).is_none() {
-                    return Err(Refused::new(
+                    sink.refuse(Refused::new(
                         format!(
                             "a builtin call in {}, whose arguments the 8-byte frame cannot read \
                              as values",
                             named()
                         ),
                         span,
-                    ));
+                    ))?;
                 }
             }
             // A Host call is the same question `make-builtin` asks, over the
@@ -846,14 +907,14 @@ fn admits_function(
             // struct, and the module docs' "What it refuses" says why.
             Inst::CallHost { argc, .. } => {
                 if operands.boundary(pc, *argc as usize).is_none() {
-                    return Err(Refused::new(
+                    sink.refuse(Refused::new(
                         format!(
                             "a Host call in {}, whose arguments the 8-byte frame cannot read as \
                              values",
                             named()
                         ),
                         span,
-                    ));
+                    ))?;
                 }
             }
             // ADR 0031: a host handle is not a VM handle. There is no eight-byte
@@ -869,20 +930,20 @@ fn admits_function(
             // uses, because the receiver is the one part of it that wiring does
             // not reach.
             Inst::CallResource { .. } => {
-                return Err(Refused::new(
+                sink.refuse(Refused::new(
                     format!(
                         "a call on a host resource in {}, whose receiver ADR 0031 keeps out of \
                          every frame word",
                         named()
                     ),
                     span,
-                ))
+                ))?;
             }
             Inst::Pop | Inst::Try | Inst::Return => {
                 if !leaves_a_boundary_value(program, function, pc)
                     && !crosses_as_a_string(&operands, pc)
                 {
-                    return Err(Refused::new(
+                    sink.refuse(Refused::new(
                         format!(
                             "{} in {}, over something that is a word rather than a value",
                             match inst {
@@ -893,7 +954,7 @@ fn admits_function(
                             named()
                         ),
                         span,
-                    ));
+                    ))?;
                 }
             }
             // Interpolation. Admitted where every operand renders the way
@@ -915,14 +976,14 @@ fn admits_function(
                         .map(Some),
                 };
                 if let Some(offending) = offending {
-                    return Err(Refused::new(
+                    sink.refuse(Refused::new(
                         format!(
                             "string interpolation in {} over {}",
                             named(),
                             undisplayable(offending)
                         ),
                         span,
-                    ));
+                    ))?;
                 }
             }
             // A comparison between two `String`s. Admitted where at least one
@@ -972,10 +1033,10 @@ fn admits_function(
                 ..
             } => {
                 if *place_argc != 0 {
-                    return Err(Refused::new(
+                    sink.refuse(Refused::new(
                         format!("a call in {} that passes a `var` argument", named()),
                         span,
-                    ));
+                    ))?;
                 }
                 // A value argument becomes a value slot of the callee without
                 // moving, so it is the same question `Inst::StoreLocal` asks:
@@ -1000,22 +1061,22 @@ fn admits_function(
                         .top(pc, *value_argc as usize)
                         .is_some_and(|kinds| kinds.iter().all(|kind| kind.is_reference()))
                 {
-                    return Err(Refused::new(
+                    sink.refuse(Refused::new(
                         format!(
                             "a call in {} whose value argument the 8-byte frame cannot show is a \
                              heap object",
                             named()
                         ),
                         span,
-                    ));
+                    ))?;
                 }
                 calls.push(*target);
             }
             other => {
-                return Err(Refused::new(
+                sink.refuse(Refused::new(
                     format!("{} in {}", describe(other), named()),
                     span,
-                ))
+                ))?;
             }
         }
     }
@@ -1029,35 +1090,86 @@ fn admits_function(
     // what catches a function whose *shape* is out of reach although every
     // instruction in it is admitted.
     if function.place_frame_size != 0 {
-        return Err(Refused::new(
+        sink.refuse(Refused::new(
             format!("{}, which takes a `var` parameter", named()),
             function.span,
-        ));
+        ))?;
     }
     if !function.captures.is_empty() {
-        return Err(Refused::new(
+        sink.refuse(Refused::new(
             format!("{}, which is a closure", named()),
             function.span,
-        ));
+        ))?;
     }
     if function.answers_a_task {
-        return Err(Refused::new(
+        sink.refuse(Refused::new(
             format!("{}, which is `async`", named()),
             function.span,
-        ));
+        ))?;
     }
     // A receiver is parameter 0 and nothing else, now that a parameter may be
     // a reference: `method.Cursor.position` takes its `Cursor` in the frame's
     // first word, and the word is a handle because the frame map says so.
-    for kind in &function.params {
-        if matches!(kind, SlotKind::Place) {
-            return Err(Refused::new(
-                format!("{}, which takes a `var` parameter", named()),
-                function.span,
-            ));
-        }
+    // Asked once over all of them rather than per parameter, so a sink that
+    // accumulates records one refusal for the function and not one per
+    // offending parameter.
+    if function
+        .params
+        .iter()
+        .any(|kind| matches!(kind, SlotKind::Place))
+    {
+        sink.refuse(Refused::new(
+            format!("{}, which takes a `var` parameter", named()),
+            function.span,
+        ))?;
     }
     Ok(calls)
+}
+
+/// Every refusal a walk from `module.name` would ever raise, gathered rather
+/// than stopped at the first.
+///
+/// [`admits`] exists to answer one question -- can this run -- and stopping
+/// at the first "no" is the right answer to it. This exists to answer a
+/// different one, for a program that already got that "no": what would the
+/// rest of it also be refused for, which `admits`'s own answer cannot say
+/// because it stops the walk before reaching any of it. The reachable set is
+/// the same one `admits` would have walked -- the walk still adds a call's
+/// target to it even where the call itself is refused, so that what a
+/// blocked call would have reached downstream is counted too rather than cut
+/// off at the block -- and every refusal any function in it raises is
+/// collected, in the order the walk found them.
+///
+/// A name that resolves to nothing declared is reported the same way
+/// [`admits`] reports it: one [`Refused`] with nowhere to point, and nothing
+/// to walk.
+///
+/// `crates/cove-cli/tests/admits_coverage.rs` is the one caller. It is what
+/// turns "a Host call blocks this program" into "and here is everything
+/// standing behind it, too."
+pub fn refusals(program: &Program, module: &str, name: &str) -> Vec<Refused> {
+    let Some(entry) = program.function_named(module, name) else {
+        return vec![Refused::nowhere(format!(
+            "`{module}.{name}`, which this package does not declare"
+        ))];
+    };
+    let structs = struct_parts(program);
+    let fields = field_positions(program);
+    let mut seen = vec![false; program.functions.len()];
+    let mut queue = vec![entry];
+    seen[entry.0 as usize] = true;
+    let mut sink = Accumulate::default();
+    while let Some(id) = queue.pop() {
+        let reached = walk_function(program, id, &structs, &fields, &mut sink)
+            .expect("`Accumulate::refuse` always answers `Ok`, so `walk_function` never returns `Err` under it");
+        for next in reached {
+            if !seen[next.0 as usize] {
+                seen[next.0 as usize] = true;
+                queue.push(next);
+            }
+        }
+    }
+    sink.found
 }
 
 /// What an instruction outside the admitted subset is called, in words a

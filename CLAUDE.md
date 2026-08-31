@@ -19,9 +19,13 @@ and the `#[ignore]`d cases, which together are more than half of a warm
 `cargo test --workspace` and which CI runs in steps of their own.
 
 Run the ignored ones by hand after a change to `crates/cove-runtime/src/frame.rs`:
-`cargo test --workspace --lib -- --ignored`. They are the five that drive the
-`benches/` rows at the turn count the published measurements were taken at, and
-that file's module docs say why shortening them was refused.
+`cargo test --workspace --lib --tests -- --ignored`. Two things are in there.
+Five cases drive the `benches/` rows at the turn count the published
+measurements were taken at, and that file's module docs say why shortening them
+was refused. The sixth is `crates/cove-cli/tests/admits_coverage.rs`, which
+compiles every program in the repository and reports which ones the eight-byte
+frame admits and what the refusals say — the roadmap for what to build next,
+and a ratchet that fails if a change admits fewer than the last one did.
 
 Before pushing, the full gate is what CI runs: `cargo fmt --all --check`,
 `cargo clippy --workspace --all-targets -- -D warnings`, `cargo test --workspace`,

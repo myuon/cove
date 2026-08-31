@@ -97,11 +97,18 @@ jobs:
       # once here rather than on every local `cargo test`. The module docs
       # there say why shortening the rows was refused instead.
       #
-      # `--lib` and not `--workspace` alone, because `--ignored` would
-      # otherwise reach the doc examples fenced ```ignore, which are marked
-      # that way precisely because they do not compile on their own.
+      # `crates/cove-cli/tests/admits_coverage.rs` is the same trade made by
+      # an integration test rather than a unit test, which is why `--lib`
+      # alone no longer covers everything `#[ignore]` marks: a target under
+      # `tests/` is not part of `--lib`, so a `--lib`-only run would build
+      # that test and never execute it. `--tests` beside it picks up every
+      # integration test binary's ignored cases too.
+      #
+      # `--lib --tests` and not `--workspace` alone, because `--ignored`
+      # would otherwise reach the doc examples fenced ```ignore, which are
+      # marked that way precisely because they do not compile on their own.
       - name: cargo test (the ignored rows)
-        run: cargo test --workspace --lib -- --ignored
+        run: cargo test --workspace --lib --tests -- --ignored
 
       # Dogfooding. These are the project's own claims about its own sources:
       # the repository is formatted, the representative programs check, and

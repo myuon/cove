@@ -123,7 +123,6 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 
-use cove_diag::SourceMap;
 use cove_runtime::budget::{Budget, Cancellation, Limits};
 use cove_runtime::clock::{Clock, VirtualTime};
 use cove_runtime::database::Database;
@@ -140,8 +139,10 @@ use cove_runtime::trace::{
 use cove_runtime::value::Value;
 use cove_runtime::vm::Vm;
 use cove_sema::config::RunConfig;
-use cove_sema::package::{Module, Package, Unit};
-use cove_sema::resolve::Program as Checked;
+
+#[path = "support/mod.rs"]
+mod support;
+use support::{Case, ModuleIndex, Prepared};
 
 /// How many corpus cases the lowering covers today.
 ///
@@ -667,10 +668,12 @@ fn run_the_corpus() -> Report {
             .or_insert_with(|| ModuleIndex::of(&case.root));
 
         // A package that does not check has no program in it to lower or to
-        // run. `tests/e2e` keeps such cases on purpose — each pins a
-        // check-time diagnostic — so they are counted apart rather than
-        // reported as anything the VM did or did not cover.
-        let Some(prepared) = Prepared::of(&case, index) else {
+        // run, and neither does a case whose entry names no module or
+        // function this package declares. `tests/e2e` keeps the first kind
+        // on purpose — each pins a check-time diagnostic — so both are
+        // counted apart rather than reported as anything the VM did or did
+        // not cover.
+        let Ok(prepared) = Prepared::of(&case, index) else {
             report.unchecked.push(case.name.clone());
             continue;
         };
@@ -709,28 +712,12 @@ fn run_the_corpus() -> Report {
 }
 
 // -------------------------------------------------------------- the corpora
-
-/// One program of the corpus: a `[run.<name>]` table, and the package it
-/// belongs to.
-struct Case {
-    /// `tests/e2e:flow_if`, `examples:hello`, `benches:arith` — the package
-    /// the run belongs to and the run's own name, which is unique across the
-    /// corpus where the run name alone is not.
-    name: String,
-    /// The package root the run's entry is resolved against.
-    root: PathBuf,
-    run: RunConfig,
-    /// The process arguments the case is run with, from the `args` file
-    /// `tests/e2e` keeps beside a case that takes them.
-    args: Vec<String>,
-}
-
-/// The repository root, from this crate's own directory.
-fn repo_root() -> PathBuf {
-    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-    path.canonicalize()
-        .unwrap_or_else(|e| panic!("cannot resolve `{}`: {e}", path.display()))
-}
+//
+// `Case`, `ModuleIndex` and `Prepared` — discovering a `[run.<name>]` case
+// and parsing and checking the modules its entry reaches — are
+// `tests/support/mod.rs`'s, shared with `admits_coverage.rs` so that there is
+// one description of how a corpus case is loaded rather than two that could
+// drift.
 
 /// Every case of every corpus, in a fixed order.
 ///
@@ -754,287 +741,20 @@ fn repo_root() -> PathBuf {
 /// runs them optimized, in fifteen seconds, on every push. What is given up
 /// is the console comparison this harness makes and that one does not, and a
 /// benchmark writes almost nothing to the console.
+///
+/// `admits_coverage.rs` makes the opposite choice for the opposite reason: it
+/// never executes a program, so a benchmark's size costs it nothing, and it
+/// wants `benches/` counted.
 fn discover() -> Vec<Case> {
-    let root = repo_root();
+    let root = support::repo_root();
     let mut roots = vec![root.join("tests/e2e")];
-    roots.extend(nested_packages(&root.join("tests/e2e")));
+    roots.extend(support::nested_packages(&root.join("tests/e2e")));
     roots.push(root.join("examples"));
 
-    let mut cases = Vec::new();
-    for package in roots {
-        let text = std::fs::read_to_string(package.join("cove.toml"))
-            .unwrap_or_else(|e| panic!("cannot read `{}/cove.toml`: {e}", package.display()));
-        let config = cove_sema::config::parse(&text)
-            .unwrap_or_else(|e| panic!("`{}/cove.toml`: {e}", package.display()));
-        for (name, run) in config.runs {
-            let mut args = read_args(&package, &name);
-            if let Some(smaller) = smaller_workload(&name) {
-                args = smaller;
-            }
-            cases.push(Case {
-                name: format!("{}:{name}", relative(&root, &package)),
-                root: package.clone(),
-                run,
-                args,
-            });
-        }
-    }
-    cases
-}
-
-/// The arguments that make a case's workload a test's size rather than its
-/// own.
-///
-/// One case needs this. `examples:cqSample` is `cq.sample`, which writes a
-/// file of records for the `cq` benchmark to read, and its own default is a
-/// hundred thousand of them — sixteen megabytes, written twice, unoptimized,
-/// by a test that is asking whether two backends agree. It was 258 of the
-/// 340 seconds this test spent running programs, which is more than the
-/// other eighty-nine cases put together by a factor of sixty.
-///
-/// A hundred records reach every line of it that a hundred thousand do. The
-/// entry already reads the count from its arguments, so this changes nothing
-/// about what runs and only how many times the loop around it turns, and
-/// `cove run cqSample` still writes what the benchmark expects.
-///
-/// This is a list rather than a rule because it should stay short enough to
-/// read. A case that needs to be here is a case whose size was chosen for
-/// something other than this test.
-fn smaller_workload(name: &str) -> Option<Vec<String>> {
-    match name {
-        "cqSample" => Some(vec!["100".to_string(), "bookings-sample.jsonl".to_string()]),
-        _ => None,
-    }
-}
-
-/// Every directory below `root` that holds a `cove.toml` of its own.
-///
-/// Such a directory is a package rather than a module of `root`'s, which is
-/// what `cove_sema::package::load` already decides and what lets a
-/// check-time-failure case fail alone.
-fn nested_packages(root: &Path) -> Vec<PathBuf> {
-    let mut found = Vec::new();
-    let mut names: Vec<PathBuf> = std::fs::read_dir(root)
-        .unwrap_or_else(|e| panic!("cannot read `{}`: {e}", root.display()))
-        .filter_map(Result::ok)
-        .map(|entry| entry.path())
-        .collect();
-    names.sort();
-    for path in names {
-        if !path.is_dir() || skipped_directory(&path) {
-            continue;
-        }
-        if path.join("cove.toml").is_file() {
-            found.push(path);
-        } else {
-            found.extend(nested_packages(&path));
-        }
-    }
-    found
-}
-
-/// Whether the walk should not enter `path`: build output and dotted
-/// directories, exactly what the package loader skips.
-fn skipped_directory(path: &Path) -> bool {
-    let name = path.file_name().unwrap_or_default().to_string_lossy();
-    name.starts_with('.') || name == "target"
-}
-
-/// `root`-relative, with forward slashes, for a case name that reads the
-/// same on every platform.
-fn relative(root: &Path, path: &Path) -> String {
-    path.strip_prefix(root)
-        .unwrap_or(path)
-        .components()
-        .map(|c| c.as_os_str().to_string_lossy().into_owned())
-        .collect::<Vec<_>>()
-        .join("/")
-}
-
-/// The process arguments a case is run with, one per line of its `args` file.
-///
-/// This is `tests/e2e.rs`'s own convention, read here so that a case that
-/// takes arguments is compared having been given them.
-fn read_args(package: &Path, name: &str) -> Vec<String> {
-    std::fs::read_to_string(package.join(name).join("args"))
-        .map(|text| text.lines().map(str::to_string).collect())
-        .unwrap_or_default()
-}
-
-// ------------------------------------------------- one case, checked alone
-
-/// One case's program: the modules it is made of, checked.
-struct Prepared {
-    sources: Arc<SourceMap>,
-    checked: Arc<Checked>,
-    /// `module.entry`, split, and owned so the borrow does not follow the
-    /// `RunConfig` around.
-    entry: (String, String),
-}
-
-impl Prepared {
-    /// Parses and checks the case's entry module together with the modules
-    /// `index` says it reaches, or `None` when that program does not check.
-    fn of(case: &Case, index: &ModuleIndex) -> Option<Prepared> {
-        let (module, entry) = case.run.entry_parts()?;
-        let wanted = index.reachable(module)?;
-
-        let mut sources = SourceMap::new();
-        let mut modules = BTreeMap::new();
-        for name in &wanted {
-            let (dir, files) = index.modules.get(name)?;
-            let mut units = Vec::new();
-            for path in files {
-                let text = std::fs::read_to_string(path).ok()?;
-                let file = sources.add(path.clone(), &text);
-                let ast = cove_syntax::parse_file(&sources, file).ok()?;
-                units.push(Unit {
-                    file,
-                    path: path.clone(),
-                    ast,
-                });
-            }
-            modules.insert(
-                name.clone(),
-                Module {
-                    name: name.clone(),
-                    dir: dir.clone(),
-                    units,
-                },
-            );
-        }
-
-        let package = Package {
-            root: case.root.clone(),
-            config: Default::default(),
-            modules,
-        };
-        // Resolved *and* type-checked, which is what `cove run` requires
-        // before it executes anything. The lowering reads the checker's
-        // answers rather than recomputing them, so a program that does not
-        // check is not a program either backend has an answer for — and
-        // `tests/e2e` keeps a dozen such cases on purpose.
-        let checked = cove_sema::Compiler::new().compile(&package).ok()?;
-        checked.lookup_fn(module, entry)?;
-        Some(Prepared {
-            sources: Arc::new(sources),
-            checked: Arc::new(checked),
-            entry: (module.to_string(), entry.to_string()),
-        })
-    }
-
-    fn entry(&self) -> (&str, &str) {
-        (&self.entry.0, &self.entry.1)
-    }
-}
-
-/// Every module of one package, and what each of them reaches.
-///
-/// The index is built by parsing the package once with the `use` declarations
-/// the only thing read off it, because a module's dependencies are all that
-/// decides which files a case's own program is made of.
-struct ModuleIndex {
-    /// Each module's directory and its `.cove` files, by dotted name.
-    modules: BTreeMap<String, (PathBuf, Vec<PathBuf>)>,
-    /// The modules of this package each module's `use` declarations name.
-    uses: BTreeMap<String, BTreeSet<String>>,
-}
-
-impl ModuleIndex {
-    fn of(root: &Path) -> ModuleIndex {
-        let mut modules = BTreeMap::new();
-        walk(root, root, &mut modules);
-
-        // The names are needed in full before any `use` can be read, since a
-        // `use` names a module by its longest matching prefix and the module
-        // it names may be discovered later in the walk.
-        let mut sources = SourceMap::new();
-        let known: BTreeSet<String> = modules.keys().cloned().collect();
-        let mut uses: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
-        for (name, (_, files)) in &modules {
-            let mut reached = BTreeSet::new();
-            for path in files {
-                let Ok(text) = std::fs::read_to_string(path) else {
-                    continue;
-                };
-                let file = sources.add(path.clone(), &text);
-                let Ok(ast) = cove_syntax::parse_file(&sources, file) else {
-                    continue;
-                };
-                for used in &ast.uses {
-                    let segments: Vec<&str> =
-                        used.path.iter().map(|part| part.node.as_str()).collect();
-                    // A `use` names a value, a type, or a whole module, so
-                    // the module it reaches is the longest prefix that is
-                    // one. `use console.println` names no module of this
-                    // package at all, which is a host and not a dependency.
-                    for length in (1..=segments.len()).rev() {
-                        let candidate = segments[..length].join(".");
-                        if known.contains(&candidate) {
-                            reached.insert(candidate);
-                            break;
-                        }
-                    }
-                }
-            }
-            uses.insert(name.clone(), reached);
-        }
-        ModuleIndex { modules, uses }
-    }
-
-    /// `start` and everything it reaches, or `None` when this package has no
-    /// such module.
-    fn reachable(&self, start: &str) -> Option<BTreeSet<String>> {
-        self.modules.get(start)?;
-        let mut found = BTreeSet::new();
-        let mut pending = vec![start.to_string()];
-        while let Some(name) = pending.pop() {
-            if !found.insert(name.clone()) {
-                continue;
-            }
-            for next in self.uses.get(&name).into_iter().flatten() {
-                pending.push(next.clone());
-            }
-        }
-        Some(found)
-    }
-}
-
-/// Turns every directory of `.cove` files below `dir` into a module named by
-/// its dotted path from `root`.
-///
-/// A directory holding its own `cove.toml` is a package and not a module of
-/// this one, so the walk does not enter it — the rule
-/// `cove_sema::package::load` follows, followed here for the same reason.
-fn walk(root: &Path, dir: &Path, modules: &mut BTreeMap<String, (PathBuf, Vec<PathBuf>)>) {
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return;
-    };
-    let mut paths: Vec<PathBuf> = entries.filter_map(Result::ok).map(|e| e.path()).collect();
-    paths.sort();
-
-    let mut cove_files = Vec::new();
-    let mut subdirs = Vec::new();
-    for path in paths {
-        if path.is_dir() {
-            if !skipped_directory(&path) {
-                subdirs.push(path);
-            }
-        } else if path.extension().and_then(|e| e.to_str()) == Some("cove") {
-            cove_files.push(path);
-        }
-    }
-    if !cove_files.is_empty() && dir != root {
-        modules.insert(
-            relative(root, dir).replace('/', "."),
-            (dir.to_path_buf(), cove_files),
-        );
-    }
-    for subdir in subdirs {
-        if !subdir.join("cove.toml").is_file() {
-            walk(root, &subdir, modules);
-        }
-    }
+    roots
+        .iter()
+        .flat_map(|package| support::cases_of(&root, package))
+        .collect()
 }
 
 // ------------------------------------------------------------ the two runs
