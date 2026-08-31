@@ -1020,6 +1020,38 @@ root set for. The stack is sound over a handle precisely because a handle is
 not a counted reference, and it becomes available when a slot stops being a
 `Value` and not before.
 
+### Where the two heaps meet, and why that is one place
+
+The paragraph above says the two accounting schemes must not overlap. There is
+exactly one place they have to, and ADR 0028 decision 5 names it: a `Value` is
+*materialized at the boundary*, so something has to read a VM-owned object and
+build one. `slot::Machine::materialise` is that, and it is the temporary-root
+stack's first caller that is not a test — a handle goes in, is a Rust local for
+the whole crossing, and reading its parts is VM work that reaches safepoints.
+
+The seam is safe because it is one-way and because it copies. No `Value`
+stores a handle, so the shortfall rule's arithmetic can never see one; no
+VM-owned object stores a `Value`, so the shadow-root stack can never yield
+something `Rc` already counts. The two root sets are over disjoint universes,
+and "yielded twice" is a question that cannot be asked across the seam. What
+comes back is an owned `Value` in decision 5's sense — "not a window onto a
+slot, a heap object or a dynamic value" — so from the moment it exists it is
+rooted by its own count exactly as `Vm::take`'s argument vector is, and the
+object it was made from may be swept without it noticing. That is also what
+keeps the assumption under "Where a collection happens, and why it is safe
+there" true once slots are handles: nothing outside the runtime is holding a
+view into the heap when a collection runs, because a host is holding a copy.
+
+What the boundary demonstrates that the rest of the slice could not is that
+the discipline is load-bearing rather than merely available. Removing the push
+from `with_root` sweeps the source object in the middle of materialising it,
+and the next word read is a use-after-free; the positive and negative tests are
+the same program either side of that one call. Nesting needs nothing added:
+the root depth at each collection during a two-level materialisation is 1, 2,
+2, 1, 2, 2, which is truncate-to-depth and not a case anybody wrote.
+
+Still none of it is wired into `Vm`, for the reason above.
+
 ### What the heap figures mean, on both backends
 
 The same thing, which they did not before. A VM heap was never swept, so what
