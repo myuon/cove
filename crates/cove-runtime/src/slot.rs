@@ -1047,6 +1047,11 @@ pub(crate) struct HandleHeap {
     /// Where [`HandleHeap::copy_replacing`] reads an object's words, kept
     /// between calls so that writing a struct field allocates nothing.
     scratch: Vec<Slot>,
+    /// The mark phase's set and worklist, kept between collections for the
+    /// same reason: a collection that allocates is a collection whose cost is
+    /// partly the allocator's.
+    marked: HashSet<u32>,
+    work: Vec<Handle>,
     allocations_since_collection: u64,
     next_collection_at: u64,
     collections: u64,
@@ -1069,6 +1074,8 @@ impl HandleHeap {
             objects: Vec::new(),
             free: Vec::new(),
             scratch: Vec::new(),
+            marked: HashSet::new(),
+            work: Vec::new(),
             allocations_since_collection: 0,
             next_collection_at: MIN_ALLOCATIONS_BETWEEN_COLLECTIONS,
             collections: 0,
@@ -1327,8 +1334,16 @@ impl HandleHeap {
 
     /// Marks from `roots` and sweeps what is not marked.
     pub(crate) fn collect(&mut self, roots: &dyn HandleRoots) -> HandleCollection {
-        let mut marked: HashSet<u32> = HashSet::new();
-        let mut work: Vec<Handle> = Vec::new();
+        // Taken out and put back rather than made here. A collection that
+        // allocates is a collection whose cost is the allocator's, and this
+        // heap now runs inside a benchmark: `frame_allocation.rs` counts the
+        // allocator's calls over ten thousand extra field writes and expects
+        // the difference to be zero, which two fresh containers per collection
+        // would spend.
+        let mut marked = std::mem::take(&mut self.marked);
+        let mut work = std::mem::take(&mut self.work);
+        marked.clear();
+        work.clear();
         let mut roots_yielded = 0u64;
 
         roots.walk(&mut |handle| {
@@ -1389,6 +1404,8 @@ impl HandleHeap {
         self.next_collection_at =
             (collection.live_objects * GROWTH_FACTOR).max(MIN_ALLOCATIONS_BETWEEN_COLLECTIONS);
         self.collections += 1;
+        self.marked = marked;
+        self.work = work;
         collection
     }
 }

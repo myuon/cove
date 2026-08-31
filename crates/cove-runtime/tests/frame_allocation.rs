@@ -6,7 +6,7 @@
 //! suite pays for it, and it is a count rather than a byte figure because
 //! what is being asked is whether a call *touches* the allocator at all.
 //!
-//! # Why two workloads and not one absolute
+//! # Why a difference and not one absolute
 //!
 //! An absolute would be a number about the whole run — the trace's four
 //! events each turn a module name into a `String`, `on_cove_stack` spawns a
@@ -19,6 +19,12 @@
 //! thousand extra calls allocated nothing, and if they are not the difference
 //! is exactly what a call costs. This needs no access to anything private and
 //! cannot be fooled by a warm-up that happened to hide a cost.
+//!
+//! There are two such differences here. The first is Phase A's — ten thousand
+//! extra **calls** — and the second is Phase B's — ten thousand extra **struct
+//! field writes**, which is the workload a rooted frame exists for. Both are
+//! taken on the frame and on the `Vm` beside it, in one process, because a
+//! zero is only worth reading beside something that is not one.
 //!
 //! `crates/cove-runtime/src/frame.rs` is the backend and its module docs are
 //! the calling convention this is checking.
@@ -109,6 +115,29 @@ export fn main() -> Int {
 export fn twice() -> Int {
   work(20000)
 }
+
+struct Cell {
+  at: Int
+  step: Int
+}
+
+fn writes(turns: Int) -> Int {
+  var cell = Cell(at: 0, step: 1)
+  var i = 0
+  while i < turns {
+    cell.at = cell.at + cell.step
+    i = i + 1
+  }
+  cell.at
+}
+
+export fn fields() -> Int {
+  writes(10000)
+}
+
+export fn fieldsTwice() -> Int {
+  writes(20000)
+}
 ";
 
 fn prepared() -> (
@@ -163,7 +192,16 @@ fn prepared() -> (
 #[test]
 fn a_call_reaches_the_allocator_zero_times_on_either_backend() {
     let (sources, checked, ir) = prepared();
-    let (frame_ten, frame_twenty, vm_ten, vm_twenty) = on_cove_stack(move || {
+    let Counts {
+        frame_ten,
+        frame_twenty,
+        vm_ten,
+        vm_twenty,
+        frame_fields_ten,
+        frame_fields_twenty,
+        vm_fields_ten,
+        vm_fields_twenty,
+    } = on_cove_stack(move || {
         let hosts = Arc::new(HostRegistry::new(Grants::new(Vec::<&str>::new())));
         let runtime = Runtime::new(checked, sources, hosts.clone());
 
@@ -181,13 +219,42 @@ fn a_call_reaches_the_allocator_zero_times_on_either_backend() {
         let (_, frame_ten) = counted(|| frame.run_entry("m", "main", Vec::new()));
         let (_, frame_twenty) = counted(|| frame.run_entry("m", "twice", Vec::new()));
 
+        // The same difference over a loop that writes a struct field a turn,
+        // which is Phase B's workload: a field write is a copy, so ten
+        // thousand extra turns are ten thousand extra objects in the traced
+        // heap and however many collections the pacing decides.
+        frame
+            .run_entry("m", "fields", Vec::new())
+            .expect("it answers");
+        frame
+            .run_entry("m", "fieldsTwice", Vec::new())
+            .expect("it answers");
+        let (_, frame_fields_ten) = counted(|| frame.run_entry("m", "fields", Vec::new()));
+        let (_, frame_fields_twenty) = counted(|| frame.run_entry("m", "fieldsTwice", Vec::new()));
+
         let mut vm = Vm::new(&runtime, &hosts, &ir);
         vm.run_entry("m", "main", Vec::new()).expect("it answers");
         vm.run_entry("m", "twice", Vec::new()).expect("it answers");
         let (_, vm_ten) = counted(|| vm.run_entry("m", "main", Vec::new()));
         let (_, vm_twenty) = counted(|| vm.run_entry("m", "twice", Vec::new()));
 
-        (frame_ten, frame_twenty, vm_ten, vm_twenty)
+        let mut vm = Vm::new(&runtime, &hosts, &ir);
+        vm.run_entry("m", "fields", Vec::new()).expect("it answers");
+        vm.run_entry("m", "fieldsTwice", Vec::new())
+            .expect("it answers");
+        let (_, vm_fields_ten) = counted(|| vm.run_entry("m", "fields", Vec::new()));
+        let (_, vm_fields_twenty) = counted(|| vm.run_entry("m", "fieldsTwice", Vec::new()));
+
+        Counts {
+            frame_ten,
+            frame_twenty,
+            vm_ten,
+            vm_twenty,
+            frame_fields_ten,
+            frame_fields_twenty,
+            vm_fields_ten,
+            vm_fields_twenty,
+        }
     })
     .expect("a thread to run Cove on");
 
@@ -213,4 +280,53 @@ fn a_call_reaches_the_allocator_zero_times_on_either_backend() {
         "a run's fixed cost is {frame_ten} allocation(s) on the frame and {vm_ten} on the VM, \
          which is more than the trace's events and the answer can account for"
     );
+
+    // --------------------------------------------- and a struct field write
+    //
+    // **Ten thousand more field writes allocate nothing on the frame, and
+    // twenty thousand times on the VM.** That is the sharpest single number
+    // Phase B produced and it is not about the frame at all: it is about where
+    // a struct's field *names* live. A `Vm` struct is an `Rc<StructValue>`
+    // holding a `Vec<(Rc<str>, Value)>`, so writing a field through
+    // `Rc::make_mut` copies both the cell and the vector, twice per turn; a
+    // traced-heap object is a layout id and a run of words, so the same write
+    // is a copy of two words into an entry the free list handed back.
+    //
+    // ADR 0028 decision 2 is what makes the difference available -- "what it
+    // names carries a layout id, the object's size, its reference map, its
+    // payload layout" in *VM-owned metadata* rather than in every object --
+    // and this is what that sentence is worth on one loop.
+    assert_eq!(
+        frame_fields_ten,
+        frame_fields_twenty,
+        "on the 8-byte frame, twenty thousand field writes allocated \
+         {frame_fields_twenty} time(s) and ten thousand allocated \
+         {frame_fields_ten}, so a field write costs {} allocation(s)",
+        (frame_fields_twenty as i64 - frame_fields_ten as i64) as f64 / 10_000.0
+    );
+    // The VM's is the control that says the zero above is a property of this
+    // arrangement rather than of the workload. It is asserted as a range
+    // rather than as a figure because what is being said is "this allocates
+    // per turn and the other does not", and the exact multiple is
+    // `Rc::make_mut`'s business.
+    let per_write = (vm_fields_twenty as i64 - vm_fields_ten as i64) as f64 / 10_000.0;
+    assert!(
+        per_write >= 1.0,
+        "the VM's field write is supposed to allocate, and it cost {per_write} \
+         allocation(s) over ten thousand extra turns; if it no longer does, the \
+         frame's zero is no longer a comparison"
+    );
+}
+
+/// What one process's counting produced, named rather than positional because
+/// eight `u64`s in a tuple is eight chances to swap two.
+struct Counts {
+    frame_ten: u64,
+    frame_twenty: u64,
+    vm_ten: u64,
+    vm_twenty: u64,
+    frame_fields_ten: u64,
+    frame_fields_twenty: u64,
+    vm_fields_ten: u64,
+    vm_fields_twenty: u64,
 }
