@@ -40,6 +40,23 @@ allow = []
 entry = "chars.main"
 allow = []
 
+# One program written twice, differing only in the order two parameters are
+# declared. `sortedargs` writes them in the order the one frame numbering puts
+# their slots in and `mixedargs` writes them against it, so the callee's
+# prologue moves two words on one row and nothing on the other and the rest of
+# the run is the same instructions on the same numbers. Issue #212's Phase E
+# added them: the argument permutation is what the mixed frame does that the
+# three-stack `Vm` has no need to, and this is the two rows of one run that
+# price it.
+
+[run.sortedargs]
+entry = "sortedargs.main"
+allow = []
+
+[run.mixedargs]
+entry = "mixedargs.main"
+allow = []
+
 # The same 2,000,000 invocations `call` makes, reached through a higher-order
 # builtin's callback rather than through the call instruction. Issue #193
 # added it: `map`, `filter`, `fold` and `sorted` are the only way a builtin

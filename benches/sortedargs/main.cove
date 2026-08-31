@@ -1,0 +1,30 @@
+/// A struct a benchmark hands to a mixed argument list.
+struct Cursor {
+  at: Int
+  step: Int
+}
+
+/// Reads the field, taking its arguments in the order the frame numbering
+/// puts their slots in: the scalar first, then the struct.
+///
+/// Every argument therefore arrives at the slot it names and the callee's
+/// prologue moves nothing. Read beside `mixedargs`, whose parameters are the
+/// same two written the other way round, this is the two rows that price the
+/// permutation.
+fn advance(by: Int, cursor: Cursor) -> Int {
+  cursor.at + by
+}
+
+/// The baseline loop, with one mixed call per iteration.
+export fn main() -> Result<Unit, Error> {
+  var cursor = Cursor(at: 0, step: 1)
+  var total = 0
+  while advance(0, cursor) < 2000000 {
+    if advance(0, cursor) % 7 == 0 {
+      total += cursor.step
+    }
+    cursor.at += cursor.step
+  }
+  assertEqual(total, 285715)?
+  Ok(())
+}

@@ -313,7 +313,21 @@ fn main_of(ty: &str, body: &str) -> String {
 /// than either: `call` minus `arith` prices a call over a frame of scalars and
 /// `method` minus `field` prices one over a frame that has to be walked, and
 /// the difference between those two differences is what rooting costs a call.
-const ADMITTED_ROWS: [&str; 4] = ["arith", "call", "field", "method"];
+///
+/// `sortedargs` and `mixedargs` are Phase E's, and they are one program
+/// written twice: the same two parameters in the numbering's order and
+/// against it, so one row's calls move two words as they open a frame and the
+/// other's move nothing. They are what prices the permutation, and the reason
+/// they are a *pair* is the reason the four above are two pairs — a per-call
+/// cost is a difference between two rows of one run, never an absolute.
+const ADMITTED_ROWS: [&str; 6] = [
+    "arith",
+    "call",
+    "field",
+    "method",
+    "sortedargs",
+    "mixedargs",
+];
 
 /// Issue #212's first acceptance criterion, and #162's Design B beside it:
 /// `benches/arith`, `benches/call`, `benches/field` and `benches/method`

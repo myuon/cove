@@ -306,7 +306,7 @@ use stats::{Baseline, Comparison, Stats, Verdict};
 const DEFAULT_ITERATIONS: u32 = 5;
 
 /// The benchmarks the suite runs, in the order their rows are reported.
-const BENCHMARKS: [&str; 9] = [
+const BENCHMARKS: [&str; 11] = [
     "pure",
     "hostheavy",
     "arith",
@@ -314,6 +314,8 @@ const BENCHMARKS: [&str; 9] = [
     "field",
     "method",
     "call",
+    "sortedargs",
+    "mixedargs",
     "chars",
     "callback",
 ];
