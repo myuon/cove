@@ -125,10 +125,19 @@ impl Ready {
     /// what the program allocated, and a rooting test that depends on that
     /// accident is a test that passes by luck.
     fn on_frame_collecting(&self, scope: RootScope) -> Collected {
+        self.on_frame_collecting_with(scope, FieldMap::TheLoweredType)
+    }
+
+    /// The same, with the third mutation knob: whether a field read's bit
+    /// comes from the lowered type at all. See [`FieldMap`].
+    fn on_frame_collecting_with(&self, scope: RootScope, fields: FieldMap) -> Collected {
         let hosts = hosts(None, None);
         let runtime = Runtime::new(self.checked.clone(), self.sources.clone(), hosts.clone());
         let mut frame = FrameVm::new(&runtime, &hosts, &self.ir);
         frame.stress();
+        if fields == FieldMap::Dropped {
+            frame.without_the_field_map();
+        }
         frame.scope = scope;
         let answered = frame.run_entry(&self.module, "main", Vec::new());
         let (collections, roots_yielded, expansions) = frame.collections();
@@ -1072,6 +1081,71 @@ export fn main() -> Int {
 }
 ";
 
+/// A nested struct read out and handed straight to a call, with nothing else
+/// naming it.
+///
+/// **This is the shape Phase C's static map admits and Phase B refused.**
+/// `Outer(...).inner` pops the outer — so the outer is garbage the moment the
+/// read is done — and pushes the inner into an operand word that is the only
+/// place it stands. The call under it is a safepoint. So the bit that word
+/// carries is the whole of what keeps the inner alive, and that bit comes from
+/// `cove_ir::StructType`'s answer about `Outer.inner`.
+///
+/// Phase B could not admit this at all: `pushed_kinds` had no reading for
+/// `Inst::GetFieldAt`, because only the object knew what a field read pushed
+/// and `admits` runs before there is an object.
+const A_NESTED_STRUCT_READ_AND_HANDED_OVER: &str = "\
+struct Inner {
+  n: Int
+}
+
+struct Outer {
+  inner: Inner
+  n: Int
+}
+
+fn take(inner: Inner) -> Int {
+  inner.n
+}
+
+export fn main() -> Int {
+  var total = 0
+  var i = 0
+  while i < 200 {
+    total = total + take(Outer(inner: Inner(n: 1), n: 2).inner)
+    i = i + 1
+  }
+  total
+}
+";
+
+/// The same read stored into a local instead of passed, which is the other
+/// half of what a field read's kind being static buys: a `store-local` is
+/// admitted only where the instruction that pushed the word says it is a
+/// reference, and a field read now can.
+const A_NESTED_STRUCT_READ_INTO_A_SLOT: &str = "\
+struct Inner {
+  n: Int
+}
+
+struct Outer {
+  inner: Inner
+  n: Int
+}
+
+export fn main() -> Int {
+  var outer = Outer(inner: Inner(n: 5), n: 1)
+  var total = 0
+  var i = 0
+  while i < 200 {
+    var held = outer.inner
+    total = total + held.n
+    i = i + 1
+  }
+  total
+}
+";
+
 /// The same loop with no bound on it, for a test about where a fuel limit
 /// stops rather than about what the loop answers.
 const A_STRUCT_LOOP_WITHOUT_END: &str = "\
@@ -1339,16 +1413,20 @@ fn nothing_is_rooted_outside_the_one_stack() {
     }
 }
 
-/// A word's kind can come from neither the frame map nor the instruction, and
-/// this is that case: `get-field-at` pushes whatever the **object's** reference
-/// map says word *i* is, so reading `outer.inner` pushes a reference and
-/// reading `outer.n` pushes scalar bits, from the same instruction.
+/// A word's kind can come from neither the frame map nor the instruction that
+/// pushed it *without help*, and this is that case: reading `outer.inner`
+/// pushes a reference and reading `outer.n` pushes scalar bits, and it is one
+/// opcode either way.
 ///
-/// That is ADR 0028 decision 2's reference map doing the job decision 1 needs
-/// it for, and it is why the bitmap is maintained rather than derived: nothing
-/// static about the instruction stream knows which of the two this is.
+/// **Phase B could only ask the object.** Phase C's `Inst::GetFieldAt` names
+/// the `cove_ir::StructType` the checker settled, so the answer is the
+/// declared field's `SlotKind` and the bitmap is written from a fact that
+/// existed before the run. The `debug_assert` in the dispatch loop reads the
+/// object's own map beside it on every field read of this test, so what runs
+/// here is the two answers agreeing rather than one of them being taken on
+/// trust.
 #[test]
-fn a_field_read_takes_its_kind_from_the_objects_reference_map() {
+fn a_field_read_takes_its_kind_from_the_type_the_instruction_names() {
     let ready = ready(A_STRUCT_INSIDE_A_STRUCT);
     let (ast, vm, collected) = crate::on_cove_stack(|| {
         (
@@ -1373,6 +1451,76 @@ fn a_field_read_takes_its_kind_from_the_objects_reference_map() {
         "the outer object and the inner one it names are two expansions of one \
          collection, which is the nested edge being followed: {collected:?}"
     );
+}
+
+/// **The third mutation.** Empty the map a field read reads its bit out of,
+/// and the struct a field read just produced is swept while it is the only
+/// thing there is.
+///
+/// The failing assertion is `crate::slot::HandleHeap`'s own — reading a word
+/// of a swept object panics with `names a swept object` rather than answering
+/// whatever is there — and it fires inside `take`, on `inner.n`, at the first
+/// collection after the call that handed the argument over.
+///
+/// What it removes is exactly Phase C's change and nothing else. The frame map
+/// still names every value slot, the operand words are still all in the walk,
+/// and `A_NESTED_STRUCT_READ_AND_HANDED_OVER` is a program where neither of
+/// those helps: the outer object was popped by the read itself, so the inner
+/// stands in one operand word and in nothing else.
+#[test]
+#[should_panic(expected = "names a swept object")]
+fn a_field_reads_bit_comes_from_the_lowered_type() {
+    let ready = ready(A_NESTED_STRUCT_READ_AND_HANDED_OVER);
+    let _ = ready.on_frame_collecting_with(RootScope::EveryWord, FieldMap::Dropped);
+}
+
+/// The control for the mutation above, and the coverage the widening is taken
+/// on.
+///
+/// Both programs are shapes Phase B refused — a field read feeding a call and
+/// a field read feeding a `store-local` — and both are admitted because
+/// `Inst::GetFieldAt` now names the type whose field it reads. So the run
+/// agrees with the VM and with the tree walk, it collects, and what it
+/// reclaims is the outer objects the reads threw away.
+#[test]
+fn a_nested_struct_read_into_a_slot_is_rooted() {
+    // The second flag is whether the program throws objects away: the first
+    // builds a fresh `Outer` a turn and abandons it at the read, and the
+    // second builds one and holds it, so only the first has a sweep to make.
+    for (source, sweeps) in [
+        (A_NESTED_STRUCT_READ_AND_HANDED_OVER, true),
+        (A_NESTED_STRUCT_READ_INTO_A_SLOT, false),
+    ] {
+        let ready = ready(source);
+        let (ast, vm, collected) = crate::on_cove_stack(|| {
+            (
+                ready.on_ast(),
+                ready.on_vm(),
+                ready.on_frame_collecting(RootScope::EveryWord),
+            )
+        })
+        .expect("a thread to run Cove on");
+
+        assert_eq!(ast, vm, "the oracle and the VM disagreed");
+        assert_eq!(
+            collected.outcome, vm,
+            "the VM and the frame disagreed about a field read that outlives its struct"
+        );
+        assert!(
+            collected.collections > 0,
+            "the run never collected, so it says nothing about rooting: {collected:?}"
+        );
+        assert_eq!(
+            collected.freed_objects > 0,
+            sweeps,
+            "a program that abandons an object a turn sweeps and one that holds \
+             its two does not: {collected:?}"
+        );
+        assert!(
+            collected.expansions > 0,
+            "no object was ever expanded, so no root was ever followed: {collected:?}"
+        );
+    }
 }
 
 /// The invariant ADR 0028 decision 1 states for any physical arrangement: **a

@@ -15,7 +15,7 @@
 //! before any side effect, is never selected by `cove run`, and is written
 //! to be deleted or absorbed once the comparison is recorded.
 //!
-//! # Two phases, and which one this is
+//! # Three phases, and which one this is
 //!
 //! **Phase A** ran `benches/arith`, `benches/call` and `benches/pure` over one
 //! contiguous `Vec<u64>`, and no word of it was ever a reference:
@@ -25,12 +25,29 @@
 //! *in its own build*, which is the only kind of comparison ADR 0029 allows —
 //! and said nothing at all about what a *rooted* frame costs.
 //!
-//! **Phase B** is this: a word-wide slot stack with a GC bitmap, which is
+//! **Phase B** was a word-wide slot stack with a GC bitmap, which is
 //! [issue #162](https://github.com/myuon/cove/issues/162)'s Design B proper. A
-//! frame word may now be a reference into a VM-owned traced object heap, and
+//! frame word may be a reference into a VM-owned traced object heap, and
 //! `benches/field` and `benches/method` run on it. What that adds, and what it
 //! costs, is under "The bitmap" below and in `docs/VM_ARCHITECTURE.md` under
 //! "What a rooted frame costs to walk".
+//!
+//! **Phase C** is this, and it is not a change to the arrangement. It is what
+//! Phase B named as its largest debt: `cove_ir` carried no per-field slot
+//! kind, so decision 2's reference map for a struct was read off the
+//! *construction* — the instructions that pushed one instance's words — and a
+//! type built two ways that disagreed was refused by name. `cove_ir::StructType`
+//! now carries one `SlotKind` per field, settled from the checker's answer
+//! about the declared type by the rule that settles every other slot's, and
+//! this backend reads the map off the lowered type. **A type is a static fact
+//! and it is now read as one.** Two consequences follow, and they are the whole
+//! of what changed here: the by-name refusal is gone because it has become
+//! impossible to state, and the bitmap's third authority — an operand a field
+//! read pushed — is decided by the instruction rather than by the object.
+//!
+//! What Phase C did **not** close is the frame map, and the reason is that
+//! Phase B's "the same absence is why" was a diagnosis of one cause for two
+//! symptoms that turn out to be two. See [`FrameMap`].
 //!
 //! [ADR 0033](../../../docs/adr/0033-an-identity-is-not-a-vm-heap-object.md)
 //! is what says a struct may be in that heap at all, and it is binding: plain
@@ -61,7 +78,9 @@
 //! one and an `Inst::LoadLocal` the other — and `FrameMap` is what makes
 //! them one region from one base, which is decision 1's "every physical offset
 //! derives from the one frame layout" met by deriving the map rather than by
-//! having been given it. Deriving it in `cove_ir` instead is Phase C's.
+//! having been given it. Phase C looked at moving that into `cove_ir` and did
+//! not: see [`FrameMap`] for what it would take and why the per-field kind did
+//! not bring it.
 //!
 //! Every logical value in this slice is exactly one word, as ADR 0028
 //! permits ("most values have width one"); a layout that spans adjacent
@@ -260,8 +279,17 @@
 //! [`admits`]. In particular there is no `Dynamic`, no `dyn`, no `Any`, no
 //! enum layout, no place, no `var`, no closure, no Host call, no task, no
 //! string and no collection — and none of ADR 0033's five identity-bearing
-//! kinds, which that ADR puts outside this heap on purpose. What Phase B adds
-//! to the admitted subset is the struct, and nothing else.
+//! kinds, which that ADR puts outside this heap on purpose. What Phase B added
+//! to the admitted subset is the struct.
+//!
+//! **What Phase C adds is one shape and it is the shape the static map made
+//! readable**: a struct-typed field read whose answer is then stored, passed or
+//! built with. `Inst::GetFieldAt` was unreadable to [`pushed_kinds`] while only
+//! the object knew what it pushed, so `var inner = outer.inner` was refused;
+//! now the instruction names the type and the read is a reference the frame can
+//! account for. `a_nested_struct_read_into_a_slot_is_rooted` is the coverage,
+//! and it is the reason the widening is taken — ADR 0029's rule read as a rule
+//! about admitting: a shape no test runs is a shape nobody knows runs.
 
 use std::rc::Rc;
 
@@ -817,9 +845,11 @@ const INITIAL_LIMBS: usize = 512;
 /// - **An operand word's bit is written by the instruction that pushed it.**
 ///   `load` and `dup` copy the bit of the word they read, `make-struct` and
 ///   `set-field` push a reference, the scalar core pushes scalars, and
-///   `get-field-at` asks the *object's* reference map — which is the one place
-///   a bit is decided by metadata that is neither the frame's nor the
-///   instruction's, and is decision 2's reference map doing its job.
+///   `get-field-at` reads the lowered type it names. That last one was the
+///   exception until Phase C: it asked the *object's* reference map, per
+///   execution, because nothing in the IR said what a field held. Decision 2's
+///   reference map is still what decides it — the map is just written down in
+///   `cove_ir::StructType` before the run rather than reconstructed during it.
 ///
 /// **A pop writes no bit.** The word above the top is stale and is never read,
 /// because the walk stops at `words.len()` and every push writes its own bit
@@ -993,6 +1023,32 @@ enum RootScope {
     WithoutFrameSlots,
 }
 
+/// Where the bit a `get-field-at` writes comes from.
+///
+/// [`FieldMap::TheLoweredType`] is the mechanism and is what a run uses:
+/// `Inst::GetFieldAt` names a `cove_ir::StructType`, and the field's
+/// `SlotKind` says whether the word it just pushed is a handle. This is Phase
+/// C's whole change to the bitmap — Phase B asked the *object* the same
+/// question, per execution, because nothing in the IR answered it.
+///
+/// [`FieldMap::Dropped`] is the mutation, and it exists for the reason the
+/// other two do: a claim nobody can make fail is not a claim.
+/// `a_field_reads_bit_comes_from_the_lowered_type` is what it costs, and it
+/// costs the heap's own use-after-free message on a real program.
+///
+/// It is read **only** inside a `debug_assert`, so it is nothing at all in a
+/// release build and the hot path is one indexed load either way. The mutation
+/// itself is applied to [`FrameVm::field_refs`], and this is what stops the
+/// assertion from catching it before the collector does.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(not(test), allow(dead_code))]
+enum FieldMap {
+    /// The `SlotKind` of the field, off the type the instruction names.
+    TheLoweredType,
+    /// Every field read says scalar, whatever the type says.
+    Dropped,
+}
+
 /// One safepoint's roots: every word of the one stack the bitmap calls a
 /// reference, and then the shadow stack.
 ///
@@ -1054,6 +1110,34 @@ impl HandleRoots for FrameRoots<'_> {
 /// every instruction that addresses a word, for a generality no admitted row
 /// uses; this way the scalar core's addressing is `base + slot`, which is
 /// Phase A's unchanged.
+///
+/// # Why Phase C's per-field kind did not close this, although Phase B said it
+/// would
+///
+/// Phase B wrote that "the same absence is why the frame map is derived at run
+/// time from two frame sizes instead of being lowered as one numbering". One
+/// absence, two symptoms — and having removed the absence, they are two.
+///
+/// A struct's reference map was genuinely missing from the IR: nothing in
+/// `cove_ir` said what a field held, so a backend had to invent an answer, and
+/// two inventions could disagree. `cove_ir::StructType` supplies it and the
+/// invention is gone. A frame's reference map is **not** missing. It is
+/// `value_frame_size` and `scalar_frame_size`, which `cove_ir::Function` has
+/// always carried and which say precisely which slots are references — this
+/// struct is three additions over them, computed once per function when a
+/// `FrameVm` is built and never during a run. Adding a `Vec<SlotKind>` beside
+/// them would move where the addition happens and change no answer.
+///
+/// What Phase B was actually pointing at is the *numbering*, and that is a
+/// different and larger change: `Inst::LoadScalar` and `Inst::LoadLocal`
+/// address two spaces, and merging them means renumbering every slot the
+/// lowering hands out and changing what those two instructions' operands mean
+/// — in the VM, which numbers three stacks and would have to keep numbering
+/// them, as much as here. What it would buy is the three refusals below that
+/// name it: a function taking both a value and a scalar parameter, a call
+/// passing both, and a value parameter beside a scalar slot. That is a real
+/// widening of the admitted subset and it is Phase D's, stated as its own
+/// piece of work rather than as a consequence of this one.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct FrameMap {
     /// How many words one call needs: both frame sizes, added.
@@ -1172,6 +1256,24 @@ impl Kind {
 /// them in a row leave `count` operands. Anything else -- a call, an operator,
 /// a branch -- is refused rather than guessed at, which is what keeps this a
 /// reading of the program rather than an inference about it.
+///
+/// # It is a peephole, and that is what it still refuses
+///
+/// **This is what Phase C did not fix, and the reason is worth writing down**:
+/// the `count` instructions before `pc` are `count` operands only where every
+/// operand took exactly one instruction to compute. `Cursor(at: 0, step: 1)`
+/// is two constants and satisfies it; `Cursor(at: i, step: 1)` is a
+/// `load-scalar`, a `scalar-to-value` and a constant, and this answers `None`
+/// although every word involved is perfectly readable.
+///
+/// The per-field kind did not remove that, and could not: the type says what
+/// the *fields* are and this asks what the *stack* holds, which is a question
+/// about a program point rather than about a declaration. What answers it is
+/// an abstract simulation of the one stack over every path control can take —
+/// `cove_ir::lower::validate` already does exactly that for operand *depths* —
+/// and that is Phase D's, listed beside the `set-field` that names its type.
+/// The `make-builtin` boundary needs the *exact* scalar kind rather than only
+/// "is it a reference", so the simulation it wants is the wider of the two.
 fn pushed_kinds(
     program: &Program,
     function: &cove_ir::Function,
@@ -1437,6 +1539,9 @@ pub struct FrameVm<'a> {
     /// is an object, a layout id and a `Vec` scan, where a field read wants a
     /// bit — and the bit is a static fact about the instruction.
     field_refs: Vec<Vec<bool>>,
+    /// Whether [`FrameVm::field_refs`] is the lowered types' map or has been
+    /// emptied by the mutation. See [`FieldMap`].
+    field_map: FieldMap,
     /// Which word a `set-field` names, indexed by the `ConstId` of the field
     /// name. See [`field_positions`].
     field_at: Vec<Option<u32>>,
@@ -1580,6 +1685,7 @@ impl<'a> FrameVm<'a> {
             heap,
             shapes,
             field_refs,
+            field_map: FieldMap::TheLoweredType,
             field_at,
             maps: program.functions.iter().map(FrameMap::of).collect(),
             temps: TempRoots::new(),
@@ -1616,6 +1722,21 @@ impl<'a> FrameVm<'a> {
     fn stress(&mut self) {
         self.heap.stress(true);
         self.due = true;
+    }
+
+    /// **The mutation.** Every field read says the word it pushed is scalar,
+    /// whatever the type it named says.
+    ///
+    /// This is Phase C's mechanism removed rather than narrowed: the lowered
+    /// type is the only thing that decides a field read's bit, so emptying the
+    /// map is emptying the decision. What it costs is a handle standing in a
+    /// word the walk skips, and the heap says so in its own words.
+    #[cfg(test)]
+    fn without_the_field_map(&mut self) {
+        self.field_map = FieldMap::Dropped;
+        for parts in &mut self.field_refs {
+            parts.fill(false);
+        }
     }
 
     /// How many collections this run ran, and what they found.
@@ -1991,9 +2112,14 @@ impl<'a> FrameVm<'a> {
                     let at = index as usize;
                     let word = self.heap.word(source, at);
                     let is_reference = self.field_refs[of.0 as usize][at];
-                    debug_assert_eq!(
-                        is_reference,
-                        self.heap.word_is_reference(source, at),
+                    // The object's own map read beside the type's, on every
+                    // field read of every debug build, so the two are compared
+                    // rather than one of them trusted. Nothing at all in a
+                    // release build, which is what keeps the hot path one
+                    // indexed load. See [`FieldMap`] for the condition.
+                    debug_assert!(
+                        self.field_map == FieldMap::Dropped
+                            || is_reference == self.heap.word_is_reference(source, at),
                         "the lowered type and the object it built disagree about word {at}"
                     );
                     self.push_word(word, is_reference);
