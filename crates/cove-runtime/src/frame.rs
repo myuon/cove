@@ -267,11 +267,11 @@
 //!   checker settled as an `Int` is the same eight bytes on both sides of a
 //!   conversion — so `scalar-to-value` and `value-to-scalar` are nothing at
 //!   all. That is ADR 0027's per-read crossing removed rather than narrowed.
-//! - Four instructions materialise a `Value`: `make-builtin`, over its
-//!   arguments and its answer, and `try`, `pop` and `return` over what one
-//!   left. They hold their operands in a buffer that is not a frame: nothing
-//!   indexes it, no frame owns a window of it, and [`admits`] refuses a
-//!   function that would need one of its entries to survive a call.
+//! - Five instructions materialise a `Value`: `make-builtin` and `call-host`,
+//!   each over its arguments and its answer, and `try`, `pop` and `return`
+//!   over what one left. They hold their operands in a buffer that is not a
+//!   frame: nothing indexes it, no frame owns a window of it, and [`admits`]
+//!   refuses a function that would need one of its entries to survive a call.
 //! - **A `String` is the one word a `try`, a `pop` or a `return` may also
 //!   materialise straight off the one stack**, rather than only off that
 //!   buffer: `crosses_as_a_string` is the static proof, asked the same way
@@ -309,10 +309,10 @@
 //!
 //! Everything else, by name, before any side effect, with no fallback. See
 //! [`admits`]. In particular there is no `Dynamic`, no `dyn`, no `Any`, no
-//! enum layout, no place, no `var`, no closure, no Host call, no task, and no
-//! `Array`, `Vector`, `Map` or `Set` — and none of ADR 0033's five
-//! identity-bearing kinds, which that ADR puts outside this heap on purpose.
-//! What Phase B added to the admitted subset is the struct.
+//! enum layout, no place, no `var`, no closure, no task, and no `Array`,
+//! `Vector`, `Map` or `Set` — and none of ADR 0033's five identity-bearing
+//! kinds, which that ADR puts outside this heap on purpose. What Phase B
+//! added to the admitted subset is the struct.
 //!
 //! **What Phase C adds is one shape and it is the shape the static map made
 //! readable**: a struct-typed field read whose answer is then stored, passed or
@@ -333,6 +333,27 @@
 //! *methods* — `.length()`, `.chars()`, and the rest of `cove_schema`'s table
 //! — stay refused, so this backend can hold, compare, interpolate and hand
 //! back a `String` without being able to call anything on one.
+//!
+//! **A Host call is admitted where its arguments are, over the same
+//! `Operands::boundary` check `make-builtin` already made — the four
+//! scalars and a `String`, never a struct.** `FrameVm::call_host` is
+//! `Vm::call_host` with the frame's own words in place of the `Vm`'s value
+//! stack: the same [`crate::host::HostRegistry`], asked the same way, so the
+//! grant, the schema, the fuel ADR 0030 asks for and the trace event are one
+//! piece of code rather than two descriptions of it that could drift. A
+//! struct argument is refused rather than admitted: `crate::slot::Shape::Struct`,
+//! the shape `crate::slot::Machine::materialise_rooted` already knows how to
+//! read, names its field and its type by a `&'static str`, which fits a host
+//! module's own compiled-in schema and does not fit a struct this backend
+//! reads out of one run's own `Program` — and reading it a second way, off
+//! `HandleHeap`'s layout id instead of off that shape, would still need this
+//! backend to answer ADR 0014's opacity question for itself, which nothing
+//! here currently tracks and `crate::slot`'s own materialiser does not model
+//! either. `Inst::CallResource` is refused outright, by ADR 0031: a resource
+//! handle is not a word this backend has a bit pattern for, so it can only
+//! ever stand as a boundary value, and nothing here keeps one alive past the
+//! very next `pop`, `try` or `return` — never as long as reaching a method
+//! call on it needs.
 //!
 //! # Strings
 //!
@@ -433,8 +454,8 @@ use cove_schema::builtins::{free_builtin, FreeBuiltinKind};
 use crate::budget::Meter;
 use crate::error::RuntimeError;
 use crate::heap::HeapStats;
-use crate::host::HostRegistry;
-use crate::interp::{returned_error_message, source_text, MAX_CALL_DEPTH};
+use crate::host::{HostRegistry, NoReentry};
+use crate::interp::{returned_error_message, source_text, stopped_here, MAX_CALL_DEPTH};
 use crate::runtime::Runtime;
 use crate::slot::{
     string_bytes, string_value, Handle, HandleHeap, HandleRoots, Layout, LayoutId, Part, Shape,
@@ -615,9 +636,25 @@ pub fn admits(program: &Program, module: &str, name: &str) -> Result<FunctionId,
 /// `try`, a `pop` or a `return` is admitted only where the thing it consumes
 /// really is one of these, which is what stops the two universes from being
 /// read into each other by accident.
+///
+/// `call-host` joins `make-builtin` and `try` unconditionally, and for the
+/// same reason `make-builtin` is unconditional: `cove_ir::lower::stack_shape`
+/// gives it one value pushed for every shape of call, whatever the host
+/// operation's own declared result is — a host answer is never a scalar-stack
+/// push the way a callee's own `returns` can be, so there is no second case to
+/// ask the way `Inst::Call` asks one.
+///
+/// Before `Inst::CallHost` had an [`admits_function`] arm of its own, this
+/// question never arose: the call itself was refused first, at its own `pc`,
+/// so a `?`, a `return` or a discarded value standing after it was never
+/// reached. Admitting the call without this arm would have swapped one
+/// refusal for a worse one — the same program refused again, one instruction
+/// later, for "a discarded value ... over something that is a word rather
+/// than a value", which names the wrong instruction and hides the one that is
+/// actually fine.
 fn leaves_a_boundary_value(program: &Program, function: &cove_ir::Function, pc: usize) -> bool {
     match function.code.get(pc.wrapping_sub(1)) {
-        Some(Inst::MakeBuiltin { .. } | Inst::Try) => true,
+        Some(Inst::MakeBuiltin { .. } | Inst::Try | Inst::CallHost { .. }) => true,
         Some(Inst::Call {
             function: target, ..
         }) => !matches!(program.function(*target).returns, SlotKind::Scalar(_)),
@@ -792,6 +829,54 @@ fn admits_function(
                         span,
                     ));
                 }
+            }
+            // A Host call is the same question `make-builtin` asks, over the
+            // same [`Operands::boundary`]: its arguments are admitted where
+            // the words they stand in can be read as the `Value`s
+            // [`FrameVm::call_host`] hands the registry. Which module, which
+            // operation, whether the capability was granted and whether the
+            // operation exists are all runtime questions the registry answers
+            // — asking them here would be a second copy of
+            // `HostRegistry::call_with`'s own check, and a refusal this backend
+            // raised before any side effect for a call that would have failed
+            // at the boundary anyway would be indistinguishable from one this
+            // backend genuinely cannot run. So a Host call is refused only for
+            // the one thing that is this backend's own limit: an argument it
+            // cannot show is one of the four scalars or a `String`. Not a
+            // struct, and the module docs' "What it refuses" says why.
+            Inst::CallHost { argc, .. } => {
+                if operands.boundary(pc, *argc as usize).is_none() {
+                    return Err(Refused::new(
+                        format!(
+                            "a Host call in {}, whose arguments the 8-byte frame cannot read as \
+                             values",
+                            named()
+                        ),
+                        span,
+                    ));
+                }
+            }
+            // ADR 0031: a host handle is not a VM handle. There is no eight-byte
+            // form for a `Repr::Resource` and no bit this backend's bitmap could
+            // set to mean "this word is a resource, specifically" — a resource
+            // is a name the host issued, not a value this backend's heap could
+            // own or a scalar its words could hold. So a resource can only ever
+            // stand as a boundary value, the way a Host call's own answer does,
+            // and nothing here keeps a boundary value alive long enough to be a
+            // receiver: it is consumed by the very next `pop`, `try` or
+            // `return`, and `Inst::CallResource` is none of those. Refused by
+            // name rather than admitted through the same wiring `Inst::CallHost`
+            // uses, because the receiver is the one part of it that wiring does
+            // not reach.
+            Inst::CallResource { .. } => {
+                return Err(Refused::new(
+                    format!(
+                        "a call on a host resource in {}, whose receiver ADR 0031 keeps out of \
+                         every frame word",
+                        named()
+                    ),
+                    span,
+                ))
             }
             Inst::Pop | Inst::Try | Inst::Return => {
                 if !leaves_a_boundary_value(program, function, pc)
@@ -1619,9 +1704,9 @@ impl Operands {
         stack[stack.len() - count..].iter().copied().collect()
     }
 
-    /// The same question a `make-builtin` asks: what its arguments are made
-    /// of, and `None` where one of them is a handle this backend cannot show
-    /// is a string.
+    /// The same question a `make-builtin` or a `call-host` asks: what its
+    /// arguments are made of, and `None` where one of them is a handle this
+    /// backend cannot show is a string.
     ///
     /// A general handle does not cross decision 5's boundary — materialising
     /// an arbitrary aggregate would be `crate::slot::Machine::materialise`'s
@@ -1935,7 +2020,6 @@ fn describe(inst: &Inst) -> &'static str {
         Inst::JumpIfFalse(_) | Inst::JumpIfTrue(_) => "a branch on a general value",
         Inst::MakeClosure { .. } | Inst::CallValue { .. } => "a closure",
         Inst::MakeDyn { .. } | Inst::CallDyn { .. } => "`dyn` dispatch",
-        Inst::CallHost { .. } | Inst::CallResource { .. } => "a Host call",
         Inst::CallBuiltin { .. } | Inst::CallBuiltinAssoc { .. } => "a builtin method",
         Inst::MakeArray(_) | Inst::MakeRange { .. } | Inst::IterItems | Inst::SpreadArgument => {
             "a collection"
@@ -1963,8 +2047,12 @@ fn describe(inst: &Inst) -> &'static str {
         | Inst::Cancel
         | Inst::Lock => "a task",
         Inst::Snapshot => "a snapshot",
-        // Everything the subset admits. Unreachable from `describe`'s one
-        // caller, which is the `match`'s fallthrough arm.
+        // Everything the subset admits, plus the two Host-call instructions,
+        // which have left this match's fallthrough arm entirely: `admits_function`
+        // gives each its own arm now; `Inst::CallHost` names the argument it
+        // could not read, when it refuses one, and `Inst::CallResource` names
+        // ADR 0031 by its own message rather than this generic one. Unreachable
+        // from `describe`'s one caller either way.
         Inst::Const(_)
         | Inst::Pop
         | Inst::ScalarConst(_)
@@ -1985,6 +2073,8 @@ fn describe(inst: &Inst) -> &'static str {
         | Inst::GetFieldAt { .. }
         | Inst::GetFieldAtScalar(_)
         | Inst::MakeBuiltin { .. }
+        | Inst::CallHost { .. }
+        | Inst::CallResource { .. }
         | Inst::Try
         | Inst::Call { .. }
         | Inst::Return
@@ -2017,6 +2107,11 @@ struct Call {
 pub struct FrameVm<'a> {
     runtime: &'a Runtime,
     program: &'a Program,
+    /// Where [`Inst::CallHost`] is dispatched: the same registry `Vm` holds,
+    /// over the same grant, the same schemas and the same budget, so
+    /// [`FrameVm::call_host`] is a call through the one boundary both backends
+    /// share rather than a second one built for this backend alone.
+    hosts: &'a HostRegistry,
     /// The one stack. Every frame is a window of it and every operand stands
     /// above the running frame's window.
     words: Vec<u64>,
@@ -2099,10 +2194,10 @@ pub struct FrameVm<'a> {
     /// Where a `Value` is materialised, and the only place one exists in a
     /// run of this backend.
     ///
-    /// Not a frame and not indexed by one: the six boundary instructions
-    /// push and pop it in the order the lowering emitted them, and
-    /// [`admits`] refuses any function that would need one of its entries to
-    /// survive a call.
+    /// Not a frame and not indexed by one: `make-builtin`, `call-host`,
+    /// `try`, `pop` and `return` push and pop it in the order the lowering
+    /// emitted them, and [`admits`] refuses any function that would need one
+    /// of its entries to survive a call.
     boundary: Vec<Value>,
     /// The word every constant of the program is, worked out once.
     ///
@@ -2172,10 +2267,11 @@ pub struct FrameVm<'a> {
 impl<'a> FrameVm<'a> {
     /// A frame VM for `program`, running against `runtime` and its hosts.
     ///
-    /// `hosts` is taken although nothing in the admitted subset calls one,
-    /// because the run's budget is installed there and the caller builds it
-    /// the way `cove run` builds it. Binding the budget here rather than at
-    /// each safepoint is `Vm::bind_budget`'s decision and its measurement.
+    /// `hosts` is where the run's budget is installed, and the caller builds
+    /// it the way `cove run` builds it; binding the budget here rather than at
+    /// each safepoint is `Vm::bind_budget`'s decision and its measurement. It
+    /// is also, since [`Inst::CallHost`] joined the admitted subset, where a
+    /// Host call this backend runs is dispatched — see `FrameVm::call_host`.
     pub fn new(runtime: &'a Runtime, hosts: &'a HostRegistry, program: &'a Program) -> Self {
         let (budget, call_depth_limit) = hosts
             .with_budget(|budget| (Some(budget.meter()), budget.limits().max_call_depth))
@@ -2239,6 +2335,7 @@ impl<'a> FrameVm<'a> {
         FrameVm {
             runtime,
             program,
+            hosts,
             words: Vec::with_capacity(INITIAL_WORDS),
             refs: Bitmap::with_limbs(INITIAL_LIMBS),
             heap,
@@ -2354,8 +2451,9 @@ impl<'a> FrameVm<'a> {
             .map(|(span, message)| (*span, message.as_str()))
     }
 
-    /// What the run spent waiting on hosts, which is zero: the admitted
-    /// subset reaches none.
+    /// What the run spent waiting on hosts, accumulated by
+    /// `FrameVm::charge_wait` the way `Vm::wait` accumulates it, and zero for
+    /// a run that reaches no [`Inst::CallHost`].
     pub fn wait(&self) -> std::time::Duration {
         self.wait
     }
@@ -2824,6 +2922,43 @@ impl<'a> FrameVm<'a> {
                         self.make_builtin(which, &mut arguments, running.arg_spans_at(pc), span);
                     self.boundary.push(answer?);
                 }
+                // The same crossing `Inst::MakeBuiltin` makes, over
+                // `admits`'s same [`Operands::boundary`] check, handed to
+                // [`FrameVm::call_host`] instead of to
+                // `FrameVm::make_builtin`: the registry, not this backend,
+                // decides whether the module, the operation and the
+                // capability are real, and charges and traces the call.
+                Inst::CallHost { module, op, argc } => {
+                    let span = running.span_at(pc);
+                    let module = const_name(program, module);
+                    let op = const_name(program, op);
+                    let here = self.frames.last().expect("a frame stands").function;
+                    let kinds = self.operands[here.0 as usize]
+                        .boundary(pc, argc as usize)
+                        .expect("`admits` settled every Host call this backend runs");
+                    let at = self.words.len() - argc as usize;
+                    let words: Vec<u64> = self.words[at..].to_vec();
+                    self.words.truncate(at);
+                    let handles: Vec<Handle> = kinds
+                        .iter()
+                        .zip(&words)
+                        .filter(|(kind, _)| **kind == Kind::Str)
+                        .map(|(_, word)| Handle::from_slot(*word))
+                        .collect();
+                    let arguments: Vec<Value> = self.with_roots(&handles, |vm| {
+                        kinds
+                            .iter()
+                            .zip(&words)
+                            .map(|(kind, word)| {
+                                vm.materialized += 1;
+                                vm.crossed_at_boundary(*kind, *word)
+                            })
+                            .collect()
+                    });
+                    self.materialized += 1;
+                    let answer = self.call_host(module, op, arguments, span);
+                    self.boundary.push(answer?);
+                }
                 Inst::Try => {
                     let span = running.span_at(pc);
                     let here = self.frames.last().expect("a frame stands").function;
@@ -3233,9 +3368,13 @@ impl<'a> FrameVm<'a> {
     ///
     /// **No `crate::interp::stopped_here`**, because both lists it reads are
     /// empty here by construction: this backend runs no spawned task, so it
-    /// owns no task cancellation flag, and it makes no Host call, so it is
-    /// inside no bounded call that could raise one. What remains is the
-    /// run's own cancellation, and that is the *budget's* flag —
+    /// owns no task cancellation flag, and it holds no closure a host could be
+    /// handed as a callback, so it is never inside a bounded call that could
+    /// raise one. [`Inst::CallHost`] is not a counterexample — it is not a
+    /// place this general safepoint is asked from at all;
+    /// [`FrameVm::call_host`] asks its own question at its own boundary, on
+    /// `Vm::call_host`'s schedule and not on this one's. What remains here is
+    /// the run's own cancellation, and that is the *budget's* flag —
     /// `crate::budget::Budget::safepoint` is where ADR 0024 puts it, and it
     /// is asked one line below on exactly the schedule `Vm` asks it on.
     fn safepoint(&mut self, span: Span) -> Result<(), RuntimeError> {
@@ -3261,6 +3400,74 @@ impl<'a> FrameVm<'a> {
                 budget.spend(fuel);
             }
         }
+    }
+
+    /// Spends the fuel charged since the last safepoint, in front of a Host
+    /// call, and collects nothing on the way.
+    ///
+    /// `Vm::charge_at_host_boundary` word for word, which is
+    /// [`FrameVm::safepoint`] with its collection taken out: ADR 0030 is that
+    /// a Host call asks the fuel limit before the outside world is reached
+    /// rather than at the end of whichever block contains it, and
+    /// `Vm::charge_at_host_boundary`'s own doc is why this still does not
+    /// collect — the arguments are already off the one stack and rooted by
+    /// [`FrameVm::with_roots`] rather than by the frame's own bitmap, so a
+    /// collection here would count them through their own references rather
+    /// than through the walk. Sound, and an unpredictable sweep in front of
+    /// every Host call for no reason the budget asked for.
+    fn charge_at_host_boundary(&mut self, span: Span) -> Result<(), RuntimeError> {
+        let fuel = std::mem::take(&mut self.fuel);
+        if let Some(budget) = &self.budget {
+            if let Err(stopped) = budget.safepoint(fuel) {
+                return Err(budget.to_runtime_error(stopped).at(span));
+            }
+        }
+        Ok(())
+    }
+
+    /// Records `wait` against the run's own timing, so a trace can separate
+    /// the work this run did from the time it spent waiting for a host to
+    /// answer. `Vm::charge_wait`, over the one [`Timing`] a run of this
+    /// backend ever has standing, because a one-stack backend runs no task of
+    /// its own and reenters nothing — see [`FrameVm::call_host`].
+    fn charge_wait(&mut self, wait: std::time::Duration) {
+        for timing in &mut self.timings {
+            timing.add_wait(wait);
+        }
+    }
+
+    /// Dispatches a Host call through the boundary `Vm::call_host` dispatches
+    /// through, and records its wait.
+    ///
+    /// The grant check, the schema check on both sides, the budget charge and
+    /// the trace event all live in [`HostRegistry`], which both backends hold
+    /// a reference to the same instance of — so a run of this backend is held
+    /// to exactly what a `Vm` run is held to, by running the same code rather
+    /// than a paraphrase of it.
+    ///
+    /// [`NoReentry`] stands in for `Vm::call_host`'s own way back into a
+    /// running program, and it is not a narrowing: [`admits`] refuses every
+    /// closure and every `dyn` value before a run of this backend begins, so
+    /// no argument a Host call here is given can ever be a callback a host
+    /// might invoke. A host operation that tried anyway would be handed
+    /// `NoReentry`'s own answer — that this call was not made from a running
+    /// program — which is wrong only in its reason and not in its effect: on
+    /// both backends, a callback this admitted subset could not have produced
+    /// does not run.
+    fn call_host(
+        &mut self,
+        module: &str,
+        op: &str,
+        values: Vec<Value>,
+        span: Span,
+    ) -> Result<Value, RuntimeError> {
+        stopped_here(None, &[], span)?;
+        self.charge_at_host_boundary(span)?;
+        let hosts = self.hosts;
+        let started = std::time::Instant::now();
+        let result = hosts.call_with(module, op, values, &mut NoReentry);
+        self.charge_wait(started.elapsed());
+        result.map_err(|error| error.at(span))
     }
 
     /// Calls `function` with `arguments` already in words, and answers the
