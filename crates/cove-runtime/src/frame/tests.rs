@@ -128,15 +128,29 @@ impl Ready {
         self.on_frame_collecting_with(scope, FieldMap::TheLoweredType)
     }
 
+    /// The same again, with the fourth: whether a permuted frame's argument
+    /// words get their bits from the frame map or keep the ones their pushes
+    /// wrote. See [`ArgumentBits`].
+    fn on_frame_collecting_with_pushed_argument_bits(&self) -> Collected {
+        self.collecting(RootScope::EveryWord, FieldMap::TheLoweredType, true)
+    }
+
     /// The same, with the third mutation knob: whether a field read's bit
     /// comes from the lowered type at all. See [`FieldMap`].
     fn on_frame_collecting_with(&self, scope: RootScope, fields: FieldMap) -> Collected {
+        self.collecting(scope, fields, false)
+    }
+
+    fn collecting(&self, scope: RootScope, fields: FieldMap, pushed_bits: bool) -> Collected {
         let hosts = hosts(None, None);
         let runtime = Runtime::new(self.checked.clone(), self.sources.clone(), hosts.clone());
         let mut frame = FrameVm::new(&runtime, &hosts, &self.ir);
         frame.stress();
         if fields == FieldMap::Dropped {
             frame.without_the_field_map();
+        }
+        if pushed_bits {
+            frame.without_moving_the_argument_bits();
         }
         frame.scope = scope;
         let answered = frame.run_entry(&self.module, "main", Vec::new());
@@ -1801,4 +1815,281 @@ fn the_peepholes_window_was_not_this_programs_operands() {
          peephole's window was these structs' operands after all and nothing here was \
          widened: {windows:?}"
     );
+}
+
+// ---------------------------------------- an argument that is not in its slot
+
+/// A mixed argument list, in the order the numbering does **not** put its
+/// slots in: the struct is declared first and its slot is numbered second,
+/// because the scalar region comes first.
+///
+/// Opening `reach`'s frame is therefore a swap, and it is the whole of what
+/// Phase E added to a call. Everything else about the program is
+/// [`A_STRUCT_HANDED_TO_A_CALL`]'s.
+const A_VALUE_ARGUMENT_BEFORE_A_SCALAR_ONE: &str = "\
+struct Cell {
+  at: Int
+  step: Int
+}
+
+fn reach(cell: Cell, by: Int) -> Int {
+  cell.at + by
+}
+
+export fn main() -> Int {
+  var cell = Cell(at: 0, step: 1)
+  var total = 0
+  while reach(cell, 0) < 200 {
+    total = total + cell.step
+    cell.at = cell.at + cell.step
+  }
+  total
+}
+";
+
+/// The same program with the parameters written the other way round, so that
+/// every argument arrives at the slot it names and nothing moves.
+///
+/// **The control, and what makes the widening a widening rather than a
+/// rewrite.** Both programs were refused before Phase E and for one reason —
+/// "takes both a value and a scalar parameter" — and only one of them ever
+/// needed anything done about it.
+const A_SCALAR_ARGUMENT_BEFORE_A_VALUE_ONE: &str = "\
+struct Cell {
+  at: Int
+  step: Int
+}
+
+fn reach(by: Int, cell: Cell) -> Int {
+  cell.at + by
+}
+
+export fn main() -> Int {
+  var cell = Cell(at: 0, step: 1)
+  var total = 0
+  while reach(0, cell) < 200 {
+    total = total + cell.step
+    cell.at = cell.at + cell.step
+  }
+  total
+}
+";
+
+/// One value parameter and no scalar one, in a function that keeps a scalar
+/// slot of its own.
+///
+/// The second shape Phase E admits, and it takes no mixed *call* to reach:
+/// `reach` is handed one argument, and the scalar local numbered before it is
+/// why the word it arrives in is not the slot it names. This was "takes a
+/// value parameter and also keeps a scalar slot".
+const A_VALUE_ARGUMENT_BESIDE_A_SCALAR_SLOT: &str = "\
+struct Cell {
+  at: Int
+  step: Int
+}
+
+fn reach(cell: Cell) -> Int {
+  var by = 0
+  by = by + cell.at
+  by
+}
+
+export fn main() -> Int {
+  var cell = Cell(at: 0, step: 1)
+  var total = 0
+  while reach(cell) < 200 {
+    total = total + cell.step
+    cell.at = cell.at + cell.step
+  }
+  total
+}
+";
+
+/// A struct that is **only** an argument of a mixed call, read after a
+/// safepoint the callee itself reaches.
+///
+/// The program the mutation runs on, and every clause of it is load-bearing.
+/// The `Cell` is built at the call site and named by nothing else, so the one
+/// word it stands in is the callee's slot 1 — the slot the permutation moved
+/// it into. `spin(by)` is a call and therefore a safepoint, and it stands
+/// between the frame opening and `cell.at`, so a collection runs while the
+/// moved word is the only root there is and before anything reads it.
+const A_STRUCT_MOVED_INTO_ITS_SLOT_AND_READ_AFTER_A_SAFEPOINT: &str = "\
+struct Cell {
+  at: Int
+  step: Int
+}
+
+fn spin(n: Int) -> Int {
+  n
+}
+
+fn reach(cell: Cell, by: Int) -> Int {
+  spin(by) + cell.at
+}
+
+export fn main() -> Int {
+  var total = 0
+  var i = 0
+  while i < 200 {
+    total = total + reach(Cell(at: i, step: 1), 1)
+    i = i + 1
+  }
+  total
+}
+";
+
+/// The widening is not vacuous, said as arithmetic over the lowering rather
+/// than as a claim about deleted code.
+///
+/// Two programs that compute the same number, differing only in the order
+/// their parameters are written. One of them has an argument that arrives at
+/// a word whose number is another slot's and the other does not, and
+/// `cove_ir::Function::param_slot` is what says which is which. Before Phase E
+/// both were refused, and the refusal could not tell them apart because it
+/// asked about the *shape* of the parameter list rather than about where its
+/// arguments land.
+#[test]
+fn one_of_the_two_orders_moves_an_argument_and_the_other_does_not() {
+    let moved = ready(A_VALUE_ARGUMENT_BEFORE_A_SCALAR_ONE);
+    let placed = ready(A_SCALAR_ARGUMENT_BEFORE_A_VALUE_ONE);
+    let beside = ready(A_VALUE_ARGUMENT_BESIDE_A_SCALAR_SLOT);
+
+    fn reach(ready: &Ready) -> &cove_ir::Function {
+        let id = ready
+            .ir
+            .function_named("m", "reach")
+            .expect("the program declares `m.reach`");
+        ready.ir.function(id)
+    }
+    assert_eq!(
+        reach(&moved).param_slot(0),
+        Some(1),
+        "the struct is written first and numbered second, because the scalar region \
+         comes first"
+    );
+    assert_eq!(reach(&moved).param_slot(1), Some(0));
+    assert!(
+        !reach(&moved).arguments_arrive_in_their_slots(),
+        "the value-first order has an argument to move"
+    );
+    assert!(
+        reach(&placed).arguments_arrive_in_their_slots(),
+        "the scalar-first order is the same list in the numbering's own order, and has \
+         nothing to move"
+    );
+    assert!(
+        !reach(&beside).arguments_arrive_in_their_slots(),
+        "one value parameter numbered after a scalar local is still an argument that \
+         does not arrive in its slot"
+    );
+    for ready in [&moved, &placed, &beside] {
+        ready
+            .admitted()
+            .expect("every one of the three is admitted now");
+    }
+}
+
+/// The four shapes run, and all three backends agree about what they answer.
+///
+/// This is the coverage the widening is taken on: three of the programs move
+/// an argument as their frames open and one does not, and the frame has to
+/// agree with the tree walk and the `Vm` about all four. The `Vm` never moves
+/// anything — its arguments arrive on the stack their own region names, so
+/// declaration order is not a question it has — which is what makes it a
+/// control for the move rather than a second copy of it.
+#[test]
+fn a_moved_argument_agrees_with_both_backends() {
+    for source in [
+        A_VALUE_ARGUMENT_BEFORE_A_SCALAR_ONE,
+        A_SCALAR_ARGUMENT_BEFORE_A_VALUE_ONE,
+        A_VALUE_ARGUMENT_BESIDE_A_SCALAR_SLOT,
+        A_STRUCT_MOVED_INTO_ITS_SLOT_AND_READ_AFTER_A_SAFEPOINT,
+    ] {
+        let ready = ready(source);
+        let (ast, vm, frame) =
+            crate::on_cove_stack(|| (ready.on_ast(), ready.on_vm(), ready.on_frame()))
+                .expect("a thread to run Cove on");
+        assert_eq!(ast, vm, "the oracle and the VM disagreed");
+        assert_eq!(
+            frame, vm,
+            "the VM and the frame disagreed about a moved argument"
+        );
+    }
+}
+
+/// A word moved into its slot is a root there, and is a root **once**.
+///
+/// Run with the collector at every safepoint: the struct of
+/// [`A_STRUCT_MOVED_INTO_ITS_SLOT_AND_READ_AFTER_A_SAFEPOINT`] is built a turn
+/// and abandoned, so a sweep has something to reclaim, and the call inside
+/// `reach` is a collection standing between the move and the read.
+///
+/// The multiplicity is the third assertion. A permutation moves a word that
+/// may be a root, and the danger it introduces is the one #192's
+/// `arg_vectors` had: the same handle reported from the slot it reached and
+/// from the word it left. Here one collection yields **one** root storage
+/// location for the one live `Cell`, which is ADR 0028 decision 8's first
+/// multiplicity holding across a move.
+#[test]
+fn an_argument_moved_into_its_slot_is_a_root_there_once() {
+    let ready = ready(A_STRUCT_MOVED_INTO_ITS_SLOT_AND_READ_AFTER_A_SAFEPOINT);
+    let (vm, collected) = crate::on_cove_stack(|| {
+        (
+            ready.on_vm(),
+            ready.on_frame_collecting(RootScope::EveryWord),
+        )
+    })
+    .expect("a thread to run Cove on");
+
+    assert_eq!(
+        collected.outcome, vm,
+        "the VM and the frame disagreed about a struct moved into its slot"
+    );
+    assert!(
+        collected.collections > 0,
+        "the run never collected, so it says nothing about rooting: {collected:?}"
+    );
+    assert!(
+        collected.freed_objects > 0,
+        "a program that abandons a `Cell` a turn has something to sweep: {collected:?}"
+    );
+    assert_eq!(
+        collected.most_roots_at_once, 1,
+        "the one live `Cell` stands in one word, and a permutation that left a copy \
+         behind would report it twice: {collected:?}"
+    );
+    assert_eq!(
+        collected.most_expansions_at_once, 1,
+        "one object, expanded once: {collected:?}"
+    );
+    assert_eq!(
+        collected.rooted_outside_the_stack, 0,
+        "the words a permutation moves through are not roots, because no collection can \
+         run while one is between two slots"
+    );
+}
+
+/// **The mutation.** A permuted frame's argument words keep the bits their
+/// pushes wrote, and the handle that moved is swept out from under the
+/// instruction that reads it.
+///
+/// This is the whole of what a *moving* convention owes, removed and nothing
+/// else: the frame map still names every value slot of every frame whose
+/// arguments arrive in their slots, every operand word is still in the walk,
+/// and the words still move. What is dropped is that the frame map has the
+/// last word about a bit *after* a word has moved — so the `Cell` stands in
+/// slot 1 carrying the bit the scalar `1` was pushed with, the walk steps over
+/// it at `spin`'s safepoint, and `cell.at` reads a swept object.
+///
+/// The failing assertion is `crate::slot::HandleHeap`'s own — `handle Handle
+/// { .. } names a swept object` — and not one anybody wrote. The word the
+/// mutation *also* mis-marks in the other direction, the scalar `1` now
+/// carrying the struct's pushed bit, costs nothing and proves nothing:
+/// `HandleHeap::collect` yields it and `is_live` says no.
+#[test]
+#[should_panic(expected = "names a swept object")]
+fn an_arguments_bit_moves_with_the_word() {
+    let ready = ready(A_STRUCT_MOVED_INTO_ITS_SLOT_AND_READ_AFTER_A_SAFEPOINT);
+    let _ = ready.on_frame_collecting_with_pushed_argument_bits();
 }

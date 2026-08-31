@@ -654,7 +654,6 @@ fn admits_function(
             }
             Inst::Call {
                 function: target,
-                scalar_argc,
                 value_argc,
                 place_argc,
                 ..
@@ -665,24 +664,20 @@ fn admits_function(
                         span,
                     ));
                 }
-                // The arguments become the callee's first words without
-                // moving, and the callee's frame puts one kind of slot first.
-                // A call that passes both kinds would need them interleaved
-                // the way the caller pushed them, which no single frame map
-                // can describe. See [`FrameMap`].
-                if *value_argc != 0 && *scalar_argc != 0 {
-                    return Err(Refused::new(
-                        format!(
-                            "a call in {} that passes both a value and a scalar argument",
-                            named()
-                        ),
-                        span,
-                    ));
-                }
-                // A value argument becomes a value slot of the callee without
-                // moving, so it is the same question `Inst::StoreLocal` asks:
-                // the frame map will call that word a reference, so the
-                // instruction that pushed it has to say it is one.
+                // A value argument becomes a value slot of the callee -- at
+                // the slot the callee's numbering gives it, which is where it
+                // stands already or where `FrameVm::permute` puts it -- so it
+                // is the same question `Inst::StoreLocal` asks: the frame map
+                // will call that word a reference, so the instruction that
+                // pushed it has to say it is one.
+                //
+                // The `value_argc` value operands are the value arguments in
+                // declaration order whether or not a scalar argument stands
+                // between two of them, because the simulation is over the
+                // value operand stack and a scalar argument is not on it. A
+                // call that passes both kinds is admitted for the same reason
+                // a mixed *frame* is: moving a word is something the frame
+                // knows how to do now. See [`FrameMap`].
                 if *value_argc != 0
                     && !operands
                         .top(pc, *value_argc as usize)
@@ -745,40 +740,13 @@ fn admits_function(
             ));
         }
     }
-    // One kind of parameter, because they arrive without moving and the frame
-    // puts the scalars first. See [`FrameMap`].
-    if function
-        .params
-        .iter()
-        .any(|kind| matches!(kind, SlotKind::Value))
-        && function.params.iter().any(|kind| kind.is_scalar())
-    {
-        return Err(Refused::new(
-            format!(
-                "{}, which takes both a value and a scalar parameter",
-                named()
-            ),
-            function.span,
-        ));
-    }
-    // And a value parameter stands at the frame base, which is scalar slot 0's
-    // place, so a function that has both is one whose parameters cannot arrive
-    // without moving. What would remove this is the lowering numbering one
-    // space; see [`FrameMap`].
-    if function
-        .params
-        .iter()
-        .any(|kind| matches!(kind, SlotKind::Value))
-        && function.scalar_frame_size != 0
-    {
-        return Err(Refused::new(
-            format!(
-                "{}, which takes a value parameter and also keeps a scalar slot",
-                named()
-            ),
-            function.span,
-        ));
-    }
+    // Two refusals stood here and are gone: a function taking both a value
+    // and a scalar parameter, and a function taking a value parameter while
+    // keeping a scalar slot. Both said the same thing -- an argument arrives
+    // in declaration order and the numbering groups slots by region, so this
+    // one's arguments do not arrive at the slots they name -- and neither is
+    // a shape the frame cannot hold. `FrameVm::permute` moves them, and
+    // `cove_ir::Function::param_slot` says where to. See [`FrameMap`].
     Ok(calls)
 }
 
@@ -1054,6 +1022,35 @@ enum FieldMap {
     Dropped,
 }
 
+/// Where the bits of a *permuted* frame's argument words come from.
+///
+/// [`ArgumentBits::TheFrameMap`] is the mechanism and is what a run uses:
+/// [`FrameVm::open`] writes every bit of the frame from [`FrameMap`], after
+/// the permutation, so each bit is about the slot its word ended up in.
+///
+/// [`ArgumentBits::ThePushesThatWroteThem`] is the mutation, and it is the
+/// mistake this backend was making until an argument could move: it leaves
+/// the argument words' bits exactly as the pushes wrote them, which is *right*
+/// for every frame whose arguments arrive in their slots and wrong for every
+/// frame whose arguments do not. A handle moved into the value region then
+/// carries the bit of the scalar it displaced, so the walk steps over it, and
+/// `an_arguments_bit_moves_with_the_word` is what that costs. It is issue
+/// #192's `arg_vectors` failure in a new place: a root that moved, yielded
+/// from where it was rather than from where it is.
+///
+/// Read only where a frame is permuted at all, so the frames that move
+/// nothing are one comparison away from it and no run outside the mutation
+/// test is ever the other arm.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(not(test), allow(dead_code))]
+enum ArgumentBits {
+    /// Every bit of an opened frame, the arguments included, says what the
+    /// numbering says about the slot the word stands in.
+    TheFrameMap,
+    /// The argument words keep the bits their pushes wrote.
+    ThePushesThatWroteThem,
+}
+
 /// One safepoint's roots: every word of the one stack the bitmap calls a
 /// reference, and then the shadow stack.
 ///
@@ -1107,27 +1104,41 @@ impl HandleRoots for FrameRoots<'_> {
 /// this struct is those answers held where a per-call [`FrameVm::open`] can
 /// use them without asking again.
 ///
-/// # Why the scalars come first, and what that still refuses
+/// # Why the scalars come first, and what an argument does about it
 ///
-/// A call does not move its arguments: `base' = top - argc`, so the words the
-/// caller pushed *are* the callee's first slots. With the scalars first that
-/// works for a scalar parameter always, because a scalar parameter is slot 0.
-/// It works for a *value* parameter only where the function has no scalar
-/// slots at all, and [`admits`] refuses one that does.
+/// A call does not move its arguments *as a rule*: `base' = top - argc`, so
+/// the words the caller pushed stand at the callee's first slots. With the
+/// scalars first that is already the right place for a scalar parameter,
+/// because a scalar parameter is slot 0; it is the right place for a *value*
+/// parameter only where nothing scalar is numbered before it.
 ///
 /// Phase D moved that order out of this file and into the lowering, where it
-/// is the one numbering's order rather than one backend's convention. It did
-/// **not** move the refusals, and the reason is worth writing down because
-/// Phase C's note predicted otherwise. The refusals are not caused by two
-/// numberings. They are caused by the calling convention: arguments are pushed
-/// in *declaration* order and become slots without moving, while the numbering
-/// groups slots by region — so a function whose parameters are mixed has its
-/// second kind of parameter pushed at a word whose number names a different
-/// slot. Closing that needs the arguments permuted as a frame opens, or a
-/// convention that states each argument's slot, and neither of those is a
-/// renumbering. **One numbering was necessary for the widening and is not
-/// sufficient for it**, which is a smaller result than Phase C expected and is
-/// the one the code supports.
+/// is the one numbering's order rather than one backend's convention, and
+/// found that the order was not what refused a mixed function. **The
+/// arguments arrive in declaration order and the numbering groups slots by
+/// region, and those are two orders.** Where they differ the frame's own
+/// numbering says where each argument belongs —
+/// `cove_ir::Function::param_slot` — and [`FrameVm::permute`] moves it there
+/// as the frame opens. `arrivals` is which of the two cases a function is,
+/// decided once when the map is built.
+///
+/// **Which is Phase E's decision, and it is a decision about a cost.** The
+/// alternative is a convention that states each argument's slot so the caller
+/// pushes it there — nothing to move, ever. That is not free, it is
+/// unreachable: a value parameter's slot is `value_origin` plus its rank, and
+/// `value_origin` is `scalar_frame_size`, a width of the callee's whole body.
+/// `cove_ir::Function::params` says so where it says why it is written out
+/// rather than derived — "a caller has to place its arguments before the
+/// callee exists: a recursive call is lowered before its own `Function`
+/// does". A numbering in which a parameter's slot is not a width — the
+/// parameters first, in arrival order, and the regions after them — would
+/// reach it, and would cost a *physically split* realisation an indexed load
+/// per slot access, because its regions would no longer be runs. ADR 0028
+/// decision 1 permits such a realisation and requires only that every
+/// physical offset derive from the one layout; this backend is one array and
+/// would not pay, and the production `Vm` is three stacks and would. So the
+/// cost is paid where it can be measured and where it is smallest: per call,
+/// on the frames that need it, and nothing at all on the frames that do not.
 ///
 /// # Why Phase C's per-field kind did not close this, although Phase B said it
 /// would
@@ -1156,6 +1167,28 @@ struct FrameMap {
     /// `values .. values + value_count`, and every word outside it is a
     /// scalar or a place.
     value_count: u32,
+    /// Whether the words a call pushed already stand at the slots they name.
+    ///
+    /// Read on every call and answered by the numbering rather than by the
+    /// run: see [`Arrivals`].
+    arrivals: Arrivals,
+}
+
+/// Whether a call's arguments are already in their slots, or have to be moved
+/// into them.
+///
+/// One byte of [`FrameMap`], which is loaded once per call anyway, so the
+/// frames that need nothing pay one comparison and no second lookup.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Arrivals {
+    /// Every argument arrives at the slot number it becomes, which is
+    /// `cove_ir::Function::arguments_arrive_in_their_slots`. Opening the
+    /// frame moves nothing.
+    InTheirSlots,
+    /// Declaration order and the numbering's order differ here, so the
+    /// arguments are permuted into their slots as the frame opens. See
+    /// [`FrameVm::permute`].
+    ToBeMoved,
 }
 
 impl FrameMap {
@@ -1165,6 +1198,10 @@ impl FrameMap {
             width: function.slot_count(),
             values: function.value_origin(),
             value_count: function.value_frame_size,
+            arrivals: match function.arguments_arrive_in_their_slots() {
+                true => Arrivals::InTheirSlots,
+                false => Arrivals::ToBeMoved,
+            },
         }
     }
 
@@ -1697,6 +1734,29 @@ pub struct FrameVm<'a> {
     /// One frame map per function of the program: the one layout every
     /// physical offset in a run derives from. See [`FrameMap`].
     maps: Vec<FrameMap>,
+    /// Where each of a call's arguments belongs, for the functions whose
+    /// arguments do not arrive in their slots, and empty for every other.
+    ///
+    /// One entry per argument, in the order a call supplies them, holding the
+    /// slot number `cove_ir::Function::param_slot` gives it — so this is the
+    /// callee's own numbering held where [`FrameVm::permute`] can walk it,
+    /// exactly as [`FrameMap`] is the callee's own layout held where
+    /// [`FrameVm::open`] can. Nothing here decides anything; the lowering
+    /// decided it.
+    arrivals: Vec<Vec<u32>>,
+    /// Where the words being permuted stand while they are between two slots.
+    ///
+    /// **Not a root, and it does not have to be one.** A permutation is
+    /// straight-line: it allocates nothing, charges no fuel and takes no
+    /// safepoint, so no collection can run while a word is here — which is
+    /// why every handle a permuted frame holds is yielded from the one stack
+    /// exactly once, and ADR 0028 decision 8's first multiplicity is
+    /// unchanged by the move. Reserved to the widest argument list the
+    /// program has, so a call allocates nothing.
+    moving: Vec<u64>,
+    /// Whether a permuted frame's own words get their bits from the frame map
+    /// or keep the ones the pushes wrote. See [`ArgumentBits`].
+    argument_bits: ArgumentBits,
     /// One value-operand simulation per function, so that the only question a
     /// run puts to it — what a `make-builtin`'s arguments are made of — is an
     /// index rather than a walk. See [`Operands`].
@@ -1841,6 +1901,31 @@ impl<'a> FrameVm<'a> {
             field_map: FieldMap::TheLoweredType,
             field_at,
             maps: program.functions.iter().map(FrameMap::of).collect(),
+            arrivals: program
+                .functions
+                .iter()
+                .map(
+                    |function| match function.arguments_arrive_in_their_slots() {
+                        true => Vec::new(),
+                        false => (0..function.arity as usize)
+                            .map(|at| {
+                                function
+                                    .param_slot(at)
+                                    .expect("an argument below `arity` has a slot")
+                            })
+                            .collect(),
+                    },
+                )
+                .collect(),
+            moving: Vec::with_capacity(
+                program
+                    .functions
+                    .iter()
+                    .map(|function| function.arity as usize)
+                    .max()
+                    .unwrap_or(0),
+            ),
+            argument_bits: ArgumentBits::TheFrameMap,
             operands: program
                 .functions
                 .iter()
@@ -1889,6 +1974,18 @@ impl<'a> FrameVm<'a> {
     /// type is the only thing that decides a field read's bit, so emptying the
     /// map is emptying the decision. What it costs is a handle standing in a
     /// word the walk skips, and the heap says so in its own words.
+    /// **The mutation.** A permuted frame's argument words keep the bits
+    /// their pushes wrote, instead of the bits the frame map gives the slots
+    /// they were moved into.
+    ///
+    /// What it removes is exactly what a *moving* convention owes and a
+    /// non-moving one does not, which is why it changes nothing about any
+    /// frame whose arguments arrive in their slots. See [`ArgumentBits`].
+    #[cfg(test)]
+    fn without_moving_the_argument_bits(&mut self) {
+        self.argument_bits = ArgumentBits::ThePushesThatWroteThem;
+    }
+
     #[cfg(test)]
     fn without_the_field_map(&mut self) {
         self.field_map = FieldMap::Dropped;
@@ -2426,7 +2523,86 @@ impl<'a> FrameVm<'a> {
         let map = self.maps[function.0 as usize];
         let width = map.width as usize;
         self.words.resize(base + width, 0);
-        self.refs.write_frame(base, width, map.references());
+        // The words first and the bits after them, so that what the map says
+        // is the last word on both. A permutation moves words the pushes
+        // already wrote bits for, and those bits are about where the word
+        // *came from*; `write_frame` is what makes every bit of this frame
+        // say where its word ended up. See `ArgumentBits`.
+        let mut kept = 0;
+        if map.arrivals == Arrivals::ToBeMoved {
+            self.permute(function, base);
+            if self.argument_bits == ArgumentBits::ThePushesThatWroteThem {
+                kept = self.arrivals[function.0 as usize].len();
+            }
+        }
+        let references = map.references();
+        self.refs.write_frame(
+            base + kept,
+            width - kept,
+            references.start.saturating_sub(kept)..references.end.saturating_sub(kept),
+        );
+    }
+
+    /// Moves a call's arguments from where they arrived to the slots they
+    /// name.
+    ///
+    /// The arguments arrive in declaration order, which
+    /// [ADR 0021](../../../docs/adr/0021-places-are-a-static-fact.md) states
+    /// as the invariant that makes pushing them left to right the same thing,
+    /// and the one numbering groups slots by region. Where the two orders
+    /// differ this is the difference, and it is a permutation of
+    /// `words[base .. base + arity]` and nothing else: no word leaves the
+    /// frame, no word enters it, and the slot numbers come from the callee's
+    /// own `cove_ir::Function::param_slot`.
+    ///
+    /// **What it costs a call is measured rather than assumed**, which is
+    /// what `benches/sortedargs` and `benches/mixedargs` are: one program
+    /// written twice, once with its parameters in the numbering's order and
+    /// once against it, so the two rows of one run are this loop.
+    ///
+    /// # What a permutation does not have to put back
+    ///
+    /// A word a permutation vacated — a source slot no argument ended in —
+    /// keeps the bits of whatever stood there, and that is safe because such
+    /// a slot is never in the value region. An argument's destination is
+    /// `param_slot`, so the value destinations are exactly
+    /// `value_origin .. value_origin + value parameters`, and a source below
+    /// `arity` that is not one of them is at or above that range only when
+    /// the function takes a place parameter, which [`admits`] refuses. The
+    /// `debug_assert` below is that argument checked rather than believed,
+    /// on every permuted call of every debug build. It matters because a
+    /// stale copy in a walked slot would be ADR 0028 decision 8's first
+    /// multiplicity broken in the way #192 broke it: one root yielded from
+    /// where it is *and* from where it was.
+    ///
+    /// # Why the bits are not moved with the words
+    ///
+    /// They could be, and it would be a second answer to a question
+    /// [`FrameMap`] already answers. A word's bit says whether the *slot* it
+    /// stands in is a reference, and after the move each word stands in the
+    /// slot the numbering gave it — so the frame map is right about every one
+    /// of them, and [`FrameVm::open`] writes the whole frame from it in one
+    /// masked pass it was making anyway. Carrying the pushes' bits along
+    /// would be arithmetic over the same permutation to reach the same
+    /// answer, and `an_arguments_bit_moves_with_the_word` is the mutation
+    /// that says the two are not interchangeable in the other direction.
+    fn permute(&mut self, function: FunctionId, base: usize) {
+        let slots = &self.arrivals[function.0 as usize];
+        debug_assert!(
+            (0..slots.len() as u32)
+                .filter(|source| !slots.contains(source))
+                .all(|vacated| self.program.function(function).region_of(vacated)
+                    != Some(cove_ir::Region::Value)),
+            "a word a permutation vacated is a slot the walk reads, so the handle it \
+             still holds would be yielded from the slot it left as well as the one it \
+             reached"
+        );
+        self.moving.clear();
+        self.moving
+            .extend_from_slice(&self.words[base..base + slots.len()]);
+        for (at, word) in self.moving.iter().enumerate() {
+            self.words[base + slots[at] as usize] = *word;
+        }
     }
 
     /// Pushes a word the layout calls scalar.
