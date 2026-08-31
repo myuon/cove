@@ -68,10 +68,17 @@ deadlines, concurrency, cancellation, and external calls at runtime.
 The runtime should trace modules, functions, tasks, capabilities, allocation,
 CPU work, and I/O wait without requiring application instrumentation.
 
-## Performance is developer experience
+## Preserve the performance class
 
 Fast compilation, startup, and execution matter for iteration speed and
 operating cost. Generated behavior should remain predictable and inspectable.
+
+Cove does not accept changes that make representative workloads multiples
+slower or move them into a meaningfully worse performance class. Within the
+same class, performance is balanced against usability, semantic simplicity,
+correctness, maintainability, and room for future optimization. A small
+measured slowdown can buy those qualities; Cove does not sacrifice them to
+chase the last few percent.
 
 ## Earn complexity through use
 
