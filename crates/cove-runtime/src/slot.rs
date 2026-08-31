@@ -162,6 +162,36 @@
 //! to what a rooting proof needs and nothing more. There is no instruction
 //! set, no layout for an enum, no `Dynamic`, and no measurement: ADR 0028
 //! makes no performance claim it has not measured and neither does this.
+//!
+//! # What the migration still owes
+//!
+//! What this slice settles is the rooting invariant and nothing else, which
+//! is what decision 8 says has to be settled before "the collector migration
+//! can be called specified". Named so that the next reader does not have to
+//! infer them from what is absent:
+//!
+//! - **The stack map is not derived.** [`Frame::refs`] is a bit per slot,
+//!   maintained by whoever pushes. A real frame's map comes from
+//!   `cove_ir::Function`'s per-slot layout, which is lowering work, and
+//!   decision 1's "every physical offset derives from the one frame layout"
+//!   is the invariant that arrangement owes.
+//! - **A handle slot is never reused.** The sweep sets an object's slot to
+//!   `None` and leaves it, so a stale handle names a dead object rather than
+//!   a live one. A heap that runs for longer than a test needs a free list
+//!   and a generation counter, and a handle then stops being a bare index.
+//! - **No layout is chosen for an enum, and there is no `Dynamic`.**
+//!   Decision 2 leaves enum layout to be selected per lowered type and
+//!   requires only that the layout completely determine how to find every
+//!   reference; decision 3's two-slot `Dynamic` needs a witness the reference
+//!   map can read. Neither is here, and both change what a reference map has
+//!   to say.
+//! - **Nothing materialises.** Decision 5's boundary is where a handle
+//!   becomes the `Value` a host is handed, and whatever does that holds a
+//!   handle across a call that can collect — which is the first real caller
+//!   of [`Machine::with_root`] and the first place the discipline will be
+//!   load-bearing rather than demonstrated.
+//! - **Nothing is measured.** #197's prototype phase ends at a measurement
+//!   gate, and this slice deliberately does not approach it.
 
 // Nothing outside this module names anything in it, and that is the point:
 // the slice is the prototype #197's measurement gate stands in front of, and
