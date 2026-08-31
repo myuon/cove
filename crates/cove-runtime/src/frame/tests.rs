@@ -503,7 +503,7 @@ fn the_other_bench_rows_are_refused_by_name() {
     for (name, expected) in [
         ("hostheavy", "a Host call"),
         ("arrayget", "a collection"),
-        ("chars", "a string"),
+        ("chars", "a builtin method"),
         ("callback", "a builtin method"),
     ] {
         let ready = bench(name);
@@ -1077,10 +1077,13 @@ fn a_frame_run_emits_the_events_a_vm_run_emits() {
 #[test]
 fn an_unsupported_construct_is_refused_before_the_run_begins() {
     for (source, expected) in [
-        ("export fn main() -> String {\n  \"hello\"\n}\n", "a string"),
         (
-            "struct P {\n  x: String\n}\n\nexport fn main() -> String {\n  P(x: \"a\").x\n}\n",
-            "a string",
+            "export fn main() -> Duration {\n  500ms\n}\n",
+            "a `Duration`",
+        ),
+        (
+            "export fn main() -> Int {\n  \"abc\".length()\n}\n",
+            "a builtin method",
         ),
         (
             "export fn main() -> Int {\n  let f: fn(Int) -> Int = fn(x) {\n    x\n  }\n  f(1)\n}\n",
@@ -1108,7 +1111,7 @@ fn an_unsupported_construct_is_refused_before_the_run_begins() {
 /// for the VM is the rule here: no silent fallback, ever.
 #[test]
 fn a_refused_entry_raises_rather_than_falling_back() {
-    let ready = ready("export fn main() -> String {\n  \"hello\"\n}\n");
+    let ready = ready("export fn main() -> Duration {\n  500ms\n}\n");
     let Outcome::Raised { message, .. } = ready.on_frame() else {
         panic!("a refused entry does not answer");
     };
@@ -1712,10 +1715,12 @@ fn a_scalar_word_that_looks_like_a_reference_is_not_walked() {
     refs.write(0, false);
     refs.write(1, true);
     let temps = TempRoots::new();
+    let constants = Vec::new();
     let roots = FrameRoots {
         words: &words,
         refs: &refs,
         temps: &temps,
+        constants: &constants,
         range: 0..words.len(),
     };
     let mut seen = Vec::new();
@@ -2016,5 +2021,244 @@ fn the_peepholes_window_was_not_this_programs_operands() {
         "every window leaves as many value operands as the type has fields, so the \
          peephole's window was these structs' operands after all and nothing here was \
          widened: {windows:?}"
+    );
+}
+
+// --------------------------------------------------------------- strings
+
+/// A `String` constant, returned. The smallest program `Kind::Str` exists
+/// for: `Inst::Const` pushes the `Handle` `FrameVm::new` allocated once, and
+/// `Inst::Return` materialises it -- the one case `crossed_at_boundary` is
+/// for and the six instructions the module docs list becoming seven.
+#[test]
+fn a_string_constant_is_returned() {
+    agree(&main_of("String", "  \"hello\""));
+}
+
+/// Every operator `==`, `!=`, `<`, `<=`, `>` and `>=` lowers to `Inst::Binary`
+/// for two `String`s, and this is `every_admitted_operator_agrees_on_all_three`
+/// for that operand kind: equal, unequal-and-ordered, ordered across a
+/// difference in *length*, and ordered across a multi-byte character, whose
+/// first byte is what a byte-wise comparison has to get right for `café` to
+/// stand after `cafe` the way `str`'s own `Ord` says it does.
+#[test]
+fn a_string_comparison_agrees_on_every_operator_the_lowering_emits() {
+    for op in ["==", "!=", "<", "<=", ">", ">="] {
+        for (a, b) in [
+            (r#""abc""#, r#""abc""#),
+            (r#""abc""#, r#""abd""#),
+            (r#""ab""#, r#""abc""#),
+            (r#""cafe""#, r#""café""#),
+        ] {
+            agree(&main_of("Bool", &format!("  {a} {op} {b}")));
+        }
+    }
+}
+
+/// `concat` over one of each of the four kinds it renders, and the rendering
+/// is asserted against the `Vm` and the tree walk rather than against a
+/// literal answer here -- so a drift in `write_float` or in how a `Bool` or a
+/// literal segment renders would show up as a disagreement rather than as
+/// nothing at all. The nested `"inner"` is itself a `String` operand, and a
+/// literal segment of the outer string is a `Str` constant beside it, so this
+/// is five operands and four kinds rather than four operands and four kinds.
+#[test]
+fn an_interpolated_string_renders_a_string_an_int_a_bool_and_a_float() {
+    agree(&main_of(
+        "String",
+        r#"  "n={1} b={true} f={3.5} s={"inner"} and a literal tail""#,
+    ));
+}
+
+/// A `String` survives a call that is a safepoint, held in a frame slot the
+/// whole time, and the comparison at the end is what proves it rather than
+/// merely running to completion: the left side is `Kind::Reference`, loaded
+/// back out of the slot, and the right side is a fresh `Kind::Str` literal --
+/// exactly the asymmetric case `Inst::Binary`'s admission and its
+/// `debug_assert` both exist for.
+#[test]
+fn a_string_held_in_a_frame_slot_across_a_call_survives_and_compares_equal() {
+    agree(
+        "fn helper(n: Int) -> Int {\n  n + 1\n}\n\n\
+         export fn main() -> Bool {\n  \
+         var s = \"a string held across a call\"\n  \
+         var n = helper(41)\n  \
+         s == \"a string held across a call\" && n == 42\n\
+         }\n",
+    );
+}
+
+/// A struct with both a `String` field and an `Int` field, the `Int` field
+/// rewritten two hundred times -- which is two hundred `copy_replacing`
+/// allocations, each one carrying the `String` field's handle into a fresh
+/// object -- and the label read back out at the end, agreeing with the `Vm`.
+/// Rooting a string nested in a struct is the field's `Part::Nested`
+/// unchanged from what a struct field of another struct already needed;
+/// nothing here is new machinery, and this is the coverage that says so.
+#[test]
+fn a_string_held_in_a_struct_field_survives_two_hundred_field_writes() {
+    agree(
+        "struct Holder {\n  label: String\n  count: Int\n}\n\n\
+         export fn main() -> Bool {\n  \
+         var h = Holder(label: \"held in a struct field\", count: 0)\n  \
+         var i = 0\n  \
+         while i < 200 {\n    h.count = h.count + 1\n    i = i + 1\n  }\n  \
+         h.label == \"held in a struct field\" && h.count == 200\n\
+         }\n",
+    );
+}
+
+/// A string whose length is not a multiple of eight bytes, so its tail's last
+/// word is zero-padded past the string's own end, and one whose length is
+/// exactly a multiple of eight, so the tail has no partial word at all --
+/// `Shape::Str`'s packing exercised at both sides of the boundary a `%8`
+/// could get wrong.
+#[test]
+fn a_strings_tail_is_packed_at_the_word_boundary_and_just_past_it() {
+    agree(&main_of("String", "  \"1234567\""));
+    agree(&main_of("String", "  \"12345678\""));
+}
+
+/// A non-ASCII string, so `Shape::Str`'s length word and its packing are
+/// counting *bytes* -- fourteen of them for `café日本語`, since `é` is two
+/// UTF-8 bytes and each of `日`, `本` and `語` is three -- and not the seven
+/// `char`s the string holds. `str::as_bytes` is what both
+/// `pack_string_words`'s packing and `crate::slot::string_bytes`'s unpacking
+/// agree the layout means, and a packing that counted characters instead
+/// would either truncate this string or read past its own tail.
+#[test]
+fn a_non_ascii_strings_tail_is_packed_by_bytes_not_by_characters() {
+    agree(&main_of("String", "  \"café日本語\""));
+}
+
+/// **The positive half of a string's own rooting proof**, mirroring
+/// `a_struct_in_a_frame_slot_survives_every_collection_of_a_run` for the kind
+/// Phase C's struct test could not exercise. `s` is built with `{0}` in it so
+/// that it is a `concat`'s answer rather than a `Str` constant -- a constant
+/// would already be a permanent root of `FrameRoots::constants` and prove
+/// nothing about the frame slot -- so `s` is kept alive by nothing but the
+/// slot it stands in. The loop beside it allocates two hundred throwaway
+/// `Junk` structs that reach nothing, so the run collects and frees real
+/// garbage while `s` is the one live object the walk has to find through the
+/// slot alone, and the closing comparison against a fresh literal is what
+/// proves it survived with its bytes intact rather than merely surviving a
+/// `Handle` that happened not to be reused yet.
+#[test]
+fn a_string_kept_alive_by_nothing_but_a_frame_slot_survives_every_collection() {
+    let ready = ready(A_STRING_IN_A_SLOT);
+    let (vm, collected) = crate::on_cove_stack(|| {
+        (
+            ready.on_vm(),
+            ready.on_frame_collecting(RootScope::EveryWord),
+        )
+    })
+    .expect("a thread to run Cove on");
+    assert_eq!(
+        collected.outcome, vm,
+        "the VM and the 8-byte frame disagreed about a rooted string"
+    );
+    assert!(
+        collected.collections > 0,
+        "the run collected {} time(s), so it proves nothing about rooting",
+        collected.collections
+    );
+    assert!(
+        collected.freed_objects > 0,
+        "the sweep reclaimed nothing, so the string that survived did not have to"
+    );
+}
+
+/// **The mutation.** Take the frame's own words out of the walk and the
+/// string in slot 0 is swept out from under the comparison that is still
+/// using it -- `crate::slot::HandleHeap`'s own use-after-free message, dying
+/// inside `FrameVm::compare_string_handles`'s `debug_assert` or, in release,
+/// inside the `HandleHeap::word` the comparison reads bytes through. This is
+/// ADR 0028 decision 8's "a handle slot is a root according to the frame
+/// reference map" removed, and what it costs a `String` exactly as it costs a
+/// struct.
+#[test]
+#[should_panic(expected = "names a swept object")]
+fn dropping_the_frame_slots_from_the_walk_sweeps_the_string_that_lived_there() {
+    let ready = ready(A_STRING_IN_A_SLOT);
+    let _ = ready.on_frame_collecting(RootScope::WithoutFrameSlots);
+}
+
+const A_STRING_IN_A_SLOT: &str = "\
+struct Junk {
+  at: Int
+}
+
+export fn main() -> Bool {
+  var s = \"kept alive by the frame slot and nothing else {0}\"
+  var i = 0
+  while i < 200 {
+    var junk = Junk(at: i)
+    i = junk.at + 1
+  }
+  s == \"kept alive by the frame slot and nothing else 0\"
+}
+";
+
+/// **The dangerous half of the crossing, forced to happen rather than merely
+/// possible.** The string is built with `{0}` in it so that it is a
+/// `concat`'s answer and not a `Str` constant: a constant is a permanent root
+/// of `FrameRoots::constants` from the moment `FrameVm::new` allocates it, so
+/// returning one would survive any collection whether or not the crossing
+/// itself rooted it, which would make the test vacuous. A `concat`'s answer
+/// has no such standing root -- it is a fresh object named only by the word
+/// `Inst::Return` is about to pop -- so its survival here is the crossing's
+/// own rooting and nothing else's.
+///
+/// The string is also long enough that its tail is several words, and
+/// `FrameVm::materialise_str` takes a GC safepoint before every one of them
+/// through `FrameVm::string_word` -- so with `HandleHeap::stress` on, a real
+/// collection runs *inside* `Inst::Return`'s handling, after the handle has
+/// already been popped off the one stack and is a bare Rust local until
+/// `FrameVm::pop_boundary_value`'s `with_root` registers it. The run
+/// answering the right bytes rather than panicking on a swept object is what
+/// says the root held for the whole stretch and not merely up to the first
+/// safepoint.
+#[test]
+fn a_collection_taken_in_the_middle_of_a_boundary_crossing_does_not_lose_the_string() {
+    let ready = ready(&main_of(
+        "String",
+        "  \"0123456789abcdefghijklmnopqrstuvwxyz {0}\"",
+    ));
+    let collected = crate::on_cove_stack(|| ready.on_frame_collecting(RootScope::EveryWord))
+        .expect("a thread to run Cove on");
+    assert_eq!(
+        collected.outcome,
+        Outcome::Answered(format!(
+            "{:?}",
+            Value::string("0123456789abcdefghijklmnopqrstuvwxyz 0")
+        )),
+        "the crossing lost or corrupted the string"
+    );
+    assert!(
+        collected.collections > 0,
+        "the run collected {} time(s), so nothing here proves a collection ran mid-crossing",
+        collected.collections
+    );
+}
+
+/// A program that is still refused, and the refusal names the operand it saw
+/// rather than only naming `concat`: a struct interpolated has no `Display`
+/// this backend can reuse without materialising an aggregate it does not
+/// admit, so `Inst::Concat`'s own check refuses it by the same
+/// `Kind::Reference` the boundary refuses everywhere else.
+#[test]
+fn string_interpolation_over_a_struct_is_refused_and_names_a_heap_object() {
+    let ready = ready(
+        "struct Cell {\n  at: Int\n}\n\nexport fn main() -> String {\n  \
+         var cell = Cell(at: 1)\n  \"{cell}\"\n}\n",
+    );
+    let refused = match ready.admitted() {
+        Ok(id) => panic!("interpolating a struct is refused, and it admitted {id:?}"),
+        Err(refused) => refused,
+    };
+    assert!(
+        refused.what.contains("a heap object"),
+        "it was refused for `{}`, and `a heap object` was expected",
+        refused.what
     );
 }
