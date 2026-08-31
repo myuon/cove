@@ -1052,6 +1052,58 @@ the root depth at each collection during a two-level materialisation is 1, 2,
 
 Still none of it is wired into `Vm`, for the reason above.
 
+### What a reference map can say about a variable-length tail
+
+Decision 2 asks an object's header for its payload layout "including a
+variable-length tail where it has one", and a tail is the one part of an object
+whose size the lowering does not know. The slice splits it the only way it can
+be split: the layout carries the fixed part, a per-word reference map for that,
+and **one** answer for the whole tail; the object's own header carries how many
+tail words the allocation asked for.
+
+So a reference map is two rules rather than a bitmap — a set of indices, and a
+single bit for the tail — and that is what a variable length permits rather
+than a compression of something better. A per-word map of a tail cannot be
+written at lowering time, when the length is unknown, and it need not be: the
+collector's question about a word is a yes-or-no, and every word of an array
+answers it the same way. Both answers are exercised, and the scalar one is the
+one worth checking, because a tail is where a walk that read the bits instead
+of the map would guess in bulk.
+
+The design consequence is that a tail is the first thing whose reference map
+depends on the object and not only on its type. It depends on the *header*,
+which is written at allocation and is never a value the program can see — a
+weaker dependency than a niche enum layout would need, where one word is both a
+value and the thing that says how to read a value. Decision 2 already calls a
+niche "more complex because the reference map may have to interpret the word
+according to the enum layout"; the tail is the measure of how much the weakest
+version of that dependency still costs, which is a header.
+
+Rooting needed nothing new, and that is what the scale was for. A tail of
+handles is a run of *siblings* — the case where a second root is load-bearing,
+since a nested object is already rooted by the parent that names it and an
+argument is not. A spread call whose argument list is one array is that case at
+a scale the program chooses rather than the frame, and truncate-to-depth covers
+eight roots the way it covered two. The array is the crossing's argument
+vector, so nothing roots it: it is swept at the first safepoint inside the
+crossing while every element survives, which is what says the shadow stack and
+not the tail's reference map is what holds them. Rooting them one at a time
+sweeps the rest.
+
+Decision 7's `Elements` guard fits an array's tail and is not needed for it.
+The tail materialises as a copy, and `Value::items` answers a plain slice
+because a materialisation's storage does sit still; a guard whose lifetime came
+from the VM's heap instead would be the lazy window ADR 0028 refuses, since "a
+lazy window keeps a `Value` alive against VM storage, which means a host
+holding one constrains when a collection may run". What a tail does not reach
+is the other half of decision 7: the five types whose identity is observable
+are "materialized as handles rather than as copies", and a `Vector` living in
+the handle heap could be neither — a copy is what decision 7 refuses for it,
+and a handle inside a `Value` would join the two heaps whose disjointness the
+section above rests on. Either those types stay in the counted heap and never
+become tails, or the seam stops being one-way. Nothing decides that yet, and
+the slice does not decide it by picking one.
+
 ### What the heap figures mean, on both backends
 
 The same thing, which they did not before. A VM heap was never swept, so what
