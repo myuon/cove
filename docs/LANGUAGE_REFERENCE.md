@@ -115,7 +115,10 @@ collects every argument the parameters before it did not take, and it is
 written **without a default**, because a variadic parameter given no
 arguments is already the empty `Array<T>` and there is nothing left for a
 default to answer. `cove check` decides both:
-`cove::type::variadic_position` and `cove::type::variadic_default`.
+`cove::type::variadic_position` and `cove::type::variadic_default`. A variadic
+parameter is written on a *declaration* only: a function value has exactly the
+parameters its function type names, and a function type names a fixed list of
+them, so a `...` on a lambda is `cove::type::variadic_lambda`.
 
 Declaration-level errors: `cove::resolve::duplicate_declaration`,
 `cove::resolve::unknown_trait`, `cove::resolve::unknown_impl_type`,
@@ -127,7 +130,8 @@ Declaration-level errors: `cove::resolve::duplicate_declaration`,
 `cove::resolve::import_cycle`, `cove::resolve::module_shadows_host`,
 `cove::parse::opaque_not_exported`, `cove::parse::opaque_not_a_struct`,
 `cove::type::missing_parameter_type`, `cove::type::variadic_position`,
-`cove::type::variadic_default`, `cove::type::conformance_signature`,
+`cove::type::variadic_default`, `cove::type::variadic_lambda`,
+`cove::type::conformance_signature`,
 `cove::type::test`, `cove::type::entry`, and the
 `cove::resolve::missing_doc` warning.
 
@@ -463,7 +467,9 @@ is permanent, not provisional; the reason is under *Every loop produces
   binding afterwards does not change what the closure sees. A captured
   `Vector` or `Shared` still shares its storage, because copying either is
   copying the handle.
-- **Errors**: `cove::type::arity`, `cove::type::mismatch`.
+- **Errors**: `cove::type::arity`, `cove::type::mismatch`,
+  `cove::type::variadic_lambda` — a lambda's parameter list is fixed, so no
+  parameter of one may be variadic, at any position.
 
 ### `scope`
 
