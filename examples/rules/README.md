@@ -257,9 +257,12 @@ different questions and the example asks both:
 the same three decisions, differing in one call, where the session runs out on
 the second and the requests each answer.
 
-Which limit to reach for is ADR 0024's, not this example's. **`max_host_calls`
-is the control that bounds effects exactly**; fuel bounds work and bounds
-effects only to within a straight line, and a fuel limit is not portable
+Which limit to reach for is ADR 0024's and ADR 0030's, not this example's.
+**`max_host_calls` is the control that bounds effects exactly**; fuel bounds
+work, and how many effects a fuel limit admits still depends on what the
+program does between them. ADR 0030 settles only the far end of that — no Host
+call begins once the fuel a run has been charged has reached its limit — and
+leaves the near end where ADR 0024 put it: a fuel limit is not portable
 between the two backends. So `decide_within` is the case written against
 `max_host_calls` — one decision makes two calls, `pull` and `record` — and it
 is the one asserted on both backends, because a call is a call on either and a
