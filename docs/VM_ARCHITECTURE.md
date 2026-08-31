@@ -4618,7 +4618,41 @@ and is more than twice what a scalar call's is**; and a loop whose frame holds
 no reference at all runs at 1.11x, because the bitmap is a bit written per word
 pushed and that row pushes most and has no reference to say anything about.
 Which of those two a program is depends on the program, and this document does
-not have a corpus that says which is typical. ADR 0027's "What is not decided here" is the list. What the
+not have a corpus that says which is typical.
+
+**Two phases have landed since, and each answered a prediction wrongly enough
+to be worth recording.** "A struct's reference map is a property of the type"
+above gave `cove_ir` a per-field slot kind, so the bit a field read pushes now
+comes from the lowered type rather than from how one instance happened to be
+built — and the by-name refusal that guarded the old arrangement is gone by
+being *unstateable* rather than by being diagnosed differently: two sites
+cannot disagree about a fact neither states. But the prediction that the same
+absence caused the frame map to be derived at run time was **wrong**. It was
+one absence and two symptoms: a struct's map genuinely was missing from the IR;
+a frame's is `value_frame_size` and `scalar_frame_size` and three additions
+over them.
+
+"One slot numbering, and a simulation in place of a peephole" then gave
+`cove_ir` the one numbering ADR 0028's decision 1 decides, and found that it
+bought **none** of the three refusals the previous phase had predicted it
+would. Those belong to the calling convention, not to the numbering: arguments
+are pushed in declaration order and become slots without moving, while the
+numbering groups by region. Necessary, not sufficient — and that is the first
+thing a production split has to decide, because a one-stack `Vm` meets it at
+every mixed call in the corpus rather than at four benchmark rows.
+
+That phase also found the operand check was not merely conservative but
+**misaligned**: its window derived `[Reference, Int]` for operands that are
+`[Int, Int]`, and it read `Inst::Dup` as a reference unconditionally, which is
+a wrong *acceptance*. The dispatch loop was never wrong — it copies the bit.
+The check was. An abstract simulation over `stack_shape` replaced it, and
+`stack_shape` is exported rather than copied so there is one description with
+three readers instead of two descriptions.
+
+`arith` has stayed on the wrong side of 1x through all four phases, and each of
+the last two said plainly that nothing it did could have moved it. That is the
+honest shape of this result: **one frame is worth a great deal at a call and
+something to pay for in a loop that never makes one.** ADR 0027's "What is not decided here" is the list. What the
 two cliffs turned out to say about it is worth recording, because it was not
 what anybody expected: **neither of them needed one physical stack.** Both were
 a slot's *role* deciding its representation, and both were fixed by taking that
