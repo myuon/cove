@@ -1,5 +1,16 @@
 # Cove
 
+## Philosophy
+
+[docs/PHILOSOPHY.md](docs/PHILOSOPHY.md) is what Cove is trying to be. Read it
+when designing a new feature, weighing a trade-off, or deciding whether a cost
+is acceptable — not only when writing an ADR. The sections most often reached
+for are "Earn complexity through use" (a feature is added when representative
+programs show recurring friction, not when it is imaginable), "Syntax must earn
+its place", and "Preserve the performance class" (a small measured slowdown may
+buy simplicity, correctness, or maintainability; a change of performance class
+may not).
+
 ## Tests
 
 `cargo t` is the local test command — an alias in `.cargo/config.toml` for

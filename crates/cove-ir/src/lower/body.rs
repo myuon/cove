@@ -193,6 +193,24 @@ pub(super) struct Finished {
     pub(super) value_frame_size: u32,
     pub(super) scalar_frame_size: u32,
     pub(super) place_frame_size: u32,
+    /// The kind of every scalar-region number this body ever handed out, in
+    /// numbering order — slot 0 first. Dense: every index below
+    /// `scalar_frame_size` has an entry, because [`Body::allocate`] only ever
+    /// grows this by pushing the next one.
+    ///
+    /// `super::convention` concatenates this with `value_layout` and
+    /// `place_layout`, in the one numbering's order, to build
+    /// [`Function::slots`](crate::Function::slots).
+    pub(super) scalar_layout: Vec<SlotKind>,
+    /// The kind of every value-region number this body ever handed out, in
+    /// numbering order. Every entry is [`SlotKind::Value`] — nothing else is
+    /// ever declared into the value region — so this never disagrees with
+    /// itself the way `scalar_layout` can.
+    pub(super) value_layout: Vec<SlotKind>,
+    /// The kind of every place-region number this body ever handed out, in
+    /// numbering order. Every entry is [`SlotKind::Place`], for the same
+    /// reason `value_layout`'s is uniform.
+    pub(super) place_layout: Vec<SlotKind>,
 }
 
 /// Everything one function's instructions are built from.
@@ -241,24 +259,38 @@ pub(super) struct Body<'a, 'l> {
     /// join point honest.
     pub(super) depth: Option<Depth>,
     pub(super) live: Vec<Binding<'a>>,
-    /// The high-water mark of value slots handed out: `self` if there is a
-    /// receiver, then parameters, then every `Value` local and temporary.
-    /// The width [`Body::finish`] carries into `Finished::value_frame_size`
-    /// and, from there,
-    /// [`Function::value_origin`](crate::Function::value_origin) is built
-    /// on.
-    pub(super) value_frame_size: u32,
-    /// The high-water mark of scalar slots handed out: every `Int` or `Bool`
-    /// local and temporary. The width of the region the one frame numbering
-    /// starts counting from, since
+    /// The kind of every value-region number handed out so far, in numbering
+    /// order — see [`Finished::value_layout`]. `self` if there is a
+    /// receiver, then parameters, then every `Value` local and temporary
+    /// declare into this one push at a time; a scope reusing a number
+    /// records nothing new, because the number is already here with the
+    /// kind it will always have.
+    ///
+    /// Its length is the high-water mark of value slots handed out, which
+    /// [`Body::finish`] carries into `Finished::value_frame_size` and, from
+    /// there, [`Function::value_origin`](crate::Function::value_origin) is
+    /// built on. Kept as the layout itself and not as a separate count,
+    /// because a count is a fact the layout already states and restating it
+    /// is exactly the kind of second description that could drift from the
+    /// first.
+    pub(super) value_layout: Vec<SlotKind>,
+    /// The kind of every scalar-region number handed out so far, in
+    /// numbering order: every `Int` or `Bool` local and temporary. Its
+    /// length is the width of the region the one frame numbering starts
+    /// counting from, since
     /// [`Function::scalar_origin`](crate::Function::scalar_origin) is
     /// always zero.
-    pub(super) scalar_frame_size: u32,
-    /// The high-water mark of place slots handed out, which is every `var`
-    /// parameter and a `var self` receiver: nothing a body declares takes
-    /// one. The width [`Function::place_origin`](crate::Function::place_origin)
-    /// is built on.
-    pub(super) place_frame_size: u32,
+    ///
+    /// This is the one layout of the three that can disagree with itself
+    /// across two scopes that reuse the same number — see
+    /// [`Body::allocate`] for why and what is done about it.
+    pub(super) scalar_layout: Vec<SlotKind>,
+    /// The kind of every place-region number handed out so far, in
+    /// numbering order, which is every `var` parameter and a `var self`
+    /// receiver: nothing a body declares takes one. Its length is the width
+    /// [`Function::place_origin`](crate::Function::place_origin) is built
+    /// on.
+    pub(super) place_layout: Vec<SlotKind>,
     /// The next value slot number to hand out, restored when a scope ends.
     ///
     /// Counted within the value region alone while the body is emitted:
@@ -306,9 +338,9 @@ impl<'a, 'l> Body<'a, 'l> {
             spans: Vec::new(),
             depth: Some(Depth::EMPTY),
             live: Vec::new(),
-            value_frame_size: 0,
-            scalar_frame_size: 0,
-            place_frame_size: 0,
+            value_layout: Vec::new(),
+            scalar_layout: Vec::new(),
+            place_layout: Vec::new(),
             next_value: 0,
             next_scalar: 0,
             next_place: 0,
@@ -356,8 +388,11 @@ impl<'a, 'l> Body<'a, 'l> {
                 other => unreachable!("a patch points at a jump, not {other:?}"),
             }
         }
-        let value_origin = self.scalar_frame_size;
-        let place_origin = self.scalar_frame_size + self.value_frame_size;
+        let scalar_frame_size = self.scalar_layout.len() as u32;
+        let value_frame_size = self.value_layout.len() as u32;
+        let place_frame_size = self.place_layout.len() as u32;
+        let value_origin = scalar_frame_size;
+        let place_origin = scalar_frame_size + value_frame_size;
         for inst in &mut self.code {
             match inst {
                 // The scalar region begins at 0, so a scalar slot's number in
@@ -375,9 +410,12 @@ impl<'a, 'l> Body<'a, 'l> {
             code: self.code,
             spans: self.spans,
             arg_spans: self.arg_spans,
-            value_frame_size: self.value_frame_size,
-            scalar_frame_size: self.scalar_frame_size,
-            place_frame_size: self.place_frame_size,
+            value_frame_size,
+            scalar_frame_size,
+            place_frame_size,
+            scalar_layout: self.scalar_layout,
+            value_layout: self.value_layout,
+            place_layout: self.place_layout,
         }
     }
 
@@ -629,27 +667,70 @@ impl<'a, 'l> Body<'a, 'l> {
     /// The number returned is a count within `kind`'s own region, not yet a
     /// number in the one frame numbering — [`Body::finish`] is what adds the
     /// region's origin, once, to every slot number a finished body carries.
+    ///
+    /// # Why a reused number can be skipped forward
+    ///
+    /// A scope hands its numbers back when it ends — see [`Body::release`] —
+    /// so one region-local number can be handed out more than once in one
+    /// body, once per scope that reuses it. Two scopes can reuse it for
+    /// bindings of different kinds: `{ let a: Int = 1 }` followed by a
+    /// sibling `{ let b: Bool = true }` both start counting their scalars
+    /// from the same number, and the first records that number a
+    /// `Scalar(Int)` while the second would want it a `Scalar(Bool)`. Only
+    /// the scalar region can actually disagree with itself this way today —
+    /// the value region never declares anything but `SlotKind::Value` and
+    /// the place region never declares anything but `SlotKind::Place` — but
+    /// the rule below is written once, over all three regions, rather than
+    /// singled out for the one that needs it.
+    ///
+    /// [`Function::slots`](crate::Function::slots) names one [`SlotKind`]
+    /// per number, so it has no way to record a number that meant two
+    /// different things in two scopes. So: when the number this call is
+    /// about to hand out is already recorded in this region's layout with a
+    /// *different* kind than `kind`, that number is left to whichever
+    /// binding already claimed it, and the search moves forward — to the
+    /// first number that is either past the end of what this region has
+    /// ever recorded, or already recorded with the *same* kind — and that
+    /// is the number handed out instead. The counter then continues from
+    /// there, so the skipped number is given up for good rather than
+    /// renegotiated the next time this region's count passes it.
+    ///
+    /// This costs at most one extra slot per such mismatch, because a skip
+    /// either lands on a number nothing has recorded yet — which grows the
+    /// layout by exactly the one entry the skip needed — or on a number
+    /// already recorded with a matching kind, which grows nothing at all.
+    /// That is the price of the table naming an exact kind for every number
+    /// rather than approximating: [`Function::slots`] never has to be read
+    /// alongside the instruction that touches a slot to know what the slot
+    /// holds.
     pub(super) fn allocate(&mut self, kind: SlotKind) -> u32 {
         match kind {
             SlotKind::Value => {
-                let slot = self.next_value;
-                self.next_value += 1;
-                self.value_frame_size = self.value_frame_size.max(self.next_value);
-                slot
+                Self::allocate_in(&mut self.next_value, &mut self.value_layout, kind)
             }
             SlotKind::Scalar(_) => {
-                let slot = self.next_scalar;
-                self.next_scalar += 1;
-                self.scalar_frame_size = self.scalar_frame_size.max(self.next_scalar);
-                slot
+                Self::allocate_in(&mut self.next_scalar, &mut self.scalar_layout, kind)
             }
             SlotKind::Place => {
-                let slot = self.next_place;
-                self.next_place += 1;
-                self.place_frame_size = self.place_frame_size.max(self.next_place);
-                slot
+                Self::allocate_in(&mut self.next_place, &mut self.place_layout, kind)
             }
         }
+    }
+
+    /// One region's half of [`Body::allocate`]: advances `next` past any
+    /// number `layout` already records with a different kind, records
+    /// `kind` at the number it settles on if nothing has recorded one
+    /// there yet, and returns that number.
+    fn allocate_in(next: &mut u32, layout: &mut Vec<SlotKind>, kind: SlotKind) -> u32 {
+        let mut slot = *next;
+        while (slot as usize) < layout.len() && layout[slot as usize] != kind {
+            slot += 1;
+        }
+        if slot as usize == layout.len() {
+            layout.push(kind);
+        }
+        *next = slot + 1;
+        slot
     }
 
     /// Lets `name` reach a slot [`Body::allocate`] already reserved.
