@@ -47,7 +47,7 @@
 //!
 //! What Phase C did **not** close is the frame map, and the reason is that
 //! Phase B's "the same absence is why" was a diagnosis of one cause for two
-//! symptoms that turn out to be two. See [`FrameMap`].
+//! symptoms that turn out to be two. See `FrameMap`.
 //!
 //! [ADR 0033](../../../docs/adr/0033-an-identity-is-not-a-vm-heap-object.md)
 //! is what says a struct may be in that heap at all, and it is binding: plain
@@ -79,7 +79,7 @@
 //! them one region from one base, which is decision 1's "every physical offset
 //! derives from the one frame layout" met by deriving the map rather than by
 //! having been given it. Phase C looked at moving that into `cove_ir` and did
-//! not: see [`FrameMap`] for what it would take and why the per-field kind did
+//! not: see `FrameMap` for what it would take and why the per-field kind did
 //! not bring it.
 //!
 //! Every logical value in this slice is exactly one word, as ADR 0028
@@ -284,7 +284,7 @@
 //!
 //! **What Phase C adds is one shape and it is the shape the static map made
 //! readable**: a struct-typed field read whose answer is then stored, passed or
-//! built with. `Inst::GetFieldAt` was unreadable to [`pushed_kinds`] while only
+//! built with. `Inst::GetFieldAt` was unreadable to `pushed_kinds` while only
 //! the object knew what it pushed, so `var inner = outer.inner` was refused;
 //! now the instruction names the type and the read is a reference the frame can
 //! account for. `a_nested_struct_read_into_a_slot_is_rooted` is the coverage,
