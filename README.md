@@ -219,8 +219,12 @@ a bound on how much may still happen and not a point at which it stops — is
 bound it left larger than zero: no Host call begins once the fuel a run has
 been charged has reached its limit. What a host is handed, and how
 that is kept separate from the representations the VM actually runs on, is
-[ADR 0028](docs/adr/0028-five-representations-and-one-is-public.md) — the one
-ADR here that is `Proposed` rather than `Accepted`, and nothing in it is built.
+[ADR 0028](docs/adr/0028-five-representations-and-one-is-public.md), whose
+visibility rule — no public signature of `cove-runtime` names one of the four
+private representations — is checked by a test rather than kept by discipline.
+[ADR 0031](docs/adr/0031-a-host-handle-is-not-a-vm-handle.md) restates that one
+rule and nothing else in ADR 0028: a handle the host owns is not a handle the
+VM owns, and a trait method is a public signature that never says `pub`.
 
 Syntax is still provisional and may change.
 

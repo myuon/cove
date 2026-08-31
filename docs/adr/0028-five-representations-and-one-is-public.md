@@ -6,6 +6,13 @@
   and accepted" — so this ADR was written and merged as `Proposed`, which no
   other ADR in `docs/adr/` has been, and accepted separately once reviewed.
   The gate is now passed and the work below may be built
+- Superseded in part by
+  [ADR 0031](0031-a-host-handle-is-not-a-vm-handle.md), which replaces the
+  **visibility rule** under decision 0 — the sentence beginning "No public
+  signature in this workspace mentions", and the claim that it "is checkable
+  — it is a `grep` over `pub fn`", repeated below under Consequences. Nothing
+  else here is superseded: the five representations, all eight decisions, the
+  seal, `ValueView`, and the Costs stand as written
 - Date: 2026-08-30
 - Supersedes: nothing. It **decides what
   [ADR 0027](0027-a-place-and-a-capture-name-a-slot.md) left open** under
