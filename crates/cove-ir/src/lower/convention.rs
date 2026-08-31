@@ -57,6 +57,16 @@ impl<'a> Lowering<'a> {
     /// name; and `Env::captures` walks that list *before* the frame, so a
     /// nested lambda's own captures come out in the same order. One `live`
     /// list in this order answers both.
+    ///
+    /// One shape used to be refused here and is gone: a closure's variadic
+    /// parameter. There is still no variadic calling convention for a call
+    /// through a value to use — an [`Inst::CallValue`] supplies a count and
+    /// every argument travels on the value stack, with nothing to say which
+    /// of them a collector should have taken — but that is no longer this
+    /// pass's to say, because `cove::type::variadic_lambda` refuses one
+    /// before either backend is handed anything. A backend refusing what the
+    /// oracle already refuses is a rule stated twice, and this pass only
+    /// lowers a program that has passed `cove check`.
     pub(super) fn lambda_function(&mut self, index: usize) -> Result<Function, Unsupported> {
         let site = &self.lambdas[index];
         let module = site.module;
@@ -80,28 +90,6 @@ impl<'a> Lowering<'a> {
         let mut slots: Vec<u32> = Vec::with_capacity(decl_params.len());
         for (at, param) in decl_params.iter().enumerate() {
             reject_parameter(param)?;
-            if param.variadic {
-                // A closure's parameters are a function type's, and a
-                // function type in Cove names a fixed list of them — which
-                // is the same rule `cove::type::variadic_as_value` states
-                // for a variadic host operation used as a value. So there is
-                // no variadic calling convention here to lower to: an
-                // `Inst::CallValue` supplies a count and every argument
-                // travels on the value stack, with nothing to say which of
-                // them a collector should have taken.
-                //
-                // The checker types such a parameter as its element type and
-                // says nothing, while `Interpreter::bind_params` wraps it in
-                // an `Array` like any other variadic slot, so the two
-                // backends answered `1` and `[1]` for the same closure.
-                // Refusing is what a backend may do when the oracle has not
-                // decided (ADR 0019); deciding it is issue #118's neighbour
-                // and not this pass's.
-                return Err(Unsupported::new(
-                    format!("a closure's variadic parameter `{}`", param.name.node),
-                    param.span,
-                ));
-            }
             if param.is_var {
                 // A `var` parameter names the caller's storage, and a call
                 // through a value has no way to hand one over: every

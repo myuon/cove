@@ -1,0 +1,3 @@
+[run.fail_variadic_lambda]
+entry = "main.main"
+allow = ["console"]

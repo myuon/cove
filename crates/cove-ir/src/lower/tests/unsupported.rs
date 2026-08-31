@@ -30,16 +30,6 @@ fn every_unsupported_construct_is_named() {
             "fn g(var x: Int...) -> Int {\n  1\n}\n",
         ),
         (
-            // A closure is a function type, and a function type in Cove
-            // names a fixed list of parameters. `cove check` still lets
-            // `...` through here and types the parameter as its element
-            // type, while `bind_params` wraps it in an `Array` — so this
-            // is the one variadic shape left where the two backends would
-            // answer differently, and the VM refuses rather than answer.
-            "a closure's variadic parameter `items`",
-            "fn f() -> Int {\n  let g = fn(items: Int...) {\n    items\n  }\n  g(1)\n  1\n}\n",
-        ),
-        (
             // A `dyn` the conversion does not reach. A `Map`'s value
             // type is written inside a head with two arguments, which
             // is where `Interpreter::coerce` stops walking, so nothing

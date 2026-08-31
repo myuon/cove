@@ -271,6 +271,20 @@
 //! disagreed about what a non-last variadic parameter binds, and nothing in
 //! either backend could ever reach a variadic parameter's default.
 //!
+//! A third is about where a variadic parameter may be written at all: on a
+//! declaration, and not on a function value ([`VARIADIC_LAMBDA`],
+//! `Checker::lambda`). This one does not come from ADR 0021 but from
+//! ADR 0016 — a function type names a fixed list of parameters, and a
+//! function value has exactly the parameters its type names. It was the VM's
+//! lowering that refused it first, and the two backends disagreed underneath
+//! that refusal: this pass typed such a parameter as its element type and
+//! dropped the `...`, while `Interpreter::bind_params` wrapped the argument
+//! in an `Array` as it does for any variadic slot, so `fn(items: Int...)`
+//! called with `1` bound `1` on one backend and `[1]` on the other. Deciding
+//! it here makes it one diagnostic on both rather than one backend's
+//! silence; issue #168 is where the question it does *not* settle — what
+//! such a parameter would mean — is written down.
+//!
 //! Two things bound it, and both are abstentions rather than gaps in the
 //! rule. A name this pass did not bind is not a place and is not reported as
 //! one — see `Checker::not_a_place`. And a receiver whose type is an
@@ -435,6 +449,9 @@ pub const MISSING_PARAMETER_TYPE: &str = "cove::type::missing_parameter_type";
 pub const VARIADIC_POSITION: &str = "cove::type::variadic_position";
 /// A variadic parameter is written with a default.
 pub const VARIADIC_DEFAULT: &str = "cove::type::variadic_default";
+/// A variadic parameter is written on a function value, whose parameters are
+/// its function type's and so are a fixed list.
+pub const VARIADIC_LAMBDA: &str = "cove::type::variadic_lambda";
 /// A host operation whose schema declares its result `Any`, so the checker
 /// can prove nothing about the value it produced (note).
 pub const UNCONSTRAINED_RESULT: &str = "cove::type::unconstrained_result";
@@ -4580,6 +4597,10 @@ impl<'a> Checker<'a> {
     /// A lambda takes its parameter types from the expected type at the call
     /// site, as ADR 0004 decides; a parameter it writes for itself is used as
     /// written.
+    ///
+    /// One shape it may not write is a variadic parameter
+    /// ([`VARIADIC_LAMBDA`]), at any position. See the comment at the
+    /// refusal for why, and for what it leaves undecided.
     fn lambda(
         &mut self,
         is_async: bool,
@@ -4668,6 +4689,50 @@ impl<'a> Checker<'a> {
                         Ty::recovery()
                     }
                 },
+            };
+            // A function value's parameters are its function type's, and
+            // ADR 0016 says a function type in Cove names a fixed list of
+            // them — the same rule `cove::type::variadic_as_value` states
+            // from the other side, where a variadic host operation is used
+            // as a value and no `fn` type can be written for it. A `...`
+            // here asks for a parameter list that is a run-time fact: how
+            // many arguments it gathers is decided at the call, and a call
+            // through a value has no declaration in reach to gather
+            // against.
+            //
+            // Which is to say this leans toward "a closure's parameter list
+            // is fixed", because that is what the rest of the language
+            // already says and it is the smaller of the two languages. What
+            // a variadic parameter on a function value should *mean* is not
+            // settled here, and the other reading — teach a function type to
+            // carry variadicity, so that a call through a value gathers — is
+            // still open; it needs ADR 0016's decision revisited, and
+            // nothing below stands in its way. Issue #168 is where both are
+            // written down.
+            //
+            // The parameter binds a recovery unknown rather than what was
+            // written, so that this is one diagnostic and not a cascade
+            // through every use of the name in the body — the same reason
+            // `MISSING_PARAMETER_TYPE` does it.
+            let ty = if param.variadic {
+                self.diagnostics.push(
+                    Diagnostic::error(
+                        VARIADIC_LAMBDA,
+                        format!(
+                            "parameter `{}` is variadic, so it cannot be written on a function value",
+                            param.name.node
+                        ),
+                    )
+                    .at(param.span)
+                    .rule("A variadic parameter is written on a declaration: a function value has exactly the parameters its function type names, and a function type names a fixed list of them.")
+                    .help(format!(
+                        "remove the `...` and give `{}` an `Array` type, passing one at the call; or declare an `fn`, which a call reaches by name and can gather arguments for",
+                        param.name.node
+                    )),
+                );
+                Ty::recovery()
+            } else {
+                ty
             };
             param_types.push(ty.clone());
             self.declare(&param.name.node, ty, param.is_var);

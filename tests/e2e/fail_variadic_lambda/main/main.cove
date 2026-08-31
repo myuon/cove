@@ -1,0 +1,22 @@
+use console.println
+
+/// Writes a variadic parameter on a function value.
+///
+/// This is the program issue #168 reproduced the two backends disagreeing
+/// on. The checker typed `items` as its element type and dropped the `...`,
+/// while `Interpreter::bind_params` wrapped the argument in an `Array` as it
+/// does for any variadic slot, so the same closure answered `1` on the VM
+/// and `[1]` on the interpreter. `cove check` refuses it now, on both.
+export fn gathered() -> String {
+  let g = fn(items: Int...) {
+    "{items}"
+  }
+  g(1)
+}
+
+/// Never runs. This case lives in its own package so that check-time failure
+/// cannot take down every other case.
+export fn main() -> Result<Unit, Error> {
+  println("{gathered()}")?
+  Ok(())
+}
