@@ -97,7 +97,10 @@ no schema describes -- neither a shipped one nor one an embedder handed over
 -- which is warned about at the `use` that names it, and a builtin
 constructor's type parameter that nothing settles. A `--deny-warnings` run
 leaves only the notes, which name exactly what a schema, or the language,
-chose not to say.
+chose not to say. A closure's parameter list is fixed, so a variadic
+parameter is written on a declaration and never on a function value
+([ADR 0032](docs/adr/0032-a-closures-parameter-list-is-fixed.md)): a call
+through a value has no declaration in reach to gather arguments against.
 A host resource handle is a name for something the host owns -- a module, a
 resource kind, an identity number, and the task-safety its schema declares --
 never the resource itself, and every operation called on one goes through the
