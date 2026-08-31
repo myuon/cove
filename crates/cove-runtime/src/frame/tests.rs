@@ -48,6 +48,7 @@ use std::sync::{Arc, Mutex};
 
 use cove_diag::{SourceMap, Span};
 use cove_ir::Program as Ir;
+use cove_schema::{Effect, HostType, ModuleSchema, OperationSchema};
 use cove_sema::config::Config;
 use cove_sema::package::{Module, Package, Unit};
 use cove_sema::resolve::Program as Checked;
@@ -55,7 +56,7 @@ use cove_sema::resolve::Program as Checked;
 use super::*;
 use crate::budget::{Budget, Cancellation, Limits};
 use crate::clock::{Clock, VirtualTime};
-use crate::host::{Console, Grants};
+use crate::host::{Console, Grants, HostApi};
 use crate::interp::Interpreter;
 use crate::trace::{TraceEvent, TraceSink};
 use crate::vm::Vm;
@@ -91,6 +92,164 @@ fn hosts(limits: Option<Limits>, cancellation: Option<Cancellation>) -> Arc<Host
         (None, None) => {}
     }
     Arc::new(hosts)
+}
+
+// -------------------------------------------------------- a Host call fixture
+
+/// A host module built only for this file's Host-call tests, over the
+/// arguments `Operands::boundary` admits and nothing else: a zero-argument
+/// operation, one operation per scalar kind `cove_schema::HostType` has --
+/// which is `Int` and `Bool`; it has no `Float` at all, so a `Float`
+/// argument is exercised through `many` instead, which takes `Any` -- one for
+/// a `String`, a variadic one that counts what it was given regardless of
+/// kind, and one that always fails. None of the shipped modules exercises all
+/// of these through operations this small, and the shipped ones' own
+/// arguments are mostly `String`.
+const ECHO_SCHEMA: ModuleSchema = ModuleSchema {
+    name: "echo",
+    capability: "echo",
+    operations: &[
+        OperationSchema {
+            name: "unit",
+            params: &[],
+            variadic: false,
+            result: HostType::Result(&HostType::Unit, &HostType::Error),
+            capability: "echo",
+            effect: Effect::Read,
+            cancellable: false,
+            recordable: true,
+            result_is_task_safe: true,
+        },
+        OperationSchema {
+            name: "int",
+            params: &[HostType::Int],
+            variadic: false,
+            result: HostType::Result(&HostType::Int, &HostType::Error),
+            capability: "echo",
+            effect: Effect::Read,
+            cancellable: false,
+            recordable: true,
+            result_is_task_safe: true,
+        },
+        OperationSchema {
+            name: "bool",
+            params: &[HostType::Bool],
+            variadic: false,
+            result: HostType::Result(&HostType::Bool, &HostType::Error),
+            capability: "echo",
+            effect: Effect::Read,
+            cancellable: false,
+            recordable: true,
+            result_is_task_safe: true,
+        },
+        OperationSchema {
+            name: "text",
+            params: &[HostType::String],
+            variadic: false,
+            result: HostType::Result(&HostType::String, &HostType::Error),
+            capability: "echo",
+            effect: Effect::Read,
+            cancellable: false,
+            recordable: true,
+            result_is_task_safe: true,
+        },
+        OperationSchema {
+            name: "many",
+            params: &[HostType::Any],
+            variadic: true,
+            result: HostType::Result(&HostType::Int, &HostType::Error),
+            capability: "echo",
+            effect: Effect::Read,
+            cancellable: false,
+            recordable: true,
+            result_is_task_safe: true,
+        },
+        OperationSchema {
+            name: "fails",
+            params: &[],
+            variadic: false,
+            result: HostType::Result(&HostType::Unit, &HostType::Error),
+            capability: "echo",
+            effect: Effect::Read,
+            cancellable: false,
+            recordable: true,
+            result_is_task_safe: true,
+        },
+    ],
+    types: &[],
+    resources: &[],
+};
+
+/// The host module [`ECHO_SCHEMA`] declares. `unit()` answers `Ok(())`;
+/// `int`, `bool` and `text` answer `Ok` of the one argument they were given,
+/// unchanged; `many(...)` answers how many arguments it was given, whatever
+/// kind each one is; `fails()` always answers a declared failure.
+struct Echo;
+
+impl HostApi for Echo {
+    fn module_schema(&self) -> ModuleSchema {
+        ECHO_SCHEMA
+    }
+
+    fn call(&self, op: &str, mut args: Vec<Value>) -> Result<Value, RuntimeError> {
+        match op {
+            "unit" => Ok(Value::ok(Value::unit())),
+            "int" | "bool" | "text" => {
+                let value = args.pop().expect("this operation takes one argument");
+                Ok(Value::ok(value))
+            }
+            "many" => Ok(Value::ok(Value::int(args.len() as i64))),
+            "fails" => Ok(Value::err(Value::error("echo.fails always fails"))),
+            _ => unreachable!("checked by `HostRegistry::call`"),
+        }
+    }
+}
+
+/// A registry holding only [`Echo`], granted the `echo` capability when
+/// `grant` is true and not otherwise -- the fixture the capability-denied
+/// test runs the same program through twice.
+fn echo_hosts(grant: bool) -> Arc<HostRegistry> {
+    let capabilities: Vec<&str> = if grant { vec!["echo"] } else { Vec::new() };
+    let mut hosts = HostRegistry::new(Grants::new(capabilities));
+    hosts.register(Box::new(Echo));
+    Arc::new(hosts)
+}
+
+/// [`agree`], with [`echo_hosts`] in place of the shared console-and-clock
+/// registry [`hosts`] builds -- every Host-call test below runs its program
+/// through this rather than through `agree`, because `agree` has no way to
+/// grant a capability `hosts` does not already grant, or to withhold one it
+/// does.
+fn agree_with_echo(source: &str, grant: bool) -> Outcome {
+    let ready = ready(source);
+    let run = |backend: &str| -> Outcome {
+        let hosts = echo_hosts(grant);
+        let runtime = Runtime::new(ready.checked.clone(), ready.sources.clone(), hosts.clone());
+        match backend {
+            "ast" => {
+                outcome(Interpreter::new(&runtime).run_entry(&ready.module, "main", Vec::new()))
+            }
+            "vm" => outcome(Vm::new(&runtime, &hosts, &ready.ir).run_entry(
+                &ready.module,
+                "main",
+                Vec::new(),
+            )),
+            _ => outcome(FrameVm::new(&runtime, &hosts, &ready.ir).run_entry(
+                &ready.module,
+                "main",
+                Vec::new(),
+            )),
+        }
+    };
+    let ast = run("ast");
+    let vm = run("vm");
+    let frame = run("frame");
+    assert_eq!(ast, vm, "the oracle and the VM disagreed for:\n{source}");
+    assert_eq!(
+        vm, frame,
+        "the VM and the 8-byte frame disagreed for:\n{source}"
+    );
+    frame
 }
 
 /// One program, checked and lowered, ready to be run three ways.
@@ -269,7 +428,15 @@ fn bench(name: &str) -> Ready {
 }
 
 fn prepared(sources: SourceMap, package: Package, module: &str) -> Ready {
-    let checked = match cove_sema::Compiler::new().compile(&package) {
+    // `ECHO_SCHEMA` is added to every checker this file builds, whether or
+    // not a given source uses it, the same way the shipped schemas are
+    // always there: registering a description does not grant a capability or
+    // require a call, so a program that never writes `use echo` checks
+    // exactly as it did before this line existed.
+    let checked = match cove_sema::Compiler::new()
+        .with_host_schema(ECHO_SCHEMA)
+        .compile(&package)
+    {
         Ok(program) => program,
         Err(items) => panic!("the source checks:\n{}", rendered(&sources, &items)),
     };
@@ -498,10 +665,16 @@ fn no_admitted_row_grows_the_one_stack_past_its_reservation() {
 ///
 /// Named individually rather than counted, because a refusal that changed
 /// which construct it was about would otherwise go unnoticed.
+///
+/// `hostheavy`'s own reason moved once `Inst::CallHost` gained an
+/// `admits_function` arm of its own: it no longer names the call, which is
+/// now fine, but `var lastSeen = clock.now()` -- a Host call's answer stored
+/// in a local -- which was always the real reason and was hidden behind the
+/// call itself being refused first.
 #[test]
 fn the_other_bench_rows_are_refused_by_name() {
     for (name, expected) in [
-        ("hostheavy", "a Host call"),
+        ("hostheavy", "a general value slot"),
         ("arrayget", "a collection"),
         ("chars", "a builtin method"),
         ("callback", "a builtin method"),
@@ -1067,6 +1240,188 @@ fn a_frame_run_emits_the_events_a_vm_run_emits() {
     assert_eq!(
         on_frame, on_vm,
         "the two backends recorded different events for the same run"
+    );
+}
+
+// ------------------------------------------------------------- Host calls
+
+/// A Host call with no arguments, and its answer returned directly -- so the
+/// only instruction between `call-host` and `return` is nothing at all, which
+/// is what proves `leaves_a_boundary_value` recognises `call-host` on its own
+/// and not only beside a `try`.
+#[test]
+fn a_host_call_with_no_arguments_agrees_on_all_three() {
+    agree_with_echo(
+        "use echo\n\nexport fn main() -> Result<Unit, Error> {\n  echo.unit()\n}\n",
+        true,
+    );
+}
+
+/// A Host call with several arguments, of every kind this backend admits at
+/// once -- an `Int`, a `Bool`, a `Float` and a `String` -- and its answer
+/// discarded rather than used: `try` unwraps it and the bare `Int` statement
+/// after is a `pop`.
+#[test]
+fn a_host_call_with_several_arguments_of_every_admitted_kind_agrees_and_is_discarded() {
+    agree_with_echo(
+        "use echo\n\nexport fn main() -> Result<Unit, Error> {\n  \
+         echo.many(1, true, 3.14, \"text\")?\n  Ok(())\n}\n",
+        true,
+    );
+}
+
+/// One Host call per scalar kind, each answer returned directly -- so each is
+/// both an argument-kind test and an answer-used test. `Float` has no
+/// dedicated operation because `cove_schema::HostType` has no `Float` case at
+/// all; `echo.many` still takes one and answers how many arguments it saw,
+/// which is what proves the argument crossed.
+#[test]
+fn a_host_call_takes_each_scalar_kind_and_a_string() {
+    agree_with_echo(
+        "use echo\n\nexport fn main() -> Result<Int, Error> {\n  echo.int(42)\n}\n",
+        true,
+    );
+    agree_with_echo(
+        "use echo\n\nexport fn main() -> Result<Bool, Error> {\n  echo.bool(true)\n}\n",
+        true,
+    );
+    agree_with_echo(
+        "use echo\n\nexport fn main() -> Result<Int, Error> {\n  echo.many(3.14)\n}\n",
+        true,
+    );
+    agree_with_echo(
+        "use echo\n\nexport fn main() -> Result<String, Error> {\n  echo.text(\"hello\")\n}\n",
+        true,
+    );
+}
+
+/// A Host call whose answer is a declared failure, taken with `?` -- the
+/// `try` that follows `call-host` leaves this frame with the error rather
+/// than the payload, the same as `try` after a `make-builtin` already does.
+#[test]
+fn a_host_calls_failure_is_taken_with_try() {
+    agree_with_echo(
+        "use echo\n\nexport fn main() -> Result<Unit, Error> {\n  echo.fails()?\n  Ok(())\n}\n",
+        true,
+    );
+}
+
+/// A Host call the program has no capability for is refused, and the refusal
+/// is the *host's* -- `HostRegistry::dispatch`'s own message, not
+/// `Refused`'s -- so it reads identically whichever backend raised it. This
+/// is a run-time failure and not an `admits` refusal: nothing about a Host
+/// call's grant is knowable before the run, the same as it is not knowable
+/// for `Vm` or the tree walk.
+#[test]
+fn a_host_call_with_no_capability_is_refused_identically_on_all_three() {
+    let outcome = agree_with_echo(
+        "use echo\n\nexport fn main() -> Result<Unit, Error> {\n  echo.unit()\n}\n",
+        false,
+    );
+    let Outcome::Raised { message, .. } = outcome else {
+        panic!("a call with no capability does not answer: {outcome:?}");
+    };
+    assert!(
+        message.contains("requires the `echo` capability"),
+        "it failed with `{message}`"
+    );
+}
+
+/// A collection taken in the middle of a Host call's own argument crossing
+/// does not lose the string -- `benches`' none of this backend's rows makes a
+/// Host call, so nothing but a dedicated test exercises
+/// `FrameVm::call_host`'s own use of `FrameVm::with_roots` the way
+/// `a_collection_taken_in_the_middle_of_a_boundary_crossing_does_not_lose_the_string`
+/// exercises `Inst::Return`'s.
+///
+/// The string is built with `{0}` so that it is a `concat`'s answer and not a
+/// `Str` constant, for `a_collection_taken_in_the_middle_of_a_boundary_crossing_does_not_lose_the_string`'s
+/// own reason: a constant is rooted by `FrameVm::string_constants` whether or
+/// not the crossing itself roots it, which would prove nothing. `echo.text`
+/// answers the same string back, so a lost root would show up as a wrong or a
+/// panicking answer rather than silently.
+#[test]
+fn a_collection_taken_in_the_middle_of_a_host_calls_argument_crossing_does_not_lose_the_string() {
+    let ready = ready(
+        "use echo\n\nexport fn main() -> Result<String, Error> {\n  \
+         echo.text(\"0123456789abcdefghijklmnopqrstuvwxyz {0}\")\n}\n",
+    );
+    let hosts = echo_hosts(true);
+    let runtime = Runtime::new(ready.checked.clone(), ready.sources.clone(), hosts.clone());
+    let mut frame = FrameVm::new(&runtime, &hosts, &ready.ir);
+    frame.stress();
+    let answered = frame.run_entry(&ready.module, "main", Vec::new());
+    assert_eq!(
+        outcome(answered),
+        Outcome::Answered(format!(
+            "{:?}",
+            Value::ok(Value::string("0123456789abcdefghijklmnopqrstuvwxyz 0"))
+        )),
+        "the crossing lost or corrupted the string"
+    );
+    let (collections, _, _) = frame.collections();
+    assert!(
+        collections > 0,
+        "the run collected {collections} time(s), so nothing here proves a collection ran \
+         mid-crossing"
+    );
+}
+
+/// A struct argument to a Host call is refused, and the refusal names the
+/// same thing `Inst::MakeBuiltin`'s does -- an argument the 8-byte frame
+/// cannot read as a value -- because `Inst::CallHost` is admitted through the
+/// same `Operands::boundary` check and a struct is refused by it everywhere
+/// else.
+#[test]
+fn a_host_calls_struct_argument_is_refused_and_names_what_it_saw() {
+    let ready = ready(
+        "use echo\n\nstruct Cell {\n  at: Int\n}\n\nexport fn main() -> Result<Unit, Error> {\n  \
+         var cell = Cell(at: 1)\n  echo.many(cell)?\n  Ok(())\n}\n",
+    );
+    let refused = match ready.admitted() {
+        Ok(id) => panic!("a struct argument to a Host call is refused, and it admitted {id:?}"),
+        Err(refused) => refused,
+    };
+    assert!(
+        refused
+            .what
+            .contains("whose arguments the 8-byte frame cannot read as values"),
+        "it was refused for `{}`",
+        refused.what
+    );
+}
+
+/// The fuel a Host call costs is the same on both backends, in the shape
+/// `the_frame_spends_the_fuel_the_vm_spends` already uses: one run of each
+/// backend against a budget with no limit, comparing what the budget reports
+/// spent at the end.
+#[test]
+fn the_frame_spends_the_fuel_the_vm_spends_over_a_host_call() {
+    let ready = ready("use echo\n\nexport fn main() -> Result<Unit, Error> {\n  echo.unit()\n}\n");
+    let spent = |on_frame: bool| {
+        let mut hosts = HostRegistry::new(Grants::new(vec!["echo"]));
+        hosts.register(Box::new(Echo));
+        hosts.set_budget(Budget::new(Limits::default()));
+        let hosts = Arc::new(hosts);
+        let runtime = Runtime::new(ready.checked.clone(), ready.sources.clone(), hosts.clone());
+        if on_frame {
+            let mut frame = FrameVm::new(&runtime, &hosts, &ready.ir);
+            frame
+                .run_entry(&ready.module, "main", Vec::new())
+                .expect("it answers");
+        } else {
+            let mut vm = Vm::new(&runtime, &hosts, &ready.ir);
+            vm.run_entry(&ready.module, "main", Vec::new())
+                .expect("it answers");
+        }
+        hosts
+            .with_budget(|budget| budget.fuel_spent())
+            .expect("a budget was installed")
+    };
+    let (on_vm, on_frame) = (spent(false), spent(true));
+    assert_eq!(
+        on_vm, on_frame,
+        "the host call spent {on_vm} fuel on the VM and {on_frame} on the 8-byte frame"
     );
 }
 
