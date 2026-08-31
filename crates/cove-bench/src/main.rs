@@ -18,17 +18,34 @@
 //! the whole exec-to-exit span, because process creation and binary loading
 //! are exactly what an in-process measurement cannot see.
 //!
-//! # Both backends
+//! # Three backends
 //!
 //! [ADR 0019](../../../docs/adr/0019-executable-ir-and-vm.md) says every
 //! number this harness reports must say which backend produced it, and
 //! [issue #111](https://github.com/myuon/cove/issues/111) gates the VM's
 //! adoption on the comparison. So every measurement below carries a
-//! `backend`, and every benchmark is measured on both.
+//! `backend`, and every benchmark is measured on all of them.
 //!
 //! The VM cannot run every construct yet. Where it cannot, the benchmark says
 //! so and names what stopped it rather than going missing: a benchmark absent
 //! from a report reads as one nobody ran, and the two are not the same fact.
+//!
+//! The third is `frame`, the experimental eight-byte-word frame
+//! [issue #212](https://github.com/myuon/cove/issues/212) asks for, and it is
+//! here rather than in a build of its own for the reason that issue insists
+//! on: **the comparison has to be made within one benchmark binary.** ADR
+//! 0029 is why — "a ratio within one build is repeatable", and a cross-build
+//! absolute on this workspace is not, because a dead `Inst` variant that no
+//! program can reach moved `arith` by +23.5% in one build and by −1.00% in
+//! another. Two rows of one run share whatever layout that binary has, so the
+//! `vm` and `frame` medians of one benchmark are a comparison and two builds'
+//! absolutes are not.
+//!
+//! It runs a closed scalar subset — see `cove_runtime::frame` — so most rows
+//! have no `frame` line and say so by name instead. **A frame refusal does
+//! not fail the suite.** Refusing six of nine rows is the experiment working:
+//! it is a measurement vehicle rather than a third permanent evaluator, and
+//! `cove run` cannot select it.
 //!
 //! `cove_ir::lower` lowers a whole package and refuses all of it for one
 //! construct anywhere in it, which is exactly what `cove run --backend vm`
@@ -79,16 +96,22 @@
 //! benchmark that is noisy in it; nothing that compares two runs reads it,
 //! because every statistic here is an order statistic.
 //!
-//! A benchmark the lowering refuses reports that instead of its `vm` lines:
+//! A benchmark the lowering refuses reports that instead of its `vm` lines,
+//! and a benchmark the eight-byte frame refuses reports the same shape:
 //!
 //! ```text
 //! {"benchmark":"pure","kind":"unsupported","backend":"vm","what":"<the construct>","ok":false}
+//! {"benchmark":"field","kind":"unsupported","backend":"frame","what":"<the construct>","ok":false}
 //! ```
+//!
+//! The first fails the suite and the second does not: one means no backend
+//! but the interpreter can run the benchmark at all, and the other means an
+//! experiment's subset has not reached it yet.
 //!
 //! `kind` keeps the value it has always had for the interpreter's rows, so a
 //! reader of the older format still finds exactly the rows it was reading and
-//! does not silently start counting the VM's as well. `backend` is what now
-//! says which of the two produced a number.
+//! does not silently start counting the others. `backend` is what now says
+//! which of the three produced a number.
 //!
 //! `ok` is `false` when a benchmark's entry returned `Err`, a backend itself
 //! failed, the lowering was refused, or (for `startup`) the spawned process
@@ -234,10 +257,19 @@
 //! fields. At `--iterations 1` the two are the same sequence, so CI is
 //! unaffected.
 //!
-//! Reading one backend against the other is what the output is arranged for:
-//! the two `wall_ns` medians of one benchmark are the comparison, and the
+//! Reading one backend against another is what the output is arranged for:
+//! the `wall_ns` medians of one benchmark are the comparison, and the
 //! `fuel_spent` beside them is not, because ADR 0019 makes fuel
 //! backend-specific and says so.
+//!
+//! The `vm` and `frame` rows are the one pair where `fuel_spent` *is*
+//! comparable, and that is a fact about them rather than an exception to ADR
+//! 0019. Both charge one fuel per instruction of the same lowered code by the
+//! same block extents, and neither charges anything proportional in the
+//! subset the frame admits — no string comparison, no collection copy — so
+//! the two figures are the same dynamic instruction count. They are equal on
+//! `arith`, `call` and `pure`, and a run in which they are not is a run in
+//! which one of the two did different work.
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
@@ -246,6 +278,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use cove_diag::SourceMap;
+use cove_runtime::frame::FrameVm;
 use cove_runtime::interp::Interpreter;
 use cove_runtime::vm::Vm;
 use cove_runtime::{
@@ -417,16 +450,19 @@ fn bench() -> ExitCode {
     // series.
     let mut rows: Vec<Row> = Vec::new();
     for name in BENCHMARKS {
-        for backend in [Backend::Ast, Backend::Vm] {
+        for backend in [Backend::Ast, Backend::Vm, Backend::Frame] {
             // A benchmark the lowering refused is reported as refused rather
             // than skipped: a missing row reads as a benchmark nobody ran,
             // and that is a different fact from one the VM cannot run.
             let ir = match (backend, &lowered) {
                 (Backend::Ast, _) => None,
-                (Backend::Vm, Ok(report)) => Some(&report.ir),
-                (Backend::Vm, Err(why)) => {
+                (_, Ok(report)) => Some(&report.ir),
+                (_, Err(why)) => {
                     println!("{}", Unsupported::new(name, why).to_json());
-                    ok = false;
+                    // A lowering failure is the VM's row missing and the
+                    // frame's row missing for one reason, so it fails the
+                    // suite once rather than twice.
+                    ok &= backend != Backend::Vm;
                     continue;
                 }
             };
@@ -439,6 +475,33 @@ fn bench() -> ExitCode {
             }
         }
     }
+    // The eight-byte frame runs a closed scalar subset, so most of the suite
+    // has no `frame` row. A refusal is reported by name for the reason a
+    // lowering refusal is -- a missing row reads as a benchmark nobody ran --
+    // and it does **not** fail the suite, because refusing is the experiment
+    // working rather than the experiment broken. See `cove_runtime::frame`.
+    rows.retain(|row| {
+        if row.backend != Backend::Frame {
+            return true;
+        }
+        let ir = row
+            .ir
+            .expect("a frame row was resolved against the lowering");
+        match cove_runtime::frame::admits(ir, row.module, row.entry) {
+            Ok(_) => true,
+            Err(refused) => {
+                println!(
+                    "{}",
+                    FrameRefusal {
+                        benchmark: row.name,
+                        what: &refused.what,
+                    }
+                    .to_json()
+                );
+                false
+            }
+        }
+    });
 
     take_samples(&program, &sources, &mut rows, iterations, order);
 
@@ -459,10 +522,17 @@ fn bench() -> ExitCode {
                 &report.wall_ns,
             );
         }
-        println!(
-            "{}",
-            bench_trace_overhead(&program, &sources, row, iterations).to_json()
-        );
+        // Not for the frame: ADR 0026 makes a recording name the backend
+        // that made it and there is no `RecordingBackend::Frame`, so there is
+        // nothing honest for the traced half of the ratio to record itself
+        // as. Issue #212 asks for wall time, instructions, allocations and
+        // frame bytes, and not for a trace-overhead ratio.
+        if row.backend != Backend::Frame {
+            println!(
+                "{}",
+                bench_trace_overhead(&program, &sources, row, iterations).to_json()
+            );
+        }
     }
 
     for backend in [Backend::Ast, Backend::Vm] {
@@ -511,6 +581,18 @@ enum Backend {
     Ast,
     /// The dedicated VM, over the executable IR.
     Vm,
+    /// The experimental eight-byte frame, over the same IR.
+    ///
+    /// [Issue #212](https://github.com/myuon/cove/issues/212) asks for the
+    /// comparison to be made **within one benchmark binary**, and this is
+    /// what makes that possible: the same lowered program, the same hosts,
+    /// the same budget, the same `run_once`, and one more row. ADR 0029 says
+    /// why that shape and not two builds — "a ratio within one build is
+    /// repeatable" and a cross-build absolute is not.
+    ///
+    /// It runs a closed scalar subset and refuses the rest, so most rows have
+    /// no `frame` line and say so. See `cove_runtime::frame`.
+    Frame,
 }
 
 impl Backend {
@@ -521,6 +603,7 @@ impl Backend {
         match self {
             Backend::Ast => "interpreter",
             Backend::Vm => "vm",
+            Backend::Frame => "frame",
         }
     }
 }
@@ -530,6 +613,7 @@ impl std::fmt::Display for Backend {
         f.write_str(match self {
             Backend::Ast => "ast",
             Backend::Vm => "vm",
+            Backend::Frame => "frame",
         })
     }
 }
@@ -603,6 +687,28 @@ impl<'a> Unsupported<'a> {
             "{{\"benchmark\":\"{}\",\"kind\":\"unsupported\",\"backend\":\"vm\",\"what\":\"{}\",\"ok\":false}}",
             self.benchmark,
             escape(&self.why.what),
+        )
+    }
+}
+
+/// One benchmark the eight-byte frame cannot run, and what stopped it.
+///
+/// Separate from [`Unsupported`], which is about a *lowering* that refused,
+/// because these are two different facts: a lowering refusal means no backend
+/// but the interpreter can run the benchmark at all, and this one means the
+/// experiment's subset does not reach it yet. The first fails the suite and
+/// the second does not.
+struct FrameRefusal<'a> {
+    benchmark: &'static str,
+    what: &'a str,
+}
+
+impl FrameRefusal<'_> {
+    fn to_json(&self) -> String {
+        format!(
+            "{{\"benchmark\":\"{}\",\"kind\":\"unsupported\",\"backend\":\"frame\",\"what\":\"{}\",\"ok\":false}}",
+            self.benchmark,
+            escape(self.what),
         )
     }
 }
@@ -939,6 +1045,7 @@ instructions per turn   ns/turn  what"
             row.entry,
             &row.allow,
             Arc::new(NullSink),
+            Backend::Vm,
             Some(&lowered),
         );
         row.samples.push(measurement.wall.as_nanos() as u64);
@@ -1125,6 +1232,7 @@ fn run_once(
     entry: &str,
     allow: &[String],
     trace: Arc<dyn TraceSink>,
+    backend: Backend,
     ir: Option<&Arc<cove_ir::Program>>,
 ) -> RunMeasurement {
     let mut hosts = fake_hosts(allow.to_vec());
@@ -1139,13 +1247,20 @@ fn run_once(
         Runtime::new(Arc::clone(program), Arc::clone(sources), hosts.clone()).with_trace(trace);
 
     let started = Instant::now();
-    let (outcome, heap, instructions) = match ir {
-        Some(ir) => {
+    let (outcome, heap, instructions) = match (backend, ir) {
+        (Backend::Vm, Some(ir)) => {
             let mut vm = Vm::new(&runtime, &hosts, ir);
             let outcome = vm.run_entry(module, entry, Vec::<Rc<str>>::new());
             (outcome, vm.heap_stats(), Some(vm.instructions()))
         }
-        None => {
+        (Backend::Frame, Some(ir)) => {
+            let mut frame = FrameVm::new(&runtime, &hosts, ir);
+            let outcome = frame.run_entry(module, entry, Vec::<Rc<str>>::new());
+            (outcome, frame.heap_stats(), Some(frame.instructions()))
+        }
+        // The interpreter, and — unreachably — a lowered backend with no IR,
+        // which `Row::resolve` cannot produce.
+        _ => {
             let mut interpreter = Interpreter::new(&runtime);
             let outcome = interpreter.run_entry(module, entry, Vec::<Rc<str>>::new());
             (outcome, interpreter.heap_stats(), None)
@@ -1289,6 +1404,7 @@ impl<'a> Row<'a> {
             self.entry,
             &self.allow,
             Arc::new(NullSink),
+            self.backend,
             self.ir,
         );
         self.wall_ns.push(measurement.wall.as_nanos() as u64);
@@ -1408,6 +1524,7 @@ fn bench_trace_overhead(
             entry,
             allow,
             Arc::new(NullSink),
+            row.backend,
             ir,
         );
         untraced.push(m.wall.as_nanos() as u64);
@@ -1420,14 +1537,29 @@ fn bench_trace_overhead(
             // recording would have been made on had it been kept.
             backend: match row.backend {
                 Backend::Ast => RecordingBackend::Ast,
-                Backend::Vm => RecordingBackend::Vm,
+                // Unreachable for `Backend::Frame`: `bench` does not ask for
+                // a trace-overhead row of one. ADR 0026 makes a recording
+                // name the backend that made it, and there is no
+                // `RecordingBackend::Frame` — adding one would be a change to
+                // the recording format for the sake of an experiment that is
+                // written to be deleted, which issue #212 puts out of scope.
+                Backend::Vm | Backend::Frame => RecordingBackend::Vm,
             },
             values: ValueCapture::Redacted,
             entry: format!("{module}.{entry}"),
             args: Vec::new(),
         };
         let sink: Arc<dyn TraceSink> = Arc::new(JsonlSink::new(std::io::sink(), header));
-        let m = run_once(program, sources, module, entry, allow, sink, ir);
+        let m = run_once(
+            program,
+            sources,
+            module,
+            entry,
+            allow,
+            sink,
+            row.backend,
+            ir,
+        );
         traced.push(m.wall.as_nanos() as u64);
     }
 
