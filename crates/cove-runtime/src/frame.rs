@@ -67,20 +67,21 @@
 //! pc                     an index into the running function's code
 //! ```
 //!
-//! A frame is `words[base .. base + width]`, where `width` is the callee's two
-//! frame sizes added. **Parameters, locals and temporaries are one index space
-//! from one base**: parameter `i` is `base + i`, the body's locals follow it
-//! densely, and a temporary is pushed above `base + width` and addressed by
-//! nothing. That is the whole of the arrangement; there is no second stack, no
-//! second base, and no second count on a call.
+//! A frame is `words[base .. base + width]`, where `width` is every slot of
+//! the one numbering. **Parameters, locals and temporaries are one index
+//! space from one base**: slot `i` is `base + i` whichever region it is in,
+//! the body's locals follow the parameters within their own region, and a
+//! temporary is pushed above `base + width` and addressed by nothing. That is
+//! the whole of the arrangement; there is no second stack, no second base,
+//! and no second count on a call.
 //!
-//! The lowering still numbers *two* spaces — an `Inst::LoadScalar` addresses
-//! one and an `Inst::LoadLocal` the other — and `FrameMap` is what makes
-//! them one region from one base, which is decision 1's "every physical offset
-//! derives from the one frame layout" met by deriving the map rather than by
-//! having been given it. Phase C looked at moving that into `cove_ir` and did
-//! not: see `FrameMap` for what it would take and why the per-field kind did
-//! not bring it.
+//! An *argument* is the one thing that does not begin where its slot is. The
+//! caller pushes arguments in declaration order and the numbering groups
+//! slots by region, so where the two orders differ the frame's prologue moves
+//! each argument into the slot `cove_ir::Function::param_slot` gives it. See
+//! `FrameVm::permute` for what that costs and why the alternative — a
+//! convention that states each argument's slot, so nothing ever moves — is
+//! not reachable from a call site.
 //!
 //! Every logical value in this slice is exactly one word, as ADR 0028
 //! permits ("most values have width one"); a layout that spans adjacent
@@ -117,10 +118,18 @@
 //! - **Arguments are evaluated in source order** and pushed onto the one
 //!   stack as they are evaluated. `cove_ir::lower` emits them that way and
 //!   this backend does not reorder.
-//! - **An argument becomes the callee's parameter word without moving.**
-//!   There is no argument vector and nothing is copied: `base' = top - argc`,
-//!   so the words the caller pushed *are* `words[base' .. base' + argc]`,
-//!   which is parameters `0 .. argc` of the callee.
+//! - **An argument becomes the callee's parameter word where it lies, or is
+//!   moved into it.** There is no argument vector: `base' = top - argc`, so
+//!   the words the caller pushed *are* `words[base' .. base' + argc]`, which
+//!   is the callee's first `argc` slots. Where declaration order and the
+//!   numbering's order agree — every frame of `benches/arith`, `call`,
+//!   `field`, `method` and `pure`, and 519 of the corpus's 607 lowered
+//!   functions — those words are already the slots the callee names and
+//!   nothing at all happens. Where they do not, the prologue permutes
+//!   `words[base' .. base' + argc]` in place, into `param_slot` order, and
+//!   the frame map then gives every word of the frame the bit of the slot it
+//!   ended up in. Nothing leaves the frame and nothing enters it, and no
+//!   safepoint stands inside the move.
 //! - **The frame base changes to `base'` and the stack pointer to
 //!   `base' + width`.** `Vec::resize` fills the locals with zero, which is
 //!   the canonical `Unit`/`false`/`0` word; a body writes every local before
@@ -183,7 +192,7 @@
 //!
 //! | where the word is | what says whether it is a reference |
 //! | --- | --- |
-//! | a frame slot | `FrameMap`, derived from `cove_ir::Function`'s two frame sizes; one masked pass per call |
+//! | a frame slot | `FrameMap`, derived from `cove_ir::Function`'s one numbering; one masked pass per call, **after** any argument has been moved into its slot |
 //! | an operand pushed by the scalar core, a `const`, or a `make-struct` | the instruction, which knows what it pushed |
 //! | an operand pushed by a field read | the **lowered type** the instruction names: `cove_ir::StructType`'s per-field `SlotKind` |
 //!
@@ -1756,6 +1765,11 @@ pub struct FrameVm<'a> {
     moving: Vec<u64>,
     /// Whether a permuted frame's own words get their bits from the frame map
     /// or keep the ones the pushes wrote. See [`ArgumentBits`].
+    ///
+    /// Read only under `#[cfg(test)]`, so a release build's `open` is what it
+    /// was before a frame could permute anything, plus the one comparison
+    /// that asks whether this frame does.
+    #[cfg_attr(not(test), allow(dead_code))]
     argument_bits: ArgumentBits,
     /// One value-operand simulation per function, so that the only question a
     /// run puts to it — what a `make-builtin`'s arguments are made of — is an
@@ -2523,24 +2537,28 @@ impl<'a> FrameVm<'a> {
         let map = self.maps[function.0 as usize];
         let width = map.width as usize;
         self.words.resize(base + width, 0);
-        // The words first and the bits after them, so that what the map says
-        // is the last word on both. A permutation moves words the pushes
-        // already wrote bits for, and those bits are about where the word
-        // *came from*; `write_frame` is what makes every bit of this frame
-        // say where its word ended up. See `ArgumentBits`.
-        let mut kept = 0;
+        // The words first and the bits after them, so that the map has the
+        // last word on both. A permutation moves words the pushes already
+        // wrote bits for, and those bits are about where each word *came
+        // from*; `write_frame` is what makes every bit of this frame say
+        // where its word ended up. See `ArgumentBits`.
         if map.arrivals == Arrivals::ToBeMoved {
             self.permute(function, base);
+            #[cfg(test)]
             if self.argument_bits == ArgumentBits::ThePushesThatWroteThem {
-                kept = self.arrivals[function.0 as usize].len();
+                // The mutation, and it is `write_frame` declining to reach
+                // the words that moved: they keep what the pushes said.
+                let kept = self.arrivals[function.0 as usize].len();
+                let refs = map.references();
+                self.refs.write_frame(
+                    base + kept,
+                    width - kept,
+                    refs.start.saturating_sub(kept)..refs.end.saturating_sub(kept),
+                );
+                return;
             }
         }
-        let references = map.references();
-        self.refs.write_frame(
-            base + kept,
-            width - kept,
-            references.start.saturating_sub(kept)..references.end.saturating_sub(kept),
-        );
+        self.refs.write_frame(base, width, map.references());
     }
 
     /// Moves a call's arguments from where they arrived to the slots they
