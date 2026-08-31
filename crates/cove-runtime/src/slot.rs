@@ -320,10 +320,15 @@
 //!   `cove_ir::Function`'s per-slot layout, which is lowering work, and
 //!   decision 1's "every physical offset derives from the one frame layout"
 //!   is the invariant that arrangement owes.
-//! - **A handle slot is never reused.** The sweep sets an object's slot to
-//!   `None` and leaves it, so a stale handle names a dead object rather than
-//!   a live one. A heap that runs for longer than a test needs a free list
-//!   and a generation counter, and a handle then stops being a bare index.
+//! - ~~**A handle slot is never reused.**~~ It is now, because a benchmark is
+//!   a run that lasts: `benches/field` allocates one object a turn for two
+//!   million turns, and an object table that only grows makes every sweep walk
+//!   everything the run ever allocated. The sweep returns an entry to a free
+//!   list and [`Handle`] carries a generation, which is what keeps a stale
+//!   handle naming a dead object *after* its index has been handed out again.
+//!   What is still owed is the tail of that: an entry keeps the word buffer of
+//!   the object the sweep took, so a dead object's memory is held until the
+//!   entry is reused rather than returned.
 //! - **No enum layout is *selected*, and there is no `Dynamic`.** [`Shape`]
 //!   gives an enum one layout per case with the case in its header, which is
 //!   the form decision 2 says the prototype may use for implementation
@@ -381,6 +386,7 @@
 #![allow(dead_code)]
 
 use std::collections::HashSet;
+use std::sync::Arc;
 
 use crate::value::Value;
 
@@ -404,8 +410,27 @@ pub(crate) type Slot = u64;
 /// `Copy`, and deliberately so: a handle is data. Copying one is a `mov`, it
 /// runs no destructor, and it tells nobody. Everything in this module's
 /// documentation follows from that one property.
+/// # An index and a generation, and why the generation is here
+///
+/// A handle was a bare index while the heap never reused an entry, which was
+/// enough for a rooting proof and is not enough for a heap a benchmark runs
+/// against: `benches/field` allocates one object a turn for two million
+/// turns, and an object table that only grows makes every sweep walk two
+/// million entries. So the sweep now returns an entry to a free list, and the
+/// generation is what keeps the negative tests honest across that reuse — a
+/// handle to a swept object does not become a handle to whatever was
+/// allocated in its place, because the entry's generation moved on and the
+/// handle's did not.
+///
+/// **Generation zero is never issued.** An entry starts at 1, so eight zero
+/// bytes are never a live handle and a frame slot that has been given no
+/// object yet is safe for the walk to visit without being filled in first.
+/// That is what lets a call open a frame with one `Vec::resize`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub(crate) struct Handle(u32);
+pub(crate) struct Handle {
+    index: u32,
+    generation: u32,
+}
 
 impl Handle {
     /// The absence of an object, for a reference word that names none.
@@ -413,26 +438,33 @@ impl Handle {
     /// A real layout would more likely give a nullable reference a niche of
     /// its own; this is the smallest thing that lets a test build a cycle in
     /// two steps, which needs an object to exist before the handle to it does.
-    pub(crate) const NONE: Handle = Handle(u32::MAX);
+    pub(crate) const NONE: Handle = Handle {
+        index: u32::MAX,
+        generation: u32::MAX,
+    };
 
     /// Whether this names no object.
     pub(crate) fn is_none(self) -> bool {
         self == Handle::NONE
     }
 
-    /// The handle as the eight bytes a slot holds.
+    /// The handle as the eight bytes a slot holds: the index low, the
+    /// generation high.
     pub(crate) fn to_slot(self) -> Slot {
-        self.0 as Slot
+        (self.index as Slot) | ((self.generation as Slot) << 32)
     }
 
     /// The handle a slot's eight bytes are, read because the layout says the
     /// slot is a reference and for no other reason.
     pub(crate) fn from_slot(bits: Slot) -> Handle {
-        Handle(bits as u32)
+        Handle {
+            index: bits as u32,
+            generation: (bits >> 32) as u32,
+        }
     }
 
     fn index(self) -> usize {
-        self.0 as usize
+        self.index as usize
     }
 }
 
@@ -601,7 +633,7 @@ impl Shape {
 /// thing about all of it.
 #[derive(Clone, Debug)]
 pub(crate) struct Layout {
-    name: &'static str,
+    name: Arc<str>,
     words: usize,
     /// Which of the object's **fixed** words are handles.
     ///
@@ -628,7 +660,7 @@ pub(crate) struct Layout {
 impl Layout {
     /// A layout of `words` eight-byte words, of which those at `refs` are
     /// handles, and which never crosses decision 5's boundary.
-    pub(crate) fn new(name: &'static str, words: usize, refs: Vec<usize>) -> Layout {
+    pub(crate) fn new(name: impl Into<Arc<str>>, words: usize, refs: Vec<usize>) -> Layout {
         Layout::opaque(name, words, refs, None)
     }
 
@@ -637,7 +669,7 @@ impl Layout {
     /// An object of such a layout is `words` fixed words and then as many tail
     /// words as its allocation asked for, which may be none.
     pub(crate) fn with_tail(
-        name: &'static str,
+        name: impl Into<Arc<str>>,
         words: usize,
         refs: Vec<usize>,
         tail: Part,
@@ -645,7 +677,13 @@ impl Layout {
         Layout::opaque(name, words, refs, Some(tail))
     }
 
-    fn opaque(name: &'static str, words: usize, refs: Vec<usize>, tail: Option<Part>) -> Layout {
+    fn opaque(
+        name: impl Into<Arc<str>>,
+        words: usize,
+        refs: Vec<usize>,
+        tail: Option<Part>,
+    ) -> Layout {
+        let name = name.into();
         for &at in &refs {
             assert!(
                 at < words,
@@ -672,7 +710,8 @@ impl Layout {
     /// tail is the case where that matters most: nothing can be told that a
     /// tail is scalar and then be handed a tail of handles, because the same
     /// [`Shape`] answers both questions.
-    pub(crate) fn boundary(name: &'static str, shape: Shape) -> Layout {
+    pub(crate) fn boundary(name: impl Into<Arc<str>>, shape: Shape) -> Layout {
+        let name = name.into();
         let parts = shape.fixed_parts();
         let refs = parts
             .iter()
@@ -702,14 +741,36 @@ impl Layout {
     }
 
     /// The layout's name, for a panic message.
-    pub(crate) fn name(&self) -> &'static str {
-        self.name
+    pub(crate) fn name(&self) -> &str {
+        &self.name
     }
 
     /// What an object of this layout materialises as.
     pub(crate) fn shape(&self) -> &Shape {
         &self.shape
     }
+}
+
+/// One entry of the object table: an object, whether it is live, and which
+/// generation of the entry it is.
+///
+/// A swept entry keeps its `Object` rather than dropping it, and the next
+/// allocation to take the entry reuses that object's word buffer. That is why
+/// a steady-state loop allocates nothing: the buffer is the only heap
+/// allocation an object has, and the free list hands it back. What a reader
+/// must not conclude from the object still standing there is that it is
+/// reachable — `live` is what says so, and the mark phase never looks inside
+/// a dead entry.
+#[derive(Clone, Debug)]
+struct Entry {
+    /// Which generation of this entry the object is. Starts at 1 and moves on
+    /// at every reuse, so a handle to a swept object never becomes a handle to
+    /// its successor.
+    generation: u32,
+    /// Whether the object is reachable-as-of-the-last-sweep, which is what
+    /// "exists" means in a traced heap.
+    live: bool,
+    object: Object,
 }
 
 /// One VM-owned heap object: a layout, how long its tail is, and its words.
@@ -962,14 +1023,21 @@ const GROWTH_FACTOR: u64 = 2;
 #[derive(Debug)]
 pub(crate) struct HandleHeap {
     layouts: Vec<Layout>,
-    /// One entry per handle ever issued; `None` once the sweep has taken it.
+    /// One entry per handle index the heap has ever issued.
     ///
-    /// A swept slot is never reused, which keeps a stale handle naming a dead
-    /// object rather than a live one and so makes the negative test observe
-    /// the failure instead of a coincidence. A real heap would reuse with a
-    /// generation counter, and that is a migration concern rather than a
-    /// rooting one.
-    objects: Vec<Option<Object>>,
+    /// An entry the sweep took is not removed: it is marked dead, its index
+    /// goes on [`HandleHeap::free`], and its generation moves on when the
+    /// index is handed out again. A stale handle therefore still names a dead
+    /// object rather than a live one, which is what makes the negative tests
+    /// observe the failure instead of a coincidence, and it keeps naming one
+    /// **after the index is reused** — which a bare index could not do and is
+    /// the reason [`Handle`] carries a generation.
+    objects: Vec<Entry>,
+    /// The indices of the entries the sweep took, waiting to be handed out
+    /// again. Reusing an index is what keeps the object table the size of the
+    /// live set rather than the size of everything the run ever allocated,
+    /// and a sweep is a walk of that table.
+    free: Vec<u32>,
     allocations_since_collection: u64,
     next_collection_at: u64,
     collections: u64,
@@ -990,6 +1058,7 @@ impl HandleHeap {
         HandleHeap {
             layouts: Vec::new(),
             objects: Vec::new(),
+            free: Vec::new(),
             allocations_since_collection: 0,
             next_collection_at: MIN_ALLOCATIONS_BETWEEN_COLLECTIONS,
             collections: 0,
@@ -1028,6 +1097,18 @@ impl HandleHeap {
     /// be trusted, and ADR 0028 decision 2's required invariant is that the
     /// layout completely determines how to find every reference.
     pub(crate) fn allocate(&mut self, layout: LayoutId, words: Vec<Slot>) -> Handle {
+        self.allocate_from(layout, &words)
+    }
+
+    /// The same, from a slice the caller already has — which is what a frame
+    /// hands over, because the words an object is built from are the operands
+    /// standing on the one stack.
+    ///
+    /// This is the allocation that does **no** heap allocation once the free
+    /// list is warm: a reused entry keeps the word buffer the previous object
+    /// had, and this refills it. `crates/cove-runtime/tests/frame_allocation.rs`
+    /// is what says so with a global allocator rather than with this sentence.
+    pub(crate) fn allocate_from(&mut self, layout: LayoutId, words: &[Slot]) -> Handle {
         let declared = self.layout(layout);
         let tail = if declared.tail.is_some() {
             assert!(
@@ -1047,22 +1128,55 @@ impl HandleHeap {
             );
             0
         };
-        self.objects.push(Some(Object {
-            layout,
-            tail,
-            words,
-        }));
         self.allocations_since_collection += 1;
-        Handle(self.objects.len() as u32 - 1)
+        match self.free.pop() {
+            Some(index) => {
+                let entry = &mut self.objects[index as usize];
+                // Generation zero is never issued, so eight zero bytes are
+                // never a live handle. See [`Handle`].
+                entry.generation = match entry.generation.wrapping_add(1) {
+                    0 => 1,
+                    next => next,
+                };
+                entry.live = true;
+                entry.object.layout = layout;
+                entry.object.tail = tail;
+                entry.object.words.clear();
+                entry.object.words.extend_from_slice(words);
+                Handle {
+                    index,
+                    generation: entry.generation,
+                }
+            }
+            None => {
+                self.objects.push(Entry {
+                    generation: 1,
+                    live: true,
+                    object: Object {
+                        layout,
+                        tail,
+                        words: words.to_vec(),
+                    },
+                });
+                Handle {
+                    index: self.objects.len() as u32 - 1,
+                    generation: 1,
+                }
+            }
+        }
     }
 
     /// Whether the object `handle` names still exists.
+    ///
+    /// Three ways to answer no, and the third is the one the generation is
+    /// here for: no such index, an entry the sweep took, or an entry that has
+    /// been handed out again since this handle was made.
     pub(crate) fn is_live(&self, handle: Handle) -> bool {
         !handle.is_none()
             && self
                 .objects
                 .get(handle.index())
-                .is_some_and(|slot| slot.is_some())
+                .is_some_and(|entry| entry.live && entry.generation == handle.generation)
     }
 
     /// The word at `at` of the object `handle` names.
@@ -1078,15 +1192,17 @@ impl HandleHeap {
 
     /// Writes the word at `at` of the object `handle` names.
     pub(crate) fn set_word(&mut self, handle: Handle, at: usize, bits: Slot) {
-        let object = self.objects[handle.index()]
-            .as_mut()
+        let entry = self
+            .objects
+            .get_mut(handle.index())
+            .filter(|entry| entry.live && entry.generation == handle.generation)
             .unwrap_or_else(|| panic!("handle {handle:?} names a swept object"));
-        object.words[at] = bits;
+        entry.object.words[at] = bits;
     }
 
     /// How many objects the heap holds.
     pub(crate) fn live_objects(&self) -> u64 {
-        self.objects.iter().filter(|slot| slot.is_some()).count() as u64
+        self.objects.iter().filter(|entry| entry.live).count() as u64
     }
 
     /// How many collections this heap has run.
@@ -1136,7 +1252,7 @@ impl HandleHeap {
     }
 
     /// The name of `handle`'s layout, for a panic message.
-    pub(crate) fn layout_name(&self, handle: Handle) -> &'static str {
+    pub(crate) fn layout_name(&self, handle: Handle) -> &str {
         let object = self.object(handle);
         self.layouts[object.layout.0 as usize].name()
     }
@@ -1144,7 +1260,8 @@ impl HandleHeap {
     fn object(&self, handle: Handle) -> &Object {
         self.objects
             .get(handle.index())
-            .and_then(|slot| slot.as_ref())
+            .filter(|entry| entry.live && entry.generation == handle.generation)
+            .map(|entry| &entry.object)
             .unwrap_or_else(|| panic!("handle {handle:?} names a swept object"))
     }
 
@@ -1156,7 +1273,7 @@ impl HandleHeap {
 
         roots.walk(&mut |handle| {
             roots_yielded += 1;
-            if self.is_live(handle) && marked.insert(handle.0) {
+            if self.is_live(handle) && marked.insert(handle.index) {
                 work.push(handle);
             }
         });
@@ -1185,16 +1302,17 @@ impl HandleHeap {
             // those bits happen to look like.
             for at in layout.refs.iter().copied().chain(tail) {
                 let child = Handle::from_slot(object.words[at]);
-                if self.is_live(child) && marked.insert(child.0) {
+                if self.is_live(child) && marked.insert(child.index) {
                     work.push(child);
                 }
             }
         }
 
         let mut freed_objects = 0u64;
-        for (at, slot) in self.objects.iter_mut().enumerate() {
-            if slot.is_some() && !marked.contains(&(at as u32)) {
-                *slot = None;
+        for (at, entry) in self.objects.iter_mut().enumerate() {
+            if entry.live && !marked.contains(&(at as u32)) {
+                entry.live = false;
+                self.free.push(at as u32);
                 freed_objects += 1;
             }
         }
@@ -1741,6 +1859,109 @@ mod tests {
             !machine.heap.is_live(local),
             "the local now names a free slot, which is the use-after-free the \
              mechanism has to prevent"
+        );
+    }
+
+    // ------------------------------------------- reuse, and what survives it
+
+    /// A sweep returns an entry to the free list and the next allocation takes
+    /// it, so a loop that allocates one object a turn does not grow the object
+    /// table. That is what makes a sweep cost the live set rather than the
+    /// history.
+    #[test]
+    fn a_swept_entry_is_handed_out_again_and_the_table_does_not_grow() {
+        let mut machine = Machine::new();
+        let layout = node(&mut machine.heap);
+        let kept = machine.allocate(layout, vec![1, Handle::NONE.to_slot()]);
+        machine.frame.push_handle(kept);
+        // One object a turn, none of them rooted, collected every turn.
+        machine.heap.stress(true);
+        for turn in 0..64 {
+            machine.allocate(layout, vec![turn as Slot, Handle::NONE.to_slot()]);
+            machine
+                .safepoint()
+                .expect("stress collects at every safepoint");
+        }
+        assert!(
+            machine.heap.is_live(kept),
+            "the rooted object is the one thing that survived every turn"
+        );
+        assert_eq!(
+            machine.heap.live_objects(),
+            1,
+            "one object is live, and the other sixty-four turns' worth are not"
+        );
+        assert_eq!(
+            machine.heap.objects.len(),
+            2,
+            "sixty-four allocations reused one entry: the table is the live set \
+             and one free entry, not the history"
+        );
+    }
+
+    /// The property the generation exists for, and the reason reuse did not
+    /// make the negative tests vacuous.
+    ///
+    /// A handle to a swept object does not become a handle to whatever is
+    /// allocated in its place. Without the generation, `stale` and `fresh`
+    /// would be the same eight bytes and the use-after-free would read as a
+    /// success.
+    #[test]
+    fn a_handle_to_a_swept_object_does_not_name_its_successor() {
+        let mut machine = Machine::new();
+        let layout = node(&mut machine.heap);
+        let stale = machine.allocate(layout, vec![7, Handle::NONE.to_slot()]);
+        let freed = machine.collect_now();
+        assert_eq!(freed.freed_objects, 1, "nothing rooted it: {freed:?}");
+
+        let fresh = machine.allocate(layout, vec![9, Handle::NONE.to_slot()]);
+        assert_eq!(
+            Handle::from_slot(fresh.to_slot()),
+            fresh,
+            "a handle survives the round trip through the eight bytes a slot holds"
+        );
+        assert_ne!(
+            stale.to_slot(),
+            fresh.to_slot(),
+            "the reused entry is a different handle, because its generation moved on"
+        );
+        assert!(machine.heap.is_live(fresh));
+        assert!(
+            !machine.heap.is_live(stale),
+            "the stale handle names the swept object and not the one that took its entry"
+        );
+    }
+
+    /// The mutation of the test above: reading through the stale handle is the
+    /// use-after-free, and it is reported as one rather than answering the
+    /// successor's word.
+    #[test]
+    #[should_panic(expected = "names a swept object")]
+    fn reading_through_a_handle_to_a_swept_object_is_refused_after_reuse() {
+        let mut machine = Machine::new();
+        let layout = node(&mut machine.heap);
+        let stale = machine.allocate(layout, vec![7, Handle::NONE.to_slot()]);
+        machine.collect_now();
+        machine.allocate(layout, vec![9, Handle::NONE.to_slot()]);
+        machine.heap.word(stale, 0);
+    }
+
+    /// Eight zero bytes are never a live handle, which is what lets a call open
+    /// a frame with one `Vec::resize` and leave the reference words to be
+    /// written by the body.
+    #[test]
+    fn a_zero_word_is_never_a_live_handle() {
+        let mut machine = Machine::new();
+        let layout = node(&mut machine.heap);
+        let first = machine.allocate(layout, vec![7, Handle::NONE.to_slot()]);
+        assert_ne!(
+            first.to_slot(),
+            0,
+            "generation zero is never issued, so the first handle is not the zero word"
+        );
+        assert!(
+            !machine.heap.is_live(Handle::from_slot(0)),
+            "a slot that has been given no object yet holds no object"
         );
     }
 
