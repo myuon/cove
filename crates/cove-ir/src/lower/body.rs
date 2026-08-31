@@ -35,7 +35,7 @@ use cove_schema::hosts;
 use cove_sema::typeck::Ty;
 use cove_sema::MethodTarget;
 use cove_syntax::ast::{
-    BinaryOp as SourceBinary, Expr, ExprId, ExprKind, GenericParam, Param, Type,
+    BinaryOp as SourceBinary, Expr, ExprId, ExprKind, GenericParam, Param, StructDecl, Type,
 };
 
 use crate::{BinaryOp, Const, Inst, IntOp, Scalar, SlotKind, Unsupported};
@@ -332,7 +332,7 @@ impl<'a, 'l> Body<'a, 'l> {
         let Some(depth) = self.depth else {
             return;
         };
-        self.depth = Some(depth.after(stack_shape(&self.outer.constants, inst)));
+        self.depth = Some(depth.after(stack_shape(&self.outer.structs, inst)));
         if matches!(
             inst,
             Inst::Return | Inst::ReturnScalar | Inst::Jump(_) | Inst::NoMatch
@@ -514,7 +514,7 @@ impl<'a, 'l> Body<'a, 'l> {
         let Some(depth) = self.depth else {
             return;
         };
-        let arrival = depth.after(stack_shape(&self.outer.constants, inst(0)));
+        let arrival = depth.after(stack_shape(&self.outer.structs, inst(0)));
         if self.labels[label].depth.is_none() {
             self.labels[label].depth = Some(arrival);
         }
@@ -909,10 +909,42 @@ impl<'a, 'l> Body<'a, 'l> {
     /// — the last of which is not this pass's failure to report, since a
     /// program the checker accepted has no such read.
     pub(super) fn field_inst(&mut self, receiver: &'a Expr, name: &str) -> Inst {
-        match self.field_position(receiver, name) {
-            Some(index) => Inst::GetFieldAt(index),
+        match self.field_of(receiver, name) {
+            Some((owner, decl, at)) => Inst::GetFieldAt {
+                of: self.outer.struct_type(owner, decl),
+                at,
+            },
             None => Inst::GetField(self.outer.name(name)),
         }
+    }
+
+    /// The struct a read of `receiver.name` reads, and where `name` stands in
+    /// it.
+    ///
+    /// [`Body::field_position`] is this with the type thrown away, and the two
+    /// are one function so that the position and the type a backend reads the
+    /// field's kind out of cannot come from two different declarations.
+    pub(super) fn field_of(
+        &self,
+        receiver: &'a Expr,
+        name: &str,
+    ) -> Option<(&'a str, &'a StructDecl, u32)> {
+        let Some(Ty::Struct(named, _)) = self.settled(receiver) else {
+            return None;
+        };
+        let checked = self.outer.checked;
+        let (owner, decl) = match named.split_once('.') {
+            Some((module, type_name)) => {
+                let (module, resolved) = checked.modules.get_key_value(module)?;
+                (module.as_str(), &*resolved.structs.get(type_name)?.decl)
+            }
+            None => self.outer.struct_of(self.module, named)?,
+        };
+        let index = decl
+            .fields
+            .iter()
+            .position(|field| field.name.node == name)?;
+        Some((owner, decl, index as u32))
     }
 
     /// Where `name` stands among the fields of the struct `receiver` is.
@@ -927,26 +959,7 @@ impl<'a, 'l> Body<'a, 'l> {
     /// import — so a bare name is read against the module this body belongs
     /// to, exactly as source written there would read it.
     pub(super) fn field_position(&self, receiver: &'a Expr, name: &str) -> Option<u32> {
-        let Some(Ty::Struct(named, _)) = self.settled(receiver) else {
-            return None;
-        };
-        let decl = match named.split_once('.') {
-            Some((module, type_name)) => self
-                .outer
-                .checked
-                .modules
-                .get(module)?
-                .structs
-                .get(type_name)?
-                .decl
-                .as_ref(),
-            None => self.outer.struct_of(self.module, named)?.1,
-        };
-        let index = decl
-            .fields
-            .iter()
-            .position(|field| field.name.node == name)?;
-        Some(index as u32)
+        self.field_of(receiver, name).map(|(_, _, at)| at)
     }
 
     /// Where `receiver.name` stands, asked only where the read is one

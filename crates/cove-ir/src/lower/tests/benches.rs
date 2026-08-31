@@ -91,7 +91,7 @@ fn the_arith_bench_loop_builds_no_value_it_does_not_use() {
     // `assertEqual` below it is the boundary, and it is outside the loop.
     let function = program.function(id);
     for inst in &function.code[4..=22] {
-        let shape = stack_shape(&program.constants, *inst);
+        let shape = stack_shape(&program.structs, *inst);
         assert_eq!(
             (shape.values.0, shape.values.1),
             (0, 0),

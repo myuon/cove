@@ -160,6 +160,12 @@ pub struct Program {
     pub constants: Vec<Const>,
     /// Every dynamic dispatch site, addressed by [`DispatchId`].
     pub dispatches: Vec<Dispatch>,
+    /// Every declared struct type the program builds or reads a field of,
+    /// addressed by [`StructId`].
+    ///
+    /// This is the **type's** layout, not one construction's: see
+    /// [`StructType`].
+    pub structs: Vec<StructType>,
 }
 
 impl Program {
@@ -176,6 +182,11 @@ impl Program {
     /// The dispatch site `id` names.
     pub fn dispatch(&self, id: DispatchId) -> &Dispatch {
         &self.dispatches[id.0 as usize]
+    }
+
+    /// The struct type `id` names.
+    pub fn struct_type(&self, id: StructId) -> &StructType {
+        &self.structs[id.0 as usize]
     }
 
     /// The function a qualified name denotes, if this program lowered one.
@@ -529,6 +540,71 @@ pub struct FunctionId(pub u32);
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ConstId(pub u32);
 
+/// Addresses a [`StructType`] of a [`Program`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct StructId(pub u32);
+
+/// One declared struct type, as the lowering settled it: its qualified name,
+/// and one field name and [`SlotKind`] per field, in declaration order.
+///
+/// # Why the type and not the construction
+///
+/// A struct's *shape* is a static fact about a declaration, and until this
+/// existed nothing in the IR said so. [`Inst::MakeStruct`] named the type and
+/// the field names and stopped there, so a backend that needs
+/// [ADR 0028](../../../docs/adr/0028-five-representations-and-one-is-public.md)
+/// decision 2's reference map — "which of its words are handles, so a
+/// collector scans those and not the scalars beside them" — had to read it
+/// off the instructions that pushed one instance's fields, and had to refuse
+/// a type whose two construction sites disagreed. Two sites for one type
+/// cannot disagree about a fact neither of them states.
+///
+/// The kinds come from where a parameter's, a local's and a return's come
+/// from: the checker's answer about the type, through
+/// `lower::convention::slot_kind_of`. That is
+/// [ADR 0027](../../../docs/adr/0027-a-place-and-a-capture-name-a-slot.md)'s
+/// rule — nothing about a slot's *role* decides which stack it lives in, only
+/// the checker's answer about its type does — asked about a field.
+///
+/// # What a kind means for a field
+///
+/// [`SlotKind::Scalar`] is a word a collector must not follow and
+/// [`SlotKind::Value`] is one it must. [`SlotKind::Place`] never appears: a
+/// place is what a *parameter* can be, and a field is storage rather than an
+/// alias of it.
+///
+/// A generic field records the declaration's own `Ty::Param`, which is not a
+/// type the scalar stack holds, so it is a [`SlotKind::Value`] on every
+/// instantiation. One name, one layout — which is what makes a [`StructId`] a
+/// complete answer rather than a key into a per-instantiation table.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct StructType {
+    /// The qualified name a value of this type carries: `module.Name`.
+    pub name: Arc<str>,
+    /// The fields, in declaration order — the order [`Inst::MakeStruct`]
+    /// pushes them and the order [`Inst::GetFieldAt`] indexes.
+    pub fields: Vec<StructField>,
+}
+
+impl StructType {
+    /// The field names in declaration order, which is what a runtime building
+    /// a named-field value pairs its words with.
+    pub fn field_names(&self) -> Vec<&str> {
+        self.fields.iter().map(|field| &*field.name).collect()
+    }
+}
+
+/// One field of a [`StructType`]: its name, and where a slot holding it
+/// lives.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct StructField {
+    /// The name the declaration wrote.
+    pub name: Arc<str>,
+    /// What the checker settled the declared field type as, read through the
+    /// one rule that decides every other slot's kind.
+    pub kind: SlotKind,
+}
+
 /// Addresses a [`Dispatch`] of a [`Program`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct DispatchId(pub u32);
@@ -720,7 +796,15 @@ pub enum Inst {
     /// Emitted where the checker settled the receiver's type, which is what
     /// makes the position knowable. [`Inst::GetField`] is what a receiver
     /// whose type the checker abstained about still gets.
-    GetFieldAt(u32),
+    ///
+    /// `of` is that settled type. The position alone was enough to *find* the
+    /// word; naming the type as well is what says what the word **is** —
+    /// `struct_type(of).fields[at].kind` — so a backend whose stack carries no
+    /// tag can decide that from the instruction rather than from the object it
+    /// just read. There is no other reading available at run time: the type is
+    /// the receiver's settled type, so it is the same type on every execution
+    /// of this instruction.
+    GetFieldAt { of: StructId, at: u32 },
     /// Pops a struct off the value stack and pushes the field at this
     /// position onto the scalar stack.
     ///
@@ -847,10 +931,16 @@ pub enum Inst {
     /// it takes an array and a value rather than two arrays — the ordinary
     /// run is wrapped on its way in, and the spread is not wrapped at all.
     SpreadArgument,
-    /// Builds a declared struct. `ty` is a `Const::Name` holding the qualified
-    /// type name, and `fields` names each field in the order the values were
-    /// pushed.
-    MakeStruct { ty: ConstId, fields: ConstId },
+    /// Builds a declared struct: the [`StructType`] this names, out of the
+    /// words standing on the value stack, one per field in declaration order.
+    ///
+    /// The type carries the qualified name, the field names **and** each
+    /// field's [`SlotKind`], so the instruction carries one id where it used
+    /// to carry two names. That is the difference between a construction
+    /// describing a type and a type describing itself: two `make-struct` sites
+    /// for one declaration name the same [`StructId`], and a reader that wants
+    /// to know which of the object's words are references asks the type.
+    MakeStruct(StructId),
     /// Pushes a field of the struct on top of the stack. `name` is a
     /// `Const::Name`.
     GetField(ConstId),
@@ -1396,7 +1486,7 @@ fn render_inst(program: &Program, inst: Inst) -> String {
         Inst::JumpIfTrueScalar(to) => format!("jump-if-true-scalar {to}"),
         Inst::ScalarToValue(what) => format!("scalar-to-value {what:?}"),
         Inst::ValueToScalar => "value-to-scalar".to_string(),
-        Inst::GetFieldAt(index) => format!("get-field-at {index}"),
+        Inst::GetFieldAt { at, .. } => format!("get-field-at {at}"),
         Inst::GetFieldAtScalar(index) => format!("get-field-at-scalar {index}"),
         Inst::Jump(to) => format!("jump {to}"),
         Inst::JumpIfFalse(to) => format!("jump-if-false {to}"),
@@ -1445,8 +1535,13 @@ fn render_inst(program: &Program, inst: Inst) -> String {
             format!("make-range {}", if inclusive_end { ".." } else { "..<" })
         }
         Inst::Concat(parts) => format!("concat {parts}"),
-        Inst::MakeStruct { ty, fields } => {
-            format!("make-struct {} fields={}", name(ty), name(fields))
+        Inst::MakeStruct(of) => {
+            let declared = program.struct_type(of);
+            format!(
+                "make-struct {} fields={}",
+                declared.name,
+                declared.field_names().join(",")
+            )
         }
         Inst::GetField(n) => format!("get-field {}", name(n)),
         Inst::SetField(n) => format!("set-field {}", name(n)),

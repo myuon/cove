@@ -13,7 +13,7 @@
 //! one of it, and each of its two readers is on the far side of it from the
 //! other.
 
-use crate::{Const, ConstId, FunctionId, Inst, Program, SlotKind};
+use crate::{Const, ConstId, FunctionId, Inst, Program, SlotKind, StructId, StructType};
 
 use super::fuel::{block_fuel, ends_a_block};
 
@@ -187,6 +187,12 @@ fn validate_function(program: &Program, id: FunctionId) -> Result<(), String> {
                 Some(other) => Err(at(format!("{what} names {other:?} rather than a name"))),
                 None => Err(at(format!("{what} names constant {} of none", which.0))),
             }
+        };
+        let declared_struct = |which: StructId, what: &str| -> Result<&StructType, String> {
+            program
+                .structs
+                .get(which.0 as usize)
+                .ok_or_else(|| at(format!("{what} names struct {} of none", which.0)))
         };
         match *inst {
             Inst::Const(which) => {
@@ -433,9 +439,20 @@ fn validate_function(program: &Program, id: FunctionId) -> Result<(), String> {
             }
             Inst::TestCase(case) => constant(case, "the case")?,
             Inst::GetField(name) | Inst::SetField(name) => constant(name, "the field")?,
-            Inst::MakeStruct { ty, fields } => {
-                constant(ty, "the type")?;
-                constant(fields, "the fields")?;
+            // A `make-struct` names a `StructType` rather than two constants,
+            // so what has to exist is the type.
+            Inst::MakeStruct(of) => {
+                declared_struct(of, "the type")?;
+            }
+            Inst::GetFieldAt { of, at: index } => {
+                let declared = declared_struct(of, "the struct")?;
+                if index as usize >= declared.fields.len() {
+                    return Err(at(format!(
+                        "reads field {index} of `{}`, which has {}",
+                        declared.name,
+                        declared.fields.len()
+                    )));
+                }
             }
             _ => {}
         }
@@ -464,7 +481,7 @@ fn validate_function(program: &Program, id: FunctionId) -> Result<(), String> {
         }
         depths[pc] = Some(depth);
         let inst = function.code[pc];
-        let shape = stack_shape(&program.constants, inst);
+        let shape = stack_shape(&program.structs, inst);
         if depth.0 < i64::from(shape.values.0) {
             return Err(format!(
                 "{pc}: takes {} values off a stack of {}",
@@ -604,15 +621,17 @@ impl Shape {
 ///
 /// One description, read by the lowering as it emits and by [`validate`] as
 /// it simulates, so the two cannot disagree about what an instruction does.
-pub(super) fn stack_shape(constants: &[Const], inst: Inst) -> Shape {
+pub(super) fn stack_shape(structs: &[StructType], inst: Inst) -> Shape {
     match inst {
         Inst::Const(_) | Inst::LoadLocal(_) | Inst::MakeHostEnum { .. } => Shape::on_values(0, 1),
         Inst::StoreLocal(_) | Inst::Pop => Shape::on_values(1, 0),
         Inst::SpreadArgument => Shape::on_values(2, 1),
         Inst::Dup => Shape::on_values(1, 2),
-        Inst::Unary(_) | Inst::GetField(_) | Inst::GetFieldAt(_) | Inst::Try | Inst::Snapshot => {
-            Shape::on_values(1, 1)
-        }
+        Inst::Unary(_)
+        | Inst::GetField(_)
+        | Inst::GetFieldAt { .. }
+        | Inst::Try
+        | Inst::Snapshot => Shape::on_values(1, 1),
         // The fusion of `Inst::GetFieldAt` with `Inst::ValueToScalar`: the
         // struct it reads is the same one value in, and the field it reads
         // out lands on the other stack.
@@ -701,7 +720,14 @@ pub(super) fn stack_shape(constants: &[Const], inst: Inst) -> Shape {
             places: (0, 0),
         },
         Inst::Concat(parts) => Shape::on_values(parts, 1),
-        Inst::MakeStruct { fields, .. } => Shape::on_values(field_count(constants, fields), 1),
+        // One value per field of the declared type, which the type says and
+        // the construction no longer has to.
+        Inst::MakeStruct(of) => Shape::on_values(
+            structs
+                .get(of.0 as usize)
+                .map_or(0, |declared| declared.fields.len() as u32),
+            1,
+        ),
         // A case's payload is what it is built from, and an associated
         // function has no receiver, so both read exactly their arguments.
         Inst::MakeEnum { argc, .. } | Inst::CallBuiltinAssoc { argc, .. } => {
@@ -743,18 +769,5 @@ fn render_return(inst: Inst) -> &'static str {
     match inst {
         Inst::ReturnScalar => "return-scalar",
         _ => "return",
-    }
-}
-
-/// How many fields a `MakeStruct` takes, read out of the name it carries.
-///
-/// The names are one comma-separated constant rather than one constant each,
-/// because an instruction carries one id and the whole list is what says
-/// which pushed value is which field.
-fn field_count(constants: &[Const], fields: ConstId) -> u32 {
-    match constants.get(fields.0 as usize) {
-        Some(Const::Name(names)) if names.is_empty() => 0,
-        Some(Const::Name(names)) => names.split(',').count() as u32,
-        _ => 0,
     }
 }
