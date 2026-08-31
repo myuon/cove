@@ -24,7 +24,7 @@ use cove_diag::Span;
 use cove_schema::builtins;
 use cove_schema::hosts;
 use cove_schema::TypeSchema;
-use cove_syntax::ast::{Arg, Expr, ExprId, ExprKind, StructDecl};
+use cove_syntax::ast::{Arg, EnumDecl, Expr, ExprId, ExprKind, StructDecl};
 
 use crate::{Inst, Scalar, SlotKind, Unsupported};
 
@@ -170,7 +170,7 @@ impl<'a, 'l> Body<'a, 'l> {
                             return self.call_declared(key, None, args, span);
                         }
                     }
-                    return on_the_value_stack(self.make_enum(owner, head, name, args, span));
+                    return on_the_value_stack(self.make_enum(owner, decl, name, args, span));
                 }
                 if let Some((owner, _)) = self.outer.struct_of(self.module, head) {
                     if let Some(key) = self.outer.method_of(owner, head, name) {
@@ -690,7 +690,7 @@ impl<'a, 'l> Body<'a, 'l> {
     pub(super) fn make_enum(
         &mut self,
         owner: &str,
-        enum_name: &str,
+        decl: &'a EnumDecl,
         case: &str,
         args: Args<'a>,
         span: Span,
@@ -699,7 +699,12 @@ impl<'a, 'l> Body<'a, 'l> {
         for arg in args.iter() {
             self.expr(arg.value)?;
         }
-        let ty = self.outer.name(&format!("{owner}.{enum_name}"));
+        // Interns the type's per-case payload kinds off the declaration,
+        // exactly as `make_struct` interns a struct's off `decl` -- read once
+        // here and never off this or any other construction. See
+        // `crate::lower::index::Lowering::enum_type`.
+        let qualified = self.outer.enum_type(owner, decl);
+        let ty = self.outer.name(&qualified);
         let case = self.outer.name(case);
         self.emit(
             Inst::MakeEnum {

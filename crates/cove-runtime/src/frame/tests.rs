@@ -56,7 +56,7 @@ use cove_sema::resolve::Program as Checked;
 use super::*;
 use crate::budget::{Budget, Cancellation, Limits};
 use crate::clock::{Clock, VirtualTime};
-use crate::host::{Console, Grants, HostApi};
+use crate::host::{Console, Env, Grants, HostApi};
 use crate::interp::Interpreter;
 use crate::trace::{TraceEvent, TraceSink};
 use crate::vm::Vm;
@@ -224,6 +224,56 @@ fn agree_with_echo(source: &str, grant: bool) -> Outcome {
     let ready = ready(source);
     let run = |backend: &str| -> Outcome {
         let hosts = echo_hosts(grant);
+        let runtime = Runtime::new(ready.checked.clone(), ready.sources.clone(), hosts.clone());
+        match backend {
+            "ast" => {
+                outcome(Interpreter::new(&runtime).run_entry(&ready.module, "main", Vec::new()))
+            }
+            "vm" => outcome(Vm::new(&runtime, &hosts, &ready.ir).run_entry(
+                &ready.module,
+                "main",
+                Vec::new(),
+            )),
+            _ => outcome(FrameVm::new(&runtime, &hosts, &ready.ir).run_entry(
+                &ready.module,
+                "main",
+                Vec::new(),
+            )),
+        }
+    };
+    let ast = run("ast");
+    let vm = run("vm");
+    let frame = run("frame");
+    assert_eq!(ast, vm, "the oracle and the VM disagreed for:\n{source}");
+    assert_eq!(
+        vm, frame,
+        "the VM and the 8-byte frame disagreed for:\n{source}"
+    );
+    frame
+}
+
+/// A registry holding only [`Env`], granted the `env` capability, with
+/// `PRESENT` mapped to `"here"` and nothing else exposed.
+///
+/// `env` is a shipped module (`cove_schema::hosts::ENV`), so `ready`'s
+/// checker already knows its schema without the `ECHO_SCHEMA` fixture
+/// `prepared` adds for the test-only one -- this is only the run-time half.
+fn env_hosts() -> Arc<HostRegistry> {
+    let mut hosts = HostRegistry::new(Grants::new(vec!["env"]));
+    hosts.register(Box::new(Env::new(BTreeMap::from([(
+        "PRESENT".to_string(),
+        "here".to_string(),
+    )]))));
+    Arc::new(hosts)
+}
+
+/// [`agree`], with [`env_hosts`] in place of the shared registry [`hosts`]
+/// builds, for the same reason [`agree_with_echo`] exists: `agree` cannot
+/// grant a capability the shared registry does not already grant.
+fn agree_with_env(source: &str) -> Outcome {
+    let ready = ready(source);
+    let run = |backend: &str| -> Outcome {
+        let hosts = env_hosts();
         let runtime = Runtime::new(ready.checked.clone(), ready.sources.clone(), hosts.clone());
         match backend {
             "ast" => {
@@ -555,10 +605,16 @@ fn the_frame_executes_exactly_the_instructions_the_vm_executes() {
 
 /// Issue #212's hard constraint, as a number rather than as a sentence.
 ///
-/// Eight `Value` operations for a run of two million turns, all of them in the
+/// Six `Value` operations for a run of two million turns, all of them in the
 /// nine instructions after the loop: `assertEqual`'s two arguments and its
-/// answer, the `try`, the `pop`, `Ok`'s one argument and its answer, and the
-/// `return`. None in the loop.
+/// answer, the `try`, the `pop`, and the `return`. None in the loop.
+///
+/// **`Ok(())` is not among them**, which is this change's own mark on a
+/// number that used to be eight: `Ok`'s one argument and its answer were two
+/// of the eight before an enum was a heap object here, and now `Inst::MakeBuiltin`
+/// builds `Ok(())`'s word the way `Inst::MakeStruct` builds a struct's,
+/// straight out of the words already on the stack, so decision 5's boundary
+/// is never asked about either one.
 ///
 /// **The number is the same for `field` and `method` as for `arith`**, and
 /// that is the Phase B claim: a loop that builds a struct, reads two of its
@@ -574,17 +630,20 @@ fn the_hot_path_performs_no_value_operation() {
         let ready = bench(name);
         let (_, materialized, heap) = ready.on_frame_measured();
         assert_eq!(
-            materialized, 8,
-            "`benches/{name}` materialized {materialized} value(s), and the epilogue is worth 8"
+            materialized, 6,
+            "`benches/{name}` materialized {materialized} value(s), and the epilogue is worth 6"
         );
         // And what the traced heap did, which is the other half of the same
         // claim: the two rooted rows allocate an object a turn and keep one
-        // alive, and the two scalar rows own no heap at all.
+        // alive, and the two scalar rows allocate exactly one object in
+        // their whole run -- `Ok(())`'s, in the epilogue, which is this
+        // change's own mark on a number that used to be zero.
         match name {
             "field" | "method" => {
                 assert_eq!(
-                    heap.allocated_objects, 2_000_001,
-                    "`benches/{name}` builds one `Cursor` and copies it once a turn"
+                    heap.allocated_objects, 2_000_002,
+                    "`benches/{name}` builds one `Cursor` and copies it once a turn, plus \
+                     `Ok(())`'s object in the epilogue"
                 );
                 assert_eq!(
                     heap.peak_bytes, 16,
@@ -609,8 +668,8 @@ fn the_hot_path_performs_no_value_operation() {
                 );
             }
             _ => assert_eq!(
-                heap.allocated_objects, 0,
-                "`benches/{name}` holds no reference anywhere, so it owns no heap"
+                heap.allocated_objects, 1,
+                "`benches/{name}` holds no reference anywhere but the epilogue's `Ok(())`"
             ),
         }
     }
@@ -2609,6 +2668,303 @@ fn string_interpolation_over_a_struct_is_refused_and_names_a_heap_object() {
     );
     let refused = match ready.admitted() {
         Ok(id) => panic!("interpolating a struct is refused, and it admitted {id:?}"),
+        Err(refused) => refused,
+    };
+    assert!(
+        refused.what.contains("a heap object"),
+        "it was refused for `{}`, and `a heap object` was expected",
+        refused.what
+    );
+}
+
+// ------------------------------------------------------------------ enums
+
+/// `Ok`, `Err`, `Some` and `None`, each built and returned as the run's own
+/// answer -- no local, no match, straight off `Inst::MakeBuiltin` into
+/// `Inst::Return`, which is what proves the word this backend now builds for
+/// each of them materialises into exactly the `Value` the other two answer.
+#[test]
+fn ok_err_some_and_none_are_built_and_returned() {
+    agree(&main_of("Result<Int, String>", "  Ok(5)"));
+    agree(&main_of("Result<Int, String>", "  Err(\"boom\")"));
+    agree(&main_of("Option<Int>", "  Some(5)"));
+    agree(&main_of("Option<Int>", "  None"));
+}
+
+/// The same four, built and then matched in the same function: `Ok(5)` and
+/// `Err(9)` held in a local, read back, and asked which case they are.
+///
+/// The payload is not bound: `Inst::GetPayload` carries no case id the way
+/// `Inst::GetFieldAt` carries a `StructId`, so [`Kind::Enum`] cannot say
+/// whether a given payload position is a word this backend must show is a
+/// reference before storing it, and a bound arm is refused for exactly the
+/// reason `a_bound_string_payload_is_still_refused_and_names_the_value_slot`
+/// pins. Which arm ran is still the proof this backend answers, because
+/// `Inst::TestCase` reads the case straight off the handle's own layout.
+#[test]
+fn ok_and_err_are_built_and_matched() {
+    agree(
+        "export fn main() -> Int {\n  \
+         let r = Ok(5)\n  \
+         match r {\n    Ok(_) => 1,\n    _ => 0,\n  }\n\
+         }\n",
+    );
+    agree(
+        "export fn main() -> Int {\n  \
+         let r = Err(9)\n  \
+         match r {\n    Ok(_) => 1,\n    _ => 0,\n  }\n\
+         }\n",
+    );
+}
+
+/// `Some(5)` and `None`, held in a local and matched -- which arm ran, over
+/// the same scope `ok_and_err_are_built_and_matched` stays inside.
+#[test]
+fn some_and_none_are_built_and_matched() {
+    agree(
+        "export fn main() -> Int {\n  \
+         let o = Some(5)\n  \
+         match o {\n    Some(_) => 1,\n    _ => 0,\n  }\n\
+         }\n",
+    );
+    agree(
+        "export fn main() -> Int {\n  \
+         let o: Option<Int> = None\n  \
+         match o {\n    Some(_) => 1,\n    _ => 0,\n  }\n\
+         }\n",
+    );
+}
+
+/// `?` over an `Ok` and over an `Err`, each built as a word straight off
+/// `Inst::MakeBuiltin` and consumed by `Inst::Try` without ever having stood
+/// in the boundary buffer first -- `crosses_as_an_enum` is what proves the
+/// operand is one, in place of `leaves_a_boundary_value`.
+///
+/// `agree` checks the whole `Outcome`, span and message included, so the
+/// `Err` row is also the proof that a `?` failing over a word answers exactly
+/// what the VM answers for the value it raises with.
+#[test]
+fn try_over_a_word_built_ok_and_a_word_built_err_agrees() {
+    agree(
+        "export fn main() -> Result<Int, String> {\n  \
+         Ok(5)?\n  \
+         Ok(1)\n\
+         }\n",
+    );
+    agree(
+        "export fn main() -> Result<Int, String> {\n  \
+         Err(\"boom\")?\n  \
+         Ok(1)\n\
+         }\n",
+    );
+}
+
+/// A declared enum with no payload, one with a single `Int` payload, and one
+/// with two -- one type, three cases, each built and then matched, over
+/// which arm ran rather than over a bound payload, for the reason
+/// `ok_and_err_are_built_and_matched` gives. `Status.Empty` exercises
+/// `Inst::MakeEnum` with `argc` zero, `Status.Single` with one payload word,
+/// and `Status.Pair` with two -- so all three of `Inst::MakeEnum`'s shapes
+/// this backend admits are reached in one program, each one matched against
+/// every case so the false arms are exercised as well as the true one.
+#[test]
+fn a_declared_enum_with_no_one_and_several_payloads_is_built_and_matched() {
+    let source = "\
+enum Status {
+  Empty
+  Single(Int)
+  Pair(Int, Int)
+}
+
+export fn main() -> Int {
+  let a = Status.Empty
+  let b = Status.Single(5)
+  let c = Status.Pair(7, 9)
+  (match a {
+    Status.Empty => 1,
+    Status.Single(_) => 2,
+    _ => 3,
+  }) + (match b {
+    Status.Empty => 10,
+    Status.Single(_) => 20,
+    _ => 30,
+  }) + (match c {
+    Status.Empty => 100,
+    Status.Single(_) => 200,
+    Status.Pair(_, _) => 300,
+    _ => 400,
+  })
+}
+";
+    agree(source);
+}
+
+/// An enum whose payload is an `Int`: the neighbouring word in the object
+/// the layout must call scalar, and the run agreeing with the other two
+/// backends under `stress()` is what shows a collection never mistook it for
+/// a handle -- `crate::slot::HandleHeap` panics on a bad handle rather than
+/// silently reading garbage, so a clean run here is the negative half of the
+/// proof `a_declared_enums_string_payload_is_a_root_the_collector_follows`
+/// gives the positive half of.
+#[test]
+fn a_declared_enums_int_payload_is_never_read_as_a_reference() {
+    let source = "\
+enum Boxed {
+  Full(Int)
+}
+
+export fn main() -> Int {
+  var boxed = Boxed.Full(0)
+  var total = 0
+  while total < 200 {
+    boxed = Boxed.Full(total)
+    total = total + 1
+  }
+  match boxed {
+    Boxed.Full(_) => total,
+    _ => 0 - 1,
+  }
+}
+";
+    let ready = ready(source);
+    let (vm, collected) = crate::on_cove_stack(|| {
+        (
+            ready.on_vm(),
+            ready.on_frame_collecting(RootScope::EveryWord),
+        )
+    })
+    .expect("a thread to run Cove on");
+    assert_eq!(
+        collected.outcome, vm,
+        "the VM and the 8-byte frame disagreed over an `Int`-payload enum"
+    );
+    assert!(
+        collected.collections > 0,
+        "the run collected {} time(s), so it proves nothing",
+        collected.collections
+    );
+}
+
+/// **The positive half of the rooting proof for an enum payload.** A declared
+/// case carrying a `String` -- a reference the layout's payload map must call
+/// `Nested` -- held in a frame slot across a loop that collects at every
+/// safepoint, and the counters a real mark phase can only produce by walking
+/// into that payload: `crate::slot::Layout::with_case`'s reference map, read
+/// off `cove_ir::EnumCase::payload`, is what `heap.register` builds it from.
+///
+/// This does not extract the payload's bytes back out -- see
+/// `crate::frame::pushed_kind`'s `Inst::GetPayload` arm for why a bound
+/// payload cannot yet be read further here -- so the proof is structural, the
+/// same shape `a_struct_in_a_frame_slot_survives_every_collection_of_a_run`
+/// already gives a struct field: the mark phase expands strictly more objects
+/// than the frame alone would hold if the `String` were never walked, and the
+/// sweep frees something, so a run that answers cleanly under `stress()` did
+/// not lose the reference. The payload is interpolated rather than a bare
+/// literal, for `a_string_kept_alive_by_nothing_but_a_frame_slot_survives_every_collection`'s
+/// own reason: a `String` constant is rooted by `FrameRoots::constants`
+/// whether or not the enum's own reference map is right, and would prove
+/// nothing about it.
+#[test]
+fn a_declared_enums_string_payload_is_a_root_the_collector_follows() {
+    let source = "\
+enum Boxed {
+  Full(String)
+}
+
+export fn main() -> Int {
+  var boxed = Boxed.Full(\"kept alive {0}\")
+  var total = 0
+  while total < 200 {
+    boxed = Boxed.Full(\"kept alive {total}\")
+    total = total + 1
+  }
+  match boxed {
+    Boxed.Full(_) => total,
+    _ => 0 - 1,
+  }
+}
+";
+    let ready = ready(source);
+    let (vm, collected) = crate::on_cove_stack(|| {
+        (
+            ready.on_vm(),
+            ready.on_frame_collecting(RootScope::EveryWord),
+        )
+    })
+    .expect("a thread to run Cove on");
+    assert_eq!(
+        collected.outcome, vm,
+        "the VM and the 8-byte frame disagreed over a `String`-payload enum"
+    );
+    assert!(
+        collected.collections > 0,
+        "the run collected {} time(s), so it proves nothing about rooting",
+        collected.collections
+    );
+    assert!(
+        collected.freed_objects > 0,
+        "the sweep reclaimed nothing, so nothing that survived had to"
+    );
+    assert!(
+        collected.expansions > 200,
+        "two hundred turns each allocate an enum object and a `String` object; \
+         fewer expansions than that means the mark phase stopped at the enum \
+         and never walked into its payload: {collected:?}"
+    );
+    assert_eq!(
+        collected.expansions, collected.marked,
+        "decision 8's third multiplicity: an object is expanded once for every \
+         time it is found live, and no more"
+    );
+}
+
+/// A Host call whose declared result `Option<String>` this backend can show a
+/// word for, stored in a local with `var` and used afterward -- the shape
+/// `benches/hostheavy`'s `var lastSeen = clock.now()` is refused for, because
+/// `Duration` has no word form; `env.get`'s answer does, and storing it is
+/// exactly what `Inst::StoreLocal`'s refusal used to block for every Host
+/// call's answer before this change.
+#[test]
+fn a_host_calls_option_answer_is_stored_in_a_local_and_matched() {
+    let present = agree_with_env(
+        "use env\n\n\
+         export fn main() -> Bool {\n  \
+         var found = env.get(\"PRESENT\")\n  \
+         match found {\n    Some(_) => true,\n    _ => false,\n  }\n\
+         }\n",
+    );
+    assert_eq!(
+        present,
+        Outcome::Answered(format!("{:?}", Value::bool(true)))
+    );
+
+    let absent = agree_with_env(
+        "use env\n\n\
+         export fn main() -> Bool {\n  \
+         var found = env.get(\"MISSING\")\n  \
+         match found {\n    Some(_) => true,\n    _ => false,\n  }\n\
+         }\n",
+    );
+    assert_eq!(
+        absent,
+        Outcome::Answered(format!("{:?}", Value::bool(false)))
+    );
+}
+
+/// A program still refused: a declared enum's `String` payload bound by a
+/// `match` arm and used, which `Inst::GetPayload`'s own scope does not reach
+/// -- see its doc comment in `crate::frame::pushed_kind` -- names the same
+/// refusal `Inst::StoreLocal` already gives a heap object it cannot show is a
+/// reference, so the roadmap still points at the right instruction rather
+/// than a new one invented for this case.
+#[test]
+fn a_bound_string_payload_is_still_refused_and_names_the_value_slot() {
+    let ready = ready(
+        "enum Boxed {\n  Full(String)\n}\n\nexport fn main() -> String {\n  \
+         match Boxed.Full(\"hi\") {\n    Boxed.Full(text) => text,\n  }\n}\n",
+    );
+    let refused = match ready.admitted() {
+        Ok(id) => panic!("a bound `String` payload is refused, and it admitted {id:?}"),
         Err(refused) => refused,
     };
     assert!(

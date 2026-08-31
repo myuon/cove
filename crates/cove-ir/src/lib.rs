@@ -171,6 +171,14 @@ pub struct Program {
     /// This is the **type's** layout, not one construction's: see
     /// [`StructType`].
     pub structs: Vec<StructType>,
+    /// Every declared enum type the program builds a case of, in the order
+    /// [`Inst::MakeEnum`] reached them.
+    ///
+    /// This is the **type's** cases and each case's payload kinds, read off
+    /// the checker's settlement of the case rather than off how one
+    /// instance happened to be built — [`EnumType`] is [`StructType`]'s rule
+    /// applied to a case's payload in place of a struct's fields.
+    pub enums: Vec<EnumType>,
 }
 
 impl Program {
@@ -192,6 +200,18 @@ impl Program {
     /// The struct type `id` names.
     pub fn struct_type(&self, id: StructId) -> &StructType {
         &self.structs[id.0 as usize]
+    }
+
+    /// The enum type declared under the qualified name `name`, if
+    /// [`Inst::MakeEnum`] anywhere reached it.
+    ///
+    /// A linear scan rather than a table, because [`Program::enums`] is one
+    /// entry per declared type a program actually builds a case of — small
+    /// for any program this crate lowers — and this is asked once per
+    /// [`Inst::MakeEnum`] site while a backend is built, not once per
+    /// execution of one.
+    pub fn enum_type_named(&self, name: &str) -> Option<&EnumType> {
+        self.enums.iter().find(|declared| &*declared.name == name)
     }
 
     /// The function a qualified name denotes, if this program lowered one.
@@ -783,6 +803,50 @@ pub struct StructField {
     /// What the checker settled the declared field type as, read through the
     /// one rule that decides every other slot's kind.
     pub kind: SlotKind,
+}
+
+/// One declared enum type, as the cases [`Inst::MakeEnum`] reached: a name
+/// and, per case, its payload's slot kinds.
+///
+/// # Where this comes from
+///
+/// `cove_sema` records one `Signature` per case — "one case of an
+/// enum, whose `params` is its payload types" — the same way it records one
+/// for a struct's synthesized initializer, keyed by the case's own span
+/// rather than the enum declaration's, because a case is what a program names
+/// and a value carries. `crate::lower::index::Lowering::enum_type` reads
+/// that signature through `crate::lower::convention::slot_kind_of`, the one
+/// rule that settles a parameter's slot, a local's, and a struct field's
+/// alike, so a case's payload kind is that rule's answer about the payload's
+/// declared type and nothing else.
+///
+/// **The case is part of the type here, not a separate key.** A two-case enum
+/// is two entries of [`EnumType::cases`], in declaration order, which is the
+/// order [`Inst::MakeEnum`]'s `argc` payload words arrive in and the order
+/// [`Inst::GetPayload`] indexes within whichever case matched.
+///
+/// A generic case's payload records the declaration's own `Ty::Param`, which
+/// `slot_kind_of` always settles as [`SlotKind::Value`] — one name, one
+/// layout, exactly as [`StructType`]'s own doc comment argues for a generic
+/// field.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct EnumType {
+    /// The qualified name a value of this type carries: `module.Name`.
+    pub name: Arc<str>,
+    /// The cases, in declaration order.
+    pub cases: Vec<EnumCase>,
+}
+
+/// One case of an [`EnumType`]: its name, and its payload's slot kinds in
+/// declaration order.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct EnumCase {
+    /// The name the declaration wrote, unqualified — `Confirmed`, not
+    /// `booking.Status.Confirmed`.
+    pub name: Arc<str>,
+    /// What the checker settled each payload position's declared type as, in
+    /// declaration order. Empty for a case with no payload.
+    pub payload: Vec<SlotKind>,
 }
 
 /// Addresses a [`Dispatch`] of a [`Program`].

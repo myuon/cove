@@ -30,8 +30,8 @@ use cove_syntax::ast::{Block, EnumDecl, ExprId, FnDecl, Param, StructDecl, Type,
 
 use super::convention::slot_kind_of;
 use crate::{
-    Const, ConstId, Dispatch, DispatchId, Function, FunctionId, Program, SlotKind, StructField,
-    StructId, StructType, Unsupported,
+    Const, ConstId, Dispatch, DispatchId, EnumCase, EnumType, Function, FunctionId, Program,
+    SlotKind, StructField, StructId, StructType, Unsupported,
 };
 
 /// Which modules each module of the package can reach, itself included.
@@ -329,6 +329,17 @@ pub(super) struct Lowering<'a> {
     /// property that makes a construction unable to disagree with another
     /// construction of the same type.
     pub(super) struct_ids: BTreeMap<String, StructId>,
+    /// Every enum type some body has built a case of, in the order they were
+    /// reached. Addressed by qualified name through [`Lowering::enum_ids`]
+    /// rather than by an id of its own, because nothing in the IR names one —
+    /// [`Inst::MakeEnum`] carries the qualified type name and the case name,
+    /// exactly as it did before this table existed, and this is read only
+    /// while a program is being lowered.
+    pub(super) enums: Vec<EnumType>,
+    /// The position in [`Lowering::enums`] each qualified enum name was
+    /// interned at, so that one declaration is one entry however many sites
+    /// build a case of it.
+    pub(super) enum_ids: BTreeMap<String, usize>,
     /// Every dynamic dispatch site some body has reached, in the order they
     /// were reached, which is what [`DispatchId`] indexes.
     ///
@@ -360,6 +371,8 @@ impl<'a> Lowering<'a> {
             constants: Vec::new(),
             structs: Vec::new(),
             struct_ids: BTreeMap::new(),
+            enums: Vec::new(),
+            enum_ids: BTreeMap::new(),
             dispatches: Vec::new(),
         };
         for (module, resolved) in &checked.modules {
@@ -498,6 +511,7 @@ impl<'a> Lowering<'a> {
             constants: self.constants,
             dispatches: self.dispatches,
             structs: self.structs,
+            enums: self.enums,
         })
     }
 
@@ -577,6 +591,49 @@ impl<'a> Lowering<'a> {
         });
         self.struct_ids.insert(qualified, id);
         id
+    }
+
+    /// The qualified name of the enum `decl` declares in `owner`, interning
+    /// its per-case payload kinds on the first site that builds a case of it.
+    ///
+    /// **The layout is read off the declaration and never off a
+    /// construction**, mirroring [`Lowering::struct_type`] exactly: a case's
+    /// payload [`SlotKind`]s come from the `params` of the [`Signature`] the
+    /// checker recorded for that *case* — keyed by the case's own span,
+    /// because `cove_sema::Checker::record_case_signatures` records one
+    /// signature per case rather than one per enum — read through
+    /// [`slot_kind_of`], the same rule a field's kind and a parameter's come
+    /// through. A case the checker recorded nothing about keeps every payload
+    /// position on the value stack, which is the same abstention rule
+    /// [`Lowering::struct_type`] follows for a field.
+    pub(super) fn enum_type(&mut self, owner: &str, decl: &'a EnumDecl) -> Arc<str> {
+        let qualified: Arc<str> = format!("{owner}.{}", decl.name.node).into();
+        if self.enum_ids.contains_key(&*qualified) {
+            return qualified;
+        }
+        let cases = decl
+            .cases
+            .iter()
+            .map(|case| EnumCase {
+                name: case.name.node.as_str().into(),
+                payload: (0..case.payload.len())
+                    .map(|at| {
+                        self.checked
+                            .facts
+                            .signature(case.span.file, case.span)
+                            .and_then(|signature| signature.params.get(at))
+                            .map_or(SlotKind::Value, slot_kind_of)
+                    })
+                    .collect(),
+            })
+            .collect();
+        let id = self.enums.len();
+        self.enums.push(EnumType {
+            name: qualified.clone(),
+            cases,
+        });
+        self.enum_ids.insert(qualified.to_string(), id);
+        qualified
     }
 
     /// Interns a constant, so that one value is one [`ConstId`] however many

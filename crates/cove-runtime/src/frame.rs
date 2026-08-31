@@ -272,6 +272,11 @@
 //!   over what one left. They hold their operands in a buffer that is not a
 //!   frame: nothing indexes it, no frame owns a window of it, and [`admits`]
 //!   refuses a function that would need one of its entries to survive a call.
+//!   `Ok`, `Err`, `Some`, `None` and a representable Host answer are no
+//!   longer among what `make-builtin` and `call-host` put there — see
+//!   "An enum is a heap object" below — so what still reaches this buffer
+//!   from those two is an assertion's answer, `Error`, `Shared`, and a Host
+//!   answer this backend cannot show a word for.
 //! - **A `String` is the one word a `try`, a `pop` or a `return` may also
 //!   materialise straight off the one stack**, rather than only off that
 //!   buffer: `crosses_as_a_string` is the static proof, asked the same way
@@ -297,9 +302,11 @@
 //! - Every boundary crossing increments [`FrameVm::materialized`], so the
 //!   claim is a number a test reads rather than a sentence. `benches/arith`,
 //!   `benches/call`, `benches/pure`, `benches/field` and `benches/method` each
-//!   report **8**, all eight in the epilogue, and every loop reports zero —
-//!   including the two whose loops build and mutate a struct. None of the
-//!   five rows holds a `String`, so none of them exercises the fifth case
+//!   report **6**, all six in the epilogue, and every loop reports zero —
+//!   including the two whose loops build and mutate a struct. The number was
+//!   eight before an enum was a heap object here: `Ok(())`'s one argument and
+//!   its answer, two of the eight, are a word now and cross nothing. None of
+//!   the five rows holds a `String`, so none of them exercises the fifth case
 //!   above; `crates/cove-runtime/src/frame/tests.rs`'s string cases do.
 //!
 //! This is ADR 0028 decision 5 — "`Value` is materialized at the boundary,
@@ -309,10 +316,11 @@
 //!
 //! Everything else, by name, before any side effect, with no fallback. See
 //! [`admits`]. In particular there is no `Dynamic`, no `dyn`, no `Any`, no
-//! enum layout, no place, no `var`, no closure, no task, and no `Array`,
-//! `Vector`, `Map` or `Set` — and none of ADR 0033's five identity-bearing
-//! kinds, which that ADR puts outside this heap on purpose. What Phase B
-//! added to the admitted subset is the struct.
+//! place, no `var`, no closure, no task, and no `Array`, `Vector`, `Map` or
+//! `Set` — and none of ADR 0033's five identity-bearing kinds, which that ADR
+//! puts outside this heap on purpose. What Phase B added to the admitted
+//! subset is the struct; an enum layout is admitted now, and "An enum is a
+//! heap object" below is where that lives.
 //!
 //! **What Phase C adds is one shape and it is the shape the static map made
 //! readable**: a struct-typed field read whose answer is then stored, passed or
@@ -354,6 +362,103 @@
 //! ever stand as a boundary value, and nothing here keeps one alive past the
 //! very next `pop`, `try` or `return` — never as long as reaching a method
 //! call on it needs.
+//!
+//! # An enum is a heap object
+//!
+//! `Result`, `Option` and a declared enum are all now `Kind::Reference` or
+//! `Kind::Enum` words naming an object in this backend's own heap, rather
+//! than entries in the boundary buffer. This is what closes the family
+//! `crates/cove-cli/tests/admits_coverage.rs` found largest: a Host call's
+//! answer is almost always a `Result`, and before this change the answer
+//! could not stand in a value slot at all — `Inst::StoreLocal` refused any
+//! word this backend could not show was a reference, and a Host call's
+//! answer was never provable, because the whole answer stood in the boundary
+//! buffer rather than in a word.
+//!
+//! **A case is one layout, and testing which case an object is asks the
+//! handle's `LayoutId` rather than any word.** Decision 2 permits a heap
+//! object's header to carry its case, and here the header *is* the layout id:
+//! `crate::slot::Layout::with_case` marks a layout `(type, case)`, so a
+//! two-case enum is two layouts exactly as `crate::slot`'s own docs say, and
+//! `Inst::TestCase` is `crate::slot::HandleHeap::case_of(handle)` compared
+//! against the constant it carries — a table lookup on the object, never a
+//! bit pattern read out of the word. `Inst::GetPayload` reads the same
+//! layout's `Part`s to know whether the word at a position is a reference,
+//! exactly as `Inst::GetFieldAt` already does for a struct field.
+//!
+//! **`enum_construction`** is `struct_parts` read for a case rather than a
+//! type: `cove_ir::EnumType` carries one `cove_ir::SlotKind` per payload
+//! position, settled by `cove_ir::lower::index::Lowering::enum_type` off the
+//! checker's answer for that *case* — `cove_sema::Checker::record_case_signatures`
+//! records one signature per case, keyed by the case's own span, the same way
+//! a struct's synthesized initializer gets one — so the payload map is read
+//! off the lowering and never off how one instance happened to be built,
+//! which is Phase C's rule for a struct field held for the same reason.
+//! `Inst::MakeEnum` is admitted exactly where `Inst::MakeStruct` is: the words
+//! standing under it agree, position by position, with the case's own map.
+//!
+//! **`Result` and `Option` are not covered by that table, because the
+//! lowering does not build them through `Inst::MakeEnum` at all.** `Ok`,
+//! `Err`, `Some` and `None` are `Inst::MakeBuiltin`, and their one payload
+//! position is generic — `cove_schema::builtins`' `Ok(T)` records no `T` a
+//! checker settlement could read a `SlotKind` off, the way `cove_ir::StructType`'s
+//! own doc comment says a generic field always does. So their layout is read
+//! off the *site* instead, the same as `Inst::MakeStruct`'s own words are
+//! checked against a declared type: whatever `Kind` the wrapped operand
+//! proves is the payload's `Part`, and `register_enum_site` gives every
+//! distinct `(case, Part)` combination its own layout the first time
+//! `FrameVm::new` reaches it. A `None` needs no such reading, because it
+//! carries nothing.
+//!
+//! **Only `Result` and `Option` may cross decision 5's boundary**, and the
+//! reason is `crate::slot::Layout::case`'s own: `crate::slot::Shape::Enum`
+//! takes `&'static str` names, because it is read by an embedder, and
+//! `cove_schema::builtins` gives `Result`'s and `Option`'s case names that
+//! storage while a declared type's qualified name is a program's own
+//! `Arc<str>`. So a declared enum's layout stays `crate::slot::Shape::Opaque`
+//! — the same shape a declared struct's already has, and for the same reason
+//! — while a builtin case's carries a live `Shape::Enum`, and
+//! `FrameVm::materialise_enum` is the constructor `crate::slot`'s own module
+//! docs used to say did not exist: a `Value` built out of an object this
+//! backend's heap holds, the reverse of `crate::slot::Machine::materialise`,
+//! read the same way over `crate::slot::Part::Unit`, `Int`, `Bool`, `Float`
+//! and a `Nested` child that is a `String`, another enum case, or the one
+//! `crate::slot::Shape::Struct` this backend ever builds — the builtin
+//! `Error`, an `Err` case's payload may point at. `Inst::Pop`, `Inst::Try` and
+//! `Inst::Return` are the only three that ask for this: `Kind::Enum`'s own
+//! doc comment is where the boundary distinction is stated as a rule about
+//! admitting.
+//!
+//! **A Host call's answer crosses the boundary the other way**, which is the
+//! half of decision 5 nothing needed before this change: `FrameVm::host_value_to_word`
+//! takes the `Value` `crate::host::HostRegistry::call_with` hands back and
+//! builds a word out of it, recursively over `cove_schema::HostType::Result`
+//! and `::Option`, so `env.get`'s `Option<String>` and `documents.read`'s
+//! `Result<String, Error>` are words a slot can hold rather than answers that
+//! can only ever be popped once. `host_part` is the static half of the same
+//! recursion, asked wherever `pushed_kind` and `FrameVm::new` need to know
+//! whether a Host operation's declared result has an eight-byte form at all
+//! — `HostType::Duration`, a collection, `Named` and `Any` do not, so a Host
+//! call whose answer is one of those still crosses through the boundary
+//! buffer exactly as it always has, unconditionally correct and only
+//! sometimes avoidable. The two heaps stay disjoint in the sense that
+//! matters throughout: an object here holds only words, and a word is still
+//! only scalar bits or a `Handle` — nothing in `crate::slot` gained a way to
+//! store a `Value`, and `crate::slot`'s own module docs say so in their own
+//! words, updated rather than contradicted.
+//!
+//! **What this does not yet reach: a payload a `match` arm binds.**
+//! `Inst::GetPayload` carries a bare index and no case id — unlike
+//! `Inst::GetFieldAt`'s `StructId` — so nothing here can say, for a *specific*
+//! `pc`, whether the word it reads is a reference or one of the two scalars;
+//! `pushed_kind`'s own arm for it says why claiming one generically would be
+//! decision 1's invariant broken from the other side. A `match` arm that does
+//! not bind — `Case(_)`, or a bare case name — is admitted and its case is
+//! read correctly; one that binds a name and uses it is refused, naming the
+//! same "general value slot" `Inst::StoreLocal` already names for any other
+//! unproven reference. `a_bound_string_payload_is_still_refused_and_names_the_value_slot`
+//! is the coverage, and closing it is carrying a settled position into
+//! `Inst::GetPayload` the way Phase C carried one into `Inst::GetFieldAt`.
 //!
 //! # Strings
 //!
@@ -446,6 +551,7 @@
 //! the first can reach a safepoint while the rest are still bare Rust locals.
 
 use std::rc::Rc;
+use std::sync::Arc;
 
 use cove_diag::Span;
 use cove_ir::{Const, FunctionId, Inst, Program, Scalar, SlotKind};
@@ -654,12 +760,35 @@ pub fn admits(program: &Program, module: &str, name: &str) -> Result<FunctionId,
 /// actually fine.
 fn leaves_a_boundary_value(program: &Program, function: &cove_ir::Function, pc: usize) -> bool {
     match function.code.get(pc.wrapping_sub(1)) {
-        Some(Inst::MakeBuiltin { .. } | Inst::Try | Inst::CallHost { .. }) => true,
+        // `make-builtin` and `call-host` used to be unconditional here, and
+        // now are not: `Ok`, `Err`, `Some`, `None`, and a Host call whose
+        // schema `host_result_layouts` can show is word-representable, leave
+        // a `Kind::Enum` word on the one stack instead -- `crosses_as_an_enum`
+        // is what proves that word rather than this function, and
+        // `pushed_kind` is the one description of which sites do which,
+        // asked the same way [`FrameVm::execute`] asks it.
+        Some(inst @ (Inst::MakeBuiltin { .. } | Inst::CallHost { .. })) => {
+            pushed_kind(program, *inst) != Some(Kind::Enum)
+        }
+        Some(Inst::Try) => true,
         Some(Inst::Call {
             function: target, ..
         }) => !matches!(program.function(*target).returns, SlotKind::Scalar(_)),
         _ => false,
     }
+}
+
+/// Whether the value operand standing at `pc` is a definite `Kind::Enum`
+/// word -- an `Ok`, `Err`, `Some` or `None` this backend built, or a Host
+/// call's word-representable answer -- provable from the instruction that
+/// pushed it and nothing else.
+///
+/// The counterpart of [`crosses_as_a_string`], asked at the same three sites
+/// and the same way: [`FrameVm::pop_boundary_value`] is where a `Try`, a
+/// `Pop` or a `Return` turns a proof of either kind into the `Value` it
+/// needs.
+fn crosses_as_an_enum(operands: &Operands, pc: usize) -> bool {
+    operands.top(pc, 1).as_deref() == Some(&[Kind::Enum])
 }
 
 /// Whether the value operand standing at `pc` is a definite `Kind::Str` word
@@ -875,6 +1004,81 @@ fn walk_function<S: Sink>(
                     ))?;
                 }
             }
+            // The same question `Inst::MakeStruct` asks, over a case's
+            // payload rather than a type's fields: `enum_construction` reads
+            // the declared case's `Part`s off `cove_ir::EnumType`, and this
+            // asks whether the words the site actually pushed agree with
+            // them. A case a declared enum does not have, or a payload length
+            // that does not match the case's own, is `enum_construction`
+            // answering `None` -- the same "no fact to check against" the
+            // struct arm folds into its own `agrees` rather than reporting
+            // separately, because the two refusals would read the same to
+            // whoever reads them.
+            Inst::MakeEnum { .. } => {
+                let agrees = enum_construction(program, &operands, pc, *inst).is_some_and(|site| {
+                    operands.top(pc, site.payload.len()).is_some_and(|kinds| {
+                        kinds
+                            .iter()
+                            .map(|kind| kind.part())
+                            .eq(site.payload.iter().copied())
+                    })
+                });
+                if !agrees {
+                    sink.refuse(Refused::new(
+                        format!(
+                            "building an enum in {} out of words the 8-byte frame cannot show are \
+                             what the case's payload is",
+                            named()
+                        ),
+                        span,
+                    ))?;
+                }
+            }
+            // Neither consumes its operand -- both peek the handle standing
+            // on top -- and neither needs to know *which* enum it is: the
+            // case is asked of the object's own layout at run time, per
+            // `Kind::Enum`'s doc comment, so any word this backend can show is
+            // a handle at all is enough to admit either. `TestCase`'s and
+            // `GetPayload`'s exact runtime answer is checked against the
+            // oracle by `crates/cove-runtime/src/frame/tests.rs`, not by
+            // anything statically provable here.
+            Inst::TestCase(_) | Inst::GetPayload(_) => {
+                if !operands
+                    .top(pc, 1)
+                    .is_some_and(|kinds| kinds[0].is_reference())
+                {
+                    sink.refuse(Refused::new(
+                        format!(
+                            "{} in {} over something that is a word rather than a handle",
+                            match inst {
+                                Inst::TestCase(_) => "a case test",
+                                _ => "reading an enum's payload",
+                            },
+                            named()
+                        ),
+                        span,
+                    ))?;
+                }
+            }
+            // A branch over a word this backend already keeps on the one
+            // stack, so it is the same mechanics `Inst::JumpIfFalseScalar`
+            // already runs -- pop one word, ask whether it is zero -- gated
+            // on the one thing a *general* condition needs that a scalar one
+            // does not: proof that the word really is a canonical `Bool` and
+            // not some other reference this backend cannot show is one.
+            // `Inst::TestCase`'s own answer is always `Some(Kind::Bool)`,
+            // which is what makes a `match` arm's own branch admitted here.
+            Inst::JumpIfFalse(_) | Inst::JumpIfTrue(_) => {
+                if operands.top(pc, 1).as_deref() != Some(&[Kind::Bool]) {
+                    sink.refuse(Refused::new(
+                        format!(
+                            "a branch in {} over something that is not a `Bool` word",
+                            named()
+                        ),
+                        span,
+                    ))?;
+                }
+            }
             // The boundary. A `make-builtin` is admitted where the words its
             // arguments stand in can be read as the `Value`s it wants, and the
             // three that consume one are admitted where what they consume
@@ -939,15 +1143,35 @@ fn walk_function<S: Sink>(
                     span,
                 ))?;
             }
-            Inst::Pop | Inst::Try | Inst::Return => {
+            // **A discard needs no proof at all, unlike `try` and `return`
+            // beside it.** Those two need an actual `Value` -- one to hand to
+            // `opened`, one to hand the caller or the run's own answer -- and
+            // this backend has no materialiser for an arbitrary reference, so
+            // each is admitted only where `FrameVm::pop_boundary_value` can
+            // show it will get one. A discard throws the word away: nothing
+            // crosses decision 5's boundary and nothing is read out of it, so
+            // there is nothing here for a static analysis to get wrong.
+            // `FrameVm::execute`'s own arm still asks `leaves_a_boundary_value`
+            // -- not to admit or refuse, but to know which of the two stacks
+            // (`self.words` or the boundary buffer) the word to discard is
+            // standing on, exactly as the mechanism `Inst::Pop`,
+            // `Inst::Try` and `Inst::Return` already share does for the two
+            // that still need a `Value`. This is what a `match`'s own
+            // subject needs: `Inst::TestCase` peeks it rather than consuming
+            // it, so the arm that is taken still has to pop it once it is
+            // done asking, and the popped word may be a struct, a declared
+            // enum, or anything else this backend has never had to name to
+            // admit a discard of it.
+            Inst::Pop => {}
+            Inst::Try | Inst::Return => {
                 if !leaves_a_boundary_value(program, function, pc)
                     && !crosses_as_a_string(&operands, pc)
+                    && !crosses_as_an_enum(&operands, pc)
                 {
                     sink.refuse(Refused::new(
                         format!(
                             "{} in {}, over something that is a word rather than a value",
                             match inst {
-                                Inst::Pop => "a discarded value",
                                 Inst::Try => "a `?`",
                                 _ => "a `return`",
                             },
@@ -1674,6 +1898,337 @@ fn struct_parts(program: &Program) -> Vec<Vec<Part>> {
         .collect()
 }
 
+// ------------------------------------------- what a declared enum is, as words
+
+/// What every declared enum's every case is as a run of eight-byte words,
+/// read off the **type** -- `cove_ir::EnumType`'s per-case, per-position
+/// `SlotKind`, which `cove_ir::lower::index::Lowering::enum_type` settles
+/// from the checker's answer about the case's declared payload types, the
+/// same rule [`struct_parts`] reads for a field.
+///
+/// Indexed the way `program.enums` is: `enum_parts(program)[t][c]` is the
+/// case `program.enums[t].cases[c]`'s payload, one [`Part`] per position in
+/// declaration order -- the order [`Inst::MakeEnum`]'s `argc` words arrive in
+/// and [`Inst::GetPayload`] indexes.
+fn enum_parts(program: &Program) -> Vec<Vec<Vec<Part>>> {
+    program
+        .enums
+        .iter()
+        .map(|declared| {
+            declared
+                .cases
+                .iter()
+                .map(|case| {
+                    case.payload
+                        .iter()
+                        .map(|kind| match kind {
+                            SlotKind::Value => Part::Nested,
+                            SlotKind::Scalar(Scalar::Int) => Part::Int,
+                            SlotKind::Scalar(Scalar::Bool) => Part::Bool,
+                            SlotKind::Place => unreachable!(
+                                "`{}` case `{}` carries a place-kinded payload position, which no \
+                                 lowering emits",
+                                declared.name, case.name
+                            ),
+                        })
+                        .collect()
+                })
+                .collect()
+        })
+        .collect()
+}
+
+/// One `(type, case, payload)` a `Kind::Enum` word this backend built might
+/// name, addressed by nothing but its own fields -- there is no id, because
+/// the two callers that need this table (the static walk and
+/// [`FrameVm::new`]) both build it themselves, from the same [`Program`], and
+/// never hand an index from one to the other.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct EnumSite {
+    type_name: Arc<str>,
+    case: Arc<str>,
+    payload: Vec<Part>,
+}
+
+/// Every `(type, case, payload)` [`register_enum_site`] has registered a
+/// layout for, addressed by [`FrameVm::enum_layout_for`] rather than by any
+/// id -- see [`EnumSite`]'s own doc comment for why there is not one.
+type EnumLayoutTable = Vec<(Arc<str>, Arc<str>, Vec<Part>, LayoutId)>;
+
+/// What `Inst::MakeEnum` or `Inst::MakeBuiltin { name: Ok | Err | Some | None, .. }`
+/// at `pc` builds, if this backend can show what it builds.
+///
+/// A declared case is read straight off [`enum_parts`] -- the type is static,
+/// so there is nothing to ask of the site beyond which case it names, exactly
+/// as [`struct_parts`] is read for `Inst::MakeStruct`. A builtin case has no
+/// such table: `Ok`, `Err` and `Some` carry one payload position of whatever
+/// type the program wrote, which [`cove_ir::StructType`]'s analogue for
+/// `Result`/`Option` does not exist to state, so its [`Part`] is read off
+/// `operands` instead -- the same [`Kind`] the site's own operand already
+/// proved, the way `Inst::MakeStruct` proves a field's kind against the
+/// pushed operand rather than inventing a second source for it. `None` carries
+/// nothing, so there is nothing to ask.
+fn enum_construction(
+    program: &Program,
+    operands: &Operands,
+    pc: usize,
+    inst: Inst,
+) -> Option<EnumSite> {
+    match inst {
+        Inst::MakeEnum { ty, case, argc } => {
+            let type_name = const_name(program, ty);
+            let case_name = const_name(program, case);
+            let declared = program.enum_type_named(type_name)?;
+            let case = declared.cases.iter().find(|c| &*c.name == case_name)?;
+            if case.payload.len() != argc as usize {
+                return None;
+            }
+            let parts = enum_parts(program);
+            let type_at = program.enums.iter().position(|e| e.name == declared.name)?;
+            let case_at = declared.cases.iter().position(|c| c.name == case.name)?;
+            Some(EnumSite {
+                type_name: declared.name.clone(),
+                case: case.name.clone(),
+                payload: parts[type_at][case_at].clone(),
+            })
+        }
+        Inst::MakeBuiltin { name, argc } => {
+            let which = const_name(program, name);
+            let (type_name, case): (&'static str, &'static str) = match which {
+                "Ok" if argc == 1 => (
+                    cove_schema::builtins::RESULT.name,
+                    cove_schema::builtins::OK_CASE.name,
+                ),
+                "Err" if argc == 1 => (
+                    cove_schema::builtins::RESULT.name,
+                    cove_schema::builtins::ERR_CASE.name,
+                ),
+                "Some" if argc == 1 => (
+                    cove_schema::builtins::OPTION.name,
+                    cove_schema::builtins::SOME_CASE.name,
+                ),
+                _ if which == cove_schema::builtins::NONE_CASE.name && argc == 0 => (
+                    cove_schema::builtins::OPTION.name,
+                    cove_schema::builtins::NONE_CASE.name,
+                ),
+                _ => return None,
+            };
+            let payload = if argc == 0 {
+                Vec::new()
+            } else {
+                vec![operands.top(pc, 1)?[0].part()]
+            };
+            Some(EnumSite {
+                type_name: type_name.into(),
+                case: case.into(),
+                payload,
+            })
+        }
+        _ => None,
+    }
+}
+
+/// Whether the object a `Layout::case` of `(type_name, case)` names is the
+/// case `Inst::TestCase`'s own constant `tested` asks for.
+///
+/// `crate::vm::is_case`'s rule, read off the two strings a layout carries
+/// rather than off a `Value`'s `EnumValue`: `tested` is either a bare case
+/// name or `Type.Case`, and a qualified one asks that `type_name`'s own short
+/// name -- the part after its last `.`, which is all a builtin's ever has --
+/// agree too.
+fn case_matches(type_name: &str, case: &str, tested: &str) -> bool {
+    let (expected_type, tested_case) = match tested.rsplit_once('.') {
+        Some((type_name, case)) => (Some(type_name), case),
+        None => (None, tested),
+    };
+    if case != tested_case {
+        return false;
+    }
+    match expected_type {
+        Some(expected) => type_name.rsplit('.').next().unwrap_or(type_name) == expected,
+        None => true,
+    }
+}
+
+/// The `'static` names `(type_name, case)` are, if the pair is one of the
+/// four builtin cases `Ok`, `Err`, `Some` or `None` -- the only ones
+/// [`crate::slot::Shape::Enum`] may ever be built with, because it is read by
+/// an embedder and a declared type's qualified name is a program's own
+/// `Arc<str>` rather than `'static` storage.
+///
+/// A declared enum's qualified name always carries a `.` and neither
+/// builtin's bare name ever does, but this compares against
+/// `cove_schema::builtins`' own constants rather than trusting that shape,
+/// because the point of asking is to get the `'static` strings back, not
+/// only a yes.
+fn static_case_name(type_name: &str, case: &str) -> Option<(&'static str, &'static str)> {
+    use cove_schema::builtins::{ERR_CASE, NONE_CASE, OK_CASE, OPTION, RESULT, SOME_CASE};
+    match (type_name, case) {
+        (t, c) if t == RESULT.name && c == OK_CASE.name => Some((RESULT.name, OK_CASE.name)),
+        (t, c) if t == RESULT.name && c == ERR_CASE.name => Some((RESULT.name, ERR_CASE.name)),
+        (t, c) if t == OPTION.name && c == SOME_CASE.name => Some((OPTION.name, SOME_CASE.name)),
+        (t, c) if t == OPTION.name && c == NONE_CASE.name => Some((OPTION.name, NONE_CASE.name)),
+        _ => None,
+    }
+}
+
+/// The [`Part`] a value of the fully-resolved host type `ty` becomes, if this
+/// backend can show one -- and every `(type, case, payload)` reaching that
+/// answer needs a layout for, appended to `sites`.
+///
+/// Recursive over `HostType::Option` and `HostType::Result`, because a host
+/// operation may declare either nested inside the other -- `cove_schema`
+/// allows it even though nothing shipped writes it. `HostType::Error` is
+/// always the same shape, one `message: String` field, so it is a single
+/// fixed struct layout rather than an [`EnumSite`] -- see
+/// `FrameVm::error_layout`. Every other `HostType` -- `Duration`, a
+/// collection, `Named`, `Any` -- has no eight-byte form this backend knows,
+/// so `None` here is what sends a Host call's answer to the boundary buffer
+/// the way it always has, per the module docs' "Where a host answer's shape
+/// has no word form".
+fn host_part(ty: &cove_schema::HostType, sites: &mut Vec<EnumSite>) -> Option<Part> {
+    use cove_schema::HostType;
+    match ty {
+        HostType::Unit => Some(Part::Unit),
+        HostType::Bool => Some(Part::Bool),
+        HostType::Int => Some(Part::Int),
+        HostType::String => Some(Part::Nested),
+        HostType::Error => Some(Part::Nested),
+        HostType::Option(inner) => {
+            let inner_part = host_part(inner, sites)?;
+            sites.push(EnumSite {
+                type_name: cove_schema::builtins::OPTION.name.into(),
+                case: cove_schema::builtins::SOME_CASE.name.into(),
+                payload: vec![inner_part],
+            });
+            sites.push(EnumSite {
+                type_name: cove_schema::builtins::OPTION.name.into(),
+                case: cove_schema::builtins::NONE_CASE.name.into(),
+                payload: Vec::new(),
+            });
+            Some(Part::Nested)
+        }
+        HostType::Result(ok, err) => {
+            let ok_part = host_part(ok, sites)?;
+            let err_part = host_part(err, sites)?;
+            sites.push(EnumSite {
+                type_name: cove_schema::builtins::RESULT.name.into(),
+                case: cove_schema::builtins::OK_CASE.name.into(),
+                payload: vec![ok_part],
+            });
+            sites.push(EnumSite {
+                type_name: cove_schema::builtins::RESULT.name.into(),
+                case: cove_schema::builtins::ERR_CASE.name.into(),
+                payload: vec![err_part],
+            });
+            Some(Part::Nested)
+        }
+        HostType::Array(_)
+        | HostType::Set(_)
+        | HostType::Map(_, _)
+        | HostType::Named(_)
+        | HostType::Any
+        | HostType::Duration => None,
+    }
+}
+
+/// Every `(type, case, payload)` an `Inst::CallHost` naming `module.op` might
+/// answer, if `cove_schema::hosts` knows `module` and this backend can show
+/// its declared result type is word-representable -- `None` otherwise,
+/// meaning the answer still crosses through the boundary buffer as it always
+/// has.
+///
+/// `cove_schema::hosts::module` is the static table every shipped host module
+/// answers through, asked the same way `cove_ir::lower::expr` asks it for a
+/// host's own enum case -- so this needs no [`crate::host::HostRegistry`] and
+/// answers the same for [`admits`], which has none, and for [`FrameVm::new`],
+/// which has one but is not asked to use it here. A module this table does
+/// not know -- an embedder's own, or a fixture built only for a test -- is
+/// `None`: the boundary buffer is always correct, only sometimes avoidable,
+/// and a module `cove_schema::hosts` cannot describe is one this backend has
+/// no static fact about at all.
+fn host_result_layouts(module: &str, op: &str) -> Option<Vec<EnumSite>> {
+    let ty = host_operation_result(module, op)?;
+    let mut sites = Vec::new();
+    host_part(ty, &mut sites)?;
+    Some(sites)
+}
+
+/// The declared result type of `module.op`, off `cove_schema::hosts`' static
+/// table -- `None` where the table does not know `module` or the operation.
+fn host_operation_result(module: &str, op: &str) -> Option<&'static cove_schema::HostType> {
+    let schema = cove_schema::hosts::module(module)?;
+    schema
+        .operations
+        .iter()
+        .find(|o| o.name == op)
+        .map(|o| &o.result)
+}
+
+/// Registers `site`'s layout in `heap`, reusing an entry `table` already has
+/// for the same `(type, case, payload)` rather than allocating a second
+/// `LayoutId` for it -- `FrameVm::new` calls this once per site
+/// [`enum_construction`] or [`host_result_layouts`] names, and two sites of
+/// one case agree about its layout the same way two `make-struct` sites of
+/// one struct type do.
+///
+/// [`static_case_name`] is what decides between the two registrations decision
+/// 5's boundary needs told apart: `Result`'s and `Option`'s cases get a live
+/// `crate::slot::Shape::Enum`, built with the `'static` names that shape
+/// needs; a declared case gets `crate::slot::Shape::Opaque`, the same shape
+/// `FrameVm::shapes` already gives a declared struct. Both carry
+/// `crate::slot::Layout::case`, because `Inst::TestCase` and
+/// `Inst::GetPayload` read that off either kind of object alike.
+fn register_enum_site(
+    heap: &mut HandleHeap,
+    table: &mut EnumLayoutTable,
+    site: &EnumSite,
+) -> LayoutId {
+    if let Some((.., id)) = table
+        .iter()
+        .find(|(t, c, p, _)| **t == *site.type_name && **c == *site.case && *p == site.payload)
+    {
+        return *id;
+    }
+    let id = match static_case_name(&site.type_name, &site.case) {
+        Some((type_name, case)) => heap.register(
+            Layout::boundary(
+                format!("{type_name}.{case}"),
+                Shape::Enum {
+                    type_name,
+                    case,
+                    payload: site.payload.clone(),
+                },
+            )
+            .with_case(site.type_name.clone(), site.case.clone()),
+        ),
+        None => {
+            let refs = site
+                .payload
+                .iter()
+                .enumerate()
+                .filter(|(_, part)| **part == Part::Nested)
+                .map(|(at, _)| at)
+                .collect();
+            heap.register(
+                Layout::new(
+                    format!("{}.{}", site.type_name, site.case),
+                    site.payload.len(),
+                    refs,
+                )
+                .with_case(site.type_name.clone(), site.case.clone()),
+            )
+        }
+    };
+    table.push((
+        site.type_name.clone(),
+        site.case.clone(),
+        site.payload.clone(),
+        id,
+    ));
+    id
+}
+
 /// What one word means, where something outside the one stack has to be told.
 ///
 /// The bits are not self-describing, so every question of this shape is
@@ -1712,6 +2267,29 @@ enum Kind {
     /// `String` constant or the answer of a `concat`. See the type's doc
     /// comment for what this does and does not let a program do.
     Str,
+    /// A word this backend knows, from the instruction that pushed it and
+    /// from nothing else, names an enum case object: `Inst::MakeEnum`, one of
+    /// `Ok`, `Err`, `Some` or `None`, or a Host call whose declared result
+    /// [`host_result_layouts`] can show is word-representable.
+    ///
+    /// This does **not** say which case, or even which type -- two branches
+    /// of an `if` that build `Ok(1)` and `Err(e)` both leave `Kind::Enum` on
+    /// the value stack, and [`merge`] keeps it standing rather than
+    /// collapsing to `None`, because the two agree on everything this kind
+    /// states. What it *does* say is answered by asking the object at run
+    /// time -- `Inst::TestCase` and `Inst::GetPayload` read
+    /// `crate::slot::Layout::case` off the handle's own layout rather than off
+    /// this kind, the same "ask the object, not the static answer" split
+    /// `Inst::GetFieldAt`'s reference bit keeps. Only decision 5's boundary
+    /// needs the static proof this kind supplies: [`Inst::Pop`], [`Inst::Try`]
+    /// and [`Inst::Return`] are admitted over a `Kind::Enum` word because
+    /// `Ok`, `Err`, `Some`, `None` and a representable Host answer are always
+    /// `Result` or `Option`, whose case names `cove_schema::builtins` gives
+    /// `'static` storage -- a **declared** enum's case is not proven this way
+    /// and stays `Kind::Reference`, which [`Inst::MakeEnum`] pushes instead.
+    /// See "Which enum objects cross the boundary, and why" in the module
+    /// docs.
+    Enum,
 }
 
 impl Kind {
@@ -1719,16 +2297,20 @@ impl Kind {
     ///
     /// A `Unit` is a canonical zero word, which decision 1 permits where the
     /// layout cannot omit it, and the map's question about one is the same
-    /// question it asks of an `Int`: not a reference. `Kind::Str` answers
-    /// exactly as `Kind::Reference` does: both are a `Handle`, and a struct
-    /// field or a value slot that expects a reference cannot tell them apart
-    /// and does not need to.
+    /// question it asks of an `Int`: not a reference -- `Part::Unit` and
+    /// `Part::Int` agree on that, and differ only in which `Value` they
+    /// materialise as, which matters the moment an enum's payload can cross
+    /// decision 5's boundary and did not before. `Kind::Str` and `Kind::Enum`
+    /// answer exactly as `Kind::Reference` does: all three are a `Handle`,
+    /// and a struct field or a value slot that expects a reference cannot
+    /// tell them apart and does not need to.
     fn part(self) -> Part {
         match self {
-            Kind::Unit | Kind::Int => Part::Int,
+            Kind::Unit => Part::Unit,
+            Kind::Int => Part::Int,
             Kind::Bool => Part::Bool,
             Kind::Float => Part::Float,
-            Kind::Reference | Kind::Str => Part::Nested,
+            Kind::Reference | Kind::Str | Kind::Enum => Part::Nested,
         }
     }
 
@@ -1738,7 +2320,7 @@ impl Kind {
     /// there" -- and neither needs to know *which* kind of reference it is,
     /// only that it is one.
     fn is_reference(self) -> bool {
-        matches!(self, Kind::Reference | Kind::Str)
+        matches!(self, Kind::Reference | Kind::Str | Kind::Enum)
     }
 }
 
@@ -1877,6 +2459,38 @@ fn pushed_kind(program: &Program, inst: Inst) -> Held {
             | cove_ir::BinaryOp::Ge,
         ) => Some(Kind::Bool),
         Inst::LoadLocal(_) | Inst::MakeStruct(_) | Inst::SetField(_) => Some(Kind::Reference),
+        // A declared enum's case is not a `Kind::Enum`: only `Result` and
+        // `Option` cross decision 5's boundary, because only their case names
+        // have `'static` storage -- see `Kind::Enum`'s doc comment. So this
+        // pushes the same generic reference `Inst::MakeStruct` does; whether
+        // the *site* actually built a case this backend can show is a
+        // question `admits_function`'s own arm asks of `enum_construction`,
+        // with `operands` in hand, exactly as it already does for
+        // `Inst::MakeStruct`.
+        Inst::MakeEnum { .. } => Some(Kind::Reference),
+        // `Ok`, `Err`, `Some` and `None` are the four constructors this
+        // backend builds as a word rather than as a materialised `Value` --
+        // see `enum_construction`. Every other `Inst::MakeBuiltin` --
+        // `Error`, `Shared`, an assertion -- is left `None`: its answer still
+        // only ever stands in the boundary buffer, where `FrameVm::execute`
+        // puts it exactly as it always has.
+        Inst::MakeBuiltin { name, argc } => {
+            let which = const_name(program, name);
+            let is_option_or_result = matches!(which, "Ok" | "Err" | "Some") && argc == 1
+                || which == cove_schema::builtins::NONE_CASE.name && argc == 0;
+            is_option_or_result.then_some(Kind::Enum)
+        }
+        // Whether a Host call's declared result is word-representable is a
+        // static fact about `module.op` alone -- `host_result_layouts` --
+        // asked here the same way it is asked at `FrameVm::new`, so the two
+        // cannot disagree about which calls this pushes a `Kind::Enum` for.
+        Inst::CallHost { module, op, .. } => {
+            let module = const_name(program, module);
+            let op = const_name(program, op);
+            host_result_layouts(module, op)
+                .is_some()
+                .then_some(Kind::Enum)
+        }
         // **Static because the instruction names the type.** A field read was
         // unreadable here in Phase B — one instruction whose answer is a handle
         // for a struct field and scalar bits for an `Int` one, and only the
@@ -1892,6 +2506,24 @@ fn pushed_kind(program: &Program, inst: Inst) -> Held {
             },
             None => None,
         },
+        // **Left `None` on purpose, unlike `Inst::LoadLocal`'s generic
+        // reference.** A payload position may be scalar -- a declared case's
+        // own `Int` or `Bool`, per `cove_ir::EnumCase::payload` -- and
+        // `Inst::GetPayload` carries no case id to ask, only a bare index, so
+        // there is no static fact here to distinguish a scalar payload from a
+        // reference one the way `Inst::GetFieldAt`'s `StructId` lets a field
+        // read do it. Claiming `Kind::Reference` unconditionally would be
+        // exactly decision 1's invariant broken from the other side: a scalar
+        // payload word admitted into a value slot the frame map calls a
+        // reference. So a payload is read off an object and it stands as an
+        // operand this backend can act on structurally -- `Inst::TestCase`
+        // beside it, a further `Inst::GetPayload`, a `Dup` -- but not stored,
+        // passed, or compared until a future change gives this instruction
+        // the type `Inst::GetFieldAt` already carries.
+        Inst::GetPayload(_) => None,
+        // A case test's answer is a canonical `Bool` bit, exactly as a
+        // comparison's is.
+        Inst::TestCase(_) => Some(Kind::Bool),
         _ => None,
     }
 }
@@ -2100,6 +2732,7 @@ fn undisplayable(kind: Option<Kind>) -> &'static str {
         None => "an operand the 8-byte frame cannot show the kind of",
         Some(Kind::Unit) => "a `Unit`",
         Some(Kind::Reference) => "a heap object this backend cannot show is a `String`",
+        Some(Kind::Enum) => "an enum",
         Some(Kind::Str | Kind::Int | Kind::Bool | Kind::Float) => {
             unreachable!("these kinds render, and `concat`'s check does not call this for them")
         }
@@ -2119,9 +2752,9 @@ fn crossed(kind: Kind, word: u64) -> Value {
         Kind::Bool => Value(Repr::Bool(Word::canonical_bool(word))),
         Kind::Int => as_value_of(Scalar::Int, Word::int(word)),
         Kind::Float => Value::float(Word::float(word)),
-        Kind::Reference | Kind::Str => unreachable!(
+        Kind::Reference | Kind::Str | Kind::Enum => unreachable!(
             "`crossed` is for the word kinds that need no heap; `crossed_at_boundary` is for \
-             `Kind::Str` and nothing calls this with `Kind::Reference`"
+             `Kind::Str` and `Kind::Enum`, and nothing calls this with `Kind::Reference`"
         ),
     }
 }
@@ -2129,7 +2762,6 @@ fn crossed(kind: Kind, word: u64) -> Value {
 fn describe(inst: &Inst) -> &'static str {
     match inst {
         Inst::Unary(_) | Inst::Binary(_) => "an operator over a general value",
-        Inst::JumpIfFalse(_) | Inst::JumpIfTrue(_) => "a branch on a general value",
         Inst::MakeClosure { .. } | Inst::CallValue { .. } => "a closure",
         Inst::MakeDyn { .. } | Inst::CallDyn { .. } => "`dyn` dispatch",
         Inst::CallBuiltin { .. } | Inst::CallBuiltinAssoc { .. } => "a builtin method",
@@ -2138,11 +2770,14 @@ fn describe(inst: &Inst) -> &'static str {
         }
         Inst::Concat(_) => "string interpolation",
         Inst::GetField(_) => "a struct field read by name",
-        Inst::MakeEnum { .. }
-        | Inst::MakeHostEnum { .. }
-        | Inst::TestCase(_)
-        | Inst::GetPayload(_)
-        | Inst::NoMatch => "an enum",
+        // `Inst::MakeEnum`, `Inst::TestCase` and `Inst::GetPayload` have their
+        // own arms in `admits_function` now; `Inst::MakeHostEnum` is out of
+        // scope -- a host's enum has no `cove_ir::EnumType` this backend can
+        // read a payload map off, only a `cove_schema::TypeSchema` -- and
+        // `Inst::NoMatch` names a `match` the checker has not proven
+        // exhaustive, which is a fact about the program rather than a shape
+        // this backend could ever admit.
+        Inst::MakeHostEnum { .. } | Inst::NoMatch => "an enum",
         Inst::PlaceLocal(_)
         | Inst::PlaceScalar(..)
         | Inst::LoadPlace(_)
@@ -2175,6 +2810,8 @@ fn describe(inst: &Inst) -> &'static str {
         | Inst::Jump(_)
         | Inst::JumpIfFalseScalar(_)
         | Inst::JumpIfTrueScalar(_)
+        | Inst::JumpIfFalse(_)
+        | Inst::JumpIfTrue(_)
         | Inst::ScalarToValue(_)
         | Inst::ValueToScalar
         | Inst::LoadLocal(_)
@@ -2184,6 +2821,9 @@ fn describe(inst: &Inst) -> &'static str {
         | Inst::SetField(_)
         | Inst::GetFieldAt { .. }
         | Inst::GetFieldAtScalar(_)
+        | Inst::MakeEnum { .. }
+        | Inst::TestCase(_)
+        | Inst::GetPayload(_)
         | Inst::MakeBuiltin { .. }
         | Inst::CallHost { .. }
         | Inst::CallResource { .. }
@@ -2244,6 +2884,29 @@ pub struct FrameVm<'a> {
     /// is what both allocate against, and this is the id `crate::slot::HandleHeap`
     /// gave that shape when it was registered.
     str_layout: LayoutId,
+    /// One layout per `(type, case)` an `Inst::MakeEnum`, an `Ok`/`Err`/
+    /// `Some`/`None`, or a representable Host call's answer might need,
+    /// registered once here and looked up by [`FrameVm::enum_layout_for`]
+    /// rather than kept twice: `Result`'s and `Option`'s cases carry a live
+    /// `crate::slot::Shape::Enum`, a declared enum's stay
+    /// `crate::slot::Shape::Opaque`, and both carry
+    /// `crate::slot::Layout::case` -- see [`Kind::Enum`] and
+    /// `crate::slot::Layout::case`'s own doc comment for why the two differ.
+    enum_layouts: EnumLayoutTable,
+    /// The one layout the builtin `Error` struct has: one `message: String`
+    /// field, `crate::slot::Shape::Struct`. Every representable Host
+    /// operation whose declared result is `Result<_, Error>` points its `Err`
+    /// case's payload at an object of this layout -- see
+    /// `FrameVm::host_value_to_word`.
+    error_layout: LayoutId,
+    /// Which layout `Inst::MakeEnum` or `Inst::MakeBuiltin`'s `Ok`, `Err`,
+    /// `Some` or `None` at a given instruction builds, indexed the way
+    /// [`FrameVm::operands`] is: one entry per function, one per instruction
+    /// of it, `None` wherever the instruction is neither of those or names a
+    /// case this backend could not show is settled. Built once here from
+    /// [`enum_construction`], so the dispatch loop reads a table rather than
+    /// re-deriving the same static fact on every execution of one site.
+    enum_site_layout: Vec<Vec<Option<LayoutId>>>,
     /// The same reference map again, as one bool per field, addressed by the
     /// `cove_ir::StructId` a `get-field-at` carries and then by the position.
     ///
@@ -2421,6 +3084,54 @@ impl<'a> FrameVm<'a> {
         // completely determines how to find every reference" applies to a
         // *kind* of object, not to each instance.
         let str_layout = heap.register(Layout::boundary("String", Shape::Str));
+        // The one layout the builtin `Error` struct has, registered
+        // unconditionally: it costs one entry in the layout table and every
+        // representable Host operation whose result is `Result<_, Error>`
+        // needs it for the `Err` case, which `FrameVm::host_value_to_word`
+        // reads back out through `FrameVm::error_layout`.
+        let error_layout = heap.register(Layout::boundary(
+            cove_schema::builtins::ERROR.name,
+            Shape::Struct {
+                type_name: cove_schema::builtins::ERROR.name,
+                fields: vec![(cove_schema::builtins::MESSAGE_FIELD.name, Part::Nested)],
+            },
+        ));
+        // One value-operand simulation per function, built here rather than
+        // inline in the struct literal below because the enum-site walk that
+        // follows needs one per function too, and a second `simulate` call
+        // per function would be a second answer to a question already asked.
+        let operands: Vec<Operands> = program
+            .functions
+            .iter()
+            .map(|function| simulate(program, function))
+            .collect();
+        // One layout per `(type, case)` an `Inst::MakeEnum`, an `Ok`/`Err`/
+        // `Some`/`None`, or a representable Host call's answer might need --
+        // see `register_enum_site` -- and, for the first two, which
+        // instruction builds which layout, so the dispatch loop reads a table
+        // rather than re-deriving `enum_construction`'s answer on every
+        // execution of one site.
+        let mut enum_layouts: EnumLayoutTable = Vec::new();
+        let mut enum_site_layout: Vec<Vec<Option<LayoutId>>> =
+            Vec::with_capacity(program.functions.len());
+        for (function, function_operands) in program.functions.iter().zip(&operands) {
+            let mut sites = vec![None; function.code.len()];
+            for (pc, inst) in function.code.iter().enumerate() {
+                if let Some(site) = enum_construction(program, function_operands, pc, *inst) {
+                    sites[pc] = Some(register_enum_site(&mut heap, &mut enum_layouts, &site));
+                }
+                if let Inst::CallHost { module, op, .. } = inst {
+                    let module_name = const_name(program, *module);
+                    let op_name = const_name(program, *op);
+                    if let Some(host_sites) = host_result_layouts(module_name, op_name) {
+                        for site in &host_sites {
+                            register_enum_site(&mut heap, &mut enum_layouts, site);
+                        }
+                    }
+                }
+            }
+            enum_site_layout.push(sites);
+        }
         // Every `String` constant is allocated once here rather than
         // materialised per read, and its word is the `Handle` `Inst::Const`
         // pushes from then on -- see `Kind::Str` and `const_word`. A constant
@@ -2453,15 +3164,14 @@ impl<'a> FrameVm<'a> {
             heap,
             shapes,
             str_layout,
+            enum_layouts,
+            error_layout,
+            enum_site_layout,
             field_refs,
             field_map: FieldMap::TheLoweredType,
             field_at,
             maps: program.functions.iter().map(FrameMap::of).collect(),
-            operands: program
-                .functions
-                .iter()
-                .map(|function| simulate(program, function))
-                .collect(),
+            operands,
             temps: TempRoots::new(),
             scope: RootScope::EveryWord,
             due: false,
@@ -2756,6 +3466,36 @@ impl<'a> FrameVm<'a> {
                     }
                     self.charge(blocks[pc + 1], || running.span_at(pc + 1))?;
                 }
+                // The general form of the two above: `admits` proved the word
+                // is a canonical `Bool` before the run began, so the word
+                // *is* the answer here too, and popping it off the one stack
+                // is `Inst::Pop`'s own arithmetic with nothing extra to it --
+                // there is only one stack, so "general" and "scalar" name the
+                // same storage and differ only in which proof admitted them.
+                Inst::JumpIfFalse(to) => {
+                    let to = to as usize;
+                    if self.pop_word() == 0 {
+                        if to <= pc {
+                            self.back_edge(running.span_at(pc))?;
+                        }
+                        self.charge(blocks[to], || running.span_at(to))?;
+                        pc = to;
+                        continue;
+                    }
+                    self.charge(blocks[pc + 1], || running.span_at(pc + 1))?;
+                }
+                Inst::JumpIfTrue(to) => {
+                    let to = to as usize;
+                    if self.pop_word() != 0 {
+                        if to <= pc {
+                            self.back_edge(running.span_at(pc))?;
+                        }
+                        self.charge(blocks[to], || running.span_at(to))?;
+                        pc = to;
+                        continue;
+                    }
+                    self.charge(blocks[pc + 1], || running.span_at(pc + 1))?;
+                }
 
                 // ------------------------------------------- call and return
                 Inst::Call {
@@ -2874,6 +3614,62 @@ impl<'a> FrameVm<'a> {
                     // `Vm::MakeStruct` charges the width beside the
                     // instruction, so this does too: same schedule, same fuel.
                     self.fuel += width as u64;
+                }
+                // A declared case, built the same way `Inst::MakeStruct`
+                // builds a struct: the layout `FrameVm::new` registered for
+                // this exact `pc` -- `admits` already proved the words
+                // standing under it agree with the case's own payload, so
+                // there is nothing left to ask here that a `debug_assert`
+                // does not already ask of `Inst::MakeStruct`.
+                Inst::MakeEnum { .. } => {
+                    let here = self.frames.last().expect("a frame stands").function;
+                    let layout = self.enum_site_layout[here.0 as usize][pc].expect(
+                        "`admits` refuses a `make-enum` `FrameVm::new` could not register a \
+                         layout for",
+                    );
+                    let width = self.heap.layout(layout).words();
+                    let at = self.words.len() - width;
+                    debug_assert!(
+                        (at..self.words.len()).all(|word| self.refs.read(word)
+                            == self.heap.layout(layout).is_reference(word - at)),
+                        "an enum payload word disagrees with the layout's reference map"
+                    );
+                    let handle = self.heap.allocate_from(layout, &self.words[at..]);
+                    self.words.truncate(at);
+                    self.allocated(width);
+                    self.push_reference(handle.to_slot());
+                    self.fuel += width as u64;
+                }
+                // The question decision 2's "the case is in the layout" makes
+                // one about the handle rather than about any word: which
+                // `(type, case)` `crate::slot::Layout::with_case` marked its
+                // layout with, read straight off the handle's own
+                // `LayoutId` -- not off `Kind::Enum`, which does not say which
+                // case, and not off the *word*, which never could. Neither
+                // instruction pops its operand; both peek the handle standing
+                // on top, exactly as `Vm::TestCase` and `Vm::GetPayload` do.
+                Inst::TestCase(case) => {
+                    let name = const_name(program, case);
+                    let handle = Handle::from_slot(self.words[self.words.len() - 1]);
+                    let matched = self
+                        .heap
+                        .case_of(handle)
+                        .is_some_and(|(type_name, case)| case_matches(type_name, case, name));
+                    self.push_word(Word::of_bool(matched), false);
+                }
+                Inst::GetPayload(index) => {
+                    let handle = Handle::from_slot(self.words[self.words.len() - 1]);
+                    let layout_id = self.heap.layout_id_of(handle);
+                    let layout = self.heap.layout(layout_id);
+                    let index = index as usize;
+                    debug_assert!(
+                        index < layout.words(),
+                        "`get-payload` read position {index} of `{}`, which carries fewer",
+                        layout.name()
+                    );
+                    let is_reference = layout.is_reference(index);
+                    let word = self.heap.word(handle, index);
+                    self.push_word(word, is_reference);
                 }
                 // **The word's kind is the instruction's, not the object's.**
                 // Phase B asked `HandleHeap::word_is_reference` here, which is
@@ -2999,14 +3795,54 @@ impl<'a> FrameVm<'a> {
                     }
                 }
                 Inst::Pop => {
-                    self.materialized += 1;
                     let here = self.frames.last().expect("a frame stands").function;
-                    self.pop_boundary_value(here, pc);
+                    // Which of the two stacks the word to discard stands on
+                    // -- exactly `FrameVm::pop_boundary_value`'s own question
+                    // -- and nothing more: a discard needs no `Value`, so a
+                    // word this backend cannot show anything about beyond
+                    // "there is one" is thrown away exactly as one it can.
+                    // Nothing crosses decision 5's boundary here, so nothing
+                    // is counted in `FrameVm::materialized` -- a discard was
+                    // never a `Value` and does not become one now. This is a
+                    // `match` subject's own cleanup, most often:
+                    // `Inst::TestCase` peeks it, and once an arm is chosen the
+                    // copy that was standing there for the asking is not
+                    // needed again.
+                    let operands = &self.operands[here.0 as usize];
+                    if leaves_a_boundary_value(program, running, pc)
+                        || crosses_as_a_string(operands, pc)
+                        || crosses_as_an_enum(operands, pc)
+                    {
+                        self.materialized += 1;
+                        self.pop_boundary_value(here, pc);
+                    } else {
+                        self.pop_word();
+                    }
                 }
                 Inst::MakeBuiltin { name: which, argc } => {
                     let span = running.span_at(pc);
-                    let which = const_name(program, which);
                     let here = self.frames.last().expect("a frame stands").function;
+                    // `Ok`, `Err`, `Some` and `None`: built the same way
+                    // `Inst::MakeStruct` builds a struct, straight out of the
+                    // words already on the stack, and never a `Value` at all.
+                    // `FrameVm::new` registered this site's layout only where
+                    // `enum_construction` could show what it builds, and
+                    // `admits` refused every site it could not, so the words
+                    // under it are proven to agree with the layout already.
+                    // No fuel is charged: `Vm::MakeBuiltin` charges none for
+                    // any of these four either, unlike `Vm::MakeEnum`, which
+                    // is why `Inst::MakeEnum`'s own arm below does.
+                    if let Some(layout) = self.enum_site_layout[here.0 as usize][pc] {
+                        let width = self.heap.layout(layout).words();
+                        let at = self.words.len() - width;
+                        let handle = self.heap.allocate_from(layout, &self.words[at..]);
+                        self.words.truncate(at);
+                        self.allocated(width);
+                        self.push_reference(handle.to_slot());
+                        pc += 1;
+                        continue;
+                    }
+                    let which = const_name(program, which);
                     let kinds = self.operands[here.0 as usize]
                         .boundary(pc, argc as usize)
                         .expect("`admits` settled every builtin call this backend runs");
@@ -3016,7 +3852,7 @@ impl<'a> FrameVm<'a> {
                     let handles: Vec<Handle> = kinds
                         .iter()
                         .zip(&words)
-                        .filter(|(kind, _)| **kind == Kind::Str)
+                        .filter(|(kind, _)| matches!(kind, Kind::Str | Kind::Enum))
                         .map(|(_, word)| Handle::from_slot(*word))
                         .collect();
                     let mut arguments: Vec<Value> = self.with_roots(&handles, |vm| {
@@ -3040,6 +3876,15 @@ impl<'a> FrameVm<'a> {
                 // `FrameVm::make_builtin`: the registry, not this backend,
                 // decides whether the module, the operation and the
                 // capability are real, and charges and traces the call.
+                //
+                // **The answer is where this backend hands a `Value` back
+                // across decision 5's boundary, rather than only taking one
+                // over it.** `host_operation_result` is the same static fact
+                // `pushed_kind` already asked, so a representable answer is
+                // built as a word by `FrameVm::host_value_to_word` and pushed
+                // straight onto the one stack; an answer this backend cannot
+                // show a word for still stands in the boundary buffer, as it
+                // always has.
                 Inst::CallHost { module, op, argc } => {
                     let span = running.span_at(pc);
                     let module = const_name(program, module);
@@ -3054,7 +3899,7 @@ impl<'a> FrameVm<'a> {
                     let handles: Vec<Handle> = kinds
                         .iter()
                         .zip(&words)
-                        .filter(|(kind, _)| **kind == Kind::Str)
+                        .filter(|(kind, _)| matches!(kind, Kind::Str | Kind::Enum))
                         .map(|(_, word)| Handle::from_slot(*word))
                         .collect();
                     let arguments: Vec<Value> = self.with_roots(&handles, |vm| {
@@ -3067,9 +3912,19 @@ impl<'a> FrameVm<'a> {
                             })
                             .collect()
                     });
-                    self.materialized += 1;
-                    let answer = self.call_host(module, op, arguments, span);
-                    self.boundary.push(answer?);
+                    let answer = self.call_host(module, op, arguments, span)?;
+                    match host_operation_result(module, op)
+                        .filter(|ty| host_part(ty, &mut Vec::new()).is_some())
+                    {
+                        Some(ty) => {
+                            let word = self.host_value_to_word(answer, ty);
+                            self.push_reference(word);
+                        }
+                        None => {
+                            self.materialized += 1;
+                            self.boundary.push(answer);
+                        }
+                    }
                 }
                 Inst::Try => {
                     let span = running.span_at(pc);
@@ -3359,11 +4214,91 @@ impl<'a> FrameVm<'a> {
         string_value(length, tail, |at| self.string_word(handle, at))
     }
 
-    /// [`crossed`] plus [`Kind::Str`]: the one case that needs the heap, and
-    /// so needs `&mut self`, rather than only the word's own bits.
+    /// The `Value::Enum` or `Value::Struct` the enum-case or `Error` object
+    /// `handle` names is, materialised -- decision 5's boundary, for the
+    /// `Kind::Enum` words a `Try`, a `Pop` or a `Return` may build one out of.
+    ///
+    /// **This is the constructor `crate::slot`'s own module docs used to say
+    /// did not exist**: a `Value` built out of an object this backend's own
+    /// heap holds, rather than only the reverse. It does not contradict what
+    /// those docs still say about `crate::slot::Machine` -- nothing there
+    /// gained one, and the two heaps stay disjoint in the sense that matters:
+    /// what comes out is an owned `Value` that shares no storage with
+    /// [`HandleHeap`] from the instant it exists, exactly as
+    /// `FrameVm::materialise_str` already builds one out of a `Shape::Str`
+    /// object. See "Which enum objects cross the boundary, and why" in the
+    /// module docs for the fuller argument.
+    ///
+    /// `handle` must already be a root before this is called, for
+    /// `FrameVm::materialise_str`'s reason: every field is read at a
+    /// safepoint, and a bare Rust local roots nothing across one. Every
+    /// caller reaches this through `FrameVm::with_root` or
+    /// `FrameVm::with_roots`.
+    fn materialise_enum(&mut self, handle: Handle) -> Value {
+        let shape = self.heap.shape_of(handle).clone();
+        match shape {
+            Shape::Enum {
+                type_name,
+                case,
+                payload,
+            } => {
+                let mut materialised = Vec::with_capacity(payload.len());
+                for (at, part) in payload.into_iter().enumerate() {
+                    materialised.push(self.boundary_part(handle, at, part));
+                }
+                Value::enumeration(type_name, case, materialised)
+            }
+            // The one `Shape::Struct` this backend ever registers: the
+            // builtin `Error`, an `Err` case's payload may point at. Read the
+            // same way `crate::slot::Machine::materialise_rooted`'s own
+            // `Shape::Struct` arm reads one, because the shape says exactly
+            // the same thing here.
+            Shape::Struct { type_name, fields } => {
+                let mut materialised = Vec::with_capacity(fields.len());
+                for (at, (name, part)) in fields.into_iter().enumerate() {
+                    materialised.push((name, self.boundary_part(handle, at, part)));
+                }
+                Value::structure(type_name, materialised)
+            }
+            other => unreachable!(
+                "`materialise_enum` was handed a {other:?} object; `Kind::Enum` never names one"
+            ),
+        }
+    }
+
+    /// Materialises word `at` of the object `handle` names, reading it as
+    /// `part` says to -- [`Machine::part`](crate::slot::Machine)'s rule, over
+    /// this backend's own heap and safepoint. `Part::Nested` is the
+    /// recursive case: the child is a Rust local of this frame from the
+    /// instant it is read until its own `Value` exists, so it is rooted on
+    /// its own rather than trusted to survive on `handle`'s root alone.
+    fn boundary_part(&mut self, handle: Handle, at: usize, part: Part) -> Value {
+        let word = self.string_word(handle, at);
+        match part {
+            Part::Int => Value::int(Word::int(word)),
+            Part::Bool => Value::bool(Word::canonical_bool(word)),
+            Part::Float => Value::float(Word::float(word)),
+            Part::Unit => Value::unit(),
+            Part::Nested => {
+                let child = Handle::from_slot(word);
+                self.with_root(child, |vm| match vm.heap.shape_of(child) {
+                    Shape::Str => vm.materialise_str(child),
+                    Shape::Enum { .. } | Shape::Struct { .. } => vm.materialise_enum(child),
+                    other => unreachable!(
+                        "an enum payload word named a {other:?} object, which nothing here builds"
+                    ),
+                })
+            }
+        }
+    }
+
+    /// [`crossed`] plus [`Kind::Str`] and [`Kind::Enum`]: the two cases that
+    /// need the heap, and so need `&mut self`, rather than only the word's
+    /// own bits.
     fn crossed_at_boundary(&mut self, kind: Kind, word: u64) -> Value {
         match kind {
             Kind::Str => self.materialise_str(Handle::from_slot(word)),
+            Kind::Enum => self.materialise_enum(Handle::from_slot(word)),
             Kind::Reference => {
                 unreachable!("`admits` refuses a boundary crossing that carries a struct")
             }
@@ -3374,17 +4309,147 @@ impl<'a> FrameVm<'a> {
     /// The `Value` `Inst::Pop`, `Inst::Try` and `Inst::Return` consume at
     /// `pc`: the top of the boundary buffer, where `leaves_a_boundary_value`
     /// proved it already is one, or the top of the one stack -- popped,
-    /// rooted, and materialised -- where `crosses_as_a_string` proved it is a
-    /// `String` instead. `admits` proved exactly one of the two holds at
-    /// every `pc` this runs at, so there is nothing left to decide here that
-    /// was not already decided; this asks the same question the same way.
+    /// rooted, and materialised -- where `crosses_as_a_string` or
+    /// `crosses_as_an_enum` proved it is a `String` or an enum-case object
+    /// instead. `admits` proved exactly one of the three holds at every `pc`
+    /// this runs at, so there is nothing left to decide here that was not
+    /// already decided; this asks the same questions the same way.
     fn pop_boundary_value(&mut self, here: FunctionId, pc: usize) -> Value {
         if crosses_as_a_string(&self.operands[here.0 as usize], pc) {
             let handle = Handle::from_slot(self.pop_word());
             self.with_root(handle, |vm| vm.materialise_str(handle))
+        } else if crosses_as_an_enum(&self.operands[here.0 as usize], pc) {
+            let handle = Handle::from_slot(self.pop_word());
+            self.with_root(handle, |vm| vm.materialise_enum(handle))
         } else {
             self.pop_value()
         }
+    }
+
+    /// The word a Host call's answer `value` becomes, at the fully-resolved
+    /// declared type `ty` -- the reverse of [`FrameVm::materialise_enum`],
+    /// and decision 5's boundary crossed the other way: a `Value`
+    /// `crate::host::HostRegistry::call_with` handed back, turned into a
+    /// word this backend's own heap owns.
+    ///
+    /// Only ever called where `host_part(ty, &mut Vec::new())` already
+    /// answered `Some` -- `Inst::CallHost`'s own dispatch arm asks that first
+    /// -- so every `HostType` this reaches has an eight-byte form, and the
+    /// `unreachable!`s below are a host answering something other than what
+    /// `cove_schema` says its own operation returns, which is `HostRegistry`'s
+    /// contract broken rather than a shape this backend chose not to run.
+    fn host_value_to_word(&mut self, value: Value, ty: &cove_schema::HostType) -> u64 {
+        use cove_schema::HostType;
+        match ty {
+            HostType::Unit => 0,
+            HostType::Bool => match value {
+                Value(Repr::Bool(flag)) => Word::of_bool(flag),
+                other => unreachable!("a Host op declared `Bool` and answered {other:?}"),
+            },
+            HostType::Int => match value {
+                Value(Repr::Int(int)) => Word::of_int(int),
+                other => unreachable!("a Host op declared `Int` and answered {other:?}"),
+            },
+            HostType::String => match value {
+                Value(Repr::Str(text)) => {
+                    let handle = self
+                        .heap
+                        .allocate(self.str_layout, pack_string_words(text.as_bytes()));
+                    self.allocated(self.heap.layout_words(handle));
+                    handle.to_slot()
+                }
+                other => unreachable!("a Host op declared `String` and answered {other:?}"),
+            },
+            HostType::Error => {
+                let message = value
+                    .error_message()
+                    .cloned()
+                    .unwrap_or_else(|| Value(Repr::Str(Rc::from(""))));
+                let message_word = self.host_value_to_word(message, &HostType::String);
+                let layout = self.error_layout;
+                let handle = self.heap.allocate(layout, vec![message_word]);
+                self.allocated(1);
+                handle.to_slot()
+            }
+            HostType::Option(inner) => {
+                let (case, payload): (&'static str, Vec<u64>) = match value.some_payload() {
+                    Some(payload) => (
+                        cove_schema::builtins::SOME_CASE.name,
+                        vec![self.host_value_to_word(
+                            payload.first().cloned().unwrap_or(Value::unit()),
+                            inner,
+                        )],
+                    ),
+                    None => (cove_schema::builtins::NONE_CASE.name, Vec::new()),
+                };
+                let part = host_part(inner, &mut Vec::new())
+                    .expect("`host_value_to_word` is only reached where `host_part` answers");
+                let payload_parts = if payload.is_empty() {
+                    Vec::new()
+                } else {
+                    vec![part]
+                };
+                let layout =
+                    self.enum_layout_for(cove_schema::builtins::OPTION.name, case, &payload_parts);
+                let handle = self.heap.allocate(layout, payload);
+                self.allocated(payload_parts.len());
+                handle.to_slot()
+            }
+            HostType::Result(ok_ty, err_ty) => {
+                let (case, payload, inner_ty): (&'static str, Vec<Value>, &HostType) = match value
+                    .ok_payload()
+                {
+                    Some(payload) => (cove_schema::builtins::OK_CASE.name, payload.to_vec(), ok_ty),
+                    None => match value.err_payload() {
+                        Some(payload) => (
+                            cove_schema::builtins::ERR_CASE.name,
+                            payload.to_vec(),
+                            err_ty,
+                        ),
+                        None => unreachable!(
+                            "a Host op declared `Result` and answered neither `Ok` nor `Err`"
+                        ),
+                    },
+                };
+                let inner_word = self.host_value_to_word(
+                    payload.first().cloned().unwrap_or(Value::unit()),
+                    inner_ty,
+                );
+                let part = host_part(inner_ty, &mut Vec::new())
+                    .expect("`host_value_to_word` is only reached where `host_part` answers");
+                let layout =
+                    self.enum_layout_for(cove_schema::builtins::RESULT.name, case, &[part]);
+                let handle = self.heap.allocate(layout, vec![inner_word]);
+                self.allocated(1);
+                handle.to_slot()
+            }
+            other => unreachable!(
+                "`host_value_to_word` was asked for a {other:?}, which `host_part` never answers \
+                 `Some` for"
+            ),
+        }
+    }
+
+    /// The layout [`FrameVm::new`] registered for `(type_name, case,
+    /// payload)`.
+    ///
+    /// # Panics
+    ///
+    /// If nothing was registered for it. `FrameVm::new` registers one entry
+    /// per site [`enum_construction`] or [`host_result_layouts`] names, so
+    /// this firing is a broken invariant between the two rather than a
+    /// program that could be told about it.
+    fn enum_layout_for(&self, type_name: &str, case: &str, payload: &[Part]) -> LayoutId {
+        self.enum_layouts
+            .iter()
+            .find(|(t, c, p, _)| &**t == type_name && &**c == case && p.as_slice() == payload)
+            .map(|(.., id)| *id)
+            .unwrap_or_else(|| {
+                unreachable!(
+                    "no layout registered for `{type_name}.{case}`; `FrameVm::new` registers one \
+                     for every site `enum_construction` or `host_result_layouts` proves reachable"
+                )
+            })
     }
 
     /// The lexicographic byte ordering two `String` handles compare by,
