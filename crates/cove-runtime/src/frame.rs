@@ -674,7 +674,7 @@ fn admits_function(
         }
     }
     // One kind of parameter, because they arrive without moving and the frame
-    // puts one kind first. See [`FrameMap`].
+    // puts the scalars first. See [`FrameMap`].
     if function
         .params
         .iter()
@@ -684,6 +684,24 @@ fn admits_function(
         return Err(Refused::new(
             format!(
                 "{}, which takes both a value and a scalar parameter",
+                named()
+            ),
+            function.span,
+        ));
+    }
+    // And a value parameter stands at the frame base, which is scalar slot 0's
+    // place, so a function that has both is one whose parameters cannot arrive
+    // without moving. What would remove this is the lowering numbering one
+    // space; see [`FrameMap`].
+    if function
+        .params
+        .iter()
+        .any(|kind| matches!(kind, SlotKind::Value))
+        && function.scalar_frame_size != 0
+    {
+        return Err(Refused::new(
+            format!(
+                "{}, which takes a value parameter and also keeps a scalar slot",
                 named()
             ),
             function.span,
@@ -978,53 +996,44 @@ impl HandleRoots for FrameRoots<'_> {
 /// offset to derive from**, and it is derived in turn from the two frame sizes
 /// `cove_ir::Function` carries. The lowering still numbers two spaces — an
 /// `Inst::LoadScalar` addresses one and an `Inst::LoadLocal` the other — and
-/// this is the map that makes them one: value slot *j* stands at
-/// `base + values + j` and scalar slot *i* at `base + scalars + i`, in one
-/// region from one base, with one width.
+/// this is the map that makes them one region from one base: **the scalar
+/// slots first and the value slots behind them**, so scalar slot *i* stands at
+/// `base + i` and value slot *j* at `base + values + j`.
 ///
-/// # Which kind comes first, and why it is the callee's choice
+/// # Why the scalars come first, and what that refuses
 ///
 /// A call does not move its arguments: `base' = top - argc`, so the words the
-/// caller pushed *are* the callee's first slots. That only works if the
-/// callee's parameters stand at the front of its frame, and a callee's
-/// parameters are all of one kind in the admitted subset — [`admits`] refuses
-/// a call that passes both — so the layout puts the parameters' kind first and
-/// the other kind behind it. A function with no parameters at all puts its
-/// scalars first, which is Phase A's arrangement unchanged.
+/// caller pushed *are* the callee's first slots. With the scalars first that
+/// works for a scalar parameter always, because a scalar parameter is scalar
+/// slot 0. It works for a *value* parameter only where the function has no
+/// scalar slots at all, and [`admits`] refuses one that does — by name, and
+/// naming what would be needed instead, which is a lowering that numbers one
+/// space rather than two.
+///
+/// The alternative was a map that puts whichever kind the parameters are
+/// first. It costs the dispatch loop a second base to keep beside `base`, on
+/// every instruction that addresses a word, for a generality no admitted row
+/// uses; this way the scalar core's addressing is `base + slot`, which is
+/// Phase A's unchanged.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct FrameMap {
     /// How many words one call needs: both frame sizes, added.
     width: u32,
-    /// Where value slot 0 stands, relative to the frame base.
+    /// Where value slot 0 stands, relative to the frame base — which is the
+    /// scalar frame size, because the scalars come first.
     values: u32,
-    /// How many value slots there are — the reference range is
-    /// `values .. values + value_count`.
+    /// How many value slots there are. The frame's reference range is
+    /// `values .. values + value_count`, and every word outside it is scalar.
     value_count: u32,
-    /// Where scalar slot 0 stands, relative to the frame base.
-    scalars: u32,
 }
 
 impl FrameMap {
-    /// The map `function`'s two frame sizes and its parameter kinds imply.
+    /// The map `function`'s two frame sizes imply.
     fn of(function: &cove_ir::Function) -> FrameMap {
-        let values = function.value_frame_size;
-        let scalars = function.scalar_frame_size;
-        // A value parameter has to arrive at the front, because the calling
-        // convention does not move it.
-        let value_first = function
-            .params
-            .first()
-            .is_some_and(|kind| matches!(kind, SlotKind::Value));
-        let (value_base, scalar_base) = if value_first {
-            (0, values)
-        } else {
-            (scalars, 0)
-        };
         FrameMap {
-            width: values + scalars,
-            values: value_base,
-            value_count: values,
-            scalars: scalar_base,
+            width: function.value_frame_size + function.scalar_frame_size,
+            values: function.scalar_frame_size,
+            value_count: function.value_frame_size,
         }
     }
 
@@ -1671,7 +1680,7 @@ impl<'a> FrameVm<'a> {
         self.frames.clear();
         self.boundary.clear();
         self.fuel = 0;
-        self.open(function, 0);
+        let _ = self.open(function, 0);
         self.frames.push(Call {
             function,
             return_pc: 0,
@@ -1718,13 +1727,13 @@ impl<'a> FrameVm<'a> {
         let program = self.program;
         let standing = *self.frames.last().expect("the caller pushed a frame");
         let mut base = standing.base as usize;
-        let mut map = self.maps[standing.function.0 as usize];
-        // The two numberings the lowering still keeps, read through the one
-        // frame map into one region from one base. Locals rather than fields
-        // for the reason `base` and `pc` are: every instruction that addresses
-        // a word reads one of them.
-        let mut values = base + map.values as usize;
-        let mut scalars = base + map.scalars as usize;
+        // The second of the two numberings the lowering still keeps, read
+        // through the one frame map into one region from one base. A local
+        // rather than a field for the reason `base` and `pc` are: every
+        // instruction that addresses a value slot reads it. The *first*
+        // numbering needs no local at all, because the scalars stand at the
+        // base — see `FrameMap`.
+        let mut values = base + self.maps[standing.function.0 as usize].values as usize;
         let mut running = program.function(standing.function);
         let mut code: &[Inst] = &running.code;
         let mut blocks: &[u32] = &running.block_fuel;
@@ -1740,12 +1749,12 @@ impl<'a> FrameVm<'a> {
                 // ------------------------------------------ the scalar core
                 Inst::ScalarConst(value) => self.push_scalar(Word::of_int(value)),
                 Inst::LoadScalar(slot) => {
-                    let word = self.words[scalars + slot as usize];
+                    let word = self.words[base + slot as usize];
                     self.push_scalar(word);
                 }
                 Inst::StoreScalar(slot) => {
                     let word = self.pop_word();
-                    self.words[scalars + slot as usize] = word;
+                    self.words[base + slot as usize] = word;
                 }
                 Inst::ScalarPop => {
                     self.pop_word();
@@ -1809,7 +1818,7 @@ impl<'a> FrameVm<'a> {
                     // a call that passes both kinds -- see `FrameMap`.
                     let argc = (scalar_argc + value_argc) as usize;
                     let callee_base = self.words.len() - argc;
-                    self.open(target, callee_base);
+                    values = self.open(target, callee_base);
                     if self.words.len() > self.high_water {
                         self.high_water = self.words.len();
                     }
@@ -1819,9 +1828,6 @@ impl<'a> FrameVm<'a> {
                         base: callee_base as u32,
                     });
                     base = callee_base;
-                    map = self.maps[target.0 as usize];
-                    values = base + map.values as usize;
-                    scalars = base + map.scalars as usize;
                     running = callee;
                     code = &callee.code;
                     blocks = &callee.block_fuel;
@@ -1837,9 +1843,7 @@ impl<'a> FrameVm<'a> {
                         Some(caller) => {
                             self.push_scalar(answer);
                             base = caller.base as usize;
-                            map = self.maps[caller.function.0 as usize];
-                            values = base + map.values as usize;
-                            scalars = base + map.scalars as usize;
+                            values = base + self.maps[caller.function.0 as usize].values as usize;
                             running = program.function(caller.function);
                             code = &running.code;
                             blocks = &running.block_fuel;
@@ -1984,9 +1988,7 @@ impl<'a> FrameVm<'a> {
                                 Err(resumed) => {
                                     let caller =
                                         self.frames.last().expect("a caller stands").function;
-                                    map = self.maps[caller.0 as usize];
-                                    values = base + map.values as usize;
-                                    scalars = base + map.scalars as usize;
+                                    values = base + self.maps[caller.0 as usize].values as usize;
                                     running = program.function(caller);
                                     code = &running.code;
                                     blocks = &running.block_fuel;
@@ -2006,9 +2008,7 @@ impl<'a> FrameVm<'a> {
                         Ok(value) => return Ok(value),
                         Err(resumed) => {
                             let caller = self.frames.last().expect("a caller stands").function;
-                            map = self.maps[caller.0 as usize];
-                            values = base + map.values as usize;
-                            scalars = base + map.scalars as usize;
+                            values = base + self.maps[caller.0 as usize].values as usize;
                             running = program.function(caller);
                             code = &running.code;
                             blocks = &running.block_fuel;
@@ -2057,11 +2057,12 @@ impl<'a> FrameVm<'a> {
     /// because `crate::slot` never issues generation zero. So a frame with
     /// reference slots is opened by the same instruction as one without, and
     /// what is added is the bitmap's masked pass over `width / 64` limbs.
-    fn open(&mut self, function: FunctionId, base: usize) {
+    fn open(&mut self, function: FunctionId, base: usize) -> usize {
         let map = self.maps[function.0 as usize];
         let width = map.width as usize;
         self.words.resize(base + width, 0);
         self.refs.write_frame(base, width, map.references());
+        base + map.values as usize
     }
 
     /// Pushes a word the layout calls scalar.
@@ -2298,7 +2299,7 @@ impl<'a> FrameVm<'a> {
         self.boundary.clear();
         self.fuel = 0;
         self.words.extend_from_slice(arguments);
-        self.open(function, 0);
+        let _ = self.open(function, 0);
         self.frames.push(Call {
             function,
             return_pc: 0,
