@@ -7,6 +7,7 @@ pub mod database;
 pub mod embed;
 pub mod error;
 pub mod files;
+pub mod frame;
 pub mod heap;
 pub mod host;
 pub mod http;
