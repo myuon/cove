@@ -1027,6 +1027,102 @@ export fn main() -> Int {
 }
 ";
 
+/// The same loop with no bound on it, for a test about where a fuel limit
+/// stops rather than about what the loop answers.
+const A_STRUCT_LOOP_WITHOUT_END: &str = "\
+struct Cell {
+  at: Int
+  step: Int
+}
+
+export fn main() -> Int {
+  var cell = Cell(at: 0, step: 1)
+  var total = 0
+  while cell.at < 1000000 {
+    total = total + cell.step
+    cell.at = cell.at + cell.step
+  }
+  total
+}
+";
+
+/// A struct's own fuel is the VM's.
+///
+/// `Vm` charges a struct's width beside `make-struct` and beside `set-field`,
+/// because building and copying one are proportional to it and ADR 0019 asks
+/// that such work is charged proportionally. This backend charges the same
+/// width at the same two instructions, so a fuel limit stops the two in the
+/// same turn of the same loop with the same message and the same span.
+///
+/// Equality here is what the stop-parity tests rest on. ADR 0019 makes fuel
+/// backend-specific and says why; what is asserted is not that it *must* be
+/// equal but that it *is*, because a limit that stopped the two backends in
+/// different turns would make every comparison of their answers a comparison
+/// of two different programs.
+#[test]
+fn a_fuel_limit_stops_a_struct_loop_where_it_stops_the_vm() {
+    let ready = ready(A_STRUCT_LOOP_WITHOUT_END);
+    let limits = Limits {
+        fuel: Some(10_000),
+        ..Limits::default()
+    };
+    let vm = ready.on_vm_with(Some(limits.clone()), None);
+    let (frame, _, _) = ready.on_frame_with(Some(limits), None);
+    assert_eq!(vm, frame, "the two backends stopped differently");
+    assert!(matches!(frame, Outcome::Raised { .. }), "the run stopped");
+}
+
+/// And the fuel each backend spends over a whole run of each admitted row is
+/// the same number.
+#[test]
+fn the_frame_spends_the_fuel_the_vm_spends() {
+    for name in ADMITTED_ROWS {
+        let ready = bench(name);
+        let spent = |on_frame: bool| {
+            let hosts = hosts(Some(Limits::default()), None);
+            let runtime = Runtime::new(ready.checked.clone(), ready.sources.clone(), hosts.clone());
+            if on_frame {
+                let mut frame = FrameVm::new(&runtime, &hosts, &ready.ir);
+                frame
+                    .run_entry(name, "main", Vec::new())
+                    .expect("it answers");
+            } else {
+                let mut vm = Vm::new(&runtime, &hosts, &ready.ir);
+                vm.run_entry(name, "main", Vec::new()).expect("it answers");
+            }
+            hosts
+                .with_budget(|budget| budget.fuel_spent())
+                .expect("a budget was installed")
+        };
+        let (on_vm, on_frame) =
+            crate::on_cove_stack(|| (spent(false), spent(true))).expect("a thread to run Cove on");
+        assert_eq!(
+            on_vm, on_frame,
+            "`benches/{name}` spent {on_vm} fuel on the VM and {on_frame} on the 8-byte frame"
+        );
+    }
+}
+
+/// A struct program that raises fails identically on all three backends —
+/// same message, same span.
+///
+/// The overflow is *inside a field write*, which is the one arithmetic Phase B
+/// added a road to: the addend is read out of a heap object through the
+/// reference map and the answer is written back into a copy of it. Nothing
+/// about that road is allowed to change what the failure says or where it
+/// points, and `agree` compares both.
+#[test]
+fn a_struct_program_that_raises_agrees_on_message_and_span() {
+    agree(
+        "struct Cell {\n  at: Int\n}\n\nexport fn main() -> Int {\n  \
+         var cell = Cell(at: 9223372036854775807)\n  cell.at = cell.at + 1\n  cell.at\n}\n",
+    );
+    agree(
+        "struct Cell {\n  at: Int\n  step: Int\n}\n\nexport fn main() -> Int {\n  \
+         var cell = Cell(at: 7, step: 0)\n  cell.at = cell.at / cell.step\n  cell.at\n}\n",
+    );
+}
+
 /// **The positive half of the rooting proof**: a struct standing in a frame
 /// slot survives every collection of a run that collects at every safepoint,
 /// and the answer is the one the other two backends give.

@@ -167,6 +167,16 @@
 //! instruction whose answer is a handle for a struct-typed field and scalar
 //! bits for an `Int` one, and only decision 2's reference map knows which.
 //!
+//! The first has a condition attached, and [`admits`] is what enforces it. The
+//! frame map calls **every** value slot a reference, so a value slot that held
+//! anything else would be scalar bits the walk reads as a handle — decision
+//! 1's invariant broken from the other side. The lowering can produce one:
+//! ADR 0027 records that a declaration reached through a value is lowered
+//! "with every argument on the value stack", so a slot `cove_ir` calls
+//! `SlotKind::Value` may hold an `Int`. So a `store-local`, and a value
+//! argument of a call, are admitted only where the instruction that pushed the
+//! word says it is a reference.
+//!
 //! **A pop writes no bit.** The word above the top is stale and is never read,
 //! because the walk stops at `words.len()` and every push writes its own bit
 //! before that word is inside the walk. So the bitmap costs a masked store per
@@ -471,12 +481,36 @@ fn admits_function(
             // the frame's reference map or an object's calls a handle, and
             // none of them builds a `Value`.
             Inst::LoadLocal(_)
-            | Inst::StoreLocal(_)
             | Inst::Dup
             | Inst::ValueToScalar
             | Inst::GetFieldAt(_)
             | Inst::GetFieldAtScalar(_)
             | Inst::ScalarToValue(_) => {}
+            // **A value slot holds a handle, and this is what makes that
+            // true.** The frame map calls every value slot a reference, so
+            // storing anything else into one would put bits the walk reads as
+            // a handle where the layout says a handle is -- which is exactly
+            // the invariant ADR 0028 decision 1 states for any physical
+            // arrangement, from the other side.
+            //
+            // The lowering can produce such a store: ADR 0027 records that a
+            // declaration reached through a value is lowered "with every
+            // argument on the value stack", so a slot `cove_ir` calls
+            // `SlotKind::Value` may hold an `Int` at run time. Nothing in the
+            // rows this backend runs does, and rather than rely on that, the
+            // instruction that pushed the word has to say it is a reference.
+            Inst::StoreLocal(_) => {
+                if pushed_kinds(program, function, pc, 1).as_deref() != Some(&[Kind::Reference]) {
+                    return Err(Refused::new(
+                        format!(
+                            "a general value slot in {} that the 8-byte frame cannot show holds \
+                             a heap object",
+                            named()
+                        ),
+                        span,
+                    ));
+                }
+            }
             // A constant is a word here rather than a `Value`. Narrowed to
             // the four kinds ADR 0028 decision 1 gives a word to: a `Str`, a
             // `Name` and a `Duration` have no eight-byte form and are out of
@@ -569,6 +603,23 @@ fn admits_function(
                     return Err(Refused::new(
                         format!(
                             "a call in {} that passes both a value and a scalar argument",
+                            named()
+                        ),
+                        span,
+                    ));
+                }
+                // A value argument becomes a value slot of the callee without
+                // moving, so it is the same question `Inst::StoreLocal` asks:
+                // the frame map will call that word a reference, so the
+                // instruction that pushed it has to say it is one.
+                if *value_argc != 0
+                    && !pushed_kinds(program, function, pc, *value_argc as usize)
+                        .is_some_and(|kinds| kinds.iter().all(|kind| *kind == Kind::Reference))
+                {
+                    return Err(Refused::new(
+                        format!(
+                            "a call in {} whose value argument the 8-byte frame cannot show is a \
+                             heap object",
                             named()
                         ),
                         span,
@@ -675,6 +726,20 @@ fn admits_function(
 /// warm before the first call rather than during it.
 const INITIAL_WORDS: usize = 4096;
 
+/// How many sixty-four-word limbs the bitmap reserves.
+///
+/// [`INITIAL_WORDS`]'s argument applies to the bitmap and applies *harder*,
+/// which is a thing Phase B found rather than assumed. The bitmap's limbs are
+/// a second small heap buffer that the hot loop touches on every push, so it
+/// is exactly the size class the bimodality of "The reservation is a
+/// measurement fix" lived in — one bit per word means the sixty-four limbs
+/// `INITIAL_WORDS` implies are 512 bytes, and a 512-byte block's placement
+/// inside a cache line is decided by the process's allocator state.
+///
+/// So it reserves 4 KB and not 512 bytes, for a bitmap every admitted row uses
+/// two limbs of. The number is a size class, not a capacity.
+const INITIAL_LIMBS: usize = 512;
+
 // ---------------------------------------------------- the GC bitmap
 
 /// One bit per word of the one stack: whether the word is a reference.
@@ -718,11 +783,19 @@ struct Bitmap {
 }
 
 impl Bitmap {
-    /// A bitmap with room for `words` words, reserved up front for
-    /// [`INITIAL_WORDS`]'s reason.
+    /// A bitmap with room for `words` words. Reached only by the tests that
+    /// exercise the masks directly; a `FrameVm` reserves by limb, because what
+    /// [`INITIAL_LIMBS`] is choosing is a size class rather than a capacity.
+    #[cfg(test)]
     fn with_capacity(words: usize) -> Bitmap {
+        Bitmap::with_limbs(words.div_ceil(64))
+    }
+
+    /// A bitmap of `limbs` limbs, reserved up front for [`INITIAL_LIMBS`]'s
+    /// reason.
+    fn with_limbs(limbs: usize) -> Bitmap {
         Bitmap {
-            limbs: vec![0; words.div_ceil(64)],
+            limbs: vec![0; limbs],
         }
     }
 
@@ -1326,6 +1399,20 @@ pub struct FrameVm<'a> {
     /// Which words a collection may find roots in, which is
     /// [`RootScope::EveryWord`] outside the two mutation tests.
     scope: RootScope,
+    /// Whether a collection is due, kept here rather than asked of the heap at
+    /// every safepoint.
+    ///
+    /// **This is a measurement fix and it is the same one twice.**
+    /// `benches/pure` takes a safepoint at every call and at every return and
+    /// allocates nothing at all, so asking the heap would be two loads from a
+    /// structure the row never otherwise touches — a cold line, twice a call,
+    /// for an answer that is always no. A row that allocates asks the heap
+    /// once per allocation instead, where the structure is warm because it
+    /// just wrote to it.
+    ///
+    /// So the pacing decision lives in the heap, as it should, and *this* is
+    /// one hot bool beside `fuel`.
+    due: bool,
     /// One record per standing call.
     frames: Vec<Call>,
     /// Where a `Value` is materialised, and the only place one exists in a
@@ -1422,13 +1509,14 @@ impl<'a> FrameVm<'a> {
             runtime,
             program,
             words: Vec::with_capacity(INITIAL_WORDS),
-            refs: Bitmap::with_capacity(INITIAL_WORDS),
+            refs: Bitmap::with_limbs(INITIAL_LIMBS),
             heap,
             shapes,
             field_at,
             maps: program.functions.iter().map(FrameMap::of).collect(),
             temps: TempRoots::new(),
             scope: RootScope::EveryWord,
+            due: false,
             frames: Vec::with_capacity(MAX_CALL_DEPTH),
             boundary: Vec::new(),
             constants: program.constants.iter().map(const_word).collect(),
@@ -1459,6 +1547,7 @@ impl<'a> FrameVm<'a> {
     #[cfg(test)]
     fn stress(&mut self) {
         self.heap.stress(true);
+        self.due = true;
     }
 
     /// How many collections this run ran, and what they found.
@@ -1962,8 +2051,8 @@ impl<'a> FrameVm<'a> {
     /// Opens `function`'s frame at `base`: the words it needs, and the bits
     /// that say which of them are references.
     ///
-    /// **This is the whole of what rooting costs a call.** The words are one
-    /// `Vec::resize`, exactly as Phase A's were -- a zero word is a canonical
+    /// **This is what rooting costs a call, beside one indexed load of the
+    /// map.** The words are one `Vec::resize`, exactly as Phase A's were -- a zero word is a canonical
     /// `Unit`, a `false` and a `0`, and it is *also* never a live handle,
     /// because `crate::slot` never issues generation zero. So a frame with
     /// reference slots is opened by the same instruction as one without, and
@@ -2006,6 +2095,10 @@ impl<'a> FrameVm<'a> {
     fn allocated(&mut self, width: usize) {
         self.heap_stats.allocated_objects += 1;
         self.heap_stats.allocated_bytes += (width * std::mem::size_of::<u64>()) as u64;
+        // Asked here rather than at the safepoint. Allocating is the only
+        // thing that can make a collection due, and this is the one moment the
+        // heap is certainly warm.
+        self.due |= self.heap.should_collect();
     }
 
     /// The running frame's window, which is what the two mutations of
@@ -2028,7 +2121,7 @@ impl<'a> FrameVm<'a> {
     /// every word of one is a `Value`, and this walks a bitmap because most
     /// words are not references and the bitmap is what says which are.
     fn collect_if_due(&mut self) {
-        if !self.heap.should_collect() {
+        if !self.due {
             return;
         }
         let range = match self.scope {
@@ -2062,6 +2155,7 @@ impl<'a> FrameVm<'a> {
         self.marked += collected.live_objects;
         self.most_roots_at_once = self.most_roots_at_once.max(collected.roots_yielded);
         self.most_expansions_at_once = self.most_expansions_at_once.max(collected.expansions);
+        self.due = self.heap.should_collect();
     }
 
     /// The top of the one stack.
