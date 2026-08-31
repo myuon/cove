@@ -1515,6 +1515,99 @@ mod tests {
         );
     }
 
+    /// A closure's own bytes, its captures' names and slots, and what the
+    /// captures reach — counted once however many live paths reach the
+    /// closure.
+    ///
+    /// `Marker::visit`'s closure arm has the `walked` guard the struct arm
+    /// was missing, so this passes today. It is here because nothing checked
+    /// it: `Value::Closure` was reached by exactly one test in this module
+    /// and that test asks about survival rather than about bytes, and
+    /// `vm::tests::heap`'s `same_heap` compares the two backends against each
+    /// other rather than against an absolute, so an error made identically on
+    /// both would go unseen there.
+    #[test]
+    fn a_closure_shared_by_two_live_paths_reports_its_bytes_once() {
+        let mut roots = SlotRoots::new();
+        let mut heap = Heap::new();
+        let closure = Rc::new(crate::value::Closure {
+            is_async: false,
+            arity: 1,
+            body: crate::value::ClosureBody::Lowered(cove_ir::FunctionId(0)),
+            module: "test".into(),
+            captures: vec![("held".into(), Value::string("seven"))],
+        });
+        let _a = root(&mut roots, Value(Repr::Closure(Rc::clone(&closure))));
+        let _b = root(&mut roots, Value(Repr::Closure(Rc::clone(&closure))));
+        // As in the struct case above: the local would otherwise be an
+        // unrooted temporary, and the shortfall rule would correctly make it
+        // a third live path.
+        drop(closure);
+
+        let collected = heap.collect(&roots);
+        let expected = size_of::<crate::value::Closure>() as u64
+            + ("held".len() + size_of::<Value>()) as u64
+            + "seven".len() as u64;
+        assert_eq!(
+            collected.live_bytes, expected,
+            "a closure reached from two roots should be counted once, not once per root"
+        );
+    }
+
+    /// An enum case is billed for the box it is, plus the payload slots it
+    /// actually allocates — and a payload of one allocates none.
+    ///
+    /// Issue #183 put the arities an ordinary program builds inside the
+    /// `EnumValue` itself, so a `Some(x)` is one allocation rather than two,
+    /// and `Marker::visit` charges only a `Payload::Many` for its slice.
+    /// ADR 0028 decision 2 says the prototype records whether a heap
+    /// representation gives that win back before it becomes the default,
+    /// which needs the present figure written down rather than assumed.
+    #[test]
+    fn an_enum_case_is_billed_for_the_payload_it_actually_allocates() {
+        let one = {
+            let mut roots = SlotRoots::new();
+            let mut heap = Heap::new();
+            let _slot = root(
+                &mut roots,
+                Value(Repr::Enum(Box::new(crate::value::EnumValue {
+                    type_name: "Option".into(),
+                    case: "Some".into(),
+                    payload: crate::value::Payload::One(Value::string("seven")),
+                }))),
+            );
+            heap.collect(&roots).live_bytes
+        };
+        assert_eq!(
+            one,
+            size_of::<crate::value::EnumValue>() as u64 + "seven".len() as u64,
+            "a payload of one lives in the box that already exists"
+        );
+
+        let many = {
+            let mut roots = SlotRoots::new();
+            let mut heap = Heap::new();
+            let _slot = root(
+                &mut roots,
+                Value(Repr::Enum(Box::new(crate::value::EnumValue {
+                    type_name: "test.Pair".into(),
+                    case: "Both".into(),
+                    payload: crate::value::Payload::Many(
+                        vec![Value::string("seven"), Value::string("eight")].into(),
+                    ),
+                }))),
+            );
+            heap.collect(&roots).live_bytes
+        };
+        assert_eq!(
+            many,
+            size_of::<crate::value::EnumValue>() as u64
+                + 2 * size_of::<Value>() as u64
+                + ("seven".len() + "eight".len()) as u64,
+            "a payload of two or more is a slice beside the box"
+        );
+    }
+
     #[test]
     fn collections_are_spaced_by_allocation() {
         let mut heap = Heap::new();
