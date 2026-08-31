@@ -699,6 +699,11 @@ static REJECTIONS: &[Rejection] = &[
         code: "cove::type::variadic_default",
     },
     Rejection {
+        section: "Lambdas",
+        source: "/// Writes a variadic parameter on a function value.\nexport fn probe() -> Int {\n  let gather = fn(items: Int...) {\n    1\n  }\n  gather(1)\n}\n",
+        code: "cove::type::variadic_lambda",
+    },
+    Rejection {
         section: "`match`",
         source: "enum Status {\n  Pending\n  Active\n}\n\n/// Leaves a case of an enum uncovered.\nexport fn probe() -> Int {\n  match Status.Pending {\n    Status.Pending => 1\n  }\n}\n",
         code: "cove::resolve::non_exhaustive_match",

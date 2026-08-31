@@ -1730,6 +1730,18 @@ impl<'a> Interpreter<'a> {
         }
     }
 
+    /// Binds a call's arguments into the frame it is filling, for a declared
+    /// function, a method and a lambda alike.
+    ///
+    /// The variadic branch below is a declaration's. It used to be a
+    /// lambda's too — one `bind_params` serves both, so a lambda's `...`
+    /// gathered into an `Array` here while the checker typed the same
+    /// parameter as its element type and said nothing, which is the
+    /// divergence issue #168 records. Nothing is removed for that:
+    /// `cove::type::variadic_lambda` refuses such a lambda now, so no
+    /// checked program reaches this branch through one, and what the branch
+    /// does for a declaration was never in question. Deleting it to say so
+    /// would delete the rule this backend is the oracle for.
     fn bind_params(
         &mut self,
         env: &mut Env,

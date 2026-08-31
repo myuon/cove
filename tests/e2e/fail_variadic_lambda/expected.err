@@ -1,0 +1,8 @@
+error[cove::type::variadic_lambda]: parameter `items` is variadic, so it cannot be written on a function value
+  --> <e2e>/fail_variadic_lambda/main/main.cove:11:14
+   |
+11 |   let g = fn(items: Int...) {
+   |              ^^^^^^^^^^^^^
+  rule: A variadic parameter is written on a declaration: a function value has exactly the parameters its function type names, and a function type names a fixed list of them.
+  help: remove the `...` and give `items` an `Array` type, passing one at the call; or declare an `fn`, which a call reaches by name and can gather arguments for
+1 error(s)

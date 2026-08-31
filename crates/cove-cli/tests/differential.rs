@@ -551,6 +551,15 @@ use cove_sema::resolve::Program as Checked;
 /// the same stretch and this is the one that counts: `fail_variadic_shape`
 /// is the other, and it pins two new check-time diagnostics, so it does not
 /// check and there is nothing in it to run.
+///
+/// It stayed at 97 when the lowering stopped refusing a closure's variadic
+/// parameter, and both halves of that are worth recording. The construct
+/// moved to `cove::type::variadic_lambda`, so no program the lowering is
+/// handed can hold one and the refusal it used to make was a rule stated
+/// twice — and no corpus case wrote one either way, which is exactly why the
+/// two backends could disagree about it undetected until issue #168 wrote
+/// the program by hand. `tests/e2e/fail_variadic_lambda` is that program,
+/// and it joins the cases that do not check rather than the ones that lower.
 const LOWERED_FLOOR: usize = 97;
 
 /// Every refusal the corpus is allowed to hold: the case, and the construct
