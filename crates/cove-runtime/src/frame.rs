@@ -67,20 +67,27 @@
 //! pc                     an index into the running function's code
 //! ```
 //!
-//! A frame is `words[base .. base + width]`, where `width` is the callee's two
-//! frame sizes added. **Parameters, locals and temporaries are one index space
-//! from one base**: parameter `i` is `base + i`, the body's locals follow it
-//! densely, and a temporary is pushed above `base + width` and addressed by
+//! A frame is `words[base .. base + width]`, where `width` is
+//! `cove_ir::Function::slot_count`: every slot of the one numbering, over all
+//! three regions together. **Parameters, locals and temporaries are one index
+//! space from one base**: parameter `i` is `base + i`, for every `i` in
+//! `0..arity`, because `cove_ir::Function::slots[..arity]` *is* `params`, in
+//! declaration order, whatever kind each one is. The body's own locals follow
+//! it densely, and a temporary is pushed above `base + width` and addressed by
 //! nothing. That is the whole of the arrangement; there is no second stack, no
 //! second base, and no second count on a call.
 //!
-//! The lowering still numbers *two* spaces — an `Inst::LoadScalar` addresses
-//! one and an `Inst::LoadLocal` the other — and `FrameMap` is what makes
-//! them one region from one base, which is decision 1's "every physical offset
-//! derives from the one frame layout" met by deriving the map rather than by
-//! having been given it. Phase C looked at moving that into `cove_ir` and did
-//! not: see `FrameMap` for what it would take and why the per-field kind did
-//! not bring it.
+//! The lowering numbers *one* space, not two: `Inst::LoadScalar`,
+//! `Inst::StoreScalar`, `Inst::LoadLocal` and `Inst::StoreLocal` all carry a
+//! number in that one numbering, and all four are read the same way —
+//! `self.words[base + slot as usize]` is the whole of the arithmetic, for any
+//! of them, with nothing to translate in between. A three-array backend still
+//! has to turn that number into a position within whichever region's own
+//! array it names, which is what `cove_ir::Function::offset` answers there;
+//! a one-array frame does not, because its one array already *is* the one
+//! numbering. What `FrameMap` supplies is the part a number cannot carry: how
+//! wide a frame is, and which of its words this backend's collector must
+//! follow — see `FrameMap`.
 //!
 //! Every logical value in this slice is exactly one word, as ADR 0028
 //! permits ("most values have width one"); a layout that spans adjacent
@@ -183,7 +190,7 @@
 //!
 //! | where the word is | what says whether it is a reference |
 //! | --- | --- |
-//! | a frame slot | `FrameMap`, derived from `cove_ir::Function`'s two frame sizes; one masked pass per call |
+//! | a frame slot | `FrameMap`, derived from `cove_ir::Function::slots`; one masked pass per call |
 //! | an operand pushed by the scalar core, a `const`, or a `make-struct` | the instruction, which knows what it pushed |
 //! | an operand pushed by a field read | the **lowered type** the instruction names: `cove_ir::StructType`'s per-field `SlotKind` |
 //!
@@ -654,7 +661,6 @@ fn admits_function(
             }
             Inst::Call {
                 function: target,
-                scalar_argc,
                 value_argc,
                 place_argc,
                 ..
@@ -665,24 +671,24 @@ fn admits_function(
                         span,
                     ));
                 }
-                // The arguments become the callee's first words without
-                // moving, and the callee's frame puts one kind of slot first.
-                // A call that passes both kinds would need them interleaved
-                // the way the caller pushed them, which no single frame map
-                // can describe. See [`FrameMap`].
-                if *value_argc != 0 && *scalar_argc != 0 {
-                    return Err(Refused::new(
-                        format!(
-                            "a call in {} that passes both a value and a scalar argument",
-                            named()
-                        ),
-                        span,
-                    ));
-                }
                 // A value argument becomes a value slot of the callee without
                 // moving, so it is the same question `Inst::StoreLocal` asks:
                 // the frame map will call that word a reference, so the
-                // instruction that pushed it has to say it is one.
+                // instruction that pushed it has to say it is one. This is
+                // the check that survived the widening, generalised only in
+                // what it no longer assumes: it used to be asked because a
+                // call's value arguments were the *only* words it pushed,
+                // and now they are interleaved with scalar ones. That does
+                // not change what has to be verified, because a scalar
+                // argument can never answer this question wrong -- the
+                // scalar core has no instruction that pushes a reference, so
+                // a scalar parameter given a word the scalar core pushed is
+                // never anything but scalar bits, and there is nothing here
+                // for a "both directions" check to catch on that side. What
+                // is still live is exactly ADR 0027's boundary: a value
+                // argument's word can be a converted scalar rather than a
+                // handle, wherever it stands among the arguments, and this
+                // is what would show it.
                 if *value_argc != 0
                     && !operands
                         .top(pc, *value_argc as usize)
@@ -744,40 +750,6 @@ fn admits_function(
                 function.span,
             ));
         }
-    }
-    // One kind of parameter, because they arrive without moving and the frame
-    // puts the scalars first. See [`FrameMap`].
-    if function
-        .params
-        .iter()
-        .any(|kind| matches!(kind, SlotKind::Value))
-        && function.params.iter().any(|kind| kind.is_scalar())
-    {
-        return Err(Refused::new(
-            format!(
-                "{}, which takes both a value and a scalar parameter",
-                named()
-            ),
-            function.span,
-        ));
-    }
-    // And a value parameter stands at the frame base, which is scalar slot 0's
-    // place, so a function that has both is one whose parameters cannot arrive
-    // without moving. What would remove this is the lowering numbering one
-    // space; see [`FrameMap`].
-    if function
-        .params
-        .iter()
-        .any(|kind| matches!(kind, SlotKind::Value))
-        && function.scalar_frame_size != 0
-    {
-        return Err(Refused::new(
-            format!(
-                "{}, which takes a value parameter and also keeps a scalar slot",
-                named()
-            ),
-            function.span,
-        ));
     }
     Ok(calls)
 }
@@ -844,9 +816,11 @@ const INITIAL_LIMBS: usize = 512;
 ///
 /// Two places, and between them they cover every word that can exist:
 ///
-/// - **A frame word's bit is static.** A call writes the callee's whole range
-///   in one masked pass from [`FrameMap`], which is derived from
-///   `cove_ir::Function`'s two frame sizes. Nothing per-slot happens.
+/// - **A frame word's bit is static.** A call writes the callee's whole
+///   window in one masked pass per limb from [`FrameMap`]'s template, which is
+///   derived from `cove_ir::Function::slots` once per function. Nothing
+///   per-slot happens at call time; what varies per call is only where the
+///   template lands.
 /// - **An operand word's bit is written by the instruction that pushed it.**
 ///   `load` and `dup` copy the bit of the word they read, `make-struct` and
 ///   `set-field` push a reference, the scalar core pushes scalars, and
@@ -922,19 +896,31 @@ impl Bitmap {
     }
 
     /// Writes a whole frame's worth in one pass: every word of
-    /// `base .. base + width` a scalar, except `references` relative to `base`.
+    /// `base .. base + map.width` a scalar, except where `map.template` names
+    /// a reference.
     ///
-    /// **One read-modify-write per limb**, which for every frame this backend
-    /// opens is one, because a frame narrower than sixty-four words lies inside
-    /// a single limb. That is what a packed bitmap is for, and it is why
-    /// opening a frame costs O(width / 64) rather than O(width) — a call does
-    /// not pay per slot for slots it is about to overwrite anyway.
+    /// **One read-modify-write per limb touched**, which for every frame this
+    /// backend opens is one or two — a frame narrower than sixty-four words
+    /// spans at most two limbs, one where `base` happens to be limb-aligned.
+    /// That is what a packed bitmap is for, and it is why opening a frame
+    /// costs O(width / 64) rather than O(width) — a call does not pay per
+    /// slot for slots it is about to overwrite anyway.
     ///
     /// The clearing half is load-bearing rather than tidy. A return writes no
     /// bit, so the words a returning frame occupied keep its answers about
     /// them; the next frame at that depth would inherit them if opening did
     /// not say otherwise.
-    fn write_frame(&mut self, base: usize, width: usize, references: std::ops::Range<usize>) {
+    ///
+    /// `map.template` is built relative to the callee's own slot 0, not to
+    /// `base`, so it is shifted left by `base % 64` before it is compared
+    /// against this bitmap's limbs — a limb `t` of the template can land
+    /// across two limbs of the bitmap once that shift is not zero, so the low
+    /// part of bitmap limb `first + t` also needs the high part of template
+    /// limb `t - 1` carried into it. `x >> 64` is undefined in Rust, so the
+    /// shift-by-nothing case is its own branch rather than a case the general
+    /// formula is trusted to fall into safely.
+    fn write_frame(&mut self, base: usize, map: &FrameMap) {
+        let width = map.width as usize;
         if width == 0 {
             return;
         }
@@ -942,11 +928,23 @@ impl Bitmap {
         if end.div_ceil(64) > self.limbs.len() {
             self.limbs.resize(end.div_ceil(64), 0);
         }
-        let refs = base + references.start..base + references.end;
-        for index in base / 64..=(end - 1) / 64 {
+        let shift = base % 64;
+        let first = base / 64;
+        let last = (end - 1) / 64;
+        for index in first..=last {
             let frame = Bitmap::mask(index, base..end);
-            let named = Bitmap::mask(index, refs.clone());
-            self.limbs[index] = (self.limbs[index] & !frame) | named;
+            let t = index - first;
+            let low = map.template.get(t).copied().unwrap_or(0);
+            let named = if shift == 0 {
+                low
+            } else {
+                let carried = t
+                    .checked_sub(1)
+                    .and_then(|prev| map.template.get(prev))
+                    .map_or(0, |prev| prev >> (64 - shift));
+                (low << shift) | carried
+            };
+            self.limbs[index] = (self.limbs[index] & !frame) | (named & frame);
         }
     }
 
@@ -1093,41 +1091,56 @@ impl HandleRoots for FrameRoots<'_> {
 /// references.
 ///
 /// **This is the one frame layout ADR 0028 decision 1 asks every physical
-/// offset to derive from**, and since Phase D it is not a second layout at
-/// all: it is `cove_ir::Function`'s own numbering, read. The lowering numbers
-/// one space — the scalar region, then the value region, then the place
-/// region, from one origin — so **a slot's number is its offset from this
-/// frame's base**, for an `Inst::LoadScalar` and an `Inst::LoadLocal` alike.
-/// There is nothing here to translate, and no second base to keep beside
-/// `base` on every instruction that addresses a word.
+/// offset to derive from**, and it is not a second layout at all: it is
+/// `cove_ir::Function`'s own numbering, read. The lowering numbers one space
+/// — parameter `i` at slot `i` for every `i` in `0..arity`, whatever kind
+/// each one is, then the body's own slots grouped by region — so **a slot's
+/// number is its offset from this frame's base**, for an `Inst::LoadScalar`
+/// and an `Inst::LoadLocal` alike. There is nothing here to translate, and no
+/// second base to keep beside `base` on every instruction that addresses a
+/// word.
 ///
 /// What is left is the part a *number* cannot carry: how wide a frame is, and
-/// which run of it a collection follows. Both come off
-/// `cove_ir::Function::slot_count` and `cove_ir::Function::value_origin`, so
-/// this struct is those answers held where a per-call [`FrameVm::open`] can
-/// use them without asking again.
+/// which of its words are references. The width comes off
+/// `cove_ir::Function::slot_count`. The references no longer come off a
+/// range, because once a function's parameters are mixed its reference slots
+/// are not one — see "Why the scalars came first" below. They come off
+/// `template`, one bit per slot, set exactly where `cove_ir::Function::slots`
+/// says `SlotKind::Value`, so this struct is that table read once per
+/// function and held where a per-call [`FrameVm::open`] can shift it into
+/// place — see [`Bitmap::write_frame`] — without asking `cove_ir` again.
 ///
-/// # Why the scalars come first, and what that still refuses
+/// # Why the scalars came first, and what closed it
 ///
 /// A call does not move its arguments: `base' = top - argc`, so the words the
-/// caller pushed *are* the callee's first slots. With the scalars first that
-/// works for a scalar parameter always, because a scalar parameter is slot 0.
-/// It works for a *value* parameter only where the function has no scalar
-/// slots at all, and [`admits`] refuses one that does.
+/// caller pushed *are* the callee's first slots. While this struct still
+/// called the whole reference region one range, that range had to be exactly
+/// the words a call's arguments landed on to be a reference — which held for
+/// a scalar parameter always, because a scalar parameter was slot 0, and for
+/// a value parameter only where the function had no scalar slots at all.
+/// [`admits`] refused every function that mixed the two, naming the shape
+/// this section used to predict would need a second change to admit.
 ///
-/// Phase D moved that order out of this file and into the lowering, where it
-/// is the one numbering's order rather than one backend's convention. It did
-/// **not** move the refusals, and the reason is worth writing down because
-/// Phase C's note predicted otherwise. The refusals are not caused by two
-/// numberings. They are caused by the calling convention: arguments are pushed
-/// in *declaration* order and become slots without moving, while the numbering
-/// groups slots by region — so a function whose parameters are mixed has its
-/// second kind of parameter pushed at a word whose number names a different
-/// slot. Closing that needs the arguments permuted as a frame opens, or a
-/// convention that states each argument's slot, and neither of those is a
-/// renumbering. **One numbering was necessary for the widening and is not
-/// sufficient for it**, which is a smaller result than Phase C expected and is
-/// the one the code supports.
+/// The numbering moving into the lowering did not close that by itself, and
+/// the reason was worth writing down at the time: arguments are pushed in
+/// *declaration* order and become slots without moving, and a numbering that
+/// still grouped slots by region gave a function's second kind of parameter a
+/// slot number that named a different word than the one the caller pushed for
+/// it. What closes it is exactly the second change this section predicted —
+/// "a convention that states each argument's slot" rather than a further
+/// renumbering: `cove_ir::Function::slots[..arity]` *is* `params`, in
+/// declaration order, so parameter `i`'s slot number is `i` regardless of its
+/// kind, and the word the caller pushed for it always lands where the
+/// callee's own declaration put it. [`admits`] now asks the question that
+/// survives — not whether a function's parameters are one kind, but whether
+/// the words a call site pushed for them agree, argument by argument, with
+/// what the callee declared each one to be.
+///
+/// That leaves a function's reference slots scattered rather than one range,
+/// which is what `template` states instead of `values .. values +
+/// value_count`: a bit per slot rather than two numbers, so a mixed frame's
+/// references are exactly the bits that are set and nothing about their
+/// positions needs to be contiguous.
 ///
 /// # Why Phase C's per-field kind did not close this, although Phase B said it
 /// would
@@ -1140,37 +1153,37 @@ impl HandleRoots for FrameRoots<'_> {
 /// `cove_ir` said what a field held, so a backend had to invent an answer, and
 /// two inventions could disagree. `cove_ir::StructType` supplies it and the
 /// invention is gone. A frame's reference map was **not** missing; it was
-/// `value_frame_size` and `scalar_frame_size`, which say precisely which slots
-/// are references. What was missing was a *number* that named one slot rather
-/// than one slot of one stack, and that is what Phase D added.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// `value_frame_size` and `scalar_frame_size`, which said precisely which
+/// slots were references as long as a function's parameters were not mixed.
+/// What was missing was a *number* that named one slot rather than one slot of
+/// one stack, and that got added — and it took the calling-convention change
+/// argued above, on top of it, before the range those two sizes described
+/// could become the scattered set `template` states in its place.
+#[derive(Clone, Debug, PartialEq, Eq)]
 struct FrameMap {
     /// How many words one call needs, which is every slot of the one
     /// numbering.
     width: u32,
-    /// Where the value region begins, relative to the frame base — and,
-    /// because a slot's number is its offset, the number of the first value
-    /// slot as well.
-    values: u32,
-    /// How many value slots there are. The frame's reference range is
-    /// `values .. values + value_count`, and every word outside it is a
-    /// scalar or a place.
-    value_count: u32,
+    /// One bit per slot of the one numbering, packed the way [`Bitmap`]
+    /// packs its own limbs: bit `i % 64` of limb `i / 64` is set exactly when
+    /// `cove_ir::Function::slots[i]` is `SlotKind::Value`. Built relative to
+    /// slot 0 — this function's own frame base — and shifted into place by
+    /// [`Bitmap::write_frame`] on every call, because the same function opens
+    /// at a different `base` each time it is called.
+    template: Vec<u64>,
 }
 
 impl FrameMap {
     /// The map `function`'s own numbering states.
     fn of(function: &cove_ir::Function) -> FrameMap {
-        FrameMap {
-            width: function.slot_count(),
-            values: function.value_origin(),
-            value_count: function.value_frame_size,
+        let width = function.slot_count();
+        let mut template = vec![0u64; (width as usize).div_ceil(64)];
+        for (slot, kind) in function.slots.iter().enumerate() {
+            if matches!(kind, SlotKind::Value) {
+                template[slot / 64] |= 1u64 << (slot % 64);
+            }
         }
-    }
-
-    /// The frame's reference range, relative to its base.
-    fn references(&self) -> std::ops::Range<usize> {
-        self.values as usize..(self.values + self.value_count) as usize
+        FrameMap { width, template }
     }
 }
 
@@ -1326,8 +1339,9 @@ struct Operands {
 }
 
 impl Operands {
-    /// The `count` value operands standing on top at `pc`, or `None` where any
-    /// of them is a word this backend cannot name.
+    /// The `count` value operands standing on top at `pc`, in push order —
+    /// operand `0` is the deepest of the `count` — or `None` where any of
+    /// them is a word this backend cannot name.
     fn top(&self, pc: usize, count: usize) -> Option<Vec<Kind>> {
         let stack = self.at.get(pc)?.as_ref()?;
         if stack.len() < count {
@@ -2150,9 +2164,10 @@ impl<'a> FrameVm<'a> {
                     self.enter(callee, span)?;
                     self.charge(callee.block_fuel[0], || callee.span_at(0))?;
                     // The arguments the caller pushed *are* the callee's
-                    // first words. Nothing is transferred; the base moves.
-                    // One of the two counts is zero, because `admits` refuses
-                    // a call that passes both kinds -- see `FrameMap`.
+                    // first words, whichever kind each one is. Nothing is
+                    // transferred; the base moves, and `open` reads the
+                    // callee's own template to say which of those words are
+                    // references -- see `FrameMap`.
                     let argc = (scalar_argc + value_argc) as usize;
                     let callee_base = self.words.len() - argc;
                     self.open(target, callee_base);
@@ -2423,10 +2438,14 @@ impl<'a> FrameVm<'a> {
     /// reference slots is opened by the same instruction as one without, and
     /// what is added is the bitmap's masked pass over `width / 64` limbs.
     fn open(&mut self, function: FunctionId, base: usize) {
-        let map = self.maps[function.0 as usize];
+        // `map` borrows `self.maps` and `self.words` / `self.refs` are
+        // mutated beside it; the three are disjoint fields, so the borrow
+        // checker admits this without a destructuring `let` or a second
+        // table to hold the templates in.
+        let map = &self.maps[function.0 as usize];
         let width = map.width as usize;
         self.words.resize(base + width, 0);
-        self.refs.write_frame(base, width, map.references());
+        self.refs.write_frame(base, map);
     }
 
     /// Pushes a word the layout calls scalar.

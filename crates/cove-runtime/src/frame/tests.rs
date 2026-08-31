@@ -791,6 +791,144 @@ fn a_frame_base_survives_the_stack_growing_under_it() {
     );
 }
 
+// -------------------------------------------------- mixed-kind parameters
+
+/// A struct with one field, small enough that a value parameter costs exactly
+/// one word — used throughout this section so a call's argument count is
+/// easy to read off the source.
+const CELL_DECL: &str = "struct Cell {\n  n: Int\n}\n\n";
+
+/// A scalar parameter before a value one. The frame map used to call the
+/// whole reference region one range and require the words a call pushed to
+/// line up with it; a scalar parameter always could, because a scalar
+/// parameter was slot 0, but the value parameter one word over used to have
+/// nowhere of its own to be `admits` could show was safe.
+#[test]
+fn a_scalar_parameter_before_a_value_one_is_admitted_and_agrees() {
+    agree(&format!(
+        "{CELL_DECL}fn combine(a: Int, cell: Cell) -> Int {{\n  a + cell.n\n}}\n\n\
+         export fn main() -> Int {{\n  combine(3, Cell(n: 4))\n}}\n"
+    ));
+}
+
+/// The same, in the other order: a value parameter before a scalar one, which
+/// used to be refused outright — a value parameter used to have to be the
+/// only kind a function took.
+#[test]
+fn a_value_parameter_before_a_scalar_one_is_admitted_and_agrees() {
+    agree(&format!(
+        "{CELL_DECL}fn combine(cell: Cell, a: Int) -> Int {{\n  cell.n + a\n}}\n\n\
+         export fn main() -> Int {{\n  combine(Cell(n: 4), 3)\n}}\n"
+    ));
+}
+
+/// A value parameter beside a scalar *local* the function declares itself —
+/// the shape the third of the three retired refusals named, by asking
+/// whether `function.scalar_frame_size != 0` stood beside a value parameter
+/// rather than asking about another parameter at all.
+#[test]
+fn a_value_parameter_beside_the_functions_own_scalar_locals_is_admitted_and_agrees() {
+    agree(&format!(
+        "{CELL_DECL}fn scan(cell: Cell) -> Int {{\n  var total = 0\n  var i = 0\n  \
+         while i < cell.n {{\n    total = total + i\n    i = i + 1\n  }}\n  total\n}}\n\n\
+         export fn main() -> Int {{\n  scan(Cell(n: 5))\n}}\n"
+    ));
+}
+
+/// A receiver is parameter 0 like any other parameter, so a method that takes
+/// one more parameter beside `self` is the same mixed shape under a
+/// different syntax: `self` is `SlotKind::Value` and `by` is
+/// `SlotKind::Scalar`, one slot apart.
+#[test]
+fn a_receiver_taking_method_with_a_scalar_parameter_beside_it_is_admitted_and_agrees() {
+    agree(
+        "struct Cursor {\n  at: Int\n  step: Int\n}\n\n\
+         impl Cursor {\n  fn advance(self, by: Int) -> Int {\n    self.at + by\n  }\n}\n\n\
+         export fn main() -> Int {\n  var cursor = Cursor(at: 0, step: 1)\n  \
+         cursor.advance(5) + cursor.advance(2)\n}\n",
+    );
+}
+
+/// Eighty parameters, alternating `Int` and `Cell`, so `wide`'s own frame
+/// numbers a reference pattern that crosses the boundary between the
+/// bitmap's first and second limb rather than standing entirely inside one —
+/// `slots[63]` and `slots[64]` are on opposite sides of it. `main` keeps two
+/// scalars of its own before the call, so `wide`'s frame does not even open
+/// limb-aligned: the shift [`Bitmap::write_frame`] has to apply is `main`'s
+/// own width, not zero, which is what makes this a real frame rather than a
+/// synthetic one built to land on the boundary.
+fn wide_mixed_params_source() -> String {
+    let params: Vec<String> = (0..80)
+        .map(|i| {
+            if i % 2 == 0 {
+                format!("a{i}: Int")
+            } else {
+                format!("c{i}: Cell")
+            }
+        })
+        .collect();
+    let args: Vec<String> = (0..80)
+        .map(|i| {
+            if i % 2 == 0 {
+                format!("{i}")
+            } else {
+                format!("Cell(n: {i})")
+            }
+        })
+        .collect();
+    // One statement per parameter rather than one chained expression: the
+    // parser bounds how deep source may nest, and eighty terms of `a + b + c`
+    // nest that deep on their own without saying anything more about mixed
+    // parameters than eighty assignments do.
+    let adds: String = (0..80)
+        .map(|i| {
+            if i % 2 == 0 {
+                format!("  total = total + a{i}\n")
+            } else {
+                format!("  total = total + c{i}.n\n")
+            }
+        })
+        .collect();
+    format!(
+        "{CELL_DECL}fn wide({}) -> Int {{\n  var total = 0\n  var i = 0\n  \
+         while i < 3 {{\n    total = total + i\n    i = i + 1\n  }}\n{adds}  total\n}}\n\n\
+         export fn main() -> Int {{\n  var seed = 3\n  var extra = seed + 1\n  \
+         wide({}) + extra\n}}\n",
+        params.join(", "),
+        args.join(", "),
+    )
+}
+
+/// `wide`'s frame is opened at a shifted base, over eighty words whose
+/// reference pattern crosses the boundary between the bitmap's first and
+/// second limb, and both backends still agree about what it answers — the
+/// case `Bitmap::write_frame`'s own unit tests exercise synthetically, now
+/// exercised by a real call.
+#[test]
+fn a_frame_whose_reference_pattern_straddles_a_limb_boundary_is_admitted_and_agrees() {
+    agree(&wide_mixed_params_source());
+}
+
+/// The same frame, standing while a collection runs at every safepoint its
+/// own loop takes: every `Cell` argument is found through its scattered slot
+/// and every `Int` argument beside it is left alone, or the run panics on the
+/// heap's own "names a swept object" rather than merely answering the wrong
+/// number — proof that the scattered references are all roots and the
+/// scalars between them are not walked.
+#[test]
+fn a_collection_over_a_straddling_frame_finds_every_scattered_reference() {
+    let ready = ready(&wide_mixed_params_source());
+    let (vm, collected) = crate::on_cove_stack(|| {
+        (
+            ready.on_vm(),
+            ready.on_frame_collecting(RootScope::EveryWord),
+        )
+    })
+    .expect("a thread to run Cove on");
+    assert_eq!(collected.outcome, vm, "the VM and the frame disagreed");
+    assert!(collected.collections > 0, "{collected:?}");
+}
+
 // ------------------------------------------------------- fuel and stopping
 
 /// A run that exceeds its fuel budget stops, on the frame as on the VM, and
@@ -1607,6 +1745,24 @@ fn a_bitmap_finds_every_reference_and_nothing_else() {
     assert_eq!(seen, vec![74, 111, 148]);
 }
 
+/// A `FrameMap` for a frame of `width` words whose reference slots are `refs`,
+/// relative to the frame's own slot 0.
+///
+/// `FrameMap::of` reads this off a real `cove_ir::Function`; these two tests
+/// want to drive [`Bitmap::write_frame`] directly, at a plain pattern and at
+/// one that straddles a limb boundary, without lowering a program to get a
+/// map from.
+fn map_of(width: usize, refs: std::ops::Range<usize>) -> FrameMap {
+    let mut template = vec![0u64; width.div_ceil(64)];
+    for at in refs {
+        template[at / 64] |= 1u64 << (at % 64);
+    }
+    FrameMap {
+        width: width as u32,
+        template,
+    }
+}
+
 /// Opening a frame writes the whole reference range in one pass, and the
 /// scalars beside it are cleared rather than left as whatever the last frame
 /// at that depth said.
@@ -1617,8 +1773,8 @@ fn a_bitmap_finds_every_reference_and_nothing_else() {
 #[test]
 fn opening_a_frame_writes_every_bit_of_its_window() {
     let mut refs = Bitmap::with_capacity(256);
-    refs.write_frame(0, 130, 0..130);
-    refs.write_frame(4, 8, 2..5);
+    refs.write_frame(0, &map_of(130, 0..130));
+    refs.write_frame(4, &map_of(8, 2..5));
     let mut seen = Vec::new();
     refs.for_each(4..12, &mut |at| seen.push(at));
     assert_eq!(
@@ -1638,13 +1794,40 @@ fn opening_a_frame_writes_every_bit_of_its_window() {
 fn a_frame_that_straddles_a_limb_is_written_correctly() {
     let mut refs = Bitmap::with_capacity(512);
     // Everything set, so that the clearing half has something to clear.
-    refs.write_frame(0, 256, 0..256);
+    refs.write_frame(0, &map_of(256, 0..256));
     // A frame of 100 words at 30, whose words 20..50 are references: absolute
     // 50..80, which spans the boundary at 64.
-    refs.write_frame(30, 100, 20..50);
+    refs.write_frame(30, &map_of(100, 20..50));
     let mut seen = Vec::new();
     refs.for_each(0..256, &mut |at| seen.push(at));
     let expected: Vec<usize> = (0..30).chain(50..80).chain(130..256).collect();
+    assert_eq!(seen, expected);
+}
+
+/// A template whose reference bits are scattered rather than one range — the
+/// pattern a mixed-parameter frame now produces — is shifted into place
+/// exactly as a contiguous one is, including across the limb boundary at 64.
+#[test]
+fn a_scattered_template_straddling_a_limb_is_written_correctly() {
+    let mut refs = Bitmap::with_capacity(256);
+    refs.write_frame(0, &map_of(256, 0..256));
+    let mut template = vec![0u64; 100usize.div_ceil(64)];
+    // Slots 20, 21, 49 and 50 of a hundred-word frame opened at 30: absolute
+    // 50, 51, 79 and 80, which spans the boundary at 64 with a gap on both
+    // sides of it.
+    for at in [20, 21, 49, 50] {
+        template[at / 64] |= 1u64 << (at % 64);
+    }
+    refs.write_frame(
+        30,
+        &FrameMap {
+            width: 100,
+            template,
+        },
+    );
+    let mut seen = Vec::new();
+    refs.for_each(0..256, &mut |at| seen.push(at));
+    let expected: Vec<usize> = (0..30).chain([50, 51, 79, 80]).chain(130..256).collect();
     assert_eq!(seen, expected);
 }
 

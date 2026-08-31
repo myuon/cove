@@ -563,19 +563,6 @@ impl Function {
         self.offsets[slot as usize]
     }
 
-    /// The first slot number of the value region, for a backend whose
-    /// realization still assumes the value region is exactly the numbers
-    /// `value_origin()..value_origin() + value_frame_size` — true only where
-    /// this function's parameters are not mixed across regions, which is
-    /// `cove_runtime::frame`'s own subset (`crate::frame::admits`) and the
-    /// only reader left. Kept for that reader alone: everywhere else,
-    /// [`Function::offset`] is what answers a slot's physical position, and
-    /// [`Function::region_of`] is what answers its region, neither of which
-    /// assumes a region is contiguous.
-    pub fn value_origin(&self) -> u32 {
-        self.scalar_frame_size
-    }
-
     /// Which region slot `slot` falls in, and `None` for a number this
     /// function has no slot for.
     ///
