@@ -230,10 +230,12 @@ fn validate_refuses_a_slot_of_the_wrong_region() {
 
 /// The two numbers a mixed frame gives one region each, told apart.
 ///
-/// `f` keeps one scalar slot and one value slot, so its numbering is
-/// `0` scalar and `1` value and there is no number both instructions may
-/// carry. The check that this replaced could see neither of these: slot 0
-/// and slot 1 were each in range of both stacks.
+/// `f`'s one parameter is its whole arity block, so `s` — the only
+/// parameter, a `String` and so a value — takes slot 0, and `a` — the one
+/// local this body declares, and a scalar — is not a parameter at all and so
+/// falls after the arity block, at slot 1. There is no number both
+/// instructions may carry. The check that this replaced could see neither of
+/// these: slot 0 and slot 1 were each in range of both stacks.
 #[test]
 fn validate_tells_the_two_regions_of_one_frame_apart() {
     let source = "fn f(s: String) -> Int {\n  let a = 1\n  a\n}\n";
@@ -242,16 +244,16 @@ fn validate_tells_the_two_regions_of_one_frame_apart() {
     assert_eq!(program.functions[0].value_frame_size, 1);
 
     let mut wrong = lower(&checked(source)).expect("it lowers");
-    wrong.functions[0].code[1] = Inst::StoreLocal(0);
+    wrong.functions[0].code[1] = Inst::StoreLocal(1);
     assert_eq!(
         validate(&wrong).expect_err("a value instruction naming the scalar slot is refused"),
-        "m.f: 1: reaches slot 0, which this frame keeps in its scalar region and not its value"
+        "m.f: 1: reaches slot 1, which this frame keeps in its scalar region and not its value"
     );
 
-    program.functions[0].code[1] = Inst::StoreScalar(1);
+    program.functions[0].code[1] = Inst::StoreScalar(0);
     assert_eq!(
         validate(&program).expect_err("a scalar instruction naming the value slot is refused"),
-        "m.f: 1: reaches slot 1, which this frame keeps in its value region and not its scalar"
+        "m.f: 1: reaches slot 0, which this frame keeps in its value region and not its scalar"
     );
 }
 

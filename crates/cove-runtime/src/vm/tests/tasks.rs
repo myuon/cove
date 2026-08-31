@@ -266,9 +266,11 @@ fn a_lock_closure_without_var_leaves_the_cell_alone() {
     assert_eq!(outcome.output, "saw 1\nstill 1\n");
 }
 
-/// The closure answers the `lock`, and it may capture — which is what
-/// `Function::capture_base` is for: a place parameter takes no value
-/// slot, so the captures begin one slot earlier than `arity` would say.
+/// The closure answers the `lock`, and it may capture: `var v` takes a
+/// place slot rather than a value one, and `by`'s capture is allocated —
+/// and so slotted — independently of it, since `cove_ir::Capture::slot`
+/// records where each capture lands rather than assuming it follows a
+/// value parameter that, here, does not exist.
 #[test]
 fn a_lock_answers_what_its_closure_answered_and_may_capture() {
     assert_eq!(

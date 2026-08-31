@@ -88,11 +88,11 @@ fn let_x_equals_x_reads_the_outer_binding() {
 
 // ---------------------------------------------------- the per-slot layout
 
-/// A scalar parameter takes the first free scalar-region number and a value
-/// parameter the first free value-region number — that is
-/// `Function::params` read as a convention. `Function::slots` has to name
-/// the same kind at each of those numbers, because it is the same fact
-/// stated for every slot rather than only for the ones a call fills in.
+/// A parameter's slot is its declaration index, whichever kind it is —
+/// that is `Function::params` read as a convention, `slots[0..arity]` is
+/// `params` exactly. `Function::slots` has to name the same kind at each of
+/// those numbers, because it is the same fact stated for every slot rather
+/// than only for the ones a call fills in.
 #[test]
 fn the_slot_table_names_each_parameters_kind_at_the_number_the_convention_gives_it() {
     let program = lower(&checked("fn f(a: Int, b: String) -> Int {\n  a\n}\n")).expect("it lowers");
@@ -102,14 +102,67 @@ fn the_slot_table_names_each_parameters_kind_at_the_number_the_convention_gives_
         function.params,
         vec![SlotKind::Scalar(Scalar::Int), SlotKind::Value]
     );
-    // `a` is the first scalar parameter, so it takes scalar slot 0.
+    // `a` is declared first, so it takes slot 0; `b` is declared second, so
+    // it takes slot 1 — regardless of which stack each lives on.
     assert_eq!(function.slots[0], SlotKind::Scalar(Scalar::Int));
-    // `b` is the first value parameter, so it takes the value region's
-    // first number, which is `value_origin()` and not 0 — the scalar
-    // region comes first in the one numbering.
+    assert_eq!(function.slots[1], SlotKind::Value);
+}
+
+/// The motivating case: a parameter's slot is where its argument physically
+/// arrives, not a number grouped by kind.
+///
+/// A call to `f` pushes `a` on the scalar stack, `b` on the value stack, and
+/// `c` back on the scalar stack, in that order — declaration order, the only
+/// order a caller can push arguments in. So the one numbering puts them at
+/// slots 0, 1, and 2 respectively: `slots[0..arity]` is `params` exactly,
+/// whatever kind each parameter is, rather than the two `Int`s sharing the
+/// first two numbers the way a numbering grouped by region alone would put
+/// them.
+#[test]
+fn mixed_kind_parameters_take_slots_in_declaration_order() {
+    let program = lower(&checked(
+        "fn f(a: Int, b: String, c: Int) -> Int {\n  a + c\n}\n",
+    ))
+    .expect("it lowers");
+    validate(&program).expect("it holds the VM's invariants");
+    let function = &program.functions[0];
     assert_eq!(
-        function.slots[function.value_origin() as usize],
-        SlotKind::Value
+        function.params,
+        vec![
+            SlotKind::Scalar(Scalar::Int),
+            SlotKind::Value,
+            SlotKind::Scalar(Scalar::Int),
+        ]
+    );
+    assert_eq!(&function.slots[0..3], function.params.as_slice());
+}
+
+/// A capture carries its own slot, read straight out of the lowering rather
+/// than counted from `n`'s — so the body's own reads of `by` name exactly
+/// that number.
+///
+/// `n`, the closure's one parameter, is this specialisation's whole arity
+/// block and takes slot 0; `by` is not a parameter of it, so it falls right
+/// after, at the scalar region's first non-parameter slot, 1.
+#[test]
+fn a_closures_capture_lands_at_the_slot_it_records() {
+    let source = "fn adder(by: Int) -> fn(Int) -> Int {\n  fn(n: Int) {\n    n + by\n  }\n}\n";
+    let program = lower(&checked(source)).expect("it lowers");
+    validate(&program).expect("it holds the VM's invariants");
+    let closure = program
+        .functions
+        .iter()
+        .find(|function| function.name.starts_with("<closure"))
+        .expect("the lambda lowers to a function of its own");
+    assert_eq!(closure.captures.len(), 1);
+    let capture = &closure.captures[0];
+    assert_eq!(&*capture.name, "by");
+    assert_eq!(capture.kind, SlotKind::Scalar(Scalar::Int));
+    assert_eq!(capture.slot, 1);
+    assert!(
+        closure.code.contains(&Inst::LoadScalar(capture.slot)),
+        "the body reads `by` at the slot its capture records: {:?}",
+        closure.code
     );
 }
 

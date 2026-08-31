@@ -24,7 +24,7 @@ use std::sync::Arc;
 use cove_sema::typeck::Ty;
 use cove_syntax::ast::Param;
 
-use crate::{Function, Inst, Scalar, SlotKind, Unsupported};
+use crate::{Capture, Function, Inst, Scalar, SlotKind, Unsupported};
 
 use super::body::{Body, Position};
 use super::fuel::block_fuel;
@@ -38,14 +38,15 @@ impl<'a> Lowering<'a> {
     /// signature. Every parameter is a value slot and the answer comes back
     /// on the value stack, because [`Inst::CallValue`] is emitted where
     /// nothing knows which function it will reach — see that instruction.
-    /// The captures then take the value slots straight after the value
-    /// parameters, which is exactly where the call puts them, and that
-    /// arrangement is only possible *because* the parameters are all in one
-    /// stack: a scalar parameter would leave a hole between the two.
+    /// The captures then take the value slots right after the value
+    /// parameters, which is exactly where the call puts them: each
+    /// [`Capture`]'s own `slot`, read out of `Body::finish`'s translation of
+    /// the region-local number it was allocated, is that number.
     ///
-    /// One lambda is not called through a value, and it is the exception the
-    /// whole of [`Function::capture_base`] exists for. The closure a `lock`
-    /// is given may write its first parameter `var`, which means it names the
+    /// One lambda is not called through a value, and it is the exception a
+    /// capture's slot being recorded on the capture itself, rather than
+    /// derived from one shared base, exists for. The closure a `lock` is
+    /// given may write its first parameter `var`, which means it names the
     /// cell's contents rather than receiving a copy of them — so that
     /// parameter is a place, [`Inst::Lock`] hands one over, and the captures
     /// begin one value slot earlier than `arity` would say.
@@ -75,11 +76,6 @@ impl<'a> Lowering<'a> {
         let decl_body = site.body;
         let capture_names: Vec<&'a str> = site.captures.clone();
         let capture_kinds: Vec<SlotKind> = site.capture_kinds.clone();
-        let captures: Vec<(Arc<str>, SlotKind)> = capture_names
-            .iter()
-            .zip(&capture_kinds)
-            .map(|(name, kind)| (Arc::from(*name), *kind))
-            .collect();
         let aliases = site.aliases_first_param;
         let is_async = site.is_async;
 
@@ -122,18 +118,15 @@ impl<'a> Lowering<'a> {
             params.push(SlotKind::Value);
             slots.push(body.allocate(SlotKind::Value));
         }
-        // Each capture takes a slot of the region its own kind names, dense
-        // within that region and in this order — which is exactly the order
-        // the call fills them in, walking the closure's list with one counter
-        // per region. The value captures land after the value parameters,
-        // because that is where the call pushes them; the scalar captures land
-        // at the scalar region's first slot, because a function a closure is
-        // made of takes no scalar argument and `validate` refuses one that
-        // does. These are region-local numbers here, as every slot number is
-        // while a body is being emitted; `Body::finish` turns the ones the
-        // instructions carry into the one numbering's, and `capture_base`
-        // below is written in that numbering directly because it is settled
-        // after the body is finished rather than during it.
+        // Each capture is allocated a region-local number right after this
+        // lambda's own parameters of that same kind — dense within its
+        // region, in this order — which is exactly the order the call fills
+        // them in, walking the closure's list with one counter per region.
+        // These are region-local numbers here, as every slot number is while
+        // a body is being emitted; `finished.scalar_slot_of` and
+        // `finished.value_slot_of`, below, are where each is turned into the
+        // one numbering's, once the whole body is finished and `Body::finish`
+        // has settled the permutation.
         let capture_slots: Vec<u32> = capture_kinds
             .iter()
             .map(|kind| body.allocate(*kind))
@@ -153,17 +146,25 @@ impl<'a> Lowering<'a> {
 
         body.block_at(decl_body, Position::Value)?;
         body.emit_final_return(decl_body.span);
-        let finished = body.finish();
-        // A slot number in the one numbering, so the value region's own
-        // origin is part of it: see `Function::value_origin`.
-        let capture_base = finished.scalar_frame_size + value_params(&params);
-        // The one numbering's order — scalar region, then value region,
-        // then place region — so a number in `slots` is the same number
-        // `Function::region_of` would compute from the three frame sizes
-        // alone. See `Function::slots`.
-        let mut slots = finished.scalar_layout;
-        slots.extend(finished.value_layout);
-        slots.extend(finished.place_layout);
+        let finished = body.finish(&params);
+
+        let captures: Vec<Capture> = capture_names
+            .iter()
+            .zip(&capture_kinds)
+            .zip(&capture_slots)
+            .map(|((name, kind), region_local)| Capture {
+                name: Arc::from(*name),
+                kind: *kind,
+                slot: match kind {
+                    SlotKind::Scalar(_) => finished.scalar_slot_of[*region_local as usize],
+                    SlotKind::Value => finished.value_slot_of[*region_local as usize],
+                    // `Function::captures` is never `SlotKind::Place`: a
+                    // closure captures the value a place names and never the
+                    // place, so nothing ever allocates a capture one.
+                    SlotKind::Place => unreachable!("a closure never captures a place"),
+                },
+            })
+            .collect();
 
         Ok(Function {
             module: module.into(),
@@ -174,7 +175,8 @@ impl<'a> Lowering<'a> {
             value_frame_size: finished.value_frame_size,
             scalar_frame_size: finished.scalar_frame_size,
             place_frame_size: finished.place_frame_size,
-            slots,
+            slots: finished.slots,
+            offsets: finished.offsets,
             arity: params.len() as u32,
             params,
             returns: SlotKind::Value,
@@ -185,7 +187,6 @@ impl<'a> Lowering<'a> {
             // body produced.
             answers_a_task: is_async,
             captures,
-            capture_base,
             param_names: param_names(decl_params),
             block_fuel: block_fuel(&finished.code),
             code: finished.code,
@@ -402,17 +403,7 @@ impl<'a> Lowering<'a> {
         // and moved across afterwards.
         body.block_at(&decl.body, position_of(returns))?;
         body.emit_final_return(decl.body.span);
-        let finished = body.finish();
-        // A slot number in the one numbering, so the value region's own
-        // origin is part of it: see `Function::value_origin`.
-        let capture_base = finished.scalar_frame_size + value_params(&params);
-        // The one numbering's order — scalar region, then value region,
-        // then place region — so a number in `slots` is the same number
-        // `Function::region_of` would compute from the three frame sizes
-        // alone. See `Function::slots`.
-        let mut slots = finished.scalar_layout;
-        slots.extend(finished.value_layout);
-        slots.extend(finished.place_layout);
+        let finished = body.finish(&params);
 
         Ok(Function {
             module: module.into(),
@@ -420,7 +411,8 @@ impl<'a> Lowering<'a> {
             value_frame_size: finished.value_frame_size,
             scalar_frame_size: finished.scalar_frame_size,
             place_frame_size: finished.place_frame_size,
-            slots,
+            slots: finished.slots,
+            offsets: finished.offsets,
             arity: params.len() as u32,
             params,
             returns,
@@ -430,7 +422,6 @@ impl<'a> Lowering<'a> {
             // `Interpreter::eval_ident` builds one with `captures:
             // Vec::new()`, because a declaration reads no environment.
             captures: Vec::new(),
-            capture_base,
             // Only a function that can become a closure value is ever called
             // with a count of the caller's choosing, so only that one can
             // reach the diagnostic these names are for.
@@ -445,22 +436,6 @@ impl<'a> Lowering<'a> {
             span: decl.span,
         })
     }
-}
-
-/// How many of a function's parameters arrive on the value stack.
-///
-/// [`Function::capture_base`] is this plus [`Function::value_origin`], not
-/// this alone: a capture begins after the value parameters, but the value
-/// parameters themselves begin wherever the one frame numbering's value
-/// region begins, not at slot 0.
-///
-/// The count here is the same as `params.len()` for every closure but the
-/// one `Shared::lock` is given a `var` parameter.
-fn value_params(params: &[SlotKind]) -> u32 {
-    params
-        .iter()
-        .filter(|kind| matches!(kind, SlotKind::Value))
-        .count() as u32
 }
 
 /// What a scalar stack would hold a value of this type as, or `None` for a

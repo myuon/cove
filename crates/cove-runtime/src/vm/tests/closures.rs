@@ -59,10 +59,11 @@ fn a_bool_capture_lands_in_a_scalar_slot_and_keeps_its_tag() {
 /// Captures of both kinds in one closure land on their own stacks, in the
 /// order the closure lists them, and the body reads each where it was put.
 ///
-/// The two counters `Vm::enter_value_call` fills the frame with are what
-/// this exercises: the value captures are dense from `capture_base` and the
-/// scalar ones dense from scalar slot 0, whatever order the two are
-/// interleaved in.
+/// What `Vm::enter_value_call` fills the frame from is what this exercises:
+/// each capture carries its own slot — `cove_ir::Capture::slot` — read
+/// straight out of the lowering rather than counted from one shared base, so
+/// a value capture and a scalar capture land correctly whatever order the
+/// two are interleaved in.
 #[test]
 fn a_closure_over_a_scalar_and_a_value_fills_both_windows() {
     assert_eq!(

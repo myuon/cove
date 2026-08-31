@@ -193,24 +193,31 @@ pub(super) struct Finished {
     pub(super) value_frame_size: u32,
     pub(super) scalar_frame_size: u32,
     pub(super) place_frame_size: u32,
-    /// The kind of every scalar-region number this body ever handed out, in
-    /// numbering order — slot 0 first. Dense: every index below
-    /// `scalar_frame_size` has an entry, because [`Body::allocate`] only ever
-    /// grows this by pushing the next one.
+    /// The kind of every slot this function's frame has, in the one
+    /// numbering's final order — [`Function::slots`](crate::Function::slots)
+    /// itself. `Body::finish` builds this directly rather than handing
+    /// `super::convention` three region layouts to concatenate, because the
+    /// final order is no longer three regions end to end: see `Body::finish`
+    /// for where each of a body's region-local numbers lands.
+    pub(super) slots: Vec<SlotKind>,
+    /// Each slot's offset within its own region — how many slots of the same
+    /// region come before it — in the same order as `slots`. This is
+    /// [`Function::offset`](crate::Function::offset): what a backend that
+    /// keeps the three regions in separate arrays adds to that region's base
+    /// to find a slot physically, now that a slot's number in the one
+    /// numbering is no longer that offset by construction.
+    pub(super) offsets: Vec<u32>,
+    /// The final slot number that scalar-region-local count `j` —
+    /// [`Body::allocate`]'s return value for a scalar binding — was turned
+    /// into, indexed by `j`.
     ///
-    /// `super::convention` concatenates this with `value_layout` and
-    /// `place_layout`, in the one numbering's order, to build
-    /// [`Function::slots`](crate::Function::slots).
-    pub(super) scalar_layout: Vec<SlotKind>,
-    /// The kind of every value-region number this body ever handed out, in
-    /// numbering order. Every entry is [`SlotKind::Value`] — nothing else is
-    /// ever declared into the value region — so this never disagrees with
-    /// itself the way `scalar_layout` can.
-    pub(super) value_layout: Vec<SlotKind>,
-    /// The kind of every place-region number this body ever handed out, in
-    /// numbering order. Every entry is [`SlotKind::Place`], for the same
-    /// reason `value_layout`'s is uniform.
-    pub(super) place_layout: Vec<SlotKind>,
+    /// A capture's slot is reserved by `Body::allocate` before the body is
+    /// finished, and unlike a load or a store it is not an instruction
+    /// operand `Body::finish` can patch in place: `super::convention` reads
+    /// its final number here instead, once, after the body is finished.
+    pub(super) scalar_slot_of: Vec<u32>,
+    /// The same translation for the value region.
+    pub(super) value_slot_of: Vec<u32>,
 }
 
 /// Everything one function's instructions are built from.
@@ -259,54 +266,58 @@ pub(super) struct Body<'a, 'l> {
     /// join point honest.
     pub(super) depth: Option<Depth>,
     pub(super) live: Vec<Binding<'a>>,
-    /// The kind of every value-region number handed out so far, in numbering
-    /// order — see [`Finished::value_layout`]. `self` if there is a
-    /// receiver, then parameters, then every `Value` local and temporary
-    /// declare into this one push at a time; a scope reusing a number
-    /// records nothing new, because the number is already here with the
-    /// kind it will always have.
+    /// The kind of every value-region number handed out so far, in
+    /// region-local order — `self` if there is a receiver, then parameters,
+    /// then every `Value` local and temporary declare into this one push at
+    /// a time; a scope reusing a number records nothing new, because the
+    /// number is already here with the kind it will always have.
+    ///
+    /// This is region-local, not the one frame numbering: a value parameter
+    /// and a value local can both be index 0 here, of a body whose scalar or
+    /// place region also has slot 0. [`Body::finish`] is what turns each
+    /// index into a number in the one numbering, by the permutation
+    /// documented there.
     ///
     /// Its length is the high-water mark of value slots handed out, which
-    /// [`Body::finish`] carries into `Finished::value_frame_size` and, from
-    /// there, [`Function::value_origin`](crate::Function::value_origin) is
-    /// built on. Kept as the layout itself and not as a separate count,
-    /// because a count is a fact the layout already states and restating it
-    /// is exactly the kind of second description that could drift from the
-    /// first.
+    /// [`Body::finish`] carries into `Finished::value_frame_size`. Kept as
+    /// the layout itself and not as a separate count, because a count is a
+    /// fact the layout already states and restating it is exactly the kind
+    /// of second description that could drift from the first.
     pub(super) value_layout: Vec<SlotKind>,
     /// The kind of every scalar-region number handed out so far, in
-    /// numbering order: every `Int` or `Bool` local and temporary. Its
-    /// length is the width of the region the one frame numbering starts
-    /// counting from, since
-    /// [`Function::scalar_origin`](crate::Function::scalar_origin) is
-    /// always zero.
+    /// region-local order: every `Int` or `Bool` parameter, local, and
+    /// temporary. Its length is the width of the scalar region — see
+    /// `value_layout` for why this is a region-local index and not yet a
+    /// number in the one frame numbering.
     ///
     /// This is the one layout of the three that can disagree with itself
     /// across two scopes that reuse the same number — see
     /// [`Body::allocate`] for why and what is done about it.
     pub(super) scalar_layout: Vec<SlotKind>,
     /// The kind of every place-region number handed out so far, in
-    /// numbering order, which is every `var` parameter and a `var self`
+    /// region-local order, which is every `var` parameter and a `var self`
     /// receiver: nothing a body declares takes one. Its length is the width
-    /// [`Function::place_origin`](crate::Function::place_origin) is built
-    /// on.
+    /// of the place region.
     pub(super) place_layout: Vec<SlotKind>,
     /// The next value slot number to hand out, restored when a scope ends.
     ///
     /// Counted within the value region alone while the body is emitted:
-    /// [`Body::finish`] adds `value_origin` once, at the end, to turn each
-    /// number an instruction carries into the one frame numbering's.
+    /// [`Body::finish`] permutes every number an instruction carries into
+    /// the one frame numbering's, once, after the whole body is emitted.
     pub(super) next_value: u32,
     /// The next scalar slot number to hand out, restored when a scope ends.
     ///
-    /// Needs no adjustment at [`Body::finish`]: the scalar region's origin
-    /// is always zero, so a scalar slot's count within its own region
-    /// already is its number in the one frame numbering.
+    /// Counted within the scalar region alone, for the same reason
+    /// `next_value` is — see [`Body::finish`]. It used to need no further
+    /// adjustment there, because the scalar region began the one numbering
+    /// and its region-local count already was its number in it; that stopped
+    /// being true once a parameter of another kind could be numbered ahead
+    /// of a body's own scalar slots.
     pub(super) next_scalar: u32,
     /// The next place slot number to hand out, restored when a scope ends.
     ///
     /// Counted within the place region alone while the body is emitted, for
-    /// the reason `next_value` is: [`Body::finish`] adds `place_origin` once.
+    /// the reason `next_value` is.
     pub(super) next_place: u32,
     labels: Vec<Label>,
     patches: Vec<(usize, usize)>,
@@ -355,26 +366,52 @@ impl<'a, 'l> Body<'a, 'l> {
     /// The finished instructions, with every jump pointing at a real one and
     /// every slot named by its number in the one frame numbering.
     ///
+    /// `params` is the calling convention this body was lowered under — the
+    /// same `Vec<SlotKind>` `super::convention` passes a call site and packs
+    /// into [`Function::params`](crate::Function::params) — read here for
+    /// the one fact only the caller of `finish` still holds: which
+    /// region-local numbers a parameter claimed, and in what declaration
+    /// order.
+    ///
     /// # Why the slot numbers are settled here and not as they were emitted
     ///
-    /// The one numbering runs the scalar region, then the value region, then
-    /// the place region, so a value slot's number is `scalar_frame_size` plus
-    /// its position among the values and a place slot's is
-    /// `scalar_frame_size + value_frame_size` plus its own. Both origins are
-    /// **high-water marks**, which is to say facts about the whole body that
-    /// are not known until the whole body is emitted: a scope hands its slot
-    /// numbers back when it ends, so the widest the scalar region ever got is
-    /// settled by the last statement as easily as by the first.
+    /// A parameter's argument arrives on the stack its own kind names and
+    /// becomes that stack's next slot without moving — that is what a
+    /// calling convention *is* — so every parameter, whichever kind it is,
+    /// occupies the first region-local number its own region ever hands out.
+    /// The one numbering has to put every parameter in `0..arity`, in
+    /// declaration order, so that a slot's number agrees with where its
+    /// argument physically arrives; and it still has to group everything
+    /// after `arity` by region, because that is what lets a backend keep the
+    /// three regions in three separate arrays. Both are true together only
+    /// because the numbering is a *permutation* of the region-local numbers
+    /// an emitter handed out, not the running sum this used to be.
     ///
-    /// So an emitter counts within its own region, where the counting rule is
-    /// local, and the one number every consumer sees is written once here.
-    /// Nothing downstream sees the intermediate form — [`Finished`] is what
+    /// For a region-local number `j` in a region that has `p` parameters of
+    /// its own kind: if `j < p`, `j` is the region-local number of some
+    /// parameter — parameters are allocated before anything else in each
+    /// region, in declaration order, so `j` is the `j`-th parameter of that
+    /// region's kind — and the answer is that parameter's declaration index,
+    /// which is where it stands in `params` and therefore its slot in
+    /// `0..arity`. Otherwise `j` is past every parameter this region has, and
+    /// the answer is `arity` plus however many non-parameter slots the
+    /// regions before this one in the numbering's order hold, plus `j - p`.
+    ///
+    /// Every one of those quantities is a **high-water mark**: a fact about
+    /// the whole body that is not known until the whole body is emitted,
+    /// because a scope hands its slot numbers back when it ends. So an
+    /// emitter counts within its own region, where the counting rule is
+    /// local, and the permutation above is computed once here, when every
+    /// region's width is finally settled, and applied to every slot number
+    /// an instruction carries and to the per-region layouts that become
+    /// [`Finished::slots`] and [`Finished::offsets`]. Nothing downstream sees
+    /// the intermediate, region-local form — [`Finished`] is what
     /// `super::convention` builds a [`Function`] out of — and
     /// `super::validate` checks the result against
     /// [`Function::region_of`](crate::Function::region_of) rather than
-    /// against three sizes, so a slip in this loop is caught by the pass that
-    /// exists to catch it.
-    pub(super) fn finish(mut self) -> Finished {
+    /// against three sizes, so a slip in this function is caught by the pass
+    /// that exists to catch it.
+    pub(super) fn finish(mut self, params: &[SlotKind]) -> Finished {
         for (pc, label) in &self.patches {
             let target = self.labels[*label]
                 .at
@@ -391,21 +428,85 @@ impl<'a, 'l> Body<'a, 'l> {
         let scalar_frame_size = self.scalar_layout.len() as u32;
         let value_frame_size = self.value_layout.len() as u32;
         let place_frame_size = self.place_layout.len() as u32;
-        let value_origin = scalar_frame_size;
-        let place_origin = scalar_frame_size + value_frame_size;
+        let arity = params.len() as u32;
+
+        // The declaration index of each parameter of each kind, in
+        // declaration order: where region-local numbers `0..p` of that
+        // region land, because a parameter is always allocated before
+        // anything else its own region ever hands out.
+        let mut scalar_params = Vec::new();
+        let mut value_params = Vec::new();
+        let mut place_params = Vec::new();
+        for (at, kind) in params.iter().enumerate() {
+            match kind {
+                SlotKind::Scalar(_) => scalar_params.push(at as u32),
+                SlotKind::Value => value_params.push(at as u32),
+                SlotKind::Place => place_params.push(at as u32),
+            }
+        }
+        let p_scalar = scalar_params.len() as u32;
+        let p_value = value_params.len() as u32;
+        let p_place = place_params.len() as u32;
+        // Where each region's non-parameter tail begins, past the `arity`
+        // block every parameter takes a slot in regardless of its own kind —
+        // in the numbering's order, scalar tail first, then value, then
+        // place.
+        let base_value = scalar_frame_size - p_scalar;
+        let base_place = base_value + value_frame_size - p_value;
+
+        let permute_scalar = |j: u32| -> u32 {
+            scalar_params
+                .get(j as usize)
+                .copied()
+                .unwrap_or_else(|| arity + (j - p_scalar))
+        };
+        let permute_value = |j: u32| -> u32 {
+            value_params
+                .get(j as usize)
+                .copied()
+                .unwrap_or_else(|| arity + base_value + (j - p_value))
+        };
+        let permute_place = |j: u32| -> u32 {
+            place_params
+                .get(j as usize)
+                .copied()
+                .unwrap_or_else(|| arity + base_place + (j - p_place))
+        };
+
         for inst in &mut self.code {
             match inst {
-                // The scalar region begins at 0, so a scalar slot's number in
-                // its own region and its number in the one numbering are the
-                // same number and there is nothing to add.
-                Inst::LoadScalar(_) | Inst::StoreScalar(_) | Inst::PlaceScalar(..) => {}
-                Inst::LoadLocal(slot) | Inst::StoreLocal(slot) | Inst::PlaceLocal(slot) => {
-                    *slot += value_origin;
+                Inst::LoadScalar(slot) | Inst::StoreScalar(slot) | Inst::PlaceScalar(slot, _) => {
+                    *slot = permute_scalar(*slot);
                 }
-                Inst::LoadPlace(slot) => *slot += place_origin,
+                Inst::LoadLocal(slot) | Inst::StoreLocal(slot) | Inst::PlaceLocal(slot) => {
+                    *slot = permute_value(*slot);
+                }
+                Inst::LoadPlace(slot) => *slot = permute_place(*slot),
                 _ => {}
             }
         }
+
+        let total = (scalar_frame_size + value_frame_size + place_frame_size) as usize;
+        let mut slots = vec![SlotKind::Value; total];
+        let mut offsets = vec![0u32; total];
+        for (j, kind) in self.scalar_layout.iter().enumerate() {
+            let slot = permute_scalar(j as u32) as usize;
+            slots[slot] = *kind;
+            offsets[slot] = j as u32;
+        }
+        for (j, kind) in self.value_layout.iter().enumerate() {
+            let slot = permute_value(j as u32) as usize;
+            slots[slot] = *kind;
+            offsets[slot] = j as u32;
+        }
+        for (j, kind) in self.place_layout.iter().enumerate() {
+            let slot = permute_place(j as u32) as usize;
+            slots[slot] = *kind;
+            offsets[slot] = j as u32;
+        }
+        let scalar_slot_of = (0..scalar_frame_size).map(permute_scalar).collect();
+        let value_slot_of = (0..value_frame_size).map(permute_value).collect();
+
         Finished {
             code: self.code,
             spans: self.spans,
@@ -413,9 +514,10 @@ impl<'a, 'l> Body<'a, 'l> {
             value_frame_size,
             scalar_frame_size,
             place_frame_size,
-            scalar_layout: self.scalar_layout,
-            value_layout: self.value_layout,
-            place_layout: self.place_layout,
+            slots,
+            offsets,
+            scalar_slot_of,
+            value_slot_of,
         }
     }
 
@@ -646,8 +748,8 @@ impl<'a, 'l> Body<'a, 'l> {
     /// the body is emitted, so `kind` picks which of the three counters this
     /// draws from — see `Body::allocate`. The number it returns is dense
     /// within that region's own count and is not yet a number in the one
-    /// numbering: [`Body::finish`] adds the region's origin once, after the
-    /// whole body is emitted and every region's width is settled.
+    /// numbering: [`Body::finish`] permutes it, once, after the whole body is
+    /// emitted and every region's width is settled.
     pub(super) fn declare(&mut self, name: Option<&'a str>, kind: SlotKind) -> u32 {
         let slot = self.allocate(kind);
         self.declare_at(name, kind, slot);
@@ -665,8 +767,8 @@ impl<'a, 'l> Body<'a, 'l> {
     /// here and one event everywhere else.
     ///
     /// The number returned is a count within `kind`'s own region, not yet a
-    /// number in the one frame numbering — [`Body::finish`] is what adds the
-    /// region's origin, once, to every slot number a finished body carries.
+    /// number in the one frame numbering — [`Body::finish`] is what permutes
+    /// every slot number a finished body carries into one, once.
     ///
     /// # Why a reused number can be skipped forward
     ///
