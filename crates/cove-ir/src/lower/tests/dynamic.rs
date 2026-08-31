@@ -93,12 +93,12 @@ fn a_dyn_return_type_converts_every_return() {
             "f"
         ),
         "fn m.f arity=2 frame=1/1 params=[value, Bool] -> value\n\
-         \x20  0  load-scalar 0\n\
+         \x20  0  load-scalar 1\n\
          \x20  1  jump-if-false-scalar 5\n\
-         \x20  2  load 1\n\
+         \x20  2  load 0\n\
          \x20  3  make-dyn m.Show\n\
          \x20  4  return\n\
-         \x20  5  load 1\n\
+         \x20  5  load 0\n\
          \x20  6  make-dyn m.Show\n\
          \x20  7  return\n"
     );

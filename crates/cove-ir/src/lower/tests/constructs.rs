@@ -9,9 +9,10 @@ use super::*;
 /// the scalar stack, because that is where its own parameter lives, and
 /// across to the value stack, because a capture is a value — and then
 /// `make-closure` pairs it with the name. `main` pushes the argument,
-/// then the callee above it, and `call-value` takes both. And the
-/// closure's own body reaches `by` by index rather than by slot,
-/// although the slot is `arity + 0` and a `load 1` would have found it.
+/// then the callee above it, and `call-value` takes both. The closure's
+/// own parameter `n` is its whole arity block and takes slot 0; `by` is
+/// not a parameter of this specialisation, so it falls after the arity
+/// block, at the scalar region's first non-parameter slot, 1.
 #[test]
 fn a_lambda_is_a_function_over_the_values_it_captured() {
     let source = "fn adder(by: Int) -> fn(Int) -> Int {\n  \
@@ -39,17 +40,18 @@ fn a_lambda_is_a_function_over_the_values_it_captured() {
     );
     assert_eq!(
         listing(source, "<closure 0>"),
-        // `by` is a scalar capture: the call put it in scalar slot 0 out
-        // of the closure it entered through, so the body reads it with a
-        // `load-scalar` and the addition consumes it with no boundary
-        // instruction at all. This listing read `capture 0` and a
+        // `by` is a scalar capture: the call put it in scalar slot 1 out
+        // of the closure it entered through — one past `n`'s slot 0, which
+        // is this specialisation's whole arity block — so the body reads it
+        // with a `load-scalar` and the addition consumes it with no
+        // boundary instruction at all. This listing read `capture 0` and a
         // `value-to-scalar` beside it until issue #162, and that second
         // instruction ran on every read of the capture rather than once per
         // call.
         "fn m.<closure 0> arity=1 frame=1/1 params=[value] captures=[by] -> value\n\
-         \x20  0  load 1\n\
+         \x20  0  load 0\n\
          \x20  1  value-to-scalar\n\
-         \x20  2  load-scalar 0\n\
+         \x20  2  load-scalar 1\n\
          \x20  3  int Add\n\
          \x20  4  scalar-to-value Int\n\
          \x20  5  return\n"
@@ -172,15 +174,17 @@ fn a_nested_lambda_captures_out_of_the_captures_it_stands_in() {
                   fn(b: Int) {\n    fn() {\n      a + b\n    }\n  }\n}\n";
     assert_eq!(
         listing(source, "<closure 0>"),
-        // `a` reaches this body in scalar slot 0, so handing it on to the
-        // inner lambda is the crossing every `make-closure` performs: a
-        // capture travels as a `Value` because a closure holds
+        // `b`, this closure's one parameter, is its whole arity block and
+        // takes slot 0. `a` is not a parameter of this specialisation, so it
+        // falls after the arity block, at scalar slot 1 — and handing it on
+        // to the inner lambda is the crossing every `make-closure` performs:
+        // a capture travels as a `Value` because a closure holds
         // `(name, Value)` pairs on both backends, and the call that enters
         // `<closure 1>` is what puts it back in a scalar slot there.
         "fn m.<closure 0> arity=1 frame=1/1 params=[value] captures=[a] -> value\n\
-         \x20  0  load-scalar 0\n\
+         \x20  0  load-scalar 1\n\
          \x20  1  scalar-to-value Int\n\
-         \x20  2  load 1\n\
+         \x20  2  load 0\n\
          \x20  3  make-closure m.<closure 1> captures=2\n\
          \x20  4  return\n"
     );
@@ -371,13 +375,13 @@ fn an_addition_is_typed_only_where_the_checker_settled_int() {
          \x20  0  load-scalar 0\n\
          \x20  1  load-scalar 1\n\
          \x20  2  int Add\n\
-         \x20  3  store-scalar 2\n\
-         \x20  4  load 3\n\
-         \x20  5  load 4\n\
+         \x20  3  store-scalar 6\n\
+         \x20  4  load 2\n\
+         \x20  5  load 3\n\
          \x20  6  binary Add\n\
          \x20  7  store 7\n\
-         \x20  8  load 5\n\
-         \x20  9  load 6\n\
+         \x20  8  load 4\n\
+         \x20  9  load 5\n\
          \x20 10  binary Add\n\
          \x20 11  return\n"
     );
@@ -1211,8 +1215,8 @@ fn a_for_over_a_sequence_asks_for_its_items_and_walks_them_by_index() {
         ),
         "fn m.f arity=1 frame=1/5 params=[value] -> Int\n\
          \x20  0  scalar-const 0\n\
-         \x20  1  store-scalar 0\n\
-         \x20  2  load 1\n\
+         \x20  1  store-scalar 1\n\
+         \x20  2  load 0\n\
          \x20  3  iter-items\n\
          \x20  4  store 2\n\
          \x20  5  load 2\n\
@@ -1229,17 +1233,17 @@ fn a_for_over_a_sequence_asks_for_its_items_and_walks_them_by_index() {
          \x20 16  call-builtin get argc=1\n\
          \x20 17  try\n\
          \x20 18  store 5\n\
-         \x20 19  load-scalar 0\n\
+         \x20 19  load-scalar 1\n\
          \x20 20  load 5\n\
          \x20 21  value-to-scalar\n\
          \x20 22  int Add\n\
-         \x20 23  store-scalar 0\n\
+         \x20 23  store-scalar 1\n\
          \x20 24  load 4\n\
          \x20 25  const Int(1)\n\
          \x20 26  binary Add\n\
          \x20 27  store 4\n\
          \x20 28  jump 10\n\
-         \x20 29  load-scalar 0\n\
+         \x20 29  load-scalar 1\n\
          \x20 30  return-scalar\n"
     );
 }
@@ -1345,20 +1349,22 @@ fn a_settled_parameter_and_a_settled_answer_travel_on_the_scalar_stack() {
     );
 }
 
-/// Each argument goes to the stack its own parameter names, and within
-/// each stack they land in the order that stack's slots are numbered in
-/// — which is why nothing has to be moved once they are pushed.
+/// Each argument goes to the stack its own parameter names, and each
+/// parameter's slot is its declaration index whichever stack that is —
+/// which is why nothing has to be moved once they are pushed: `n`, `tag`,
+/// and `k` are slots 0, 1, and 2, and the two on the scalar stack and the
+/// one on the value stack are each still dense within their own stack.
 ///
-/// `g`'s frame is one value slot and one scalar slot, and `tag` is value
-/// slot 0 while `n` is scalar slot 0: the numbering is dense inside each
-/// stack and says nothing about the other.
+/// `g` reads `tag`, its middle parameter and its one value slot, so this is
+/// the same rule `an_addition_is_typed_only_where_the_checker_settled_int`
+/// states, read for three parameters instead of six.
 #[test]
 fn an_argument_travels_on_the_stack_its_own_type_names() {
     let source = "fn g(n: Int, tag: String, k: Int) -> String {\n  tag\n}\n\nfn f() -> String {\n  g(1, \"a\", 2)\n}\n";
     assert_eq!(
         listing(source, "g"),
         "fn m.g arity=3 frame=2/1 params=[Int, value, Int] -> value\n\
-         \x20  0  load 2\n\
+         \x20  0  load 1\n\
          \x20  1  return\n"
     );
     assert_eq!(
@@ -1375,16 +1381,17 @@ fn an_argument_travels_on_the_stack_its_own_type_names() {
 /// A receiver is pushed first because it is the first thing `params`
 /// names, and it goes to its own stack like any other argument — which
 /// is the value stack, because a method is declared on a struct or an
-/// enum.
+/// enum. It is also declaration index 0, so it takes slot 0 regardless;
+/// `by`, declared after it, takes slot 1.
 #[test]
 fn a_receiver_is_the_first_argument_and_travels_on_its_own_stack() {
     let source = "struct P {\n  x: Int\n}\n\nimpl P {\n  fn plus(self, by: Int) -> Int {\n    self.x + by\n  }\n}\n\nfn f(p: P) -> Int {\n  p.plus(by: 2)\n}\n";
     assert_eq!(
         listing(source, "P.plus"),
         "fn m.P.plus arity=2 frame=1/1 params=[value, Int] receiver -> Int\n\
-         \x20  0  load 1\n\
+         \x20  0  load 0\n\
          \x20  1  get-field-at-scalar 0\n\
-         \x20  2  load-scalar 0\n\
+         \x20  2  load-scalar 1\n\
          \x20  3  int Add\n\
          \x20  4  return-scalar\n"
     );
@@ -1754,8 +1761,9 @@ fn a_return_ends_the_function_where_it_is_written() {
 ///
 /// What travels is a `Value` on both roads, so the closure's list is the
 /// same either way and the call is what puts the capture in the slot
-/// `Function::captures` names — here a scalar one, read by
-/// `load-scalar 0` with no boundary instruction beside it. The checker's
+/// `Function::captures` names — here a scalar one, one past the closure's
+/// own parameter `n`'s slot 0, read by `load-scalar 1` with no boundary
+/// instruction beside it. The checker's
 /// type is the same on both roads, so the conversion the call makes cannot
 /// fail; a disagreement costs a conversion and cannot cost an answer.
 /// `crates/cove-runtime/src/vm/tests/closures.rs` runs the same program on
@@ -1774,9 +1782,9 @@ fn one_lambda_reached_from_two_conventions_keeps_one_capture_layout() {
     assert_eq!(
         listing(source, "<closure 0>"),
         "fn m.<closure 0> arity=1 frame=1/1 params=[value] captures=[by] -> value\n\
-         \x20  0  load 1\n\
+         \x20  0  load 0\n\
          \x20  1  value-to-scalar\n\
-         \x20  2  load-scalar 0\n\
+         \x20  2  load-scalar 1\n\
          \x20  3  int Add\n\
          \x20  4  scalar-to-value Int\n\
          \x20  5  return\n"

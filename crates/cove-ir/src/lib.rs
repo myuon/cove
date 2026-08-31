@@ -105,11 +105,11 @@
 //! the only one whose convention differs. [`Inst::Lock`] hands its closure a
 //! *place* naming the cell's contents, because a closure written
 //! `fn(var value)` changes what the cell will hold rather than a copy of it;
-//! that parameter therefore takes no value slot, and
-//! [`Function::capture_base`] is where the captures begin as a result. It is
-//! sound because the lowering builds such a closure only as the argument of
-//! the `lock` that consumes it, so it never becomes a value a `call-value`
-//! could reach.
+//! that parameter therefore takes no value slot, and each
+//! [`Capture`]'s own `slot` is one slot later as a result. It is sound
+//! because the lowering builds such a closure only as the argument of the
+//! `lock` that consumes it, so it never becomes a value a `call-value` could
+//! reach.
 //!
 //! # One program, and every thread of a run reads it
 //!
@@ -217,40 +217,46 @@ pub struct Function {
     /// How many slots the *value* region needs: `self` if it has a
     /// receiver, then each parameter `params` names a value slot for, then
     /// every `Value` local and temporary the body declares. The width of
-    /// [`Region::Value`], the one frame numbering's middle third.
+    /// [`Region::Value`].
     ///
-    /// [`Inst::LoadLocal`] and [`Inst::StoreLocal`] address
-    /// `value_origin()..value_origin() + value_frame_size`, where
-    /// [`Function::value_origin`] is `scalar_frame_size`; nothing else
-    /// addresses that range. That makes this the frame metadata a precise
-    /// root set is read from: a frame's whole value window,
-    /// `stack[base .. base + value_frame_size]` at run time, is its root
-    /// set, with nothing to skip inside it, because a scalar slot's number
-    /// never falls in this region — [`Function::region_of`] puts it in
-    /// [`Region::Scalar`] instead, addressed by [`Inst::LoadScalar`] and
-    /// [`Inst::StoreScalar`].
+    /// [`Inst::LoadLocal`] and [`Inst::StoreLocal`] never carry a number
+    /// outside this region — [`Function::region_of`] is what says a given
+    /// slot number is in it, and `crate::lower::validate` checks every one
+    /// against it. The numbers themselves are not one contiguous run the way
+    /// they were before parameters named their own slot:
+    /// `slots[0..arity]` holds every parameter in declaration order,
+    /// whichever region each one's own kind names, so a value parameter's
+    /// number can stand between two scalar parameters'. [`Function::offset`]
+    /// is where a value slot's position *within* this region is answered —
+    /// what a backend keeping this region in an array of its own needs in
+    /// place of the number itself.
+    ///
+    /// That makes this the frame metadata a precise root set is read from: a
+    /// frame's whole value window, `stack[base .. base + value_frame_size]`
+    /// at run time, is its root set, with nothing to skip inside it, because
+    /// a scalar slot's number never falls in this region —
+    /// [`Function::region_of`] puts it in [`Region::Scalar`] instead,
+    /// addressed by [`Inst::LoadScalar`] and [`Inst::StoreScalar`].
     pub value_frame_size: u32,
     /// How many slots the *scalar* region needs: every `Int` or `Bool`
     /// parameter, local, and temporary the body declares. The width of
-    /// [`Region::Scalar`], the one frame numbering's first third —
-    /// [`Function::scalar_origin`] is always zero, so this is also where the
-    /// numbering starts counting.
+    /// [`Region::Scalar`].
     ///
-    /// [`Inst::LoadScalar`] and [`Inst::StoreScalar`] address
-    /// `0..scalar_frame_size` directly, for that reason; nothing else does. A
-    /// scalar parameter is counted here and a value parameter is counted in
-    /// `value_frame_size`, because an argument arrives on the stack its own
-    /// type names and becomes the callee's slot there without moving; see
-    /// `params`.
+    /// [`Inst::LoadScalar`] and [`Inst::StoreScalar`] never carry a number
+    /// outside this region, checked the way [`Function::value_frame_size`]
+    /// describes for [`Inst::LoadLocal`]. A scalar parameter is counted here
+    /// and a value parameter is counted in `value_frame_size`, because an
+    /// argument arrives on the stack its own type names and becomes the
+    /// callee's slot there without moving; see `params`. [`Function::offset`]
+    /// answers where a scalar slot stands within this region, now that its
+    /// number is not that position by construction.
     pub scalar_frame_size: u32,
     /// How many slots the *place* region needs, which today is every `var`
     /// parameter and a `var self` receiver and nothing else. The width of
-    /// [`Region::Place`], the one frame numbering's last third.
+    /// [`Region::Place`].
     ///
-    /// [`Inst::LoadPlace`] addresses
-    /// `place_origin()..place_origin() + place_frame_size`, where
-    /// [`Function::place_origin`] is `scalar_frame_size + value_frame_size`;
-    /// nothing else addresses that range, and nothing stores into it,
+    /// [`Inst::LoadPlace`] never carries a number outside this region,
+    /// checked the same way; nothing stores into it,
     /// because a place slot is filled by the calling convention and never
     /// assigned. A body declares no place slots of its own: `var` is a
     /// property of a parameter, and a local that a `var` argument is rooted
@@ -274,23 +280,47 @@ pub struct Function {
     /// [ADR 0028](../../../docs/adr/0028-five-representations-and-one-is-public.md)
     /// decision 1 means by "what a slot means comes from `cove_ir::Function`'s
     /// per-slot layout": the three frame sizes above say how wide each region
-    /// is and where it begins, and this says what each of the numbers inside
-    /// it *is* — a `Value`, an `Int`, a `Bool`, or a place — without a reader
-    /// having to already know which instruction touches it.
-    /// [`Function::region_of`] is this table read one level less
-    /// specifically, for the reader — a collector, or `crate::lower::validate`
-    /// — that only needs to tell [`Region::Value`] from the other two.
+    /// is, and this says what each of the numbers inside the frame *is* — a
+    /// `Value`, an `Int`, a `Bool`, or a place — without a reader having to
+    /// already know which instruction touches it. [`Function::region_of`] is
+    /// this table read one level less specifically, for the reader — a
+    /// collector, or `crate::lower::validate` — that only needs to tell
+    /// [`Region::Value`] from the other two.
     ///
-    /// Built in the one numbering's order — every scalar-region entry, then
-    /// every value-region entry, then every place-region entry — by
-    /// `super::lower::convention` out of `Body`'s three per-region layouts,
+    /// `slots[0..arity]` is `params` exactly, because a parameter's slot
+    /// number *is* its declaration index: an argument arrives on the stack
+    /// its own kind names and becomes that stack's next slot without moving,
+    /// and the one numbering has to agree with that arrival order rather than
+    /// group every parameter by region first. Everything from `arity` on is
+    /// this body's own — the remaining scalar slots, then the remaining
+    /// value slots, then the place slots, each run dense within its own
+    /// region.
+    ///
+    /// Built by `Body::finish` out of `Body`'s three per-region layouts,
     /// which is where the entries are actually decided: `Body::allocate`
-    /// records a binding's kind at the number it hands out, and
-    /// `Body::finish` is what turns a region-local number into this array's
-    /// index. See `Body::allocate` for the one place this table cannot be
-    /// exact by construction — a scalar number two scopes reuse for an `Int`
-    /// and then a `Bool` — and the rule that keeps it exact anyway.
+    /// records a binding's kind at the region-local number it hands out, and
+    /// `Body::finish` is what permutes a region-local number into this
+    /// array's index — see it for the permutation. See `Body::allocate` for
+    /// the one place this table cannot be exact by construction — a scalar
+    /// number two scopes reuse for an `Int` and then a `Bool` — and the rule
+    /// that keeps it exact anyway.
     pub slots: Vec<SlotKind>,
+    /// Where slot `n` stands within its own region: the number of slots of
+    /// the same region that precede it in the one numbering. Indexed by slot
+    /// number, exactly as `slots` is — see [`Function::offset`], which is
+    /// this table read.
+    ///
+    /// A three-array backend keeps each region in a `Vec` of its own and
+    /// needs a slot's position in that `Vec`, not its number in the one
+    /// numbering: `cove_runtime::vm` derives one base per region per frame
+    /// and adds this to reach a word. Deriving it from the three frame sizes
+    /// alone — as `Function::value_origin` used to let a backend do by
+    /// subtraction — stopped being possible once a parameter's slot number
+    /// could stand anywhere in `0..arity` regardless of its region, so this
+    /// is a table rather than arithmetic: `Body::finish` builds it once, at
+    /// lowering, alongside `slots`, so a hot path pays one indexed load and
+    /// not a search.
+    pub offsets: Vec<u32>,
     /// How many arguments a call must supply, `self` included.
     pub arity: u32,
     /// Which stack each of those arguments arrives on, in the order a call
@@ -300,11 +330,12 @@ pub struct Function {
     /// This is the calling convention, and it is the callee's to state
     /// because the callee is what a slot number means. An argument is
     /// pushed onto the stack its own settled type names and *becomes* the
-    /// callee's slot in that stack without moving, so the value parameters
-    /// occupy the first value slots in the order they appear here and the
-    /// scalar parameters the first scalar slots, each dense within its own
-    /// stack. `params.len()` is `arity`, which `validate` checks rather than
-    /// assumes.
+    /// callee's slot in that stack without moving, and the one numbering
+    /// puts every parameter — whichever kind it is — in `0..arity`, in this
+    /// declaration order: `params[at]` is `slots[at]`, and `Function::offset`
+    /// is where that argument's position within its own physical stack is
+    /// answered. `params.len()` is `arity`, which `validate` checks rather
+    /// than assumes.
     ///
     /// Written out rather than derived, because a caller has to place its
     /// arguments before the callee exists: a recursive call is lowered
@@ -364,9 +395,7 @@ pub struct Function {
     ///
     /// The values themselves live in the frame slots this list gives them, put
     /// there by the call that entered this body, out of the closure it was
-    /// called through.
-    /// One entry per capture, in that order, pairing the name with the stack
-    /// its slot is in.
+    /// called through. One entry per capture, in that order.
     ///
     /// A capture is a frame slot like any other, and issue #162 is where that
     /// became true of its *representation* as well as of its numbering. A
@@ -380,12 +409,15 @@ pub struct Function {
     /// parameter, the capture *and* the answer all crossed, and cost 1.20x
     /// of it.
     ///
-    /// The layout is dense within each region of the one numbering and in
-    /// this order: the value captures fill `capture_base ..` and the scalar
-    /// captures fill `0 ..`, which they can because a function a closure is
-    /// made of takes no scalar argument — `crate::lower::validate` refuses
-    /// one that does, and that refusal is what makes `0` a static number
-    /// here, which it also is as [`Function::scalar_origin`].
+    /// Each capture is allocated a slot right after this function's own
+    /// parameters of that same kind — `crate::lower::convention` allocates
+    /// them in that order — but that is no longer a fact a reader can derive
+    /// from one number a whole region's captures begin at: since a
+    /// parameter's slot moved into `0..arity` in declaration order, the first
+    /// non-parameter slot of a region is not a fixed offset from the frame's
+    /// three sizes alone. So each [`Capture`] carries its own slot, read
+    /// directly out of the lowering rather than computed from a base plus a
+    /// position in this list.
     ///
     /// **What travels is still a `Value`.** The closure holds
     /// `(name, Value)` pairs whichever backend built it, because a host reads
@@ -398,28 +430,7 @@ pub struct Function {
     ///
     /// Never [`SlotKind::Place`]: a closure captures the value a place names
     /// and never the place. [`Inst::PlaceLocal`] is where that is argued.
-    ///
-    /// One list rather than two beside each other, because a name and a slot
-    /// are one fact about one capture and a reader that could hold half of it
-    /// is a reader that could disagree with itself. It also keeps a
-    /// [`Function`] the size it was.
-    pub captures: Vec<(Arc<str>, SlotKind)>,
-    /// Where this function's *value* captures begin, as a number in the one
-    /// frame numbering: [`Function::value_origin`] plus how many of its
-    /// parameters arrived on the value stack.
-    ///
-    /// That second part is the same number as `arity` for every closure but
-    /// one. The exception is the closure `Shared::lock` is given a `var`
-    /// parameter: that parameter names the cell's contents rather than
-    /// receiving a copy of them, so it arrives on the place stack and takes
-    /// no value slot, and the captures begin one slot earlier than `arity`
-    /// would say. See [`Inst::Lock`].
-    ///
-    /// There is no second field for where the scalar captures begin, because
-    /// the answer is always zero: `validate` refuses a function a closure is
-    /// made of that takes any argument on the scalar stack, and
-    /// [`Function::scalar_origin`] is zero regardless.
-    pub capture_base: u32,
+    pub captures: Vec<Capture>,
     /// The names source gave this function's parameters, for a function a
     /// closure value can be made of, and empty for every other.
     ///
@@ -535,33 +546,21 @@ impl Function {
         self.slots.len() as u32
     }
 
-    /// The first slot number of the scalar region, which is zero: the one
-    /// numbering runs scalars, then values, then places.
+    /// Where slot `slot` stands within its own region — the number of slots
+    /// of the same region that come before it in the one numbering.
     ///
-    /// Written as a method although the answer is a constant, because the
-    /// order of the three regions is a fact about the *layout* and a reader
-    /// that spelled the zero itself would be a reader that had memorised it.
-    /// [`Function::value_origin`] is the same fact read one region along.
-    pub fn scalar_origin(&self) -> u32 {
-        0
-    }
-
-    /// The first slot number of the value region, which is where the scalar
-    /// region ends.
-    ///
-    /// A backend keeping the values in a separate array subtracts this to get
-    /// the offset in it, and a backend keeping one array adds nothing at all.
-    /// That subtraction is the whole of what
-    /// [ADR 0028](../../../docs/adr/0028-five-representations-and-one-is-public.md)
-    /// decision 1 means by "derives every physical offset from the one frame
-    /// layout".
-    pub fn value_origin(&self) -> u32 {
-        self.scalar_frame_size
-    }
-
-    /// The first slot number of the place region.
-    pub fn place_origin(&self) -> u32 {
-        self.scalar_frame_size + self.value_frame_size
+    /// A three-array backend keeps each region in a `Vec` of its own, and a
+    /// slot's number in the one numbering is no longer that `Vec`'s index by
+    /// construction: `slots[0..arity]` holds every parameter in declaration
+    /// order regardless of which region each one's own kind names, so a
+    /// region's own slots are no longer one contiguous run beginning at a
+    /// fixed origin the way they were before a parameter named its own slot.
+    /// [`Function::offsets`] is the table this reads, built once at lowering
+    /// by `crate::lower::body::Body::finish`, so this is one indexed load —
+    /// what `cove_runtime::vm`'s dispatch loop needs, since it calls this
+    /// once per slot-addressing instruction it runs.
+    pub fn offset(&self, slot: u32) -> u32 {
+        self.offsets[slot as usize]
     }
 
     /// Which region slot `slot` falls in, and `None` for a number this
@@ -574,17 +573,47 @@ impl Function {
     /// slot-addressing instruction of every lowered program, which is how a
     /// scalar instruction reaching a value slot is caught before a run.
     ///
-    /// Reads [`SlotKind::region`] off `slots[slot]` rather than comparing
-    /// `slot` against the three frame sizes, because `slots` is the
-    /// authority for what a slot *is* — the three sizes stay the authority
-    /// for where a region *begins*, which is a different question and is
-    /// still what `scalar_origin`, `value_origin`, and `place_origin` answer.
-    /// The two cannot disagree about which region a slot number falls in,
-    /// because `slots` is built in the same one-numbering order those three
-    /// origins assume: see `Function::slots`.
+    /// Reads [`SlotKind::region`] off `slots[slot]`, because `slots` is the
+    /// authority for what a slot *is*. It used to be checked against the
+    /// three frame sizes as a second, independent question — where a region
+    /// *begins* — but a region no longer begins anywhere in particular once a
+    /// parameter of another kind can stand ahead of it, so `slots` is the
+    /// only authority left; see [`Function::slots`].
     pub fn region_of(&self, slot: u32) -> Option<Region> {
         self.slots.get(slot as usize).map(|kind| kind.region())
     }
+}
+
+/// One capture a closure's frame reserves a slot for.
+///
+/// A name, a kind, and a slot are three facts about one capture, kept
+/// together for the reason [`Function::captures`] used to give for keeping
+/// just the first two beside each other: a reader that could hold part of
+/// one capture without the rest is a reader that could disagree with itself.
+/// The slot joined the other two once it stopped being derivable from a
+/// region's origin and a position in this list — see [`Function::captures`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Capture {
+    /// The name source gave the binding this capture reads, kept for the
+    /// reason [`Function::captures`] keeps it: nothing here looks a capture
+    /// up by name, but `cove_runtime::value::Closure::captures` is a list of
+    /// `(name, Value)` pairs a host may read, and a listing shows the name.
+    pub name: Arc<str>,
+    /// Which stack this capture's value lives in. Never [`SlotKind::Place`]:
+    /// a closure captures the value a place names and never the place.
+    pub kind: SlotKind,
+    /// This capture's slot, in the one frame numbering.
+    ///
+    /// `crate::lower::convention` reads it straight out of the lowering: a
+    /// capture is allocated a region-local number by
+    /// `crate::lower::body::Body::allocate`, right after this function's own
+    /// parameters of that same kind, and `Body::finish`'s permutation is what
+    /// turns that region-local number into this one — the same translation
+    /// applied to every slot number an instruction carries. There is no
+    /// shorter derivation left: a parameter's slot can stand anywhere in
+    /// `0..arity` regardless of its region, so the first non-parameter slot
+    /// of a region is not a fixed offset from the three frame sizes alone.
+    pub slot: u32,
 }
 
 /// What a scalar slot or a scalar operand holds.
@@ -914,11 +943,11 @@ pub enum Inst {
     /// Pushes the scalar in a frame slot onto the scalar stack.
     ///
     /// The slot is a [`SlotKind::Scalar`] one, checked by `validate` through
-    /// [`Function::region_of`] rather than asked about here. It is also the
-    /// one instruction whose slot number needs no region added to reach the
-    /// one frame numbering: [`Function::scalar_origin`] is always zero, so a
-    /// scalar slot's number within its own region already is its number in
-    /// the whole frame.
+    /// [`Function::region_of`] rather than asked about here. Its number in
+    /// the one frame numbering and its offset within the scalar region are
+    /// two different numbers now that a parameter of another kind can stand
+    /// ahead of a body's own scalars — [`Function::offset`] answers the
+    /// second.
     LoadScalar(u32),
     /// Pops the scalar stack into a frame slot, addressed the same way as
     /// [`Inst::LoadScalar`].
@@ -1245,8 +1274,8 @@ pub enum Inst {
     /// which is what makes the callee's callee alias the original binding
     /// rather than the parameter's own slot; reading it is this and a
     /// [`Inst::PlaceRead`]; writing to it is this and a
-    /// [`Inst::PlaceWrite`]. The slot is a number in the one frame
-    /// numbering's place region, past [`Function::place_origin`].
+    /// [`Inst::PlaceWrite`]. The slot is a number of the place region,
+    /// checked by `validate` through [`Function::region_of`].
     LoadPlace(u32),
     /// Refines the place on top of the place stack by one field, named by
     /// its position.
@@ -1580,11 +1609,13 @@ impl Unsupported {
 pub fn render(program: &Program, id: FunctionId) -> String {
     let function = program.function(id);
     let mut out = String::new();
-    // The three region widths, **in the order the one numbering runs them**:
-    // scalars, then values, then places. Written this way round rather than
-    // the other because a listing's slot numbers are the one numbering's, so
-    // this line is what a reader decodes them with — the value region begins
-    // at the first number and the place region at the two added.
+    // A reader decodes a listing's slot numbers in two steps: `params=[...]`
+    // below is slots `0..arity`, in that order, whatever kind each parameter
+    // is; and the three widths written here are what everything from `arity`
+    // on is grouped into — the remaining scalars, then the remaining values,
+    // then the places — in this same order. Written scalars-first,
+    // values-second, places-third for that reason, and not because a slot's
+    // number can be decoded from these three widths alone anymore.
     out.push_str(&format!(
         "fn {}.{} arity={} frame={}/{}",
         function.module,
@@ -1608,7 +1639,7 @@ pub fn render(program: &Program, id: FunctionId) -> String {
         out.push_str(" receiver");
     }
     if !function.captures.is_empty() {
-        let names: Vec<&str> = function.captures.iter().map(|(name, _)| &**name).collect();
+        let names: Vec<&str> = function.captures.iter().map(|c| &*c.name).collect();
         out.push_str(&format!(" captures=[{}]", names.join(", ")));
     }
     out.push_str(&format!(" -> {}", render_kind(function.returns)));

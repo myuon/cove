@@ -107,8 +107,8 @@ fn validate_function(program: &Program, id: FunctionId) -> Result<(), String> {
     // — how wide this function's frame is — kept apart because one is the
     // authority for where a region begins and the other for what each of
     // its numbers is. They cannot be allowed to say two different things,
-    // so this is where they are made to agree, the way `capture_base` and
-    // the captures are reconciled below.
+    // so this is where they are made to agree, the way each capture's own
+    // slot is checked against the frame below.
     let declared_frame =
         function.scalar_frame_size + function.value_frame_size + function.place_frame_size;
     if function.slots.len() as u32 != declared_frame {
@@ -121,19 +121,41 @@ fn validate_function(program: &Program, id: FunctionId) -> Result<(), String> {
             function.place_frame_size
         ));
     }
+    if function.offsets.len() as u32 != declared_frame {
+        return Err(format!(
+            "carries {} offset(s) for a frame of {declared_frame}",
+            function.offsets.len()
+        ));
+    }
     // Every entry has to stand in the region the numbering itself puts that
-    // number in — computed from the three sizes directly here, rather than
-    // through `Function::region_of`, because `region_of` now reads this same
-    // table and a check that asked the table whether it agreed with itself
-    // would not be a check at all.
+    // number in — computed here rather than through `Function::region_of`,
+    // because `region_of` now reads this same table and a check that asked
+    // the table whether it agreed with itself would not be a check at all.
+    //
+    // A slot below `arity` is a parameter, and a parameter's region is
+    // whichever its own kind names — `params[index]` — because the one
+    // numbering puts every parameter in `0..arity` in declaration order
+    // regardless of which region it belongs to. A slot at or past `arity` is
+    // this body's own, grouped by region in the numbering's order — the
+    // remaining scalar slots, then the remaining value slots, then the
+    // place slots — each tail as wide as its region's frame size minus how
+    // many parameters that region already accounted for in the arity block.
+    let scalar_tail = function.scalar_frame_size - scalar_params;
+    let value_tail = function.value_frame_size - value_params;
+    let (mut scalar_seen, mut value_seen, mut place_seen) = (0u32, 0u32, 0u32);
     for (index, kind) in function.slots.iter().enumerate() {
         let index = index as u32;
-        let numbered_region = if index < function.scalar_frame_size {
-            Region::Scalar
-        } else if index < function.place_origin() {
-            Region::Value
+        let numbered_region = if index < function.arity {
+            function.params[index as usize].region()
         } else {
-            Region::Place
+            let tail = index - function.arity;
+            if tail < scalar_tail {
+                Region::Scalar
+            } else if tail < scalar_tail + value_tail {
+                Region::Value
+            } else {
+                Region::Place
+            }
         };
         if kind.region() != numbered_region {
             return Err(format!(
@@ -142,38 +164,32 @@ fn validate_function(program: &Program, id: FunctionId) -> Result<(), String> {
                 region_name(numbered_region)
             ));
         }
-    }
-    // The calling convention again, read the other way round: a scalar
-    // parameter takes the first free scalar-region numbers in declaration
-    // order, a value parameter the first value-region numbers, and a place
-    // parameter the first place-region numbers — see
-    // `super::convention::declared_function`. Walking `params` with one
-    // counter per region has to land on exactly the entries the layout
-    // itself records at those numbers, or the table and the convention it is
-    // supposed to describe have come apart.
-    let (mut scalar_at, mut value_at, mut place_at) = (0u32, 0u32, 0u32);
-    for (at, kind) in function.params.iter().copied().enumerate() {
-        let slot = match kind {
-            SlotKind::Scalar(_) => {
-                let slot = function.scalar_origin() + scalar_at;
-                scalar_at += 1;
-                slot
-            }
-            SlotKind::Value => {
-                let slot = function.value_origin() + value_at;
-                value_at += 1;
-                slot
-            }
-            SlotKind::Place => {
-                let slot = function.place_origin() + place_at;
-                place_at += 1;
-                slot
-            }
+        let seen = match kind.region() {
+            Region::Scalar => &mut scalar_seen,
+            Region::Value => &mut value_seen,
+            Region::Place => &mut place_seen,
         };
-        let recorded = function.slots.get(slot as usize).copied();
+        let offset = function.offsets[index as usize];
+        if offset != *seen {
+            return Err(format!(
+                "names slot {index} at offset {offset} within its {} region, \
+                 which holds {seen} slot(s) before it",
+                region_name(kind.region())
+            ));
+        }
+        *seen += 1;
+    }
+    // The calling convention again, read the other way round: a parameter's
+    // slot is its declaration index, whichever kind it is — see
+    // `super::convention::declared_function` — so walking `params` has to
+    // land on exactly the entries the layout itself records at
+    // `0..arity`, or the table and the convention it is supposed to describe
+    // have come apart.
+    for (at, kind) in function.params.iter().copied().enumerate() {
+        let recorded = function.slots.get(at).copied();
         if recorded != Some(kind) {
             return Err(format!(
-                "takes parameter {at} as a {} slot at {slot}, which its layout names {}",
+                "takes parameter {at} as a {} slot, which its layout names {}",
                 render_kind(kind),
                 recorded.map_or("no slot at all".to_string(), |k| format!(
                     "a {} slot",
@@ -202,26 +218,16 @@ fn validate_function(program: &Program, id: FunctionId) -> Result<(), String> {
             render_return(other)
         ));
     }
-    // The value captures stand in the value slots straight after the
-    // parameters that arrived on the value stack, put there by the call out
-    // of the closure it went through, so `capture_base` has to be that
-    // number and the frame has to have room for them. The scalar captures
-    // stand at scalar slot 0 for the same reason read on the other stack,
-    // and the check below that no argument arrives there is what makes 0 a
-    // static number. This is the one place the layout the call fills in and
-    // the layout the body reads are reconciled.
-    if function.capture_base != function.value_origin() + value_params {
-        return Err(format!(
-            "begins its captures at slot {} and takes {value_params} value argument(s), \
-             whose value region begins at slot {}",
-            function.capture_base,
-            function.value_origin()
-        ));
-    }
+    // Each capture names its own slot now, in place of one shared base a
+    // position in the list used to be read against — see
+    // `cove_ir::Capture::slot` — so what is left to check is that the slot
+    // is really this frame's, holds the region the capture's own kind
+    // names, and that no two captures claim the same one.
     if !function.captures.is_empty() {
         // Every argument but a `lock` closure's first one arrives on the
-        // value stack, which is what makes a capture's slot a static number:
-        // see `Function::capture_base`.
+        // value stack: a function with a capture is only ever reached
+        // through `Inst::MakeClosure`, and `Inst::CallValue`'s convention has
+        // no room for a scalar argument or a second place one.
         if scalar_params > 0 || place_params > 1 {
             return Err(format!(
                 "holds {} capture(s) and takes {} of its {} arguments off another stack",
@@ -230,34 +236,42 @@ fn validate_function(program: &Program, id: FunctionId) -> Result<(), String> {
                 function.arity
             ));
         }
-        // A closure captures the value a place names and never the place,
-        // so no capture is a place slot. `Inst::PlaceLocal` is the argument.
-        if function
-            .captures
-            .iter()
-            .any(|(_, kind)| matches!(kind, SlotKind::Place))
-        {
-            return Err("holds a capture in a place slot".to_string());
-        }
-        let values = function
-            .captures
-            .iter()
-            .filter(|(_, kind)| matches!(kind, SlotKind::Value))
-            .count();
-        let scalars = function.captures.len() - values;
-        let window = function.capture_base + values as u32;
-        if window > function.place_origin() {
-            return Err(format!(
-                "holds {values} value capture(s) from slot {} in a value region that ends at {}",
-                function.capture_base,
-                function.place_origin()
-            ));
-        }
-        if scalars > function.scalar_frame_size as usize {
-            return Err(format!(
-                "holds {scalars} scalar capture(s) in a scalar frame of {}",
-                function.scalar_frame_size
-            ));
+        let mut claimed: Vec<u32> = Vec::with_capacity(function.captures.len());
+        for capture in &function.captures {
+            // A closure captures the value a place names and never the
+            // place, so no capture's own kind is ever a place.
+            // `Inst::PlaceLocal` is the argument.
+            if matches!(capture.kind, SlotKind::Place) {
+                return Err(format!(
+                    "holds its capture `{}` in a place slot",
+                    capture.name
+                ));
+            }
+            match function.region_of(capture.slot) {
+                Some(region) if region == capture.kind.region() => {}
+                Some(region) => {
+                    return Err(format!(
+                        "holds its capture `{}` as a {} slot at {}, which this frame keeps in its {} region",
+                        capture.name,
+                        region_name(capture.kind.region()),
+                        capture.slot,
+                        region_name(region)
+                    ));
+                }
+                None => {
+                    return Err(format!(
+                        "holds its capture `{}` at slot {}, which is not a slot of this frame",
+                        capture.name, capture.slot
+                    ));
+                }
+            }
+            if claimed.contains(&capture.slot) {
+                return Err(format!(
+                    "holds its capture `{}` at slot {}, which another capture already claims",
+                    capture.name, capture.slot
+                ));
+            }
+            claimed.push(capture.slot);
         }
     }
     for at in function.arg_spans.keys() {
