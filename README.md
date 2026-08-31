@@ -228,6 +228,11 @@ private representations — is checked by a test rather than kept by discipline.
 [ADR 0031](docs/adr/0031-a-host-handle-is-not-a-vm-handle.md) restates that one
 rule and nothing else in ADR 0028: a handle the host owns is not a handle the
 VM owns, and a trait method is a public signature that never says `pub`.
+[ADR 0033](docs/adr/0033-an-identity-is-not-a-vm-heap-object.md) settles where
+a value whose identity is observable actually lives: `Vector` and `Shared`,
+`Task` and `TaskScope`, and a host `Resource` are three kinds of ownership
+rather than one, they stay outside the VM's own traced heap, and the
+materialisation seam stays one-way.
 
 Syntax is still provisional and may change.
 

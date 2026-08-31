@@ -13,6 +13,20 @@
   — it is a `grep` over `pub fn`", repeated below under Consequences. Nothing
   else here is superseded: the five representations, all eight decisions, the
   seal, `ValueView`, and the Costs stand as written
+- Superseded in part by
+  [ADR 0033](0033-an-identity-is-not-a-vm-heap-object.md), which replaces the
+  **answer to which store an identity-bearing value's handle names** —
+  decision 7's closing sentence "The values whose identity is observable —
+  `Vector`, `Shared`, `Task`, `TaskScope`, `Resource` — are materialized as
+  handles rather than as copies, which is what they already are", together
+  with decision 1's slot table row placing `vector` among the heap-backed
+  values whose eight bytes hold "a VM heap handle". Those five are three
+  ownership classes rather than one storage class, they stay outside the
+  VM-owned traced object heap, and the eight-byte slot permits several
+  compact handle kinds. Nothing else there is superseded: the one-way seam of
+  decision 5, decision 7's refusal of a copying constructor, decision 8's
+  three multiplicities, the seal, `ValueView`, and the resolution of #195's
+  tension all stand
 - Date: 2026-08-30
 - Supersedes: nothing. It **decides what
   [ADR 0027](0027-a-place-and-a-capture-name-a-slot.md) left open** under
