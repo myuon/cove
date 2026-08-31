@@ -4162,6 +4162,315 @@ sharpened:
   enums, a field write that does not copy, places and `var` and closures and
   `dyn` and tasks and Host calls, and the bitmap's alternatives.
 
+## One slot numbering, and a simulation in place of a peephole
+
+Phase D of [issue #212](https://github.com/myuon/cove/issues/212) is the first
+of these phases to change the **production `Vm`**, and it is the item Phase C
+separated out and handed on: the numbering.
+
+[ADR 0028](adr/0028-five-representations-and-one-is-public.md) decision 1 says
+"one logical frame, one slot numbering, one base", and closes the obvious
+escape in the same paragraph — "a physically split realization is legal only if
+it presents the same single logical numbering and derives every physical offset
+from the one frame layout; **three independently numbered stacks and three
+independent frame bases are not one logical frame.**" The lowering had three.
+`load-scalar 0` and `load 0` named two different slots and both were called
+slot 0, so there was no number in the IR that named *a slot of a frame*.
+
+There is now, and it is the numbering the one-array backend already realized:
+**the scalar region, then the value region, then the place region, from one
+origin.**
+
+### What changed in `cove_ir`
+
+`Function` presents the numbering rather than three sizes: `slot_count`,
+`scalar_origin`, `value_origin`, `place_origin`, and `region_of`, which answers
+a new `Region { Value, Scalar, Place }`. `Region` is a `SlotKind` with the part
+a *number* cannot answer taken off — a slot number says a slot is scalar, and
+says nothing about whether the word is an `Int` or a `Bool`, because nothing
+addressed by a number needs to know. **It is also the frame's reference map**:
+`Region::Value` is a word a collector follows and the other two are words it
+leaves alone.
+
+The three `*_frame_size` fields keep their names and their values and become
+the *widths of the three regions*. Nothing about a frame's shape moved; what
+moved is that a slot now has one number, and the region is derived from the
+number rather than the number from the region.
+
+`Body::finish` is where the numbers are settled, and that is forced rather than
+chosen. Both origins are **high-water marks** — a scope hands its slot numbers
+back when it ends, so the widest a region ever got is settled by the last
+statement as easily as by the first — so an emitter counts within its own
+region, where the rule is local, and the one number every consumer sees is
+written once, at the end, by adding the region's origin to the instructions
+that carry a slot.
+
+`validate` stopped asking three bounds and asks one question: is this a slot of
+this frame, and is it in the region this instruction reads. **That is a check
+the three bounds could not make.** Each number was in range of its own stack,
+so a `store` reaching a scalar slot could only be caught where the value region
+happened to be too narrow for the number, and could not be caught at all where
+both were wide enough. `validate_refuses_a_slot_of_the_wrong_region` and
+`validate_tells_the_two_regions_of_one_frame_apart` are the two halves of it.
+
+A listing's header prints `frame=<scalar>/<value>[/<place>]` — the widths **in
+the order the numbering runs them** — because that line is now what a reader
+decodes a listing's slot numbers with. Every golden listing in `lower::tests`
+moved with it, and that is the whole of what moved in them.
+
+### What changed in the production `Vm`, and what it cost
+
+The three stacks stay. What decision 1 requires of a split realization is that
+every physical offset be *derived* from the one layout, and the derivation is a
+subtraction of the region's origin — done **once per frame** rather than once
+per access.
+
+The scalar region begins at slot 0, so the scalar core is untouched:
+`Inst::LoadScalar` is `scalars[scalar_base + slot]` exactly as it was, which is
+the loop `benches/arith` spends its whole run in. For the value region,
+`Vm::execute` keeps `values = frame.base.wrapping_sub(function.value_origin())`
+as a loop local beside `frame`, recomputed at each of the six places the frame
+changes, and `Inst::LoadLocal` is `stack[values + slot]` — one addition, which
+is what it cost when a slot's number was its offset. `Frame` is 32 bytes as it
+was; nothing was added to it.
+
+**Instruction counts did not move and could not have.** A renumbering changes
+the operand of an instruction and never which instruction it is:
+
+| row | instructions, both backends |
+| --- | ---: |
+| `arith` | 31,142,877 |
+| `call` | 37,142,877 |
+| `field` | 47,428,595 |
+| `method` | 59,428,598 |
+
+which are Phase B's and Phase C's to the instruction, printed by
+`the_frame_executes_exactly_the_instructions_the_vm_executes` after it asserts
+the two backends agree. VM fuel is its instruction count, so no fuel moved
+either, and ADR 0024's four constants are untouched. Allocations are unmoved as
+well — 2,000,001 traced objects on `field` and on `method`, none at all on
+`arith` and `call`, asserted exactly by
+`the_hot_path_performs_no_value_operation`.
+
+The **differential harness is the net here**, because a change to numbering
+must not change what a program means: 129 corpus cases, 97 lowered and agreeing
+on both backends, 2 refused, which is Phase B's and Phase C's number exactly.
+
+### What the frame backend got out of it, which is a deletion
+
+`FrameVm` had a second number live across the whole dispatch loop —
+`values = base + map.values` — recomputed at every frame change, because the
+lowering numbered two spaces and a value slot's number had to be read through
+the frame map into one region from one base. **It is gone.** A slot's number
+*is* its offset from the frame's base now, for `load-scalar` and `load` alike,
+and `FrameMap` is what is left over: how wide a frame is, and which run of it a
+collection follows, both read off `Function::slot_count` and
+`Function::value_origin`.
+
+That is the concrete thing #122's production split needed. There is nothing
+left in this backend that translates a slot number.
+
+### What one numbering did *not* buy, which Phase C expected it would
+
+Phase C wrote that the numbering "would buy three named refusals": a function
+taking both a value and a scalar parameter, a call passing both, and a value
+parameter beside a scalar slot. **It bought none of them, and the reason is
+worth writing down because it is a correction to what the previous phase
+believed.**
+
+Those refusals are not caused by two numberings. They are caused by the
+**calling convention**: arguments are pushed in *declaration* order and become
+the callee's first slots without moving, while the numbering groups slots by
+region — so a function whose parameters are mixed has its second kind of
+parameter pushed at a word whose number names a different slot. Closing that
+needs the arguments permuted as a frame opens, or a convention that states each
+argument's slot, and neither of those is a renumbering. One numbering was
+*necessary* for the widening and is not *sufficient* for it.
+
+Which region goes first is the choice of which of the two mixed shapes is
+refused, and not of whether either is. The order chosen is the one the
+one-array backend already measured, so the admitted set is exactly what it was:
+the four benchmark rows still refused are refused for the same four reasons —
+`hostheavy` "a Host call", `arrayget` "a collection", `chars` "a string",
+`callback` "a builtin method".
+
+### The peephole, replaced
+
+Phase C's other named debt was `frame::pushed_kinds`, which read the `count`
+instructions immediately before an instruction and called them its `count`
+operands. That is right only where every operand took exactly one instruction
+and that instruction left exactly one word on the value stack.
+
+The shape Phase C named is `Cursor(at: i, step: 1)`, and looking at what the
+lowering actually emits sharpens the complaint rather than confirming it. For
+`Cursor(at: i, step: here.step)` the two instructions before the `make-struct`
+are a `load` and a `get-field-at`, and the read *consumes* the object the load
+pushed — so between them they leave **one** operand where the peephole counted
+two.
+
+**A misaligned window does not merely fail to name the operands; it names
+something else.** The reading there is `[Reference, Int]` where the operands
+are `[Int, Int]`, so the `make-struct` was refused for disagreeing with a type
+it agrees with. And the same misalignment could as easily have derived kinds
+that agreed *wrongly*. One reading already did: `Inst::Dup` was read as
+`Kind::Reference` unconditionally, because the one instruction the peephole
+could see says nothing about what it copies — so a `dup` over an `Int` fed to a
+`store-local` would have been admitted while putting a non-handle into a slot
+the frame map calls a reference, which is the invariant decision 1 states for
+any physical arrangement, read from the other side. The dispatch loop was never
+wrong about it — `Inst::Dup` copies the *bit* — so nothing that ran was
+unsound. The check was.
+
+`frame::Operands` is the replacement: one abstract word per value operand, at
+every instruction, over every path control can take. A word is a `Kind` every
+path agrees on or nothing at all, and the fixed point terminates because a word
+only ever moves from a `Kind` to nothing and never back.
+
+Its pop and push counts are `cove_ir::lower::stack_shape`, which the emitter
+and `validate` already read. It is **exported rather than copied**, and that is
+the point: the whole argument for there being one description of what an
+instruction does is that two of them can come apart, so a third reader belongs
+on the far side of the one description rather than beside a copy of it. It is
+computed once per function in `admits` and once per function when a `FrameVm`
+is built, so the one question a *run* puts to it — what a `make-builtin`'s
+arguments are made of — is an index rather than a walk.
+
+### What it widened, and the coverage the widening was taken on
+
+**One shape: a struct built out of words that took more than one instruction to
+compute.** `a_struct_built_from_a_loaded_word_is_admitted_and_agrees` runs it
+against the tree walk and the `Vm` as well as the frame, and
+`a_struct_built_from_a_loaded_word_is_rooted_in_its_slot` runs the same program
+with the collector at **every** safepoint under `HandleHeap::stress`, asserting
+that collections ran and that the sweep reclaimed the cursors the loop
+abandons.
+
+`the_widened_shapes_struct_is_a_root_in_its_slot` is the mutation: drop the
+frame's own words from the walk and the cursor is swept out from under the loop
+that reads it on the next turn. It dies on `crate::slot::HandleHeap`'s own
+`names a swept object` rather than on an assertion anybody wrote.
+
+`the_peepholes_window_was_not_this_programs_operands` is what says the widening
+is not vacuous, and it says it as arithmetic over `stack_shape` rather than as
+a claim about deleted code: the two instructions before the loop's
+`make-struct` leave one value operand between them, and the type has two
+fields. The initializer above it — two constants, two operands — is the aligned
+case, so the same instruction is admitted twice for two different reasons and
+the program is a fair test rather than a rigged one.
+
+### The measurement
+
+Six `cove-bench --iterations 15` suites, six processes of one binary, stacks
+reserved, quiet machine; **each ratio is the two rows of one run**, and the
+figure quoted is the median of the six.
+
+| row | instructions | VM | mixed frame | frame ÷ VM | band over six |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| `pure` | — | 1.56 ms | 1.39 ms | 0.899× | 4.4 pt |
+| `arith` | 31,142,877 | 100.33 ms | 104.63 ms | **1.042×** | 7.7 pt |
+| `call` | 37,142,877 | 177.16 ms | 168.78 ms | 0.953× | 4.0 pt |
+| `field` | 47,428,595 | 475.54 ms | 202.04 ms | **0.424×** | 1.2 pt |
+| `method` | 59,428,598 | 698.84 ms | 372.39 ms | 0.533× | 3.7 pt |
+
+Per instruction, which the exactly equal counts make available:
+
+| row | VM | mixed frame |
+| --- | ---: | ---: |
+| `arith` | 3.22 ns | **3.36 ns** — still the only row where the frame is slower |
+| `call` | 4.77 ns | 4.54 ns |
+| `field` | 10.03 ns | 4.26 ns |
+| `method` | 11.76 ns | 6.27 ns |
+
+And the per-call prize, each figure two rows of one run and the median of six:
+
+| | VM | mixed frame | saved per call |
+| --- | ---: | ---: | ---: |
+| frame of scalars — `call` − `arith`, 2,000,000 calls | 38.4 ns | 30.9 ns | **8.0 ns** |
+| frame with a reference — `method` − `field`, 4,000,000 calls | 55.8 ns | 42.1 ns | **13.6 ns** |
+
+**`arith` is still the one row where the frame is slower**, at 1.042× against
+Phase C's 1.065×, and nothing here could have moved it onto the other side.
+`benches/arith` addresses only scalar slots, whose region begins at slot 0, so
+its dispatch loop executes the same arithmetic on the same numbers it did
+before. Phase B's negative result stands as recorded: a frame with no reference
+in it pays the bitmap a bit per word pushed and gets nothing back.
+
+Its band is the widest of the five, 7.7 points, and one suite is the whole of
+it — five read 1.038 to 1.049 and the sixth read 1.115. That is the
+process-level effect "The reservation is a measurement fix" describes, which is
+why the number quoted is a median of six rather than a suite.
+
+#### What moved against Phase C, which is an indication and not a measurement
+
+Every row here is from a different binary from Phase C's, so the comparison
+crosses a build and ADR 0029 and
+[#179](https://github.com/myuon/cove/issues/179) are why that is not evidence.
+Stated as an indication:
+
+| row | Phase C | Phase D | change |
+| --- | ---: | ---: | ---: |
+| `pure` | 0.894× | 0.899× | +0.6% |
+| `arith` | 1.065× | 1.042× | −2.2% |
+| `call` | 0.935× | 0.953× | +1.9% |
+| `field` | 0.428× | 0.424× | −0.9% |
+| `method` | 0.495× | 0.533× | +7.7% |
+
+The two rows that moved most moved in *opposite* directions, and the change
+that could have reached either of them is the same change — one addition per
+value-slot access on the `Vm` side taken out of the loop and folded into the
+base, and one fewer number live across the frame backend's dispatch loop.
+Neither row's movement is separable from the rebuild that produced it: `arith`
+cannot have been touched at all on the frame side and moved 2.2%, which is the
+size of the term a rebuild moves on its own. The per-call figures show the same
+shape and the same caveat — 8.0 ns against Phase C's 8.7, and 13.6 ns against
+21.3 — and the six suites' own spread on the second of those is 12.5 to 20.0
+ns, which is most of the difference being claimed.
+
+**What is measured is the standings inside this binary**, and they are the ones
+in the first table.
+
+### Bars
+
+- `LOWERED_FLOOR` **97**; `REGISTERED_REFUSALS` exactly its two entries,
+  compared as a whole in both directions. 129 corpus cases, 97 lowered, 2
+  refused — Phase B's and Phase C's numbers exactly.
+- The four frame rows still refused are refused for the same four reasons, by
+  name and with a span.
+- **ADR 0030 does not bind**, confirmed rather than assumed: this backend makes
+  no Host call at all, and the `hostheavy` refusal is the harness saying so on
+  every suite.
+- ADR 0024's four constants untouched; `responsiveness.rs` green;
+  `the_frame_spends_the_fuel_the_vm_spends` holds, which is the equal
+  instruction counts read through the budget.
+- `Value` stays 24 bytes — the `const _: () = assert!` in `value.rs` compiles.
+- Diagnostics tested for message and span, including
+  `a_struct_program_that_raises_agrees_on_message_and_span`.
+- `cove check`, `cove test` (165 tests), `cove fmt --check`, and
+  `cove api snapshot`, which does not move.
+
+### What Phase D did not do, and what #122 is still waiting on
+
+Two of the three things Phase C listed are built. What is left of that list and
+what this added:
+
+- **A `set-field` that names its type.** Untouched. `Inst::SetField` still
+  carries a `Const::Name` and `frame::admits` still keeps a by-name table for
+  it, which is the last one in this backend.
+- **The argument permutation, or a convention that states each argument's
+  slot.** This is the item the numbering was expected to close and did not, and
+  it is what the two mixed-parameter refusals are actually waiting on. It is
+  the first thing #122's production split will have to decide, because a
+  one-stack production `Vm` has the same question to answer about every mixed
+  call in the corpus rather than about the four rows a prototype admits.
+- **A physically single frame in the production `Vm`.** Still three arrays and
+  three bases, now derived from one layout. What #122 needs from `cove_ir` is
+  built; what it needs from `cove_runtime` is the permutation above.
+- **Everything else on Phase B's list**, unchanged and not restated: an
+  aggregate at decision 5's boundary, the inbound half ADR 0033 clause 1 keeps
+  closed, every one of clause 7's identity obligations, arrays and strings and
+  enums, a field write that does not copy, places and `var` and closures and
+  `dyn` and tasks and Host calls, and the bitmap's alternatives.
+
 ## What is settled and what is open
 
 **Settled by measurement.** Typed scalar slots, the calling convention,
