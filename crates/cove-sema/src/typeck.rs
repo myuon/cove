@@ -301,7 +301,9 @@
 //!   out of condition, so a loop can reach its end without breaking and
 //!   there is nothing at that end to produce but `()`; a `break` operand is
 //!   checked on its own and its value discarded, exactly as an `if`'s
-//!   branch value is. Whether a loop should ever carry a value is issue #87.
+//!   branch value is. That a loop never carries a value is decided rather
+//!   than pending: issue #87 settled it, and the Language Reference gives
+//!   the reason.
 //!
 //! The interpreter obeys both, so a checked program's static and dynamic
 //! answers are the same one.
@@ -3309,13 +3311,14 @@ impl<'a> Checker<'a> {
                 }
                 Ty::Never
             }
-            // A loop's value comes from `break`, so a `break` operand is
-            // checked against the loop's expected type rather than the
-            // function's. Neither form produces a value of its own.
+            // A `break` produces no value of its own, and neither does the
+            // loop it leaves.
             ExprKind::Break(value) => {
                 // The operand is checked on its own, against no expectation,
                 // and its value is discarded: the loop it leaves produces
-                // `()` however it leaves. See issue #87.
+                // `()` however it leaves. Nothing expects the operand
+                // because there is nowhere for it to go -- a loop is
+                // permanently `()`, decided in issue #87.
                 if let Some(value) = value {
                     self.expr(value, None);
                 }
@@ -10566,8 +10569,8 @@ fn apply(transform: fn(Int) -> Int) -> Int {
         // Every loop can reach its end without breaking, and there is
         // nothing at that end to produce but `()`, so the loop is `()` and a
         // `break` operand is checked on its own and its value discarded --
-        // the rule an `if` with no `else` already follows. Whether a loop
-        // should ever carry a value is issue #87.
+        // the rule an `if` with no `else` already follows. That a loop never
+        // carries a value is settled, not pending: issue #87 decided it.
         accepts_body("  let ran = for value in [1, 2] {\n    value\n  }\n  println(\"{ran}\")?");
         accepts_body(
             "  let ran = for value in [1, 2] {\n    break value\n  }\n  println(\"{ran}\")?",
