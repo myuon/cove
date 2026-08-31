@@ -139,13 +139,40 @@
 //! two heaps meet, so it is where the paragraph above stops being a claim and
 //! becomes something a test can fail.
 //!
-//! The direction of travel is the whole of the argument. A [`Handle`] goes in
-//! and an owned `Value` comes out. Nothing goes the other way: there is no
-//! constructor here that puts a `Value` into an object, and the `Value` that
-//! comes out holds no handle, no layout id and no index into
-//! [`HandleHeap`]. Decision 5 is what makes that true rather than a
-//! convention — a `Value` "is not a window onto a slot, a heap object or a
-//! dynamic value; it is a separate object with a representation of its own".
+//! **Inside this module, the direction of travel is still one way.** A
+//! [`Handle`] goes in and an owned `Value` comes out of [`Machine::materialise`];
+//! there is no constructor *here* that puts a `Value` into an object, and the
+//! `Value` that comes out holds no handle, no layout id and no index into
+//! [`HandleHeap`]. `Machine` itself did not change.
+//!
+//! **`crate::frame::FrameVm` is a second consumer of this module's primitives,
+//! and it now has such a constructor.** `FrameVm::host_value_to_word` takes
+//! the `Value` a Host call answered with and allocates an object out of it —
+//! the reverse of [`Machine::materialise`], read against
+//! [`crate::frame::host_part`]'s recursion in place of a [`Layout`]'s own
+//! [`Shape`] — for the shapes decision 5's list closes it to: `Result` and
+//! `Option`, whose builtin case names [`Layout::with_case`] can carry as
+//! `'static` strings, and the one [`Shape::Struct`] this backend ever builds,
+//! the builtin `Error`. That sentence was written when nothing outside this
+//! module could reach [`HandleHeap::allocate`] with a `Value` already in
+//! hand; a Host call's answer is exactly that value, and storing it in a slot
+//! is what issue #212's next family needed.
+//!
+//! **This does not reopen the seam decision 5 closes**, for the reason the
+//! rest of this section argues from the other direction: the handover is
+//! still per part and still a copy. `FrameVm::host_value_to_word` reads one
+//! part of the `Value` at a time — an `Int`, a `Bool`, a `String`'s bytes
+//! copied into a fresh [`Shape::Str`] object, a nested `Result` or `Option`
+//! recursed into — and writes a word, never the `Value` itself, into the
+//! object it allocates. An object's payload is still [`Slot`] words and
+//! nothing else; a word is still scalar bits or a [`Handle`]; no object
+//! anywhere in either heap holds a `Value`, a reference count, or a pointer
+//! into `crate::heap`'s counted world. What changed is which module is
+//! *allowed* to make that copy in this direction, not whether the copy still
+//! is one — decision 5's "is not a window onto a slot, a heap object or a
+//! dynamic value; it is a separate object with a representation of its own"
+//! is exactly as true of a `Value` an embedder gets back as it is of one a
+//! Host call handed in to be turned into a word.
 //!
 //! **The handover is per part, and it is a copy.** [`Machine::materialise`]
 //! reads one word of one object, builds the `Value` that word means, and from
@@ -499,6 +526,19 @@ pub(crate) enum Part {
     Float,
     /// Canonical 0 or 1.
     Bool,
+    /// A canonical zero word that materialises as `Value::unit()` rather than
+    /// as `Value::int(0)`.
+    ///
+    /// The bits are identical to [`Part::Int`]'s zero -- decision 1 gives a
+    /// `Unit` no eight-byte form of its own beyond that -- so the two are
+    /// told apart only here, where something outside the word has to say
+    /// which `Value` it stands for. Nothing a declared struct's or a declared
+    /// enum's own field ever needs, because `cove_ir::Scalar` is `Int | Bool`
+    /// and a `Unit`-typed field is a [`Part::Nested`] value slot instead; this
+    /// is for `Ok(())`, `Err(())` and a Host operation whose declared result
+    /// wraps `Unit`, none of which goes through `cove_ir`'s own per-field
+    /// settlement.
+    Unit,
     /// A [`Handle`], whose object is materialised in turn. This is the only
     /// `Part` the reference map names.
     Nested,
@@ -666,6 +706,23 @@ pub(crate) struct Layout {
     /// What an object of this layout materialises as, and what each of its
     /// words means on the way.
     shape: Shape,
+    /// The `(type, case)` this layout is one case of, if it is one at all.
+    ///
+    /// This is independent of [`Layout::shape`] on purpose: which case an
+    /// object is, and how many payload words it carries, is a question
+    /// `Inst::TestCase` and `Inst::GetPayload` ask of *every* enum object a
+    /// frame holds — a declared enum matched right after it is built, one
+    /// loaded back out of a local, one read out of a struct field — and none
+    /// of those is a question about decision 5's boundary. `Shape::Enum`
+    /// answers a narrower question — "what does this materialise as", which
+    /// needs a `&'static str` because it is read by an embedder — and a
+    /// declared type's qualified name is a program's own `Arc<str>`, not
+    /// `'static`. So a declared enum's layout carries this and stays
+    /// [`Shape::Opaque`], the same shape a declared struct's layout already
+    /// does; only `Result`'s and `Option`'s builtin cases carry both this and
+    /// a live [`Shape::Enum`], because [`cove_schema::builtins`] gives their
+    /// names `'static` storage.
+    case: Option<(Arc<str>, Arc<str>)>,
 }
 
 impl Layout {
@@ -707,6 +764,7 @@ impl Layout {
             refs,
             tail,
             shape: Shape::Opaque,
+            case: None,
         }
     }
 
@@ -736,7 +794,24 @@ impl Layout {
             refs,
             tail: shape.tail(),
             shape,
+            case: None,
         }
+    }
+
+    /// Marks this layout as the case `case` of the enum `type_name`, so that
+    /// `Inst::TestCase` and `Inst::GetPayload` can ask which case an object of
+    /// it is without going through [`Layout::shape`] — see
+    /// [`Layout::case`]'s doc comment for why the two are kept apart.
+    ///
+    /// Takes `self` by value and hands it back, so a registration reads as
+    /// one expression: `heap.register(Layout::new(...).with_case(ty, case))`.
+    pub(crate) fn with_case(
+        mut self,
+        type_name: impl Into<Arc<str>>,
+        case: impl Into<Arc<str>>,
+    ) -> Layout {
+        self.case = Some((type_name.into(), case.into()));
+        self
     }
 
     /// How many eight-byte words the object's **fixed** part holds. An
@@ -765,6 +840,14 @@ impl Layout {
     /// What an object of this layout materialises as.
     pub(crate) fn shape(&self) -> &Shape {
         &self.shape
+    }
+
+    /// The `(type, case)` this layout is one case of, if [`Layout::with_case`]
+    /// was ever called on it.
+    pub(crate) fn case(&self) -> Option<(&str, &str)> {
+        self.case
+            .as_ref()
+            .map(|(type_name, case)| (&**type_name, &**case))
     }
 }
 
@@ -1299,6 +1382,26 @@ impl HandleHeap {
         self.layouts[object.layout.0 as usize].shape()
     }
 
+    /// The `(type, case)` the object `handle` names is one case of, if its
+    /// layout is an enum case's — see [`Layout::case`].
+    ///
+    /// # Panics
+    ///
+    /// If the object has been swept, exactly as [`HandleHeap::shape_of`].
+    pub(crate) fn case_of(&self, handle: Handle) -> Option<(&str, &str)> {
+        let object = self.object(handle);
+        self.layouts[object.layout.0 as usize].case()
+    }
+
+    /// Which layout the object `handle` names was allocated against.
+    ///
+    /// # Panics
+    ///
+    /// If the object has been swept, exactly as [`HandleHeap::shape_of`].
+    pub(crate) fn layout_id_of(&self, handle: Handle) -> LayoutId {
+        self.object(handle).layout
+    }
+
     /// The word indices of the tail of the object `handle` names: decision 2's
     /// "and then N more", which is the object's header and not its layout.
     ///
@@ -1777,6 +1880,7 @@ impl Machine {
             Part::Int => Value::int(bits as i64),
             Part::Float => Value::float(f64::from_bits(bits)),
             Part::Bool => Value::bool(bits != 0),
+            Part::Unit => Value::unit(),
             // The handover, recursively. The child is a Rust local of this
             // frame from here until its own `Value` exists, so it gets a root
             // of its own. It is *also* reachable from `source`, which is

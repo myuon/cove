@@ -741,14 +741,14 @@ impl<'a, 'l> Body<'a, 'l> {
         }
         if let ExprKind::Ident(head) = &base.kind {
             if self.lookup(head).is_none() {
-                if let Some((owner, _)) = self.outer.enum_of(self.module, head) {
+                if let Some((owner, decl)) = self.outer.enum_of(self.module, head) {
                     // `Status.Confirmed`: a case written without a call, so
                     // its payload is empty. Whether the enum declares such a
                     // case is settled where the interpreter settles it — in
                     // `enum_case`, at run time — because a case that does not
                     // exist is a failure with a message rather than a shape
                     // the lowering could produce something else for.
-                    return self.make_enum(owner, head, name, Args::new(&[], None), span);
+                    return self.make_enum(owner, decl, name, Args::new(&[], None), span);
                 }
                 if self.outer.is_host_module(self.module, head) {
                     return Err(Unsupported::new(
