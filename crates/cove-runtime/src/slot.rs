@@ -740,6 +740,12 @@ impl Layout {
         self.tail
     }
 
+    /// Whether the fixed word at `at` is a handle, straight off the reference
+    /// map.
+    pub(crate) fn is_reference(&self, at: usize) -> bool {
+        self.refs.contains(&at)
+    }
+
     /// The layout's name, for a panic message.
     pub(crate) fn name(&self) -> &str {
         &self.name
@@ -1038,6 +1044,9 @@ pub(crate) struct HandleHeap {
     /// live set rather than the size of everything the run ever allocated,
     /// and a sweep is a walk of that table.
     free: Vec<u32>,
+    /// Where [`HandleHeap::copy_replacing`] reads an object's words, kept
+    /// between calls so that writing a struct field allocates nothing.
+    scratch: Vec<Slot>,
     allocations_since_collection: u64,
     next_collection_at: u64,
     collections: u64,
@@ -1059,6 +1068,7 @@ impl HandleHeap {
             layouts: Vec::new(),
             objects: Vec::new(),
             free: Vec::new(),
+            scratch: Vec::new(),
             allocations_since_collection: 0,
             next_collection_at: MIN_ALLOCATIONS_BETWEEN_COLLECTIONS,
             collections: 0,
@@ -1190,6 +1200,50 @@ impl HandleHeap {
         self.object(handle).words[at]
     }
 
+    /// Whether word `at` of the object `handle` names is a reference.
+    ///
+    /// **The reference map, and nothing else, answers this.** It is asked by a
+    /// field read, which has to say what kind of word it just pushed onto a
+    /// frame — decision 2's "which of its words are handles, so a collector
+    /// scans those and not the scalars beside them", asked one word at a time
+    /// rather than once per collection.
+    pub(crate) fn word_is_reference(&self, handle: Handle, at: usize) -> bool {
+        let object = self.object(handle);
+        let layout = &self.layouts[object.layout.0 as usize];
+        if at < layout.words {
+            layout.refs.contains(&at)
+        } else {
+            layout.tail.is_some_and(Part::is_reference)
+        }
+    }
+
+    /// Allocates a copy of the object `source` names with word `at` replaced.
+    ///
+    /// This is what writing a field of a Cove struct is, and the copy is not
+    /// caution. A struct is a value: `Vm` reaches the same point holding an
+    /// `Rc` and calls `Rc::make_mut`, which copies when another holder exists
+    /// and mutates in place when none does. A traced heap keeps no count, so
+    /// it cannot tell those apart — and always copying is the answer that is
+    /// right in both cases, because the copy is what a value type's assignment
+    /// means and the original is left for the collector.
+    ///
+    /// The scratch buffer is why this allocates nothing: the words are read
+    /// into it, the free list hands back an entry with a buffer of its own,
+    /// and neither is a `Vec` this had to make.
+    pub(crate) fn copy_replacing(&mut self, source: Handle, at: usize, bits: Slot) -> Handle {
+        let mut scratch = std::mem::take(&mut self.scratch);
+        {
+            let object = self.object(source);
+            scratch.clear();
+            scratch.extend_from_slice(&object.words);
+        }
+        scratch[at] = bits;
+        let layout = self.object(source).layout;
+        let handle = self.allocate_from(layout, &scratch);
+        self.scratch = scratch;
+        handle
+    }
+
     /// Writes the word at `at` of the object `handle` names.
     pub(crate) fn set_word(&mut self, handle: Handle, at: usize, bits: Slot) {
         let entry = self
@@ -1249,6 +1303,12 @@ impl HandleHeap {
         self.layouts[object.layout.0 as usize]
             .tail
             .is_some_and(Part::is_reference)
+    }
+
+    /// How many words the object `handle` names holds, fixed part and tail
+    /// together.
+    pub(crate) fn layout_words(&self, handle: Handle) -> usize {
+        self.object(handle).words.len()
     }
 
     /// The name of `handle`'s layout, for a panic message.

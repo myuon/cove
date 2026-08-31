@@ -106,6 +106,37 @@ impl Ready {
         )
     }
 
+    /// The same run with the traced heap collecting at **every** safepoint,
+    /// reporting what the collections found.
+    ///
+    /// `scope` is the mutation knob: [`RootScope::EveryWord`] is what a run
+    /// does, and the other two are the two halves of the rooting removed one
+    /// at a time. Stress is on for `crate::slot::HandleHeap::stress`'s reason
+    /// — which safepoint a collection lands on is otherwise an accident of
+    /// what the program allocated, and a rooting test that depends on that
+    /// accident is a test that passes by luck.
+    fn on_frame_collecting(&self, scope: RootScope) -> Collected {
+        let hosts = hosts(None, None);
+        let runtime = Runtime::new(self.checked.clone(), self.sources.clone(), hosts.clone());
+        let mut frame = FrameVm::new(&runtime, &hosts, &self.ir);
+        frame.stress();
+        frame.scope = scope;
+        let answered = frame.run_entry(&self.module, "main", Vec::new());
+        let (collections, roots_yielded, expansions) = frame.collections();
+        Collected {
+            outcome: outcome(answered),
+            collections,
+            roots_yielded,
+            expansions,
+            marked: frame.marked,
+            most_roots_at_once: frame.most_roots_at_once,
+            most_expansions_at_once: frame.most_expansions_at_once,
+            rooted_outside_the_stack: frame.rooted_outside_the_stack(),
+            allocated_objects: frame.heap_stats().allocated_objects,
+            freed_objects: frame.heap_stats().freed_objects,
+        }
+    }
+
     fn on_vm_with(&self, limits: Option<Limits>, cancellation: Option<Cancellation>) -> Outcome {
         let hosts = hosts(limits, cancellation);
         let runtime = Runtime::new(self.checked.clone(), self.sources.clone(), hosts.clone());
@@ -123,6 +154,32 @@ impl Ready {
     fn admitted(&self) -> Result<FunctionId, Refused> {
         admits(&self.ir, &self.module, "main")
     }
+}
+
+/// What one run's collections did, which is how a rooting claim about a whole
+/// program is checked rather than asserted.
+#[derive(Debug)]
+struct Collected {
+    outcome: Outcome,
+    /// How many collections actually ran. Asserted nonzero everywhere, because
+    /// a rooting test over a run that never collected is vacuous.
+    collections: u64,
+    /// ADR 0028 decision 8's first multiplicity, summed: root storage
+    /// locations yielded.
+    roots_yielded: u64,
+    /// Its third, summed: objects the mark phase expanded.
+    expansions: u64,
+    /// Objects the mark phase found live, summed over the same collections.
+    /// Equal to `expansions` whatever the graph, which is what "expanded once"
+    /// means.
+    marked: u64,
+    /// The most root storage locations any single collection yielded.
+    most_roots_at_once: u64,
+    /// The most objects any single collection expanded.
+    most_expansions_at_once: u64,
+    rooted_outside_the_stack: usize,
+    allocated_objects: u64,
+    freed_objects: u64,
 }
 
 /// Parses, checks and lowers `source` as module `m`.
@@ -217,15 +274,25 @@ fn main_of(ty: &str, body: &str) -> String {
 
 // ------------------------------------------------------- the two bench rows
 
-/// Issue #212's first acceptance criterion: `benches/arith` and
-/// `benches/call` execute over one `Vec<u64>` frame stack.
+/// The rows this backend runs.
+///
+/// `arith` and `call` are Phase A's, whose frames hold no reference at all;
+/// `field` and `method` are Phase B's, whose frames do. The pair matters more
+/// than either: `call` minus `arith` prices a call over a frame of scalars and
+/// `method` minus `field` prices one over a frame that has to be walked, and
+/// the difference between those two differences is what rooting costs a call.
+const ADMITTED_ROWS: [&str; 4] = ["arith", "call", "field", "method"];
+
+/// Issue #212's first acceptance criterion, and #162's Design B beside it:
+/// `benches/arith`, `benches/call`, `benches/field` and `benches/method`
+/// execute over one `Vec<u64>` frame stack.
 ///
 /// The whole entry, not a hand-written loop: this consumes the
 /// `cove_ir::Program` `cove run --backend vm` consumes, and answers what the
 /// other two backends answer.
 #[test]
-fn the_two_bench_rows_run_on_the_frame_and_agree_with_both_backends() {
-    for name in ["arith", "call"] {
+fn the_admitted_bench_rows_run_on_the_frame_and_agree_with_both_backends() {
+    for name in ADMITTED_ROWS {
         let ready = bench(name);
         ready
             .admitted()
@@ -256,7 +323,7 @@ fn the_two_bench_rows_run_on_the_frame_and_agree_with_both_backends() {
 /// not instead of it.
 #[test]
 fn the_frame_executes_exactly_the_instructions_the_vm_executes() {
-    for name in ["arith", "call"] {
+    for name in ADMITTED_ROWS {
         let ready = bench(name);
         let (_, instructions, _) = ready.on_frame_with(None, None);
         assert_eq!(
@@ -269,14 +336,21 @@ fn the_frame_executes_exactly_the_instructions_the_vm_executes() {
 
 /// Issue #212's hard constraint, as a number rather than as a sentence.
 ///
-/// Eight `Value` operations for a run of two million turns, all of them in
-/// the nine instructions after the loop — `scalar-to-value`, `const`,
-/// `make-builtin assertEqual` over its two arguments, `try`, `pop`, `const
-/// Unit`, `make-builtin Ok` over its one, and the `return` — and none of
-/// them in the loop.
+/// Eight `Value` operations for a run of two million turns, all of them in the
+/// nine instructions after the loop: `assertEqual`'s two arguments and its
+/// answer, the `try`, the `pop`, `Ok`'s one argument and its answer, and the
+/// `return`. None in the loop.
+///
+/// **The number is the same for `field` and `method` as for `arith`**, and
+/// that is the Phase B claim: a loop that builds a struct, reads two of its
+/// fields and writes one of them, two million times, still constructs no
+/// `Value` at all. `const` and `scalar-to-value` no longer materialise
+/// anything, because a constant that is one of decision 1's four kinds *is*
+/// eight bytes and a settled `Int` is the same eight bytes on both sides of
+/// the conversion.
 #[test]
 fn the_hot_path_performs_no_value_operation() {
-    for name in ["arith", "call"] {
+    for name in ADMITTED_ROWS {
         let ready = bench(name);
         let (_, _, materialized) = ready.on_frame_with(None, None);
         assert_eq!(
@@ -340,8 +414,6 @@ fn the_other_bench_rows_are_refused_by_name() {
         ("hostheavy", "a Host call"),
         ("arrayget", "a collection"),
         ("chars", "a string"),
-        ("field", "a struct"),
-        ("method", "a struct"),
         ("callback", "a builtin method"),
     ] {
         let ready = bench(name);
@@ -779,8 +851,8 @@ fn an_unsupported_construct_is_refused_before_the_run_begins() {
     for (source, expected) in [
         ("export fn main() -> String {\n  \"hello\"\n}\n", "a string"),
         (
-            "struct P {\n  x: Int\n}\n\nexport fn main() -> Int {\n  P(x: 1).x\n}\n",
-            "a struct",
+            "struct P {\n  x: String\n}\n\nexport fn main() -> String {\n  P(x: \"a\").x\n}\n",
+            "a string",
         ),
         (
             "export fn main() -> Int {\n  let f: fn(Int) -> Int = fn(x) {\n    x\n  }\n  f(1)\n}\n",
@@ -847,4 +919,385 @@ fn every_admitted_operator_agrees_on_all_three() {
     agree(&main_of("Bool", "  1 > 2 || 3 < 4"));
     agree(&main_of("Bool", "  1 > 2 && 3 < 4"));
     agree(&main_of("Bool", "  1 < 2 || 3 > 4"));
+}
+
+// ------------------------------------------ what a rooted frame is made of
+
+/// `benches/field`'s loop, short enough to run with a collection at every
+/// safepoint.
+///
+/// One struct in one frame slot, two field reads and one field write a turn.
+/// The write allocates — a struct is a value, so writing a field is a copy;
+/// see `crate::slot::HandleHeap::copy_replacing` — so the loop feeds the
+/// collector as well as the frame.
+const A_STRUCT_IN_A_SLOT: &str = "\
+struct Cell {
+  at: Int
+  step: Int
+}
+
+export fn main() -> Int {
+  var cell = Cell(at: 0, step: 1)
+  var total = 0
+  while cell.at < 200 {
+    total = total + cell.step
+    cell.at = cell.at + cell.step
+  }
+  total
+}
+";
+
+/// The same loop with the read behind a call, which is `benches/method`'s
+/// shape.
+///
+/// The call is what puts a handle in a word that is in **no frame at all**:
+/// the caller pushed it and the callee's base has not moved under it yet, and
+/// the call is a safepoint in between.
+const A_STRUCT_HANDED_TO_A_CALL: &str = "\
+struct Cell {
+  at: Int
+  step: Int
+}
+
+fn reach(cell: Cell) -> Int {
+  cell.at
+}
+
+export fn main() -> Int {
+  var cell = Cell(at: 0, step: 1)
+  var total = 0
+  while reach(cell) < 200 {
+    total = total + cell.step
+    cell.at = cell.at + cell.step
+  }
+  total
+}
+";
+
+/// A struct that is **only** an argument: built at the call site, handed over,
+/// and named by nothing else.
+///
+/// The difference from [`A_STRUCT_HANDED_TO_A_CALL`] is what roots it. There,
+/// the caller's own slot holds the same handle, so the operand word is a
+/// second location for something already rooted. Here the operand word is the
+/// only location there is, and the call takes a safepoint while it is the
+/// only one.
+const A_STRUCT_THAT_IS_ONLY_AN_ARGUMENT: &str = "\
+struct Cell {
+  at: Int
+  step: Int
+}
+
+fn reach(cell: Cell) -> Int {
+  cell.at
+}
+
+export fn main() -> Int {
+  var total = 0
+  var i = 0
+  while i < 200 {
+    total = total + reach(Cell(at: i, step: 1))
+    i = i + 1
+  }
+  total
+}
+";
+
+/// A struct whose first field is another struct, so that one of its words is
+/// a handle and the other is not.
+const A_STRUCT_INSIDE_A_STRUCT: &str = "\
+struct Inner {
+  n: Int
+}
+
+struct Outer {
+  inner: Inner
+  n: Int
+}
+
+export fn main() -> Int {
+  var outer = Outer(inner: Inner(n: 5), n: 1)
+  var total = 0
+  var i = 0
+  while i < 200 {
+    total = total + outer.inner.n
+    i = i + 1
+  }
+  total
+}
+";
+
+/// **The positive half of the rooting proof**: a struct standing in a frame
+/// slot survives every collection of a run that collects at every safepoint,
+/// and the answer is the one the other two backends give.
+///
+/// Nothing here is a claim about pacing. `collections` is asserted nonzero and
+/// `freed_objects` is asserted nonzero, so the heap really did sweep and the
+/// object really did have to be found — a run that collected nothing would
+/// pass a rooting test by not testing it.
+#[test]
+fn a_struct_in_a_frame_slot_survives_every_collection_of_a_run() {
+    let ready = ready(A_STRUCT_IN_A_SLOT);
+    let (vm, collected) = crate::on_cove_stack(|| {
+        (
+            ready.on_vm(),
+            ready.on_frame_collecting(RootScope::EveryWord),
+        )
+    })
+    .expect("a thread to run Cove on");
+
+    assert_eq!(
+        collected.outcome, vm,
+        "the VM and the 8-byte frame disagreed about a rooted loop"
+    );
+    assert!(
+        collected.collections > 0,
+        "the run collected {} time(s), so it proves nothing about rooting",
+        collected.collections
+    );
+    assert!(
+        collected.freed_objects > 0,
+        "the sweep reclaimed nothing, so the object that survived did not have to"
+    );
+    assert!(
+        collected.expansions > 0,
+        "no object was ever expanded, so no root was ever followed"
+    );
+    assert!(
+        collected.allocated_objects > 200,
+        "the loop turns two hundred times and writes a field each turn, and a \
+         field write is a copy: {collected:?}"
+    );
+    assert!(
+        collected.roots_yielded >= collected.expansions,
+        "a walk cannot expand more objects than it yielded locations: {collected:?}"
+    );
+    assert_eq!(
+        collected.expansions, collected.marked,
+        "decision 8's third multiplicity: an object is expanded once for every \
+         time it is found live, and no more"
+    );
+}
+
+/// **The mutation.** Take the frame's own words out of the walk and the
+/// struct in slot 0 is swept out from under the loop that is using it.
+///
+/// The failing assertion is `crate::slot::HandleHeap`'s own: reading a word of
+/// a swept object panics rather than answering whatever is there, so the run
+/// dies at the first `cell.at` after the first collection. That is ADR 0028
+/// decision 8's "a handle slot is a root according to the frame reference map"
+/// removed, and what it costs.
+#[test]
+#[should_panic(expected = "names a swept object")]
+fn a_value_slot_is_a_root_across_the_loop_it_lives_in() {
+    let ready = ready(A_STRUCT_IN_A_SLOT);
+    let _ = ready.on_frame_collecting(RootScope::WithoutFrameSlots);
+}
+
+/// **The other mutation.** Take the operand words out of the walk and the
+/// argument of a call is swept between the caller pushing it and the callee's
+/// frame arriving under it.
+///
+/// This is the half a *static* stack map would have to cover and the half the
+/// frame's own reference map does not: the word is above the caller's frame
+/// and below a callee that does not exist yet, and `Inst::Call` takes a
+/// safepoint there because ADR 0024 says every call is one.
+#[test]
+#[should_panic(expected = "names a swept object")]
+fn a_call_argument_is_a_root_before_the_callee_has_a_frame() {
+    let ready = ready(A_STRUCT_THAT_IS_ONLY_AN_ARGUMENT);
+    let _ = ready.on_frame_collecting(RootScope::WithoutOperands);
+}
+
+/// The control for the mutation above: with the operand words in the walk,
+/// the same two programs run and agree with the VM.
+#[test]
+fn a_struct_handed_to_a_call_survives_the_call_that_is_a_safepoint() {
+    for source in [A_STRUCT_HANDED_TO_A_CALL, A_STRUCT_THAT_IS_ONLY_AN_ARGUMENT] {
+        let ready = ready(source);
+        let (vm, collected) = crate::on_cove_stack(|| {
+            (
+                ready.on_vm(),
+                ready.on_frame_collecting(RootScope::EveryWord),
+            )
+        })
+        .expect("a thread to run Cove on");
+
+        assert_eq!(collected.outcome, vm, "the VM and the frame disagreed");
+        assert!(
+            collected.collections > 0 && collected.freed_objects > 0,
+            "{collected:?}"
+        );
+    }
+}
+
+/// ADR 0028 decision 8's first and third multiplicities, told apart.
+///
+/// At the safepoint a call takes, one struct stands in the caller's frame slot
+/// **and** in the word that is about to be the callee's parameter. Those are
+/// two root storage locations and one object: the walk yields both, because a
+/// bit is a location and de-duplicating handles is not its job, and the mark
+/// phase expands the object they share once.
+///
+/// The second multiplicity — real graph edges counted once each — does not
+/// arise, and `crate::slot`'s module documentation says why: it exists for the
+/// comparison against `Rc::strong_count`, there is no such comparison in a
+/// traced heap, and that is the whole reason a bitmap over words is sound
+/// where a shadow stack over `Value` would not be.
+#[test]
+fn a_reference_in_a_slot_and_in_an_operand_is_two_locations_and_one_expansion() {
+    let ready = ready(A_STRUCT_HANDED_TO_A_CALL);
+    let collected = crate::on_cove_stack(|| ready.on_frame_collecting(RootScope::EveryWord))
+        .expect("a thread to run Cove on");
+
+    assert!(
+        collected.most_roots_at_once >= 2,
+        "no collection ever saw two root locations at once, so this says nothing \
+         about the first multiplicity: {collected:?}"
+    );
+    assert_eq!(
+        collected.most_expansions_at_once, 1,
+        "the two locations name one object, and one object is expanded once: {collected:?}"
+    );
+    assert_eq!(
+        collected.expansions, collected.marked,
+        "an object is expanded exactly once per collection that finds it live"
+    );
+}
+
+/// The shadow-root stack is empty for the whole of an admitted run, and that
+/// is a **finding** rather than an omission.
+///
+/// ADR 0028 decision 8 lists four coherent temporary-rooting mechanisms.
+/// `crate::slot` chose the second — an explicit shadow stack — and showed the
+/// third, "the dispatch discipline guarantees that a collection can occur only
+/// when every live handle has been returned to a mapped VM slot", to be *false*
+/// for `Vm` at five named places. It is true here by construction, because a
+/// one-stack backend has nowhere else to put an operand: every handle a run of
+/// this backend holds is a word of `words`, and every word of `words` is in the
+/// walk.
+///
+/// It stops being free the moment an aggregate crosses decision 5's boundary,
+/// which is Phase C's, and the mechanism is wired and empty rather than absent
+/// so that this test can say so.
+#[test]
+fn nothing_is_rooted_outside_the_one_stack() {
+    for source in [
+        A_STRUCT_IN_A_SLOT,
+        A_STRUCT_HANDED_TO_A_CALL,
+        A_STRUCT_THAT_IS_ONLY_AN_ARGUMENT,
+        A_STRUCT_INSIDE_A_STRUCT,
+    ] {
+        let ready = ready(source);
+        let collected = crate::on_cove_stack(|| ready.on_frame_collecting(RootScope::EveryWord))
+            .expect("a thread to run Cove on");
+        assert_eq!(
+            collected.rooted_outside_the_stack, 0,
+            "a handle stood outside the one stack, which the admitted subset has no way to do"
+        );
+    }
+}
+
+/// A word's kind can come from neither the frame map nor the instruction, and
+/// this is that case: `get-field-at` pushes whatever the **object's** reference
+/// map says word *i* is, so reading `outer.inner` pushes a reference and
+/// reading `outer.n` pushes scalar bits, from the same instruction.
+///
+/// That is ADR 0028 decision 2's reference map doing the job decision 1 needs
+/// it for, and it is why the bitmap is maintained rather than derived: nothing
+/// static about the instruction stream knows which of the two this is.
+#[test]
+fn a_field_read_takes_its_kind_from_the_objects_reference_map() {
+    let ready = ready(A_STRUCT_INSIDE_A_STRUCT);
+    let (ast, vm, collected) = crate::on_cove_stack(|| {
+        (
+            ready.on_ast(),
+            ready.on_vm(),
+            ready.on_frame_collecting(RootScope::EveryWord),
+        )
+    })
+    .expect("a thread to run Cove on");
+
+    assert_eq!(ast, vm, "the oracle and the VM disagreed");
+    assert_eq!(
+        collected.outcome, vm,
+        "the VM and the frame disagreed about a struct inside a struct"
+    );
+    assert!(
+        collected.collections > 0,
+        "the run never collected, so the nested edge was never walked"
+    );
+    assert_eq!(
+        collected.most_expansions_at_once, 2,
+        "the outer object and the inner one it names are two expansions of one \
+         collection, which is the nested edge being followed: {collected:?}"
+    );
+}
+
+/// The invariant ADR 0028 decision 1 states for any physical arrangement: **a
+/// slot the layout calls scalar is never reachable by a walk that treats it as
+/// a reference.**
+///
+/// A word holding the exact eight bytes of a live handle, with its bit clear,
+/// is not yielded. Nothing about the bits is different from the word beside it;
+/// the bitmap is the only difference, which is the point.
+#[test]
+fn a_scalar_word_that_looks_like_a_reference_is_not_walked() {
+    let mut refs = Bitmap::with_capacity(64);
+    let words = [0x0000_0001_0000_0002u64, 0x0000_0001_0000_0002u64];
+    refs.write(0, false);
+    refs.write(1, true);
+    let temps = TempRoots::new();
+    let roots = FrameRoots {
+        words: &words,
+        refs: &refs,
+        temps: &temps,
+        range: 0..words.len(),
+    };
+    let mut seen = Vec::new();
+    roots.walk(&mut |handle| seen.push(handle));
+    assert_eq!(
+        seen,
+        vec![Handle::from_slot(words[1])],
+        "the walk yielded the scalar word, whose bits are the reference word's"
+    );
+}
+
+/// A bitmap skips sixty-four words at a time where a limb is empty, and finds
+/// every set bit where one is not.
+#[test]
+fn a_bitmap_finds_every_reference_and_nothing_else() {
+    let mut refs = Bitmap::with_capacity(256);
+    for at in 0..200 {
+        refs.write(at, at % 37 == 0);
+    }
+    let mut seen = Vec::new();
+    refs.for_each(0..200, &mut |at| seen.push(at));
+    assert_eq!(seen, vec![0, 37, 74, 111, 148, 185]);
+
+    // And a range that starts and ends inside a limb.
+    let mut seen = Vec::new();
+    refs.for_each(38..149, &mut |at| seen.push(at));
+    assert_eq!(seen, vec![74, 111, 148]);
+}
+
+/// Opening a frame writes the whole reference range in one pass, and the
+/// scalars beside it are cleared rather than left as whatever the last frame
+/// at that depth said.
+///
+/// The clearing is load-bearing: a return writes no bit, so a word reused by
+/// the next frame at the same depth would keep the previous frame's answer
+/// about it if opening did not overwrite one.
+#[test]
+fn opening_a_frame_writes_every_bit_of_its_window() {
+    let mut refs = Bitmap::with_capacity(256);
+    refs.write_frame(0, 130, 0..130);
+    refs.write_frame(4, 8, 2..5);
+    let mut seen = Vec::new();
+    refs.for_each(4..12, &mut |at| seen.push(at));
+    assert_eq!(
+        seen,
+        vec![6, 7, 8],
+        "the frame at 4 says words 6, 7 and 8 are references and the rest are not"
+    );
 }
