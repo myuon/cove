@@ -239,7 +239,7 @@ use crate::value::{Closure, ClosureBody, Repr, StructValue, Value};
 /// line runs to its end or the run ends. What that changes is not what a path
 /// costs but how much may happen between two *checks* of the budget, and
 /// [`SAFEPOINT_INTERVAL`] is where that bound is stated.
-const INSTRUCTION_FUEL: u64 = 1;
+pub(crate) const INSTRUCTION_FUEL: u64 = 1;
 
 /// How much fuel may accumulate between safepoints before one is forced.
 ///
@@ -3591,7 +3591,7 @@ enum Answered {
 /// `Option` answers its `Some` payload or returns `None`. An empty payload
 /// answers `()`, because the schema says one is carried and a host that broke
 /// its word is not a reason to lose the shape of the answer.
-fn opened(value: Value, span: Span) -> Result<Result<Value, Value>, RuntimeError> {
+pub(crate) fn opened(value: Value, span: Span) -> Result<Result<Value, Value>, RuntimeError> {
     match &value {
         Value(Repr::Enum(result)) if &*result.type_name == RESULT.name => {
             Ok(match value.ok_payload() {
@@ -3631,7 +3631,7 @@ fn not_a_condition(value: &Value, span: Span) -> RuntimeError {
 }
 
 /// One constant as the value it stands for.
-fn constant(held: &Const) -> Value {
+pub(crate) fn constant(held: &Const) -> Value {
     match held {
         Const::Unit => Value(Repr::Unit),
         Const::Bool(value) => Value(Repr::Bool(*value)),
@@ -3652,7 +3652,7 @@ fn constant(held: &Const) -> Value {
 }
 
 /// The text an instruction's constant names.
-fn name(program: &Program, id: ConstId) -> &str {
+pub(crate) fn name(program: &Program, id: ConstId) -> &str {
     match program.constant(id) {
         Const::Name(text) | Const::Str(text) => text,
         other => unreachable!("an instruction named {other:?} rather than a name"),
@@ -3738,7 +3738,7 @@ fn as_value(returns: SlotKind, scalar: i64) -> Value {
 /// [`Scalar`] itself, because the two callers that reach it — the
 /// `Inst::ScalarToValue` arm and a read through a place rooted at a scalar
 /// slot — hold that and not a slot kind.
-fn as_value_of(what: Scalar, scalar: i64) -> Value {
+pub(crate) fn as_value_of(what: Scalar, scalar: i64) -> Value {
     match what {
         Scalar::Int => Value(Repr::Int(scalar)),
         Scalar::Bool => Value(Repr::Bool(scalar != 0)),
@@ -3759,7 +3759,7 @@ fn as_value_of(what: Scalar, scalar: i64) -> Value {
 /// answers `None` for `i64::MIN / -1` and for `n / 0` alike and those are
 /// two different failures with two different messages. `crate::interp::binary`
 /// tests in that order for that reason, and so this does.
-fn int_binary(op: IntOp, lhs: i64, rhs: i64, span: Span) -> Result<i64, RuntimeError> {
+pub(crate) fn int_binary(op: IntOp, lhs: i64, rhs: i64, span: Span) -> Result<i64, RuntimeError> {
     Ok(match op {
         IntOp::Add => lhs
             .checked_add(rhs)
