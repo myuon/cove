@@ -73,7 +73,7 @@ fn a_resource_call_is_lowered_to_the_instruction_that_routes_by_a_handle() {
         main_of(
             "use files\n\nexport fn main() -> Result<Unit, Error> {\n  let writer = files.create(\"notes.txt\")?\n  writer.writeLine(\"first\")?\n  writer.close()\n}\n"
         ),
-        "fn m.main arity=0 frame=1/0 -> value\n\
+        "fn m.main arity=0 frame=0/1 -> value\n\
          \x20  0  const Str(\"notes.txt\")\n\
          \x20  1  call-host files.create argc=1\n\
          \x20  2  try\n\

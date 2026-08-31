@@ -16,10 +16,14 @@
 //! control cannot reach is not kept, which is what leaves a listing with
 //! nothing in it the VM could never execute.
 //!
-//! The slot rules are one set of rules over three independently numbered
-//! stacks: a scope is a [`Mark`] taken before it and restored after it, a
+//! The slot rules are one set of rules over the three regions of one frame
+//! numbering: a scope is a [`Mark`] taken before it and restored after it, a
 //! shadow is a new slot rather than an overwrite, and each frame size is a
-//! high-water mark rather than a count.
+//! high-water mark rather than a count. An emitter counts within its own
+//! region as it allocates — [`Body::allocate`] draws from one of three
+//! per-region counters — and [`Body::finish`] is what turns each
+//! region-local count into the one number every instruction after lowering
+//! carries.
 //!
 //! And the questions put to the checker are asked here, once each, so that
 //! the answer one construct acts on and the answer another acts on are the
@@ -67,8 +71,11 @@ pub(super) struct Binding<'a> {
 /// Where a scope begins: [`Body::scope`] takes one and [`Body::release`]
 /// restores it, which is what ends the scope.
 ///
-/// The three slot counters are numbered separately, so ending a scope has to
-/// roll all of them back, not just how many bindings are live.
+/// The three slot counters are counted separately, one per region of the one
+/// frame numbering, so ending a scope has to roll all of them back, not just
+/// how many bindings are live. Each is a region-local count while the body
+/// is being emitted — [`Body::finish`] is where a count becomes a number in
+/// the one numbering, not here.
 #[derive(Clone, Copy)]
 pub(super) struct Mark {
     pub(super) live: usize,
@@ -236,19 +243,38 @@ pub(super) struct Body<'a, 'l> {
     pub(super) live: Vec<Binding<'a>>,
     /// The high-water mark of value slots handed out: `self` if there is a
     /// receiver, then parameters, then every `Value` local and temporary.
+    /// The width [`Body::finish`] carries into `Finished::value_frame_size`
+    /// and, from there,
+    /// [`Function::value_origin`](crate::Function::value_origin) is built
+    /// on.
     pub(super) value_frame_size: u32,
     /// The high-water mark of scalar slots handed out: every `Int` or `Bool`
-    /// local and temporary.
+    /// local and temporary. The width of the region the one frame numbering
+    /// starts counting from, since
+    /// [`Function::scalar_origin`](crate::Function::scalar_origin) is
+    /// always zero.
     pub(super) scalar_frame_size: u32,
     /// The high-water mark of place slots handed out, which is every `var`
     /// parameter and a `var self` receiver: nothing a body declares takes
-    /// one.
+    /// one. The width [`Function::place_origin`](crate::Function::place_origin)
+    /// is built on.
     pub(super) place_frame_size: u32,
     /// The next value slot number to hand out, restored when a scope ends.
+    ///
+    /// Counted within the value region alone while the body is emitted:
+    /// [`Body::finish`] adds `value_origin` once, at the end, to turn each
+    /// number an instruction carries into the one frame numbering's.
     pub(super) next_value: u32,
     /// The next scalar slot number to hand out, restored when a scope ends.
+    ///
+    /// Needs no adjustment at [`Body::finish`]: the scalar region's origin
+    /// is always zero, so a scalar slot's count within its own region
+    /// already is its number in the one frame numbering.
     pub(super) next_scalar: u32,
     /// The next place slot number to hand out, restored when a scope ends.
+    ///
+    /// Counted within the place region alone while the body is emitted, for
+    /// the reason `next_value` is: [`Body::finish`] adds `place_origin` once.
     pub(super) next_place: u32,
     labels: Vec<Label>,
     patches: Vec<(usize, usize)>,
@@ -294,7 +320,28 @@ impl<'a, 'l> Body<'a, 'l> {
         }
     }
 
-    /// The finished instructions, with every jump pointing at a real one.
+    /// The finished instructions, with every jump pointing at a real one and
+    /// every slot named by its number in the one frame numbering.
+    ///
+    /// # Why the slot numbers are settled here and not as they were emitted
+    ///
+    /// The one numbering runs the scalar region, then the value region, then
+    /// the place region, so a value slot's number is `scalar_frame_size` plus
+    /// its position among the values and a place slot's is
+    /// `scalar_frame_size + value_frame_size` plus its own. Both origins are
+    /// **high-water marks**, which is to say facts about the whole body that
+    /// are not known until the whole body is emitted: a scope hands its slot
+    /// numbers back when it ends, so the widest the scalar region ever got is
+    /// settled by the last statement as easily as by the first.
+    ///
+    /// So an emitter counts within its own region, where the counting rule is
+    /// local, and the one number every consumer sees is written once here.
+    /// Nothing downstream sees the intermediate form — [`Finished`] is what
+    /// `super::convention` builds a [`Function`] out of — and
+    /// `super::validate` checks the result against
+    /// [`Function::region_of`](crate::Function::region_of) rather than
+    /// against three sizes, so a slip in this loop is caught by the pass that
+    /// exists to catch it.
     pub(super) fn finish(mut self) -> Finished {
         for (pc, label) in &self.patches {
             let target = self.labels[*label]
@@ -307,6 +354,21 @@ impl<'a, 'l> Body<'a, 'l> {
                 | Inst::JumpIfFalseScalar(to)
                 | Inst::JumpIfTrueScalar(to) => *to = target,
                 other => unreachable!("a patch points at a jump, not {other:?}"),
+            }
+        }
+        let value_origin = self.scalar_frame_size;
+        let place_origin = self.scalar_frame_size + self.value_frame_size;
+        for inst in &mut self.code {
+            match inst {
+                // The scalar region begins at 0, so a scalar slot's number in
+                // its own region and its number in the one numbering are the
+                // same number and there is nothing to add.
+                Inst::LoadScalar(_) | Inst::StoreScalar(_) | Inst::PlaceScalar(..) => {}
+                Inst::LoadLocal(slot) | Inst::StoreLocal(slot) | Inst::PlaceLocal(slot) => {
+                    *slot += value_origin;
+                }
+                Inst::LoadPlace(slot) => *slot += place_origin,
+                _ => {}
             }
         }
         Finished {
@@ -542,10 +604,12 @@ impl<'a, 'l> Body<'a, 'l> {
     /// Shadowing declares rather than overwrites, exactly as `Env::declare`
     /// does, so `let x = 1; let x = 2` is two slots.
     ///
-    /// The value stack and the scalar stack are numbered separately, so
-    /// `kind` picks which counter this draws from. A number is dense within
-    /// its own stack — nothing to skip, because the other stack's numbers
-    /// are not in this space at all.
+    /// Each region of the one frame numbering is counted on its own while
+    /// the body is emitted, so `kind` picks which of the three counters this
+    /// draws from — see `Body::allocate`. The number it returns is dense
+    /// within that region's own count and is not yet a number in the one
+    /// numbering: [`Body::finish`] adds the region's origin once, after the
+    /// whole body is emitted and every region's width is settled.
     pub(super) fn declare(&mut self, name: Option<&'a str>, kind: SlotKind) -> u32 {
         let slot = self.allocate(kind);
         self.declare_at(name, kind, slot);
@@ -561,6 +625,10 @@ impl<'a, 'l> Body<'a, 'l> {
     /// its own parameter's turn comes in, so a parameter's name must not be
     /// reachable before then. Reserving and naming are therefore two events
     /// here and one event everywhere else.
+    ///
+    /// The number returned is a count within `kind`'s own region, not yet a
+    /// number in the one frame numbering — [`Body::finish`] is what adds the
+    /// region's origin, once, to every slot number a finished body carries.
     pub(super) fn allocate(&mut self, kind: SlotKind) -> u32 {
         match kind {
             SlotKind::Value => {
@@ -604,9 +672,10 @@ impl<'a, 'l> Body<'a, 'l> {
     /// scope.
     ///
     /// Every slot counter goes back with them, restored from the mark rather
-    /// than recomputed from what remains live: a scope's declarations are on
-    /// three independent stacks now, and the mark is what was true of all of
-    /// them before any grew.
+    /// than recomputed from what remains live: a scope's declarations are
+    /// counted across three independent regions of the one frame numbering,
+    /// and the mark is what was true of all three counters before any of
+    /// them grew.
     pub(super) fn release(&mut self, mark: Mark) {
         self.live.truncate(mark.live);
         self.next_value = mark.next_value;

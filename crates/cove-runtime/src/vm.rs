@@ -49,7 +49,12 @@
 //! Beside it is a `Vec<i64>`, and a slot the checker proved holds an `Int` or
 //! a `Bool` lives there instead — as the integer itself, or as 0 or 1. Every
 //! frame is a window into both, at its `base` and at its `scalar_base`, and
-//! a call and a return move both the same way.
+//! a call and a return move both the same way. `cove_ir` numbers a value
+//! slot and a scalar slot in one frame numbering rather than two, and `base`
+//! and `scalar_base` are this backend's realization of that: each is where a
+//! different region of the one numbering begins in its own `Vec`, derived
+//! once per frame from `cove_ir::Function::value_origin` and
+//! `cove_ir::Function::scalar_origin` — see `value_origin`, below.
 //!
 //! That includes the arguments and the answer. A parameter the checker
 //! settled is a scalar slot, so its argument was pushed onto the scalar
@@ -87,11 +92,14 @@
 //! `Interpreter::make_closure` captures too.
 //!
 //! **A scalar slot holds no reference, and neither does a place.** That is
-//! what the root set is: the stacks are numbered separately, so a scalar slot
-//! is not a number in the value stack's space at all, and a frame's whole
-//! value window, `stack[base .. base + value_frame_size]`, is its root set
-//! with nothing inside it to skip. A place holds an index into that same
-//! window, so whatever it reaches is reachable from what is already scanned.
+//! what the root set is: `cove_ir` numbers a scalar slot and a value slot in
+//! one frame numbering, but the two are still different *regions* of it —
+//! [`cove_ir::Region::Scalar`] and [`cove_ir::Region::Value`] — so a scalar
+//! slot's number is never one that reaches into the value stack, and a
+//! frame's whole value window, `stack[base .. base + value_frame_size]`, is
+//! its root set with nothing inside it to skip. A place holds an index into
+//! that same window, so whatever it reaches is reachable from what is
+//! already scanned.
 //!
 //! **This VM collects.** What is written above used to be a statement about
 //! where the roots are rather than code that reads them; `StackRoots` is
@@ -297,6 +305,39 @@ pub const BACK_EDGE_FUEL: u64 = 64;
 /// everywhere else in the IR — every jump target is one, and
 /// `cove_ir::lower::validate` bounds them all by the code's length — so a
 /// resumption point being one too is the same fact read from the other side.
+/// Where the running function's slot number **zero** would stand in the
+/// value stack, so that adding a value slot's number reaches it.
+///
+/// One numbering means one slot number and three storages, so a backend that
+/// keeps three has to derive each physical offset from the one layout — which
+/// is exactly what [ADR 0028](../../docs/adr/0028-five-representations-and-one-is-public.md)
+/// decision 1 requires of a physically split realization. The derivation is a
+/// subtraction of the region's origin, and it is done **once per frame**
+/// rather than once per access: `frame.base` is where the value region
+/// begins, `cove_ir::Function::value_origin` is the slot number that region
+/// begins at, and the difference is a number that a slot's own number can be
+/// added to. A value slot therefore costs one addition, which is what it cost
+/// when its number was its offset.
+///
+/// The subtraction wraps and the addition that undoes it wraps back. A
+/// function whose scalar region is wider than its frame's base is at — the
+/// first frame of a run, most obviously — has no value slot standing below
+/// the bottom of the stack; it has a number that is only meaningful once a
+/// slot number is added to it, and `cove_ir::lower::validate` is what
+/// guarantees every slot number a `load-local` carries is at least
+/// `value_origin`. Every use indexes a `Vec`, so a slip is an index panic and
+/// never a read of the wrong word.
+fn value_origin(frame: &Frame, function: &cove_ir::Function) -> usize {
+    frame.base.wrapping_sub(function.value_origin() as usize)
+}
+
+/// The same derivation for the place region, which no hot path reads.
+fn place_origin(frame: &Frame, function: &cove_ir::Function) -> usize {
+    frame
+        .place_base
+        .wrapping_sub(function.place_origin() as usize)
+}
+
 #[derive(Clone, Copy)]
 struct Frame {
     /// The function whose instructions are running.
@@ -324,11 +365,20 @@ struct Frame {
     /// it, which discards this frame's scalar slots and its scalar arguments
     /// together and leaves the caller's own operands exactly as they were.
     ///
-    /// The two stacks are numbered separately: `cove_ir::Inst::LoadLocal` and
-    /// `cove_ir::Inst::StoreLocal` address `base`'s stack, and
-    /// `cove_ir::Inst::LoadScalar` and `cove_ir::Inst::StoreScalar` address
-    /// this one, so which stack a slot lives in is decided by which
-    /// instruction addresses it rather than by anything read at run time.
+    /// There is one numbering and there are two of these, which is what
+    /// ADR 0028 decision 1 permits a physically split realization to do —
+    /// "derives every physical offset from the one frame layout" — and the
+    /// derivation is a region origin subtracted from a slot's number. The
+    /// scalar region begins at slot 0, so this base needs no subtraction at
+    /// all and `cove_ir::Inst::LoadScalar` is `scalars[scalar_base + slot]`
+    /// exactly as it was. `base` is where the other half of that is done, in
+    /// [`value_origin`].
+    ///
+    /// Which region a slot lives in is still decided by which instruction
+    /// addresses it, and nothing is read at run time to find out.
+    /// `cove_ir::lower::validate` is what holds the two together: a slot
+    /// number a `load-scalar` carries is a number `Function::region_of`
+    /// answers `Region::Scalar` for, checked once before the run.
     scalar_base: usize,
     /// Where this frame's place slots begin in the place stack, read from
     /// the other side exactly as the two above are: it is the caller's place
@@ -423,10 +473,19 @@ struct Place {
     path: Vec<u32>,
 }
 
-/// The slot a [`Place`] is rooted at: which stack, and where in it.
+/// The slot a [`Place`] is rooted at, as this backend stores it: which of its
+/// arrays, and where in it.
+///
+/// **This is a physical answer to a question the IR asks logically.** A place
+/// names a *slot*, one number in one numbering, and `cove_ir::Inst::PlaceLocal`
+/// and `cove_ir::Inst::PlaceScalar` carry one such number each; two variants
+/// survive here because two arrays do, and a backend keeping one word stack
+/// would have one variant and the same number in it.
 ///
 /// Absolute in both cases, for the reason [`Place`] gives: a place travels
-/// into a call, where the callee's bases are different numbers.
+/// into a call, where the callee's bases are different numbers. That is also
+/// why the region's origin is taken off *here* rather than carried — an
+/// absolute index into a live array is what outlives the frame that built it.
 ///
 /// The `Scalar` variant carries which of the two words it is naming, because
 /// the scalar stack keeps no tag — the same fact `cove_ir::Inst::ScalarToValue`
@@ -557,9 +616,10 @@ struct OpenScope {
 ///   but "very nearly" is not an invariant anything enforces, and the cost is
 ///   one iteration over a vector that is empty in every program that writes
 ///   no `scope`.
-/// - `scalars` — not a root. The two stacks are numbered separately, so a
-///   scalar slot is not a number in the value stack's space at all; an `i64`
-///   holds no reference.
+/// - `scalars` — not a root. One numbering, three regions: a scalar slot's
+///   number is one `cove_ir::Function::region_of` answers
+///   `cove_ir::Region::Scalar` for, and no instruction that reaches the value
+///   stack may carry one. An `i64` holds no reference.
 /// - `places` — not a root, and issue #162 did not make it one. A place is a
 ///   slot number and which stack it is in: a place rooted at a value slot
 ///   reaches only what that slot holds, which is inside the window already
@@ -1368,6 +1428,13 @@ impl<'a> Vm<'a> {
         let mut running = program.function(frame.function);
         let mut code: &[Inst] = &running.code;
         let mut blocks: &[u32] = &running.block_fuel;
+        // Where slot number zero of the running function *would* stand in
+        // the value stack, which is one region along from where its value
+        // slots actually begin. See [`value_origin`]: recomputing it here
+        // and at every frame change is what keeps a value slot's address one
+        // addition, exactly as it was when a value slot's number was its own
+        // offset.
+        let mut values = value_origin(&frame, running);
         let mut pc = 0usize;
 
         // Entering a call is a safepoint and the entry is a call, so a run
@@ -1381,12 +1448,12 @@ impl<'a> Vm<'a> {
             match code[pc] {
                 Inst::Const(id) => self.stack.push(self.constants[id.0 as usize].clone()),
                 Inst::LoadLocal(slot) => {
-                    let value = self.stack[frame.base + slot as usize].clone();
+                    let value = self.stack[values.wrapping_add(slot as usize)].clone();
                     self.stack.push(value);
                 }
                 Inst::StoreLocal(slot) => {
                     let value = self.pop();
-                    self.stack[frame.base + slot as usize] = value;
+                    self.stack[values.wrapping_add(slot as usize)] = value;
                 }
                 Inst::Pop => {
                     self.pop();
@@ -1557,6 +1624,7 @@ impl<'a> Vm<'a> {
                     running = callee;
                     code = &callee.code;
                     blocks = &callee.block_fuel;
+                    values = value_origin(&frame, callee);
                     pc = 0;
                     continue;
                 }
@@ -1571,6 +1639,7 @@ impl<'a> Vm<'a> {
                         running = program.function(frame.function);
                         code = &running.code;
                         blocks = &running.block_fuel;
+                        values = value_origin(&frame, running);
                         self.charge(blocks[0], || running.span_at(0))?;
                         pc = 0;
                         continue;
@@ -1586,6 +1655,7 @@ impl<'a> Vm<'a> {
                         running = program.function(frame.function);
                         code = &running.code;
                         blocks = &running.block_fuel;
+                        values = value_origin(&frame, running);
                         self.charge(blocks[0], || running.span_at(0))?;
                         pc = 0;
                         continue;
@@ -1870,6 +1940,7 @@ impl<'a> Vm<'a> {
                                     running = program.function(frame.function);
                                     code = &running.code;
                                     blocks = &running.block_fuel;
+                                    values = value_origin(&frame, running);
                                     pc = resumed;
                                     // The caller resumes at the instruction
                                     // after its `Call`, which is a block head
@@ -1891,6 +1962,7 @@ impl<'a> Vm<'a> {
                             running = program.function(frame.function);
                             code = &running.code;
                             blocks = &running.block_fuel;
+                            values = value_origin(&frame, running);
                             pc = resumed;
                             // The caller resumes at the instruction after its
                             // `Call`, which is a block head for exactly that
@@ -1914,6 +1986,7 @@ impl<'a> Vm<'a> {
                             running = program.function(frame.function);
                             code = &running.code;
                             blocks = &running.block_fuel;
+                            values = value_origin(&frame, running);
                             pc = resumed;
                             // The caller resumes at the instruction after its
                             // `Call`, which is a block head for exactly that
@@ -1974,20 +2047,26 @@ impl<'a> Vm<'a> {
         match running.code[pc] {
             Inst::PlaceLocal(slot) => {
                 // Absolute, because a place travels into a call and the
-                // callee's `base` is a different number — see `Place`.
-                self.places
-                    .push(Place::rooted_at(frame.base + slot as usize));
+                // callee's `base` is a different number — see `Place`. The
+                // slot's number is the one numbering's, so the value
+                // region's origin comes off it: see `value_origin`.
+                self.places.push(Place::rooted_at(
+                    value_origin(&frame, running).wrapping_add(slot as usize),
+                ));
             }
             Inst::PlaceScalar(slot, what) => {
                 // The same thing on the other stack, and absolute for the
-                // same reason: `frame.scalar_base` is the callee's own.
+                // same reason: `frame.scalar_base` is the callee's own. No
+                // origin comes off this one, because the scalar region is
+                // the region the one numbering begins with.
                 self.places.push(Place::rooted_at_scalar(
                     frame.scalar_base + slot as usize,
                     what,
                 ));
             }
             Inst::LoadPlace(slot) => {
-                let place = self.places[frame.place_base + slot as usize].clone();
+                let place =
+                    self.places[place_origin(&frame, running).wrapping_add(slot as usize)].clone();
                 self.places.push(place);
             }
             Inst::PlaceField(index) => {

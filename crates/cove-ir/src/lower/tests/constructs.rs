@@ -19,7 +19,7 @@ fn a_lambda_is_a_function_over_the_values_it_captured() {
                   fn main() -> Int {\n  let add = adder(3)\n  add(4)\n}\n";
     assert_eq!(
         listing(source, "adder"),
-        "fn m.adder arity=1 frame=0/1 params=[Int] -> value\n\
+        "fn m.adder arity=1 frame=1/0 params=[Int] -> value\n\
          \x20  0  load-scalar 0\n\
          \x20  1  scalar-to-value Int\n\
          \x20  2  make-closure m.<closure 0> captures=1\n\
@@ -27,7 +27,7 @@ fn a_lambda_is_a_function_over_the_values_it_captured() {
     );
     assert_eq!(
         listing(source, "main"),
-        "fn m.main arity=0 frame=1/0 -> Int\n\
+        "fn m.main arity=0 frame=0/1 -> Int\n\
          \x20  0  scalar-const 3\n\
          \x20  1  call m.adder argc=0/1\n\
          \x20  2  store 0\n\
@@ -47,7 +47,7 @@ fn a_lambda_is_a_function_over_the_values_it_captured() {
         // instruction ran on every read of the capture rather than once per
         // call.
         "fn m.<closure 0> arity=1 frame=1/1 params=[value] captures=[by] -> value\n\
-         \x20  0  load 0\n\
+         \x20  0  load 1\n\
          \x20  1  value-to-scalar\n\
          \x20  2  load-scalar 0\n\
          \x20  3  int Add\n\
@@ -73,7 +73,7 @@ fn a_function_used_as_a_value_is_a_closure_over_nothing() {
                   fn f() -> Int {\n  let g = twice\n  twice(1) + g(2)\n}\n";
     assert_eq!(
         specialisation(source, "twice", 1),
-        "fn m.twice arity=1 frame=0/1 params=[Int] -> Int\n\
+        "fn m.twice arity=1 frame=1/0 params=[Int] -> Int\n\
          \x20  0  load-scalar 0\n\
          \x20  1  scalar-const 2\n\
          \x20  2  int Mul\n\
@@ -90,7 +90,7 @@ fn a_function_used_as_a_value_is_a_closure_over_nothing() {
         .expect("`twice` is lowered a second time, as a value");
     assert_eq!(
         crate::render(&program, FunctionId(boxed as u32)),
-        "fn m.twice arity=1 frame=1/0 params=[value] -> value\n\
+        "fn m.twice arity=1 frame=0/1 params=[value] -> value\n\
          \x20  0  load 0\n\
          \x20  1  value-to-scalar\n\
          \x20  2  scalar-const 2\n\
@@ -180,7 +180,7 @@ fn a_nested_lambda_captures_out_of_the_captures_it_stands_in() {
         "fn m.<closure 0> arity=1 frame=1/1 params=[value] captures=[a] -> value\n\
          \x20  0  load-scalar 0\n\
          \x20  1  scalar-to-value Int\n\
-         \x20  2  load 0\n\
+         \x20  2  load 1\n\
          \x20  3  make-closure m.<closure 1> captures=2\n\
          \x20  4  return\n"
     );
@@ -192,7 +192,7 @@ fn a_nested_lambda_captures_out_of_the_captures_it_stands_in() {
         // with one counter per stack.
         "fn m.<closure 1> arity=0 frame=1/1 captures=[a, b] -> value\n\
          \x20  0  load-scalar 0\n\
-         \x20  1  load 0\n\
+         \x20  1  load 1\n\
          \x20  2  value-to-scalar\n\
          \x20  3  int Add\n\
          \x20  4  scalar-to-value Int\n\
@@ -210,7 +210,7 @@ fn a_shadowed_name_is_captured_once_and_at_its_latest_binding() {
                   fn() {\n    a + b\n  }\n}\n";
     assert_eq!(
         listing(source, "f"),
-        "fn m.f arity=0 frame=0/3 -> value\n\
+        "fn m.f arity=0 frame=3/0 -> value\n\
          \x20  0  scalar-const 1\n\
          \x20  1  store-scalar 0\n\
          \x20  2  scalar-const 2\n\
@@ -233,19 +233,19 @@ fn every_literal_loads_one_constant() {
             "fn f() -> Int {\n  let a = 1\n  let b = 1.5\n  let c = true\n  let d = 250ms\n  let e = ()\n  let g = \"hi\"\n  a\n}\n",
             "f"
         ),
-        "fn m.f arity=0 frame=4/2 -> Int\n\
+        "fn m.f arity=0 frame=2/4 -> Int\n\
          \x20  0  scalar-const 1\n\
          \x20  1  store-scalar 0\n\
          \x20  2  const Float(1.5)\n\
-         \x20  3  store 0\n\
+         \x20  3  store 2\n\
          \x20  4  scalar-const 1\n\
          \x20  5  store-scalar 1\n\
          \x20  6  const Duration(250000000)\n\
-         \x20  7  store 1\n\
+         \x20  7  store 3\n\
          \x20  8  const Unit\n\
-         \x20  9  store 2\n\
+         \x20  9  store 4\n\
          \x20 10  const Str(\"hi\")\n\
-         \x20 11  store 3\n\
+         \x20 11  store 5\n\
          \x20 12  load-scalar 0\n\
          \x20 13  return-scalar\n"
     );
@@ -255,7 +255,7 @@ fn every_literal_loads_one_constant() {
 fn an_interpolated_string_renders_its_parts_left_to_right() {
     assert_eq!(
         listing("fn f(n: Int) -> String {\n  \"tick {n}!\"\n}\n", "f"),
-        "fn m.f arity=1 frame=0/1 params=[Int] -> value\n\
+        "fn m.f arity=1 frame=1/0 params=[Int] -> value\n\
          \x20  0  const Str(\"tick \")\n\
          \x20  1  load-scalar 0\n\
          \x20  2  scalar-to-value Int\n\
@@ -288,7 +288,7 @@ fn an_assignment_written_as_a_statement_builds_no_value() {
             "fn f() -> Int {\n  var x = 1\n  x = 2\n  x += 3\n  x\n}\n",
             "f"
         ),
-        "fn m.f arity=0 frame=0/1 -> Int\n\
+        "fn m.f arity=0 frame=1/0 -> Int\n\
          \x20  0  scalar-const 1\n\
          \x20  1  store-scalar 0\n\
          \x20  2  scalar-const 2\n\
@@ -312,7 +312,7 @@ fn an_assignment_written_as_a_statement_builds_no_value() {
 fn an_assignment_whose_value_is_read_still_answers_unit() {
     assert_eq!(
         listing("fn f() -> Unit {\n  var x = 1\n  x = 2\n}\n", "f"),
-        "fn m.f arity=0 frame=0/1 -> value\n\
+        "fn m.f arity=0 frame=1/0 -> value\n\
          \x20  0  scalar-const 1\n\
          \x20  1  store-scalar 0\n\
          \x20  2  scalar-const 2\n\
@@ -329,7 +329,7 @@ fn operands_are_evaluated_left_to_right() {
             "fn f(a: Int, b: Int) -> Bool {\n  a * b / a % b - a + b != a\n}\n",
             "f"
         ),
-        "fn m.f arity=2 frame=0/2 params=[Int, Int] -> Bool\n\
+        "fn m.f arity=2 frame=2/0 params=[Int, Int] -> Bool\n\
          \x20  0  load-scalar 0\n\
          \x20  1  load-scalar 1\n\
          \x20  2  int Mul\n\
@@ -367,17 +367,17 @@ fn an_addition_is_typed_only_where_the_checker_settled_int() {
             "fn f(a: Int, b: Int, c: Float, d: Float, e: Duration, g: Duration) -> Duration {\n  let n = a + b\n  let x = c + d\n  e + g\n}\n",
             "f"
         ),
-        "fn m.f arity=6 frame=5/3 params=[Int, Int, value, value, value, value] -> value\n\
+        "fn m.f arity=6 frame=3/5 params=[Int, Int, value, value, value, value] -> value\n\
          \x20  0  load-scalar 0\n\
          \x20  1  load-scalar 1\n\
          \x20  2  int Add\n\
          \x20  3  store-scalar 2\n\
-         \x20  4  load 0\n\
-         \x20  5  load 1\n\
+         \x20  4  load 3\n\
+         \x20  5  load 4\n\
          \x20  6  binary Add\n\
-         \x20  7  store 4\n\
-         \x20  8  load 2\n\
-         \x20  9  load 3\n\
+         \x20  7  store 7\n\
+         \x20  8  load 5\n\
+         \x20  9  load 6\n\
          \x20 10  binary Add\n\
          \x20 11  return\n"
     );
@@ -394,7 +394,7 @@ fn a_field_of_a_settled_struct_is_read_by_position() {
             "struct P {\n  x: Int\n  y: Int\n}\n\nfn f(p: P) -> Int {\n  p.x + p.y\n}\n",
             "f"
         ),
-        "fn m.f arity=1 frame=1/0 params=[value] -> Int\n\
+        "fn m.f arity=1 frame=0/1 params=[value] -> Int\n\
          \x20  0  load 0\n\
          \x20  1  get-field-at-scalar 0\n\
          \x20  2  load 0\n\
@@ -415,7 +415,7 @@ fn a_bool_field_as_a_condition_never_builds_a_value() {
             "struct P {\n  ready: Bool\n}\n\nfn f(p: P) -> Int {\n  if p.ready {\n    1\n  } else {\n    0\n  }\n}\n",
             "f"
         ),
-        "fn m.f arity=1 frame=1/0 params=[value] -> Int\n\
+        "fn m.f arity=1 frame=0/1 params=[value] -> Int\n\
          \x20  0  load 0\n\
          \x20  1  get-field-at-scalar 0\n\
          \x20  2  jump-if-false-scalar 5\n\
@@ -465,7 +465,7 @@ fn a_name_a_builtin_and_a_declared_type_share_reaches_what_the_receiver_names() 
             "struct Box {\n  n: Int\n}\n\nimpl Box {\n  fn length(self) -> Int {\n    self.n\n  }\n}\n\nfn f(b: Box) -> Int {\n  b.length() + [1, 2, 3].length()\n}\n",
             "f"
         ),
-        "fn m.f arity=1 frame=1/0 params=[value] -> Int\n\
+        "fn m.f arity=1 frame=0/1 params=[value] -> Int\n\
          \x20  0  load 0\n\
          \x20  1  call m.Box.length argc=1/0 -> scalar\n\
          \x20  2  const Int(1)\n\
@@ -486,7 +486,7 @@ fn a_unary_operator_applies_to_what_was_pushed() {
             "fn f(b: Bool) -> Int {\n  if !b {\n    return -1\n  }\n  0\n}\n",
             "f"
         ),
-        "fn m.f arity=1 frame=0/1 params=[Bool] -> Int\n\
+        "fn m.f arity=1 frame=1/0 params=[Bool] -> Int\n\
          \x20  0  load-scalar 0\n\
          \x20  1  scalar-to-value Bool\n\
          \x20  2  unary Not\n\
@@ -504,7 +504,7 @@ fn a_unary_operator_applies_to_what_was_pushed() {
 fn and_and_or_short_circuit_through_jumps() {
     assert_eq!(
         listing("fn f(a: Bool, b: Bool) -> Bool {\n  a && b || a\n}\n", "f"),
-        "fn m.f arity=2 frame=0/2 params=[Bool, Bool] -> Bool\n\
+        "fn m.f arity=2 frame=2/0 params=[Bool, Bool] -> Bool\n\
          \x20  0  load-scalar 0\n\
          \x20  1  jump-if-false-scalar 4\n\
          \x20  2  load-scalar 1\n\
@@ -532,7 +532,7 @@ fn and_over_two_values_still_lowers_through_jumps() {
             "fn f(s: MapEntry<String, Bool>, t: MapEntry<String, Bool>) -> Bool {\n  s.value && t.value\n}\n",
             "f"
         ),
-        "fn m.f arity=2 frame=2/0 params=[value, value] -> Bool\n\
+        "fn m.f arity=2 frame=0/2 params=[value, value] -> Bool\n\
          \x20  0  load 0\n\
          \x20  1  get-field value\n\
          \x20  2  jump-if-false 6\n\
@@ -554,7 +554,7 @@ fn and_of_scalar_bools_as_a_condition_never_builds_a_value() {
             "fn f(a: Bool, b: Bool) -> Int {\n  if a && b {\n    1\n  } else {\n    0\n  }\n}\n",
             "f"
         ),
-        "fn m.f arity=2 frame=0/2 params=[Bool, Bool] -> Int\n\
+        "fn m.f arity=2 frame=2/0 params=[Bool, Bool] -> Int\n\
          \x20  0  load-scalar 0\n\
          \x20  1  jump-if-false-scalar 4\n\
          \x20  2  load-scalar 1\n\
@@ -572,7 +572,7 @@ fn and_of_scalar_bools_as_a_condition_never_builds_a_value() {
 fn a_block_with_no_tail_is_unit() {
     assert_eq!(
         listing("fn f() -> Unit {\n  let a = 1\n}\n", "f"),
-        "fn m.f arity=0 frame=0/1 -> value\n\
+        "fn m.f arity=0 frame=1/0 -> value\n\
          \x20  0  scalar-const 1\n\
          \x20  1  store-scalar 0\n\
          \x20  2  const Unit\n\
@@ -593,7 +593,7 @@ fn a_block_whose_tail_is_an_if_else_still_builds_both_values() {
             "fn f(n: Int) -> Unit {\n  {\n    if n < 2 {\n      let a = 1\n    } else {\n      let b = 2\n    }\n  }\n}\n",
             "f"
         ),
-        "fn m.f arity=1 frame=0/2 params=[Int] -> value\n\
+        "fn m.f arity=1 frame=2/0 params=[Int] -> value\n\
          \x20  0  load-scalar 0\n\
          \x20  1  scalar-const 2\n\
          \x20  2  int Lt\n\
@@ -618,7 +618,7 @@ fn a_let_of_an_if_else_stores_the_branch_that_ran() {
             "fn f(n: Int) -> Int {\n  let x = if n < 2 {\n    1\n  } else {\n    2\n  }\n  x\n}\n",
             "f"
         ),
-        "fn m.f arity=1 frame=0/2 params=[Int] -> Int\n\
+        "fn m.f arity=1 frame=2/0 params=[Int] -> Int\n\
          \x20  0  load-scalar 0\n\
          \x20  1  scalar-const 2\n\
          \x20  2  int Lt\n\
@@ -639,7 +639,7 @@ fn an_if_with_an_else_joins_both_branches() {
             "fn f(n: Int) -> Int {\n  if n < 2 {\n    n\n  } else {\n    n - 1\n  }\n}\n",
             "f"
         ),
-        "fn m.f arity=1 frame=0/1 params=[Int] -> Int\n\
+        "fn m.f arity=1 frame=1/0 params=[Int] -> Int\n\
          \x20  0  load-scalar 0\n\
          \x20  1  scalar-const 2\n\
          \x20  2  int Lt\n\
@@ -665,7 +665,7 @@ fn an_if_with_no_else_written_as_a_statement_builds_no_value() {
             "fn f(n: Int) -> Int {\n  var t = 0\n  if n < 2 {\n    t = 1\n  }\n  t\n}\n",
             "f"
         ),
-        "fn m.f arity=1 frame=0/2 params=[Int] -> Int\n\
+        "fn m.f arity=1 frame=2/0 params=[Int] -> Int\n\
          \x20  0  scalar-const 0\n\
          \x20  1  store-scalar 1\n\
          \x20  2  load-scalar 0\n\
@@ -687,7 +687,7 @@ fn an_if_with_no_else_whose_value_is_read_is_still_unit() {
             "fn f(n: Int) -> Unit {\n  var t = 0\n  if n < 2 {\n    t = 1\n  }\n}\n",
             "f"
         ),
-        "fn m.f arity=1 frame=0/2 params=[Int] -> value\n\
+        "fn m.f arity=1 frame=2/0 params=[Int] -> value\n\
          \x20  0  scalar-const 0\n\
          \x20  1  store-scalar 1\n\
          \x20  2  load-scalar 0\n\
@@ -714,7 +714,7 @@ fn a_while_loop_tests_at_the_top_and_jumps_back() {
             "fn f() -> Int {\n  var i = 0\n  while i < 3 {\n    i += 1\n  }\n  i\n}\n",
             "f"
         ),
-        "fn m.f arity=0 frame=0/1 -> Int\n\
+        "fn m.f arity=0 frame=1/0 -> Int\n\
          \x20  0  scalar-const 0\n\
          \x20  1  store-scalar 0\n\
          \x20  2  load-scalar 0\n\
@@ -807,7 +807,7 @@ fn a_variadic_parameter_of_ints_is_still_a_value_slot() {
             "fn count(items: Int...) -> Int {\n  items.length()\n}\n\nfn f() -> Int {\n  count(1, 2)\n}\n",
             "count"
         ),
-        "fn m.count arity=1 frame=1/0 params=[value] -> Int\n\
+        "fn m.count arity=1 frame=0/1 params=[value] -> Int\n\
          \x20  0  load 0\n\
          \x20  1  call-builtin length argc=0\n\
          \x20  2  value-to-scalar\n\
@@ -946,7 +946,7 @@ fn a_parameter_left_to_its_default_is_computed_by_the_callee() {
     );
     assert_eq!(
         specialisation(source, "g", 1),
-        "fn m.g arity=1 frame=0/2 params=[Int] -> Int\n\
+        "fn m.g arity=1 frame=2/0 params=[Int] -> Int\n\
          \x20  0  scalar-const 2\n\
          \x20  1  store-scalar 1\n\
          \x20  2  load-scalar 0\n\
@@ -994,14 +994,14 @@ fn a_label_may_skip_a_parameter_that_has_a_default() {
     );
     assert_eq!(
         specialisation(source, "measure", 2),
-        "fn m.measure arity=2 frame=2/1 params=[Int, value] -> value\n\
+        "fn m.measure arity=2 frame=1/2 params=[Int, value] -> value\n\
          \x20  0  const Str(\"m\")\n\
-         \x20  1  store 1\n\
-         \x20  2  load 0\n\
+         \x20  1  store 2\n\
+         \x20  2  load 1\n\
          \x20  3  const Str(\": \")\n\
          \x20  4  load-scalar 0\n\
          \x20  5  scalar-to-value Int\n\
-         \x20  6  load 1\n\
+         \x20  6  load 2\n\
          \x20  7  concat 4\n\
          \x20  8  return\n"
     );
@@ -1026,7 +1026,7 @@ fn a_default_reads_the_parameters_before_it_and_no_others() {
             "g",
             1
         ),
-        "fn m.g arity=1 frame=0/2 params=[Int] -> Int\n\
+        "fn m.g arity=1 frame=2/0 params=[Int] -> Int\n\
          \x20  0  load-scalar 0\n\
          \x20  1  scalar-const 2\n\
          \x20  2  int Mul\n\
@@ -1059,7 +1059,7 @@ fn a_default_before_a_variadic_parameter_is_computed_by_the_callee() {
     );
     assert_eq!(
         specialisation(source, "join", 1),
-        "fn m.join arity=1 frame=2/0 params=[value] -> Int\n\
+        "fn m.join arity=1 frame=0/2 params=[value] -> Int\n\
          \x20  0  const Str(\"-\")\n\
          \x20  1  store 1\n\
          \x20  2  load 0\n\
@@ -1124,8 +1124,8 @@ fn a_range_can_be_bound_and_asked_its_methods() {
          \x20  0  scalar-const 1\n\
          \x20  1  load-scalar 0\n\
          \x20  2  make-range ..\n\
-         \x20  3  store 0\n\
-         \x20  4  load 0\n\
+         \x20  3  store 1\n\
+         \x20  4  load 1\n\
          \x20  5  call-builtin length argc=0\n\
          \x20  6  value-to-scalar\n\
          \x20  7  return-scalar\n"
@@ -1151,28 +1151,28 @@ fn a_for_over_a_range_counts_between_two_hidden_slots() {
             "fn f() -> Int {\n  var t = 0\n  for i in 0..<3 {\n    t += i\n  }\n  t\n}\n",
             "f"
         ),
-        "fn m.f arity=0 frame=3/1 -> Int\n\
+        "fn m.f arity=0 frame=1/3 -> Int\n\
          \x20  0  scalar-const 0\n\
          \x20  1  store-scalar 0\n\
          \x20  2  const Int(0)\n\
-         \x20  3  store 0\n\
+         \x20  3  store 1\n\
          \x20  4  const Int(3)\n\
-         \x20  5  store 1\n\
-         \x20  6  load 0\n\
-         \x20  7  load 1\n\
+         \x20  5  store 2\n\
+         \x20  6  load 1\n\
+         \x20  7  load 2\n\
          \x20  8  binary Lt\n\
          \x20  9  jump-if-false 22\n\
-         \x20 10  load 0\n\
-         \x20 11  store 2\n\
+         \x20 10  load 1\n\
+         \x20 11  store 3\n\
          \x20 12  load-scalar 0\n\
-         \x20 13  load 2\n\
+         \x20 13  load 3\n\
          \x20 14  value-to-scalar\n\
          \x20 15  int Add\n\
          \x20 16  store-scalar 0\n\
-         \x20 17  load 0\n\
+         \x20 17  load 1\n\
          \x20 18  const Int(1)\n\
          \x20 19  binary Add\n\
-         \x20 20  store 0\n\
+         \x20 20  store 1\n\
          \x20 21  jump 6\n\
          \x20 22  load-scalar 0\n\
          \x20 23  return-scalar\n"
@@ -1209,35 +1209,35 @@ fn a_for_over_a_sequence_asks_for_its_items_and_walks_them_by_index() {
             "fn f(items: Array<Int>) -> Int {\n  var t = 0\n  for item in items {\n    t += item\n  }\n  t\n}\n",
             "f"
         ),
-        "fn m.f arity=1 frame=5/1 params=[value] -> Int\n\
+        "fn m.f arity=1 frame=1/5 params=[value] -> Int\n\
          \x20  0  scalar-const 0\n\
          \x20  1  store-scalar 0\n\
-         \x20  2  load 0\n\
+         \x20  2  load 1\n\
          \x20  3  iter-items\n\
-         \x20  4  store 1\n\
-         \x20  5  load 1\n\
+         \x20  4  store 2\n\
+         \x20  5  load 2\n\
          \x20  6  call-builtin length argc=0\n\
-         \x20  7  store 2\n\
+         \x20  7  store 3\n\
          \x20  8  const Int(0)\n\
-         \x20  9  store 3\n\
-         \x20 10  load 3\n\
-         \x20 11  load 2\n\
+         \x20  9  store 4\n\
+         \x20 10  load 4\n\
+         \x20 11  load 3\n\
          \x20 12  binary Lt\n\
          \x20 13  jump-if-false 29\n\
-         \x20 14  load 1\n\
-         \x20 15  load 3\n\
+         \x20 14  load 2\n\
+         \x20 15  load 4\n\
          \x20 16  call-builtin get argc=1\n\
          \x20 17  try\n\
-         \x20 18  store 4\n\
+         \x20 18  store 5\n\
          \x20 19  load-scalar 0\n\
-         \x20 20  load 4\n\
+         \x20 20  load 5\n\
          \x20 21  value-to-scalar\n\
          \x20 22  int Add\n\
          \x20 23  store-scalar 0\n\
-         \x20 24  load 3\n\
+         \x20 24  load 4\n\
          \x20 25  const Int(1)\n\
          \x20 26  binary Add\n\
-         \x20 27  store 3\n\
+         \x20 27  store 4\n\
          \x20 28  jump 10\n\
          \x20 29  load-scalar 0\n\
          \x20 30  return-scalar\n"
@@ -1253,7 +1253,7 @@ fn break_leaves_the_loop_and_continue_reaches_the_next_iteration() {
             "fn f() -> Int {\n  var i = 0\n  while i < 10 {\n    i += 1\n    if i == 2 {\n      continue\n    }\n    if i == 5 {\n      break\n    }\n  }\n  i\n}\n",
             "f"
         ),
-        "fn m.f arity=0 frame=0/1 -> Int\n\
+        "fn m.f arity=0 frame=1/0 -> Int\n\
          \x20  0  scalar-const 0\n\
          \x20  1  store-scalar 0\n\
          \x20  2  load-scalar 0\n\
@@ -1287,7 +1287,7 @@ fn a_call_reaches_a_declaration_and_a_function_reaches_itself() {
             "fn fib(n: Int) -> Int {\n  if n < 2 {\n    n\n  } else {\n    fib(n - 1) + fib(n - 2)\n  }\n}\n",
             "fib"
         ),
-        "fn m.fib arity=1 frame=0/1 params=[Int] -> Int\n\
+        "fn m.fib arity=1 frame=1/0 params=[Int] -> Int\n\
          \x20  0  load-scalar 0\n\
          \x20  1  scalar-const 2\n\
          \x20  2  int Lt\n\
@@ -1332,7 +1332,7 @@ fn a_settled_parameter_and_a_settled_answer_travel_on_the_scalar_stack() {
         "fn identity(value: Int) -> Int {\n  value\n}\n\nfn f() -> Int {\n  identity(1)\n}\n";
     assert_eq!(
         listing(source, "identity"),
-        "fn m.identity arity=1 frame=0/1 params=[Int] -> Int\n\
+        "fn m.identity arity=1 frame=1/0 params=[Int] -> Int\n\
          \x20  0  load-scalar 0\n\
          \x20  1  return-scalar\n"
     );
@@ -1357,8 +1357,8 @@ fn an_argument_travels_on_the_stack_its_own_type_names() {
     let source = "fn g(n: Int, tag: String, k: Int) -> String {\n  tag\n}\n\nfn f() -> String {\n  g(1, \"a\", 2)\n}\n";
     assert_eq!(
         listing(source, "g"),
-        "fn m.g arity=3 frame=1/2 params=[Int, value, Int] -> value\n\
-         \x20  0  load 0\n\
+        "fn m.g arity=3 frame=2/1 params=[Int, value, Int] -> value\n\
+         \x20  0  load 2\n\
          \x20  1  return\n"
     );
     assert_eq!(
@@ -1382,7 +1382,7 @@ fn a_receiver_is_the_first_argument_and_travels_on_its_own_stack() {
     assert_eq!(
         listing(source, "P.plus"),
         "fn m.P.plus arity=2 frame=1/1 params=[value, Int] receiver -> Int\n\
-         \x20  0  load 0\n\
+         \x20  0  load 1\n\
          \x20  1  get-field-at-scalar 0\n\
          \x20  2  load-scalar 0\n\
          \x20  3  int Add\n\
@@ -1390,7 +1390,7 @@ fn a_receiver_is_the_first_argument_and_travels_on_its_own_stack() {
     );
     assert_eq!(
         listing(source, "f"),
-        "fn m.f arity=1 frame=1/0 params=[value] -> Int\n\
+        "fn m.f arity=1 frame=0/1 params=[value] -> Int\n\
          \x20  0  load 0\n\
          \x20  1  scalar-const 2\n\
          \x20  2  call m.P.plus argc=1/1 -> scalar\n\
@@ -1408,7 +1408,7 @@ fn a_scalar_answer_crosses_only_where_a_value_reads_it() {
         "fn g() -> Int {\n  1\n}\n\nfn f() -> String {\n  g()\n  let n = g() + 1\n  \"{g()}\"\n}\n";
     assert_eq!(
         listing(source, "f"),
-        "fn m.f arity=0 frame=0/1 -> value\n\
+        "fn m.f arity=0 frame=1/0 -> value\n\
          \x20  0  call m.g argc=0/0 -> scalar\n\
          \x20  1  scalar-pop\n\
          \x20  2  call m.g argc=0/0 -> scalar\n\
@@ -1429,7 +1429,7 @@ fn a_bool_a_call_answered_is_tested_where_it_stands() {
     let source = "fn big(n: Int) -> Bool {\n  n > 2\n}\n\nfn f(n: Int) -> Int {\n  if big(n) {\n    1\n  } else {\n    0\n  }\n}\n";
     assert_eq!(
         listing(source, "f"),
-        "fn m.f arity=1 frame=0/1 params=[Int] -> Int\n\
+        "fn m.f arity=1 frame=1/0 params=[Int] -> Int\n\
          \x20  0  load-scalar 0\n\
          \x20  1  call m.big argc=0/1 -> scalar\n\
          \x20  2  jump-if-false-scalar 5\n\
@@ -1446,7 +1446,7 @@ const STRUCT_AND_METHOD: &str = "struct P {\n  x: Int\n  y: Int\n}\n\nimpl P {\n
 fn a_struct_is_built_in_declaration_order_and_read_by_field() {
     assert_eq!(
         listing(STRUCT_AND_METHOD, "f"),
-        "fn m.f arity=0 frame=1/0 -> Int\n\
+        "fn m.f arity=0 frame=0/1 -> Int\n\
          \x20  0  const Int(1)\n\
          \x20  1  const Int(2)\n\
          \x20  2  make-struct m.P fields=x,y\n\
@@ -1464,7 +1464,7 @@ fn a_struct_is_built_in_declaration_order_and_read_by_field() {
 fn a_method_takes_its_receiver_in_slot_zero() {
     assert_eq!(
         listing(STRUCT_AND_METHOD, "P.sum"),
-        "fn m.P.sum arity=1 frame=1/0 params=[value] receiver -> Int\n\
+        "fn m.P.sum arity=1 frame=0/1 params=[value] receiver -> Int\n\
          \x20  0  load 0\n\
          \x20  1  get-field-at-scalar 0\n\
          \x20  2  load 0\n\
@@ -1487,7 +1487,7 @@ fn snapshot_is_a_call_where_a_conformance_answers_and_an_instruction_where_none_
             "struct B {\n  n: Int\n}\n\nimpl Snapshot for B {\n  fn snapshot(self) -> B {\n    B(n: self.n)\n  }\n}\n\nfn f(b: B) -> B {\n  b.snapshot()\n}\n",
             "f"
         ),
-        "fn m.f arity=1 frame=1/0 params=[value] -> value\n\
+        "fn m.f arity=1 frame=0/1 params=[value] -> value\n\
          \x20  0  load 0\n\
          \x20  1  call m.B.snapshot argc=1/0\n\
          \x20  2  return\n"
@@ -1497,7 +1497,7 @@ fn snapshot_is_a_call_where_a_conformance_answers_and_an_instruction_where_none_
             "fn f(v: Vector<Int>) -> Vector<Int> {\n  v.snapshot()\n}\n",
             "f"
         ),
-        "fn m.f arity=1 frame=1/0 params=[value] -> value\n\
+        "fn m.f arity=1 frame=0/1 params=[value] -> value\n\
          \x20  0  load 0\n\
          \x20  1  snapshot\n\
          \x20  2  return\n"
@@ -1553,7 +1553,7 @@ fn a_host_operation_is_called_through_its_module() {
             "use console.println\nuse clock\n\nfn f() -> Result<Unit, Error> {\n  let at = clock.now()\n  println(\"at {at}\")?\n  Ok(())\n}\n",
             "f"
         ),
-        "fn m.f arity=0 frame=1/0 -> value\n\
+        "fn m.f arity=0 frame=0/1 -> value\n\
          \x20  0  call-host clock.now argc=0\n\
          \x20  1  store 0\n\
          \x20  2  const Str(\"at \")\n\
@@ -1575,7 +1575,7 @@ fn a_resource_operation_is_called_through_the_handle_it_stands_on() {
             "use http\n\nfn f() -> Result<Unit, Error> {\n  let server = http.listen(0)?\n  server.close()\n}\n",
             "f"
         ),
-        "fn m.f arity=0 frame=1/0 -> value\n\
+        "fn m.f arity=0 frame=0/1 -> value\n\
          \x20  0  const Int(0)\n\
          \x20  1  call-host http.listen argc=1\n\
          \x20  2  try\n\
@@ -1593,7 +1593,7 @@ fn a_resource_operation_takes_its_handle_below_its_arguments() {
             "use files\n\nfn f(line: String) -> Result<Unit, Error> {\n  let writer = files.create(\"notes.txt\")?\n  writer.writeLine(line)\n}\n",
             "f"
         ),
-        "fn m.f arity=1 frame=2/0 params=[value] -> value\n\
+        "fn m.f arity=1 frame=0/2 params=[value] -> value\n\
          \x20  0  const Str(\"notes.txt\")\n\
          \x20  1  call-host files.create argc=1\n\
          \x20  2  try\n\
@@ -1612,7 +1612,7 @@ fn a_builtin_method_takes_its_receiver_below_its_arguments() {
             "fn f(items: Array<Int>) -> Int {\n  items.get(0).unwrapOr(7)\n}\n",
             "f"
         ),
-        "fn m.f arity=1 frame=1/0 params=[value] -> Int\n\
+        "fn m.f arity=1 frame=0/1 params=[value] -> Int\n\
          \x20  0  load 0\n\
          \x20  1  const Int(0)\n\
          \x20  2  call-builtin get argc=1\n\
@@ -1708,7 +1708,7 @@ fn a_question_mark_opens_what_it_is_given() {
             "fn f(v: Option<Int>) -> Option<Int> {\n  Some(v? + 1)\n}\n",
             "f"
         ),
-        "fn m.f arity=1 frame=1/0 params=[value] -> value\n\
+        "fn m.f arity=1 frame=0/1 params=[value] -> value\n\
          \x20  0  load 0\n\
          \x20  1  try\n\
          \x20  2  value-to-scalar\n\
@@ -1727,7 +1727,7 @@ fn a_return_ends_the_function_where_it_is_written() {
             "fn f(n: Int) -> Int {\n  if n < 0 {\n    return 0\n  }\n  return n\n}\n",
             "f"
         ),
-        "fn m.f arity=1 frame=0/1 params=[Int] -> Int\n\
+        "fn m.f arity=1 frame=1/0 params=[Int] -> Int\n\
          \x20  0  load-scalar 0\n\
          \x20  1  scalar-const 0\n\
          \x20  2  int Lt\n\
@@ -1765,7 +1765,7 @@ fn one_lambda_reached_from_two_conventions_keeps_one_capture_layout() {
     let source = "fn adder(by: Int) -> fn(Int) -> Int {\n  fn(n: Int) {\n    n + by\n  }\n}\n\nexport fn main() -> Int {\n  let direct = adder(3)\n  let indirect: fn(Int) -> fn(Int) -> Int = adder\n  let viaValue = indirect(30)\n  direct(1) + viaValue(1)\n}\n";
     assert_eq!(
         specialisation(source, "adder", 1),
-        "fn m.adder arity=1 frame=0/1 params=[Int] -> value\n\
+        "fn m.adder arity=1 frame=1/0 params=[Int] -> value\n\
          \x20  0  load-scalar 0\n\
          \x20  1  scalar-to-value Int\n\
          \x20  2  make-closure m.<closure 0> captures=1\n\
@@ -1774,7 +1774,7 @@ fn one_lambda_reached_from_two_conventions_keeps_one_capture_layout() {
     assert_eq!(
         listing(source, "<closure 0>"),
         "fn m.<closure 0> arity=1 frame=1/1 params=[value] captures=[by] -> value\n\
-         \x20  0  load 0\n\
+         \x20  0  load 1\n\
          \x20  1  value-to-scalar\n\
          \x20  2  load-scalar 0\n\
          \x20  3  int Add\n\
@@ -1795,7 +1795,7 @@ fn one_lambda_reached_from_two_conventions_keeps_one_capture_layout() {
         .expect("`adder` was lowered under the general convention too");
     assert_eq!(
         crate::render(&program, as_value),
-        "fn m.adder arity=1 frame=1/0 params=[value] -> value\n\
+        "fn m.adder arity=1 frame=0/1 params=[value] -> value\n\
          \x20  0  load 0\n\
          \x20  1  make-closure m.<closure 0> captures=1\n\
          \x20  2  return\n"

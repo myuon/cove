@@ -122,13 +122,18 @@ impl<'a> Lowering<'a> {
             params.push(SlotKind::Value);
             slots.push(body.allocate(SlotKind::Value));
         }
-        // Each capture takes a slot of the stack its own kind names, dense
-        // within that stack and in this order — which is exactly the order
-        // the call fills them in, walking the closure's list with one
-        // counter per stack. The value captures land after the value
-        // parameters, because that is where the call pushes them; the scalar
-        // captures land at 0, because a function a closure is made of takes
-        // no scalar argument and `validate` refuses one that does.
+        // Each capture takes a slot of the region its own kind names, dense
+        // within that region and in this order — which is exactly the order
+        // the call fills them in, walking the closure's list with one counter
+        // per region. The value captures land after the value parameters,
+        // because that is where the call pushes them; the scalar captures land
+        // at the scalar region's first slot, because a function a closure is
+        // made of takes no scalar argument and `validate` refuses one that
+        // does. These are region-local numbers here, as every slot number is
+        // while a body is being emitted; `Body::finish` turns the ones the
+        // instructions carry into the one numbering's, and `capture_base`
+        // below is written in that numbering directly because it is settled
+        // after the body is finished rather than during it.
         let capture_slots: Vec<u32> = capture_kinds
             .iter()
             .map(|kind| body.allocate(*kind))
@@ -149,7 +154,9 @@ impl<'a> Lowering<'a> {
         body.block_at(decl_body, Position::Value)?;
         body.emit_final_return(decl_body.span);
         let finished = body.finish();
-        let capture_base = value_params(&params);
+        // A slot number in the one numbering, so the value region's own
+        // origin is part of it: see `Function::value_origin`.
+        let capture_base = finished.scalar_frame_size + value_params(&params);
 
         Ok(Function {
             module: module.into(),
@@ -388,7 +395,9 @@ impl<'a> Lowering<'a> {
         body.block_at(&decl.body, position_of(returns))?;
         body.emit_final_return(decl.body.span);
         let finished = body.finish();
-        let capture_base = value_params(&params);
+        // A slot number in the one numbering, so the value region's own
+        // origin is part of it: see `Function::value_origin`.
+        let capture_base = finished.scalar_frame_size + value_params(&params);
 
         Ok(Function {
             module: module.into(),
@@ -422,11 +431,15 @@ impl<'a> Lowering<'a> {
     }
 }
 
-/// How many of a function's parameters arrive on the value stack, which is
-/// where its captures begin.
+/// How many of a function's parameters arrive on the value stack.
 ///
-/// The same as `params.len()` for every closure but the one `Shared::lock` is
-/// given a `var` parameter; see [`Function::capture_base`].
+/// [`Function::capture_base`] is this plus [`Function::value_origin`], not
+/// this alone: a capture begins after the value parameters, but the value
+/// parameters themselves begin wherever the one frame numbering's value
+/// region begins, not at slot 0.
+///
+/// The count here is the same as `params.len()` for every closure but the
+/// one `Shared::lock` is given a `var` parameter.
 fn value_params(params: &[SlotKind]) -> u32 {
     params
         .iter()

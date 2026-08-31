@@ -51,7 +51,7 @@ fn the_arith_bench_loop_builds_no_value_it_does_not_use() {
         .expect("its entry is lowered");
     assert_eq!(
         crate::render(&program, id),
-        "fn arith.main arity=0 frame=0/2 -> value\n\
+        "fn arith.main arity=0 frame=2/0 -> value\n\
          \x20  0  scalar-const 0\n\
          \x20  1  store-scalar 0\n\
          \x20  2  scalar-const 0\n\
@@ -137,7 +137,7 @@ fn a_compound_field_write_reads_the_field_it_writes() {
     let id = program.function_named("m", "f").expect("`f` is lowered");
     assert_eq!(
         crate::render(&program, id),
-        "fn m.f arity=0 frame=1/0 -> Int\n\
+        "fn m.f arity=0 frame=0/1 -> Int\n\
          \x20  0  const Int(1)\n\
          \x20  1  make-struct m.P fields=x\n\
          \x20  2  store 0\n\
@@ -166,7 +166,7 @@ fn push_on_a_var_binding_lowers_like_any_other_builtin_method() {
             "fn f() -> Int {\n  var v = Vector.of()\n  v.push(1)\n  v.length()\n}\n",
             "f"
         ),
-        "fn m.f arity=0 frame=1/0 -> Int\n\
+        "fn m.f arity=0 frame=0/1 -> Int\n\
          \x20  0  call-assoc Vector.of argc=0\n\
          \x20  1  store 0\n\
          \x20  2  load 0\n\
@@ -191,7 +191,7 @@ fn push_through_a_var_struct_field_lowers() {
             "struct S {\n  items: Vector<Int>\n}\n\nfn f() -> Int {\n  var s = S(items: Vector.of())\n  s.items.push(1)\n  s.items.length()\n}\n",
             "f"
         ),
-        "fn m.f arity=0 frame=1/0 -> Int\n\
+        "fn m.f arity=0 frame=0/1 -> Int\n\
          \x20  0  call-assoc Vector.of argc=0\n\
          \x20  1  make-struct m.S fields=items\n\
          \x20  2  store 0\n\
@@ -223,7 +223,7 @@ fn freeze_takes_the_place_and_not_a_read_of_it() {
             "fn f() -> Int {\n  var v = Vector.of()\n  let frozen = v.freeze()\n  frozen.length()\n}\n",
             "f"
         ),
-        "fn m.f arity=0 frame=2/0 -> Int\n\
+        "fn m.f arity=0 frame=0/2 -> Int\n\
          \x20  0  call-assoc Vector.of argc=0\n\
          \x20  1  store 0\n\
          \x20  2  place 0\n\

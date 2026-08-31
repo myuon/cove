@@ -19,7 +19,7 @@ fn two_var_arguments_naming_one_binding_push_the_same_place_twice() {
             "fn two(var a: Int, var b: Int) {\n  a += 1\n  b += 10\n}\n\nfn f() -> Int {\n  var x = 0\n  two(var x, var x)\n  x\n}\n",
             "f"
         ),
-        "fn m.f arity=0 frame=0/1 -> Int\n\
+        "fn m.f arity=0 frame=1/0 -> Int\n\
          \x20  0  scalar-const 0\n\
          \x20  1  store-scalar 0\n\
          \x20  2  place-scalar 0 Int\n\
@@ -80,7 +80,7 @@ fn a_var_self_receiver_is_a_place_argument() {
     );
     assert_eq!(
         listing(source, "f"),
-        "fn m.f arity=0 frame=1/0 -> Int\n\
+        "fn m.f arity=0 frame=0/1 -> Int\n\
          \x20  0  const Int(0)\n\
          \x20  1  make-struct m.Counter fields=hits\n\
          \x20  2  store 0\n\
@@ -121,7 +121,7 @@ fn a_field_two_deep_is_written_through_a_place() {
             "struct Inner {\n  n: Int\n}\n\nstruct Outer {\n  inner: Inner\n}\n\nfn f() -> Int {\n  var o = Outer(inner: Inner(n: 1))\n  o.inner.n = 2\n  o.inner.n\n}\n",
             "f"
         ),
-        "fn m.f arity=0 frame=1/0 -> Int\n\
+        "fn m.f arity=0 frame=0/1 -> Int\n\
          \x20  0  const Int(1)\n\
          \x20  1  make-struct m.Inner fields=n\n\
          \x20  2  make-struct m.Outer fields=inner\n\
