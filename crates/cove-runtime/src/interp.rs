@@ -2128,7 +2128,8 @@ impl<'a> Interpreter<'a> {
                         // produce but `()`. Its value is therefore `()`
                         // however it leaves, and a `break` operand is
                         // evaluated for its effects alone -- the same rule
-                        // an `if` with no `else` follows. See issue #87.
+                        // an `if` with no `else` follows. Permanently so:
+                        // issue #87 decided it.
                         Err(Control::Break) => break,
                         Err(Control::Continue) => continue,
                         Err(other) => return Err(other),
@@ -2159,7 +2160,7 @@ impl<'a> Interpreter<'a> {
                     // `()` however it leaves and a `break` operand is
                     // evaluated for its effects alone. `while true` is no
                     // exception: nothing about the condition makes it a
-                    // different form. See issue #87.
+                    // different form. Permanently so: issue #87 decided it.
                     Err(Control::Break) => return Ok(Value(Repr::Unit)),
                     Err(Control::Continue) => continue,
                     Err(other) => return Err(other),

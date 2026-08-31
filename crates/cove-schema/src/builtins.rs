@@ -895,13 +895,14 @@ const SLICE: MethodSchema = MethodSchema {
 // snapshot — applied where the same question arises, and not a second
 // answer to it.
 //
-// A callback cannot currently reach the receiver to test that: a closure
-// captures a copy of each binding and a captured binding is a read-only
-// place, so `items.push(..)` inside a callback is refused by the checker.
-// The rule is checked through a `for` loop over the same vector, which is
-// expressible and does walk it live. Whether a callback should be able to
-// mutate its receiver at all is issue #190 and is not decided; if it ever
-// can, this rule is what says what it would see.
+// A callback cannot reach the receiver to test that, and that is the rule
+// rather than a gap in it: a closure captures a copy of each binding and a
+// captured binding is a read-only place, so `items.push(..)` inside a
+// callback is refused by the checker. Issue #190 decided that it stays
+// refused -- a callback that can push onto the vector it is filtering is a
+// way to write a walk that does not end, and the read-only capture is what
+// prevents it -- so this rule is checked through a `for` loop over the same
+// vector, which is expressible and does walk it live.
 //
 // Each **visits every element exactly once, front to back**, in the
 // receiver's own order.

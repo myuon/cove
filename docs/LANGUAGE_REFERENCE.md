@@ -43,10 +43,47 @@ the same answer this document gives an `if` with no `else`, for the same
 reason. `while true` is an ordinary `while`: nothing about the condition makes
 it a different form in either pass.
 
-Whether Cove should have a loop that carries a value at all — a `loop`
-keyword, an `Option<T>`-valued loop, a `for`/`else` clause, or none of them —
-is [issue #87](https://github.com/myuon/cove/issues/87), and is deliberately
-left open here. This document records only that today the two passes agree.
+This is settled rather than deferred: a `for` and a `while` produce `()`
+permanently, and no `break` will ever carry a value out of one
+([issue #87](https://github.com/myuon/cove/issues/87)). Cost is not the
+reason. The checker has a bottom type — `Ty::Never`, which `break`, `continue`
+and `return` already produce and which `Ty::join` already resolves against any
+other type — so joining a loop's `break`s is not the piece that is missing.
+What is missing is a way to give the *fall-through* edge, the exit a `for`
+reaches by running out of items and a `while` by running out of condition, a
+value at all, and nothing in the type system supplies one.
+
+Declining to read a type off an early exit is a rule this document already
+keeps elsewhere. A `return` inside a function value that nothing expects is
+`cove::type::lambda_return`, on the stated grounds that a body's value and an
+early `return`'s value are produced in different places, and nothing written
+anywhere says what the two have to agree on. Typing a loop by joining its
+`break`s is that same inference, so refusing it is consistency rather than a
+new restriction.
+
+The lowering restates the question as an arithmetic fact rather than adding a
+separate one. In both `while_loop` and `for_loop` the fall-through edge is
+emitted first, so it is the edge that fixes the `end` label's operand-stack
+depth, and `validate` refuses a join point reached at two different depths. A
+`break` arriving one value deeper is a build-time error, and there are exactly
+three ways out of it: the fall-through edge does not exist, something is
+pushed on it, or the loop is `()`. `?` is not the precedent it looks like
+here — `Inst::Try` is not one of the instructions after which the lowering
+drops the depth, and on failure the VM discards the whole frame, so no depth
+is ever reconciled. A `?` leaves the frame; a `break` stays in it.
+
+Other languages divide along the same three ways, and none of them makes a
+loop's type depend on whether a `break` was reached. Rust's `break value`
+is confined to `loop`, the form with no fall-through edge, and Rust does not
+special-case `while true` either. Zig lets a loop carry a value and charges
+an `else` clause to supply the value for the normal ending. Kotlin has a
+bottom type, types `break` with it, and still keeps loops `Unit`, putting the
+value-carrying escape in a block form instead. Cove takes the third way, which
+is the answer it already gives an `if` with no `else`. If a program ever needs
+a loop that produces a value, what would be added is a distinct form with no
+valueless exit — a `loop` — which is additive and changes nothing written
+here; what will not be added is a rule that makes `while true` a different
+form from `while c`.
 
 **A `dyn Trait` value answers as the value it holds.** The conversion happens
 where a `dyn Trait` type is *written* — a `let` annotation, a field, a
@@ -397,7 +434,9 @@ while condition { ... }
 next iteration. Neither produces a value of its own, so both are `Never`.
 Neither may cross a closure boundary, exactly as a `return` inside a lambda
 returns from the lambda: `cove::resolve::break_outside_loop` and
-`cove::resolve::continue_outside_loop`.
+`cove::resolve::continue_outside_loop`. That a `break` operand goes nowhere
+is permanent, not provisional; the reason is under *Every loop produces
+`()`*, above.
 
 ### `return`
 

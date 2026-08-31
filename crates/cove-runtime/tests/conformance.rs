@@ -412,8 +412,9 @@ static RULES: &[Rule] = &[
         foreign: "Bool",
     },
     // Every loop is `()`, `while true` included, and a `break` operand is
-    // evaluated for its effects and discarded. Whether a loop should ever
-    // carry a value is issue #87.
+    // evaluated for its effects and discarded, whether it has one or not.
+    // That a loop never carries a value is settled rather than pending:
+    // issue #87 decided it.
     Rule {
         section: "Loops",
         decls: "",
@@ -426,6 +427,14 @@ static RULES: &[Rule] = &[
         section: "Loops",
         decls: "",
         body: "var seen = 0\nfor value in [1, 2] {\n  seen = value\n  break value\n}",
+        ty: "()",
+        value: "()",
+        foreign: "Int",
+    },
+    Rule {
+        section: "Loops",
+        decls: "",
+        body: "var seen = 0\nfor value in [1, 2, 3] {\n  if value == 3 {\n    break\n  }\n  seen = value\n}",
         ty: "()",
         value: "()",
         foreign: "Int",
