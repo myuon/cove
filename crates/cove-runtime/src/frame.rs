@@ -75,8 +75,8 @@
 //!   `base' + width`.** `Vec::resize` fills the locals with zero, which is
 //!   the canonical `Unit`/`false`/`0` word; a body writes every local before
 //!   it reads one, because the checker settled that before lowering.
-//! - **The return address and the caller's metadata** are one [`Call`]
-//!   record pushed onto [`FrameVm::frames`]: the callee's `FunctionId`, the
+//! - **The return address and the caller's metadata** are one `Call`
+//!   record pushed onto the frame stack: the callee's `FunctionId`, the
 //!   caller's resume point (`pc + 1`, which `cove_ir::lower` makes a block
 //!   head for exactly this reason), and the caller's frame base. A `Call`
 //!   is 12 bytes and `Copy`.
@@ -94,7 +94,7 @@
 //! - **A run that raises** leaves its frames where they stand and unwinds
 //!   through Rust's `?`. Whatever fuel had been charged and not handed over
 //!   is spent at the end of the run, however the run ended; see
-//!   [`FrameVm::spend_pending_fuel`], which is `Vm::spend_pending_fuel`.
+//!   `FrameVm::spend_pending_fuel`, which is `Vm::spend_pending_fuel`.
 //! - **Fuel and cancellation** are asked at the same control-flow points the
 //!   VM asks them at, on the same schedule and against the same four
 //!   constants of
@@ -110,8 +110,11 @@
 //!
 //! **A call and a return allocate nothing once the capacity is warm.** The
 //! only growth is `Vec::resize` on a `Vec<u64>` past its capacity, and
-//! `crates/cove-runtime/tests/frame_allocation.rs` counts it: zero
-//! allocations across two million calls after the first.
+//! `INITIAL_WORDS` reserves 32 KB of it before the first call so that even
+//! that does not happen on anything this backend admits.
+//! `crates/cove-runtime/tests/frame_allocation.rs` counts what is left with a
+//! global allocator: ten thousand extra calls and ten thousand extra returns
+//! reach it **zero** times.
 //!
 //! # The boundary, and where a `Value` is allowed to be
 //!
@@ -126,10 +129,9 @@
 //!   `pop`, `make-builtin`, `try` and `return` — and they exist because
 //!   `benches/arith` and `benches/call` end with `assertEqual(...)?` and
 //!   `Ok(())`, which is nine instructions run *once* against a loop run two
-//!   million times. They hold their operands in [`FrameVm::boundary`], which
-//!   is a materialisation buffer and not a frame: nothing indexes it, no
-//!   frame owns a window of it, and a function that needed one word of it to
-//!   survive a call is refused.
+//!   million times. They hold their operands in a materialisation buffer
+//!   that is not a frame: nothing indexes it, no frame owns a window of it,
+//!   and a function that needed one word of it to survive a call is refused.
 //! - Every one of the six increments [`FrameVm::materialized`], so the claim
 //!   is a number a test reads rather than a sentence. `benches/arith` and
 //!   `benches/call` each report **8**, and the loop reports zero.
@@ -451,6 +453,33 @@ fn admits_function(program: &Program, id: FunctionId) -> Result<Vec<FunctionId>,
 /// differential harness groups a refusal and how a reader thinks about one:
 /// what stopped the run is `dyn` or a closure or a struct, not the
 /// particular opcode the lowering chose for it.
+/// How many words the one stack reserves when a `FrameVm` is built.
+///
+/// **This is a measurement fix and not a capacity guess**, which is why it is
+/// this large for a stack `benches/arith` needs five words of.
+///
+/// Without it the buffer is whatever `Vec`'s doubling arrives at — 64 bytes
+/// for `arith` — and where a 64-byte block lands inside a cache line is
+/// decided by the process's allocator state. The two loop rows came back
+/// **bimodal across processes of one unchanged binary**: `arith` at 91.1 ms
+/// or 112.2 ms and `call` at 120.1 ms or 143.6 ms, in ten processes, always
+/// the two together, each mode internally tight to under 2%, while the `Vm`
+/// rows measured in the same processes held to under 1.5%. `benches/pure`,
+/// whose frames are one word and whose hot data is the frame *stack* rather
+/// than two locals in it, did not move at all.
+///
+/// Reserving 32 KB takes the allocation out of the size class where that is
+/// decided, and the modes go with it. `docs/VM_ARCHITECTURE.md`, under "One
+/// physical frame, measured", is the evidence and is honest about what it
+/// does not establish: that the *mechanism* is cache-line straddling is the
+/// hypothesis this fix was chosen from, and what is measured is that the
+/// bimodality is gone.
+///
+/// It is also what a VM ought to do. Issue #212 asks that calls and returns
+/// allocate nothing after warm capacity, and reserving is how a stack becomes
+/// warm before the first call rather than during it.
+const INITIAL_WORDS: usize = 4096;
+
 fn describe(inst: &Inst) -> &'static str {
     match inst {
         Inst::LoadLocal(_) | Inst::StoreLocal(_) | Inst::Dup => "a general value slot",
@@ -589,8 +618,8 @@ impl<'a> FrameVm<'a> {
         FrameVm {
             runtime,
             program,
-            words: Vec::new(),
-            frames: Vec::new(),
+            words: Vec::with_capacity(INITIAL_WORDS),
+            frames: Vec::with_capacity(MAX_CALL_DEPTH),
             boundary: Vec::new(),
             constants: program.constants.iter().map(constant).collect(),
             materialized: 0,

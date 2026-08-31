@@ -3432,6 +3432,211 @@ of the answer — the work is still per-character interpretation, and the
 remaining `Option` per index and `Rc<str>` per character are the two the "open"
 list below still names.
 
+## One physical frame, measured
+
+[Issue #162](https://github.com/myuon/cove/issues/162)'s title asked to unify
+the VM's logical stack and frame layout.
+[ADR 0027](adr/0027-a-place-and-a-capture-name-a-slot.md) unified a slot's
+*identity* and said, under "What is not decided here", that a single physical
+frame was "not built, not measured, and not refused".
+[ADR 0028](adr/0028-five-representations-and-one-is-public.md) decision 1 then
+decided what a slot *is* — eight bytes, untagged, one numbering, one base —
+and left the same question open in the same words: "**the physical
+arrangement is a measurement question and is not decided here.**"
+
+[Issue #212](https://github.com/myuon/cove/issues/212) is that measurement.
+`crates/cove-runtime/src/frame.rs` is the vehicle: one contiguous `Vec<u64>`,
+one frame base, one index space for parameters, locals and temporaries,
+running the same `cove_ir::Program` the `Vm` runs. It is Phase A of #197 and
+**not a third permanent evaluator** — it admits a closed scalar subset,
+refuses everything else by name before any side effect, and `cove run` cannot
+select it.
+
+### The answer
+
+`benches/arith`, `benches/call` and `benches/pure` execute on it and agree with
+both existing backends. Five `cove-bench --iterations 15` suites,
+`--sample-order round-robin`, quiet machine; the ratio is the two rows of one
+run, which is what ADR 0029 says is repeatable:
+
+| row | VM | 8-byte frame | frame ÷ VM |
+| --- | ---: | ---: | ---: |
+| `pure` — nothing but calls | 1.482 ms | 0.936 ms | **0.63×** |
+| `call` — a call per turn | 175.5 ms | 120.1 ms | **0.68×** |
+| `arith` — the loop alone | 98.8 ms | 91.4 ms | **0.93×** |
+
+The error bar is the five suites' disagreement with each other, per row. The
+`frame ÷ VM` ratio came back
+
+| row | the five ratios | band |
+| --- | --- | ---: |
+| `pure` | 0.605 0.632 0.634 0.635 0.637 | 3.2 pt |
+| `call` | 0.681 0.682 0.684 0.684 0.686 | 0.5 pt |
+| `arith` | 0.917 0.925 0.928 0.928 0.933 | 1.6 pt |
+
+and every row's own null across the five was under 1.2%, except `pure`, which
+times 1.5 ms and moved 4.3%. **Three of the five are one build and two are
+another**, rebased onto four commits that changed only Markdown — so this
+particular comparison also survived the one thing ADR 0029 says a comparison
+usually does not, which is being taken from two builds. That is a bonus and
+not the method: the method is that each ratio is two rows of one run.
+
+Dynamic instruction counts are **exactly equal** on the two backends — 229,862
+on `pure`, 31,142,877 on `arith`, 37,142,877 on `call` — because the frame
+executes the same lowered code and charges the same block extents. So none of
+the above is fewer instructions. It is the same instructions costing less.
+
+**The order is the whole of the argument, and it is ADR 0019's order again.**
+What gains most is what is most about calling, and what gains least is the one
+row that never calls anything. The three stacks never cost `benches/arith`
+anything, because its loop touches exactly one of them — so unifying them
+returns 7%, which is the dispatch loop's own difference and not a
+representation's.
+
+### What a call costs, decomposed
+
+Both rows turn 2,000,000 times and `call` runs three more instructions a turn
+than `arith` — the call, the callee's body, the return. Subtracting one row
+from the other prices a call and a return directly:
+
+| | VM | 8-byte frame |
+| --- | ---: | ---: |
+| `arith`, per turn | 49.4 ns | 45.7 ns |
+| `call`, per turn | 87.7 ns | 60.1 ns |
+| **a call and a return** | **38.3 ns** | **14.4 ns** |
+| the three instructions, at the row's own rate | 9.5 ns | 8.8 ns |
+| **what the call costs beyond its instructions** | **28.8 ns** | **5.6 ns** |
+
+`benches/pure` says the same thing from the other side and was not used to
+derive it. `fib(20)` is 21,891 calls and 229,862 instructions, so a call is
+67.7 ns on the VM and 42.8 ns on the frame — **24.9 ns saved per call**,
+against the 23.9 ns the `call` row's subtraction gives. Two rows that share no
+arithmetic agree on the size of the thing to within a nanosecond.
+
+That is what one frame buys, and it is exactly what it was predicted to buy:
+three `Vec::resize`s and three `Vec::truncate`s become one, three bases become
+one, three counts on an `Inst::Call` become one, and a `Frame` of 32 bytes
+becomes a `Call` of 12.
+
+### Bytes per live frame, and the stack
+
+A live frame is a 12-byte `Call` record plus eight bytes per slot, against the
+VM's 32-byte `Frame` plus eight bytes per scalar slot plus twenty-four per
+value slot:
+
+| function | 8-byte frame | VM |
+| --- | ---: | ---: |
+| `arith.main` — two slots | 28 B | 48 B |
+| `call.identity` — one slot | 20 B | 40 B |
+| `pure.fib` — one slot | 20 B | 40 B |
+
+The one stack reserves 4,096 words — 32 KB — when a `FrameVm` is built, and
+no admitted row comes near it: `crates/cove-runtime/src/frame/tests.rs`
+asserts that all three stay under the reservation, and `benches/pure`'s
+twenty standing frames are the deepest of them.
+`crates/cove-runtime/tests/frame_allocation.rs` counts the other half with a
+global allocator: **ten thousand extra calls and ten thousand extra returns
+reach the allocator zero times**, on the frame and on the `Vm` alike. The
+per-call allocation figure was never the difference between the two
+arrangements; the width of the window and what moving through it costs is.
+
+`Value` operations in the hot path are **zero**, structurally rather than by
+care. `frame::admits` refuses any function whose `value_frame_size` is
+nonzero, so no frame word is ever a `Value` and there is no `Vec<Value>` frame
+to be one. Six instructions materialise a `Value` at the boundary, they exist
+for the `assertEqual(...)?` and `Ok(())` both benchmarks end with, and each
+increments a counter: `benches/arith` and `benches/call` report **8** for a
+run of two million turns, all eight in the epilogue.
+
+### The reservation is a measurement fix, and this is what it fixed
+
+The 32 KB reservation is not a capacity guess for a stack `arith` needs five
+words of. It is there because without it the two loop rows came back
+**bimodal across processes of one unchanged binary**.
+
+Ten processes, same binary, quiet machine: `benches/arith` on the frame
+measured 91.1 ms in seven of them and 110.7–112.2 ms in three, and
+`benches/call` measured 119.4–120.5 ms and 142.6–143.6 ms in exactly the same
+processes — always the two together, never one without the other. Each mode
+was internally tight, under 2% over fifteen samples. The `Vm` rows measured in
+those same processes held to 1.5% throughout, and `benches/pure` — whose hot
+data is the frame *stack* rather than two locals inside one frame — did not
+move at all.
+
+So it was neither the machine nor the build. It was something a process
+decides once and then keeps, that reaches a loop indexing two words of a small
+heap buffer and does not reach a loop walking a deep one. Reserving 32 KB
+takes that buffer out of the size class where a small allocation's placement
+inside a cache line is decided by the allocator's history, and the modes went
+with it: nine processes of the reserved build — three at fifteen iterations
+and six at three — are all in the fast mode, with per-row spread of 1.5% and
+3.0%.
+
+**What is established is that the bimodality is gone, and not why it was
+there.** Cache-line straddling of the word stack is the hypothesis the fix was
+chosen from; it was not confirmed, because confirming it needs the address the
+buffer actually landed at in each process and that was not recorded. A
+symbol-level profile was attempted and is not here either: `samply
+--save-only` writes an unsymbolicated profile, and the decomposition above is
+arithmetic over measured medians and exact instruction counts, which needs no
+sampler.
+
+It belongs beside "The layout band is much wider than it was thought to be"
+and ADR 0029's null study rather than as a correction to either. Those two
+established that *code* layout is a performance variable this workspace does
+not control, worth up to 23.5% between builds, and that one row's null within
+a build is under 1%. This is a third thing: a **data** placement variable
+worth about 20%, constant within a process and varying between processes of
+one binary — which the null study could not have found, because it measured
+the shipped binary, and the shipped binary's hot loop does not have a small
+heap buffer at the centre of it.
+
+The practical rule it adds to ADR 0029's: **a row that disagrees with itself
+between processes of one binary is not a row about the code.** Run the binary
+several times before quoting a ratio from it. The first suite taken here read
+`arith` at 1.13× and would have been reported as a regression.
+
+### What this says about #162
+
+The physical-arrangement question #162's title asks is answered **yes, and the
+prize is at the call.**
+
+ADR 0027 recorded the surprise that neither of the two cliffs #116 handed to
+#162 needed one physical stack — both were a slot's *role* deciding its
+representation, and both were fixed by taking that decision away from the
+role. That stands, and this adds the other half of the sentence: what one
+physical frame is worth is not those cliffs at all. It is the **per-call
+constant**, and it is 24 ns of it, which is 5× what a call costs beyond its
+own instructions.
+
+That is a bigger prize than the two cliffs were, and it is on a different
+axis. A program that calls nothing gains 7%. `examples/cq` is a call per
+record per field.
+
+### What Phase A did not measure, and what Phase B owes
+
+The subset is scalars only, so nothing below is measured and nothing below is
+predicted from what is:
+
+- **Heap-backed values.** PR #210 and #211's `slot.rs` — the VM-owned handle
+  and its shadow root — is the mechanism, and it is Phase B. Every figure
+  above is from a backend in which no frame word is ever a reference, so it
+  says nothing about what a rooted frame costs to walk.
+- **A `Value` in a frame slot at all.** `admits` refuses one, which is what
+  makes the zero above structural. What a *mixed* frame costs — a word-wide
+  slot stack with a GC bitmap, which is #162's Design B — is the next
+  measurement and this one does not stand in for it.
+- **`Float` in a slot.** ADR 0028 decision 1 puts it there and `cove_ir::Scalar`
+  is still `Int | Bool`, so a `Float` is still a `Value` and this backend
+  refuses every function holding one. What is proved is the word: all 64 bits
+  survive the codec and a real frame, NaN payloads and both zeroes included.
+- **Places, `var`, closures, `dyn`, enums, tasks, Host calls, strings,
+  collections.** Refused by name. Six of the nine benchmark rows have no
+  `frame` line for one of those reasons, and the harness prints which.
+- **A second word.** Every value here is one slot. ADR 0028 allows a value
+  location to span adjacent slots and a `Dynamic` to be two; nothing here
+  builds or measures one.
+
 ## What is settled and what is open
 
 **Settled by measurement.** Typed scalar slots, the calling convention,
@@ -3561,9 +3766,14 @@ belonging to the general `call-value` convention rather than to a capture. The
 third — the Host boundary at twenty-nine times a loop turn (#184 and #183) — is
 not, and "The cliffs" above says what it would take.
 
-What is still open of #162 is its *title*: there are three stacks, three bases
-per frame and three counts on a call, and a single physical frame is neither
-built nor refused. ADR 0027's "What is not decided here" is the list. What the
+What was still open of #162 when this was written is its *title*: there are
+three stacks, three bases per frame and three counts on a call, and a single
+physical frame is neither built nor refused. **It has since been built and
+measured** — "One physical frame, measured" above is the result, and the short
+version is that one frame is worth 24 ns a call, 0.68x on `benches/call` and
+0.62x on `benches/pure`, and 0.93x on the one row that calls nothing. The
+paragraph is left as it was written because what it says next is the part that
+survived. ADR 0027's "What is not decided here" is the list. What the
 two cliffs turned out to say about it is worth recording, because it was not
 what anybody expected: **neither of them needed one physical stack.** Both were
 a slot's *role* deciding its representation, and both were fixed by taking that

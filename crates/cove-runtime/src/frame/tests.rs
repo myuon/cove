@@ -300,6 +300,36 @@ fn pure_runs_on_the_frame_as_well() {
     assert_eq!(vm, frame);
 }
 
+/// The deepest the one stack gets on the three admitted rows, so that
+/// `docs/VM_ARCHITECTURE.md`'s "maximum stack capacity" figure is a number a
+/// test reads rather than one somebody worked out once.
+///
+/// `benches/pure` is the deep one — `fib(20)` stands twenty frames — and it
+/// is two orders of magnitude below [`INITIAL_WORDS`]. So the reservation is
+/// never exceeded on any row this backend runs, which is the other half of
+/// "calls and returns allocate nothing after warm capacity": here the
+/// capacity is warm before the first call rather than after it.
+#[test]
+fn no_admitted_row_grows_the_one_stack_past_its_reservation() {
+    for name in ["pure", "arith", "call"] {
+        let ready = bench(name);
+        let hosts = hosts(None, None);
+        let runtime = Runtime::new(ready.checked.clone(), ready.sources.clone(), hosts.clone());
+        let high = crate::on_cove_stack(|| {
+            let mut frame = FrameVm::new(&runtime, &hosts, &ready.ir);
+            frame
+                .run_entry(&ready.module, "main", Vec::new())
+                .expect("it answers");
+            frame.high_water_words()
+        })
+        .expect("a thread to run Cove on");
+        assert!(
+            high < INITIAL_WORDS,
+            "`benches/{name}` reached {high} word(s), and the reservation is {INITIAL_WORDS}"
+        );
+    }
+}
+
 /// Every other benchmark entry is refused, by name, before it runs.
 ///
 /// Named individually rather than counted, because a refusal that changed
