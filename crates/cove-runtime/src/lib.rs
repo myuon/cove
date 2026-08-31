@@ -18,6 +18,12 @@ pub mod process;
 pub mod runtime;
 pub mod schema;
 pub mod shared;
+// Private, and ADR 0028 decision 0 is why: a `Slot`, a `HeapObject` and the
+// handle that names one are internal representations, and "changing the VM's
+// internal representation must not require exposing that representation to
+// embedders" is the sentence issue #197 calls its thesis. This is the
+// vertical slice decision 8 asks for before any of that migration can begin.
+mod slot;
 pub mod task;
 pub mod trace;
 pub mod value;
