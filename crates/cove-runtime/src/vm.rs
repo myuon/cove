@@ -685,9 +685,9 @@ pub struct Vm<'a> {
     /// place standing in this vector. This one moves nothing.
     places: Vec<Place>,
     frames: Vec<Frame>,
-    /// One entry per constant, filled for the constants a `MakeStruct` names
-    /// its type with and empty everywhere else.
-    shapes: Vec<Option<StructShape>>,
+    /// One entry per `cove_ir::StructType` the program declares, addressed by
+    /// the `StructId` a `MakeStruct` carries.
+    shapes: Vec<StructShape>,
     /// The same table for the enums a `MakeEnum` builds a case of.
     enums: Vec<Option<EnumShape>>,
     /// One entry per constant, as the [`Value`] that constant stands for.
@@ -1640,10 +1640,8 @@ impl<'a> Vm<'a> {
                     self.fuel += u64::from(parts) + text.len() as u64;
                     self.stack.push(Value(Repr::Str(text.into())));
                 }
-                Inst::MakeStruct { ty, .. } => {
-                    let shape = self.shapes[ty.0 as usize]
-                        .as_ref()
-                        .expect("every `make-struct` names a type this VM shaped");
+                Inst::MakeStruct(of) => {
+                    let shape = &self.shapes[of.0 as usize];
                     let width = shape.fields.len();
                     let at = self.stack.len() - width;
                     let fields: Vec<(Rc<str>, Value)> = shape
@@ -1677,7 +1675,7 @@ impl<'a> Vm<'a> {
                     let found = found.clone();
                     self.stack.push(found);
                 }
-                Inst::GetFieldAt(index) => {
+                Inst::GetFieldAt { at: index, .. } => {
                     // Neither the type nor the position is asked about: the
                     // lowering emitted this only where the checker settled the
                     // receiver's type, and a struct's fields stand in
@@ -3814,38 +3812,32 @@ fn size_of_value(value: &Value) -> u64 {
     }
 }
 
-/// The shape of every struct the program builds, worked out once.
+/// The shape of every struct type the program declares, worked out once.
 ///
-/// A `MakeStruct` names its type with one constant and its fields with
-/// another, and the same type always carries the same pair, so one entry per
-/// type constant is a complete table. Whether the type is opaque is the
-/// checker's answer, read here rather than at every construction.
-fn struct_shapes(runtime: &Runtime, program: &Program) -> Vec<Option<StructShape>> {
-    let mut shapes: Vec<Option<StructShape>> = (0..program.constants.len()).map(|_| None).collect();
-    for function in &program.functions {
-        for inst in &function.code {
-            let Inst::MakeStruct { ty, fields } = *inst else {
-                continue;
-            };
-            if shapes[ty.0 as usize].is_some() {
-                continue;
-            }
-            let type_name: Rc<str> = name(program, ty).into();
-            let written = name(program, fields);
-            let fields = if written.is_empty() {
-                Vec::new()
-            } else {
-                written.split(',').map(Rc::<str>::from).collect()
-            };
+/// One entry per `cove_ir::StructType`, in that table's own order, rather
+/// than one per constant filled by scanning for a `make-struct`: the IR now
+/// carries the types themselves, so the name and the field names are read off
+/// the declaration instead of off whichever instruction happened to build one.
+/// Whether the type is opaque is still the checker's answer, read here rather
+/// than at every construction.
+fn struct_shapes(runtime: &Runtime, program: &Program) -> Vec<StructShape> {
+    program
+        .structs
+        .iter()
+        .map(|declared| {
+            let type_name: Rc<str> = declared.name.as_ref().into();
             let opaque = is_opaque(runtime, &type_name);
-            shapes[ty.0 as usize] = Some(StructShape {
+            StructShape {
                 type_name,
-                fields,
+                fields: declared
+                    .fields
+                    .iter()
+                    .map(|field| Rc::<str>::from(field.name.as_ref()))
+                    .collect(),
                 opaque,
-            });
-        }
-    }
-    shapes
+            }
+        })
+        .collect()
 }
 
 /// Whether the module that declares `qualified` declared it `export opaque

@@ -35,6 +35,7 @@ fn a_value_that_cannot_be_walked_fails_in_the_interpreters_words() {
         ];
         let program = Program {
             dispatches: Vec::new(),
+            structs: Vec::new(),
             constants: vec![Const::Int(1)],
             functions: vec![cove_ir::Function {
                 module: "m".into(),
@@ -145,6 +146,7 @@ fn built_by_hand(
         code.push(cove_ir::Inst::Return);
         let program = Program {
             dispatches: Vec::new(),
+            structs: Vec::new(),
             constants: vec![
                 Const::Name("m.Status".into()),
                 Const::Name(case.into()),

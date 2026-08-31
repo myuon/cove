@@ -15,7 +15,7 @@
 //! before any side effect, is never selected by `cove run`, and is written
 //! to be deleted or absorbed once the comparison is recorded.
 //!
-//! # Two phases, and which one this is
+//! # Three phases, and which one this is
 //!
 //! **Phase A** ran `benches/arith`, `benches/call` and `benches/pure` over one
 //! contiguous `Vec<u64>`, and no word of it was ever a reference:
@@ -25,12 +25,29 @@
 //! *in its own build*, which is the only kind of comparison ADR 0029 allows —
 //! and said nothing at all about what a *rooted* frame costs.
 //!
-//! **Phase B** is this: a word-wide slot stack with a GC bitmap, which is
+//! **Phase B** was a word-wide slot stack with a GC bitmap, which is
 //! [issue #162](https://github.com/myuon/cove/issues/162)'s Design B proper. A
-//! frame word may now be a reference into a VM-owned traced object heap, and
+//! frame word may be a reference into a VM-owned traced object heap, and
 //! `benches/field` and `benches/method` run on it. What that adds, and what it
 //! costs, is under "The bitmap" below and in `docs/VM_ARCHITECTURE.md` under
 //! "What a rooted frame costs to walk".
+//!
+//! **Phase C** is this, and it is not a change to the arrangement. It is what
+//! Phase B named as its largest debt: `cove_ir` carried no per-field slot
+//! kind, so decision 2's reference map for a struct was read off the
+//! *construction* — the instructions that pushed one instance's words — and a
+//! type built two ways that disagreed was refused by name. `cove_ir::StructType`
+//! now carries one `SlotKind` per field, settled from the checker's answer
+//! about the declared type by the rule that settles every other slot's, and
+//! this backend reads the map off the lowered type. **A type is a static fact
+//! and it is now read as one.** Two consequences follow, and they are the whole
+//! of what changed here: the by-name refusal is gone because it has become
+//! impossible to state, and the bitmap's third authority — an operand a field
+//! read pushed — is decided by the instruction rather than by the object.
+//!
+//! What Phase C did **not** close is the frame map, and the reason is that
+//! Phase B's "the same absence is why" was a diagnosis of one cause for two
+//! symptoms that turn out to be two. See `FrameMap`.
 //!
 //! [ADR 0033](../../../docs/adr/0033-an-identity-is-not-a-vm-heap-object.md)
 //! is what says a struct may be in that heap at all, and it is binding: plain
@@ -61,7 +78,9 @@
 //! one and an `Inst::LoadLocal` the other — and `FrameMap` is what makes
 //! them one region from one base, which is decision 1's "every physical offset
 //! derives from the one frame layout" met by deriving the map rather than by
-//! having been given it. Deriving it in `cove_ir` instead is Phase C's.
+//! having been given it. Phase C looked at moving that into `cove_ir` and did
+//! not: see `FrameMap` for what it would take and why the per-field kind did
+//! not bring it.
 //!
 //! Every logical value in this slice is exactly one word, as ADR 0028
 //! permits ("most values have width one"); a layout that spans adjacent
@@ -166,11 +185,18 @@
 //! | --- | --- |
 //! | a frame slot | `FrameMap`, derived from `cove_ir::Function`'s two frame sizes; one masked pass per call |
 //! | an operand pushed by the scalar core, a `const`, or a `make-struct` | the instruction, which knows what it pushed |
-//! | an operand pushed by a field read | the **object's** reference map, `crate::slot::HandleHeap::word_is_reference` |
+//! | an operand pushed by a field read | the **lowered type** the instruction names: `cove_ir::StructType`'s per-field `SlotKind` |
 //!
-//! The third is the one that cannot be static: `get-field-at` is one
-//! instruction whose answer is a handle for a struct-typed field and scalar
-//! bits for an `Int` one, and only decision 2's reference map knows which.
+//! **The third was the one that could not be static, and Phase C is what made
+//! it so.** Phase B asked `crate::slot::HandleHeap::word_is_reference` — the
+//! object's own layout, read per execution — because `get-field-at` is one
+//! instruction whose answer is a handle for a struct field and scalar bits for
+//! an `Int` one, and nothing in the IR said which. `Inst::GetFieldAt` now
+//! carries the `cove_ir::StructId` of the type the checker settled for the
+//! receiver, and a type's field kinds are the same on every execution of one
+//! instruction, so the bit is a table lookup decided before the run. The
+//! object is still asked under `debug_assert`, which is the two answers being
+//! compared rather than one of them being trusted.
 //!
 //! The first has a condition attached, and [`admits`] is what enforces it. The
 //! frame map calls **every** value slot a reference, so a value slot that held
@@ -253,13 +279,22 @@
 //! [`admits`]. In particular there is no `Dynamic`, no `dyn`, no `Any`, no
 //! enum layout, no place, no `var`, no closure, no Host call, no task, no
 //! string and no collection — and none of ADR 0033's five identity-bearing
-//! kinds, which that ADR puts outside this heap on purpose. What Phase B adds
-//! to the admitted subset is the struct, and nothing else.
+//! kinds, which that ADR puts outside this heap on purpose. What Phase B added
+//! to the admitted subset is the struct.
+//!
+//! **What Phase C adds is one shape and it is the shape the static map made
+//! readable**: a struct-typed field read whose answer is then stored, passed or
+//! built with. `Inst::GetFieldAt` was unreadable to `pushed_kinds` while only
+//! the object knew what it pushed, so `var inner = outer.inner` was refused;
+//! now the instruction names the type and the read is a reference the frame can
+//! account for. `a_nested_struct_read_into_a_slot_is_rooted` is the coverage,
+//! and it is the reason the widening is taken — ADR 0029's rule read as a rule
+//! about admitting: a shape no test runs is a shape nobody knows runs.
 
 use std::rc::Rc;
 
 use cove_diag::Span;
-use cove_ir::{Const, ConstId, FunctionId, Inst, Program, Scalar, SlotKind};
+use cove_ir::{Const, FunctionId, Inst, Program, Scalar, SlotKind};
 use cove_schema::builtins::{free_builtin, FreeBuiltinKind};
 
 use crate::budget::Meter;
@@ -420,8 +455,8 @@ pub fn admits(program: &Program, module: &str, name: &str) -> Result<FunctionId,
             "`{module}.{name}`, which this package does not declare"
         )));
     };
-    let structs = struct_words(program);
-    let fields = field_positions(program, &structs);
+    let structs = struct_parts(program);
+    let fields = field_positions(program);
     let mut seen = vec![false; program.functions.len()];
     let mut queue = vec![entry];
     seen[entry.0 as usize] = true;
@@ -458,7 +493,7 @@ fn leaves_a_boundary_value(program: &Program, function: &cove_ir::Function, pc: 
 fn admits_function(
     program: &Program,
     id: FunctionId,
-    structs: &[Option<StructWords>],
+    structs: &[Vec<Part>],
     fields: &[Option<u32>],
 ) -> Result<Vec<FunctionId>, Refused> {
     let function = program.function(id);
@@ -488,9 +523,12 @@ fn admits_function(
             Inst::LoadLocal(_)
             | Inst::Dup
             | Inst::ValueToScalar
-            | Inst::GetFieldAt(_)
             | Inst::GetFieldAtScalar(_)
             | Inst::ScalarToValue(_) => {}
+            // A field read is a word whose kind is the *type's*, and the
+            // instruction names the type. `validate` has already checked that
+            // the position is inside it, so there is nothing left to refuse.
+            Inst::GetFieldAt { .. } => {}
             // **A value slot holds a handle, and this is what makes that
             // true.** The frame map calls every value slot a reference, so
             // storing anything else into one would put bits the walk reads as
@@ -529,13 +567,37 @@ fn admits_function(
                     return Err(Refused::new(format!("a `Duration` in {}", named()), span))
                 }
             },
-            Inst::MakeStruct { ty, .. } => {
-                if structs[ty.0 as usize].is_none() {
+            // **The type says what its words are, and this asks whether the
+            // site pushed them.** The reference map is
+            // `structs[of]`, derived from `cove_ir::StructType`'s per-field
+            // slot kinds, so two sites for one type cannot disagree about it
+            // and there is no type-wide refusal left to make. What is still a
+            // question is the same one `Inst::StoreLocal` asks: the map will
+            // call some of these words references, so the instructions that
+            // pushed them have to say they are.
+            //
+            // ADR 0027 is why that question survives a static map. A
+            // declaration reached through a value is lowered "with every
+            // argument on the value stack", so an `Int` field's argument can
+            // arrive as a word the frame calls a reference; and a `Float`
+            // field is a value slot because `cove_ir::Scalar` is `Int | Bool`,
+            // while a `Float` constant is scalar bits. Both are refusals about
+            // this *site*, with its span, rather than about the type.
+            Inst::MakeStruct(of) => {
+                let declared = &structs[of.0 as usize];
+                let pushed = pushed_kinds(program, function, pc, declared.len());
+                let agrees = pushed.as_ref().is_some_and(|kinds| {
+                    kinds
+                        .iter()
+                        .map(|kind| kind.part())
+                        .eq(declared.iter().copied())
+                });
+                if !agrees {
                     return Err(Refused::new(
                         format!(
-                            "`{}` in {}, whose fields the 8-byte frame cannot read off its \
-                             construction",
-                            const_name(program, *ty),
+                            "building `{}` in {} out of words the 8-byte frame cannot show are \
+                             what the type's fields are",
+                            program.struct_type(*of).name,
                             named()
                         ),
                         span,
@@ -783,9 +845,11 @@ const INITIAL_LIMBS: usize = 512;
 /// - **An operand word's bit is written by the instruction that pushed it.**
 ///   `load` and `dup` copy the bit of the word they read, `make-struct` and
 ///   `set-field` push a reference, the scalar core pushes scalars, and
-///   `get-field-at` asks the *object's* reference map — which is the one place
-///   a bit is decided by metadata that is neither the frame's nor the
-///   instruction's, and is decision 2's reference map doing its job.
+///   `get-field-at` reads the lowered type it names. That last one was the
+///   exception until Phase C: it asked the *object's* reference map, per
+///   execution, because nothing in the IR said what a field held. Decision 2's
+///   reference map is still what decides it — the map is just written down in
+///   `cove_ir::StructType` before the run rather than reconstructed during it.
 ///
 /// **A pop writes no bit.** The word above the top is stale and is never read,
 /// because the walk stops at `words.len()` and every push writes its own bit
@@ -959,6 +1023,32 @@ enum RootScope {
     WithoutFrameSlots,
 }
 
+/// Where the bit a `get-field-at` writes comes from.
+///
+/// [`FieldMap::TheLoweredType`] is the mechanism and is what a run uses:
+/// `Inst::GetFieldAt` names a `cove_ir::StructType`, and the field's
+/// `SlotKind` says whether the word it just pushed is a handle. This is Phase
+/// C's whole change to the bitmap — Phase B asked the *object* the same
+/// question, per execution, because nothing in the IR answered it.
+///
+/// [`FieldMap::Dropped`] is the mutation, and it exists for the reason the
+/// other two do: a claim nobody can make fail is not a claim.
+/// `a_field_reads_bit_comes_from_the_lowered_type` is what it costs, and it
+/// costs the heap's own use-after-free message on a real program.
+///
+/// It is read **only** inside a `debug_assert`, so it is nothing at all in a
+/// release build and the hot path is one indexed load either way. The mutation
+/// itself is applied to [`FrameVm::field_refs`], and this is what stops the
+/// assertion from catching it before the collector does.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(not(test), allow(dead_code))]
+enum FieldMap {
+    /// The `SlotKind` of the field, off the type the instruction names.
+    TheLoweredType,
+    /// Every field read says scalar, whatever the type says.
+    Dropped,
+}
+
 /// One safepoint's roots: every word of the one stack the bitmap calls a
 /// reference, and then the shadow stack.
 ///
@@ -1020,6 +1110,34 @@ impl HandleRoots for FrameRoots<'_> {
 /// every instruction that addresses a word, for a generality no admitted row
 /// uses; this way the scalar core's addressing is `base + slot`, which is
 /// Phase A's unchanged.
+///
+/// # Why Phase C's per-field kind did not close this, although Phase B said it
+/// would
+///
+/// Phase B wrote that "the same absence is why the frame map is derived at run
+/// time from two frame sizes instead of being lowered as one numbering". One
+/// absence, two symptoms — and having removed the absence, they are two.
+///
+/// A struct's reference map was genuinely missing from the IR: nothing in
+/// `cove_ir` said what a field held, so a backend had to invent an answer, and
+/// two inventions could disagree. `cove_ir::StructType` supplies it and the
+/// invention is gone. A frame's reference map is **not** missing. It is
+/// `value_frame_size` and `scalar_frame_size`, which `cove_ir::Function` has
+/// always carried and which say precisely which slots are references — this
+/// struct is three additions over them, computed once per function when a
+/// `FrameVm` is built and never during a run. Adding a `Vec<SlotKind>` beside
+/// them would move where the addition happens and change no answer.
+///
+/// What Phase B was actually pointing at is the *numbering*, and that is a
+/// different and larger change: `Inst::LoadScalar` and `Inst::LoadLocal`
+/// address two spaces, and merging them means renumbering every slot the
+/// lowering hands out and changing what those two instructions' operands mean
+/// — in the VM, which numbers three stacks and would have to keep numbering
+/// them, as much as here. What it would buy is the three refusals below that
+/// name it: a function taking both a value and a scalar parameter, a call
+/// passing both, and a value parameter beside a scalar slot. That is a real
+/// widening of the admitted subset and it is Phase D's, stated as its own
+/// piece of work rather than as a consequence of this one.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct FrameMap {
     /// How many words one call needs: both frame sizes, added.
@@ -1050,79 +1168,59 @@ impl FrameMap {
 
 // ----------------------------------------- what a struct is, as words
 
-/// What one declared struct looks like as a run of eight-byte words.
+/// What one declared struct is as a run of eight-byte words, read off the
+/// **type**.
 ///
-/// # Where this comes from, and what it costs to come from there
+/// # Where this comes from
 ///
-/// **`cove_ir` does not carry a struct's per-field slot kind.** An
-/// `Inst::MakeStruct` names the type and the field names and nothing else, and
-/// `cove_ir::Function` numbers slots without saying what is in one beyond
-/// `params` and two counts. So a backend that needs decision 2's reference map
-/// — "which of its words are handles, so a collector scans those and not the
-/// scalars beside them" — cannot read one off the lowering today.
+/// `cove_ir::StructType` carries one `SlotKind` per field, settled from the
+/// checker's answer about the declared field type by the rule that decides a
+/// parameter's slot and a local's. So decision 2's reference map — "which of
+/// its words are handles, so a collector scans those and not the scalars
+/// beside them" — is read off the lowering, one [`Part`] per field, and
+/// nothing about a construction is consulted.
 ///
-/// What it can do, and what this does, is read it off the *construction*: the
-/// `fields.len()` instructions before a `make-struct` are what pushed its
-/// words, and each of them says what kind of word it pushed. Two sites for one
-/// type that disagree, or a site whose producers this cannot read, leave the
-/// type unsettled and [`admits`] refuses every function that builds it, by
-/// name.
+/// **That is the difference Phase C exists to make.** Phase B derived this map
+/// from the `fields.len()` instructions before each `make-struct`, so a type
+/// built two ways that disagreed had no single reference map and was refused
+/// by name. A fact neither construction states is a fact no two constructions
+/// can disagree about, so that refusal is not diagnosed here — it cannot
+/// arise. What [`admits`] still asks is the other half, per site: whether the
+/// words a given `make-struct` pushed *are* what the type says its fields are.
 ///
-/// That is a prototype economy and it is the largest single thing Phase C
-/// owes: a reference map belongs in `cove_ir` beside the frame sizes, derived
-/// from the checker's field types once, rather than re-derived from the
-/// instruction stream by every backend that wants one.
-#[derive(Clone, Debug)]
-struct StructWords {
-    /// The field names, in declaration order, as the `make-struct` writes
-    /// them.
-    fields: Vec<String>,
-    /// What each field's word is. `Part::Nested` is a handle the collector
-    /// follows and everything else is scalar bits it must not.
-    parts: Vec<Part>,
-}
-
-/// Every struct the program builds, worked out once, indexed by the `ConstId`
-/// of its type name exactly as `Vm::shapes` is.
+/// # What a slot kind is as a word
 ///
-/// `None` is either "no such type constant" or "this backend cannot settle
-/// what its words are", and the two are the same answer here because both mean
-/// no object of it may be built.
-fn struct_words(program: &Program) -> Vec<Option<StructWords>> {
-    let mut settled: Vec<Option<StructWords>> = vec![None; program.constants.len()];
-    let mut refused = vec![false; program.constants.len()];
-    for function in &program.functions {
-        for (pc, inst) in function.code.iter().enumerate() {
-            let Inst::MakeStruct { ty, fields } = *inst else {
-                continue;
-            };
-            let written = const_name(program, fields);
-            let fields: Vec<String> = if written.is_empty() {
-                Vec::new()
-            } else {
-                written.split(',').map(str::to_string).collect()
-            };
-            let Some(kinds) = pushed_kinds(program, function, pc, fields.len()) else {
-                refused[ty.0 as usize] = true;
-                continue;
-            };
-            let parts: Vec<Part> = kinds.into_iter().map(Kind::part).collect();
-            let found = StructWords { fields, parts };
-            match &settled[ty.0 as usize] {
-                // One type built two ways that disagree about its words is a
-                // type this backend has no single reference map for.
-                Some(before) if before.parts != found.parts => refused[ty.0 as usize] = true,
-                Some(_) => {}
-                None => settled[ty.0 as usize] = Some(found),
-            }
-        }
-    }
-    for (at, refused) in refused.into_iter().enumerate() {
-        if refused {
-            settled[at] = None;
-        }
-    }
-    settled
+/// `SlotKind::Value` is a word the collector follows and `SlotKind::Scalar` is
+/// one it must not, which is decision 1's invariant stated for an object's
+/// interior.
+///
+/// `SlotKind::Place` is not a refusal but an `unreachable!`, and the
+/// difference is deliberate. A refusal is for a program this backend cannot
+/// run; a place-kinded *field* is a lowering that cannot exist, because
+/// `lower::convention::slot_kind_of` answers only `Scalar` or `Value` and a
+/// field's kind is that function's answer and nothing else. It is
+/// `Word::canonical_bool`'s treatment for the same reason: a broken invariant
+/// of the pipeline rather than a program that could be told about it.
+fn struct_parts(program: &Program) -> Vec<Vec<Part>> {
+    program
+        .structs
+        .iter()
+        .map(|declared| {
+            declared
+                .fields
+                .iter()
+                .map(|field| match field.kind {
+                    SlotKind::Value => Part::Nested,
+                    SlotKind::Scalar(Scalar::Int) => Part::Int,
+                    SlotKind::Scalar(Scalar::Bool) => Part::Bool,
+                    SlotKind::Place => unreachable!(
+                        "`{}` declares field `{}` as a place, which no lowering emits",
+                        declared.name, field.name
+                    ),
+                })
+                .collect()
+        })
+        .collect()
 }
 
 /// What one word means, where something outside the one stack has to be told.
@@ -1164,6 +1262,24 @@ impl Kind {
 /// them in a row leave `count` operands. Anything else -- a call, an operator,
 /// a branch -- is refused rather than guessed at, which is what keeps this a
 /// reading of the program rather than an inference about it.
+///
+/// # It is a peephole, and that is what it still refuses
+///
+/// **This is what Phase C did not fix, and the reason is worth writing down**:
+/// the `count` instructions before `pc` are `count` operands only where every
+/// operand took exactly one instruction to compute. `Cursor(at: 0, step: 1)`
+/// is two constants and satisfies it; `Cursor(at: i, step: 1)` is a
+/// `load-scalar`, a `scalar-to-value` and a constant, and this answers `None`
+/// although every word involved is perfectly readable.
+///
+/// The per-field kind did not remove that, and could not: the type says what
+/// the *fields* are and this asks what the *stack* holds, which is a question
+/// about a program point rather than about a declaration. What answers it is
+/// an abstract simulation of the one stack over every path control can take —
+/// `cove_ir::lower::validate` already does exactly that for operand *depths* —
+/// and that is Phase D's, listed beside the `set-field` that names its type.
+/// The `make-builtin` boundary needs the *exact* scalar kind rather than only
+/// "is it a reference", so the simulation it wants is the wider of the two.
 fn pushed_kinds(
     program: &Program,
     function: &cove_ir::Function,
@@ -1185,8 +1301,23 @@ fn pushed_kinds(
             },
             Inst::ScalarToValue(Scalar::Int) => Some(Kind::Int),
             Inst::ScalarToValue(Scalar::Bool) => Some(Kind::Bool),
-            Inst::LoadLocal(_) | Inst::Dup | Inst::MakeStruct { .. } | Inst::SetField(_) => {
+            Inst::LoadLocal(_) | Inst::Dup | Inst::MakeStruct(_) | Inst::SetField(_) => {
                 Some(Kind::Reference)
+            }
+            // **Static because the instruction names the type.** A field read
+            // was unreadable here in Phase B — one instruction whose answer is
+            // a handle for a struct field and scalar bits for an `Int` one,
+            // and only the object could say which. `Inst::GetFieldAt` now
+            // names the `cove_ir::StructType` the checker settled for the
+            // receiver, so the field's slot kind is a static fact and a read
+            // may feed a `store-local`, a call argument, or another struct.
+            Inst::GetFieldAt { of, at } => {
+                match program.struct_type(*of).fields.get(*at as usize)?.kind {
+                    SlotKind::Value => Some(Kind::Reference),
+                    SlotKind::Scalar(Scalar::Int) => Some(Kind::Int),
+                    SlotKind::Scalar(Scalar::Bool) => Some(Kind::Bool),
+                    SlotKind::Place => None,
+                }
             }
             _ => None,
         })
@@ -1217,14 +1348,23 @@ fn boundary_kinds(
 /// Which word of a struct a `set-field` names, indexed by the `ConstId` of the
 /// field name.
 ///
+/// **This is the one thing a struct field still costs a name.** `Inst::SetField`
+/// carries a `Const::Name` and nothing else — the lowering's own comment says
+/// "the write goes by name whatever the checker settled" — so unlike
+/// `Inst::MakeStruct` and `Inst::GetFieldAt`, which now name a
+/// `cove_ir::StructType`, a write has no type on it to read a position off.
+/// What this does instead is ask every declared struct type where that name
+/// stands, and refuse the write where two of them answer differently.
+///
 /// A name is interned once per string, so one entry per constant is a complete
 /// table and reading it costs one indexed load rather than the walk over field
-/// names `Vm::SetField` does per execution. Where two admitted structs put the
-/// same field name at different positions the entry is `None` and [`admits`]
-/// refuses the function that writes it — a `set-field` whose target type is
-/// not known statically is exactly the thing a per-pc type map would settle,
-/// and Phase C owes that map.
-fn field_positions(program: &Program, structs: &[Option<StructWords>]) -> Vec<Option<u32>> {
+/// names `Vm::SetField` does per execution. Where two structs put the same
+/// field name at different positions the entry is `None` and [`admits`]
+/// refuses the function that writes it. A `set-field` that named its type is
+/// what would remove this, and it is Phase D's: `lower::expr::assign_field`
+/// already resolves the base's type through `Body::field_of`, so the fact
+/// exists and is thrown away.
+fn field_positions(program: &Program) -> Vec<Option<u32>> {
     let mut positions: Vec<Option<u32>> = vec![None; program.constants.len()];
     let mut ambiguous = vec![false; program.constants.len()];
     for function in &program.functions {
@@ -1233,8 +1373,12 @@ fn field_positions(program: &Program, structs: &[Option<StructWords>]) -> Vec<Op
                 continue;
             };
             let wanted = const_name(program, id);
-            for shape in structs.iter().flatten() {
-                let Some(at) = shape.fields.iter().position(|field| field == wanted) else {
+            for declared in &program.structs {
+                let Some(at) = declared
+                    .fields
+                    .iter()
+                    .position(|field| &*field.name == wanted)
+                else {
                     continue;
                 };
                 match positions[id.0 as usize] {
@@ -1340,9 +1484,9 @@ fn describe(inst: &Inst) -> &'static str {
         | Inst::LoadLocal(_)
         | Inst::StoreLocal(_)
         | Inst::Dup
-        | Inst::MakeStruct { .. }
+        | Inst::MakeStruct(_)
         | Inst::SetField(_)
-        | Inst::GetFieldAt(_)
+        | Inst::GetFieldAt { .. }
         | Inst::GetFieldAtScalar(_)
         | Inst::MakeBuiltin { .. }
         | Inst::Try
@@ -1388,9 +1532,22 @@ pub struct FrameVm<'a> {
     /// The VM-owned traced object heap, which is `crate::slot`'s and is wired
     /// here rather than reimplemented.
     heap: HandleHeap,
-    /// One layout per struct the program builds, indexed by the `ConstId` of
-    /// its type name, and `None` for a type this backend refused.
-    shapes: Vec<Option<LayoutId>>,
+    /// One layout per struct type the program declares, addressed by the
+    /// `cove_ir::StructId` a `make-struct` carries.
+    shapes: Vec<LayoutId>,
+    /// The same reference map again, as one bool per field, addressed by the
+    /// `cove_ir::StructId` a `get-field-at` carries and then by the position.
+    ///
+    /// Not a second source of truth: both this and [`FrameVm::shapes`] are
+    /// built from one [`struct_parts`] call, and the dispatch loop's
+    /// `debug_assert` reads the *object's* map beside this one on every field
+    /// read. It exists because the shapes are inside the heap and reaching one
+    /// is an object, a layout id and a `Vec` scan, where a field read wants a
+    /// bit — and the bit is a static fact about the instruction.
+    field_refs: Vec<Vec<bool>>,
+    /// Whether [`FrameVm::field_refs`] is the lowered types' map or has been
+    /// emptied by the mutation. See [`FieldMap`].
+    field_map: FieldMap,
     /// Which word a `set-field` names, indexed by the `ConstId` of the field
     /// name. See [`field_positions`].
     field_at: Vec<Option<u32>>,
@@ -1498,26 +1655,29 @@ impl<'a> FrameVm<'a> {
             .with_budget(|budget| (Some(budget.meter()), budget.limits().max_call_depth))
             .unwrap_or((None, None));
         let mut heap = HandleHeap::new();
-        let settled = struct_words(program);
-        let field_at = field_positions(program, &settled);
-        let shapes = settled
+        let field_at = field_positions(program);
+        // One heap layout per *declared type*, in `cove_ir::Program::structs`'
+        // own order, so a `StructId` addresses both. The reference map is the
+        // type's, which is the whole of Phase C: `struct_parts` reads it off
+        // `cove_ir::StructType` and a construction has no say in it.
+        //
+        let parts = struct_parts(program);
+        let shapes = parts
             .iter()
-            .enumerate()
-            .map(|(at, shape)| {
-                let shape = shape.as_ref()?;
-                let refs = shape
-                    .parts
+            .zip(&program.structs)
+            .map(|(parts, declared)| {
+                let refs = parts
                     .iter()
                     .enumerate()
                     .filter(|(_, part)| **part == Part::Nested)
                     .map(|(at, _)| at)
                     .collect();
-                Some(heap.register(Layout::new(
-                    const_name(program, ConstId(at as u32)),
-                    shape.parts.len(),
-                    refs,
-                )))
+                heap.register(Layout::new(&*declared.name, parts.len(), refs))
             })
+            .collect();
+        let field_refs = parts
+            .iter()
+            .map(|parts| parts.iter().map(|part| *part == Part::Nested).collect())
             .collect();
         FrameVm {
             runtime,
@@ -1526,6 +1686,8 @@ impl<'a> FrameVm<'a> {
             refs: Bitmap::with_limbs(INITIAL_LIMBS),
             heap,
             shapes,
+            field_refs,
+            field_map: FieldMap::TheLoweredType,
             field_at,
             maps: program.functions.iter().map(FrameMap::of).collect(),
             temps: TempRoots::new(),
@@ -1562,6 +1724,21 @@ impl<'a> FrameVm<'a> {
     fn stress(&mut self) {
         self.heap.stress(true);
         self.due = true;
+    }
+
+    /// **The mutation.** Every field read says the word it pushed is scalar,
+    /// whatever the type it named says.
+    ///
+    /// This is Phase C's mechanism removed rather than narrowed: the lowered
+    /// type is the only thing that decides a field read's bit, so emptying the
+    /// map is emptying the decision. What it costs is a handle standing in a
+    /// word the walk skips, and the heap says so in its own words.
+    #[cfg(test)]
+    fn without_the_field_map(&mut self) {
+        self.field_map = FieldMap::Dropped;
+        for parts in &mut self.field_refs {
+            parts.fill(false);
+        }
     }
 
     /// How many collections this run ran, and what they found.
@@ -1903,9 +2080,8 @@ impl<'a> FrameVm<'a> {
                         "a conversion between a scalar and a value was handed a reference"
                     );
                 }
-                Inst::MakeStruct { ty, .. } => {
-                    let layout = self.shapes[ty.0 as usize]
-                        .expect("`admits` settled every struct this backend builds");
+                Inst::MakeStruct(of) => {
+                    let layout = self.shapes[of.0 as usize];
                     let width = self.heap.layout(layout).words();
                     let at = self.words.len() - width;
                     debug_assert!(
@@ -1924,19 +2100,46 @@ impl<'a> FrameVm<'a> {
                     // instruction, so this does too: same schedule, same fuel.
                     self.fuel += width as u64;
                 }
-                // One instruction in this backend, two in the lowering, and
-                // the difference between them is which stack the answer went
-                // on. There is one stack.
-                Inst::GetFieldAt(index) | Inst::GetFieldAtScalar(index) => {
+                // **The word's kind is the instruction's, not the object's.**
+                // Phase B asked `HandleHeap::word_is_reference` here, which is
+                // the object's layout consulted per read, and the module docs
+                // called it "the one that cannot be static". It can:
+                // `Inst::GetFieldAt` names the `cove_ir::StructType` the
+                // checker settled for the receiver, and a type's field kinds
+                // do not vary between two executions of one instruction. So
+                // the bit is one indexed load out of a table built before the
+                // run, and the heap is not asked what it is holding.
+                Inst::GetFieldAt { of, at: index } => {
                     let source = Handle::from_slot(self.pop_word());
                     let at = index as usize;
                     let word = self.heap.word(source, at);
-                    // The object's reference map, and nothing else, says what
-                    // kind of word this is -- ADR 0028 decision 2, asked one
-                    // word at a time because a frame has to be told what it
-                    // just received.
-                    let is_reference = self.heap.word_is_reference(source, at);
+                    let is_reference = self.field_refs[of.0 as usize][at];
+                    // The object's own map read beside the type's, on every
+                    // field read of every debug build, so the two are compared
+                    // rather than one of them trusted. Nothing at all in a
+                    // release build, which is what keeps the hot path one
+                    // indexed load. See [`FieldMap`] for the condition.
+                    debug_assert!(
+                        self.field_map == FieldMap::Dropped
+                            || is_reference == self.heap.word_is_reference(source, at),
+                        "the lowered type and the object it built disagree about word {at}"
+                    );
                     self.push_word(word, is_reference);
+                }
+                // The same read whose answer went on the other stack, which is
+                // one stack here — and a scalar word by construction, because
+                // the lowering emits this only where the checker settled the
+                // *field's* own type as `Int` or `Bool`. Nothing is asked at
+                // all.
+                Inst::GetFieldAtScalar(index) => {
+                    let source = Handle::from_slot(self.pop_word());
+                    let at = index as usize;
+                    let word = self.heap.word(source, at);
+                    debug_assert!(
+                        !self.heap.word_is_reference(source, at),
+                        "`get-field-at-scalar` read word {at}, which the object calls a reference"
+                    );
+                    self.push_scalar(word);
                 }
                 Inst::SetField(field) => {
                     let at = self.field_at[field.0 as usize]

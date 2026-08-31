@@ -3891,6 +3891,9 @@ nothing below is predicted from what is:
   owes, and it is one thing rather than two: the same absence is why the frame
   map is derived at run time from two frame sizes instead of being lowered as
   one numbering.
+  *Done, in "A struct's reference map is a property of the type" below — and
+  it was two things rather than one. The frame map is still derived, and that
+  section says why the per-field kind did not and could not close it.*
 - **A `set-field` whose target type is known statically.** The field-position
   table is per field-name constant, so two admitted structs that put the same
   field name at different positions refuse the function that writes it. A
@@ -3931,6 +3934,233 @@ nothing below is predicted from what is:
   move the cost out of the loop entirely at the price of a table the size of the
   instruction stream and a second thing for the lowering to keep true. Neither
   is built. What is measured is the form #162 names.
+
+## A struct's reference map is a property of the type
+
+Phase C is the first item on the list above, and it is not a change to the
+physical arrangement at all. The stack, the bitmap, the calling convention, the
+frame map and the boundary are Phase B's unchanged. What changed is where one
+fact comes from.
+
+**`cove_ir::StructType` carries one `SlotKind` per field**, in declaration
+order, settled from the checker's answer about the declared field type through
+`lower::convention::slot_kind_of` — the same function that decides a
+parameter's slot, a local's and a return's. The checker already publishes a
+struct's field types, as the `params` of the signature it synthesizes for the
+initializer `Cursor(at: 0)`; this is that answer read once and written down,
+not a second resolution of the same annotations.
+
+Two instructions name a type instead of describing one. `Inst::MakeStruct` is
+`MakeStruct(StructId)`, one id where it carried a type-name constant and a
+field-name constant. `Inst::GetFieldAt` is `GetFieldAt { of, at }`, where `of`
+is the type the checker settled for the receiver — the position always said
+*where* the word is, and the type is what says what it **is**. Listings are
+unchanged: `make-struct m.Cursor fields=at,step` and `get-field-at 0` read as
+they did, because the renderer reads the same names out of the type.
+
+### The third authority is static, and there are now two of it
+
+| where the word is | Phase B | Phase C |
+| --- | --- | --- |
+| a frame slot | the frame map | unchanged |
+| an operand the scalar core, a `const` or a `make-struct` pushed | the instruction | unchanged |
+| an operand a field read pushed | the **object's** reference map, per execution | the **lowered type** the instruction names |
+
+Phase B wrote that the third "cannot be static", and that was true of an IR
+that recorded nothing about a field. It is a table lookup now: one indexed
+load out of a `Vec<Vec<bool>>` built before the run, addressed by the
+`StructId` the instruction carries and then by the position. What it replaced
+was `HandleHeap::word_is_reference` — an object-table index, a layout id, and
+`Vec::contains` over the layout's reference list — on the hot path of every
+field read of `benches/field` and `benches/method`.
+
+The object is still asked, under `debug_assert`, on every field read of every
+debug build, so what a test run checks is the two answers **agreeing** rather
+than one of them being trusted. `get-field-at-scalar` asks nothing at all: the
+lowering emits it only where the checker settled the field's own type as `Int`
+or `Bool`, so its answer is scalar by construction.
+
+### The by-name refusal is gone, and it is gone by being unstateable
+
+Phase B derived a struct's reference map from the `fields.len()` instructions
+before each `make-struct`, so **a type built two ways that disagreed had no
+single map and every function that built it was refused, by name.** That
+refusal is not diagnosed differently here. A fact neither construction states
+is a fact no two constructions can disagree about, so the case cannot arise
+and there is no code for it.
+
+What `admits` still asks about a `make-struct` is the other half, per site and
+with its span: whether the words this site pushed **are** what the type says
+its fields are. That is the question `store-local` already asks, and ADR 0027
+is why it survives a static map — a declaration reached through a value is
+lowered "with every argument on the value stack", so a word a value slot holds
+may be an `Int`.
+
+One by-name table is left, and it is a different one: `Inst::SetField` carries
+a `Const::Name`, because the lowering writes a field by name whatever the
+checker settled, so the frame backend asks every declared type where that name
+stands and refuses a write two of them answer differently. `lower::expr::assign_field`
+already resolves the base's type through `Body::field_of` and throws it away.
+That is Phase D's and it is now the *only* place a struct field costs a name.
+
+### What it widened, and the coverage it was widened on
+
+One shape: **a struct-typed field read whose answer is then stored, passed, or
+built with.** `pushed_kinds` had no reading for `Inst::GetFieldAt` while only
+the object knew what it pushed, so `var inner = outer.inner` and
+`take(outer.inner)` were both refused. Both are admitted now.
+
+The widening is taken only because a test runs it.
+`a_nested_struct_read_into_a_slot_is_rooted` runs both shapes against the `Vm`
+and the tree walk, under `HandleHeap::stress`, and asserts that collections
+ran and that the program that abandons an object a turn swept one.
+
+### Proving it, which is a third mutation
+
+`a_field_reads_bit_comes_from_the_lowered_type` empties the map a field read
+reads its bit out of, and nothing else: the frame map still names every value
+slot and every operand word is still in the walk.
+
+| mutation | what it removes | what happens |
+| --- | --- | --- |
+| `a_field_reads_bit_comes_from_the_lowered_type` | the per-field kind a `get-field-at` writes its bit from | `Outer(inner: Inner(n: 1), n: 2).inner` pops the outer, so the inner stands in one operand word and in nothing else; the call under it is a safepoint, the inner is swept, and `inner.n` in the callee panics with `handle Handle { index: 0, generation: 1 } names a swept object` |
+
+The program is chosen so that neither of Phase B's two halves can cover for
+this one. The outer object is consumed by the read itself, so no frame slot
+holds it; the inner exists only in the word the read pushed. Its control is
+`a_nested_struct_read_into_a_slot_is_rooted`, which runs the same program with
+the map whole and agrees with the `Vm`.
+
+### The frame map, which one fix did not close
+
+Phase B said the missing per-field kind was "one thing rather than two: the
+same absence is why the frame map is derived at run time from two frame sizes
+instead of being lowered as one numbering". **Having removed the absence, they
+are two, and this is the negative result of Phase C.**
+
+A struct's reference map really was missing from the IR: nothing said what a
+field held, a backend had to invent an answer, and two inventions could
+disagree. A frame's reference map is not missing. It is `value_frame_size` and
+`scalar_frame_size`, which `cove_ir::Function` has always carried and which say
+exactly which slots are references; `frame::FrameMap` is three additions over
+them, computed once per function when a `FrameVm` is built and never during a
+run. Putting a `Vec<SlotKind>` beside them would move where the addition
+happens and change no answer.
+
+What Phase B was pointing at is the **numbering**, and that is a different and
+larger change: `Inst::LoadScalar` and `Inst::LoadLocal` address two spaces, and
+merging them means renumbering every slot the lowering hands out and changing
+what those two instructions' operands mean — in the `Vm`, which numbers three
+stacks, as much as here. What it would buy is three named refusals: a function
+taking both a value and a scalar parameter, a call passing both, and a value
+parameter beside a scalar slot. It is Phase D's, as its own piece of work.
+
+### The measurement
+
+Six `cove-bench --iterations 15` suites, six processes of one binary, quiet
+machine; **each ratio is the two rows of one run**, and the figure quoted is
+the median of the six. Instruction counts are exact and are printed by
+`the_frame_executes_exactly_the_instructions_the_vm_executes`, which asserts
+they are equal on both backends before printing them.
+
+| row | instructions | VM | mixed frame | frame ÷ VM | band over six |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| `pure` | — | 1.50 ms | 1.34 ms | 0.894× | 8.1 pt |
+| `arith` | 31,142,877 | 98.86 ms | 105.29 ms | **1.065×** | 6.7 pt |
+| `call` | 37,142,877 | 177.24 ms | 166.28 ms | 0.935× | 5.3 pt |
+| `field` | 47,428,595 | 483.27 ms | 207.59 ms | **0.428×** | 2.3 pt |
+| `method` | 59,428,598 | 720.64 ms | 359.42 ms | **0.495×** | 5.0 pt |
+
+The counts are Phase B's, to the instruction, and so is the allocation
+behaviour: 2,000,001 traced objects on `field` and on `method`, none at all on
+`arith` and `call`, and zero Rust allocations for ten thousand extra calls and
+returns under `tests/frame_allocation.rs`. **Nothing about what these programs
+do changed. Only where one fact is read from did.**
+
+Per instruction, which the equal counts make available:
+
+| row | VM | mixed frame |
+| --- | ---: | ---: |
+| `arith` | 3.17 ns | **3.38 ns** — still the only row where the frame is slower |
+| `call` | 4.77 ns | 4.48 ns |
+| `field` | 10.19 ns | 4.38 ns |
+| `method` | 12.13 ns | 6.05 ns |
+
+And the per-call prize, both pairs being two rows of one run:
+
+| | VM | mixed frame | saved per call |
+| --- | ---: | ---: | ---: |
+| frame of scalars — `call` − `arith`, 2,000,000 calls | 39.2 ns | 30.5 ns | **8.7 ns** |
+| frame with a reference — `method` − `field`, 4,000,000 calls | 59.3 ns | 38.0 ns | **21.3 ns** |
+
+**The bands are wider than Phase B's** — 2.3 to 8.1 points against 0.2 to 1.4 —
+and the reason is a process rather than a row. One of the six suites is the
+high end of `arith`, `call`, `field` and `method` at once, which is the
+process-level effect "The reservation is a measurement fix" describes and is
+exactly why the number quoted is a median of six rather than a suite. `pure`'s
+8.1 points is 8.1 points of a 1.5 ms row.
+
+**`arith` did not stop being slower than the VM, and this change could not have
+made it so.** `benches/arith` executes no `get-field-at` at all, so the only
+thing Phase C touched is absent from it. The negative result Phase B recorded
+stands as recorded: a frame with no reference in it pays the bitmap a bit per
+word pushed and gets nothing back, and it is 6.5% slower than the `Vm` here.
+
+#### Whether the static map is what moved `field`, which is an indication
+
+`field` reads 0.428× where Phase B read 0.489–0.491×, and `method` 0.495×
+where Phase B read 0.546–0.555×. **That comparison crosses a build, so it is an
+indication and not a measurement**, for the reason ADR 0029 and
+[#179](https://github.com/myuon/cove/issues/179) give and the reason Phase B
+could not price the bitmap alone: the control for "the same backend that asks
+the object instead" is a different binary.
+
+What can be said is the shape of it. Against Phase B's recorded absolutes, in
+the same rows:
+
+| row | field reads per turn | frame, Phase B | frame, Phase C | change |
+| --- | ---: | ---: | ---: | ---: |
+| `field` | 2 | 234.0 ms | 207.59 ms | **−11.3%** |
+| `method` | 2, both behind a call | 384.5 ms | 359.42 ms | **−6.5%** |
+| `arith` | 0 | 109.3 ms | 105.29 ms | −3.7% |
+| `call` | 0 | 169.2 ms | 166.28 ms | −1.7% |
+| `pure` | 0 | 1.33 ms | 1.34 ms | +0.8% |
+
+`arith`'s −3.7% is the size of the term a rebuild moves on its own, since
+nothing in this change can reach that row. The two rows that read fields moved
+three times and twice that. That is consistent with what was removed — an
+object-table index, a layout id and a `Vec::contains` over the layout's
+reference list, replaced by one indexed load, on every `get-field-at` — and it
+is not proof of it. The `Vm` rows moved by −0.1% to +3.0% across the same two
+builds, which is the other half of the same caveat.
+
+### What Phase C did not do, and what Phase D owes
+
+Phase C changed where one fact comes from. Everything Phase B listed and did
+not build is still not built, and this adds three that Phase C either found or
+sharpened:
+
+- **One numbering in `cove_ir`.** The paragraph above: not a consequence of the
+  per-field kind, and the three refusals it would remove are named there.
+- **A `set-field` that names its type.** The last by-name table in the frame
+  backend, and the fact it wants is already computed and discarded in
+  `lower::expr::assign_field`.
+- **A per-`pc` operand-kind analysis, to replace `frame::pushed_kinds`.** It is
+  a peephole: the `count` instructions before a `make-struct` are `count`
+  operands only where every operand took one instruction to compute.
+  `Cursor(at: 0, step: 1)` satisfies that and `Cursor(at: i, step: 1)` does
+  not, so the second is refused although every word in it is readable. The
+  per-field kind could not fix this and was never going to: the type says what
+  the *fields* are and this asks what the *stack* holds, which is a question
+  about a program point. `cove_ir::lower::validate` already simulates operand
+  *depths* over every path control can take; the same simulation carrying kinds
+  is the answer, and the `make-builtin` boundary needs the exact scalar kind
+  rather than only "is it a reference", so it is the wider of the two.
+- **Everything else on Phase B's list**, unchanged and not restated here: an
+  aggregate at decision 5's boundary, the inbound half ADR 0033 clause 1 keeps
+  closed, every one of clause 7's identity obligations, arrays and strings and
+  enums, a field write that does not copy, places and `var` and closures and
+  `dyn` and tasks and Host calls, and the bitmap's alternatives.
 
 ## What is settled and what is open
 

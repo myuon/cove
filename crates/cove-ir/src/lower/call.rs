@@ -587,9 +587,8 @@ impl<'a, 'l> Body<'a, 'l> {
         for arg in args.iter() {
             self.expr(arg.value)?;
         }
-        let ty = self.outer.name(&format!("{module}.{}", declared.name));
-        let fields = self.outer.name(&names.join(","));
-        self.emit(Inst::MakeStruct { ty, fields }, span);
+        let of = self.outer.host_struct_type(module, declared.name, &names);
+        self.emit(Inst::MakeStruct(of), span);
         Ok(())
     }
 
@@ -671,9 +670,8 @@ impl<'a, 'l> Body<'a, 'l> {
             // an argument and the arguments fill them in increasing order.
             self.coerce_to(owner, &decl.fields[at].ty, arg.span);
         }
-        let ty = self.outer.name(&format!("{owner}.{}", decl.name.node));
-        let fields = self.outer.name(&names.join(","));
-        self.emit(Inst::MakeStruct { ty, fields }, span);
+        let of = self.outer.struct_type(owner, decl);
+        self.emit(Inst::MakeStruct(of), span);
         Ok(())
     }
 

@@ -28,8 +28,10 @@ use cove_sema::resolve::Program as Checked;
 use cove_sema::Signature;
 use cove_syntax::ast::{Block, EnumDecl, ExprId, FnDecl, Param, StructDecl, Type, TypeKind};
 
+use super::convention::slot_kind_of;
 use crate::{
-    Const, ConstId, Dispatch, DispatchId, Function, FunctionId, Program, SlotKind, Unsupported,
+    Const, ConstId, Dispatch, DispatchId, Function, FunctionId, Program, SlotKind, StructField,
+    StructId, StructType, Unsupported,
 };
 
 /// Which modules each module of the package can reach, itself included.
@@ -315,6 +317,18 @@ pub(super) struct Lowering<'a> {
     /// within the file it was parsed from and a package has many files.
     pub(super) lambda_of: BTreeMap<(FileId, ExprId), usize>,
     pub(super) constants: Vec<Const>,
+    /// Every struct type some body has built or read a field of, in the order
+    /// they were reached, which is what [`StructId`] indexes.
+    pub(super) structs: Vec<StructType>,
+    /// The id each qualified type name was interned as, so that one
+    /// declaration is one [`StructId`] however many sites name it.
+    ///
+    /// The qualified name is the key because it is what identifies the
+    /// *declaration*: two modules may each declare a `Cursor`, and a value of
+    /// either carries `module.Cursor`. One name, one layout — which is the
+    /// property that makes a construction unable to disagree with another
+    /// construction of the same type.
+    pub(super) struct_ids: BTreeMap<String, StructId>,
     /// Every dynamic dispatch site some body has reached, in the order they
     /// were reached, which is what [`DispatchId`] indexes.
     ///
@@ -344,6 +358,8 @@ impl<'a> Lowering<'a> {
             lambdas: Vec::new(),
             lambda_of: BTreeMap::new(),
             constants: Vec::new(),
+            structs: Vec::new(),
+            struct_ids: BTreeMap::new(),
             dispatches: Vec::new(),
         };
         for (module, resolved) in &checked.modules {
@@ -481,7 +497,86 @@ impl<'a> Lowering<'a> {
             functions,
             constants: self.constants,
             dispatches: self.dispatches,
+            structs: self.structs,
         })
+    }
+
+    /// The [`StructId`] of the struct `decl` declares in `owner`, interning it
+    /// on the first site that names it.
+    ///
+    /// **The layout is read off the declaration and never off a construction.**
+    /// A field's [`SlotKind`] is [`slot_kind_of`] over the type the checker
+    /// resolved for it, which is the same rule and the same function that
+    /// decides a parameter's slot, a local's and a return's — ADR 0027's
+    /// "only the checker's answer about its type" asked about a field.
+    ///
+    /// The checker records a struct's field types as the `params` of the
+    /// signature it synthesizes for the initializer `Cursor(at: 0)`, in
+    /// declaration order, which `cove_sema::Signature` says in as many words.
+    /// So this is the checker's answer read once rather than a second
+    /// resolution of the same annotations.
+    ///
+    /// A declaration the checker recorded nothing about keeps every field on
+    /// the value stack. That is the abstention rule the rest of the lowering
+    /// follows — an unsettled type is not a scalar — and it is what stops a
+    /// missing fact from becoming a wrong one.
+    pub(super) fn struct_type(&mut self, owner: &str, decl: &'a StructDecl) -> StructId {
+        let qualified = format!("{owner}.{}", decl.name.node);
+        if let Some(id) = self.struct_ids.get(&qualified) {
+            return *id;
+        }
+        let settled = self.checked.facts.signature(decl.span.file, decl.span);
+        let fields = decl
+            .fields
+            .iter()
+            .enumerate()
+            .map(|(at, field)| StructField {
+                name: field.name.node.as_str().into(),
+                kind: settled
+                    .and_then(|signature| signature.params.get(at))
+                    .map_or(SlotKind::Value, slot_kind_of),
+            })
+            .collect();
+        let id = StructId(self.structs.len() as u32);
+        self.structs.push(StructType {
+            name: qualified.as_str().into(),
+            fields,
+        });
+        self.struct_ids.insert(qualified, id);
+        id
+    }
+
+    /// The [`StructId`] of a type a *host* module declares, such as
+    /// `http.Route`.
+    ///
+    /// Every field is a value slot, and that is not caution: a host's fields
+    /// are described by a `cove_schema::TypeSchema` rather than by a
+    /// declaration the checker walked, so there is no `Ty` to read and the
+    /// abstention rule applies exactly as it does to a declaration the checker
+    /// recorded nothing about.
+    pub(super) fn host_struct_type(
+        &mut self,
+        module: &str,
+        name: &str,
+        fields: &[&str],
+    ) -> StructId {
+        let qualified = format!("{module}.{name}");
+        if let Some(id) = self.struct_ids.get(&qualified) {
+            return *id;
+        }
+        let id = StructId(self.structs.len() as u32);
+        self.structs.push(StructType {
+            name: qualified.as_str().into(),
+            fields: fields
+                .iter()
+                .map(|name| StructField {
+                    name: (*name).into(),
+                    kind: SlotKind::Value,
+                })
+                .collect(),
+        });
+        self.struct_ids.insert(qualified, id);
+        id
     }
 
     /// Interns a constant, so that one value is one [`ConstId`] however many
