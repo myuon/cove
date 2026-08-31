@@ -1,0 +1,16 @@
+# `cargo t` is the local test command, and it is `cargo test` minus the two
+# things that are slow and that CI runs anyway.
+#
+# `--lib --bins --tests` is the whole of the suite except the doc examples.
+# Compiling those is about a fifth of a warm `cargo test --workspace` here —
+# each fenced example is its own crate — and what it catches is an example
+# that stopped compiling, which is a documentation break rather than a
+# behaviour one. CI's `cargo test --workspace` step compiles them all.
+#
+# The `#[ignore]`d cases go with them: `crates/cove-runtime/src/frame/tests.rs`
+# drives the `benches/` rows at the 2,000,000 turns they are measured at, and
+# its module docs say why those were not shortened instead. CI has a step of
+# its own for them, and `cargo test --workspace --lib -- --ignored` is how to
+# run them by hand — which is worth doing after a change to `frame.rs`.
+[alias]
+t = "test --workspace --lib --bins --tests"

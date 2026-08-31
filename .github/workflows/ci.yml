@@ -90,6 +90,19 @@ jobs:
       - name: cargo test
         run: cargo test --workspace
 
+      # The cases `crates/cove-runtime/src/frame/tests.rs` marks `#[ignore]`:
+      # the five that drive the `benches/` rows at the 2,000,000 turns the
+      # published measurement was taken at. They cost between thirty and fifty
+      # seconds each in an unoptimised build, which is a price worth paying
+      # once here rather than on every local `cargo test`. The module docs
+      # there say why shortening the rows was refused instead.
+      #
+      # `--lib` and not `--workspace` alone, because `--ignored` would
+      # otherwise reach the doc examples fenced ```ignore, which are marked
+      # that way precisely because they do not compile on their own.
+      - name: cargo test (the ignored rows)
+        run: cargo test --workspace --lib -- --ignored
+
       # Dogfooding. These are the project's own claims about its own sources:
       # the repository is formatted, the representative programs check, and
       # their tests pass. They are checked with the binary this commit builds.

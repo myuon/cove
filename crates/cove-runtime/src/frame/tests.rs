@@ -13,6 +13,34 @@
 //! non-canonical word, `Float` bit patterns including NaN payloads, nested
 //! calls and the call-depth limit, and a stack that grows past its initial
 //! capacity while indices into it stay valid.
+//!
+//! # The five that are `#[ignore]`d, and what runs them
+//!
+//! Five cases here drive the `benches/` package, and a bench row is written
+//! to be *measured*: `benches/arith` and every row shaped like it run
+//! 2,000,000 turns, because that is the number the figures in
+//! `docs/VM_ARCHITECTURE.md` were taken at. Running one of those on the tree
+//! walk, on the `Vm`, and on the `FrameVm` — unoptimised, which is what a
+//! test binary is — costs between thirty and fifty seconds each, and
+//! together they were the whole of `cove-runtime`'s test time and about two
+//! fifths of the workspace's.
+//!
+//! Shortening the rows was refused rather than not considered. The turn count
+//! is what the published measurement means, so a row that ran fewer turns
+//! under test would be a different program from the one the numbers are
+//! about, and the claim these cases make — that the three backends agree
+//! about *the programs that get benchmarked* — is the one that would be lost.
+//! Bounding the run with fuel was refused for the same kind of reason: two of
+//! the five count something over a whole run, and a prefix of a run does not
+//! answer a question about its total.
+//!
+//! So they are `#[ignore]`d and CI runs them, which is the split ADR 0012's
+//! ranking permits: nothing here is the specification, and none of the five
+//! is the only thing standing between a wrong frame and a green suite — the
+//! forty-three cases that stay are the ones written against the invariants
+//! directly. `cargo test --workspace --lib -- --ignored` is what runs them,
+//! and it is worth running by hand after a change to `frame.rs` rather than
+//! waiting for CI to say so.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -309,6 +337,7 @@ const ADMITTED_ROWS: [&str; 4] = ["arith", "call", "field", "method"];
 /// `cove_ir::Program` `cove run --backend vm` consumes, and answers what the
 /// other two backends answer.
 #[test]
+#[ignore = "runs the `benches/` rows at their measured 2,000,000 turns; see the module docs"]
 fn the_admitted_bench_rows_run_on_the_frame_and_agree_with_both_backends() {
     for name in ADMITTED_ROWS {
         let ready = bench(name);
@@ -340,6 +369,7 @@ fn the_admitted_bench_rows_run_on_the_frame_and_agree_with_both_backends() {
 /// to 19% slower — which is why the wall-clock comparison is beside it and
 /// not instead of it.
 #[test]
+#[ignore = "runs the `benches/` rows at their measured 2,000,000 turns; see the module docs"]
 fn the_frame_executes_exactly_the_instructions_the_vm_executes() {
     for name in ADMITTED_ROWS {
         let ready = bench(name);
@@ -371,6 +401,7 @@ fn the_frame_executes_exactly_the_instructions_the_vm_executes() {
 /// eight bytes and a settled `Int` is the same eight bytes on both sides of
 /// the conversion.
 #[test]
+#[ignore = "runs the `benches/` rows at their measured 2,000,000 turns; see the module docs"]
 fn the_hot_path_performs_no_value_operation() {
     for name in ADMITTED_ROWS {
         let ready = bench(name);
@@ -422,6 +453,7 @@ fn the_hot_path_performs_no_value_operation() {
 /// nothing else, so the frame runs it too — and it is the row that says most
 /// about what a call costs.
 #[test]
+#[ignore = "runs the `benches/` rows at their measured 2,000,000 turns; see the module docs"]
 fn pure_runs_on_the_frame_as_well() {
     let ready = bench("pure");
     ready
@@ -1198,6 +1230,7 @@ fn a_fuel_limit_stops_a_struct_loop_where_it_stops_the_vm() {
 /// And the fuel each backend spends over a whole run of each admitted row is
 /// the same number.
 #[test]
+#[ignore = "runs the `benches/` rows at their measured 2,000,000 turns; see the module docs"]
 fn the_frame_spends_the_fuel_the_vm_spends() {
     for name in ADMITTED_ROWS {
         let ready = bench(name);

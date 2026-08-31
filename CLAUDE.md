@@ -1,5 +1,21 @@
 # Cove
 
+## Tests
+
+`cargo t` is the local test command — an alias in `.cargo/config.toml` for
+`cargo test --workspace --lib --bins --tests`. It leaves out the doc examples
+and the `#[ignore]`d cases, which together are more than half of a warm
+`cargo test --workspace` and which CI runs in steps of their own.
+
+Run the ignored ones by hand after a change to `crates/cove-runtime/src/frame.rs`:
+`cargo test --workspace --lib -- --ignored`. They are the five that drive the
+`benches/` rows at the turn count the published measurements were taken at, and
+that file's module docs say why shortening them was refused.
+
+Before pushing, the full gate is what CI runs: `cargo fmt --all --check`,
+`cargo clippy --workspace --all-targets -- -D warnings`, `cargo test --workspace`,
+and `cargo doc --workspace --no-deps`.
+
 ## Architecture Decision Records
 
 ADRs live in `docs/adr/`, numbered sequentially.
