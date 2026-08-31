@@ -349,6 +349,10 @@ fn the_frame_executes_exactly_the_instructions_the_vm_executes() {
             ready.vm_instructions(),
             "`benches/{name}` ran a different number of instructions on the two backends"
         );
+        // Printed rather than only compared, because the absolute is what
+        // `docs/VM_ARCHITECTURE.md` quotes beside a wall-clock ratio and a
+        // number nobody can read out of a run is a number that drifts.
+        println!("benches/{name}: {instructions} instructions on both backends");
     }
 }
 

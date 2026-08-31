@@ -455,7 +455,7 @@ pub fn admits(program: &Program, module: &str, name: &str) -> Result<FunctionId,
             "`{module}.{name}`, which this package does not declare"
         )));
     };
-    let structs = struct_parts(program)?;
+    let structs = struct_parts(program);
     let fields = field_positions(program);
     let mut seen = vec![false; program.functions.len()];
     let mut queue = vec![entry];
@@ -1192,10 +1192,16 @@ impl FrameMap {
 ///
 /// `SlotKind::Value` is a word the collector follows and `SlotKind::Scalar` is
 /// one it must not, which is decision 1's invariant stated for an object's
-/// interior. `SlotKind::Place` is refused: a place is what a parameter can be,
-/// and a field that was one would be an alias inside a traced object — neither
-/// a thing the lowering emits nor a thing this heap can describe.
-fn struct_parts(program: &Program) -> Result<Vec<Vec<Part>>, Refused> {
+/// interior.
+///
+/// `SlotKind::Place` is not a refusal but an `unreachable!`, and the
+/// difference is deliberate. A refusal is for a program this backend cannot
+/// run; a place-kinded *field* is a lowering that cannot exist, because
+/// `lower::convention::slot_kind_of` answers only `Scalar` or `Value` and a
+/// field's kind is that function's answer and nothing else. It is
+/// `Word::canonical_bool`'s treatment for the same reason: a broken invariant
+/// of the pipeline rather than a program that could be told about it.
+fn struct_parts(program: &Program) -> Vec<Vec<Part>> {
     program
         .structs
         .iter()
@@ -1204,13 +1210,13 @@ fn struct_parts(program: &Program) -> Result<Vec<Vec<Part>>, Refused> {
                 .fields
                 .iter()
                 .map(|field| match field.kind {
-                    SlotKind::Value => Ok(Part::Nested),
-                    SlotKind::Scalar(Scalar::Int) => Ok(Part::Int),
-                    SlotKind::Scalar(Scalar::Bool) => Ok(Part::Bool),
-                    SlotKind::Place => Err(Refused::nowhere(format!(
-                        "`{}`, one of whose fields is a `var` alias",
-                        declared.name
-                    ))),
+                    SlotKind::Value => Part::Nested,
+                    SlotKind::Scalar(Scalar::Int) => Part::Int,
+                    SlotKind::Scalar(Scalar::Bool) => Part::Bool,
+                    SlotKind::Place => unreachable!(
+                        "`{}` declares field `{}` as a place, which no lowering emits",
+                        declared.name, field.name
+                    ),
                 })
                 .collect()
         })
@@ -1655,11 +1661,7 @@ impl<'a> FrameVm<'a> {
         // type's, which is the whole of Phase C: `struct_parts` reads it off
         // `cove_ir::StructType` and a construction has no say in it.
         //
-        // A refusal here is impossible for anything `admits` lets run — it
-        // answers only for a `SlotKind::Place` field, which no lowering emits
-        // — and a `FrameVm` is built before `admits` is asked, so the empty
-        // table is what a program that will be refused anyway gets.
-        let parts = struct_parts(program).unwrap_or_default();
+        let parts = struct_parts(program);
         let shapes = parts
             .iter()
             .zip(&program.structs)
