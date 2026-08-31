@@ -10,8 +10,9 @@
 //! two descriptions of one thing. `super::body`'s `Body::emit` reads it as
 //! it emits and [`validate`] reads it as it simulates, so a boundary between
 //! the two would be a boundary between two things that must agree. There is
-//! one of it, and each of its two readers is on the far side of it from the
-//! other.
+//! one of it, and each of its readers is on the far side of it from the
+//! others — including the third, `cove_runtime::frame`'s operand-kind
+//! simulation, which is why it is `pub`.
 
 use crate::{
     Const, ConstId, Function, FunctionId, Inst, Program, Region, SlotKind, StructId, StructType,
@@ -562,13 +563,13 @@ fn validate_function(program: &Program, id: FunctionId) -> Result<(), String> {
 /// instruction *is*, and reading a place is the boundary between the place
 /// stack and the value stack.
 #[derive(Clone, Copy)]
-pub(super) struct Shape {
+pub struct Shape {
     /// Taken off, and put back on, the value stack.
-    pub(super) values: (u32, u32),
+    pub values: (u32, u32),
     /// Taken off, and put back on, the scalar stack.
-    pub(super) scalars: (u32, u32),
+    pub scalars: (u32, u32),
     /// Taken off, and put back on, the place stack.
-    pub(super) places: (u32, u32),
+    pub places: (u32, u32),
 }
 
 impl Shape {
@@ -604,7 +605,16 @@ impl Shape {
 ///
 /// One description, read by the lowering as it emits and by [`validate`] as
 /// it simulates, so the two cannot disagree about what an instruction does.
-pub(super) fn stack_shape(structs: &[StructType], inst: Inst) -> Shape {
+///
+/// It has a third reader outside this crate now, and that is why it is
+/// exported rather than copied: `cove_runtime::frame`'s operand-kind
+/// simulation walks a function's value operand stack over every path control
+/// can take, and needs exactly these counts to know how deep it is standing.
+/// A copy of them there would be a second description of what an instruction
+/// does, and the whole argument for there being one of these is that two can
+/// come apart. A third reader on the far side of the one description cannot
+/// disagree with the two already here.
+pub fn stack_shape(structs: &[StructType], inst: Inst) -> Shape {
     match inst {
         Inst::Const(_) | Inst::LoadLocal(_) | Inst::MakeHostEnum { .. } => Shape::on_values(0, 1),
         Inst::StoreLocal(_) | Inst::Pop => Shape::on_values(1, 0),

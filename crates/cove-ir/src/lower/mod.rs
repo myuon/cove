@@ -198,6 +198,7 @@ use index::{Instance, Key, Lowering};
 
 pub use fuel::block_fuel;
 pub use validate::validate;
+pub use validate::{stack_shape, Shape};
 
 /// A lowered program and the function to start it at.
 ///

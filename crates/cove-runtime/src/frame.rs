@@ -503,6 +503,10 @@ fn admits_function(
     // refusal is the only reader it has.
     let named = || format!("`{}.{}`", function.module, function.name);
     let mut calls = Vec::new();
+    // Once for the function, and every question below is a lookup in it. See
+    // [`Operands`]: what this replaced looked at the instructions immediately
+    // before the one asking, which is a different thing and a smaller one.
+    let operands = simulate(program, function);
     for (pc, inst) in function.code.iter().enumerate() {
         let span = function.span_at(pc);
         match inst {
@@ -543,7 +547,7 @@ fn admits_function(
             // rows this backend runs does, and rather than rely on that, the
             // instruction that pushed the word has to say it is a reference.
             Inst::StoreLocal(_) => {
-                if pushed_kinds(program, function, pc, 1).as_deref() != Some(&[Kind::Reference]) {
+                if operands.top(pc, 1).as_deref() != Some(&[Kind::Reference]) {
                     return Err(Refused::new(
                         format!(
                             "a general value slot in {} that the 8-byte frame cannot show holds \
@@ -585,7 +589,7 @@ fn admits_function(
             // this *site*, with its span, rather than about the type.
             Inst::MakeStruct(of) => {
                 let declared = &structs[of.0 as usize];
-                let pushed = pushed_kinds(program, function, pc, declared.len());
+                let pushed = operands.top(pc, declared.len());
                 let agrees = pushed.as_ref().is_some_and(|kinds| {
                     kinds
                         .iter()
@@ -621,7 +625,7 @@ fn admits_function(
             // three that consume one are admitted where what they consume
             // really is one.
             Inst::MakeBuiltin { argc, .. } => {
-                if boundary_kinds(program, function, pc, *argc as usize).is_none() {
+                if operands.boundary(pc, *argc as usize).is_none() {
                     return Err(Refused::new(
                         format!(
                             "a builtin call in {}, whose arguments the 8-byte frame cannot read \
@@ -680,7 +684,8 @@ fn admits_function(
                 // the frame map will call that word a reference, so the
                 // instruction that pushed it has to say it is one.
                 if *value_argc != 0
-                    && !pushed_kinds(program, function, pc, *value_argc as usize)
+                    && !operands
+                        .top(pc, *value_argc as usize)
                         .is_some_and(|kinds| kinds.iter().all(|kind| *kind == Kind::Reference))
                 {
                     return Err(Refused::new(
@@ -1258,94 +1263,229 @@ impl Kind {
     }
 }
 
-/// What the `count` instructions before `pc` pushed, one [`Kind`] each, or
-/// `None` where one of them is not a single word this backend can name.
+/// What one value operand is, wherever control can be standing at one
+/// instruction: a [`Kind`] every path agrees on, or `None`.
 ///
-/// Each of these either pushes one word or replaces the top one, so `count` of
-/// them in a row leave `count` operands. Anything else -- a call, an operator,
-/// a branch -- is refused rather than guessed at, which is what keeps this a
-/// reading of the program rather than an inference about it.
+/// `None` is both "no path that reaches here can say" and "two paths disagree",
+/// and the two do not need telling apart: either way nothing static may be
+/// asserted about the word, so a refusal is the only honest answer.
+type Held = Option<Kind>;
+
+/// The **value operand stack**, abstracted to one [`Held`] per word, as it
+/// stands on entry to every instruction of one function.
 ///
-/// # It is a peephole, and that is what it still refuses
+/// # Why this replaced a peephole
 ///
-/// **This is what Phase C did not fix, and the reason is worth writing down**:
-/// the `count` instructions before `pc` are `count` operands only where every
-/// operand took exactly one instruction to compute. `Cursor(at: 0, step: 1)`
-/// is two constants and satisfies it; `Cursor(at: i, step: 1)` is a
-/// `load-scalar`, a `scalar-to-value` and a constant, and this answers `None`
-/// although every word involved is perfectly readable.
+/// What it replaced read the `count` instructions immediately before `pc` and
+/// called them the `count` operands, which is right only where every operand
+/// took exactly one instruction and that instruction left exactly one word on
+/// the value stack. `Cursor(at: 0, step: 1)` satisfies it: two constants, two
+/// operands. `Cursor(at: i, step: here.step)` does not — the two instructions
+/// before it are a `load` and a `get-field-at`, and the read *consumes* the
+/// object the load pushed, so between them they leave one operand where the
+/// peephole counted two.
 ///
-/// The per-field kind did not remove that, and could not: the type says what
-/// the *fields* are and this asks what the *stack* holds, which is a question
-/// about a program point rather than about a declaration. What answers it is
-/// an abstract simulation of the one stack over every path control can take —
-/// `cove_ir::lower::validate` already does exactly that for operand *depths* —
-/// and that is Phase D's, listed beside the `set-field` that names its type.
-/// The `make-builtin` boundary needs the *exact* scalar kind rather than only
-/// "is it a reference", so the simulation it wants is the wider of the two.
-fn pushed_kinds(
-    program: &Program,
-    function: &cove_ir::Function,
-    pc: usize,
-    count: usize,
-) -> Option<Vec<Kind>> {
-    if count > pc {
-        return None;
-    }
-    function.code[pc - count..pc]
-        .iter()
-        .map(|inst| match inst {
-            Inst::Const(id) => match program.constant(*id) {
-                Const::Unit => Some(Kind::Unit),
-                Const::Int(_) => Some(Kind::Int),
-                Const::Bool(_) => Some(Kind::Bool),
-                Const::Float(_) => Some(Kind::Float),
-                Const::Str(_) | Const::Name(_) | Const::Duration(_) => None,
-            },
-            Inst::ScalarToValue(Scalar::Int) => Some(Kind::Int),
-            Inst::ScalarToValue(Scalar::Bool) => Some(Kind::Bool),
-            Inst::LoadLocal(_) | Inst::Dup | Inst::MakeStruct(_) | Inst::SetField(_) => {
-                Some(Kind::Reference)
-            }
-            // **Static because the instruction names the type.** A field read
-            // was unreadable here in Phase B — one instruction whose answer is
-            // a handle for a struct field and scalar bits for an `Int` one,
-            // and only the object could say which. `Inst::GetFieldAt` now
-            // names the `cove_ir::StructType` the checker settled for the
-            // receiver, so the field's slot kind is a static fact and a read
-            // may feed a `store-local`, a call argument, or another struct.
-            Inst::GetFieldAt { of, at } => {
-                match program.struct_type(*of).fields.get(*at as usize)?.kind {
-                    SlotKind::Value => Some(Kind::Reference),
-                    SlotKind::Scalar(Scalar::Int) => Some(Kind::Int),
-                    SlotKind::Scalar(Scalar::Bool) => Some(Kind::Bool),
-                    SlotKind::Place => None,
-                }
-            }
-            _ => None,
-        })
-        .collect()
+/// **A misaligned window does not merely fail to name the operands; it names
+/// something else.** The reading there is `[Reference, Int]` where the operands
+/// are `[Int, Int]`, so the `make-struct` was refused for disagreeing with a
+/// type it agrees with. `the_peepholes_window_was_not_this_programs_operands`
+/// is that stated as an arithmetic fact about the program, through the same
+/// `stack_shape` this counts with. A check that refuses programs it could read
+/// is keeping work off the frame for no reason, and a check that could as
+/// easily have derived the wrong kinds and *admitted* one is worse than that.
+///
+/// It is also stricter in one place, and that is the more important half. The
+/// peephole read `Inst::Dup` as a reference unconditionally, because the
+/// instruction it could see says nothing about what it copies. That is wrong
+/// for `dup` over an `Int`, and a wrong *acceptance* is worse than a refusal
+/// here: a `store-local` of such a word would put a non-handle where the frame
+/// map says a handle is, which is exactly the invariant ADR 0028 decision 1
+/// states for any physical arrangement. Simulating the stack gives `dup` the
+/// kind it actually copies, so that program is refused rather than admitted.
+/// The dispatch loop was never wrong about it — `Inst::Dup` copies the *bit* —
+/// so nothing that ran was unsound; what was unsound was the check.
+///
+/// # How it is right
+///
+/// The pop and push counts are `cove_ir::lower::stack_shape`, which is the one
+/// description `cove_ir::lower`'s emitter and its `validate` already read: a
+/// third reader of one description cannot disagree with the two, and inventing
+/// a second table here is precisely how it would. `validate` has also already
+/// proved that every instruction control can reach is reached at one operand
+/// *depth*, so the only thing left to settle is which [`Kind`] stands at each
+/// of those depths.
+///
+/// The fixed point is reached because a word only ever moves from a `Kind` to
+/// `None` and never back, and the depth at each instruction never changes
+/// after the first path arrives — so each instruction is re-entered at most
+/// once per word it holds.
+struct Operands {
+    /// The stack on entry to each instruction, and `None` at an instruction
+    /// control cannot arrive at.
+    at: Vec<Option<Vec<Held>>>,
 }
 
-/// What a `Value` at decision 5's boundary is made of, per argument of a
-/// `make-builtin`.
+impl Operands {
+    /// The `count` value operands standing on top at `pc`, or `None` where any
+    /// of them is a word this backend cannot name.
+    fn top(&self, pc: usize, count: usize) -> Option<Vec<Kind>> {
+        let stack = self.at.get(pc)?.as_ref()?;
+        if stack.len() < count {
+            return None;
+        }
+        stack[stack.len() - count..].iter().copied().collect()
+    }
+
+    /// The same question a `make-builtin` asks: what its arguments are made
+    /// of, and `None` where one of them is a handle.
+    ///
+    /// A handle does not cross decision 5's boundary — materialising an
+    /// aggregate is `crate::slot::Machine::materialise`'s job and it is not
+    /// wired here — so a reference operand refuses the whole call.
+    fn boundary(&self, pc: usize, argc: usize) -> Option<Vec<Kind>> {
+        let kinds = self.top(pc, argc)?;
+        kinds
+            .iter()
+            .all(|kind| *kind != Kind::Reference)
+            .then_some(kinds)
+    }
+}
+
+/// What one instruction leaves on the value stack, where every word it leaves
+/// is the same and is not a copy of one it took.
 ///
-/// The same reading as [`pushed_kinds`] and for the same reason: a word is not
-/// self-describing, so the only thing that can say what one means is what put
-/// it there. A handle does not cross this boundary -- materialising an
-/// aggregate is `crate::slot::Machine::materialise`'s job and it is not wired
-/// here -- so a reference operand refuses the whole call.
-fn boundary_kinds(
-    program: &Program,
-    function: &cove_ir::Function,
-    pc: usize,
-    argc: usize,
-) -> Option<Vec<Kind>> {
-    let kinds = pushed_kinds(program, function, pc, argc)?;
-    kinds
-        .iter()
-        .all(|kind| *kind != Kind::Reference)
-        .then_some(kinds)
+/// `None` is an abstention and never a claim. An instruction whose answer is
+/// only knowable at run time — a call, a `?`, an operator over general values
+/// — is one this backend refuses anyway, so the abstention costs nothing it
+/// would otherwise have.
+fn pushed_kind(program: &Program, inst: Inst) -> Held {
+    match inst {
+        Inst::Const(id) => match program.constant(id) {
+            Const::Unit => Some(Kind::Unit),
+            Const::Int(_) => Some(Kind::Int),
+            Const::Bool(_) => Some(Kind::Bool),
+            Const::Float(_) => Some(Kind::Float),
+            Const::Str(_) | Const::Name(_) | Const::Duration(_) => None,
+        },
+        Inst::ScalarToValue(Scalar::Int) => Some(Kind::Int),
+        Inst::ScalarToValue(Scalar::Bool) => Some(Kind::Bool),
+        Inst::LoadLocal(_) | Inst::MakeStruct(_) | Inst::SetField(_) => Some(Kind::Reference),
+        // **Static because the instruction names the type.** A field read was
+        // unreadable here in Phase B — one instruction whose answer is a handle
+        // for a struct field and scalar bits for an `Int` one, and only the
+        // object could say which. `Inst::GetFieldAt` names the
+        // `cove_ir::StructType` the checker settled for the receiver, so the
+        // field's slot kind is a static fact.
+        Inst::GetFieldAt { of, at } => match program.struct_type(of).fields.get(at as usize) {
+            Some(field) => match field.kind {
+                SlotKind::Value => Some(Kind::Reference),
+                SlotKind::Scalar(Scalar::Int) => Some(Kind::Int),
+                SlotKind::Scalar(Scalar::Bool) => Some(Kind::Bool),
+                SlotKind::Place => None,
+            },
+            None => None,
+        },
+        _ => None,
+    }
+}
+
+/// Where control can be next, by instruction index.
+///
+/// A jump's target and a conditional jump's two, a return's nothing, and
+/// everything else the instruction after it. A `?` that fails leaves the frame
+/// rather than jumping inside it, so it has one successor here like any other
+/// instruction that can raise.
+fn successors(inst: Inst, pc: usize, out: &mut Vec<usize>) {
+    out.clear();
+    match inst {
+        Inst::Jump(to) => out.push(to as usize),
+        Inst::JumpIfFalse(to)
+        | Inst::JumpIfTrue(to)
+        | Inst::JumpIfFalseScalar(to)
+        | Inst::JumpIfTrueScalar(to) => {
+            out.push(to as usize);
+            out.push(pc + 1);
+        }
+        Inst::Return | Inst::ReturnScalar | Inst::NoMatch => {}
+        _ => out.push(pc + 1),
+    }
+}
+
+/// Simulates one function's value operand stack, one abstract word per operand,
+/// over every path control can take.
+fn simulate(program: &Program, function: &cove_ir::Function) -> Operands {
+    let structs = &program.structs;
+    let mut at: Vec<Option<Vec<Held>>> = vec![None; function.code.len()];
+    if at.is_empty() {
+        return Operands { at };
+    }
+    // A body begins with nothing standing: a parameter is a slot and not an
+    // operand, which is what ADR 0019's "slots, not names" means at entry.
+    at[0] = Some(Vec::new());
+    let mut queue = vec![0usize];
+    let mut next = Vec::new();
+    while let Some(pc) = queue.pop() {
+        let Some(mut stack) = at[pc].clone() else {
+            continue;
+        };
+        let inst = function.code[pc];
+        let shape = cove_ir::lower::stack_shape(structs, inst);
+        let (taken, left) = shape.values;
+        // `Inst::Dup` is the one instruction that puts back what it took, so
+        // it is the one whose answer is not `pushed_kind`'s.
+        let copied = (taken == 1 && left == 2).then(|| stack.last().copied().flatten());
+        for _ in 0..taken {
+            stack.pop();
+        }
+        let put = match copied {
+            Some(held) => held,
+            None => pushed_kind(program, inst),
+        };
+        for _ in 0..left {
+            stack.push(put);
+        }
+        successors(inst, pc, &mut next);
+        for &to in &next {
+            if to >= at.len() {
+                continue;
+            }
+            let changed = match &mut at[to] {
+                None => {
+                    at[to] = Some(stack.clone());
+                    true
+                }
+                Some(held) => merge(held, &stack),
+            };
+            if changed {
+                queue.push(to);
+            }
+        }
+    }
+    Operands { at }
+}
+
+/// Merges an arriving stack into the one already recorded, and answers whether
+/// anything moved.
+///
+/// A word two paths disagree about becomes `None`, which is the only direction
+/// this ever moves a word and is why the fixed point terminates. Two arrivals
+/// at different *depths* cannot happen — `cove_ir::lower::validate` refuses a
+/// program where they do — and if one ever did, everything recorded here is
+/// dropped to `None` rather than aligned by guessing.
+fn merge(held: &mut [Held], arriving: &[Held]) -> bool {
+    if held.len() != arriving.len() {
+        let changed = held.iter().any(Option::is_some);
+        held.iter_mut().for_each(|word| *word = None);
+        return changed;
+    }
+    let mut changed = false;
+    for (word, coming) in held.iter_mut().zip(arriving) {
+        if word.is_some() && word != coming {
+            *word = None;
+            changed = true;
+        }
+    }
+    changed
 }
 
 /// Which word of a struct a `set-field` names, indexed by the `ConstId` of the
@@ -1557,6 +1697,14 @@ pub struct FrameVm<'a> {
     /// One frame map per function of the program: the one layout every
     /// physical offset in a run derives from. See [`FrameMap`].
     maps: Vec<FrameMap>,
+    /// One value-operand simulation per function, so that the only question a
+    /// run puts to it — what a `make-builtin`'s arguments are made of — is an
+    /// index rather than a walk. See [`Operands`].
+    ///
+    /// It is the same answer [`admits`] refused the run on, computed the same
+    /// way and not merely consistently with it, so the `expect` at the one
+    /// place that reads it cannot fire for a program that got this far.
+    operands: Vec<Operands>,
     /// The shadow-root stack, empty for the whole of an admitted run.
     ///
     /// **That emptiness is a finding and not an omission.** ADR 0028 decision
@@ -1693,6 +1841,11 @@ impl<'a> FrameVm<'a> {
             field_map: FieldMap::TheLoweredType,
             field_at,
             maps: program.functions.iter().map(FrameMap::of).collect(),
+            operands: program
+                .functions
+                .iter()
+                .map(|function| simulate(program, function))
+                .collect(),
             temps: TempRoots::new(),
             scope: RootScope::EveryWord,
             due: false,
@@ -2165,7 +2318,9 @@ impl<'a> FrameVm<'a> {
                 Inst::MakeBuiltin { name: which, argc } => {
                     let span = running.span_at(pc);
                     let which = const_name(program, which);
-                    let kinds = boundary_kinds(program, running, pc, argc as usize)
+                    let here = self.frames.last().expect("a frame stands").function;
+                    let kinds = self.operands[here.0 as usize]
+                        .boundary(pc, argc as usize)
                         .expect("`admits` settled every builtin call this backend runs");
                     let at = self.words.len() - argc as usize;
                     let mut arguments: Vec<Value> = kinds

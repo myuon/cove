@@ -1614,3 +1614,191 @@ fn a_frame_that_straddles_a_limb_is_written_correctly() {
     let expected: Vec<usize> = (0..30).chain(50..80).chain(130..256).collect();
     assert_eq!(seen, expected);
 }
+
+// ------------------------------------- the per-`pc` operand-kind simulation
+
+/// A struct whose fields are computed rather than written as constants.
+///
+/// `Cursor(at: i, step: 1)` is the shape the peephole this replaced named as
+/// what it could not read: `i` is a scalar local, so its word is pushed by a
+/// `load-scalar` and moved across by a `scalar-to-value`, and two instructions
+/// stand where the peephole counted one operand.
+const A_STRUCT_BUILT_FROM_A_LOADED_WORD: &str = "\
+struct Cursor {
+  at: Int
+  step: Int
+}
+
+export fn main() -> Int {
+  var here = Cursor(at: 0, step: 1)
+  var total = 0
+  var i = 0
+  while i < 60 {
+    here = Cursor(at: i, step: here.step)
+    total = total + here.at + here.step
+    i = i + 1
+  }
+  total
+}
+";
+
+/// The shape the peephole refused is admitted, and all three backends agree
+/// about what it answers.
+///
+/// This is the widening, and it is taken only because the test below runs the
+/// same program through the collector at every safepoint. `admits` is asserted
+/// as well as the answer, because a program that agreed by being refused and
+/// raising on both sides would agree for the wrong reason.
+#[test]
+fn a_struct_built_from_a_loaded_word_is_admitted_and_agrees() {
+    let ready = agree(A_STRUCT_BUILT_FROM_A_LOADED_WORD);
+    ready
+        .admitted()
+        .expect("the simulation reads every word this builds a struct out of");
+}
+
+/// The control: the same program with the walk whole, through the collector at
+/// every safepoint, agreeing with the `Vm`.
+///
+/// The cursor stands in a value slot across the loop's back edge — the next
+/// turn reads `here.step` out of it — and the back edge is a safepoint, so
+/// every turn puts the rooting to the test. The assertions on `collections`
+/// and `freed_objects` are what stop this passing by never collecting: a turn
+/// abandons the cursor the turn before it, and the sweep is asserted to have
+/// reclaimed some.
+#[test]
+fn a_struct_built_from_a_loaded_word_is_rooted_in_its_slot() {
+    let ready = ready(A_STRUCT_BUILT_FROM_A_LOADED_WORD);
+    let whole = ready.on_frame_collecting(RootScope::EveryWord);
+    assert!(
+        matches!(whole.outcome, Outcome::Answered(_)),
+        "the walk whole, it answers: {:?}",
+        whole.outcome
+    );
+    assert_eq!(whole.outcome, ready.on_vm(), "and it agrees with the VM");
+    assert!(
+        whole.collections > 0,
+        "the stressed run collected {} time(s)",
+        whole.collections
+    );
+    assert!(
+        whole.freed_objects > 0,
+        "the loop abandons a cursor a turn and the sweep reclaimed {} of them",
+        whole.freed_objects
+    );
+}
+
+/// **The mutation for the widening.** Drop the frame's own words from the walk
+/// and the cursor the simulation admitted is swept out from under the loop
+/// that is still using it.
+///
+/// This is `a_value_slot_is_a_root_across_the_loop_it_lives_in` asked about the
+/// shape Phase D added, and it is asked separately because the widening is only
+/// worth taking if the program it admits is rooted for a reason a test can
+/// break. It dies on `crate::slot::HandleHeap`'s own use-after-free message
+/// rather than on an assertion anybody wrote, under
+/// `HandleHeap::stress`, so neither direction depends on when a collection
+/// happens to land.
+#[test]
+#[should_panic(expected = "names a swept object")]
+fn the_widened_shapes_struct_is_a_root_in_its_slot() {
+    let ready = ready(A_STRUCT_BUILT_FROM_A_LOADED_WORD);
+    let _ = ready.on_frame_collecting(RootScope::WithoutFrameSlots);
+}
+
+/// A constant is named as the constant it is, wherever it stands.
+///
+/// This is the half of the replacement that is *stricter*, and it is the more
+/// important half. The peephole read `Inst::Dup` as `Kind::Reference`
+/// unconditionally, because the one instruction it could see says nothing about
+/// what it copies — so a `dup` over the word this test looks at would have been
+/// called a handle, and `store-local` is admitted exactly where the word pushed
+/// is one. That is a wrong *acceptance*: a non-handle would have gone into a
+/// slot the frame map calls a reference, which is the invariant ADR 0028
+/// decision 1 states for any physical arrangement, from the other side.
+///
+/// The dispatch loop was never wrong about it — `Inst::Dup` copies the *bit* —
+/// so nothing that ran was unsound. The check was. Simulating the stack gives
+/// `dup` the kind of the word it actually copies, which is what this asserts
+/// the simulation knows about the word underneath one.
+#[test]
+fn a_constant_is_not_read_as_a_handle() {
+    let ready = ready(A_STRUCT_BUILT_FROM_A_LOADED_WORD);
+    let id = ready.admitted().expect("it is admitted");
+    let function = ready.ir.function(id);
+    let operands = simulate(&ready.ir, function);
+    let at = function
+        .code
+        .iter()
+        .position(|inst| matches!(inst, Inst::Const(_)))
+        .expect("the program loads a constant");
+    assert_ne!(
+        operands.top(at + 1, 1),
+        Some(vec![Kind::Reference]),
+        "a constant is not a handle, and the peephole this replaced called \
+         `dup` over one a handle"
+    );
+}
+
+/// **The widening is not vacuous**, and this is what says so from the program
+/// rather than from a claim about deleted code.
+///
+/// The peephole assumed the `count` instructions before a `make-struct` are its
+/// `count` operands. The two before the one in the loop are `load` and
+/// `get-field-at`, which between them leave **one**: the read consumes the
+/// object the load pushed. So the window was misaligned, the kinds it derived
+/// from it were `[Reference, Int]` where the operands are `[Int, Int]`, and the
+/// `make-struct` was refused for disagreeing with a type it agrees with.
+///
+/// That is a sharper statement than "it could not read the window", and it is
+/// the one this program supports: a misaligned window does not only *fail* to
+/// name the operands, it names something else. The initializer above it is the
+/// aligned case — two constants, two operands — so the same instruction is
+/// admitted twice for two different reasons and the program is a fair test
+/// rather than a rigged one.
+///
+/// Asserted through `cove_ir::lower::stack_shape`, which is the same
+/// description [`simulate`] counts with, so this is the peephole's assumption
+/// tested against the one authority on what an instruction does.
+#[test]
+fn the_peepholes_window_was_not_this_programs_operands() {
+    let ready = ready(A_STRUCT_BUILT_FROM_A_LOADED_WORD);
+    let id = ready.admitted().expect("it is admitted");
+    let function = ready.ir.function(id);
+    // Two `make-struct`s: the initializer, which is two constants and which
+    // the peephole read perfectly well, and the one in the loop, which is the
+    // widened shape. It is the second that has to be unreadable, and the first
+    // being readable is why the program is a fair test rather than a rigged
+    // one — the same instruction is admitted twice for two different reasons.
+    let windows: Vec<(usize, Vec<Inst>, i64)> = function
+        .code
+        .iter()
+        .enumerate()
+        .filter_map(|(pc, inst)| match inst {
+            Inst::MakeStruct(of) => {
+                let fields = ready.ir.struct_type(*of).fields.len();
+                let window = function.code[pc - fields..pc].to_vec();
+                // What the window actually leaves on the value stack, which is
+                // what the peephole assumed was `fields`.
+                let left: i64 = window
+                    .iter()
+                    .map(|inst| {
+                        let shape = cove_ir::lower::stack_shape(&ready.ir.structs, *inst);
+                        i64::from(shape.values.1) - i64::from(shape.values.0)
+                    })
+                    .sum();
+                Some((fields, window, left))
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(windows.len(), 2, "the program builds a cursor twice");
+    assert!(
+        windows
+            .iter()
+            .any(|(fields, _, left)| *left != *fields as i64),
+        "every window leaves as many value operands as the type has fields, so the \
+         peephole's window was these structs' operands after all and nothing here was \
+         widened: {windows:?}"
+    );
+}

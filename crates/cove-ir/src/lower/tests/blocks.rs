@@ -255,16 +255,15 @@ fn validate_tells_the_two_regions_of_one_frame_apart() {
     );
 }
 
-/// Two sibling blocks share a slot number even when they disagree about
-/// where it lives, because the value stack and the scalar stack are
-/// numbered separately now.
+/// Two sibling blocks each take the first slot of their own region, because
+/// a region's width is its own high-water mark.
 ///
-/// The first block's `Int` takes scalar slot 0. The second block's
-/// `String` is free to take value slot 0 as well — a value number and a
-/// scalar number are not the same number space, so there is nothing to
-/// skip past — and the third block's `Int` reuses scalar slot 0 again.
-/// The frame is as big as either stack's deepest block, not as big as
-/// their sum.
+/// The first block's `Int` takes the first slot of the scalar region, which
+/// is slot 0. The second block's `String` takes the first slot of the value
+/// region, which is a different number and is not skipped past — the two
+/// regions grow independently even though the numbering over them is one.
+/// The third block's `Int` reuses slot 0 again. The frame is as wide as each
+/// region's deepest block, not as wide as their sum.
 #[test]
 fn sibling_blocks_share_a_slot_number_regardless_of_kind() {
     assert_eq!(
