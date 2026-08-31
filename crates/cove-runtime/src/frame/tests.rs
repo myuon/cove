@@ -411,7 +411,7 @@ fn the_hot_path_performs_no_value_operation() {
         // claim: the two rooted rows allocate an object a turn and keep one
         // alive, and the two scalar rows own no heap at all.
         match name {
-            "field" | "method" => {
+            "field" | "method" | "sortedargs" | "mixedargs" => {
                 assert_eq!(
                     heap.allocated_objects, 2_000_001,
                     "`benches/{name}` builds one `Cursor` and copies it once a turn"
