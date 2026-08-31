@@ -703,7 +703,7 @@ impl<'a, 'l> Body<'a, 'l> {
         // exactly as `make_struct` interns a struct's off `decl` -- read once
         // here and never off this or any other construction. See
         // `crate::lower::index::Lowering::enum_type`.
-        let qualified = self.outer.enum_type(owner, decl);
+        let (_, qualified) = self.outer.enum_type(owner, decl);
         let ty = self.outer.name(&qualified);
         let case = self.outer.name(case);
         self.emit(

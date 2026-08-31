@@ -447,18 +447,34 @@
 //! store a `Value`, and `crate::slot`'s own module docs say so in their own
 //! words, updated rather than contradicted.
 //!
-//! **What this does not yet reach: a payload a `match` arm binds.**
-//! `Inst::GetPayload` carries a bare index and no case id — unlike
-//! `Inst::GetFieldAt`'s `StructId` — so nothing here can say, for a *specific*
-//! `pc`, whether the word it reads is a reference or one of the two scalars;
-//! `pushed_kind`'s own arm for it says why claiming one generically would be
-//! decision 1's invariant broken from the other side. A `match` arm that does
-//! not bind — `Case(_)`, or a bare case name — is admitted and its case is
-//! read correctly; one that binds a name and uses it is refused, naming the
+//! **A payload a `match` arm binds is provable where the case it binds from
+//! is a declared enum.** `Inst::GetPayload` now carries the `cove_ir::EnumId`
+//! and the case position the checker settled the pattern's subject as —
+//! unset only where it could not, over `Result` and `Option` — so
+//! `pushed_kind` can answer a real `Kind` for it the same way it does for
+//! `Inst::GetFieldAt`, and `Case(x) => ... x ...` is admitted wherever
+//! `Case` is one of this package's own declared cases.
+//! `a_declared_enums_string_payload_is_bound_and_used` and
+//! `a_declared_enums_scalar_payload_is_bound_and_used` are the coverage.
+//!
+//! `Result` and `Option` stay exactly where they were for a *reference*
+//! payload: `Ok(T)` records no `T` a single table entry could settle a
+//! `Kind` for, the reason [`Inst::GetPayload`]'s own doc comment gives, so a
+//! `match` arm that binds one of their payloads is still refused, naming the
 //! same "general value slot" `Inst::StoreLocal` already names for any other
-//! unproven reference. `a_bound_string_payload_is_still_refused_and_names_the_value_slot`
-//! is the coverage, and closing it is carrying a settled position into
-//! `Inst::GetPayload` the way Phase C carried one into `Inst::GetFieldAt`.
+//! unproven reference.
+//! `an_ok_string_payload_bound_by_a_match_arm_is_still_refused_and_names_the_value_slot`
+//! is that coverage kept.
+//!
+//! **A scalar payload does not need `Inst::GetPayload`'s case at all,
+//! builtin or declared.** `cove_ir::lower::expr::Body::bind_top` routes a
+//! binder to the scalar stack wherever the checker settled *the binding's
+//! own site* as `Int` or `Bool` — the same site-specific settlement
+//! `enum_construction`'s own operand-kind reading already trusts for `Ok(1)`
+//! — and `Inst::ValueToScalar` needs no proof from `pushed_kind` at all: a
+//! scalar slot is never a collector's root, so there is nothing for a wrong
+//! `Kind` to corrupt. `Ok(5)`'s payload is bound and used today for exactly
+//! this reason, alongside `Boxed.Full(Int)`'s own.
 //!
 //! # Strings
 //!
@@ -1042,7 +1058,7 @@ fn walk_function<S: Sink>(
             // `GetPayload`'s exact runtime answer is checked against the
             // oracle by `crates/cove-runtime/src/frame/tests.rs`, not by
             // anything statically provable here.
-            Inst::TestCase(_) | Inst::GetPayload(_) => {
+            Inst::TestCase(_) | Inst::GetPayload { .. } => {
                 if !operands
                     .top(pc, 1)
                     .is_some_and(|kinds| kinds[0].is_reference())
@@ -2506,21 +2522,37 @@ fn pushed_kind(program: &Program, inst: Inst) -> Held {
             },
             None => None,
         },
-        // **Left `None` on purpose, unlike `Inst::LoadLocal`'s generic
-        // reference.** A payload position may be scalar -- a declared case's
-        // own `Int` or `Bool`, per `cove_ir::EnumCase::payload` -- and
-        // `Inst::GetPayload` carries no case id to ask, only a bare index, so
-        // there is no static fact here to distinguish a scalar payload from a
-        // reference one the way `Inst::GetFieldAt`'s `StructId` lets a field
-        // read do it. Claiming `Kind::Reference` unconditionally would be
-        // exactly decision 1's invariant broken from the other side: a scalar
-        // payload word admitted into a value slot the frame map calls a
-        // reference. So a payload is read off an object and it stands as an
-        // operand this backend can act on structurally -- `Inst::TestCase`
-        // beside it, a further `Inst::GetPayload`, a `Dup` -- but not stored,
-        // passed, or compared until a future change gives this instruction
-        // the type `Inst::GetFieldAt` already carries.
-        Inst::GetPayload(_) => None,
+        // **Static for the same reason `Inst::GetFieldAt` is, and by the same
+        // means.** `of` is the `cove_ir::EnumId` and case position the
+        // checker settled the pattern's subject as, so a declared case's own
+        // `Int` or `Bool` payload position is a static fact here exactly as
+        // a struct field's is -- decision 1's invariant no longer has to be
+        // guessed at from the other side.
+        //
+        // `of` is `None` for `Result` and `Option`: their case names come
+        // from `cove_schema::builtins` rather than a declaration this
+        // package owns, and their payload is whatever type the program wrote
+        // at each site -- `Ok(T)` records no `T` a single table entry could
+        // settle a `Kind` for. So a payload read off one of those still
+        // stands as an operand this backend can act on structurally --
+        // `Inst::TestCase` beside it, a further `Inst::GetPayload`, a `Dup`
+        // -- but not stored, passed, or compared, the same limit `GetPayload`
+        // carried everywhere before this change and carries there still.
+        Inst::GetPayload {
+            of: Some((of, case)),
+            at,
+        } => match program
+            .enum_type(of)
+            .cases
+            .get(case as usize)
+            .and_then(|declared| declared.payload.get(at as usize))
+        {
+            Some(SlotKind::Value) => Some(Kind::Reference),
+            Some(SlotKind::Scalar(Scalar::Int)) => Some(Kind::Int),
+            Some(SlotKind::Scalar(Scalar::Bool)) => Some(Kind::Bool),
+            Some(SlotKind::Place) | None => None,
+        },
+        Inst::GetPayload { of: None, .. } => None,
         // A case test's answer is a canonical `Bool` bit, exactly as a
         // comparison's is.
         Inst::TestCase(_) => Some(Kind::Bool),
@@ -2823,7 +2855,7 @@ fn describe(inst: &Inst) -> &'static str {
         | Inst::GetFieldAtScalar(_)
         | Inst::MakeEnum { .. }
         | Inst::TestCase(_)
-        | Inst::GetPayload(_)
+        | Inst::GetPayload { .. }
         | Inst::MakeBuiltin { .. }
         | Inst::CallHost { .. }
         | Inst::CallResource { .. }
@@ -2920,6 +2952,13 @@ pub struct FrameVm<'a> {
     /// Whether [`FrameVm::field_refs`] is the lowered types' map or has been
     /// emptied by the mutation. See [`FieldMap`].
     field_map: FieldMap,
+    /// [`FrameVm::field_refs`]'s counterpart for a declared enum's case,
+    /// addressed by the `cove_ir::EnumId` an `Inst::GetPayload` carries, then
+    /// the case's own position, then the payload's. Built from one
+    /// [`enum_parts`] call, exactly as [`FrameVm::field_refs`] is built from
+    /// one [`struct_parts`] call — and read the same way, beside the
+    /// object's own map, in the dispatch loop's `debug_assert`.
+    payload_refs: Vec<Vec<Vec<bool>>>,
     /// Which word a `set-field` names, indexed by the `ConstId` of the field
     /// name. See [`field_positions`].
     field_at: Vec<Option<u32>>,
@@ -3076,6 +3115,24 @@ impl<'a> FrameVm<'a> {
             .iter()
             .map(|parts| parts.iter().map(|part| *part == Part::Nested).collect())
             .collect();
+        // `FrameVm::payload_refs`, over `enum_parts` the way `field_refs` is
+        // over `struct_parts` -- one bool per payload position, nested one
+        // level deeper than a struct's because a declared enum's positions
+        // are per-*case* rather than per-type.
+        let payload_refs = enum_parts(program)
+            .into_iter()
+            .map(|cases| {
+                cases
+                    .into_iter()
+                    .map(|payload| {
+                        payload
+                            .into_iter()
+                            .map(|part| part == Part::Nested)
+                            .collect()
+                    })
+                    .collect()
+            })
+            .collect();
         // One `crate::slot::Shape::Str` layout for every `String` object this
         // backend ever allocates, whichever of the two instructions built it.
         // Registered once here rather than once per constant, because the
@@ -3169,6 +3226,7 @@ impl<'a> FrameVm<'a> {
             enum_site_layout,
             field_refs,
             field_map: FieldMap::TheLoweredType,
+            payload_refs,
             field_at,
             maps: program.functions.iter().map(FrameMap::of).collect(),
             operands,
@@ -3657,18 +3715,39 @@ impl<'a> FrameVm<'a> {
                         .is_some_and(|(type_name, case)| case_matches(type_name, case, name));
                     self.push_word(Word::of_bool(matched), false);
                 }
-                Inst::GetPayload(index) => {
+                Inst::GetPayload { of, at } => {
                     let handle = Handle::from_slot(self.words[self.words.len() - 1]);
                     let layout_id = self.heap.layout_id_of(handle);
                     let layout = self.heap.layout(layout_id);
-                    let index = index as usize;
+                    let at = at as usize;
                     debug_assert!(
-                        index < layout.words(),
-                        "`get-payload` read position {index} of `{}`, which carries fewer",
+                        at < layout.words(),
+                        "`get-payload` read position {at} of `{}`, which carries fewer",
                         layout.name()
                     );
-                    let is_reference = layout.is_reference(index);
-                    let word = self.heap.word(handle, index);
+                    // `of` is the lowered case's own answer where `admits`
+                    // proved one -- `crate::frame::pushed_kind`'s
+                    // `Inst::GetPayload` arm -- read here beside the object's
+                    // own map, on every debug build, for the reason
+                    // `Inst::GetFieldAt`'s own `debug_assert` gives: the two
+                    // are compared rather than one of them trusted. `of` is
+                    // `None` for `Result` and `Option`, whose case this
+                    // backend never gave a lowered map to ask, so the
+                    // object's own map is the only answer there, exactly as
+                    // it always has been.
+                    let is_reference = match of {
+                        Some((enum_id, case)) => {
+                            let expected = self.payload_refs[enum_id.0 as usize][case as usize][at];
+                            debug_assert!(
+                                expected == layout.is_reference(at),
+                                "the lowered case and the object it built disagree about payload \
+                                 word {at}"
+                            );
+                            expected
+                        }
+                        None => layout.is_reference(at),
+                    };
+                    let word = self.heap.word(handle, at);
                     self.push_word(word, is_reference);
                 }
                 // **The word's kind is the instruction's, not the object's.**

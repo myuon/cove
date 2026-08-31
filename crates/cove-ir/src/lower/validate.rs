@@ -15,8 +15,8 @@
 //! simulation, which is why it is `pub`.
 
 use crate::{
-    render_kind, Const, ConstId, Function, FunctionId, Inst, Program, Region, SlotKind, StructId,
-    StructType,
+    render_kind, Const, ConstId, EnumId, EnumType, Function, FunctionId, Inst, Program, Region,
+    SlotKind, StructId, StructType,
 };
 
 use super::fuel::{block_fuel, ends_a_block};
@@ -299,6 +299,12 @@ fn validate_function(program: &Program, id: FunctionId) -> Result<(), String> {
                 .get(which.0 as usize)
                 .ok_or_else(|| at(format!("{what} names struct {} of none", which.0)))
         };
+        let declared_enum = |which: EnumId, what: &str| -> Result<&EnumType, String> {
+            program
+                .enums
+                .get(which.0 as usize)
+                .ok_or_else(|| at(format!("{what} names enum {} of none", which.0)))
+        };
         match *inst {
             Inst::Const(which) => {
                 if program.constants.get(which.0 as usize).is_none() {
@@ -529,6 +535,32 @@ fn validate_function(program: &Program, id: FunctionId) -> Result<(), String> {
                         "reads field {index} of `{}`, which has {}",
                         declared.name,
                         declared.fields.len()
+                    )));
+                }
+            }
+            // `of: None` names nothing, exactly as `Inst::GetField`'s bare
+            // name does — see `Inst::GetPayload`'s own doc comment for why
+            // there is nothing to check there. `of: Some` is checked the
+            // same two ways `Inst::GetFieldAt`'s `of` is: the case exists in
+            // the enum, and the position exists in the case.
+            Inst::GetPayload {
+                of: Some((of, case_index)),
+                at: index,
+            } => {
+                let declared = declared_enum(of, "the enum")?;
+                let Some(case) = declared.cases.get(case_index as usize) else {
+                    return Err(at(format!(
+                        "reads a payload of case {case_index} of `{}`, which has {}",
+                        declared.name,
+                        declared.cases.len()
+                    )));
+                };
+                if index as usize >= case.payload.len() {
+                    return Err(at(format!(
+                        "reads payload {index} of `{}.{}`, which has {}",
+                        declared.name,
+                        case.name,
+                        case.payload.len()
                     )));
                 }
             }
@@ -822,7 +854,7 @@ pub fn stack_shape(structs: &[StructType], inst: Inst) -> Shape {
         }
         // Both peek: a pattern tests the subject and then binds out of it,
         // and the arm after this one needs the subject still there.
-        Inst::TestCase(_) | Inst::GetPayload(_) => Shape::on_values(0, 1),
+        Inst::TestCase(_) | Inst::GetPayload { .. } => Shape::on_values(0, 1),
         // The iterable is read and the `Array` of what a `for` walks it as
         // stands where it stood.
         Inst::IterItems => Shape::on_values(1, 1),

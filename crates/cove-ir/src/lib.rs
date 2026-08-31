@@ -171,8 +171,10 @@ pub struct Program {
     /// This is the **type's** layout, not one construction's: see
     /// [`StructType`].
     pub structs: Vec<StructType>,
-    /// Every declared enum type the program builds a case of, in the order
-    /// [`Inst::MakeEnum`] reached them.
+    /// Every declared enum type the program builds a case of or reads a
+    /// payload of, addressed by [`EnumId`] and, for the cases
+    /// [`Inst::MakeEnum`] reached before anything read one, in the order it
+    /// reached them.
     ///
     /// This is the **type's** cases and each case's payload kinds, read off
     /// the checker's settlement of the case rather than off how one
@@ -202,14 +204,27 @@ impl Program {
         &self.structs[id.0 as usize]
     }
 
+    /// The enum type `id` names.
+    ///
+    /// [`Inst::GetPayload`] carries this rather than a name, for the reason
+    /// [`Inst::GetFieldAt`] carries a [`StructId`] rather than one: an index
+    /// is a lookup this backend does not have to scan a table for, and the
+    /// direction of travel for a fact a hot path reads is away from a
+    /// by-name one.
+    pub fn enum_type(&self, id: EnumId) -> &EnumType {
+        &self.enums[id.0 as usize]
+    }
+
     /// The enum type declared under the qualified name `name`, if
-    /// [`Inst::MakeEnum`] anywhere reached it.
+    /// [`Inst::MakeEnum`] or [`Inst::GetPayload`] anywhere reached it.
     ///
     /// A linear scan rather than a table, because [`Program::enums`] is one
-    /// entry per declared type a program actually builds a case of — small
-    /// for any program this crate lowers — and this is asked once per
-    /// [`Inst::MakeEnum`] site while a backend is built, not once per
-    /// execution of one.
+    /// entry per declared type a program actually builds a case of or reads
+    /// a payload of — small for any program this crate lowers — and this is
+    /// asked once per site while a backend is built, not once per execution
+    /// of one. [`Program::enum_type`] is the same table addressed by
+    /// [`EnumId`] instead, which is what an instruction that already carries
+    /// one reads through.
     pub fn enum_type_named(&self, name: &str) -> Option<&EnumType> {
         self.enums.iter().find(|declared| &*declared.name == name)
     }
@@ -744,6 +759,10 @@ pub struct ConstId(pub u32);
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct StructId(pub u32);
 
+/// Addresses an [`EnumType`] of a [`Program`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct EnumId(pub u32);
+
 /// One declared struct type, as the lowering settled it: its qualified name,
 /// and one field name and [`SlotKind`] per field, in declaration order.
 ///
@@ -805,8 +824,9 @@ pub struct StructField {
     pub kind: SlotKind,
 }
 
-/// One declared enum type, as the cases [`Inst::MakeEnum`] reached: a name
-/// and, per case, its payload's slot kinds.
+/// One declared enum type, as the cases [`Inst::MakeEnum`] built or
+/// [`Inst::GetPayload`] read reached: a name and, per case, its payload's
+/// slot kinds. Addressed by [`EnumId`].
 ///
 /// # Where this comes from
 ///
@@ -822,8 +842,9 @@ pub struct StructField {
 ///
 /// **The case is part of the type here, not a separate key.** A two-case enum
 /// is two entries of [`EnumType::cases`], in declaration order, which is the
-/// order [`Inst::MakeEnum`]'s `argc` payload words arrive in and the order
-/// [`Inst::GetPayload`] indexes within whichever case matched.
+/// order [`Inst::MakeEnum`]'s `argc` payload words arrive in, the order
+/// [`Inst::GetPayload`]'s `case` indexes, and the order [`Inst::GetPayload`]'s
+/// `at` indexes within whichever entry `case` names.
 ///
 /// A generic case's payload records the declaration's own `Ty::Param`, which
 /// `slot_kind_of` always settles as [`SlotKind::Value`] — one name, one
@@ -1252,7 +1273,34 @@ pub enum Inst {
     /// writes when an arm is done with it.
     TestCase(ConstId),
     /// Pushes one payload of the enum on top, without consuming it.
-    GetPayload(u32),
+    ///
+    /// Emitted where the checker settled the pattern's subject as a
+    /// declared enum this package owns, which is what makes the case
+    /// knowable — the same settlement [`Inst::GetFieldAt`]'s `of` reads for
+    /// a receiver, asked of a `match` arm's subject instead. `of` is that
+    /// case: the [`EnumId`] the subject's type interned as and its position
+    /// within [`EnumType::cases`]. `at` is the position within *that case's*
+    /// payload, the order [`Inst::MakeEnum`]'s `argc` words arrive in.
+    ///
+    /// Naming the case is what says what the word **is** —
+    /// `program.enum_type(of.0).cases[of.1].payload[at]` — the same reason
+    /// [`Inst::GetFieldAt`]'s doc gives for naming a struct: a backend whose
+    /// stack carries no tag can decide a payload position is a reference or
+    /// a scalar from the instruction, rather than refusing every read
+    /// because *some* position of *some* case could be either.
+    ///
+    /// `of` is `None` where the subject is not one of this package's own
+    /// declared enums — `Result` and `Option`, whose case names
+    /// `cove_schema::builtins` gives rather than a declaration, carry a
+    /// payload of whatever type the program wrote at each site: `Ok(T)`
+    /// records no `T` a single table entry could settle a [`SlotKind`] for,
+    /// the way a generic field or case payload always resolves to
+    /// [`SlotKind::Value`] and would be no answer at all for the `Ok(1)` a
+    /// backend already knows is scalar at its own construction site. There
+    /// is nothing this instruction can name there, so it names nothing,
+    /// exactly as an abstained field read stays [`Inst::GetField`] rather
+    /// than [`Inst::GetFieldAt`].
+    GetPayload { of: Option<(EnumId, u32)>, at: u32 },
     /// Pops a value and pushes an `Array` of what `for` walks over it: the
     /// elements of a sequence, the `MapEntry` of each pair of a `Map`, a
     /// `Set`'s elements in ascending order.
@@ -1860,7 +1908,17 @@ fn render_inst(program: &Program, inst: Inst) -> String {
         Inst::Cancel => "cancel".to_string(),
         Inst::SpreadArgument => "spread-argument".to_string(),
         Inst::TestCase(case) => format!("test-case {}", name(case)),
-        Inst::GetPayload(index) => format!("get-payload {index}"),
+        Inst::GetPayload {
+            of: Some((of, case)),
+            at,
+        } => {
+            let declared = program.enum_type(of);
+            format!(
+                "get-payload {}.{} {at}",
+                declared.name, declared.cases[case as usize].name
+            )
+        }
+        Inst::GetPayload { of: None, at } => format!("get-payload {at}"),
         Inst::IterItems => "iter-items".to_string(),
         Inst::NoMatch => "no-match".to_string(),
         Inst::Try => "try".to_string(),

@@ -14,6 +14,7 @@
 
 use cove_diag::Span;
 use cove_schema::builtins;
+use cove_sema::typeck::Ty;
 use cove_syntax::ast::{
     BinaryOp as SourceBinary, Block, Expr, ExprKind, ItemKind, MatchArm, Param, Pattern,
     PatternKind, Stmt, StmtKind, StrPart, UnaryOp as SourceUnary,
@@ -1389,11 +1390,19 @@ impl<'a, 'l> Body<'a, 'l> {
         // down to it before it jumps, so the next arm begins where this one
         // began and `validate`'s simulation sees one depth per instruction.
         let subject = self.depth.map_or(0, |depth| depth.values);
+        // What the checker settled the scrutinee's own type as, threaded
+        // into every arm's pattern the same way `cove_sema::Checker::pattern`
+        // threads it into its own — so a `Case(x)` arm can resolve `x`'s
+        // enum and case the same way `Body::field_inst` resolves a field
+        // read's, off the same settlement. Cloned once per arm rather than
+        // borrowed, because `Body::pattern` recurses into a payload's own
+        // type and there is no receiver expression to borrow that one from.
+        let subject_ty = self.settled(scrutinee).cloned();
         let end = self.label();
         for arm in arms {
             let mark = self.scope();
             let next = self.label();
-            self.pattern(&arm.pattern, next, subject)?;
+            self.pattern(&arm.pattern, next, subject, subject_ty.clone())?;
             self.emit(Inst::Pop, arm.span);
             self.expr_at(&arm.body, position)?;
             self.release(mark);
@@ -1424,18 +1433,31 @@ impl<'a, 'l> Body<'a, 'l> {
     /// pattern — `cove::type::payload_arity` — so no checked program reaches
     /// either, and reproducing the message would be reproducing it for a
     /// program that cannot exist.
+    ///
+    /// `subject_ty` is what the checker settled the value this pattern
+    /// stands on as, when it settled anything — the scrutinee's own type at
+    /// the top level, and a case's payload type one level inside a
+    /// [`PatternKind::Variant`]'s own payload. It is what
+    /// [`Body::variant_case`] resolves a nested `Case(x)` arm's
+    /// [`Inst::GetPayload`] against, and it travels down rather than being
+    /// re-derived at each level because a payload position's type is a fact
+    /// about the *case above it*, not one this function could recover from
+    /// the sub-pattern alone.
     fn pattern(
         &mut self,
         pattern: &'a Pattern,
         next: usize,
         subject: u32,
+        subject_ty: Option<Ty>,
     ) -> Result<(), Unsupported> {
         let span = pattern.span;
         match &pattern.kind {
             // Matches anything and binds nothing, so there is nothing to
             // emit: falling through is the match.
             PatternKind::Wildcard => Ok(()),
-            PatternKind::Binding(name) => self.binder(name, next, subject, span),
+            PatternKind::Binding(name) => {
+                self.binder(name, next, subject, span, subject_ty.as_ref())
+            }
             PatternKind::Literal(expr) => {
                 // The same equality `==` is, because it is the same
                 // comparison: `match_pattern` asks `eq_value`, which is what
@@ -1452,13 +1474,37 @@ impl<'a, 'l> Body<'a, 'l> {
                 let case = self.outer.name(&case_tested(path));
                 self.emit(Inst::TestCase(case), span);
                 self.test(next, subject, span);
+                // The declared case `subject_ty` settles this variant as, if
+                // it settles one this package declares — `None` for `Result`
+                // and `Option`, whose case `Inst::GetPayload` still reads,
+                // just without a static answer for what it reads. See
+                // `Body::variant_case`'s own doc comment.
+                let case_name = variant_case_name(path);
+                let resolved = subject_ty
+                    .as_ref()
+                    .and_then(|ty| self.variant_case(ty, case_name));
                 // Each payload is matched against its own pattern, on top of
                 // the value it came out of, which is how `Ok(Some(x))` reads
                 // two levels down. The payload is dropped once its pattern is
                 // done with it, leaving the enum it belongs to on top.
                 for (index, sub) in payload.iter().enumerate() {
-                    self.emit(Inst::GetPayload(index as u32), span);
-                    self.pattern(sub, next, subject)?;
+                    let of = resolved.map(|(of, case, _)| (of, case));
+                    self.emit(
+                        Inst::GetPayload {
+                            of,
+                            at: index as u32,
+                        },
+                        span,
+                    );
+                    let sub_ty = match resolved {
+                        Some((_, case_index, decl)) => {
+                            self.case_payload_ty(decl, case_index, index)
+                        }
+                        None => subject_ty
+                            .as_ref()
+                            .and_then(|ty| builtin_variant_payload(ty, case_name)),
+                    };
+                    self.pattern(sub, next, subject, sub_ty)?;
                     self.emit(Inst::Pop, span);
                 }
                 Ok(())
@@ -1494,11 +1540,11 @@ impl<'a, 'l> Body<'a, 'l> {
         next: usize,
         subject: u32,
         span: Span,
+        subject_ty: Option<&Ty>,
     ) -> Result<(), Unsupported> {
         if name != builtins::NONE_CASE.name {
             self.emit(Inst::Dup, span);
-            let slot = self.declare(Some(name), SlotKind::Value);
-            self.emit(Inst::StoreLocal(slot), span);
+            self.bind_top(name, subject_ty, span);
             return Ok(());
         }
         let matched = self.label();
@@ -1518,10 +1564,46 @@ impl<'a, 'l> Body<'a, 'l> {
         self.fail_arm(next, subject, span);
         self.bind(bind_it);
         self.emit(Inst::Dup, span);
-        let slot = self.declare(Some(name), SlotKind::Value);
-        self.emit(Inst::StoreLocal(slot), span);
+        self.bind_top(name, subject_ty, span);
         self.bind(matched);
         Ok(())
+    }
+
+    /// Declares `name` and stores the value stack's top under it, choosing
+    /// the region the same rule chooses every other binding's: the
+    /// checker's settlement of its type, through `slot_kind_of`'s cousin for
+    /// the two scalar types.
+    ///
+    /// `subject_ty` is `Some(Ty::Int)` or `Some(Ty::Bool)` only where the
+    /// checker settled the bound value's own type as one of them — a
+    /// declared case's scalar payload position, or a `match` subject that is
+    /// itself an `Int` or a `Bool` — and [`Inst::TestCase`] and
+    /// [`Inst::GetPayload`] leave a value-stack operand however they built
+    /// it, boxed or not, the way every value-stack push does. So the value
+    /// on top is unboxed with [`Inst::ValueToScalar`] before
+    /// [`Inst::StoreScalar`], exactly [`Inst::ValueToScalar`]'s own doc
+    /// comment: "what a scalar binding declared from something the value
+    /// path computed lowers to". Every other settlement, `None` included,
+    /// keeps the binding on the value stack: an abstained type is not a
+    /// scalar, the rule `crate::lower::index::Lowering::struct_type`'s own
+    /// doc argues, and a reference is never one.
+    fn bind_top(&mut self, name: &'a str, subject_ty: Option<&Ty>, span: Span) {
+        match subject_ty {
+            Some(Ty::Int) => {
+                self.emit(Inst::ValueToScalar, span);
+                let slot = self.declare(Some(name), SlotKind::Scalar(Scalar::Int));
+                self.emit(Inst::StoreScalar(slot), span);
+            }
+            Some(Ty::Bool) => {
+                self.emit(Inst::ValueToScalar, span);
+                let slot = self.declare(Some(name), SlotKind::Scalar(Scalar::Bool));
+                self.emit(Inst::StoreScalar(slot), span);
+            }
+            _ => {
+                let slot = self.declare(Some(name), SlotKind::Value);
+                self.emit(Inst::StoreLocal(slot), span);
+            }
+        }
     }
 
     /// Consumes the `Bool` a test pushed and leaves for the next arm when it
@@ -1589,4 +1671,39 @@ fn case_tested(path: &[cove_syntax::ast::Ident]) -> String {
 /// which is the pair [`Inst::TestCase`] tests both halves of.
 fn qualified_case(type_name: &str, case: &str) -> String {
     format!("{type_name}.{case}")
+}
+
+/// The bare case name one pattern path names — `Confirmed`, never
+/// `Status.Confirmed` — which is what [`Body::variant_case`] and
+/// [`builtin_variant_payload`] look a declaration's or a builtin's own case
+/// up by. [`case_tested`] answers the qualified form [`Inst::TestCase`]
+/// carries instead, because the two ask different questions: a *runtime*
+/// test needs to tell two same-named cases apart, and this, a *static*
+/// lookup keyed by the one declaration the checker already settled, does
+/// not.
+fn variant_case_name(path: &[cove_syntax::ast::Ident]) -> &str {
+    match path.last() {
+        Some(case) => &case.node,
+        None => "",
+    }
+}
+
+/// The payload type `case` carries on a `Result` or `Option` subject, if
+/// `subject` is one of those two and carries this case at all.
+///
+/// The builtin counterpart of [`Body::variant_case`]: `Result` and `Option`
+/// are not declarations [`Body::variant_case`] can resolve, because their
+/// cases come from `cove_schema::builtins` rather than from an [`EnumDecl`]
+/// this package owns, so their payload's type is read straight off the
+/// substituted type argument the checker already carried onto `subject`
+/// instead — the same answer `cove_sema::Checker`'s own `case_payload`
+/// gives a pattern this narrow, over the two constructors that can nest a
+/// [`PatternKind::Variant`] beneath another.
+fn builtin_variant_payload(subject: &Ty, case: &str) -> Option<Ty> {
+    match subject {
+        Ty::Option(inner) if case == builtins::SOME_CASE.name => Some((**inner).clone()),
+        Ty::Result(ok, _) if case == builtins::OK_CASE.name => Some((**ok).clone()),
+        Ty::Result(_, err) if case == builtins::ERR_CASE.name => Some((**err).clone()),
+        _ => None,
+    }
 }

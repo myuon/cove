@@ -30,8 +30,8 @@ use cove_syntax::ast::{Block, EnumDecl, ExprId, FnDecl, Param, StructDecl, Type,
 
 use super::convention::slot_kind_of;
 use crate::{
-    Const, ConstId, Dispatch, DispatchId, EnumCase, EnumType, Function, FunctionId, Program,
-    SlotKind, StructField, StructId, StructType, Unsupported,
+    Const, ConstId, Dispatch, DispatchId, EnumCase, EnumId, EnumType, Function, FunctionId,
+    Program, SlotKind, StructField, StructId, StructType, Unsupported,
 };
 
 /// Which modules each module of the package can reach, itself included.
@@ -329,17 +329,15 @@ pub(super) struct Lowering<'a> {
     /// property that makes a construction unable to disagree with another
     /// construction of the same type.
     pub(super) struct_ids: BTreeMap<String, StructId>,
-    /// Every enum type some body has built a case of, in the order they were
-    /// reached. Addressed by qualified name through [`Lowering::enum_ids`]
-    /// rather than by an id of its own, because nothing in the IR names one —
-    /// [`Inst::MakeEnum`] carries the qualified type name and the case name,
-    /// exactly as it did before this table existed, and this is read only
-    /// while a program is being lowered.
+    /// Every enum type some body has built a case of or read a payload of,
+    /// in the order they were reached — this becomes [`crate::Program::enums`]
+    /// unchanged, so [`EnumId`] indexes it the same way once lowering is
+    /// done as while it is under way.
     pub(super) enums: Vec<EnumType>,
-    /// The position in [`Lowering::enums`] each qualified enum name was
-    /// interned at, so that one declaration is one entry however many sites
-    /// build a case of it.
-    pub(super) enum_ids: BTreeMap<String, usize>,
+    /// The [`EnumId`] each qualified enum name was interned at, so that one
+    /// declaration is one entry however many sites build a case of it or
+    /// read a payload of one.
+    pub(super) enum_ids: BTreeMap<String, EnumId>,
     /// Every dynamic dispatch site some body has reached, in the order they
     /// were reached, which is what [`DispatchId`] indexes.
     ///
@@ -593,8 +591,9 @@ impl<'a> Lowering<'a> {
         id
     }
 
-    /// The qualified name of the enum `decl` declares in `owner`, interning
-    /// its per-case payload kinds on the first site that builds a case of it.
+    /// The [`EnumId`] and the qualified name of the enum `decl` declares in
+    /// `owner`, interning its per-case payload kinds on the first site that
+    /// builds a case of it or reads a payload of one.
     ///
     /// **The layout is read off the declaration and never off a
     /// construction**, mirroring [`Lowering::struct_type`] exactly: a case's
@@ -606,10 +605,14 @@ impl<'a> Lowering<'a> {
     /// through. A case the checker recorded nothing about keeps every payload
     /// position on the value stack, which is the same abstention rule
     /// [`Lowering::struct_type`] follows for a field.
-    pub(super) fn enum_type(&mut self, owner: &str, decl: &'a EnumDecl) -> Arc<str> {
+    ///
+    /// The [`EnumId`] is what [`crate::Inst::GetPayload`] carries — see
+    /// `crate::lower::expr::Body::variant_case`, the caller a pattern's own
+    /// `match` reaches this through.
+    pub(super) fn enum_type(&mut self, owner: &str, decl: &'a EnumDecl) -> (EnumId, Arc<str>) {
         let qualified: Arc<str> = format!("{owner}.{}", decl.name.node).into();
-        if self.enum_ids.contains_key(&*qualified) {
-            return qualified;
+        if let Some(id) = self.enum_ids.get(&*qualified) {
+            return (*id, qualified);
         }
         let cases = decl
             .cases
@@ -627,13 +630,13 @@ impl<'a> Lowering<'a> {
                     .collect(),
             })
             .collect();
-        let id = self.enums.len();
+        let id = EnumId(self.enums.len() as u32);
         self.enums.push(EnumType {
             name: qualified.clone(),
             cases,
         });
         self.enum_ids.insert(qualified.to_string(), id);
-        qualified
+        (id, qualified)
     }
 
     /// Interns a constant, so that one value is one [`ConstId`] however many
