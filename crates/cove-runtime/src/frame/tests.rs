@@ -1301,3 +1301,23 @@ fn opening_a_frame_writes_every_bit_of_its_window() {
         "the frame at 4 says words 6, 7 and 8 are references and the rest are not"
     );
 }
+
+/// The same, for a frame that straddles a limb boundary and a reference range
+/// that straddles it too.
+///
+/// One read-modify-write per limb is only correct if the mask is right at both
+/// ends of every limb it touches, and a frame entirely inside one limb — which
+/// is every frame this backend actually opens — exercises neither end.
+#[test]
+fn a_frame_that_straddles_a_limb_is_written_correctly() {
+    let mut refs = Bitmap::with_capacity(512);
+    // Everything set, so that the clearing half has something to clear.
+    refs.write_frame(0, 256, 0..256);
+    // A frame of 100 words at 30, whose words 20..50 are references: absolute
+    // 50..80, which spans the boundary at 64.
+    refs.write_frame(30, 100, 20..50);
+    let mut seen = Vec::new();
+    refs.for_each(0..256, &mut |at| seen.push(at));
+    let expected: Vec<usize> = (0..30).chain(50..80).chain(130..256).collect();
+    assert_eq!(seen, expected);
+}

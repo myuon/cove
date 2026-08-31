@@ -727,17 +727,26 @@ impl Bitmap {
     }
 
     /// Says whether the word at `at` is a reference.
+    ///
+    /// One bounds check, which is why it is a `get_mut` and a `match` rather
+    /// than a length test and two indexings: this runs once per push and the
+    /// growth arm runs on nothing this backend admits, because
+    /// [`INITIAL_WORDS`] reserved past every row's high-water mark.
     #[inline(always)]
     fn write(&mut self, at: usize, is_reference: bool) {
-        let limb = at / 64;
-        if limb >= self.limbs.len() {
-            self.limbs.resize(limb + 1, 0);
-        }
         let bit = 1u64 << (at % 64);
-        if is_reference {
-            self.limbs[limb] |= bit;
-        } else {
-            self.limbs[limb] &= !bit;
+        match self.limbs.get_mut(at / 64) {
+            Some(limb) => {
+                if is_reference {
+                    *limb |= bit;
+                } else {
+                    *limb &= !bit;
+                }
+            }
+            None => {
+                self.limbs.resize(at / 64 + 1, 0);
+                self.limbs[at / 64] = if is_reference { bit } else { 0 };
+            }
         }
     }
 
@@ -747,25 +756,49 @@ impl Bitmap {
         self.limbs[at / 64] >> (at % 64) & 1 == 1
     }
 
-    /// Writes a whole frame's worth in one pass: `scalars` first as scalars,
-    /// then `references` as references, from `base`.
+    /// Writes a whole frame's worth in one pass: every word of
+    /// `base .. base + width` a scalar, except `references` relative to `base`.
     ///
-    /// A masked store per limb rather than a bit at a time, which is what a
-    /// packed bitmap is for and what makes opening a frame cost O(width/64)
-    /// rather than O(width).
+    /// **One read-modify-write per limb**, which for every frame this backend
+    /// opens is one, because a frame narrower than sixty-four words lies inside
+    /// a single limb. That is what a packed bitmap is for, and it is why
+    /// opening a frame costs O(width / 64) rather than O(width) — a call does
+    /// not pay per slot for slots it is about to overwrite anyway.
+    ///
+    /// The clearing half is load-bearing rather than tidy. A return writes no
+    /// bit, so the words a returning frame occupied keep its answers about
+    /// them; the next frame at that depth would inherit them if opening did
+    /// not say otherwise.
     fn write_frame(&mut self, base: usize, width: usize, references: std::ops::Range<usize>) {
-        let end = base + width;
-        let limb = end.div_ceil(64);
-        if limb > self.limbs.len() {
-            self.limbs.resize(limb, 0);
+        if width == 0 {
+            return;
         }
-        for at in base..end {
-            let bit = 1u64 << (at % 64);
-            if references.contains(&(at - base)) {
-                self.limbs[at / 64] |= bit;
-            } else {
-                self.limbs[at / 64] &= !bit;
-            }
+        let end = base + width;
+        if end.div_ceil(64) > self.limbs.len() {
+            self.limbs.resize(end.div_ceil(64), 0);
+        }
+        let refs = base + references.start..base + references.end;
+        for index in base / 64..=(end - 1) / 64 {
+            let frame = Bitmap::mask(index, base..end);
+            let named = Bitmap::mask(index, refs.clone());
+            self.limbs[index] = (self.limbs[index] & !frame) | named;
+        }
+    }
+
+    /// The bits of limb `index` that `range` covers.
+    #[inline(always)]
+    fn mask(index: usize, range: std::ops::Range<usize>) -> u64 {
+        let low = index * 64;
+        let high = low + 64;
+        if range.start >= high || range.end <= low {
+            return 0;
+        }
+        let from = range.start.max(low) - low;
+        let to = range.end.min(high) - low;
+        if to == 64 {
+            u64::MAX << from
+        } else {
+            (u64::MAX << from) & !(u64::MAX << to)
         }
     }
 
