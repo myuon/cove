@@ -980,6 +980,46 @@ return, which takes its safepoint *before* popping the answer so the answer is
 still an operand, and the host call, where the arguments and the receiver are
 in Rust locals below whatever frames a re-entrant callback pushes above them.
 
+### What that rule does not survive, and what was built instead
+
+The shortfall rule is a rule about `Rc`, and it stops being one the moment a
+slot stops being a `Value`. [ADR 0028](adr/0028-five-representations-and-one-is-public.md)
+decision 8 says so in as many words: "an index or offset copied into a Rust
+local does not change `Rc::strong_count`, so the ADR does not claim that the
+current shortfall collector survives such a handle untouched." A handle is
+eight bytes of data. Copying one runs no destructor and tells nobody, so an
+accounting rule that reads counts is blind to it, and an object owned by a VM
+heap rather than by `Rc` is then swept out from under the local that names it.
+
+The decision lists four mechanisms that would restore the invariant and asks
+the prototype to choose and test one. `cove_runtime::slot` is that prototype
+and the choice is the second: **an explicit temporary-root stack**, with the
+push and the truncate paired by a scope the way `heap::SlotRoots` already
+pairs them for the tree walk. Its module documentation carries the argument
+against the other three; the shape of it is that reference-counted handles
+reintroduce per-slot destructors — the cost ADR 0027 built the scalar stack to
+remove — and that stack maps over Rust frames are what ADR 0011 ruled out in
+advance.
+
+The third mechanism deserves separate mention because it is the one that looks
+free: a dispatch discipline under which a collection can happen only when
+every live handle is back in a mapped slot. It is not free and it is not
+nearly true. `Vm::collect_if_due`'s list of collection sites is exhaustive
+about *where* a collection may happen — which is what issue #209 re-confirmed
+— and says nothing about what is in a Rust local when one does. Its own text
+names five places where something is: a failed `?`, a host call's arguments, a
+`lock`'s closure, a scope being left, and a finished task's answer. Every one
+of them is load-bearing on the rule above.
+
+None of this is wired into this backend, and that is a finding rather than an
+omission. A shadow-root stack over `Value` would be *unsound* here: a `Value`
+in a Rust local is already accounted for by its own count, so registering it
+in a second root list would yield one reference twice and conceal the very
+shortfall that roots it — the failure #192 kept `Vm::arg_vectors` out of the
+root set for. The stack is sound over a handle precisely because a handle is
+not a counted reference, and it becomes available when a slot stops being a
+`Value` and not before.
+
 ### What the heap figures mean, on both backends
 
 The same thing, which they did not before. A VM heap was never swept, so what
