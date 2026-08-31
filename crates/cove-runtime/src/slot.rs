@@ -1421,6 +1421,43 @@ impl HandleHeap {
     }
 }
 
+/// The raw UTF-8 bytes a [`Shape::Str`] object's words spell out: its length
+/// word, then a tail read one word at a time through `word` — which is where
+/// a caller's own safepoint belongs, because a long string is a stretch of VM
+/// work whose length the program chose rather than one read. [`Machine::word`]
+/// closes `word` over its own heap and its own safepoint; `crate::frame`'s
+/// `FrameVm` closes it over its own heap and its own, different, safepoint —
+/// this is the packing rule the two would otherwise have to state twice.
+pub(crate) fn string_bytes(
+    length: Slot,
+    tail: std::ops::Range<usize>,
+    mut word: impl FnMut(usize) -> Slot,
+) -> Vec<u8> {
+    let mut bytes = Vec::with_capacity(tail.len() * size_of::<Slot>());
+    for at in tail {
+        bytes.extend_from_slice(&word(at).to_le_bytes());
+    }
+    assert!(
+        length as usize <= bytes.len(),
+        "a String's length word runs past its tail"
+    );
+    bytes.truncate(length as usize);
+    bytes
+}
+
+/// The `Value::Str` a [`Shape::Str`] object's words are, once
+/// [`string_bytes`] has read them: valid UTF-8 because a `Shape::Str`
+/// object's own construction already guarantees it.
+pub(crate) fn string_value(
+    length: Slot,
+    tail: std::ops::Range<usize>,
+    word: impl FnMut(usize) -> Slot,
+) -> Value {
+    let text = String::from_utf8(string_bytes(length, tail, word))
+        .expect("a String object's tail is UTF-8");
+    Value::string(text)
+}
+
 /// A dispatch loop's worth of the slice: a frame, a shadow stack, and a heap
 /// with a safepoint between them.
 ///
@@ -1708,20 +1745,14 @@ impl Machine {
             // word says how many bytes of the last word are the string's, and
             // reading it is the same act as reading any other word: the
             // boundary knows it is a length because the layout says so.
+            //
+            // `string_value` is where the packing rule itself lives, shared
+            // with `crate::frame::FrameVm`'s own reader: see its doc comment
+            // for why a second copy of it would be a second description.
             Shape::Str => {
-                let length = self.word(handle, 0) as usize;
+                let length = self.word(handle, 0);
                 let tail = self.heap.tail_range(handle);
-                let mut bytes = Vec::with_capacity(tail.len() * size_of::<Slot>());
-                for at in tail {
-                    bytes.extend_from_slice(&self.word(handle, at).to_le_bytes());
-                }
-                assert!(
-                    length <= bytes.len(),
-                    "a String's length word runs past its tail"
-                );
-                bytes.truncate(length);
-                let text = String::from_utf8(bytes).expect("a String object's tail is UTF-8");
-                Value::string(text)
+                string_value(length, tail, |at| self.word(handle, at))
             }
         }
     }

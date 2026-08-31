@@ -102,6 +102,7 @@
 //! | `Bool` | canonical 0 or 1 |
 //! | `Unit` | a canonical zero word where the layout cannot omit it |
 //! | a struct | a handle into this backend's traced object heap |
+//! | a `String` | a handle into the same heap, at a `crate::slot::Shape::Str` layout — see "Strings" below |
 //!
 //! The bits are not self-describing. What a word means comes from the
 //! instruction that touches it and from `cove_ir::Function`'s per-slot
@@ -271,11 +272,35 @@
 //!   left. They hold their operands in a buffer that is not a frame: nothing
 //!   indexes it, no frame owns a window of it, and [`admits`] refuses a
 //!   function that would need one of its entries to survive a call.
-//! - Every one of them increments [`FrameVm::materialized`], so the claim is a
-//!   number a test reads rather than a sentence. `benches/arith`,
+//! - **A `String` is the one word a `try`, a `pop` or a `return` may also
+//!   materialise straight off the one stack**, rather than only off that
+//!   buffer: `crosses_as_a_string` is the static proof, asked the same way
+//!   at [`admits`] time and at run time, and `FrameVm::pop_boundary_value`
+//!   is where the two meet. Reading the object's bytes is more than one
+//!   instruction's worth of work for a long string, so
+//!   `FrameVm::materialise_str` takes a safepoint per word the way
+//!   `crate::slot::Machine::word` does, and the handle is registered with
+//!   `FrameVm::with_root` for exactly that stretch — the one place a
+//!   Rust-local `Handle` stands between two safepoints in this backend's own
+//!   code, everywhere else being the frame's own bitmap or the boundary
+//!   buffer.
+//! - **`concat` is the odd one out: it builds a `Value` per operand too, and
+//!   none of them is this boundary.** Rendering a `String`, an `Int`, a
+//!   `Bool` or a `Float` reuses `Value`'s own `Display`, which is the same
+//!   code `Vm::Concat` and the interpreter's own interpolation call already
+//!   run — see "Strings" below for why reusing it rather than writing a
+//!   second renderer is the point. What comes out is an owned `String`
+//!   accumulator and, at the end, a fresh heap object; no `Value` it built
+//!   along the way is handed to anything outside this instruction, so none
+//!   of them is counted by [`FrameVm::materialized`] and none of them is a
+//!   boundary crossing in decision 5's sense.
+//! - Every boundary crossing increments [`FrameVm::materialized`], so the
+//!   claim is a number a test reads rather than a sentence. `benches/arith`,
 //!   `benches/call`, `benches/pure`, `benches/field` and `benches/method` each
 //!   report **8**, all eight in the epilogue, and every loop reports zero —
-//!   including the two whose loops build and mutate a struct.
+//!   including the two whose loops build and mutate a struct. None of the
+//!   five rows holds a `String`, so none of them exercises the fifth case
+//!   above; `crates/cove-runtime/src/frame/tests.rs`'s string cases do.
 //!
 //! This is ADR 0028 decision 5 — "`Value` is materialized at the boundary,
 //! and the boundary list is closed" — with the list written out.
@@ -284,10 +309,10 @@
 //!
 //! Everything else, by name, before any side effect, with no fallback. See
 //! [`admits`]. In particular there is no `Dynamic`, no `dyn`, no `Any`, no
-//! enum layout, no place, no `var`, no closure, no Host call, no task, no
-//! string and no collection — and none of ADR 0033's five identity-bearing
-//! kinds, which that ADR puts outside this heap on purpose. What Phase B added
-//! to the admitted subset is the struct.
+//! enum layout, no place, no `var`, no closure, no Host call, no task, and no
+//! `Array`, `Vector`, `Map` or `Set` — and none of ADR 0033's five
+//! identity-bearing kinds, which that ADR puts outside this heap on purpose.
+//! What Phase B added to the admitted subset is the struct.
 //!
 //! **What Phase C adds is one shape and it is the shape the static map made
 //! readable**: a struct-typed field read whose answer is then stored, passed or
@@ -297,6 +322,107 @@
 //! account for. `a_nested_struct_read_into_a_slot_is_rooted` is the coverage,
 //! and it is the reason the widening is taken — ADR 0029's rule read as a rule
 //! about admitting: a shape no test runs is a shape nobody knows runs.
+//!
+//! **A `String` is admitted too, now, and it is the first heap-backed kind
+//! that is not a struct.** "Strings" below is where that lives: a `String`
+//! constant, a `concat`, and a comparison between two `String`s, all
+//! admitted where the static `Kind` simulation can show, from the
+//! instruction alone, that the word really is one — never by asking the
+//! object at run time and never by trusting a program that merely type-checked
+//! upstream. `Inst::CallBuiltin` is not part of this: a `String`'s own
+//! *methods* — `.length()`, `.chars()`, and the rest of `cove_schema`'s table
+//! — stay refused, so this backend can hold, compare, interpolate and hand
+//! back a `String` without being able to call anything on one.
+//!
+//! # Strings
+//!
+//! A `String` is a `crate::slot::Shape::Str` object: one fixed word holding
+//! its length in bytes, then a tail packing eight UTF-8 bytes to a word,
+//! zero-padded past the string's own end where its length is not a multiple
+//! of eight. `pack_string_words` is the packing, shared by the two
+//! instructions that ever build one.
+//!
+//! **A `String` constant is allocated once, when [`FrameVm::new`] builds the
+//! program's constant table, and its word is the `Handle` from then on.**
+//! Nothing else about `Inst::Const` changes: the constant is still one
+//! indexed load, the same as an `Int` or a `Bool`, and
+//! `FrameVm::const_is_reference` is the one bit of bookkeeping that tells the
+//! bitmap so — the word looks exactly like any other sixty-four bits, so
+//! nothing about it could answer that question, the same reason every other
+//! bit here is written by an instruction and never guessed from a value.
+//! That handle is then a root nothing on the one stack names: it is not
+//! pushed until `Inst::Const` runs, and after it is popped it may never be
+//! pushed again for the rest of the run. `FrameVm::string_constants` is the
+//! list every one of them stands on, and `FrameRoots` yields it whole on
+//! every collection — a constant string that is only ever reachable from the
+//! constant pool must survive a collection between two of its uses, and
+//! `a_string_kept_alive_by_nothing_but_a_frame_slot_survives_every_collection`'s
+//! own `s` is deliberately *not* this case, built through `concat` instead,
+//! because a constant would survive any mutation of the frame's own rooting
+//! and prove nothing about it.
+//!
+//! **`concat` renders through `Value`'s `Display` rather than through a
+//! second description of it.** The interpreter's string interpolation and
+//! `Vm::Concat` both render an operand with `write!(f, "{value}")`, which is
+//! `impl Display for Value` in `crate::value`; a byte-for-byte match with
+//! either of them is only guaranteed by running the same code, so
+//! `FrameVm::crossed_at_boundary` turns each admitted operand into a
+//! `Value` — a `String` materialised the way any other crossing materialises
+//! one, an `Int`, a `Bool` or a `Float` read straight off its word — and
+//! `.to_string()` is what both other backends call too. [`admits`] admits a
+//! `concat` only where every operand's `Kind` is one `Value`'s `Display`
+//! covers: `Kind::Str`, `Kind::Int`, `Kind::Bool` or `Kind::Float`; anything
+//! else, including a struct, is refused by name.
+//!
+//! **A comparison between two `String`s reads their bytes and builds no
+//! `Value` at all.** `interp::binary` compares two `Str`s with `Rc<str>`'s own
+//! `PartialOrd`, which is defined over UTF-8 bytes; `FrameVm::compare_string_handles`
+//! reads the same bytes out of both objects' tails through the shared
+//! `crate::slot::string_bytes` and compares them the same way, so the six
+//! operators `==`, `!=`, `<`, `<=`, `>` and `>=` agree with `interp::binary`
+//! and with `Vm` exactly, ordering across a difference in length or across a
+//! multi-byte character included. [`admits`] requires at least one operand to
+//! be a statically provable `Kind::Str` — a literal or a `concat`'s answer —
+//! and the other to be `Kind::Str` or `Kind::Reference`, never a scalar.
+//!
+//! **That second case is deliberately not "provably a `String`, too", and the
+//! reason is checked against the compiler rather than assumed.** `cove_sema`
+//! refuses any `==` and its neighbours whose two sides are not one type —
+//! diagnostic `cove::type::operator`, "`==` means value equality between
+//! values of the same type" — and it refuses that for a declared type
+//! (`String` against a struct) and for a type parameter (`String` against a
+//! `T`) exactly alike. So a `Kind::Reference` word standing across a
+//! comparison from a proven `String` *is* a `String`, by the program's own
+//! type, whether or not this backend's own weak analysis of a loaded local or
+//! a read field can show it — this backend just has no static proof of it,
+//! the way it has none for an arbitrary struct either. A narrower rule that
+//! required both sides provably `Kind::Str` would refuse `a == b` over two
+//! locals, which is most of the comparisons a program actually writes, and it
+//! would not buy any safety back: `FrameVm::compare_string_handles`'s
+//! `debug_assert` is what turns the appeal to the checker into something a
+//! debug build actually checks, the same "two answers, not one trusted" shape
+//! `Inst::GetFieldAt`'s already keeps for a field's reference bit.
+//! Everything else `Inst::Binary` could be — arithmetic, `is`, or a
+//! comparison over anything this backend cannot show is two `String`s —
+//! stays refused by the catch-all, as "an operator over a general value".
+//!
+//! **The materialiser that reads a string's bytes is shared with
+//! `crate::slot`'s own, rather than written a second time.**
+//! `crate::slot::string_bytes` and `crate::slot::string_value` are what
+//! `crate::slot::Machine::materialise`'s `Shape::Str` arm reads through and
+//! what `FrameVm::materialise_str` reads through, each supplying its own
+//! word reader — `Machine::word`'s safepoint there, `FrameVm::string_word`'s
+//! here — because the two own different heaps and different safepoints, but
+//! the packing rule itself is one description. `Machine::materialise`'s
+//! rooting is the model `FrameVm::pop_boundary_value` and
+//! `FrameVm::materialise_str` follow for the same reason it exists there: a
+//! handle popped off the one stack is a bare Rust local from that instant,
+//! and reading the object it names is VM work that reaches safepoints, so
+//! `FrameVm::with_root` holds it for exactly that stretch. A `concat` or a
+//! `make-builtin` whose arguments include more than one `String` roots all of
+//! them together through `FrameVm::with_roots`, `Machine::materialise_args`'s
+//! reason applied to a run of siblings rather than to one handle: rendering
+//! the first can reach a safepoint while the rest are still bare Rust locals.
 
 use std::rc::Rc;
 
@@ -310,7 +436,10 @@ use crate::heap::HeapStats;
 use crate::host::HostRegistry;
 use crate::interp::{returned_error_message, source_text, MAX_CALL_DEPTH};
 use crate::runtime::Runtime;
-use crate::slot::{Handle, HandleHeap, HandleRoots, Layout, LayoutId, Part, TempRoots};
+use crate::slot::{
+    string_bytes, string_value, Handle, HandleHeap, HandleRoots, Layout, LayoutId, Part, Shape,
+    TempRoots,
+};
 use crate::trace::{RunOutcome, Timing, TraceEvent};
 use crate::value::{Repr, Value};
 use crate::vm::{
@@ -496,6 +625,22 @@ fn leaves_a_boundary_value(program: &Program, function: &cove_ir::Function, pc: 
     }
 }
 
+/// Whether the value operand standing at `pc` is a definite `Kind::Str` word
+/// -- a `String` constant or a `concat`'s answer, provable from the
+/// instruction that pushed it and nothing else.
+///
+/// This is decision 5's boundary too, and it is a second case rather than a
+/// fourth entry in `leaves_a_boundary_value`'s match: that function answers
+/// "is the word already a materialised `Value`, sitting in the boundary
+/// buffer", and a `Kind::Str` word is not one yet -- it is a `Handle` on the
+/// one stack, which `Inst::Pop`, `Inst::Try` and `Inst::Return` now know how
+/// to turn into one. `FrameVm::execute` asks the same question the same way,
+/// so admission and execution cannot disagree about which of the two buffers
+/// a given `pc` draws from.
+fn crosses_as_a_string(operands: &Operands, pc: usize) -> bool {
+    operands.top(pc, 1).as_deref() == Some(&[Kind::Str])
+}
+
 /// One function's shape and instructions, and the functions it calls.
 fn admits_function(
     program: &Program,
@@ -554,7 +699,10 @@ fn admits_function(
             // rows this backend runs does, and rather than rely on that, the
             // instruction that pushed the word has to say it is a reference.
             Inst::StoreLocal(_) => {
-                if operands.top(pc, 1).as_deref() != Some(&[Kind::Reference]) {
+                if !operands
+                    .top(pc, 1)
+                    .is_some_and(|kinds| kinds.iter().all(|kind| kind.is_reference()))
+                {
                     return Err(Refused::new(
                         format!(
                             "a general value slot in {} that the 8-byte frame cannot show holds \
@@ -565,15 +713,17 @@ fn admits_function(
                     ));
                 }
             }
-            // A constant is a word here rather than a `Value`. Narrowed to
-            // the four kinds ADR 0028 decision 1 gives a word to: a `Str`, a
-            // `Name` and a `Duration` have no eight-byte form and are out of
-            // this backend's scope.
+            // A constant is a word here rather than a `Value`, for the five
+            // kinds ADR 0028 decision 1 and this backend's own `Kind::Str`
+            // together give a word to: a `Name` and a `Duration` have no
+            // eight-byte form and are out of this backend's scope. A `Str` is
+            // the one exception decision 1's own table does not list -- it
+            // has no eight-byte form either, so what crosses is a `Handle`
+            // into this backend's heap, allocated once when `FrameVm` is
+            // built. See `FrameVm::new` and `Kind::Str`.
             Inst::Const(id) => match program.constant(*id) {
-                Const::Unit | Const::Bool(_) | Const::Int(_) | Const::Float(_) => {}
-                Const::Str(_) | Const::Name(_) => {
-                    return Err(Refused::new(format!("a string in {}", named()), span))
-                }
+                Const::Unit | Const::Bool(_) | Const::Int(_) | Const::Float(_) | Const::Str(_) => {}
+                Const::Name(_) => return Err(Refused::new(format!("a name in {}", named()), span)),
                 Const::Duration(_) => {
                     return Err(Refused::new(format!("a `Duration` in {}", named()), span))
                 }
@@ -644,7 +794,9 @@ fn admits_function(
                 }
             }
             Inst::Pop | Inst::Try | Inst::Return => {
-                if !leaves_a_boundary_value(program, function, pc) {
+                if !leaves_a_boundary_value(program, function, pc)
+                    && !crosses_as_a_string(&operands, pc)
+                {
                     return Err(Refused::new(
                         format!(
                             "{} in {}, over something that is a word rather than a value",
@@ -659,6 +811,75 @@ fn admits_function(
                     ));
                 }
             }
+            // Interpolation. Admitted where every operand renders the way
+            // `Value`'s own `Display` renders it -- a `String`, an `Int`, a
+            // `Bool` or a `Float` -- and refused, naming the first operand
+            // that is not one of those, otherwise. `Inst::Unary` and the
+            // arithmetic and `is` cases of `Inst::Binary` fall to the
+            // catch-all below, unchanged.
+            Inst::Concat(count) => {
+                let kinds = operands.top(pc, *count as usize);
+                let offending = match &kinds {
+                    None => Some(None),
+                    Some(kinds) => kinds
+                        .iter()
+                        .find(|kind| {
+                            !matches!(kind, Kind::Str | Kind::Int | Kind::Bool | Kind::Float)
+                        })
+                        .copied()
+                        .map(Some),
+                };
+                if let Some(offending) = offending {
+                    return Err(Refused::new(
+                        format!(
+                            "string interpolation in {} over {}",
+                            named(),
+                            undisplayable(offending)
+                        ),
+                        span,
+                    ));
+                }
+            }
+            // A comparison between two `String`s. Admitted where at least one
+            // side is a definite `Kind::Str` -- a literal or a `concat`'s
+            // answer -- and the other is `Kind::Str` or `Kind::Reference`,
+            // never a scalar. The reason the second case is not required to
+            // be provably a `String` too: `cove_sema` refuses any `==` and
+            // its neighbours whose two sides are not one type -- diagnostic
+            // `cove::type::operator`, "`==` means value equality between
+            // values of the same type" -- and it refuses that for a declared
+            // type (`String` against a struct) and for a type parameter
+            // (`String` against a `T`) exactly alike. So a `Kind::Reference`
+            // word standing across a comparison from a proven `String` *is* a
+            // `String`, by the program's own type, whether or not this
+            // backend's own weak analysis of a loaded local or a read field
+            // can show it -- this backend just has no static proof of it, the
+            // way it has none for an arbitrary struct either. A narrower rule
+            // that required both sides provably `Kind::Str` would refuse
+            // `a == b` over two locals, which is most of the comparisons a
+            // program actually writes, and would not buy any safety back:
+            // `FrameVm::execute` asks the object itself beside this, under
+            // `debug_assert`, the same "two answers, not one trusted" shape
+            // `Inst::GetFieldAt` already keeps.
+            //
+            // Every other `Inst::Binary` -- arithmetic, `is`, or a comparison
+            // this backend cannot show is over two `String`s -- falls to the
+            // catch-all below and is refused as "an operator over a general
+            // value", which is the right answer for an operand kind nothing
+            // here implements.
+            Inst::Binary(op)
+                if matches!(
+                    op,
+                    cove_ir::BinaryOp::Eq
+                        | cove_ir::BinaryOp::Ne
+                        | cove_ir::BinaryOp::Lt
+                        | cove_ir::BinaryOp::Le
+                        | cove_ir::BinaryOp::Gt
+                        | cove_ir::BinaryOp::Ge
+                ) && operands.top(pc, 2).is_some_and(|kinds| {
+                    (kinds[0] == Kind::Str || kinds[1] == Kind::Str)
+                        && kinds.iter().all(|kind| kind.is_reference())
+                }) => {}
             Inst::Call {
                 function: target,
                 value_argc,
@@ -692,7 +913,7 @@ fn admits_function(
                 if *value_argc != 0
                     && !operands
                         .top(pc, *value_argc as usize)
-                        .is_some_and(|kinds| kinds.iter().all(|kind| *kind == Kind::Reference))
+                        .is_some_and(|kinds| kinds.iter().all(|kind| kind.is_reference()))
                 {
                     return Err(Refused::new(
                         format!(
@@ -1053,7 +1274,7 @@ enum FieldMap {
 }
 
 /// One safepoint's roots: every word of the one stack the bitmap calls a
-/// reference, and then the shadow stack.
+/// reference, then the shadow stack, then every `String` constant.
 ///
 /// The counterpart of `vm::StackRoots`, and the list of what is *not* here is
 /// the same kind of list that one carries. A word the bitmap does not name is
@@ -1066,10 +1287,19 @@ enum FieldMap {
 /// two locations and one object, and
 /// `a_reference_in_a_slot_and_in_an_operand_is_two_locations_and_one_expansion`
 /// pins it.
+///
+/// A `String` constant's handle is a root storage location too, and it is not
+/// covered by the two above it: it is reachable from nowhere `self.words`
+/// scans and nowhere the shadow stack is pushed to, from the moment
+/// `FrameVm::new` allocates it until the run ends. `constants` is that list,
+/// yielded whole on every collection -- see `FrameVm::new` and
+/// `a_string_constant_survives_a_collection_that_never_touches_the_stack`.
 struct FrameRoots<'v> {
     words: &'v [u64],
     refs: &'v Bitmap,
     temps: &'v TempRoots,
+    /// Every `String` constant's handle, permanent for the whole run.
+    constants: &'v [Handle],
     /// Which words the walk reads. `0..words.len()` in a run; narrower in the
     /// two mutations. See [`RootScope`].
     range: std::ops::Range<usize>,
@@ -1082,6 +1312,9 @@ impl HandleRoots for FrameRoots<'_> {
             visit(Handle::from_slot(words[at]))
         });
         self.temps.walk(visit);
+        for &handle in self.constants {
+            visit(handle);
+        }
     }
 }
 
@@ -1249,8 +1482,27 @@ fn struct_parts(program: &Program) -> Vec<Vec<Part>> {
 /// The bits are not self-describing, so every question of this shape is
 /// answered by something that is not the word: the frame map, an object's
 /// reference map, or -- here -- the instruction that pushed it. This is the
-/// third of those, and it is the smallest: four answers, one per kind of word
-/// ADR 0028 decision 1 gives eight bytes to, plus the reference.
+/// third of those: five answers, one per kind of word ADR 0028 decision 1
+/// gives eight bytes to, plus the reference, plus `Kind::Str`.
+///
+/// `Kind::Str` and `Kind::Reference` are the same eight bytes -- a `Handle` --
+/// and agree on everything decision 1 asks a physical arrangement to
+/// guarantee: `part()` calls both `Part::Nested`, so a value slot or a struct
+/// field accepts either, and the frame map and the bitmap never ask which.
+/// The two are told apart only where it matters, which is *what a word may
+/// become at decision 5's boundary*: a `String` constant and a `concat` both
+/// push a word this backend knows, statically, names a `crate::slot::Shape::Str`
+/// object, because nothing but those two instructions can produce one. A
+/// struct field read or a loaded local stays `Kind::Reference` -- it might be
+/// a string too, but nothing here proves it -- and `Kind::Reference` alone
+/// never crosses the boundary. Two strings compared, where one side is a
+/// `Kind::Str` literal and the other is a loaded `Kind::Reference`, are still
+/// admitted: decision 5 does not need every string in a running program to be
+/// provably a string by this backend's own weak analysis, only the
+/// *particular* word it is about to read as one, and the object's own
+/// `crate::slot::Shape` is asked beside the static answer at that read -- the
+/// same "two answers, not one trusted" discipline `Inst::GetFieldAt` already
+/// keeps.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Kind {
     Unit,
@@ -1258,6 +1510,11 @@ enum Kind {
     Int,
     Float,
     Reference,
+    /// A word this backend knows, from the instruction that pushed it and
+    /// from nothing else, names a `crate::slot::Shape::Str` object: a
+    /// `String` constant or the answer of a `concat`. See the type's doc
+    /// comment for what this does and does not let a program do.
+    Str,
 }
 
 impl Kind {
@@ -1265,14 +1522,26 @@ impl Kind {
     ///
     /// A `Unit` is a canonical zero word, which decision 1 permits where the
     /// layout cannot omit it, and the map's question about one is the same
-    /// question it asks of an `Int`: not a reference.
+    /// question it asks of an `Int`: not a reference. `Kind::Str` answers
+    /// exactly as `Kind::Reference` does: both are a `Handle`, and a struct
+    /// field or a value slot that expects a reference cannot tell them apart
+    /// and does not need to.
     fn part(self) -> Part {
         match self {
             Kind::Unit | Kind::Int => Part::Int,
             Kind::Bool => Part::Bool,
             Kind::Float => Part::Float,
-            Kind::Reference => Part::Nested,
+            Kind::Reference | Kind::Str => Part::Nested,
         }
+    }
+
+    /// Whether a word of this kind is a `Handle`, whichever object it names.
+    /// `Inst::StoreLocal` and a call's value arguments ask this -- "is the
+    /// frame map's belief about this slot true of the word I am about to put
+    /// there" -- and neither needs to know *which* kind of reference it is,
+    /// only that it is one.
+    fn is_reference(self) -> bool {
+        matches!(self, Kind::Reference | Kind::Str)
     }
 }
 
@@ -1351,11 +1620,14 @@ impl Operands {
     }
 
     /// The same question a `make-builtin` asks: what its arguments are made
-    /// of, and `None` where one of them is a handle.
+    /// of, and `None` where one of them is a handle this backend cannot show
+    /// is a string.
     ///
-    /// A handle does not cross decision 5's boundary — materialising an
-    /// aggregate is `crate::slot::Machine::materialise`'s job and it is not
-    /// wired here — so a reference operand refuses the whole call.
+    /// A general handle does not cross decision 5's boundary — materialising
+    /// an arbitrary aggregate would be `crate::slot::Machine::materialise`'s
+    /// job and it is not wired here for one. `Kind::Str` is wired: a `String`
+    /// is the one heap-backed kind this backend knows how to materialise, so
+    /// it is the one `Kind::Reference` does not refuse.
     fn boundary(&self, pc: usize, argc: usize) -> Option<Vec<Kind>> {
         let kinds = self.top(pc, argc)?;
         kinds
@@ -1379,10 +1651,34 @@ fn pushed_kind(program: &Program, inst: Inst) -> Held {
             Const::Int(_) => Some(Kind::Int),
             Const::Bool(_) => Some(Kind::Bool),
             Const::Float(_) => Some(Kind::Float),
-            Const::Str(_) | Const::Name(_) | Const::Duration(_) => None,
+            // A `String` constant is a `Handle` this backend allocated once
+            // at build time -- see `FrameVm::new` -- and the only word this
+            // instruction can ever push for it, so `Kind::Str` is provable
+            // from the instruction alone, the same as every other constant
+            // kind above.
+            Const::Str(_) => Some(Kind::Str),
+            Const::Name(_) | Const::Duration(_) => None,
         },
         Inst::ScalarToValue(Scalar::Int) => Some(Kind::Int),
         Inst::ScalarToValue(Scalar::Bool) => Some(Kind::Bool),
+        // `concat` renders its operands and allocates a fresh `Shape::Str`
+        // object of the result -- see `FrameVm::execute` -- so its answer is
+        // provably `Kind::Str` for the same reason a `String` constant's is.
+        Inst::Concat(_) => Some(Kind::Str),
+        // A comparison's answer is a canonical `Bool` bit, on the value stack
+        // because the operands it compared were -- ADR 0027's "a slot
+        // `cove_ir` calls `SlotKind::Value` may hold an `Int`" generalised to
+        // a `Bool`. An arithmetic `Inst::Binary` is not admitted by anything
+        // this backend runs, so its answer is left `None` rather than guessed
+        // at; nothing downstream of a refused instruction is reached.
+        Inst::Binary(
+            cove_ir::BinaryOp::Eq
+            | cove_ir::BinaryOp::Ne
+            | cove_ir::BinaryOp::Lt
+            | cove_ir::BinaryOp::Le
+            | cove_ir::BinaryOp::Gt
+            | cove_ir::BinaryOp::Ge,
+        ) => Some(Kind::Bool),
         Inst::LoadLocal(_) | Inst::MakeStruct(_) | Inst::SetField(_) => Some(Kind::Reference),
         // **Static because the instruction names the type.** A field read was
         // unreadable here in Phase B — one instruction whose answer is a handle
@@ -1554,16 +1850,18 @@ fn field_positions(program: &Program) -> Vec<Option<u32>> {
     positions
 }
 
-/// The word an admitted constant is, which is the whole of what
+/// The word an admitted *scalar* constant is, which is most of what
 /// `Inst::Const` does in this backend.
 ///
 /// A constant this backend admits is one of the four kinds ADR 0028 decision 1
-/// gives a word to, so it *is* a word and does not have to become a `Value` to
-/// be pushed. That is the change Phase A did not make: there, `const`
-/// materialised, and the only loop it fed was the epilogue. Here the same
-/// instruction feeds `make-struct`.
+/// gives a word to, or a `Str`, which is not among them and is not this
+/// function's business: `FrameVm::new` allocates every `Str` constant once,
+/// as an object, and this handles the rest -- so it *is* a word and does not
+/// have to become a `Value` to be pushed. That is the change Phase A did not
+/// make: there, `const` materialised, and the only loop it fed was the
+/// epilogue. Here the same instruction feeds `make-struct`.
 ///
-/// Zero for the three kinds that have no eight-byte form, every one of which
+/// Zero for the two kinds that have no eight-byte form at all, both of which
 /// [`admits`] refuses: the table is built over every constant of the program
 /// and a refused one is never read.
 fn const_word(constant: &Const) -> u64 {
@@ -1572,21 +1870,62 @@ fn const_word(constant: &Const) -> u64 {
         Const::Bool(value) => Word::of_bool(*value),
         Const::Int(value) => Word::of_int(*value),
         Const::Float(value) => Word::of_float(*value),
-        Const::Str(_) | Const::Name(_) | Const::Duration(_) => 0,
+        Const::Str(_) => unreachable!("a `Str` constant's word is `FrameVm::new`'s to build"),
+        Const::Name(_) | Const::Duration(_) => 0,
     }
 }
 
-/// The `Value` a word stands for at decision 5's boundary, read as [`Kind`]
-/// says to and never out of the bits.
+/// Packs `bytes` the way `crate::slot::Shape::Str` requires: one fixed word
+/// holding the length, then a tail of little-endian eight-byte chunks, the
+/// last zero-padded where the length is not a multiple of eight. The packing
+/// a string constant is allocated with in `FrameVm::new` and the packing
+/// `concat` allocates its answer with in `FrameVm::execute` share this rather
+/// than restating it.
+fn pack_string_words(bytes: &[u8]) -> Vec<u64> {
+    let mut words = vec![bytes.len() as u64];
+    words.extend(bytes.chunks(std::mem::size_of::<u64>()).map(|chunk| {
+        let mut word = [0u8; std::mem::size_of::<u64>()];
+        word[..chunk.len()].copy_from_slice(chunk);
+        u64::from_le_bytes(word)
+    }));
+    words
+}
+
+/// What a word this backend cannot render in `concat` is, named for the
+/// refusal.
+///
+/// `Kind::Str`, `Kind::Int`, `Kind::Bool` and `Kind::Float` all render, so
+/// this only ever answers for the rest: `None` is two paths disagreeing about
+/// the word or reaching it by no path at all, and everything else is a kind
+/// `concat` refuses by name.
+fn undisplayable(kind: Option<Kind>) -> &'static str {
+    match kind {
+        None => "an operand the 8-byte frame cannot show the kind of",
+        Some(Kind::Unit) => "a `Unit`",
+        Some(Kind::Reference) => "a heap object this backend cannot show is a `String`",
+        Some(Kind::Str | Kind::Int | Kind::Bool | Kind::Float) => {
+            unreachable!("these kinds render, and `concat`'s check does not call this for them")
+        }
+    }
+}
+
+/// The `Value` a scalar word stands for at decision 5's boundary, read as
+/// [`Kind`] says to and never out of the bits.
+///
+/// Every kind but `Kind::Str`: that one is read out of the object the word
+/// names rather than out of the word itself, so it needs the heap and needs
+/// `&mut self` for the safepoints reading it may take --
+/// `FrameVm::crossed_at_boundary` is this plus that one case.
 fn crossed(kind: Kind, word: u64) -> Value {
     match kind {
         Kind::Unit => Value::unit(),
         Kind::Bool => Value(Repr::Bool(Word::canonical_bool(word))),
         Kind::Int => as_value_of(Scalar::Int, Word::int(word)),
         Kind::Float => Value::float(Word::float(word)),
-        Kind::Reference => {
-            unreachable!("`admits` refuses a boundary crossing that carries a reference")
-        }
+        Kind::Reference | Kind::Str => unreachable!(
+            "`crossed` is for the word kinds that need no heap; `crossed_at_boundary` is for \
+             `Kind::Str` and nothing calls this with `Kind::Reference`"
+        ),
     }
 }
 
@@ -1692,6 +2031,12 @@ pub struct FrameVm<'a> {
     /// One layout per struct type the program declares, addressed by the
     /// `cove_ir::StructId` a `make-struct` carries.
     shapes: Vec<LayoutId>,
+    /// The one layout every `String` object has, whatever program built it: a
+    /// `String` constant allocated once in `FrameVm::new`, or a `concat`'s
+    /// answer allocated fresh in `FrameVm::execute`. `crate::slot::Shape::Str`
+    /// is what both allocate against, and this is the id `crate::slot::HandleHeap`
+    /// gave that shape when it was registered.
+    str_layout: LayoutId,
     /// The same reference map again, as one bool per field, addressed by the
     /// `cove_ir::StructId` a `get-field-at` carries and then by the position.
     ///
@@ -1764,8 +2109,24 @@ pub struct FrameVm<'a> {
     /// `Vm::constants` is a `Vec<Value>` for the same reason at the same
     /// point, and the difference is the whole of Phase B at the boundary: a
     /// constant this backend admits *is* eight bytes, so nothing is
-    /// materialised to push one.
+    /// materialised to push one. A `Str` constant is the one exception: its
+    /// eight bytes are a `Handle`, allocated once here, into the object
+    /// `FrameVm::string_constants` roots for the whole run.
     constants: Vec<u64>,
+    /// Whether each entry of `FrameVm::constants` is a `Handle` rather than
+    /// scalar bits, indexed the same way. `Inst::Const` reads this once to
+    /// know whether to write the bitmap's bit -- a `Str` constant's word looks
+    /// exactly like any other sixty-four bits, so nothing about the word
+    /// itself could ever answer this, the same reason every other bit in
+    /// `Bitmap` is written by an instruction and not guessed from a value.
+    const_is_reference: Vec<bool>,
+    /// Every `String` constant's handle, so a collection can root it. A
+    /// constant string is reachable from nowhere `self.words` or `self.temps`
+    /// covers until `Inst::Const` pushes it, and after `Inst::Const` pushes it
+    /// again the next time the same constant is read -- it is not a value the
+    /// stack owns once, the way an allocated object usually is, and the
+    /// constant pool is not scanned by anything else. See `FrameRoots`.
+    string_constants: Vec<Handle>,
     /// How many `Value`s this run built or consumed at decision 5's boundary.
     ///
     /// The measurement issue #212 asks for, kept as a counter rather than as a
@@ -1844,6 +2205,37 @@ impl<'a> FrameVm<'a> {
             .iter()
             .map(|parts| parts.iter().map(|part| *part == Part::Nested).collect())
             .collect();
+        // One `crate::slot::Shape::Str` layout for every `String` object this
+        // backend ever allocates, whichever of the two instructions built it.
+        // Registered once here rather than once per constant, because the
+        // packing `crate::slot::Layout::boundary` derives from `Shape::Str`
+        // is the same for all of them: decision 2's "the lowered layout
+        // completely determines how to find every reference" applies to a
+        // *kind* of object, not to each instance.
+        let str_layout = heap.register(Layout::boundary("String", Shape::Str));
+        // Every `String` constant is allocated once here rather than
+        // materialised per read, and its word is the `Handle` `Inst::Const`
+        // pushes from then on -- see `Kind::Str` and `const_word`. A constant
+        // reached from nowhere else, so `string_constants` is the list
+        // `FrameRoots` walks to keep every one of them alive for the run.
+        let mut string_constants = Vec::new();
+        let const_is_reference = program
+            .constants
+            .iter()
+            .map(|constant| matches!(constant, Const::Str(_)))
+            .collect();
+        let constants = program
+            .constants
+            .iter()
+            .map(|constant| match constant {
+                Const::Str(text) => {
+                    let handle = heap.allocate(str_layout, pack_string_words(text.as_bytes()));
+                    string_constants.push(handle);
+                    handle.to_slot()
+                }
+                other => const_word(other),
+            })
+            .collect();
         FrameVm {
             runtime,
             program,
@@ -1851,6 +2243,7 @@ impl<'a> FrameVm<'a> {
             refs: Bitmap::with_limbs(INITIAL_LIMBS),
             heap,
             shapes,
+            str_layout,
             field_refs,
             field_map: FieldMap::TheLoweredType,
             field_at,
@@ -1865,7 +2258,9 @@ impl<'a> FrameVm<'a> {
             due: false,
             frames: Vec::with_capacity(MAX_CALL_DEPTH),
             boundary: Vec::new(),
-            constants: program.constants.iter().map(const_word).collect(),
+            constants,
+            const_is_reference,
+            string_constants,
             materialized: 0,
             heap_stats: HeapStats::default(),
             roots_yielded: 0,
@@ -2324,11 +2719,79 @@ impl<'a> FrameVm<'a> {
                     self.fuel += width as u64;
                 }
 
+                // ----------------------------------------- string operators
+                // Neither of these two is a boundary crossing in decision 5's
+                // sense, though for different reasons. `concat` materialises
+                // a `Value` per operand -- `crossed_at_boundary` reuses
+                // exactly the `Display` impl `Vm::Concat` and the
+                // interpreter's own interpolation call render through -- but
+                // what it hands back is an owned `String` accumulator and,
+                // at the end, a fresh heap object; nothing it built is a
+                // `self.boundary` entry or crosses out of this instruction,
+                // so `FrameVm::materialized` does not move for it.
+                // `Inst::Binary` over two strings never builds a `Value` at
+                // all: the answer is a `Bool` word, compared out of the
+                // objects' own bytes.
+                Inst::Concat(count) => {
+                    let here = self.frames.last().expect("a frame stands").function;
+                    let kinds = self.operands[here.0 as usize]
+                        .top(pc, count as usize)
+                        .expect("`admits` settled every `concat` this backend runs");
+                    let at = self.words.len() - count as usize;
+                    let words: Vec<u64> = self.words[at..].to_vec();
+                    self.words.truncate(at);
+                    let handles: Vec<Handle> = kinds
+                        .iter()
+                        .zip(&words)
+                        .filter(|(kind, _)| **kind == Kind::Str)
+                        .map(|(_, word)| Handle::from_slot(*word))
+                        .collect();
+                    let mut text = String::new();
+                    self.with_roots(&handles, |vm| {
+                        for (kind, word) in kinds.iter().zip(&words) {
+                            let rendered = vm.crossed_at_boundary(*kind, *word);
+                            text.push_str(&rendered.to_string());
+                        }
+                    });
+                    self.fuel += u64::from(count) + text.len() as u64;
+                    let handle = self
+                        .heap
+                        .allocate(self.str_layout, pack_string_words(text.as_bytes()));
+                    self.allocated(self.heap.layout_words(handle));
+                    self.push_reference(handle.to_slot());
+                }
+                Inst::Binary(op) => {
+                    let rhs = Handle::from_slot(self.pop_word());
+                    let lhs = Handle::from_slot(self.pop_word());
+                    let ordering = self.compare_string_handles(lhs, rhs);
+                    let result = match op {
+                        cove_ir::BinaryOp::Eq => ordering.is_eq(),
+                        cove_ir::BinaryOp::Ne => ordering.is_ne(),
+                        cove_ir::BinaryOp::Lt => ordering.is_lt(),
+                        cove_ir::BinaryOp::Le => ordering.is_le(),
+                        cove_ir::BinaryOp::Gt => ordering.is_gt(),
+                        cove_ir::BinaryOp::Ge => ordering.is_ge(),
+                        other => unreachable!(
+                            "`admits` refuses every `Inst::Binary` but the six comparisons; {other:?} \
+                             reached the dispatch loop"
+                        ),
+                    };
+                    self.push_word(Word::of_bool(result), false);
+                }
+
                 // --------------------------------------------- the boundary
-                Inst::Const(id) => self.push_scalar(self.constants[id.0 as usize]),
+                Inst::Const(id) => {
+                    let word = self.constants[id.0 as usize];
+                    if self.const_is_reference[id.0 as usize] {
+                        self.push_reference(word);
+                    } else {
+                        self.push_scalar(word);
+                    }
+                }
                 Inst::Pop => {
                     self.materialized += 1;
-                    self.pop_value();
+                    let here = self.frames.last().expect("a frame stands").function;
+                    self.pop_boundary_value(here, pc);
                 }
                 Inst::MakeBuiltin { name: which, argc } => {
                     let span = running.span_at(pc);
@@ -2338,15 +2801,24 @@ impl<'a> FrameVm<'a> {
                         .boundary(pc, argc as usize)
                         .expect("`admits` settled every builtin call this backend runs");
                     let at = self.words.len() - argc as usize;
-                    let mut arguments: Vec<Value> = kinds
-                        .iter()
-                        .enumerate()
-                        .map(|(offset, kind)| {
-                            self.materialized += 1;
-                            crossed(*kind, self.words[at + offset])
-                        })
-                        .collect();
+                    let words: Vec<u64> = self.words[at..].to_vec();
                     self.words.truncate(at);
+                    let handles: Vec<Handle> = kinds
+                        .iter()
+                        .zip(&words)
+                        .filter(|(kind, _)| **kind == Kind::Str)
+                        .map(|(_, word)| Handle::from_slot(*word))
+                        .collect();
+                    let mut arguments: Vec<Value> = self.with_roots(&handles, |vm| {
+                        kinds
+                            .iter()
+                            .zip(&words)
+                            .map(|(kind, word)| {
+                                vm.materialized += 1;
+                                vm.crossed_at_boundary(*kind, *word)
+                            })
+                            .collect()
+                    });
                     self.materialized += 1;
                     let answer =
                         self.make_builtin(which, &mut arguments, running.arg_spans_at(pc), span);
@@ -2354,7 +2826,8 @@ impl<'a> FrameVm<'a> {
                 }
                 Inst::Try => {
                     let span = running.span_at(pc);
-                    let value = self.pop_value();
+                    let here = self.frames.last().expect("a frame stands").function;
+                    let value = self.pop_boundary_value(here, pc);
                     self.materialized += 1;
                     match opened(value, span)? {
                         Ok(payload) => {
@@ -2383,7 +2856,8 @@ impl<'a> FrameVm<'a> {
                 Inst::Return => {
                     self.safepoint(running.span_at(pc))?;
                     self.materialized += 1;
-                    let value = self.pop_value();
+                    let here = self.frames.last().expect("a frame stands").function;
+                    let value = self.pop_boundary_value(here, pc);
                     match self.leave_with_value(value, &mut base) {
                         Ok(value) => return Ok(value),
                         Err(resumed) => {
@@ -2519,12 +2993,14 @@ impl<'a> FrameVm<'a> {
             words,
             refs,
             temps,
+            string_constants,
             ..
         } = self;
         let roots = FrameRoots {
             words: words.as_slice(),
             refs,
             temps,
+            constants: string_constants,
             range,
         };
         let collected = heap.collect(&roots);
@@ -2567,6 +3043,128 @@ impl<'a> FrameVm<'a> {
         self.boundary
             .pop()
             .expect("a validated boundary instruction takes only values that are there")
+    }
+
+    /// Runs `body` with `handle` registered as a temporary root.
+    ///
+    /// `crate::slot::Machine::with_root`'s mechanism, kept here rather than
+    /// shared with it: `FrameVm` owns its own heap and its own shadow stack
+    /// rather than `Machine`'s. A handle a dispatch loop has just popped off
+    /// the one stack is a Rust local from that instant and the frame's
+    /// reference map no longer names it, and reading the object it names is
+    /// VM work that reaches safepoints -- so the stretch between the pop and
+    /// the last read of it is rooted here or it is not rooted at all. See
+    /// `FrameVm::pop_boundary_value`, its one caller through
+    /// `FrameVm::materialise_str`.
+    fn with_root<R>(&mut self, handle: Handle, body: impl FnOnce(&mut FrameVm<'a>) -> R) -> R {
+        let depth = self.temps.depth();
+        self.temps.push(handle);
+        let answer = body(self);
+        self.temps.truncate(depth);
+        answer
+    }
+
+    /// The same, for a run's worth of siblings none of which roots another.
+    ///
+    /// `crate::slot::Machine::with_roots`'s reason applies unchanged here: a
+    /// `concat` or a `make-builtin`'s arguments are popped off the one stack
+    /// together, and rendering the first can reach a safepoint while the rest
+    /// are Rust locals with nothing but this stack holding them until they are
+    /// rendered in turn.
+    fn with_roots<R>(&mut self, handles: &[Handle], body: impl FnOnce(&mut FrameVm<'a>) -> R) -> R {
+        let depth = self.temps.depth();
+        for &handle in handles {
+            self.temps.push(handle);
+        }
+        let answer = body(self);
+        self.temps.truncate(depth);
+        answer
+    }
+
+    /// Reads word `at` of the string `handle` names, taking a GC safepoint
+    /// first.
+    ///
+    /// `crate::slot::Machine::word`'s contract kept rather than shared: both
+    /// take a safepoint before every word a materialisation reads, because a
+    /// `String` can be long enough that reading it is a stretch of VM work
+    /// rather than one instruction and `HandleHeap::stress` needs every one
+    /// of those stretches to be a real safepoint for a test to find. This
+    /// backend's safepoint is `FrameVm::collect_if_due` rather than
+    /// `Machine`'s budget-free one, because pacing is `self.heap`'s question
+    /// either way and nothing about reading a string's bytes is a fuel
+    /// question.
+    fn string_word(&mut self, handle: Handle, at: usize) -> u64 {
+        self.collect_if_due();
+        self.heap.word(handle, at)
+    }
+
+    /// The `Value::Str` the string `handle` names, materialised -- decision
+    /// 5's boundary, for the one heap-backed kind this backend crosses it
+    /// with.
+    ///
+    /// `handle` must already be a root before this is called: it reads the
+    /// object several times, each read a safepoint, and a bare Rust local
+    /// roots nothing. Every caller reaches this through `FrameVm::with_root`
+    /// or `FrameVm::with_roots`.
+    fn materialise_str(&mut self, handle: Handle) -> Value {
+        let length = self.string_word(handle, 0);
+        let tail = self.heap.tail_range(handle);
+        string_value(length, tail, |at| self.string_word(handle, at))
+    }
+
+    /// [`crossed`] plus [`Kind::Str`]: the one case that needs the heap, and
+    /// so needs `&mut self`, rather than only the word's own bits.
+    fn crossed_at_boundary(&mut self, kind: Kind, word: u64) -> Value {
+        match kind {
+            Kind::Str => self.materialise_str(Handle::from_slot(word)),
+            Kind::Reference => {
+                unreachable!("`admits` refuses a boundary crossing that carries a struct")
+            }
+            _ => crossed(kind, word),
+        }
+    }
+
+    /// The `Value` `Inst::Pop`, `Inst::Try` and `Inst::Return` consume at
+    /// `pc`: the top of the boundary buffer, where `leaves_a_boundary_value`
+    /// proved it already is one, or the top of the one stack -- popped,
+    /// rooted, and materialised -- where `crosses_as_a_string` proved it is a
+    /// `String` instead. `admits` proved exactly one of the two holds at
+    /// every `pc` this runs at, so there is nothing left to decide here that
+    /// was not already decided; this asks the same question the same way.
+    fn pop_boundary_value(&mut self, here: FunctionId, pc: usize) -> Value {
+        if crosses_as_a_string(&self.operands[here.0 as usize], pc) {
+            let handle = Handle::from_slot(self.pop_word());
+            self.with_root(handle, |vm| vm.materialise_str(handle))
+        } else {
+            self.pop_value()
+        }
+    }
+
+    /// The lexicographic byte ordering two `String` handles compare by,
+    /// matching `interp::binary`'s `Rc<str>` comparison exactly: `str`'s own
+    /// `Ord` is over its UTF-8 bytes, which is what a `String` object's tail
+    /// already is, packed.
+    ///
+    /// No safepoint anywhere in this, and none is needed: both handles are
+    /// still named by a mapped word of the one stack for the whole of
+    /// `Inst::Binary`'s handling in `FrameVm::execute` -- popped into locals,
+    /// yes, but nothing between that pop and this read ever reaches a
+    /// safepoint, so nothing can collect out from under them. Decision 5's
+    /// boundary is not crossed either: the answer is a `Bool`, not a `Value`.
+    fn compare_string_handles(&self, lhs: Handle, rhs: Handle) -> std::cmp::Ordering {
+        debug_assert!(
+            matches!(self.heap.shape_of(lhs), Shape::Str)
+                && matches!(self.heap.shape_of(rhs), Shape::Str),
+            "`admits` proved at least one side of a comparison is a `String`; the object the \
+             other side names says otherwise"
+        );
+        let lhs_bytes = string_bytes(self.heap.word(lhs, 0), self.heap.tail_range(lhs), |at| {
+            self.heap.word(lhs, at)
+        });
+        let rhs_bytes = string_bytes(self.heap.word(rhs, 0), self.heap.tail_range(rhs), |at| {
+            self.heap.word(rhs, at)
+        });
+        lhs_bytes.cmp(&rhs_bytes)
     }
 
     /// Opens a call: the two depth bounds, and the safepoint every call is.
