@@ -3637,6 +3637,301 @@ predicted from what is:
   location to span adjacent slots and a `Dynamic` to be two; nothing here
   builds or measures one.
 
+## The mixed frame, measured
+
+Phase A of [issue #212](https://github.com/myuon/cove/issues/212) ran three
+rows over one contiguous `Vec<u64>`, and **no word of it was ever a
+reference**: `frame::admits` refused any function with a nonzero
+`value_frame_size`, which is what made its "no `Value` in the hot path" claim
+structural rather than careful — and what made it silent about the question
+this section answers.
+
+Phase B is [issue #162](https://github.com/myuon/cove/issues/162)'s **Design B
+proper**: a word-wide slot stack with a GC bitmap, over a VM-owned traced
+object heap. `benches/field` and `benches/method` execute on it, agree with
+both existing backends, and run **exactly the instruction counts the `Vm`
+runs** — 47,428,595 and 59,428,598 — and spend exactly the fuel it spends.
+
+[ADR 0033](adr/0033-an-identity-is-not-a-vm-heap-object.md) is what makes that
+target legal, and it is what chose it. Clause 6 puts plain copyable aggregates
+— strings, arrays, structs, ordinary enums — in the VM-owned handle heap, and
+clause 3 puts the five identity-bearing kinds outside it. A struct is the
+smallest of the aggregates, `benches/field` is a struct field read and write,
+and neither it nor `benches/method` needs a `Vector`, a `Shared`, a `Task`, a
+`TaskScope` or a `Resource`. **So the classification did not constrain what
+could be targeted — it named the target.** Where it did bind is the boundary:
+`make-builtin` refuses a reference argument, so nothing crossing out of this
+backend carries a handle, which is clause 1 held by refusal rather than by
+care.
+
+### The bitmap, and how a word is known to be a reference
+
+One bit per word of the one stack, packed sixty-four to a limb. It is the whole
+of what a collection consults, and ADR 0028 decision 1's invariant — "a slot
+the layout calls scalar must never be reachable by a walk that treats it as a
+reference" — holds because the walk has nothing else it *could* read.
+
+A bit is written by one of three authorities, and never by looking at the word:
+
+| where the word is | what says whether it is a reference |
+| --- | --- |
+| a frame slot | the frame map, derived from `cove_ir::Function`'s two frame sizes; one read-modify-write per limb per call |
+| an operand the scalar core, a `const` or a `make-struct` pushed | the instruction, which knows what it pushed |
+| an operand a field read pushed | the **object's** reference map |
+
+The third is the one that cannot be static: `get-field-at` is one instruction
+whose answer is a handle for a struct-typed field and scalar bits for an `Int`
+one, and only ADR 0028 decision 2's reference map knows which.
+
+The first has a condition attached, and `admits` enforces it. The frame map
+calls **every** value slot a reference, so a value slot holding anything else
+would be scalar bits the walk reads as a handle — decision 1's invariant broken
+from the other side. The lowering can produce one: ADR 0027 records that a
+declaration reached through a value is lowered "with every argument on the
+value stack", so a slot `cove_ir` calls `SlotKind::Value` may hold an `Int`. So
+a `store-local`, and a value argument of a call, are admitted only where the
+instruction that pushed the word says it is a reference.
+
+**A pop writes no bit.** The word above the top is stale and is never read,
+because the walk stops at `words.len()` and every push writes its own bit
+before that word is inside the walk. So the bitmap costs a masked store per
+push, one read-modify-write per limb per call, and nothing per pop or per
+return.
+
+### The answer
+
+Six `cove-bench --iterations 15` suites, `--sample-order round-robin`, quiet
+machine; **each ratio is the two rows of one run**, which is what ADR 0029 says
+is repeatable, and the six suites are six processes of one binary, which is
+what "The reservation is a measurement fix" says to take before quoting one.
+
+| row | what it does | VM | mixed frame | frame ÷ VM |
+| --- | --- | ---: | ---: | ---: |
+| `pure` | nothing but calls, no reference anywhere | 1.48 ms | 1.33 ms | 0.90× |
+| `arith` | the loop alone, no reference anywhere | 98.8 ms | 109.3 ms | **1.11×** |
+| `call` | a call a turn, no reference anywhere | 175.2 ms | 169.2 ms | 0.96× |
+| `field` | a struct in a frame slot, two field reads and a field write a turn | 477.9 ms | 234.0 ms | **0.49×** |
+| `method` | the same, with both reads behind a call | 699.7 ms | 384.5 ms | **0.55×** |
+
+The error bar is the six suites' disagreement with each other, per row, and
+there is no bimodality left in it:
+
+| row | the six ratios | band |
+| --- | --- | ---: |
+| `field` | 0.489 0.489 0.489 0.490 0.491 0.491 | 0.2 pt |
+| `arith` | 1.103 1.105 1.105 1.106 1.108 1.110 | 0.7 pt |
+| `pure` | 0.897 0.897 0.902 0.903 0.905 0.906 | 0.9 pt |
+| `method` | 0.546 0.549 0.550 0.550 0.555 | 0.9 pt |
+| `call` | 0.955 0.959 0.962 0.968 0.969 | 1.4 pt |
+
+Dynamic instruction counts are **exactly equal** on the two backends —
+47,428,595 on `field` and 59,428,598 on `method`, beside `arith`'s 31,142,877
+and `call`'s 37,142,877 — and so is the fuel each run spends, which
+`the_frame_spends_the_fuel_the_vm_spends` asserts for all four rows. So none of
+the above is fewer instructions or a different amount of program.
+
+**The result is two-sided, and the two sides are the whole of it.** A row whose
+frame holds a reference runs at half the VM's time. A row whose frame holds
+none runs *slower* than the VM, for the first time in this experiment. Neither
+is a surprise once the other is stated: the bitmap is a second buffer the hot
+loop writes on every push, and `arith` is the row that pushes most per unit of
+work and has nothing for the bitmap to say about any of it.
+
+### What a rooted frame costs to walk
+
+Per instruction, which is the comparison the equal counts make available:
+
+| row | VM | mixed frame | |
+| --- | ---: | ---: | --- |
+| `pure` | 6.42 ns | 5.78 ns | |
+| `arith` | 3.17 ns | **3.51 ns** | the only row where the frame is slower |
+| `call` | 4.72 ns | 4.56 ns | |
+| `field` | 10.08 ns | 4.93 ns | |
+| `method` | 11.77 ns | 6.47 ns | |
+
+`arith` is the whole of the negative result, and it is where it should be. It
+is the row with the most pushes per instruction and it has no reference in it
+at all, so every bit it writes is a bit about a word that will never be one.
+Phase A's build read the same row at 0.93× where this one reads 1.11× — a
+comparison that crosses a build, which
+[#179](https://github.com/myuon/cove/issues/179) and ADR 0029 say is worth an
+indication rather than a measurement, and the indication is that the bitmap
+costs a scalar loop something of the order of what one physical frame won it.
+
+**A within-build price for the bitmap alone is not available**, because the
+control for that is the same backend without one, and that is a different
+build. What *is* within one build, and is the finding, is the trade: in one
+binary, in one run, a loop with a reference in its frame gains 2× and a loop
+with none loses 11%.
+
+### Whether the per-call prize survives rooting
+
+It does, and it is **larger**. Both pairs are two rows of one run, and the
+second pair is the first with a struct in the frame instead of two scalars.
+
+`call` differs from `arith` by one call a turn — 2,000,000 calls, three more
+instructions each. `method` differs from `field` by putting each of two field
+reads behind a call — 4,000,000 calls, three more instructions each.
+
+| | VM | mixed frame | saved per call |
+| --- | ---: | ---: | ---: |
+| a call and a return, frame of scalars — `call` − `arith` | 38.2 ns | 30.0 ns | **8.2 ns** |
+| a call and a return, frame with a reference in it — `method` − `field` | 55.8 ns | 37.7 ns | **18.1 ns** |
+
+A call whose callee opens a frame the collector has to walk, and whose argument
+is a handle standing for a moment in no frame at all, is cheaper on the mixed
+frame than on the VM by **more than twice** what a scalar call is — in the same
+binary, which is the only comparison worth anything here. So the per-call prize
+is not what rooting spends. What the bitmap spends is per *word pushed*, which
+is why the row it costs is the one that pushes and never calls.
+
+`benches/pure` says the same from the other side and was not used to derive it:
+21,891 calls, 67.4 ns each on the VM and 60.7 on the frame.
+
+### Where the win on `field` actually comes from, which is not the frame
+
+Half the VM's time on `field` is a large number and it would be wrong to credit
+the frame layout with it. **It is the object header.**
+
+A `Vm` struct is an `Rc<StructValue>` holding a `Vec<(Rc<str>, Value)>`: the
+field *names* are in every object. Writing a field is `Rc::make_mut`, which
+copies the cell and the vector — two allocations and two `Rc<str>` clones —
+every turn of `benches/field`, because the local still holds the struct the
+operand was cloned from. A traced-heap object is a layout id and a run of
+words, and its names are in the layout, so the same write is two words into an
+entry the free list handed back.
+
+`crates/cove-runtime/tests/frame_allocation.rs` is where that stops being an
+argument: ten thousand extra struct field writes reach the allocator **zero**
+times on the frame and at least one per write on the `Vm`, counted with a
+global allocator in one process.
+
+That is ADR 0028 decision 2's "what it names carries a layout id, the object's
+size, its reference map, its payload layout" *in VM-owned metadata* — priced on
+one loop. The honest decomposition of `field`'s 0.49× is: an object header
+instead of per-object field names, minus the bitmap's cost on the same loop's
+pushes, plus whatever one physical frame was already worth. The first term is
+the large one. The row does not separate them and this document does not claim
+it does.
+
+The live set is 16 bytes throughout — one `Cursor` of two words — against two
+million objects allocated, so the collector's own work inside those 234 ms is
+a sweep of a table the free list keeps at two entries and a walk of a frame of
+three words, every sixty-four allocations, which is `crate::heap`'s own pacing
+floor.
+
+### The three multiplicities, and the shadow stack that stays empty
+
+ADR 0028 decision 8 distinguishes three multiplicities and says they must not
+be conflated. Under a bitmap over one stack:
+
+1. **Root storage locations are yielded once** — one bit, one visit. A struct
+   standing in a frame slot *and* in the operand word about to become a
+   callee's parameter is **two locations and one object**, and both are
+   yielded: de-duplicating handles is not the walk's job.
+   `a_reference_in_a_slot_and_in_an_operand_is_two_locations_and_one_expansion`
+   pins it, over a real run of a real loop, asserting that some collection saw
+   at least two locations while no collection expanded more than one object.
+2. **Real graph edges counted once each** does not arise, because there is no
+   `Rc::strong_count` to compare against. That absence is exactly why a bitmap
+   over words is sound where a shadow stack over `Value` would not be —
+   [PR #210](https://github.com/myuon/cove/pull/210)'s finding, which ADR 0033
+   preserves and this change does nothing to weaken. **Nothing in the frame's
+   root set is a `Value`**, so the bitmap cannot become a second path to
+   anything `crate::heap` already yields, which is #192's `arg_vectors` failure
+   and ADR 0027's place exclusion, avoided by the two universes being disjoint
+   rather than by anybody remembering.
+3. **Objects are expanded once during marking** — asserted equal to the live
+   set on every collection of every rooted row.
+
+**The shadow-root stack is wired and stays empty**, and that is a finding
+rather than an omission. Decision 8's third candidate mechanism — "the dispatch
+discipline guarantees that a collection can occur only when every live handle
+has been returned to a mapped VM slot" — is *false* for `Vm` at the five places
+`crates/cove-runtime/src/slot.rs` names, and is **true here by construction**,
+because a one-stack backend has nowhere else to put an operand. It stops being
+free the moment an aggregate crosses decision 5's boundary, which is Phase C's,
+so `TempRoots` is present and read by a test rather than absent:
+`nothing_is_rooted_outside_the_one_stack`.
+
+### Proving the rooting, which is two mutations
+
+A rooting claim nobody can make fail is not a claim, so each half of the walk
+is removed on its own and the run is made to die of it. Both run a real
+program, under `HandleHeap::stress` so that neither depends on which safepoint
+the pacing happened to choose, and both fail on the heap's own use-after-free
+message rather than on an assertion somebody wrote.
+
+| mutation | what it removes | what happens |
+| --- | --- | --- |
+| `a_value_slot_is_a_root_across_the_loop_it_lives_in` | the frame's own words | the struct in slot 0 is swept out from under the loop using it, and the next `cell.at` panics with `names a swept object` |
+| `a_call_argument_is_a_root_before_the_callee_has_a_frame` | the operand words | the argument of a call is swept between the caller pushing it and the callee's base arriving under it, and the callee's first field read panics the same way |
+
+The second is the half a *static* stack map would have to cover and the frame's
+own reference map does not: the word is above the caller's frame and below a
+callee that does not exist yet, and `Inst::Call` takes a safepoint there
+because ADR 0024 says every call is one. Each mutation has a control that runs
+the same program with the walk whole and agrees with the `Vm`, and every
+positive test asserts that collections actually ran and that the sweep actually
+reclaimed something — a rooting test over a run that collected nothing is
+vacuous, and this document has been caught believing one before.
+
+### What Phase B did not measure, and what Phase C owes
+
+The subset gained the struct and nothing else, so nothing below is measured and
+nothing below is predicted from what is:
+
+- **A reference map in `cove_ir`.** An `Inst::MakeStruct` names its type and its
+  field names and nothing else, and `cove_ir::Function` numbers slots without
+  saying what is in one beyond `params` and two counts. So a backend that needs
+  decision 2's reference map cannot read one off the lowering, and this one
+  reads it off the *construction* instead — the `fields.len()` instructions
+  before a `make-struct` are what pushed its words, and a type built two ways
+  that disagree is refused by name. That is the largest single thing Phase C
+  owes, and it is one thing rather than two: the same absence is why the frame
+  map is derived at run time from two frame sizes instead of being lowered as
+  one numbering.
+- **A `set-field` whose target type is known statically.** The field-position
+  table is per field-name constant, so two admitted structs that put the same
+  field name at different positions refuse the function that writes it. A
+  per-instruction type map would settle it and is lowering work.
+- **An aggregate at decision 5's boundary.** `crate::slot::Machine::materialise`
+  exists, is tested, and is *not wired here*: `make-builtin` refuses a
+  reference argument, so no struct crosses out of this backend. Decision 5's
+  own cost — "the boundary can only get more expensive" — is therefore still
+  unmeasured for anything larger than a word, and the copy a tail costs is the
+  measurement #211 already named and nobody has taken.
+- **The inbound half.** ADR 0033 clause 1 keeps it closed on purpose. Nothing
+  here consumes a `Value` into the heap and nothing here needs to.
+- **Every one of ADR 0033's identity obligations.** Clause 7 asks for one
+  explicit handle kind and one reference-map entry per external identity class,
+  and lifecycle tests for storage in a frame, storage in a heap object's field,
+  a Host round trip, Host reentry, task exit and collection. **None of that is
+  here**, and that is the ADR being followed rather than deferred: Phase B
+  stayed inside the VM-owned traced heap, where a struct belongs, and did not
+  bring a `Vector`, a `Shared`, a `Task`, a `TaskScope` or a `Resource` into
+  it.
+- **Arrays, strings and enums.** `crate::slot` has the variable-length tail and
+  a `Shape::Str`; the frame has no `make-array`, no `concat` and no enum
+  layout. `Map` and `Set` remain blocked on the `Part` that can say "a key",
+  which ADR 0033 clause 6 leaves open.
+- **A field write that does not copy.** A struct is a value, so writing a field
+  is a copy; `Vm` reaches the same point holding an `Rc` and calls
+  `Rc::make_mut`, which copies when another holder exists and mutates in place
+  when none does. A traced heap keeps no count and cannot tell those apart, so
+  it always copies — right in both cases, and strictly more work in one of
+  them. Whether a uniqueness analysis or a real place model recovers the
+  in-place write is a lowering question and is not asked here.
+- **Places, `var` parameters, closures, `dyn`, tasks, Host calls.** Refused by
+  name, as in Phase A. Four of the nine benchmark rows still have no `frame`
+  line and the harness prints which construct stopped each.
+- **The bitmap's alternatives.** A `Vec<bool>` would make a push a plain byte
+  store instead of a read-modify-write and make the walk read a byte per word
+  instead of skipping sixty-four at a time; a static per-`pc` operand map would
+  move the cost out of the loop entirely at the price of a table the size of the
+  instruction stream and a second thing for the lowering to keep true. Neither
+  is built. What is measured is the form #162 names.
+
 ## What is settled and what is open
 
 **Settled by measurement.** Typed scalar slots, the calling convention,
@@ -3773,7 +4068,18 @@ measured** — "One physical frame, measured" above is the result, and the short
 version is that one frame is worth 24 ns a call, 0.68x on `benches/call` and
 0.62x on `benches/pure`, and 0.93x on the one row that calls nothing. The
 paragraph is left as it was written because what it says next is the part that
-survived. ADR 0027's "What is not decided here" is the list. What the
+survived.
+
+**And #162's Design B has since been built and measured too** — "The mixed
+frame, measured" above — which is the half of the title that was about a *GC
+bitmap* rather than about one stack. The short version is two-sided: a loop
+whose frame holds a reference runs at 0.49x the VM and a call over such a frame
+saves 18.1 ns against the VM's 55.8, so **the per-call prize survives rooting
+and is more than twice what a scalar call's is**; and a loop whose frame holds
+no reference at all runs at 1.11x, because the bitmap is a bit written per word
+pushed and that row pushes most and has no reference to say anything about.
+Which of those two a program is depends on the program, and this document does
+not have a corpus that says which is typical. ADR 0027's "What is not decided here" is the list. What the
 two cliffs turned out to say about it is worth recording, because it was not
 what anybody expected: **neither of them needed one physical stack.** Both were
 a slot's *role* deciding its representation, and both were fixed by taking that
