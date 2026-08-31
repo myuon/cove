@@ -21,8 +21,9 @@
 //! contiguous `Vec<u64>`, and no word of it was ever a reference:
 //! [`admits`] refused any function with a nonzero `value_frame_size`, which is
 //! what made its "no `Value` in the hot path" claim structural rather than
-//! careful. It priced a call and a return at **14.4 ns against the VM's
-//! 38.3**, and said nothing at all about what a *rooted* frame costs.
+//! careful. It priced a call and a return at 14.4 ns against the VM's 38.3 —
+//! *in its own build*, which is the only kind of comparison ADR 0029 allows —
+//! and said nothing at all about what a *rooted* frame costs.
 //!
 //! **Phase B** is this: a word-wide slot stack with a GC bitmap, which is
 //! [issue #162](https://github.com/myuon/cove/issues/162)'s Design B proper. A
@@ -84,7 +85,7 @@
 //! canonicalised on the way in.
 //!
 //! `Float` is included because ADR 0028 decides it, and it is *not* exercised
-//! by the two rows this slice was built for: `cove_ir::Scalar` is `Int | Bool`
+//! by any of the four rows this backend runs: `cove_ir::Scalar` is `Int | Bool`
 //! today, so a `Float` is still lowered as a `Value` and this backend refuses
 //! any function that holds one. What the tests prove is the word: all 64 bits
 //! survive both the codec and a real frame.
@@ -104,7 +105,11 @@
 //! - **The frame base changes to `base'` and the stack pointer to
 //!   `base' + width`.** `Vec::resize` fills the locals with zero, which is
 //!   the canonical `Unit`/`false`/`0` word; a body writes every local before
-//!   it reads one, because the checker settled that before lowering.
+//!   it reads one, because the checker settled that before lowering. A zero
+//!   word is *also* never a live handle — `crate::slot` never issues
+//!   generation zero — so a frame with reference slots is opened by the same
+//!   instruction as one without, and a walk that reaches an unwritten value
+//!   slot finds nothing there rather than something arbitrary.
 //! - **The return address and the caller's metadata** are one `Call`
 //!   record pushed onto the frame stack: the callee's `FunctionId`, the
 //!   caller's resume point (`pc + 1`, which `cove_ir::lower` makes a block

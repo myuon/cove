@@ -106,6 +106,15 @@ impl Ready {
         )
     }
 
+    /// The same run, reporting what the traced heap did as well.
+    fn on_frame_measured(&self) -> (Outcome, u64, HeapStats) {
+        let hosts = hosts(None, None);
+        let runtime = Runtime::new(self.checked.clone(), self.sources.clone(), hosts.clone());
+        let mut frame = FrameVm::new(&runtime, &hosts, &self.ir);
+        let answered = frame.run_entry(&self.module, "main", Vec::new());
+        (outcome(answered), frame.materialized(), frame.heap_stats())
+    }
+
     /// The same run with the traced heap collecting at **every** safepoint,
     /// reporting what the collections found.
     ///
@@ -352,11 +361,47 @@ fn the_frame_executes_exactly_the_instructions_the_vm_executes() {
 fn the_hot_path_performs_no_value_operation() {
     for name in ADMITTED_ROWS {
         let ready = bench(name);
-        let (_, _, materialized) = ready.on_frame_with(None, None);
+        let (_, materialized, heap) = ready.on_frame_measured();
         assert_eq!(
             materialized, 8,
             "`benches/{name}` materialized {materialized} value(s), and the epilogue is worth 8"
         );
+        // And what the traced heap did, which is the other half of the same
+        // claim: the two rooted rows allocate an object a turn and keep one
+        // alive, and the two scalar rows own no heap at all.
+        match name {
+            "field" | "method" => {
+                assert_eq!(
+                    heap.allocated_objects, 2_000_001,
+                    "`benches/{name}` builds one `Cursor` and copies it once a turn"
+                );
+                assert_eq!(
+                    heap.peak_bytes, 16,
+                    "the live set is one two-word object, whatever the row allocated"
+                );
+                assert_eq!(heap.live_objects, 1);
+                assert!(
+                    heap.collections > 30_000,
+                    "`benches/{name}` collected {} time(s), and two million allocations \
+                     against a floor of sixty-four is about thirty-one thousand",
+                    heap.collections
+                );
+                // Everything the row allocated was either reclaimed or is
+                // live, except what it allocated after the last collection —
+                // which the pacing floor bounds at sixty-four however long the
+                // run was.
+                let outstanding = heap.allocated_objects - heap.freed_objects - heap.live_objects;
+                assert!(
+                    outstanding < 64,
+                    "`benches/{name}` left {outstanding} object(s) unaccounted for, and the \
+                     pacing floor is sixty-four allocations"
+                );
+            }
+            _ => assert_eq!(
+                heap.allocated_objects, 0,
+                "`benches/{name}` holds no reference anywhere, so it owns no heap"
+            ),
+        }
     }
 }
 

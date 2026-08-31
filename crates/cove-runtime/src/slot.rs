@@ -9,6 +9,13 @@
 //! "Why this cannot be added to the collector as it stands", below, is the
 //! argument, and it is the finding this slice exists to establish.
 //!
+//! [`crate::frame`]'s Phase B is that sentence's other half. Its slots *are*
+//! eight bytes, so [`HandleHeap`], [`Handle`], [`Layout`] and [`TempRoots`] are
+//! wired into it and it collects at the safepoints `Vm` collects at, over a
+//! bitmap rather than over this module's [`Frame`]. What stays here is the
+//! boundary — [`Machine`] and its materialiser — which Phase B does not reach,
+//! because an aggregate does not yet cross out of it.
+//!
 //! # What the gate is
 //!
 //! [`crate::heap`] finds a value the backend is holding in a Rust local by
@@ -378,11 +385,15 @@
 //!   own cost — "the boundary can only get more expensive" — is the number
 //!   this materialiser most obviously owes, and it is not taken here.
 
-// Nothing outside this module names anything in it, and that is the point:
-// the slice is the prototype #197's measurement gate stands in front of, and
-// wiring it into the live VM before the migration would mean paying for two
-// heaps to run one. The `allow` is scoped to this file for that reason, and
-// every item in this file is prototype code, so it hides nothing else.
+// `crate::frame` names the heap, the handle, the layout and the shadow stack
+// now; it did not when this module was written, and the paragraph that used to
+// stand here said so. What is still true is the half that mattered: nothing in
+// the **live** `Vm` names any of it, because wiring it there before the
+// migration would mean paying for two heaps to run one.
+//
+// The `allow` stays because the boundary half of the slice — `Machine`, the
+// materialiser, `Shape`, the tail — is still reached only by this module's own
+// tests, and it is scoped to this file so it hides nothing else.
 #![allow(dead_code)]
 
 use std::collections::HashSet;
