@@ -13,7 +13,9 @@
 //! one of it, and each of its two readers is on the far side of it from the
 //! other.
 
-use crate::{Const, ConstId, FunctionId, Inst, Program, SlotKind, StructId, StructType};
+use crate::{
+    Const, ConstId, Function, FunctionId, Inst, Program, Region, SlotKind, StructId, StructType,
+};
 
 use super::fuel::{block_fuel, ends_a_block};
 
@@ -122,10 +124,12 @@ fn validate_function(program: &Program, id: FunctionId) -> Result<(), String> {
     // and the check below that no argument arrives there is what makes 0 a
     // static number. This is the one place the layout the call fills in and
     // the layout the body reads are reconciled.
-    if function.capture_base != value_params {
+    if function.capture_base != function.value_origin() + value_params {
         return Err(format!(
-            "begins its captures at value slot {} and takes {value_params} value argument(s)",
-            function.capture_base
+            "begins its captures at slot {} and takes {value_params} value argument(s), \
+             whose value region begins at slot {}",
+            function.capture_base,
+            function.value_origin()
         ));
     }
     if !function.captures.is_empty() {
@@ -155,11 +159,12 @@ fn validate_function(program: &Program, id: FunctionId) -> Result<(), String> {
             .filter(|(_, kind)| matches!(kind, SlotKind::Value))
             .count();
         let scalars = function.captures.len() - values;
-        let window = function.capture_base as usize + values;
-        if window > function.value_frame_size as usize {
+        let window = function.capture_base + values as u32;
+        if window > function.place_origin() {
             return Err(format!(
-                "holds {values} value capture(s) after {} value argument(s) in a value frame of {}",
-                function.capture_base, function.value_frame_size
+                "holds {values} value capture(s) from slot {} in a value region that ends at {}",
+                function.capture_base,
+                function.place_origin()
             ));
         }
         if scalars > function.scalar_frame_size as usize {
@@ -203,48 +208,21 @@ fn validate_function(program: &Program, id: FunctionId) -> Result<(), String> {
                     )));
                 }
             }
-            Inst::LoadLocal(slot) | Inst::StoreLocal(slot) => {
-                if slot >= function.value_frame_size {
-                    return Err(at(format!(
-                        "reaches slot {slot} of a frame of {}",
-                        function.value_frame_size
-                    )));
-                }
+            // One numbering, so one question: is the slot this instruction
+            // names a slot of this frame at all, and is it in the region the
+            // instruction is the reader of? Both halves used to be one bound
+            // per stack, which could only ask the first half of the question
+            // — a `load-scalar 0` and a `load-local 0` named two different
+            // slots and each was in range of its own stack. Now they name one
+            // slot at most one of them may touch.
+            Inst::LoadLocal(slot) | Inst::StoreLocal(slot) | Inst::PlaceLocal(slot) => {
+                in_region(function, slot, Region::Value).map_err(&at)?;
             }
-            Inst::LoadScalar(slot) | Inst::StoreScalar(slot) => {
-                if slot >= function.scalar_frame_size {
-                    return Err(at(format!(
-                        "reaches slot {slot} of a frame of {}",
-                        function.scalar_frame_size
-                    )));
-                }
+            Inst::LoadScalar(slot) | Inst::StoreScalar(slot) | Inst::PlaceScalar(slot, _) => {
+                in_region(function, slot, Region::Scalar).map_err(&at)?;
             }
             Inst::LoadPlace(slot) => {
-                if slot >= function.place_frame_size {
-                    return Err(at(format!(
-                        "reaches slot {slot} of a frame of {}",
-                        function.place_frame_size
-                    )));
-                }
-            }
-            // A place names one slot of one stack, and which stack it is
-            // is which instruction built it. Checking each against its own
-            // frame size is what makes that a fact rather than an intention.
-            Inst::PlaceLocal(slot) => {
-                if slot >= function.value_frame_size {
-                    return Err(at(format!(
-                        "names value slot {slot} of a frame of {}",
-                        function.value_frame_size
-                    )));
-                }
-            }
-            Inst::PlaceScalar(slot, _) => {
-                if slot >= function.scalar_frame_size {
-                    return Err(at(format!(
-                        "names scalar slot {slot} of a frame of {}",
-                        function.scalar_frame_size
-                    )));
-                }
+                in_region(function, slot, Region::Place).map_err(&at)?;
             }
             Inst::MakeClosure {
                 function: target,
@@ -765,6 +743,37 @@ pub(super) fn stack_shape(structs: &[StructType], inst: Inst) -> Shape {
 }
 
 /// A return instruction as a diagnostic names it.
+/// Whether `slot` is a slot of this frame at all, and whether it is one of
+/// the region the instruction naming it is the reader of.
+///
+/// The one numbering is what makes this one question. A slot number is unique
+/// within a frame, so `region_of` answering the wrong region *is* a scalar
+/// instruction reaching a value slot — the failure the three separate bounds
+/// could not see, because each number was in range of its own stack and there
+/// was no number that told them apart.
+fn in_region(function: &Function, slot: u32, wanted: Region) -> Result<(), String> {
+    match function.region_of(slot) {
+        Some(region) if region == wanted => Ok(()),
+        Some(region) => Err(format!(
+            "reaches slot {slot}, which this frame keeps in its {} region and not its {}",
+            region_name(region),
+            region_name(wanted)
+        )),
+        None => Err(format!(
+            "reaches slot {slot} of a frame of {}",
+            function.slot_count()
+        )),
+    }
+}
+
+fn region_name(region: Region) -> &'static str {
+    match region {
+        Region::Value => "value",
+        Region::Scalar => "scalar",
+        Region::Place => "place",
+    }
+}
+
 fn render_return(inst: Inst) -> &'static str {
     match inst {
         Inst::ReturnScalar => "return-scalar",

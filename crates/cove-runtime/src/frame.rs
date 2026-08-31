@@ -1088,74 +1088,77 @@ impl HandleRoots for FrameRoots<'_> {
 /// references.
 ///
 /// **This is the one frame layout ADR 0028 decision 1 asks every physical
-/// offset to derive from**, and it is derived in turn from the two frame sizes
-/// `cove_ir::Function` carries. The lowering still numbers two spaces — an
-/// `Inst::LoadScalar` addresses one and an `Inst::LoadLocal` the other — and
-/// this is the map that makes them one region from one base: **the scalar
-/// slots first and the value slots behind them**, so scalar slot *i* stands at
-/// `base + i` and value slot *j* at `base + values + j`.
+/// offset to derive from**, and since Phase D it is not a second layout at
+/// all: it is `cove_ir::Function`'s own numbering, read. The lowering numbers
+/// one space — the scalar region, then the value region, then the place
+/// region, from one origin — so **a slot's number is its offset from this
+/// frame's base**, for an `Inst::LoadScalar` and an `Inst::LoadLocal` alike.
+/// There is nothing here to translate, and no second base to keep beside
+/// `base` on every instruction that addresses a word.
 ///
-/// # Why the scalars come first, and what that refuses
+/// What is left is the part a *number* cannot carry: how wide a frame is, and
+/// which run of it a collection follows. Both come off
+/// `cove_ir::Function::slot_count` and `cove_ir::Function::value_origin`, so
+/// this struct is those answers held where a per-call [`FrameVm::open`] can
+/// use them without asking again.
+///
+/// # Why the scalars come first, and what that still refuses
 ///
 /// A call does not move its arguments: `base' = top - argc`, so the words the
 /// caller pushed *are* the callee's first slots. With the scalars first that
-/// works for a scalar parameter always, because a scalar parameter is scalar
-/// slot 0. It works for a *value* parameter only where the function has no
-/// scalar slots at all, and [`admits`] refuses one that does — by name, and
-/// naming what would be needed instead, which is a lowering that numbers one
-/// space rather than two.
+/// works for a scalar parameter always, because a scalar parameter is slot 0.
+/// It works for a *value* parameter only where the function has no scalar
+/// slots at all, and [`admits`] refuses one that does.
 ///
-/// The alternative was a map that puts whichever kind the parameters are
-/// first. It costs the dispatch loop a second base to keep beside `base`, on
-/// every instruction that addresses a word, for a generality no admitted row
-/// uses; this way the scalar core's addressing is `base + slot`, which is
-/// Phase A's unchanged.
+/// Phase D moved that order out of this file and into the lowering, where it
+/// is the one numbering's order rather than one backend's convention. It did
+/// **not** move the refusals, and the reason is worth writing down because
+/// Phase C's note predicted otherwise. The refusals are not caused by two
+/// numberings. They are caused by the calling convention: arguments are pushed
+/// in *declaration* order and become slots without moving, while the numbering
+/// groups slots by region — so a function whose parameters are mixed has its
+/// second kind of parameter pushed at a word whose number names a different
+/// slot. Closing that needs the arguments permuted as a frame opens, or a
+/// convention that states each argument's slot, and neither of those is a
+/// renumbering. **One numbering was necessary for the widening and is not
+/// sufficient for it**, which is a smaller result than Phase C expected and is
+/// the one the code supports.
 ///
 /// # Why Phase C's per-field kind did not close this, although Phase B said it
 /// would
 ///
 /// Phase B wrote that "the same absence is why the frame map is derived at run
 /// time from two frame sizes instead of being lowered as one numbering". One
-/// absence, two symptoms — and having removed the absence, they are two.
+/// absence, two symptoms — and having removed the absence, they were two.
 ///
 /// A struct's reference map was genuinely missing from the IR: nothing in
 /// `cove_ir` said what a field held, so a backend had to invent an answer, and
 /// two inventions could disagree. `cove_ir::StructType` supplies it and the
-/// invention is gone. A frame's reference map is **not** missing. It is
-/// `value_frame_size` and `scalar_frame_size`, which `cove_ir::Function` has
-/// always carried and which say precisely which slots are references — this
-/// struct is three additions over them, computed once per function when a
-/// `FrameVm` is built and never during a run. Adding a `Vec<SlotKind>` beside
-/// them would move where the addition happens and change no answer.
-///
-/// What Phase B was actually pointing at is the *numbering*, and that is a
-/// different and larger change: `Inst::LoadScalar` and `Inst::LoadLocal`
-/// address two spaces, and merging them means renumbering every slot the
-/// lowering hands out and changing what those two instructions' operands mean
-/// — in the VM, which numbers three stacks and would have to keep numbering
-/// them, as much as here. What it would buy is the three refusals below that
-/// name it: a function taking both a value and a scalar parameter, a call
-/// passing both, and a value parameter beside a scalar slot. That is a real
-/// widening of the admitted subset and it is Phase D's, stated as its own
-/// piece of work rather than as a consequence of this one.
+/// invention is gone. A frame's reference map was **not** missing; it was
+/// `value_frame_size` and `scalar_frame_size`, which say precisely which slots
+/// are references. What was missing was a *number* that named one slot rather
+/// than one slot of one stack, and that is what Phase D added.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct FrameMap {
-    /// How many words one call needs: both frame sizes, added.
+    /// How many words one call needs, which is every slot of the one
+    /// numbering.
     width: u32,
-    /// Where value slot 0 stands, relative to the frame base — which is the
-    /// scalar frame size, because the scalars come first.
+    /// Where the value region begins, relative to the frame base — and,
+    /// because a slot's number is its offset, the number of the first value
+    /// slot as well.
     values: u32,
     /// How many value slots there are. The frame's reference range is
-    /// `values .. values + value_count`, and every word outside it is scalar.
+    /// `values .. values + value_count`, and every word outside it is a
+    /// scalar or a place.
     value_count: u32,
 }
 
 impl FrameMap {
-    /// The map `function`'s two frame sizes imply.
+    /// The map `function`'s own numbering states.
     fn of(function: &cove_ir::Function) -> FrameMap {
         FrameMap {
-            width: function.value_frame_size + function.scalar_frame_size,
-            values: function.scalar_frame_size,
+            width: function.slot_count(),
+            values: function.value_origin(),
             value_count: function.value_frame_size,
         }
     }
@@ -1862,7 +1865,7 @@ impl<'a> FrameVm<'a> {
         self.frames.clear();
         self.boundary.clear();
         self.fuel = 0;
-        let _ = self.open(function, 0);
+        self.open(function, 0);
         self.frames.push(Call {
             function,
             return_pc: 0,
@@ -1909,13 +1912,12 @@ impl<'a> FrameVm<'a> {
         let program = self.program;
         let standing = *self.frames.last().expect("the caller pushed a frame");
         let mut base = standing.base as usize;
-        // The second of the two numberings the lowering still keeps, read
-        // through the one frame map into one region from one base. A local
-        // rather than a field for the reason `base` and `pc` are: every
-        // instruction that addresses a value slot reads it. The *first*
-        // numbering needs no local at all, because the scalars stand at the
-        // base — see `FrameMap`.
-        let mut values = base + self.maps[standing.function.0 as usize].values as usize;
+        // There is no second local here and there used to be one. The
+        // lowering numbered two spaces, so a value slot's number had to be
+        // read through the frame map into one region from one base, and the
+        // number that did it was live across the whole loop and recomputed at
+        // every frame change. One numbering deleted it: a slot's number *is*
+        // its offset from `base`, whichever region it is in — see `FrameMap`.
         let mut running = program.function(standing.function);
         let mut code: &[Inst] = &running.code;
         let mut blocks: &[u32] = &running.block_fuel;
@@ -2000,7 +2002,7 @@ impl<'a> FrameVm<'a> {
                     // a call that passes both kinds -- see `FrameMap`.
                     let argc = (scalar_argc + value_argc) as usize;
                     let callee_base = self.words.len() - argc;
-                    values = self.open(target, callee_base);
+                    self.open(target, callee_base);
                     if self.words.len() > self.high_water {
                         self.high_water = self.words.len();
                     }
@@ -2025,7 +2027,7 @@ impl<'a> FrameVm<'a> {
                         Some(caller) => {
                             self.push_scalar(answer);
                             base = caller.base as usize;
-                            values = base + self.maps[caller.function.0 as usize].values as usize;
+
                             running = program.function(caller.function);
                             code = &running.code;
                             blocks = &running.block_fuel;
@@ -2054,12 +2056,12 @@ impl<'a> FrameVm<'a> {
 
                 // ----------------------------------------- the reference core
                 Inst::LoadLocal(slot) => {
-                    let word = self.words[values + slot as usize];
+                    let word = self.words[base + slot as usize];
                     self.push_reference(word);
                 }
                 Inst::StoreLocal(slot) => {
                     let word = self.pop_word();
-                    self.words[values + slot as usize] = word;
+                    self.words[base + slot as usize] = word;
                 }
                 Inst::Dup => {
                     let at = self.words.len() - 1;
@@ -2196,7 +2198,7 @@ impl<'a> FrameVm<'a> {
                                 Err(resumed) => {
                                     let caller =
                                         self.frames.last().expect("a caller stands").function;
-                                    values = base + self.maps[caller.0 as usize].values as usize;
+
                                     running = program.function(caller);
                                     code = &running.code;
                                     blocks = &running.block_fuel;
@@ -2216,7 +2218,7 @@ impl<'a> FrameVm<'a> {
                         Ok(value) => return Ok(value),
                         Err(resumed) => {
                             let caller = self.frames.last().expect("a caller stands").function;
-                            values = base + self.maps[caller.0 as usize].values as usize;
+
                             running = program.function(caller);
                             code = &running.code;
                             blocks = &running.block_fuel;
@@ -2265,12 +2267,11 @@ impl<'a> FrameVm<'a> {
     /// because `crate::slot` never issues generation zero. So a frame with
     /// reference slots is opened by the same instruction as one without, and
     /// what is added is the bitmap's masked pass over `width / 64` limbs.
-    fn open(&mut self, function: FunctionId, base: usize) -> usize {
+    fn open(&mut self, function: FunctionId, base: usize) {
         let map = self.maps[function.0 as usize];
         let width = map.width as usize;
         self.words.resize(base + width, 0);
         self.refs.write_frame(base, width, map.references());
-        base + map.values as usize
     }
 
     /// Pushes a word the layout calls scalar.
@@ -2507,7 +2508,7 @@ impl<'a> FrameVm<'a> {
         self.boundary.clear();
         self.fuel = 0;
         self.words.extend_from_slice(arguments);
-        let _ = self.open(function, 0);
+        self.open(function, 0);
         self.frames.push(Call {
             function,
             return_pc: 0,

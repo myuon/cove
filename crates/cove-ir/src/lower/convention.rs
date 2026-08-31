@@ -149,7 +149,9 @@ impl<'a> Lowering<'a> {
         body.block_at(decl_body, Position::Value)?;
         body.emit_final_return(decl_body.span);
         let finished = body.finish();
-        let capture_base = value_params(&params);
+        // A slot number in the one numbering, so the value region's own
+        // origin is part of it: see `Function::value_origin`.
+        let capture_base = finished.scalar_frame_size + value_params(&params);
 
         Ok(Function {
             module: module.into(),
@@ -388,7 +390,9 @@ impl<'a> Lowering<'a> {
         body.block_at(&decl.body, position_of(returns))?;
         body.emit_final_return(decl.body.span);
         let finished = body.finish();
-        let capture_base = value_params(&params);
+        // A slot number in the one numbering, so the value region's own
+        // origin is part of it: see `Function::value_origin`.
+        let capture_base = finished.scalar_frame_size + value_params(&params);
 
         Ok(Function {
             module: module.into(),

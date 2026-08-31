@@ -195,31 +195,63 @@ fn validate_refuses_a_slot_outside_the_frame() {
     );
 }
 
-/// A slot number is bounded by its own stack's frame size, not by
-/// whatever the other stack's frame happens to be.
+/// An instruction that names a slot of the wrong region is refused as
+/// *that*, and not as a slot outside the frame.
 ///
-/// The first program has no value locals at all — `value_frame_size` is
-/// 0 — so addressing value slot 0 is refused exactly as it would be in a
-/// frame with a hundred scalar slots and no value ones. The second is the
-/// mirror image: no scalar locals, so scalar slot 0 is refused however
-/// large the value frame is. Two independent numberings mean the mistake
-/// once caught by comparing a slot's declared kind is caught the same way
-/// an out-of-range slot always was.
+/// This is what the one numbering made sayable. A slot number used to be
+/// bounded by its own stack's frame size, and two numberings meant slot 0
+/// existed twice — so a `store` reaching a scalar slot could only be caught
+/// where the value frame happened to be too small for the number, and could
+/// not be caught at all where both frames were wide enough. There is one
+/// slot 0 now, and the region it is in is a fact about the frame, so the
+/// diagnostic names the mistake rather than a coincidence.
+///
+/// Both programs below have room for the number in the *other* region, which
+/// is the case the old bound could not see: the first has one scalar slot
+/// and no value slot, the second one value slot and no scalar slot, and each
+/// is refused for naming the region it did not mean.
 #[test]
-fn validate_refuses_a_slot_past_its_own_stacks_frame() {
+fn validate_refuses_a_slot_of_the_wrong_region() {
     let source = "fn f() -> Int {\n  let a = 1\n  a\n}\n";
     let mut program = lower(&checked(source)).expect("it lowers");
     program.functions[0].code[1] = Inst::StoreLocal(0);
     assert_eq!(
-        validate(&program).expect_err("a value slot past an empty value frame is refused"),
-        "m.f: 1: reaches slot 0 of a frame of 0"
+        validate(&program).expect_err("a value instruction naming a scalar slot is refused"),
+        "m.f: 1: reaches slot 0, which this frame keeps in its scalar region and not its value"
     );
 
     let mut program = lower(&checked("fn f(s: String) -> String {\n  s\n}\n")).expect("it lowers");
     program.functions[0].code[0] = Inst::LoadScalar(0);
     assert_eq!(
-        validate(&program).expect_err("a scalar slot past an empty scalar frame is refused"),
-        "m.f: 0: reaches slot 0 of a frame of 0"
+        validate(&program).expect_err("a scalar instruction naming a value slot is refused"),
+        "m.f: 0: reaches slot 0, which this frame keeps in its value region and not its scalar"
+    );
+}
+
+/// The two numbers a mixed frame gives one region each, told apart.
+///
+/// `f` keeps one scalar slot and one value slot, so its numbering is
+/// `0` scalar and `1` value and there is no number both instructions may
+/// carry. The check that this replaced could see neither of these: slot 0
+/// and slot 1 were each in range of both stacks.
+#[test]
+fn validate_tells_the_two_regions_of_one_frame_apart() {
+    let source = "fn f(s: String) -> Int {\n  let a = 1\n  a\n}\n";
+    let mut program = lower(&checked(source)).expect("it lowers");
+    assert_eq!(program.functions[0].scalar_frame_size, 1);
+    assert_eq!(program.functions[0].value_frame_size, 1);
+
+    let mut wrong = lower(&checked(source)).expect("it lowers");
+    wrong.functions[0].code[1] = Inst::StoreLocal(0);
+    assert_eq!(
+        validate(&wrong).expect_err("a value instruction naming the scalar slot is refused"),
+        "m.f: 1: reaches slot 0, which this frame keeps in its scalar region and not its value"
+    );
+
+    program.functions[0].code[1] = Inst::StoreScalar(1);
+    assert_eq!(
+        validate(&program).expect_err("a scalar instruction naming the value slot is refused"),
+        "m.f: 1: reaches slot 1, which this frame keeps in its value region and not its scalar"
     );
 }
 
@@ -244,7 +276,7 @@ fn sibling_blocks_share_a_slot_number_regardless_of_kind() {
          \x20  0  scalar-const 1\n\
          \x20  1  store-scalar 0\n\
          \x20  2  const Str(\"two\")\n\
-         \x20  3  store 0\n\
+         \x20  3  store 1\n\
          \x20  4  scalar-const 3\n\
          \x20  5  store-scalar 0\n\
          \x20  6  const Unit\n\

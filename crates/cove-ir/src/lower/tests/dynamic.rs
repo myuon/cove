@@ -15,7 +15,7 @@ fn a_dyn_parameter_is_converted_where_it_is_bound_and_dispatches_from_the_value(
              fn f(v: dyn Show) -> String {\n  v.show()\n}\n",
             "f"
         ),
-        "fn m.f arity=1 frame=1/0 params=[value] -> value\n\
+        "fn m.f arity=1 frame=0/1 params=[value] -> value\n\
          \x20  0  load 0\n\
          \x20  1  make-dyn m.Show\n\
          \x20  2  store 0\n\
@@ -42,7 +42,7 @@ fn a_dyn_field_is_converted_where_the_struct_is_built() {
              fn f() -> String {\n  let held = Box(item: A(n: 1))\n  held.item.show()\n}\n",
             "f"
         ),
-        "fn m.f arity=0 frame=1/0 -> value\n\
+        "fn m.f arity=0 frame=0/1 -> value\n\
          \x20  0  const Int(1)\n\
          \x20  1  make-struct m.A fields=n\n\
          \x20  2  make-dyn m.Show\n\
@@ -67,7 +67,7 @@ fn an_array_of_dyn_converts_each_element() {
              fn f(v: Array<dyn Show>) -> Int {\n  v.length()\n}\n",
             "f"
         ),
-        "fn m.f arity=1 frame=1/0 params=[value] -> Int\n\
+        "fn m.f arity=1 frame=0/1 params=[value] -> Int\n\
          \x20  0  load 0\n\
          \x20  1  make-dyn m.Show inside 1\n\
          \x20  2  store 0\n\
@@ -95,10 +95,10 @@ fn a_dyn_return_type_converts_every_return() {
         "fn m.f arity=2 frame=1/1 params=[value, Bool] -> value\n\
          \x20  0  load-scalar 0\n\
          \x20  1  jump-if-false-scalar 5\n\
-         \x20  2  load 0\n\
+         \x20  2  load 1\n\
          \x20  3  make-dyn m.Show\n\
          \x20  4  return\n\
-         \x20  5  load 0\n\
+         \x20  5  load 1\n\
          \x20  6  make-dyn m.Show\n\
          \x20  7  return\n"
     );
@@ -120,7 +120,7 @@ fn a_call_through_a_trait_bound_dispatches_from_the_value() {
              fn f<T: Show>(v: T) -> String {\n  v.show()\n}\n",
             "f"
         ),
-        "fn m.f arity=1 frame=1/0 params=[value] -> value\n\
+        "fn m.f arity=1 frame=0/1 params=[value] -> value\n\
          \x20  0  load 0\n\
          \x20  1  call-dyn m.Show.show argc=1 [m.A, m.B]\n\
          \x20  2  return\n"
@@ -143,7 +143,7 @@ fn a_trait_default_body_dispatches_on_self() {
              fn f(v: dyn Show) -> String {\n  v.loud()\n}\n",
             "A.loud"
         ),
-        "fn m.A.loud arity=1 frame=1/0 params=[value] receiver -> value\n\
+        "fn m.A.loud arity=1 frame=0/1 params=[value] receiver -> value\n\
          \x20  0  const Str(\"!\")\n\
          \x20  1  load 0\n\
          \x20  2  call-dyn m.Show.show argc=1 [m.A]\n\

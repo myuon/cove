@@ -115,7 +115,7 @@ fn a_scope_with_a_spawn_lowers_to_the_scope_and_the_try_that_leaves_it() {
             "export fn main() -> Result<Unit, Error> {\n  scope work {\n    let t = work.spawn { 1 }\n    await t\n  }\n  Ok(())\n}\n"
         ),
         concat!(
-            "fn m.main arity=0 frame=2/0 -> value\n",
+            "fn m.main arity=0 frame=0/2 -> value\n",
             "   0  enter-scope work\n",
             "   1  store 0\n",
             "   2  load 0\n",
@@ -321,7 +321,7 @@ fn a_lock_lowers_to_the_cell_the_closure_and_one_instruction() {
             "export fn main() -> Result<Unit, Error> {\n  let c = Shared(1)\n  c.lock(fn(var v) {\n    v = 2\n  })\n  Ok(())\n}\n"
         ),
         concat!(
-            "fn m.main arity=0 frame=1/0 -> value\n",
+            "fn m.main arity=0 frame=0/1 -> value\n",
             "   0  const Int(1)\n",
             "   1  make-builtin Shared argc=1\n",
             "   2  store 0\n",

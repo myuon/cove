@@ -294,7 +294,28 @@ impl<'a, 'l> Body<'a, 'l> {
         }
     }
 
-    /// The finished instructions, with every jump pointing at a real one.
+    /// The finished instructions, with every jump pointing at a real one and
+    /// every slot named by its number in the one frame numbering.
+    ///
+    /// # Why the slot numbers are settled here and not as they were emitted
+    ///
+    /// The one numbering runs the scalar region, then the value region, then
+    /// the place region, so a value slot's number is `scalar_frame_size` plus
+    /// its position among the values and a place slot's is
+    /// `scalar_frame_size + value_frame_size` plus its own. Both origins are
+    /// **high-water marks**, which is to say facts about the whole body that
+    /// are not known until the whole body is emitted: a scope hands its slot
+    /// numbers back when it ends, so the widest the scalar region ever got is
+    /// settled by the last statement as easily as by the first.
+    ///
+    /// So an emitter counts within its own region, where the counting rule is
+    /// local, and the one number every consumer sees is written once here.
+    /// Nothing downstream sees the intermediate form — [`Finished`] is what
+    /// `super::convention` builds a [`Function`] out of — and
+    /// `super::validate` checks the result against
+    /// [`Function::region_of`](crate::Function::region_of) rather than
+    /// against three sizes, so a slip in this loop is caught by the pass that
+    /// exists to catch it.
     pub(super) fn finish(mut self) -> Finished {
         for (pc, label) in &self.patches {
             let target = self.labels[*label]
@@ -307,6 +328,21 @@ impl<'a, 'l> Body<'a, 'l> {
                 | Inst::JumpIfFalseScalar(to)
                 | Inst::JumpIfTrueScalar(to) => *to = target,
                 other => unreachable!("a patch points at a jump, not {other:?}"),
+            }
+        }
+        let value_origin = self.scalar_frame_size;
+        let place_origin = self.scalar_frame_size + self.value_frame_size;
+        for inst in &mut self.code {
+            match inst {
+                // The scalar region begins at 0, so a scalar slot's number in
+                // its own region and its number in the one numbering are the
+                // same number and there is nothing to add.
+                Inst::LoadScalar(_) | Inst::StoreScalar(_) | Inst::PlaceScalar(..) => {}
+                Inst::LoadLocal(slot) | Inst::StoreLocal(slot) | Inst::PlaceLocal(slot) => {
+                    *slot += value_origin;
+                }
+                Inst::LoadPlace(slot) => *slot += place_origin,
+                _ => {}
             }
         }
         Finished {

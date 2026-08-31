@@ -475,6 +475,63 @@ impl Function {
             .get(&(pc as u32))
             .map_or(&[][..], Vec::as_slice)
     }
+
+    /// How many slots one frame of this function has, over all three
+    /// regions: the whole of the one numbering, and the number of eight-byte
+    /// words a one-array realization of the frame reserves.
+    pub fn slot_count(&self) -> u32 {
+        self.value_frame_size + self.scalar_frame_size + self.place_frame_size
+    }
+
+    /// The first slot number of the scalar region, which is zero: the one
+    /// numbering runs scalars, then values, then places.
+    ///
+    /// Written as a method although the answer is a constant, because the
+    /// order of the three regions is a fact about the *layout* and a reader
+    /// that spelled the zero itself would be a reader that had memorised it.
+    /// [`Function::value_origin`] is the same fact read one region along.
+    pub fn scalar_origin(&self) -> u32 {
+        0
+    }
+
+    /// The first slot number of the value region, which is where the scalar
+    /// region ends.
+    ///
+    /// A backend keeping the values in a separate array subtracts this to get
+    /// the offset in it, and a backend keeping one array adds nothing at all.
+    /// That subtraction is the whole of what
+    /// [ADR 0028](../../../docs/adr/0028-five-representations-and-one-is-public.md)
+    /// decision 1 means by "derives every physical offset from the one frame
+    /// layout".
+    pub fn value_origin(&self) -> u32 {
+        self.scalar_frame_size
+    }
+
+    /// The first slot number of the place region.
+    pub fn place_origin(&self) -> u32 {
+        self.scalar_frame_size + self.value_frame_size
+    }
+
+    /// Which region slot `slot` falls in, and `None` for a number this
+    /// function has no slot for.
+    ///
+    /// This is the frame's reference map, read the way a collector needs it:
+    /// [`Region::Value`] is a word to follow and the other two are words to
+    /// leave alone. Nothing on a hot path calls it — a backend builds its
+    /// map once per function — and `crate::lower::validate` calls it once per
+    /// slot-addressing instruction of every lowered program, which is how a
+    /// scalar instruction reaching a value slot is caught before a run.
+    pub fn region_of(&self, slot: u32) -> Option<Region> {
+        if slot < self.scalar_frame_size {
+            Some(Region::Scalar)
+        } else if slot < self.place_origin() {
+            Some(Region::Value)
+        } else if slot < self.slot_count() {
+            Some(Region::Place)
+        } else {
+            None
+        }
+    }
 }
 
 /// What a scalar slot or a scalar operand holds.
@@ -530,6 +587,42 @@ impl SlotKind {
     pub fn is_place(self) -> bool {
         matches!(self, SlotKind::Place)
     }
+
+    /// Which region of the one frame numbering a slot of this kind falls in.
+    pub fn region(self) -> Region {
+        match self {
+            SlotKind::Value => Region::Value,
+            SlotKind::Scalar(_) => Region::Scalar,
+            SlotKind::Place => Region::Place,
+        }
+    }
+}
+
+/// Which run of the one frame numbering a slot number falls in, and so which
+/// storage a backend keeps it in.
+///
+/// This is a [`SlotKind`] with the part a *number* cannot answer taken off.
+/// A slot number says a slot is scalar; it does not say whether the word is
+/// an `Int` or a `Bool`, because nothing addressed by a number needs to know
+/// — [`Inst::LoadScalar`] pushes the word as itself and
+/// [`Inst::PlaceScalar`] carries the [`Scalar`] where a read has to put a tag
+/// back. So the layout answers this and the instruction answers the rest,
+/// which is
+/// [ADR 0028](../../../docs/adr/0028-five-representations-and-one-is-public.md)
+/// decision 1's "what a slot means comes from `cove_ir::Function`'s per-slot
+/// layout and from the instruction that touches it".
+///
+/// It is also exactly the reference map a collector reads:
+/// [`Region::Value`] is a word to follow and the other two are words to leave
+/// alone.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Region {
+    /// A slot holding a general value, and the only region a collector walks.
+    Value,
+    /// A slot holding the eight untagged bytes of an `Int` or a `Bool`.
+    Scalar,
+    /// A slot holding a place: the number of another slot, and a path.
+    Place,
 }
 
 /// Addresses a [`Function`] of a [`Program`].
@@ -1417,15 +1510,20 @@ impl Unsupported {
 pub fn render(program: &Program, id: FunctionId) -> String {
     let function = program.function(id);
     let mut out = String::new();
+    // The three region widths, **in the order the one numbering runs them**:
+    // scalars, then values, then places. Written this way round rather than
+    // the other because a listing's slot numbers are the one numbering's, so
+    // this line is what a reader decodes them with — the value region begins
+    // at the first number and the place region at the two added.
     out.push_str(&format!(
         "fn {}.{} arity={} frame={}/{}",
         function.module,
         function.name,
         function.arity,
-        function.value_frame_size,
-        function.scalar_frame_size
+        function.scalar_frame_size,
+        function.value_frame_size
     ));
-    // The third window is written only where there is one, exactly as
+    // The third region is written only where there is one, exactly as
     // `params` and `captures` below are written only where they are not
     // empty. A listing should say what a function has and stay quiet about
     // what it does not, and almost no function has a place slot.

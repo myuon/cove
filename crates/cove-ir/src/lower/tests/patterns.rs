@@ -53,7 +53,7 @@ fn a_match_tries_its_arms_in_order_over_one_subject() {
             &format!("{ENUM}fn f(e: E) -> Int {{\n  match e {{\n    E.A => 1\n    E.B(n) => n\n  }}\n}}\n"),
             "f"
         ),
-        "fn m.f arity=1 frame=2/0 params=[value] -> Int\n\
+        "fn m.f arity=1 frame=0/2 params=[value] -> Int\n\
          \x20  0  load 0\n\
          \x20  1  test-case E.A\n\
          \x20  2  jump-if-false 6\n\
@@ -85,7 +85,7 @@ fn sibling_arms_reuse_the_slots_the_first_released() {
             "enum Pair {\n  L(Int)\n  R(Int)\n}\n\nfn f(p: Pair) -> Int {\n  match p {\n    Pair.L(x) => x\n    Pair.R(y) => y\n  }\n}\n",
             "f"
         ),
-        "fn m.f arity=1 frame=2/0 params=[value] -> Int\n\
+        "fn m.f arity=1 frame=0/2 params=[value] -> Int\n\
          \x20  0  load 0\n\
          \x20  1  test-case Pair.L\n\
          \x20  2  jump-if-false 11\n\
@@ -121,7 +121,7 @@ fn a_nested_pattern_matches_the_payload_it_stands_on() {
             "fn f(r: Result<Option<Int>, Error>) -> Int {\n  match r {\n    Ok(Some(x)) => x\n    _ => 0\n  }\n}\n",
             "f"
         ),
-        "fn m.f arity=1 frame=2/0 params=[value] -> Int\n\
+        "fn m.f arity=1 frame=0/2 params=[value] -> Int\n\
          \x20  0  load 0\n\
          \x20  1  test-case Ok\n\
          \x20  2  jump-if-false 17\n\

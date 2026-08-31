@@ -297,6 +297,39 @@ pub const BACK_EDGE_FUEL: u64 = 64;
 /// everywhere else in the IR — every jump target is one, and
 /// `cove_ir::lower::validate` bounds them all by the code's length — so a
 /// resumption point being one too is the same fact read from the other side.
+/// Where the running function's slot number **zero** would stand in the
+/// value stack, so that adding a value slot's number reaches it.
+///
+/// One numbering means one slot number and three storages, so a backend that
+/// keeps three has to derive each physical offset from the one layout — which
+/// is exactly what [ADR 0028](../../docs/adr/0028-five-representations-and-one-is-public.md)
+/// decision 1 requires of a physically split realization. The derivation is a
+/// subtraction of the region's origin, and it is done **once per frame**
+/// rather than once per access: `frame.base` is where the value region
+/// begins, `cove_ir::Function::value_origin` is the slot number that region
+/// begins at, and the difference is a number that a slot's own number can be
+/// added to. A value slot therefore costs one addition, which is what it cost
+/// when its number was its offset.
+///
+/// The subtraction wraps and the addition that undoes it wraps back. A
+/// function whose scalar region is wider than its frame's base is at — the
+/// first frame of a run, most obviously — has no value slot standing below
+/// the bottom of the stack; it has a number that is only meaningful once a
+/// slot number is added to it, and `cove_ir::lower::validate` is what
+/// guarantees every slot number a `load-local` carries is at least
+/// `value_origin`. Every use indexes a `Vec`, so a slip is an index panic and
+/// never a read of the wrong word.
+fn value_origin(frame: &Frame, function: &cove_ir::Function) -> usize {
+    frame.base.wrapping_sub(function.value_origin() as usize)
+}
+
+/// The same derivation for the place region, which no hot path reads.
+fn place_origin(frame: &Frame, function: &cove_ir::Function) -> usize {
+    frame
+        .place_base
+        .wrapping_sub(function.place_origin() as usize)
+}
+
 #[derive(Clone, Copy)]
 struct Frame {
     /// The function whose instructions are running.
@@ -1368,6 +1401,13 @@ impl<'a> Vm<'a> {
         let mut running = program.function(frame.function);
         let mut code: &[Inst] = &running.code;
         let mut blocks: &[u32] = &running.block_fuel;
+        // Where slot number zero of the running function *would* stand in
+        // the value stack, which is one region along from where its value
+        // slots actually begin. See [`value_origin`]: recomputing it here
+        // and at every frame change is what keeps a value slot's address one
+        // addition, exactly as it was when a value slot's number was its own
+        // offset.
+        let mut values = value_origin(&frame, running);
         let mut pc = 0usize;
 
         // Entering a call is a safepoint and the entry is a call, so a run
@@ -1381,12 +1421,12 @@ impl<'a> Vm<'a> {
             match code[pc] {
                 Inst::Const(id) => self.stack.push(self.constants[id.0 as usize].clone()),
                 Inst::LoadLocal(slot) => {
-                    let value = self.stack[frame.base + slot as usize].clone();
+                    let value = self.stack[values.wrapping_add(slot as usize)].clone();
                     self.stack.push(value);
                 }
                 Inst::StoreLocal(slot) => {
                     let value = self.pop();
-                    self.stack[frame.base + slot as usize] = value;
+                    self.stack[values.wrapping_add(slot as usize)] = value;
                 }
                 Inst::Pop => {
                     self.pop();
@@ -1557,6 +1597,7 @@ impl<'a> Vm<'a> {
                     running = callee;
                     code = &callee.code;
                     blocks = &callee.block_fuel;
+                    values = value_origin(&frame, callee);
                     pc = 0;
                     continue;
                 }
@@ -1571,6 +1612,7 @@ impl<'a> Vm<'a> {
                         running = program.function(frame.function);
                         code = &running.code;
                         blocks = &running.block_fuel;
+                        values = value_origin(&frame, running);
                         self.charge(blocks[0], || running.span_at(0))?;
                         pc = 0;
                         continue;
@@ -1586,6 +1628,7 @@ impl<'a> Vm<'a> {
                         running = program.function(frame.function);
                         code = &running.code;
                         blocks = &running.block_fuel;
+                        values = value_origin(&frame, running);
                         self.charge(blocks[0], || running.span_at(0))?;
                         pc = 0;
                         continue;
@@ -1870,6 +1913,7 @@ impl<'a> Vm<'a> {
                                     running = program.function(frame.function);
                                     code = &running.code;
                                     blocks = &running.block_fuel;
+                                    values = value_origin(&frame, running);
                                     pc = resumed;
                                     // The caller resumes at the instruction
                                     // after its `Call`, which is a block head
@@ -1891,6 +1935,7 @@ impl<'a> Vm<'a> {
                             running = program.function(frame.function);
                             code = &running.code;
                             blocks = &running.block_fuel;
+                            values = value_origin(&frame, running);
                             pc = resumed;
                             // The caller resumes at the instruction after its
                             // `Call`, which is a block head for exactly that
@@ -1914,6 +1959,7 @@ impl<'a> Vm<'a> {
                             running = program.function(frame.function);
                             code = &running.code;
                             blocks = &running.block_fuel;
+                            values = value_origin(&frame, running);
                             pc = resumed;
                             // The caller resumes at the instruction after its
                             // `Call`, which is a block head for exactly that
@@ -1974,20 +2020,26 @@ impl<'a> Vm<'a> {
         match running.code[pc] {
             Inst::PlaceLocal(slot) => {
                 // Absolute, because a place travels into a call and the
-                // callee's `base` is a different number — see `Place`.
-                self.places
-                    .push(Place::rooted_at(frame.base + slot as usize));
+                // callee's `base` is a different number — see `Place`. The
+                // slot's number is the one numbering's, so the value
+                // region's origin comes off it: see `value_origin`.
+                self.places.push(Place::rooted_at(
+                    value_origin(&frame, running).wrapping_add(slot as usize),
+                ));
             }
             Inst::PlaceScalar(slot, what) => {
                 // The same thing on the other stack, and absolute for the
-                // same reason: `frame.scalar_base` is the callee's own.
+                // same reason: `frame.scalar_base` is the callee's own. No
+                // origin comes off this one, because the scalar region is
+                // the region the one numbering begins with.
                 self.places.push(Place::rooted_at_scalar(
                     frame.scalar_base + slot as usize,
                     what,
                 ));
             }
             Inst::LoadPlace(slot) => {
-                let place = self.places[frame.place_base + slot as usize].clone();
+                let place =
+                    self.places[place_origin(&frame, running).wrapping_add(slot as usize)].clone();
                 self.places.push(place);
             }
             Inst::PlaceField(index) => {

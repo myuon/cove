@@ -185,7 +185,7 @@ fn a_binding_a_place_is_rooted_at_keeps_its_scalar_slot() {
     // where it stands.
     assert_eq!(
         listed,
-        "fn m.main arity=0 frame=0/2 -> Int\n\
+        "fn m.main arity=0 frame=2/0 -> Int\n\
          \x20  0  scalar-const 1\n\
          \x20  1  store-scalar 0\n\
          \x20  2  scalar-const 2\n\
