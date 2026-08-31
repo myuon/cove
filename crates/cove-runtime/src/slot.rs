@@ -170,6 +170,103 @@
 //! `the_source_is_swept_mid_materialisation_without_the_root` is what it costs
 //! to forget.
 //!
+//! # A variable-length tail, and what a reference map can say about one
+//!
+//! Decision 2 requires an object's header to carry its "payload layout,
+//! including a variable-length tail where it has one". Everything else in this
+//! module is a fixed set of words, so the half of that sentence after the
+//! comma was specified and unexercised, and so was the reference map's ability
+//! to describe a run whose length is not known until the allocation.
+//!
+//! A tail is split between the two places an object's description lives, and
+//! the split is forced rather than chosen:
+//!
+//! - the [`Layout`] — one per lowered type, written before any object of it
+//!   exists — carries the fixed part, a per-word reference map for *that*, and
+//!   **one** [`Part`] for the whole tail;
+//! - the object's own header carries how many tail words there are, because
+//!   that is settled by the allocation and by nothing earlier.
+//!
+//! So the reference map is two rules rather than a bitmap: a set of indices
+//! for the fixed part, and a single bit for the tail. That is not an economy,
+//! it is what a variable length permits. A per-word map of a tail cannot be
+//! written down at lowering time, when the length is unknown — and it need not
+//! be, because the collector's question about a word is a yes-or-no and every
+//! word of a tail answers it the same way.
+//!
+//! Both answers are exercised, and the second is the one that matters.
+//! [`Shape::Array`] with [`Part::Nested`] is a run of handles the mark phase
+//! walks, which is the thing a reference map exists for; the same shape with
+//! [`Part::Int`] is a run of scalars the mark phase must not follow one word
+//! of, however much those words look like live handles, which is decision 1's
+//! invariant — "a slot the layout calls scalar must never be reachable by a
+//! walk that treats it as a reference" — stated for a tail, where a walk that
+//! guessed from the bits would guess in bulk. [`Shape::Str`] is the third
+//! case: a tail whose word count is not its element count, over a fixed part
+//! that is load-bearing. The map is indifferent to the packing, and that
+//! indifference is the point.
+//!
+//! ## A tail of handles is a run of siblings
+//!
+//! [`Machine::materialise_args`] is where a second root is load-bearing rather
+//! than redundant: a nested object is reachable from the rooted parent that
+//! names it, but a call's arguments are *siblings*, and no one of them roots
+//! another. A tail of handles is that case at a scale the program rather than
+//! the frame chooses, and [`Machine::materialise_tail_args`] is it — a spread
+//! call whose whole argument list is one array.
+//!
+//! The array is the crossing's argument vector, so nothing roots it, and it is
+//! swept at the first safepoint inside the crossing while every one of its
+//! former elements survives. That is the assertion and not an accident: it is
+//! what says the tail's reference map is not what keeps the elements alive
+//! there. The shadow stack is. Rooting them one at a time sweeps the rest,
+//! which is `rooting_one_tail_element_at_a_time_sweeps_the_siblings`.
+//!
+//! Nothing about the mechanism had to change for the scale. Truncate-to-depth
+//! covers eight roots the way it covers two, so a tail turns out to be a large
+//! instance of the sibling case rather than a new one.
+//!
+//! ## Decision 7's `Elements` guard, and where a tail meets it
+//!
+//! [`Elements`](crate::value::Elements) is decision 7's opaque public guard
+//! over a `Vector`'s `RefCell`, there because an alias may write the elements
+//! and so nothing can hand out a plain `&[Value]` of them. A tail is the
+//! handle-heap analogue of the same problem — a run of words the VM owns and
+//! a host wants to read — so whether the guard's shape fits one is a question
+//! this slice owes an answer to. The answer is in two halves.
+//!
+//! **For an array the guard fits and is not needed.** A tail materialises as
+//! `Value::array`, a copy, and the copy is read with `Value::items`, which
+//! answers a plain slice because the materialised array's storage does sit
+//! still. Handing out a guard there would be answering a question nobody
+//! asked.
+//!
+//! **A guard onto a live tail is a different object, and it is refused rather
+//! than missing.** `Elements` borrows from a `Value`; a guard whose lifetime
+//! came from [`HandleHeap`] would be a window onto VM storage, and ADR 0028's
+//! "The tension #195 left" refuses exactly that in its second reason — "a lazy
+//! window keeps a `Value` alive against VM storage, which means a host holding
+//! one constrains when a collection may run", where materialisation is what
+//! keeps the safepoint assumption true. So `Elements`'s shape is the one a
+//! tail must *not* be handed out with, and the fact that it fits an array so
+//! easily is because the guard is over a materialisation and not over a heap.
+//!
+//! What is left over is not about the guard's shape at all, and it is the
+//! finding this slice ends on. Decision 7 also says that "the values whose
+//! identity is observable — `Vector`, `Shared`, `Task`, `TaskScope`,
+//! `Resource` — are materialized as handles rather than as copies", and that
+//! `Vector` keeps having no copying constructor because `is` is defined for
+//! it. A Cove `Vector` living in this heap would be a tail. Materialising it
+//! as a copy is what decision 7 refuses; materialising it "as a handle" cannot
+//! mean a [`Handle`], because a `Value` holding one would join the two heaps
+//! whose disjointness is what makes everything above sound. A tail therefore
+//! reaches every aggregate whose identity is *not* observable — array, string,
+//! and any composition of them — and stops at the five that is. Which way that
+//! stops is a decision ADR 0028 does not take: either those types stay in
+//! `crate::heap`'s counted world and never become tails, or a `Value` gains a
+//! way to name VM storage and the seam stops being one-way. This slice picks
+//! neither, because picking one is not a rooting question.
+//!
 //! # The three multiplicities
 //!
 //! Decision 8 distinguishes three and says they must not be conflated. Here
@@ -182,7 +279,10 @@
 //!    temporary root is two storage locations and both are yielded.
 //!    [`HandleCollection::roots_yielded`] is that count, and
 //!    `a_handle_in_a_slot_and_in_the_shadow_stack_is_two_locations_and_one_object`
-//!    pins it.
+//!    pins it. A tail does not change the rule and makes it easier to break:
+//!    `a_tail_naming_one_object_twice_is_two_locations_and_one_expansion` is
+//!    two tail slots naming one object, which is two locations to root and one
+//!    object to expand.
 //! 2. **Real graph edges are counted once each.** This requirement exists for
 //!    the comparison against `Rc::strong_count` and there is no such
 //!    comparison here, so it does not arise — which is the whole reason a
@@ -193,9 +293,10 @@
 //!    [`HandleCollection::expansions`] counts how many times the mark phase
 //!    read an object's reference map, and it equals the number of live
 //!    objects whatever the shape of the graph.
-//!    `a_shared_object_reached_by_many_edges_is_expanded_once` and
-//!    `a_cycle_of_handles_is_expanded_once_and_reclaimed` are the two shapes
-//!    that would break it.
+//!    `a_shared_object_reached_by_many_edges_is_expanded_once`,
+//!    `a_cycle_of_handles_is_expanded_once_and_reclaimed` and
+//!    `a_shared_object_in_many_tail_slots_is_expanded_once` are the three
+//!    shapes that would break it.
 //!
 //! # What this is not
 //!
@@ -231,11 +332,36 @@
 //!   Decision 3's two-slot `Dynamic` needs a witness the reference map can
 //!   read, and it is not here; adding one changes what a reference map has to
 //!   say.
-//! - **No variable-length tail.** A [`Layout`] is a fixed number of words, so
-//!   there is no array, string, map or set shape, and `Value::items`,
-//!   `as_str` and `vector_elements` have nothing to materialise from.
-//!   Decision 7's `Elements` guard is the answer for the ones whose storage
-//!   sits behind a cell, and none of that is exercised here.
+//!
+//!   The tail is worth one finding for whichever round selects that layout,
+//!   because it moves a line the niche form would have to cross. A reference
+//!   map is now a function of the layout *and one number in the object's
+//!   header*: how long the tail is. That number is written at the allocation
+//!   and is never a value the program can see. A niche layout would make the
+//!   map a function of the object's *payload* instead — the same word being
+//!   both a value and the thing that says how to read a value — and those two
+//!   are different in kind rather than in degree. Decision 2 already says a
+//!   niche is "more complex because the reference map may have to interpret
+//!   the word according to the enum layout"; a tail is evidence for how much,
+//!   since it is the weakest possible version of that dependency and it still
+//!   required the header to exist. Neither of the other two forms is affected:
+//!   an immediate discriminant and typed payload slots are both fixed maps.
+//! - **No aggregate whose identity is observable.** A tail materialises as an
+//!   array or a string, which are values a copy is right for. `Vector`,
+//!   `Shared`, `Task`, `TaskScope` and `Resource` are the five decision 7 says
+//!   are materialised as handles because `is` can tell them apart, and
+//!   "Decision 7's `Elements` guard, and where a tail meets it" above is why a
+//!   tail cannot be one of them without either a copying constructor decision
+//!   7 refuses or a `Value` that stores a [`Handle`]. So `vector_elements` has
+//!   nothing here to materialise from and will not until that is decided.
+//!   `Map` and `Set` are unbuilt for a smaller reason: their tails would be
+//!   `MapKey`s in key order, and a [`Part`] has no way to say "a key".
+//! - **A tail is copied at the boundary and never windowed**, which is
+//!   deliberate and is also the reason the two heaps stay disjoint. Whether
+//!   the copy is what a large array should cost is a measurement question,
+//!   and it is the one decision 5's "the boundary can only get more expensive"
+//!   most obviously points at now that the thing crossing can be as long as
+//!   the program likes.
 //! - **The boundary is one-way.** Decision 5 says a `Value` is *built* on the
 //!   way out and *consumed* on the way in, and only the first half is here.
 //!   Consuming one — a host's answer becoming slots and objects — is the
@@ -372,6 +498,31 @@ pub(crate) enum Shape {
         type_name: &'static str,
         fields: Vec<(&'static str, Part)>,
     },
+    /// A declared array: no fixed words at all, and one tail word per
+    /// element.
+    ///
+    /// This is decision 2's variable-length tail at its smallest — the whole
+    /// payload is the tail, and how long it is is the *object's* business and
+    /// not the layout's. `element` is what every tail word is, and one answer
+    /// for the whole run is what lets a reference map describe a length
+    /// nobody knows until the allocation: the map says "the tail is handles"
+    /// or "the tail is scalars" once, and it is as true of a tail of nought
+    /// as of a tail of a thousand.
+    Array { element: Part },
+    /// A declared string: one fixed word holding the length in bytes, and a
+    /// tail of words packing eight UTF-8 bytes each.
+    ///
+    /// Here for the two cases [`Shape::Array`] does not reach — a tail whose
+    /// word count is not its element count, and a fixed part that is
+    /// load-bearing rather than empty. The packing is a layout question and
+    /// the reference map is indifferent to it: what the map has to say about
+    /// this tail is that it is scalar, and it would say the same if the
+    /// layout spent a whole word on every byte.
+    ///
+    /// The fixed word is [`Part::Int`] because the only thing anything asks
+    /// of it is that it is not a handle. Nothing materialises it on its own:
+    /// a byte count is not a Cove value.
+    Str,
     /// One case of a declared enum, with its payload words in the order the
     /// case declares them.
     ///
@@ -388,13 +539,23 @@ pub(crate) enum Shape {
 }
 
 impl Shape {
-    /// The parts of an object of this shape, in word order.
-    fn parts(&self) -> Vec<Part> {
+    /// The parts of this shape's **fixed** part, in word order.
+    fn fixed_parts(&self) -> Vec<Part> {
         match self {
-            Shape::Opaque => Vec::new(),
+            Shape::Opaque | Shape::Array { .. } => Vec::new(),
             Shape::Scalar(part) => vec![*part],
+            Shape::Str => vec![Part::Int],
             Shape::Struct { fields, .. } => fields.iter().map(|(_, part)| *part).collect(),
             Shape::Enum { payload, .. } => payload.clone(),
+        }
+    }
+
+    /// What every word of this shape's tail is, where it has one.
+    fn tail(&self) -> Option<Part> {
+        match self {
+            Shape::Array { element } => Some(*element),
+            Shape::Str => Some(Part::Int),
+            Shape::Opaque | Shape::Scalar(_) | Shape::Struct { .. } | Shape::Enum { .. } => None,
         }
     }
 }
@@ -402,34 +563,63 @@ impl Shape {
 /// What the VM owns about one shape of heap object.
 ///
 /// ADR 0028 decision 2 names five things a header or the VM's metadata must
-/// carry. Three of them are here — a layout id, the object's size, and its
-/// reference map — and the other two are deliberately absent. There is no
-/// payload layout beyond "`words` words", because this slice has no aggregate
-/// worth describing; and there is no movement guarantee, because ADR 0011 and
-/// the Language Card make collection non-moving and decision 2 records that
-/// as an allocator invariant rather than a mandatory word in every header.
-/// [`HandleHeap`] never moves an object.
+/// carry. Four of them are here — a layout id, the object's size, its
+/// reference map, and its payload layout including the variable-length tail
+/// where it has one — and the fifth is deliberately absent: there is no
+/// movement guarantee, because ADR 0011 and the Language Card make collection
+/// non-moving and decision 2 records that as an allocator invariant rather
+/// than a mandatory word in every header. [`HandleHeap`] never moves an
+/// object.
 ///
-/// The payload layout is here now, as [`Layout::shape`], because decision 5's
+/// The payload layout is here as [`Layout::shape`], because decision 5's
 /// boundary needs one: reading a word as an `Int` rather than as a `Float` or
 /// a handle is a question only the layout can answer. A layout built from a
 /// [`Shape`] derives its reference map from that payload layout rather than
 /// being told it twice, which is decision 2's required invariant — "the
 /// lowered layout completely determines how to find every reference; runtime
 /// code must not guess" — made true by there being nothing else to consult.
+///
+/// # What a layout says about a tail, and what it cannot
+///
+/// A layout is one description shared by every object that has it, and a tail
+/// is the one part of an object whose *size* the layout does not know: how
+/// many words follow the fixed part is settled by the allocation and recorded
+/// in the object's own header, as [`Object::tail`]. So the layout says two
+/// things and the object says the third:
+///
+/// - `words` — how many fixed words come first, and [`Layout::refs`] which of
+///   *those* are handles, word by word;
+/// - `tail` — what every word after them is, as one [`Part`] for the whole
+///   run, or `None` for a layout with no tail at all;
+/// - and the object's own `tail` count is how far that run goes.
+///
+/// The reference map is therefore two rules rather than a bitmap: an explicit
+/// set for the fixed part, and one bit for the tail. That is not an economy,
+/// it is what a variable length forces — a per-word map for the tail could not
+/// be written down before the allocation that decides how many words there
+/// are, so the only map that can describe a tail is one that says the same
+/// thing about all of it.
 #[derive(Clone, Debug)]
 pub(crate) struct Layout {
     name: &'static str,
     words: usize,
-    /// Which of the object's words are handles.
+    /// Which of the object's **fixed** words are handles.
     ///
-    /// This is the reference map, and it is the only thing that decides.
-    /// A word this does not name is scalar bits and is never read as a
-    /// handle, however much it may look like one — which is decision 1's
-    /// invariant that "a slot the layout calls scalar must never be reachable
-    /// by a walk that treats it as a reference", stated for an object's
-    /// interior rather than for a frame.
+    /// This is half the reference map, and within the fixed part it is the
+    /// only thing that decides. A word this does not name is scalar bits and
+    /// is never read as a handle, however much it may look like one — which is
+    /// decision 1's invariant that "a slot the layout calls scalar must never
+    /// be reachable by a walk that treats it as a reference", stated for an
+    /// object's interior rather than for a frame.
     refs: Vec<usize>,
+    /// What each word of the variable-length tail is, or `None` where the
+    /// layout has no tail.
+    ///
+    /// The other half of the reference map, and it is one answer rather than a
+    /// set because a tail's length is not known until the object exists.
+    /// `Some(Part::Nested)` is a run of handles the collector walks;
+    /// `Some(`anything else`)` is a run of scalars it must not.
+    tail: Option<Part>,
     /// What an object of this layout materialises as, and what each of its
     /// words means on the way.
     shape: Shape,
@@ -439,6 +629,23 @@ impl Layout {
     /// A layout of `words` eight-byte words, of which those at `refs` are
     /// handles, and which never crosses decision 5's boundary.
     pub(crate) fn new(name: &'static str, words: usize, refs: Vec<usize>) -> Layout {
+        Layout::opaque(name, words, refs, None)
+    }
+
+    /// The same, with a variable-length tail every word of which is `tail`.
+    ///
+    /// An object of such a layout is `words` fixed words and then as many tail
+    /// words as its allocation asked for, which may be none.
+    pub(crate) fn with_tail(
+        name: &'static str,
+        words: usize,
+        refs: Vec<usize>,
+        tail: Part,
+    ) -> Layout {
+        Layout::opaque(name, words, refs, Some(tail))
+    }
+
+    fn opaque(name: &'static str, words: usize, refs: Vec<usize>, tail: Option<Part>) -> Layout {
         for &at in &refs {
             assert!(
                 at < words,
@@ -449,19 +656,24 @@ impl Layout {
             name,
             words,
             refs,
+            tail,
             shape: Shape::Opaque,
         }
     }
 
-    /// A layout whose objects a host may be handed: the width its `shape`
-    /// implies, and the reference map that shape derives.
+    /// A layout whose objects a host may be handed: the fixed width its
+    /// `shape` implies, the tail it implies, and the reference map that shape
+    /// derives for both.
     ///
     /// There is no second argument for the reference map, and that is the
     /// point. Decision 2 requires that "the lowered layout completely
     /// determines how to find every reference"; here it does so because there
-    /// is nothing else to consult and no way to say something different.
+    /// is nothing else to consult and no way to say something different. The
+    /// tail is the case where that matters most: nothing can be told that a
+    /// tail is scalar and then be handed a tail of handles, because the same
+    /// [`Shape`] answers both questions.
     pub(crate) fn boundary(name: &'static str, shape: Shape) -> Layout {
-        let parts = shape.parts();
+        let parts = shape.fixed_parts();
         let refs = parts
             .iter()
             .enumerate()
@@ -472,13 +684,21 @@ impl Layout {
             name,
             words: parts.len(),
             refs,
+            tail: shape.tail(),
             shape,
         }
     }
 
-    /// How many eight-byte words the object holds.
+    /// How many eight-byte words the object's **fixed** part holds. An
+    /// object's tail stands after these, and how long it is is the object's
+    /// own header and not this.
     pub(crate) fn words(&self) -> usize {
         self.words
+    }
+
+    /// What every word of the tail is, or `None` for a layout without one.
+    pub(crate) fn tail(&self) -> Option<Part> {
+        self.tail
     }
 
     /// The layout's name, for a panic message.
@@ -492,10 +712,18 @@ impl Layout {
     }
 }
 
-/// One VM-owned heap object: a layout and its words.
+/// One VM-owned heap object: a layout, how long its tail is, and its words.
 #[derive(Clone, Debug)]
 struct Object {
     layout: LayoutId,
+    /// How many of `words` are the tail — decision 2's "and then N more".
+    ///
+    /// This is the one piece of an object's layout the [`Layout`] cannot
+    /// carry, because it is settled by the allocation rather than by the
+    /// lowering, and it is why a header exists at all rather than every word
+    /// of the description living in the layout table. Always zero for a layout
+    /// whose `tail` is `None`.
+    tail: usize,
     words: Vec<Slot>,
 }
 
@@ -787,22 +1015,43 @@ impl HandleHeap {
 
     /// Allocates an object of `layout` holding `words`.
     ///
+    /// Where the layout has a tail, everything past its fixed part is the
+    /// tail, and how many words that is goes in the object's header. This is
+    /// the only place a tail's length is decided, which is decision 2's point:
+    /// it is not known until here.
+    ///
     /// # Panics
     ///
-    /// If `words` is not the width the layout declares. An object whose size
-    /// disagrees with its layout is one whose reference map cannot be
-    /// trusted, and ADR 0028 decision 2's required invariant is that the
+    /// If `words` is not the width the layout declares — exactly, for a layout
+    /// with no tail; at least its fixed part, for a layout with one. An object
+    /// whose size disagrees with its layout is one whose reference map cannot
+    /// be trusted, and ADR 0028 decision 2's required invariant is that the
     /// layout completely determines how to find every reference.
     pub(crate) fn allocate(&mut self, layout: LayoutId, words: Vec<Slot>) -> Handle {
         let declared = self.layout(layout);
-        assert_eq!(
-            words.len(),
-            declared.words,
-            "{} declares {} words",
-            declared.name,
-            declared.words
-        );
-        self.objects.push(Some(Object { layout, words }));
+        let tail = if declared.tail.is_some() {
+            assert!(
+                words.len() >= declared.words,
+                "{} declares {} words before its tail",
+                declared.name,
+                declared.words
+            );
+            words.len() - declared.words
+        } else {
+            assert_eq!(
+                words.len(),
+                declared.words,
+                "{} declares {} words",
+                declared.name,
+                declared.words
+            );
+            0
+        };
+        self.objects.push(Some(Object {
+            layout,
+            tail,
+            words,
+        }));
         self.allocations_since_collection += 1;
         Handle(self.objects.len() as u32 - 1)
     }
@@ -862,6 +1111,30 @@ impl HandleHeap {
         self.layouts[object.layout.0 as usize].shape()
     }
 
+    /// The word indices of the tail of the object `handle` names: decision 2's
+    /// "and then N more", which is the object's header and not its layout.
+    ///
+    /// Empty for an object of a layout with no tail, and empty for one whose
+    /// allocation asked for no tail words — which are different facts about
+    /// the heap and the same answer here, because nothing that walks a tail
+    /// has any reason to tell them apart.
+    pub(crate) fn tail_range(&self, handle: Handle) -> std::ops::Range<usize> {
+        let object = self.object(handle);
+        let fixed = self.layouts[object.layout.0 as usize].words;
+        fixed..fixed + object.tail
+    }
+
+    /// Whether the tail of the object `handle` names is a run of handles.
+    ///
+    /// The reference map's answer about the tail, and the only thing that
+    /// decides whether a tail word is followed.
+    pub(crate) fn tail_is_reference(&self, handle: Handle) -> bool {
+        let object = self.object(handle);
+        self.layouts[object.layout.0 as usize]
+            .tail
+            .is_some_and(Part::is_reference)
+    }
+
     /// The name of `handle`'s layout, for a panic message.
     pub(crate) fn layout_name(&self, handle: Handle) -> &'static str {
         let object = self.object(handle);
@@ -896,11 +1169,21 @@ impl HandleHeap {
         while let Some(handle) = work.pop() {
             expansions += 1;
             let object = self.object(handle);
+            let layout = &self.layouts[object.layout.0 as usize];
             live_bytes += (object.words.len() * std::mem::size_of::<Slot>()) as u64;
+            // The tail's share of the reference map: one bit for the whole
+            // run, and the object's own header for how far it goes. A tail of
+            // scalars contributes no indices at all, which is the same
+            // statement as a fixed word the map does not name.
+            let tail = if layout.tail.is_some_and(Part::is_reference) {
+                self.tail_range(handle)
+            } else {
+                0..0
+            };
             // The reference map, and nothing else, decides which words are
             // followed. A word it does not name is scalar bits, whatever
             // those bits happen to look like.
-            for &at in &self.layouts[object.layout.0 as usize].refs {
+            for at in layout.refs.iter().copied().chain(tail) {
                 let child = Handle::from_slot(object.words[at]);
                 if self.is_live(child) && marked.insert(child.0) {
                     work.push(child);
@@ -1110,6 +1393,59 @@ impl Machine {
         })
     }
 
+    /// The same crossing, where the arguments arrive as the tail of one heap
+    /// array rather than as a run of frame slots.
+    ///
+    /// This is [`Machine::materialise_args`] at a scale the frame does not
+    /// choose: a spread call's argument list is as long as the array is, and
+    /// the array is a value the program built. Decision 5 lists "the arguments
+    /// a host passes to a Cove closure" beside "Host calls — arguments out",
+    /// and both are this shape once an argument list can be a heap object.
+    ///
+    /// **The array is consumed and is not rooted, and that is the whole of
+    /// what this proves.** The tail's handles are read out into a Rust local
+    /// vector in one go, the way `Vm::take` drains a call's arguments off the
+    /// operand stack — and from that instant the array itself is what #192
+    /// kept `Vm::arg_vectors` out of the root set for: a container the
+    /// crossing has finished with, whose elements are now siblings in a Rust
+    /// local with nothing but the shadow stack holding them. The array is
+    /// swept at the first safepoint inside the crossing and every element
+    /// survives it, which is only true because each element is a root of its
+    /// own. `rooting_one_tail_element_at_a_time_sweeps_the_siblings` is what
+    /// it costs to draw the scope round each in turn instead.
+    ///
+    /// # Panics
+    ///
+    /// If the layout's tail is not a run of handles. Reading a scalar tail as
+    /// references is the one thing decision 1's invariant forbids, stated for
+    /// a tail.
+    pub(crate) fn materialise_tail_args(&mut self, source: Handle) -> Vec<Value> {
+        let handles = self.tail_handles(source);
+        self.with_roots(&handles, |machine| {
+            handles
+                .iter()
+                .map(|&handle| machine.materialise_rooted(handle))
+                .collect()
+        })
+    }
+
+    /// The handles standing in the tail of the object `source` names.
+    ///
+    /// No safepoint: this is one read, the way `Vm::take` is one drain, and
+    /// what happens after it is the caller's rooting problem rather than
+    /// this one's.
+    fn tail_handles(&self, source: Handle) -> Vec<Handle> {
+        assert!(
+            self.heap.tail_is_reference(source),
+            "{}'s tail is scalar and holds no references",
+            self.heap.layout_name(source)
+        );
+        self.heap
+            .tail_range(source)
+            .map(|at| Handle::from_slot(self.heap.word(source, at)))
+            .collect()
+    }
+
     /// The body of [`Machine::materialise`], which assumes `handle` is already
     /// a root.
     ///
@@ -1149,6 +1485,38 @@ impl Machine {
                 }
                 Value::enumeration(type_name, case, materialised)
             }
+            // The tail, and it is read exactly as the fixed part is: one word
+            // at a time, as the [`Part`] the layout gives the whole run, with
+            // a safepoint before each. How many there are is the object's
+            // header rather than the layout's — the one number that arrives at
+            // the boundary from the allocation instead of from the lowering.
+            Shape::Array { element } => {
+                let tail = self.heap.tail_range(handle);
+                let mut items = Vec::with_capacity(tail.len());
+                for at in tail {
+                    items.push(self.part(handle, at, element));
+                }
+                Value::array(items)
+            }
+            // A tail whose words are not one element each. The layout's fixed
+            // word says how many bytes of the last word are the string's, and
+            // reading it is the same act as reading any other word: the
+            // boundary knows it is a length because the layout says so.
+            Shape::Str => {
+                let length = self.word(handle, 0) as usize;
+                let tail = self.heap.tail_range(handle);
+                let mut bytes = Vec::with_capacity(tail.len() * size_of::<Slot>());
+                for at in tail {
+                    bytes.extend_from_slice(&self.word(handle, at).to_le_bytes());
+                }
+                assert!(
+                    length <= bytes.len(),
+                    "a String's length word runs past its tail"
+                );
+                bytes.truncate(length);
+                let text = String::from_utf8(bytes).expect("a String object's tail is UTF-8");
+                Value::string(text)
+            }
         }
     }
 
@@ -1167,11 +1535,7 @@ impl Machine {
     /// That is decision 4's rule at the boundary — the type comes from the
     /// metadata, never from the value.
     fn part(&mut self, source: Handle, at: usize, part: Part) -> Value {
-        // Deliberately discarded: what the collection did is on
-        // `Machine::collections` for a test to read, and the materialiser has
-        // no decision to make about it.
-        let _ = self.safepoint();
-        let bits = self.heap.word(source, at);
+        let bits = self.word(source, at);
         match part {
             Part::Int => Value::int(bits as i64),
             Part::Float => Value::float(f64::from_bits(bits)),
@@ -1185,6 +1549,21 @@ impl Machine {
             // to replace with a local one.
             Part::Nested => self.materialise(Handle::from_slot(bits)),
         }
+    }
+
+    /// Reads one word of the object `source` names, at a safepoint.
+    ///
+    /// The safepoint is the point of the whole exercise, and it is per *word*
+    /// rather than per crossing for the reason above: a boundary is a stretch
+    /// of VM work whose length is the size of what crosses, and a tail is what
+    /// makes that length something the program chose. An array of a thousand
+    /// handles is a thousand safepoints inside one crossing.
+    fn word(&mut self, source: Handle, at: usize) -> Slot {
+        // Deliberately discarded: what the collection did is on
+        // `Machine::collections` for a test to read, and the materialiser has
+        // no decision to make about it.
+        let _ = self.safepoint();
+        self.heap.word(source, at)
     }
 }
 
@@ -1268,6 +1647,59 @@ mod tests {
     /// A `Point` at `x`, `y`, and the handle naming it.
     fn a_point(machine: &mut Machine, layout: LayoutId, x: i64, y: i64) -> Handle {
         machine.allocate(layout, vec![x as Slot, y as Slot])
+    }
+
+    /// An array whose tail is a run of handles, and which has no fixed part at
+    /// all: the shape the reference map exists for.
+    fn handle_array(heap: &mut HandleHeap) -> LayoutId {
+        heap.register(Layout::boundary(
+            "test.Array",
+            Shape::Array {
+                element: Part::Nested,
+            },
+        ))
+    }
+
+    /// An array whose tail is a run of scalars, and which the collector must
+    /// therefore not follow one word of.
+    fn int_array(heap: &mut HandleHeap) -> LayoutId {
+        heap.register(Layout::boundary(
+            "test.IntArray",
+            Shape::Array { element: Part::Int },
+        ))
+    }
+
+    /// A string: one fixed word of byte length, and a tail packing eight bytes
+    /// a word.
+    fn strings(heap: &mut HandleHeap) -> LayoutId {
+        heap.register(Layout::boundary("test.Str", Shape::Str))
+    }
+
+    /// An array object whose tail names `elements`.
+    fn an_array(machine: &mut Machine, layout: LayoutId, elements: &[Handle]) -> Handle {
+        machine.allocate(
+            layout,
+            elements.iter().map(|handle| handle.to_slot()).collect(),
+        )
+    }
+
+    /// A string object holding `text`, packed the way [`Shape::Str`] says.
+    fn a_string(machine: &mut Machine, layout: LayoutId, text: &str) -> Handle {
+        let bytes = text.as_bytes();
+        let mut words = vec![bytes.len() as Slot];
+        words.extend(bytes.chunks(size_of::<Slot>()).map(|chunk| {
+            let mut word = [0u8; size_of::<Slot>()];
+            word[..chunk.len()].copy_from_slice(chunk);
+            Slot::from_le_bytes(word)
+        }));
+        machine.allocate(layout, words)
+    }
+
+    /// `count` `Point`s, which is what a tail of handles is filled with.
+    fn some_points(machine: &mut Machine, layout: LayoutId, count: i64) -> Vec<Handle> {
+        (0..count)
+            .map(|n| a_point(machine, layout, n, n * 10))
+            .collect()
     }
 
     /// Allocates `count` objects nothing points at, which is how a test makes
@@ -2066,5 +2498,399 @@ mod tests {
         let layout = node(&mut machine.heap);
         let handle = machine.allocate(layout, vec![7, Handle::NONE.to_slot()]);
         machine.materialise(handle);
+    }
+
+    // ------------------------------- decision 2's variable-length tail
+
+    /// The thing a reference map exists for: a run of handles whose length
+    /// nobody knew until the allocation, walked because the layout says the
+    /// tail is references and for no other reason.
+    #[test]
+    fn a_tail_of_handles_is_walked_by_the_reference_map() {
+        let mut machine = Machine::new();
+        let points = point(&mut machine.heap);
+        let arrays = handle_array(&mut machine.heap);
+        let elements = some_points(&mut machine, points, 8);
+        let array = an_array(&mut machine, arrays, &elements);
+        machine.frame.push_handle(array);
+
+        let collected = machine.collect_now();
+        assert_eq!(
+            collected.roots_yielded, 1,
+            "one slot names the array and nothing names its elements: {collected:?}"
+        );
+        assert_eq!(collected.live_objects, 9, "the array and all eight");
+        assert_eq!(
+            collected.expansions, collected.live_objects,
+            "each expanded once: {collected:?}"
+        );
+        assert!(elements.iter().all(|&handle| machine.heap.is_live(handle)));
+    }
+
+    /// And the other half of the same statement. A tail the layout calls
+    /// scalar is not walked however much its words look like handles — the
+    /// tail's analogue of `a_scalar_word_holding_a_live_handles_bits_is_not_an_edge`,
+    /// and the one that matters more, because a tail is where a walk that
+    /// guessed from the bits would guess in bulk.
+    #[test]
+    fn a_tail_of_scalars_is_not_walked_however_its_words_look() {
+        let mut machine = Machine::new();
+        let points = point(&mut machine.heap);
+        let ints = int_array(&mut machine.heap);
+        let hidden = some_points(&mut machine, points, 4);
+        let array = an_array(&mut machine, ints, &hidden);
+        machine.frame.push_handle(array);
+
+        let collected = machine.collect_now();
+        assert_eq!(collected.live_objects, 1, "the array alone: {collected:?}");
+        assert_eq!(collected.freed_objects, 4);
+        assert!(
+            hidden.iter().all(|&handle| !machine.heap.is_live(handle)),
+            "every word of the tail holds a live object's handle, and the map \
+             says the tail is scalar, so none of them is an edge"
+        );
+    }
+
+    /// One layout, two objects, two lengths. The layout carries the fixed part
+    /// and what the tail's words are; how many of them there are is the
+    /// object's own header, and the walk and the byte count both take it from
+    /// there.
+    #[test]
+    fn a_tails_length_is_the_objects_own_and_not_its_layouts() {
+        let mut machine = Machine::new();
+        let points = point(&mut machine.heap);
+        let arrays = handle_array(&mut machine.heap);
+        assert_eq!(
+            machine.heap.layout(arrays).words(),
+            0,
+            "an array is all tail"
+        );
+        assert_eq!(machine.heap.layout(arrays).tail(), Some(Part::Nested));
+
+        let elements = some_points(&mut machine, points, 3);
+        let empty = an_array(&mut machine, arrays, &[]);
+        let three = an_array(&mut machine, arrays, &elements);
+        machine.frame.push_handle(empty);
+        machine.frame.push_handle(three);
+
+        assert_eq!(machine.heap.tail_range(empty).len(), 0);
+        assert_eq!(machine.heap.tail_range(three).len(), 3);
+
+        let collected = machine.collect_now();
+        assert_eq!(collected.live_objects, 5, "both arrays and three points");
+        assert_eq!(
+            collected.live_bytes,
+            (3 + 3 * 2) * size_of::<Slot>() as u64,
+            "the empty array's nought words, the other's three, and six in \
+             the points: {collected:?}"
+        );
+    }
+
+    /// Decision 8's second and third multiplicities, in a tail. Five tail
+    /// words naming one object are five edges and one expansion, and the
+    /// object is neither expanded five times nor freed because it was reached
+    /// more than once.
+    #[test]
+    fn a_shared_object_in_many_tail_slots_is_expanded_once() {
+        let mut machine = Machine::new();
+        let points = point(&mut machine.heap);
+        let arrays = handle_array(&mut machine.heap);
+        let shared = a_point(&mut machine, points, 1, 2);
+        let array = an_array(&mut machine, arrays, &[shared; 5]);
+        machine.frame.push_handle(array);
+
+        let collected = machine.collect_now();
+        assert_eq!(collected.live_objects, 2, "{collected:?}");
+        assert_eq!(
+            collected.expansions, collected.live_objects,
+            "reached five times and expanded once: {collected:?}"
+        );
+        assert!(machine.heap.is_live(shared));
+    }
+
+    /// A fixed part and a tail in one object, with a reference in each and a
+    /// scalar beside them. The map is two rules and the walk applies both.
+    #[test]
+    fn a_fixed_part_and_a_tail_are_both_walked() {
+        let mut machine = Machine::new();
+        let points = point(&mut machine.heap);
+        let chunks =
+            machine
+                .heap
+                .register(Layout::with_tail("test.Chunk", 2, vec![1], Part::Nested));
+        let hidden = a_point(&mut machine, points, 8, 9);
+        let fixed = a_point(&mut machine, points, 1, 2);
+        let tail = some_points(&mut machine, points, 3);
+        let mut words = vec![hidden.to_slot(), fixed.to_slot()];
+        words.extend(tail.iter().map(|handle| handle.to_slot()));
+        let chunk = machine.allocate(chunks, words);
+        machine.frame.push_handle(chunk);
+
+        let collected = machine.collect_now();
+        assert_eq!(
+            collected.live_objects, 5,
+            "the chunk, its one fixed reference and its three tail words: {collected:?}"
+        );
+        assert!(machine.heap.is_live(fixed));
+        assert!(tail.iter().all(|&handle| machine.heap.is_live(handle)));
+        assert!(
+            !machine.heap.is_live(hidden),
+            "the fixed word the map does not name is not an edge, and having a \
+             tail did not make it one"
+        );
+    }
+
+    /// An object shorter than its layout's fixed part has no tail; it has a
+    /// missing field. A tail makes the width a range and not a free-for-all.
+    #[test]
+    #[should_panic(expected = "test.Chunk declares 2 words before its tail")]
+    fn an_object_shorter_than_its_fixed_part_is_refused() {
+        let mut machine = Machine::new();
+        let chunks =
+            machine
+                .heap
+                .register(Layout::with_tail("test.Chunk", 2, vec![1], Part::Nested));
+        machine.allocate(chunks, vec![0]);
+    }
+
+    // --------------------------------------- a tail at decision 5's boundary
+
+    /// A tail of scalars across the boundary, at three lengths from one
+    /// layout, and `Value::items` is the reader that answers.
+    #[test]
+    fn an_array_of_scalars_materialises_from_a_tail() {
+        let mut machine = Machine::new();
+        let ints = int_array(&mut machine.heap);
+        for length in [0usize, 1, 5] {
+            let words: Vec<Slot> = (0..length).map(|n| n as Slot).collect();
+            let handle = machine.allocate(ints, words);
+            let value = machine.materialise(handle);
+            let items = value.items().expect("an array's items");
+            assert_eq!(items.len(), length);
+            let read: Vec<Option<i64>> = items.iter().map(Value::as_int).collect();
+            assert_eq!(
+                read,
+                (0..length as i64).map(Some).collect::<Vec<_>>(),
+                "a tail of {length}"
+            );
+        }
+        assert_eq!(machine.rooted(), 0);
+    }
+
+    /// A tail of handles across the boundary: the reference map says the run
+    /// is references, so every word of it is materialised in turn.
+    #[test]
+    fn an_array_of_handles_materialises_through_the_tails_reference_map() {
+        let mut machine = Machine::new();
+        let points = point(&mut machine.heap);
+        let arrays = handle_array(&mut machine.heap);
+        let elements = some_points(&mut machine, points, 3);
+        let array = an_array(&mut machine, arrays, &elements);
+
+        let value = machine.materialise(array);
+        let items = value.items().expect("an array's items");
+        assert_eq!(items.len(), 3);
+        let read: Vec<Option<i64>> = items
+            .iter()
+            .map(|item| item.field("y").and_then(Value::as_int))
+            .collect();
+        assert_eq!(read, vec![Some(0), Some(10), Some(20)]);
+    }
+
+    /// The tail whose word count is not its element count. The fixed word says
+    /// how many bytes are the string's, the tail packs eight to a word, and
+    /// the reference map's only interest in any of it is that none of it is a
+    /// handle.
+    #[test]
+    fn a_string_materialises_from_a_packed_scalar_tail() {
+        let mut machine = Machine::new();
+        let layout = strings(&mut machine.heap);
+        for text in ["", "hi", "eight!!!", "a string that needs three words"] {
+            let handle = a_string(&mut machine, layout, text);
+            assert_eq!(
+                machine.heap.tail_range(handle).len(),
+                text.len().div_ceil(size_of::<Slot>()),
+                "eight bytes to a word, for {text:?}"
+            );
+            let value = machine.materialise(handle);
+            assert_eq!(value.as_str(), Some(text));
+        }
+    }
+
+    /// The positive rooting direction, for a tail. The array is out of the
+    /// frame and in a Rust local for the whole crossing, a collection runs
+    /// before every word of the tail is read, and nothing in it is swept.
+    #[test]
+    fn the_tail_of_a_source_survives_a_collection_in_the_middle_of_materialising_it() {
+        let mut machine = Machine::new();
+        let points = point(&mut machine.heap);
+        let arrays = handle_array(&mut machine.heap);
+        let elements = some_points(&mut machine, points, 4);
+        let array = an_array(&mut machine, arrays, &elements);
+        let at = machine.frame.push_handle(array);
+
+        let local = machine.frame.take_handle(at);
+        machine.heap.stress(true);
+        let value = machine.materialise(local);
+
+        assert_eq!(
+            value
+                .items()
+                .map(|items| items.len())
+                .expect("an array's items"),
+            4
+        );
+        assert!(
+            machine
+                .collections()
+                .iter()
+                .all(|collection| collection.live_objects == 5 && collection.freed_objects == 0),
+            "the array and its four elements survived every one: {:?}",
+            machine.collections()
+        );
+        let depths: Vec<u64> = machine
+            .collections()
+            .iter()
+            .map(|collection| collection.roots_yielded)
+            .collect();
+        assert_eq!(
+            depths,
+            vec![1, 2, 2, 1, 2, 2, 1, 2, 2, 1, 2, 2],
+            "one root while a tail word is read, two while the point it names \
+             is, four times over"
+        );
+        assert_eq!(machine.rooted(), 0);
+    }
+
+    /// The negative direction, same program without the root: the first
+    /// safepoint inside the crossing sweeps the array, and the next tail word
+    /// read is the use-after-free.
+    #[test]
+    #[should_panic(expected = "names a swept object")]
+    fn the_source_of_a_tail_is_swept_mid_materialisation_without_the_root() {
+        let mut machine = Machine::new();
+        let points = point(&mut machine.heap);
+        let arrays = handle_array(&mut machine.heap);
+        let elements = some_points(&mut machine, points, 4);
+        let array = an_array(&mut machine, arrays, &elements);
+        let at = machine.frame.push_handle(array);
+
+        let local = machine.frame.take_handle(at);
+        machine.heap.stress(true);
+        machine.materialise_rooted(local);
+    }
+
+    // ------------------------------------------- a tail as a run of siblings
+
+    /// The sibling case at the scale a tail gives it. A spread call's
+    /// arguments are the tail of an array; the array is consumed by the
+    /// crossing and rooted by nothing, so the elements' only root is the
+    /// shadow stack — eight of them at once, none of which roots any other.
+    ///
+    /// The array being swept at the first safepoint is the assertion, not an
+    /// accident: it is what says the reference map is not what is keeping the
+    /// elements alive here.
+    #[test]
+    fn every_element_of_a_tail_is_rooted_for_the_whole_crossing() {
+        let mut machine = Machine::new();
+        let points = point(&mut machine.heap);
+        let arrays = handle_array(&mut machine.heap);
+        let elements = some_points(&mut machine, points, 8);
+        let array = an_array(&mut machine, arrays, &elements);
+
+        machine.heap.stress(true);
+        let args = machine.materialise_tail_args(array);
+
+        assert_eq!(args.len(), 8);
+        let read: Vec<Option<i64>> = args
+            .iter()
+            .map(|arg| arg.field("y").and_then(Value::as_int))
+            .collect();
+        assert_eq!(read, (0..8).map(|n| Some(n * 10)).collect::<Vec<_>>());
+        assert!(
+            !machine.heap.is_live(array),
+            "the array is the crossing's argument vector and nothing roots it"
+        );
+        assert_eq!(
+            machine.collections()[0].freed_objects,
+            1,
+            "the array went at the first safepoint and nothing else did: {:?}",
+            machine.collections()
+        );
+        assert!(
+            machine
+                .collections()
+                .iter()
+                .all(|collection| collection.roots_yielded == 8 && collection.live_objects == 8),
+            "all eight were roots at every one of them: {:?}",
+            machine.collections()
+        );
+        assert!(elements.iter().all(|&handle| machine.heap.is_live(handle)));
+        assert_eq!(machine.rooted(), 0);
+    }
+
+    /// The mutation of the test above, and the reason its rooting is not
+    /// decoration. Rooting each element for its own materialisation leaves the
+    /// other seven in a Rust local and in no root at all, and the first
+    /// safepoint inside the first crossing takes them.
+    #[test]
+    #[should_panic(expected = "names a swept object")]
+    fn rooting_one_tail_element_at_a_time_sweeps_the_siblings() {
+        let mut machine = Machine::new();
+        let points = point(&mut machine.heap);
+        let arrays = handle_array(&mut machine.heap);
+        let elements = some_points(&mut machine, points, 8);
+        let array = an_array(&mut machine, arrays, &elements);
+
+        machine.heap.stress(true);
+        let handles = machine.tail_handles(array);
+        for handle in handles {
+            machine.materialise(handle);
+        }
+    }
+
+    /// Decision 8's three multiplicities at the seam, in a tail. Two tail
+    /// words naming one object are **two root storage locations and one
+    /// expansion**: the crossing roots each location it took a handle out of,
+    /// and marking expands the object they share once.
+    #[test]
+    fn a_tail_naming_one_object_twice_is_two_locations_and_one_expansion() {
+        let mut machine = Machine::new();
+        let points = point(&mut machine.heap);
+        let arrays = handle_array(&mut machine.heap);
+        let shared = a_point(&mut machine, points, 1, 2);
+        let array = an_array(&mut machine, arrays, &[shared, shared]);
+
+        machine.heap.stress(true);
+        let args = machine.materialise_tail_args(array);
+
+        for collection in machine.collections() {
+            assert_eq!(
+                collection.roots_yielded, 2,
+                "two tail slots are two locations: {collection:?}"
+            );
+            assert_eq!(collection.live_objects, 1, "{collection:?}");
+            assert_eq!(
+                collection.expansions, collection.live_objects,
+                "and one expansion however many locations reach it: {collection:?}"
+            );
+        }
+        let read: Vec<Option<i64>> = args
+            .iter()
+            .map(|arg| arg.field("x").and_then(Value::as_int))
+            .collect();
+        assert_eq!(read, vec![Some(1), Some(1)], "two `Value`s, one object");
+        assert_eq!(machine.rooted(), 0);
+    }
+
+    /// A scalar tail holds no references, so nothing may read one out of it —
+    /// decision 1's invariant, stated for a tail rather than for a slot.
+    #[test]
+    #[should_panic(expected = "test.IntArray's tail is scalar")]
+    fn a_scalar_tail_cannot_be_read_as_references() {
+        let mut machine = Machine::new();
+        let ints = int_array(&mut machine.heap);
+        let array = machine.allocate(ints, vec![0, 1, 2]);
+        machine.materialise_tail_args(array);
     }
 }
