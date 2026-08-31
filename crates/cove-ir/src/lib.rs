@@ -42,7 +42,7 @@
 //! scalar slot without moving, and an answer comes back the way it was
 //! computed.
 //!
-//! # A third stack, for the arguments that are not values either
+//! # A third region, for the arguments that are not values either
 //!
 //! A `var` parameter does not receive a copy of anything. It names the
 //! caller's own storage, so that `bump(var total)` adds to the binding the
@@ -50,25 +50,30 @@
 //! observably a different language, since `two(var x, var x)` answers 11
 //! rather than 10 and only aliasing gives that answer.
 //!
-//! What names storage here is a *place*: one slot — which stack, and where
-//! in it — together with the field positions to walk from what stands there.
-//! [`SlotKind::Place`] is the third kind a slot can have, a `var`
-//! parameter's argument travels on the third stack, and
-//! [`Function::place_frame_size`] is that stack's window the way the other
-//! two have theirs. Nothing about it is new machinery: it is
-//! [`SlotKind::Scalar`]'s arrangement asked of a third representation, and
-//! `Inst::Call`'s per-stack counts, `Function::params`, and `validate`
-//! already generalise over the question.
+//! What names storage here is a *place*: one slot number in the one frame
+//! numbering, together with the field positions to walk from what stands
+//! there. [`SlotKind::Place`] is the third kind a slot can have,
+//! [`Region::Place`] is the third region the numbering runs, after the
+//! scalar and value regions, and [`Function::place_frame_size`] is that
+//! region's width the way the other two have theirs. Nothing about it is new
+//! machinery: it is [`SlotKind::Scalar`]'s arrangement asked of a third
+//! representation, and `Inst::Call`'s per-stack counts, `Function::params`,
+//! and `validate` already generalise over the question.
 //!
-//! **A place names a slot, and it does not care which stack the slot is in.**
-//! That is issue #162's one slot identity read at the only place the three
-//! stacks previously disagreed about what a slot was: [`Inst::PlaceLocal`]
-//! names one of the value stack's and [`Inst::PlaceScalar`] one of the scalar
-//! stack's, and a `var` argument rooted at a binding the checker settled as
-//! `Int` therefore leaves the binding where its arithmetic wants it. It could
-//! not until then — the lowering kept every such binding on the value stack
-//! for the whole of the body that named it, and paid a conversion on every
-//! read and every write of it.
+//! **A place names a slot, and it does not care which region the slot is
+//! in.** That is issue #162's one slot identity, and
+//! [ADR 0028](../../../docs/adr/0028-five-representations-and-one-is-public.md)
+//! decision 1 — one logical frame, one slot numbering, one base — is what
+//! makes it literally true rather than aspirational. [`Inst::PlaceLocal`]
+//! and [`Inst::PlaceScalar`] hand out numbers from the same one numbering
+//! rather than from two numbering spaces that separately called their first
+//! slot zero, and [`Function::region_of`] alone is what says which region a
+//! given number falls in — nothing about the number itself has to say so. A
+//! `var` argument rooted at a binding the checker settled as `Int` therefore
+//! leaves the binding where its arithmetic wants it. It could not before
+//! there was one numbering to place it in — the lowering kept every such
+//! binding on the value stack for the whole of the body that named it, and
+//! paid a conversion on every read and every write of it.
 //!
 //! An index rather than a pointer, because a stack is one `Vec` that grows,
 //! and an index survives a reallocation that a borrow could not even be
@@ -209,45 +214,55 @@ pub struct Function {
     /// diagnostics and traces, and read by nothing on a hot path.
     pub module: Arc<str>,
     pub name: Arc<str>,
-    /// How many slots of the *value* stack one call needs: `self` if it has
-    /// a receiver, then each parameter `params` names a value slot for, then
-    /// every `Value` local and temporary the body declares.
+    /// How many slots the *value* region needs: `self` if it has a
+    /// receiver, then each parameter `params` names a value slot for, then
+    /// every `Value` local and temporary the body declares. The width of
+    /// [`Region::Value`], the one frame numbering's middle third.
     ///
-    /// [`Inst::LoadLocal`] and [`Inst::StoreLocal`] address `0..value_frame_size`
-    /// of the value stack; nothing else does. That makes this the frame
-    /// metadata a precise root set is read from: a frame's whole value
-    /// window, `stack[base .. base + value_frame_size]`, is its root set,
-    /// with nothing to skip inside it, because a scalar slot is not numbered
-    /// in this space at all — it lives in the other stack, addressed by
-    /// [`Inst::LoadScalar`] and [`Inst::StoreScalar`] through
-    /// `scalar_frame_size` instead.
+    /// [`Inst::LoadLocal`] and [`Inst::StoreLocal`] address
+    /// `value_origin()..value_origin() + value_frame_size`, where
+    /// [`Function::value_origin`] is `scalar_frame_size`; nothing else
+    /// addresses that range. That makes this the frame metadata a precise
+    /// root set is read from: a frame's whole value window,
+    /// `stack[base .. base + value_frame_size]` at run time, is its root
+    /// set, with nothing to skip inside it, because a scalar slot's number
+    /// never falls in this region — [`Function::region_of`] puts it in
+    /// [`Region::Scalar`] instead, addressed by [`Inst::LoadScalar`] and
+    /// [`Inst::StoreScalar`].
     pub value_frame_size: u32,
-    /// How many slots of the *scalar* stack one call needs: every `Int` or
-    /// `Bool` parameter, local, and temporary the body declares.
+    /// How many slots the *scalar* region needs: every `Int` or `Bool`
+    /// parameter, local, and temporary the body declares. The width of
+    /// [`Region::Scalar`], the one frame numbering's first third —
+    /// [`Function::scalar_origin`] is always zero, so this is also where the
+    /// numbering starts counting.
     ///
     /// [`Inst::LoadScalar`] and [`Inst::StoreScalar`] address
-    /// `0..scalar_frame_size` of the scalar stack; nothing else does. A
+    /// `0..scalar_frame_size` directly, for that reason; nothing else does. A
     /// scalar parameter is counted here and a value parameter is counted in
     /// `value_frame_size`, because an argument arrives on the stack its own
     /// type names and becomes the callee's slot there without moving; see
     /// `params`.
     pub scalar_frame_size: u32,
-    /// How many slots of the *place* stack one call needs, which today is
-    /// every `var` parameter and a `var self` receiver and nothing else.
+    /// How many slots the *place* region needs, which today is every `var`
+    /// parameter and a `var self` receiver and nothing else. The width of
+    /// [`Region::Place`], the one frame numbering's last third.
     ///
-    /// [`Inst::LoadPlace`] addresses `0..place_frame_size` of the place
-    /// stack; nothing else does, and nothing stores into it, because a place
-    /// slot is filled by the calling convention and never assigned. A body
-    /// declares no place slots of its own: `var` is a property of a
-    /// parameter, and a local that a `var` argument is rooted at is an
-    /// ordinary slot of whichever stack its own type named, which a place
-    /// *names* rather than being a place itself.
+    /// [`Inst::LoadPlace`] addresses
+    /// `place_origin()..place_origin() + place_frame_size`, where
+    /// [`Function::place_origin`] is `scalar_frame_size + value_frame_size`;
+    /// nothing else addresses that range, and nothing stores into it,
+    /// because a place slot is filled by the calling convention and never
+    /// assigned. A body declares no place slots of its own: `var` is a
+    /// property of a parameter, and a local that a `var` argument is rooted
+    /// at is an ordinary slot of whichever region its own type named, which
+    /// a place *names* rather than being a place itself.
     ///
     /// Not a root set, and not a hole in one either. A place holds a slot
-    /// number, the stack that number is in, and a path of field positions, so
-    /// it reaches a `Value` only by way of the value stack, whose own window
-    /// is already scanned — and a place rooted at a scalar slot reaches no
-    /// `Value` at all.
+    /// number — one number in the one numbering, so [`Function::region_of`]
+    /// alone says which region it names — and a path of field positions, so
+    /// it reaches a `Value` only by way of the value region, whose own
+    /// window is already scanned — and a place rooted at a scalar slot
+    /// reaches no `Value` at all.
     pub place_frame_size: u32,
     /// How many arguments a call must supply, `self` included.
     pub arity: u32,
@@ -338,11 +353,12 @@ pub struct Function {
     /// parameter, the capture *and* the answer all crossed, and cost 1.20x
     /// of it.
     ///
-    /// The layout is dense within each stack and in this order: the value
-    /// captures fill `capture_base ..` and the scalar captures fill `0 ..`,
-    /// which they can because a function a closure is made of takes no
-    /// scalar argument — `crate::lower::validate` refuses one that does, and
-    /// that refusal is what makes `0` a static number here.
+    /// The layout is dense within each region of the one numbering and in
+    /// this order: the value captures fill `capture_base ..` and the scalar
+    /// captures fill `0 ..`, which they can because a function a closure is
+    /// made of takes no scalar argument — `crate::lower::validate` refuses
+    /// one that does, and that refusal is what makes `0` a static number
+    /// here, which it also is as [`Function::scalar_origin`].
     ///
     /// **What travels is still a `Value`.** The closure holds
     /// `(name, Value)` pairs whichever backend built it, because a host reads
@@ -361,18 +377,21 @@ pub struct Function {
     /// is a reader that could disagree with itself. It also keeps a
     /// [`Function`] the size it was.
     pub captures: Vec<(Arc<str>, SlotKind)>,
-    /// Where this function's *value* captures begin among its value slots,
-    /// which is how many of its parameters arrived on the value stack.
+    /// Where this function's *value* captures begin, as a number in the one
+    /// frame numbering: [`Function::value_origin`] plus how many of its
+    /// parameters arrived on the value stack.
     ///
-    /// The same number as `arity` for every closure but one. The exception is
-    /// the closure `Shared::lock` is given a `var` parameter: that parameter
-    /// names the cell's contents rather than receiving a copy of them, so it
-    /// arrives on the place stack and takes no value slot, and the captures
-    /// begin one slot earlier than `arity` would say. See [`Inst::Lock`].
+    /// That second part is the same number as `arity` for every closure but
+    /// one. The exception is the closure `Shared::lock` is given a `var`
+    /// parameter: that parameter names the cell's contents rather than
+    /// receiving a copy of them, so it arrives on the place stack and takes
+    /// no value slot, and the captures begin one slot earlier than `arity`
+    /// would say. See [`Inst::Lock`].
     ///
     /// There is no second field for where the scalar captures begin, because
     /// the answer is always zero: `validate` refuses a function a closure is
-    /// made of that takes any argument on the scalar stack.
+    /// made of that takes any argument on the scalar stack, and
+    /// [`Function::scalar_origin`] is zero regardless.
     pub capture_base: u32,
     /// The names source gave this function's parameters, for a function a
     /// closure value can be made of, and empty for every other.
@@ -562,14 +581,19 @@ pub enum Scalar {
 /// whatever its type is, and a parameter written without it receives a copy
 /// whatever its type is. So the declaration decides that one and the checker
 /// decides between the other two.
+///
+/// [`SlotKind::region`] carries this to a slot *number*'s region of the one
+/// frame numbering, dropping the one part a number cannot answer — see
+/// [`Region`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SlotKind {
-    /// A `Value` in the value stack.
+    /// A `Value` in the value region.
     Value,
-    /// An `i64` in the scalar stack, meaning what [`Scalar`] says.
+    /// An `i64` in the scalar region, meaning what [`Scalar`] says.
     Scalar(Scalar),
-    /// A place in the place stack: one slot of the value or the scalar
-    /// stack, and the field positions to walk from it.
+    /// A place in the place region: one slot number of the value or the
+    /// scalar region, and the field positions to walk from what stands
+    /// there.
     ///
     /// What a `var` parameter's slot holds. Reading such a parameter is a
     /// [`Inst::LoadPlace`] and then a [`Inst::PlaceRead`], and writing to it
@@ -771,8 +795,13 @@ pub enum Inst {
     /// Pushes a constant.
     Const(ConstId),
     /// Pushes the value in a frame slot.
+    ///
+    /// The slot is a number in the one frame numbering's value region;
+    /// `validate` is where that is checked, through
+    /// [`Function::region_of`], so nothing here asks.
     LoadLocal(u32),
-    /// Pops a value into a frame slot.
+    /// Pops a value into a frame slot, addressed the same way as
+    /// [`Inst::LoadLocal`].
     StoreLocal(u32),
     /// Pushes one of this call's captures.
     ///
@@ -850,10 +879,15 @@ pub enum Inst {
     ScalarConst(i64),
     /// Pushes the scalar in a frame slot onto the scalar stack.
     ///
-    /// The slot is a [`SlotKind::Scalar`] one; `validate` is where that is
-    /// checked, so nothing here asks.
+    /// The slot is a [`SlotKind::Scalar`] one, checked by `validate` through
+    /// [`Function::region_of`] rather than asked about here. It is also the
+    /// one instruction whose slot number needs no region added to reach the
+    /// one frame numbering: [`Function::scalar_origin`] is always zero, so a
+    /// scalar slot's number within its own region already is its number in
+    /// the whole frame.
     LoadScalar(u32),
-    /// Pops the scalar stack into a frame slot.
+    /// Pops the scalar stack into a frame slot, addressed the same way as
+    /// [`Inst::LoadScalar`].
     StoreScalar(u32),
     /// Discards the top of the scalar stack.
     ///
@@ -1139,10 +1173,11 @@ pub enum Inst {
     /// `Value::Closure` holds `Value`s, and the place stack is still
     /// something only a call's arguments travel on.
     ///
-    /// The slot is a [`SlotKind::Value`] one, checked by `validate` rather
-    /// than asked about here. [`Inst::PlaceScalar`] is the same instruction
-    /// for a slot of the scalar stack, and the pair is what lets a place
-    /// name storage in either representation.
+    /// The slot is a [`SlotKind::Value`] one — a number in the one frame
+    /// numbering's value region — checked by `validate` rather than asked
+    /// about here. [`Inst::PlaceScalar`] is the same instruction for a slot
+    /// of the scalar region, and the pair is what lets a place name storage
+    /// in either representation.
     PlaceLocal(u32),
     /// Pushes the place that names one of this frame's *scalar* slots.
     ///
@@ -1176,7 +1211,8 @@ pub enum Inst {
     /// which is what makes the callee's callee alias the original binding
     /// rather than the parameter's own slot; reading it is this and a
     /// [`Inst::PlaceRead`]; writing to it is this and a
-    /// [`Inst::PlaceWrite`].
+    /// [`Inst::PlaceWrite`]. The slot is a number in the one frame
+    /// numbering's place region, past [`Function::place_origin`].
     LoadPlace(u32),
     /// Refines the place on top of the place stack by one field, named by
     /// its position.

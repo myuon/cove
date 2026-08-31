@@ -31,10 +31,15 @@ use super::fuel::{block_fuel, ends_a_block};
 /// it here is the difference between a failed test and a VM reading a value
 /// that is not there.
 ///
-/// A slot is addressed as what it is, too. A slot number names storage in
-/// one of the two stacks, and which one is settled at lowering, so a scalar
-/// instruction reaching a value slot — or the other way round — is caught
-/// here rather than read as whichever eight bytes happened to stand there.
+/// A slot is addressed as what it is, too. A slot number is a number in the
+/// one frame numbering, and `region_of` is the one question this asks of it:
+/// is this a slot of this frame, and is it in the region the instruction
+/// naming it reads. A scalar instruction reaching a value slot — or the
+/// other way round, or either reaching a place slot — is caught here rather
+/// than read as whichever eight bytes happened to stand there, which is a
+/// check three separate bounds could not make: each number was in range of
+/// its own stack, and there was no single number that told a value slot and
+/// a scalar slot apart.
 ///
 /// The calling convention is checked from both ends, which is what makes it
 /// an invariant rather than a convention. A function's `params` has one

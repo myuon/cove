@@ -49,7 +49,12 @@
 //! Beside it is a `Vec<i64>`, and a slot the checker proved holds an `Int` or
 //! a `Bool` lives there instead — as the integer itself, or as 0 or 1. Every
 //! frame is a window into both, at its `base` and at its `scalar_base`, and
-//! a call and a return move both the same way.
+//! a call and a return move both the same way. `cove_ir` numbers a value
+//! slot and a scalar slot in one frame numbering rather than two, and `base`
+//! and `scalar_base` are this backend's realization of that: each is where a
+//! different region of the one numbering begins in its own `Vec`, derived
+//! once per frame from `cove_ir::Function::value_origin` and
+//! `cove_ir::Function::scalar_origin` — see `value_origin`, below.
 //!
 //! That includes the arguments and the answer. A parameter the checker
 //! settled is a scalar slot, so its argument was pushed onto the scalar
@@ -87,11 +92,14 @@
 //! `Interpreter::make_closure` captures too.
 //!
 //! **A scalar slot holds no reference, and neither does a place.** That is
-//! what the root set is: the stacks are numbered separately, so a scalar slot
-//! is not a number in the value stack's space at all, and a frame's whole
-//! value window, `stack[base .. base + value_frame_size]`, is its root set
-//! with nothing inside it to skip. A place holds an index into that same
-//! window, so whatever it reaches is reachable from what is already scanned.
+//! what the root set is: `cove_ir` numbers a scalar slot and a value slot in
+//! one frame numbering, but the two are still different *regions* of it —
+//! [`cove_ir::Region::Scalar`] and [`cove_ir::Region::Value`] — so a scalar
+//! slot's number is never one that reaches into the value stack, and a
+//! frame's whole value window, `stack[base .. base + value_frame_size]`, is
+//! its root set with nothing inside it to skip. A place holds an index into
+//! that same window, so whatever it reaches is reachable from what is
+//! already scanned.
 //!
 //! **This VM collects.** What is written above used to be a statement about
 //! where the roots are rather than code that reads them; `StackRoots` is
@@ -357,11 +365,20 @@ struct Frame {
     /// it, which discards this frame's scalar slots and its scalar arguments
     /// together and leaves the caller's own operands exactly as they were.
     ///
-    /// The two stacks are numbered separately: `cove_ir::Inst::LoadLocal` and
-    /// `cove_ir::Inst::StoreLocal` address `base`'s stack, and
-    /// `cove_ir::Inst::LoadScalar` and `cove_ir::Inst::StoreScalar` address
-    /// this one, so which stack a slot lives in is decided by which
-    /// instruction addresses it rather than by anything read at run time.
+    /// There is one numbering and there are two of these, which is what
+    /// ADR 0028 decision 1 permits a physically split realization to do —
+    /// "derives every physical offset from the one frame layout" — and the
+    /// derivation is a region origin subtracted from a slot's number. The
+    /// scalar region begins at slot 0, so this base needs no subtraction at
+    /// all and `cove_ir::Inst::LoadScalar` is `scalars[scalar_base + slot]`
+    /// exactly as it was. `base` is where the other half of that is done, in
+    /// [`value_origin`].
+    ///
+    /// Which region a slot lives in is still decided by which instruction
+    /// addresses it, and nothing is read at run time to find out.
+    /// `cove_ir::lower::validate` is what holds the two together: a slot
+    /// number a `load-scalar` carries is a number `Function::region_of`
+    /// answers `Region::Scalar` for, checked once before the run.
     scalar_base: usize,
     /// Where this frame's place slots begin in the place stack, read from
     /// the other side exactly as the two above are: it is the caller's place
@@ -456,10 +473,19 @@ struct Place {
     path: Vec<u32>,
 }
 
-/// The slot a [`Place`] is rooted at: which stack, and where in it.
+/// The slot a [`Place`] is rooted at, as this backend stores it: which of its
+/// arrays, and where in it.
+///
+/// **This is a physical answer to a question the IR asks logically.** A place
+/// names a *slot*, one number in one numbering, and `cove_ir::Inst::PlaceLocal`
+/// and `cove_ir::Inst::PlaceScalar` carry one such number each; two variants
+/// survive here because two arrays do, and a backend keeping one word stack
+/// would have one variant and the same number in it.
 ///
 /// Absolute in both cases, for the reason [`Place`] gives: a place travels
-/// into a call, where the callee's bases are different numbers.
+/// into a call, where the callee's bases are different numbers. That is also
+/// why the region's origin is taken off *here* rather than carried — an
+/// absolute index into a live array is what outlives the frame that built it.
 ///
 /// The `Scalar` variant carries which of the two words it is naming, because
 /// the scalar stack keeps no tag — the same fact `cove_ir::Inst::ScalarToValue`
@@ -590,9 +616,10 @@ struct OpenScope {
 ///   but "very nearly" is not an invariant anything enforces, and the cost is
 ///   one iteration over a vector that is empty in every program that writes
 ///   no `scope`.
-/// - `scalars` — not a root. The two stacks are numbered separately, so a
-///   scalar slot is not a number in the value stack's space at all; an `i64`
-///   holds no reference.
+/// - `scalars` — not a root. One numbering, three regions: a scalar slot's
+///   number is one `cove_ir::Function::region_of` answers
+///   `cove_ir::Region::Scalar` for, and no instruction that reaches the value
+///   stack may carry one. An `i64` holds no reference.
 /// - `places` — not a root, and issue #162 did not make it one. A place is a
 ///   slot number and which stack it is in: a place rooted at a value slot
 ///   reaches only what that slot holds, which is inside the window already
