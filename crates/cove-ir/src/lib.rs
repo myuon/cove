@@ -264,6 +264,33 @@ pub struct Function {
     /// window is already scanned — and a place rooted at a scalar slot
     /// reaches no `Value` at all.
     pub place_frame_size: u32,
+    /// The kind of every slot this function's frame has, indexed by its
+    /// number in the one frame numbering — `slots.len()` is
+    /// [`Function::slot_count`] and `slots[n]` is what
+    /// [`Function::region_of`] would place slot `n` in, read one level more
+    /// specifically.
+    ///
+    /// This is the per-slot layout
+    /// [ADR 0028](../../../docs/adr/0028-five-representations-and-one-is-public.md)
+    /// decision 1 means by "what a slot means comes from `cove_ir::Function`'s
+    /// per-slot layout": the three frame sizes above say how wide each region
+    /// is and where it begins, and this says what each of the numbers inside
+    /// it *is* — a `Value`, an `Int`, a `Bool`, or a place — without a reader
+    /// having to already know which instruction touches it.
+    /// [`Function::region_of`] is this table read one level less
+    /// specifically, for the reader — a collector, or `crate::lower::validate`
+    /// — that only needs to tell [`Region::Value`] from the other two.
+    ///
+    /// Built in the one numbering's order — every scalar-region entry, then
+    /// every value-region entry, then every place-region entry — by
+    /// `super::lower::convention` out of `Body`'s three per-region layouts,
+    /// which is where the entries are actually decided: `Body::allocate`
+    /// records a binding's kind at the number it hands out, and
+    /// `Body::finish` is what turns a region-local number into this array's
+    /// index. See `Body::allocate` for the one place this table cannot be
+    /// exact by construction — a scalar number two scopes reuse for an `Int`
+    /// and then a `Bool` — and the rule that keeps it exact anyway.
+    pub slots: Vec<SlotKind>,
     /// How many arguments a call must supply, `self` included.
     pub arity: u32,
     /// Which stack each of those arguments arrives on, in the order a call
@@ -498,8 +525,14 @@ impl Function {
     /// How many slots one frame of this function has, over all three
     /// regions: the whole of the one numbering, and the number of eight-byte
     /// words a one-array realization of the frame reserves.
+    ///
+    /// `slots.len()`, which `crate::lower::validate` holds equal to
+    /// `value_frame_size + scalar_frame_size + place_frame_size` — the sum
+    /// this answered directly before `slots` exists to ask instead. The two
+    /// are one fact stated twice only until validation runs; after that,
+    /// reading either answers the other.
     pub fn slot_count(&self) -> u32 {
-        self.value_frame_size + self.scalar_frame_size + self.place_frame_size
+        self.slots.len() as u32
     }
 
     /// The first slot number of the scalar region, which is zero: the one
@@ -540,16 +573,17 @@ impl Function {
     /// map once per function — and `crate::lower::validate` calls it once per
     /// slot-addressing instruction of every lowered program, which is how a
     /// scalar instruction reaching a value slot is caught before a run.
+    ///
+    /// Reads [`SlotKind::region`] off `slots[slot]` rather than comparing
+    /// `slot` against the three frame sizes, because `slots` is the
+    /// authority for what a slot *is* — the three sizes stay the authority
+    /// for where a region *begins*, which is a different question and is
+    /// still what `scalar_origin`, `value_origin`, and `place_origin` answer.
+    /// The two cannot disagree about which region a slot number falls in,
+    /// because `slots` is built in the same one-numbering order those three
+    /// origins assume: see `Function::slots`.
     pub fn region_of(&self, slot: u32) -> Option<Region> {
-        if slot < self.scalar_frame_size {
-            Some(Region::Scalar)
-        } else if slot < self.place_origin() {
-            Some(Region::Value)
-        } else if slot < self.slot_count() {
-            Some(Region::Place)
-        } else {
-            None
-        }
+        self.slots.get(slot as usize).map(|kind| kind.region())
     }
 }
 
@@ -1587,7 +1621,12 @@ pub fn render(program: &Program, id: FunctionId) -> String {
 
 /// Which stack a slot lives in, as a listing names it: the scalar's by what
 /// it holds, and the value stack's by being the one that holds anything.
-fn render_kind(kind: SlotKind) -> &'static str {
+///
+/// `pub(crate)` rather than private, because `crate::lower::validate` names a
+/// mismatched [`SlotKind`] in its own diagnostics and a second rendering
+/// beside this one is exactly the kind of duplicate description this crate's
+/// doc comments keep arguing against.
+pub(crate) fn render_kind(kind: SlotKind) -> &'static str {
     match kind {
         SlotKind::Value => "value",
         SlotKind::Scalar(Scalar::Int) => "Int",

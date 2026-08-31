@@ -157,6 +157,13 @@ impl<'a> Lowering<'a> {
         // A slot number in the one numbering, so the value region's own
         // origin is part of it: see `Function::value_origin`.
         let capture_base = finished.scalar_frame_size + value_params(&params);
+        // The one numbering's order — scalar region, then value region,
+        // then place region — so a number in `slots` is the same number
+        // `Function::region_of` would compute from the three frame sizes
+        // alone. See `Function::slots`.
+        let mut slots = finished.scalar_layout;
+        slots.extend(finished.value_layout);
+        slots.extend(finished.place_layout);
 
         Ok(Function {
             module: module.into(),
@@ -167,6 +174,7 @@ impl<'a> Lowering<'a> {
             value_frame_size: finished.value_frame_size,
             scalar_frame_size: finished.scalar_frame_size,
             place_frame_size: finished.place_frame_size,
+            slots,
             arity: params.len() as u32,
             params,
             returns: SlotKind::Value,
@@ -398,6 +406,13 @@ impl<'a> Lowering<'a> {
         // A slot number in the one numbering, so the value region's own
         // origin is part of it: see `Function::value_origin`.
         let capture_base = finished.scalar_frame_size + value_params(&params);
+        // The one numbering's order — scalar region, then value region,
+        // then place region — so a number in `slots` is the same number
+        // `Function::region_of` would compute from the three frame sizes
+        // alone. See `Function::slots`.
+        let mut slots = finished.scalar_layout;
+        slots.extend(finished.value_layout);
+        slots.extend(finished.place_layout);
 
         Ok(Function {
             module: module.into(),
@@ -405,6 +420,7 @@ impl<'a> Lowering<'a> {
             value_frame_size: finished.value_frame_size,
             scalar_frame_size: finished.scalar_frame_size,
             place_frame_size: finished.place_frame_size,
+            slots,
             arity: params.len() as u32,
             params,
             returns,

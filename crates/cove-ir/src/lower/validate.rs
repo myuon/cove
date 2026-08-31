@@ -15,7 +15,8 @@
 //! simulation, which is why it is `pub`.
 
 use crate::{
-    Const, ConstId, Function, FunctionId, Inst, Program, Region, SlotKind, StructId, StructType,
+    render_kind, Const, ConstId, Function, FunctionId, Inst, Program, Region, SlotKind, StructId,
+    StructType,
 };
 
 use super::fuel::{block_fuel, ends_a_block};
@@ -101,6 +102,85 @@ fn validate_function(program: &Program, id: FunctionId) -> Result<(), String> {
             "takes {place_params} place arguments but has a place frame of {}",
             function.place_frame_size
         ));
+    }
+    // `slots` and the three frame sizes are two statements of the same fact
+    // — how wide this function's frame is — kept apart because one is the
+    // authority for where a region begins and the other for what each of
+    // its numbers is. They cannot be allowed to say two different things,
+    // so this is where they are made to agree, the way `capture_base` and
+    // the captures are reconciled below.
+    let declared_frame =
+        function.scalar_frame_size + function.value_frame_size + function.place_frame_size;
+    if function.slots.len() as u32 != declared_frame {
+        return Err(format!(
+            "carries a layout of {} slot(s) for a frame of {declared_frame} \
+             (scalar {} + value {} + place {})",
+            function.slots.len(),
+            function.scalar_frame_size,
+            function.value_frame_size,
+            function.place_frame_size
+        ));
+    }
+    // Every entry has to stand in the region the numbering itself puts that
+    // number in — computed from the three sizes directly here, rather than
+    // through `Function::region_of`, because `region_of` now reads this same
+    // table and a check that asked the table whether it agreed with itself
+    // would not be a check at all.
+    for (index, kind) in function.slots.iter().enumerate() {
+        let index = index as u32;
+        let numbered_region = if index < function.scalar_frame_size {
+            Region::Scalar
+        } else if index < function.place_origin() {
+            Region::Value
+        } else {
+            Region::Place
+        };
+        if kind.region() != numbered_region {
+            return Err(format!(
+                "names slot {index} a {} slot, which the numbering keeps in its {} region",
+                region_name(kind.region()),
+                region_name(numbered_region)
+            ));
+        }
+    }
+    // The calling convention again, read the other way round: a scalar
+    // parameter takes the first free scalar-region numbers in declaration
+    // order, a value parameter the first value-region numbers, and a place
+    // parameter the first place-region numbers — see
+    // `super::convention::declared_function`. Walking `params` with one
+    // counter per region has to land on exactly the entries the layout
+    // itself records at those numbers, or the table and the convention it is
+    // supposed to describe have come apart.
+    let (mut scalar_at, mut value_at, mut place_at) = (0u32, 0u32, 0u32);
+    for (at, kind) in function.params.iter().copied().enumerate() {
+        let slot = match kind {
+            SlotKind::Scalar(_) => {
+                let slot = function.scalar_origin() + scalar_at;
+                scalar_at += 1;
+                slot
+            }
+            SlotKind::Value => {
+                let slot = function.value_origin() + value_at;
+                value_at += 1;
+                slot
+            }
+            SlotKind::Place => {
+                let slot = function.place_origin() + place_at;
+                place_at += 1;
+                slot
+            }
+        };
+        let recorded = function.slots.get(slot as usize).copied();
+        if recorded != Some(kind) {
+            return Err(format!(
+                "takes parameter {at} as a {} slot at {slot}, which its layout names {}",
+                render_kind(kind),
+                recorded.map_or("no slot at all".to_string(), |k| format!(
+                    "a {} slot",
+                    render_kind(k)
+                ))
+            ));
+        }
     }
     // One return instruction per function, decided by where the answer
     // travels: a caller reads exactly the stack `returns` names, and nothing
