@@ -157,8 +157,16 @@ impl<'a> Lowering<'a> {
         // A slot number in the one numbering, so the value region's own
         // origin is part of it: see `Function::value_origin`.
         let capture_base = finished.scalar_frame_size + value_params(&params);
+        // As in `declared_function`: the slots the parameters were actually
+        // handed, in arrival order, so `param_slots_agree` can say whether
+        // the rule reads them back.
+        let emitted: Vec<u32> = slots
+            .iter()
+            .enumerate()
+            .map(|(at, slot)| slot + origin_of(params[at], &finished))
+            .collect();
 
-        Ok(Function {
+        let function = Function {
             module: module.into(),
             // Stable, and unique within the program, because the index is
             // the order lambdas were reached in and that order is the
@@ -184,7 +192,15 @@ impl<'a> Lowering<'a> {
             spans: finished.spans,
             arg_spans: finished.arg_spans,
             span,
-        })
+        };
+        debug_assert!(
+            param_slots_agree(&function, &emitted),
+            "`{}` handed its arguments {emitted:?}, which is not what \
+             `Function::param_slot` says of {:?}",
+            function.name,
+            function.params
+        );
+        Ok(function)
     }
 
     /// Lowers one declared function into its instructions.
@@ -398,8 +414,21 @@ impl<'a> Lowering<'a> {
         // A slot number in the one numbering, so the value region's own
         // origin is part of it: see `Function::value_origin`.
         let capture_base = finished.scalar_frame_size + value_params(&params);
+        // The slots this pass actually handed the arguments, in the order a
+        // call supplies them: the receiver, which took the first slot of its
+        // own region, and then each supplied parameter's own. Compared
+        // against `Function::param_slot` below.
+        let mut emitted: Vec<u32> = Vec::with_capacity(params.len());
+        if decl.receiver.is_some() {
+            emitted.push(origin_of(params[0], &finished));
+        }
+        for (at, kind) in kinds.iter().enumerate() {
+            if supplied[at] {
+                emitted.push(slots[at] + origin_of(*kind, &finished));
+            }
+        }
 
-        Ok(Function {
+        let function = Function {
             module: module.into(),
             name,
             value_frame_size: finished.value_frame_size,
@@ -427,8 +456,47 @@ impl<'a> Lowering<'a> {
             spans: finished.spans,
             arg_spans: finished.arg_spans,
             span: decl.span,
-        })
+        };
+        debug_assert!(
+            param_slots_agree(&function, &emitted),
+            "`{}.{}` handed its arguments {emitted:?}, which is not what \
+             `Function::param_slot` says of {:?}",
+            function.module,
+            function.name,
+            function.params
+        );
+        Ok(function)
     }
+}
+
+/// Where the region a slot of this kind lives in begins, given the three
+/// widths a finished body reports.
+fn origin_of(kind: SlotKind, finished: &super::body::Finished) -> u32 {
+    match kind {
+        SlotKind::Scalar(_) => 0,
+        SlotKind::Value => finished.scalar_frame_size,
+        SlotKind::Place => finished.scalar_frame_size + finished.value_frame_size,
+    }
+}
+
+/// Checks the slots this pass handed the parameters against the rule
+/// [`Function::param_slot`] states, on every debug build of every lowered
+/// program.
+///
+/// The rule is not a second description of what happens here: it is this
+/// pass's own arrangement — a supplied parameter takes a slot before
+/// anything else does, so the parameters of a region are its first slots,
+/// dense and in declaration order — read back out of the finished
+/// [`Function`]. A backend that permutes a call's arguments into their slots
+/// reads it, and it must not be able to disagree with the pass that made it
+/// true. So both answers are computed and compared rather than one of them
+/// being trusted.
+fn param_slots_agree(function: &Function, emitted: &[u32]) -> bool {
+    emitted.len() == function.arity as usize
+        && emitted
+            .iter()
+            .enumerate()
+            .all(|(at, slot)| function.param_slot(at) == Some(*slot))
 }
 
 /// How many of a function's parameters arrive on the value stack.

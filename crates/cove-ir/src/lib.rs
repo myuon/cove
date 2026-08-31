@@ -551,6 +551,64 @@ impl Function {
             None
         }
     }
+
+    /// Which slot argument `at` becomes, in the one frame numbering.
+    ///
+    /// This is the callee's half of the calling convention as a *number*
+    /// rather than as a stack. [`Function::params`] already says which
+    /// region each argument's own type named; this says where in that
+    /// region it lands, which is the position it holds among the parameters
+    /// of that region, counted from the region's origin. Both halves are the
+    /// same fact `lower::convention` acts on when it allocates a slot for
+    /// each supplied parameter before allocating anything else: the
+    /// parameters of a region take the first slots of it, dense and in
+    /// declaration order.
+    ///
+    /// # Why an argument's arrival is not its slot
+    ///
+    /// **The order arguments arrive in and the order slots are numbered in
+    /// are two orders, and they are the same order only sometimes.**
+    /// Arguments arrive in declaration order — ADR 0021 states the invariant
+    /// that makes pushing them left to right the same thing — and the
+    /// numbering groups slots by region. So `f(cursor: Cursor, by: Int)`
+    /// receives its arguments in the order `cursor, by` and numbers their
+    /// slots `by = 0, cursor = 1`, because the scalar region comes first.
+    ///
+    /// A backend that gives each region its own stack never notices: an
+    /// argument pushed onto the stack its type names lands at that stack's
+    /// next free position, which is exactly this number less the region's
+    /// origin. A backend that keeps one array notices every time the two
+    /// orders differ, and has to move the arguments into their slots as it
+    /// opens the frame. `param_slot(at) == at` for every argument is the
+    /// test for whether it has anything to move.
+    ///
+    /// `None` for an `at` past `arity`, which is the same answer
+    /// [`Function::region_of`] gives a number that is not a slot.
+    pub fn param_slot(&self, at: usize) -> Option<u32> {
+        let kind = self.params.get(at)?;
+        let region = kind.region();
+        let origin = match region {
+            Region::Scalar => self.scalar_origin(),
+            Region::Value => self.value_origin(),
+            Region::Place => self.place_origin(),
+        };
+        let rank = self.params[..at]
+            .iter()
+            .filter(|earlier| earlier.region() == region)
+            .count() as u32;
+        Some(origin + rank)
+    }
+
+    /// Whether every argument of a call to this function arrives at the slot
+    /// number it becomes.
+    ///
+    /// True where the declaration order and the region order agree, which is
+    /// every function with parameters of one region whose earlier regions are
+    /// empty of everything — and false where a backend keeping one array has
+    /// to permute. See [`Function::param_slot`].
+    pub fn arguments_arrive_in_their_slots(&self) -> bool {
+        (0..self.arity as usize).all(|at| self.param_slot(at) == Some(at as u32))
+    }
 }
 
 /// What a scalar slot or a scalar operand holds.
