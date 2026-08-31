@@ -3323,6 +3323,81 @@ impl<'a> Vm<'a> {
         Ok(())
     }
 
+    /// Spends what this VM has charged and not yet handed over, and asks the
+    /// budget whether the run may continue — at a Host call, before the call
+    /// is dispatched.
+    ///
+    /// # The decision this is
+    ///
+    /// **No Host call begins once the fuel the run has been charged has
+    /// reached its limit.** That is the whole of it, and it holds on both
+    /// backends. Here it holds because this runs first; on the tree walk it
+    /// holds because `Interpreter::charge_safepoint` hands `SAFEPOINT_FUEL`
+    /// over as it charges it, so that backend has no pending fuel for a Host
+    /// call to flush and its charged total cannot move between two
+    /// safepoints. What the two backends do *not* share is what the limit
+    /// admits: a straight line of Host calls charges this backend about two
+    /// fuel each and the tree walk nothing at all, so the same number bounds
+    /// very different programs. [ADR 0024](../../../docs/adr/0024-a-stop-is-a-bound-not-a-point.md)
+    /// accepts that a fuel limit is not portable between backends and
+    /// [ADR 0030](../../../docs/adr/0030-a-host-call-asks-the-fuel-limit.md)
+    /// does not disturb it: this is a statement about the bound, not about
+    /// the count.
+    ///
+    /// # Why it changed
+    ///
+    /// ADR 0024 decided the other way — a Host call was a stop point for
+    /// every flag and for no budget except the deadline and `max_host_calls`
+    /// — and its reason was cost: "measuring fuel means spending what a
+    /// backend has charged and not yet handed over, and not doing that per
+    /// instruction is the whole of why block charging exists". At the time
+    /// spending meant [`HostRegistry::with_budget`]'s mutex, the one issue
+    /// #182 measured at 36% of `benches/call`. It does not now.
+    /// [`crate::budget::Meter`] is the `&self` view of the run's accounting
+    /// over atomics, this VM holds one, and the flush is a `mem::take` and a
+    /// relaxed `fetch_add` on a boundary that already locks that mutex once,
+    /// reads the clock in [`crate::budget::Budget::charge_host_call`], and
+    /// reads it twice more here to time the wait. Issue #160 measured the
+    /// pre-#182 variant — which took a *second* mutex — at under 50 ns
+    /// against a Host call costing 640 to 890; this is cheaper than the thing
+    /// that measurement bounded.
+    ///
+    /// What that buys is the bound issue #160 was opened to state. It was
+    /// `SAFEPOINT_INTERVAL` of standing fuel plus one block extent, divided
+    /// by what a Host call charges — a quantity fixed by the shape of the
+    /// program rather than by any constant of the runtime, and measured at
+    /// 300 effects at every fuel limit for a straight line written to have
+    /// them. It is now zero.
+    ///
+    /// # What it is not
+    ///
+    /// Fuel still does not bound *effects*. How many Host calls a limit
+    /// admits still depends on what the program does between them, so
+    /// `max_host_calls` is still the only control that bounds effects
+    /// exactly, and the three controls still mean three different things.
+    /// This narrows one gap: the effects that used to happen *after* the run
+    /// had charged past its limit.
+    ///
+    /// # Why this is not [`Vm::safepoint`]
+    ///
+    /// [`Vm::safepoint`] collects, and a Host call is not a place to collect.
+    /// [`Vm::take`] has already drained the arguments into a `Vec<Value>` and
+    /// `Inst::CallResource` has popped the receiver besides, so a collection
+    /// here would count them through their own references rather than through
+    /// the walk — sound, as [`Vm::collect`] documents for the callback case,
+    /// but it would put an unpredictable sweep in front of every Host call
+    /// for no reason the budget asked for. The two flags [`stopped_here`]
+    /// reads are already read by the caller, one line above.
+    fn charge_at_host_boundary(&mut self, span: Span) -> Result<(), RuntimeError> {
+        let fuel = std::mem::take(&mut self.fuel);
+        if let Some(budget) = &self.budget {
+            if let Err(stopped) = budget.safepoint(fuel) {
+                return Err(budget.to_runtime_error(stopped).at(span));
+            }
+        }
+        Ok(())
+    }
+
     /// Records `wait` against every active [`Timing`] context, so a trace can
     /// separate the work a body did from the time it spent waiting for a host
     /// to answer.
@@ -3343,6 +3418,12 @@ impl<'a> Vm<'a> {
     /// the span, and the two stop flags a `Budget` shared by every task
     /// cannot ask about. [`stopped_here`] is the whole of that last part,
     /// and the interpreter calls it here too.
+    ///
+    /// [`Vm::charge_at_host_boundary`] is the part the interpreter has no
+    /// equivalent of, because it holds no pending fuel: it hands over what
+    /// this VM has charged and not yet spent, so the fuel limit is asked
+    /// before the outside world is reached rather than at the end of the
+    /// block that reached it.
     fn call_host(
         &mut self,
         module: &str,
@@ -3351,6 +3432,7 @@ impl<'a> Vm<'a> {
         span: Span,
     ) -> Result<Value, RuntimeError> {
         stopped_here(self.cancellation.as_ref(), &self.stops, span)?;
+        self.charge_at_host_boundary(span)?;
         let hosts = self.hosts;
         let started = Instant::now();
         let result = hosts.call_with(module, op, values, &mut Callback { vm: self, span });
@@ -3376,6 +3458,7 @@ impl<'a> Vm<'a> {
         span: Span,
     ) -> Result<Value, RuntimeError> {
         stopped_here(self.cancellation.as_ref(), &self.stops, span)?;
+        self.charge_at_host_boundary(span)?;
         let hosts = self.hosts;
         let started = Instant::now();
         let result = hosts.call_resource(handle, op, values, &mut Callback { vm: self, span });

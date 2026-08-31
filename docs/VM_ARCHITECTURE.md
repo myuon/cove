@@ -430,11 +430,16 @@ in a row lower to one extent of 1,606 instructions; with a fuel limit of 803
 the VM stops, executes none of them, and reports `fuel_spent` of 1,606. The
 tree walk answers `Ok(400)` for the same program under the same limit, because
 its schedule is calls, back edges and `await`, and a straight line reaches none
-of the three — it charges nothing for that line at all. So neither backend
-stops in the middle of a straight line. One refuses the whole of it and the
-other never measures it, which is a difference in outcome and not only in
+of the three — it charges nothing for that line at all. So for a line of pure
+work neither backend stops in the middle of it. One refuses the whole of it and
+the other never measures it, which is a difference in outcome and not only in
 `fuel_spent`. [ADR 0024](adr/0024-a-stop-is-a-bound-not-a-point.md) is where
 that is decided rather than discovered.
+
+The one place the VM does stop inside a straight line is a Host call, which
+hands the standing charge over before it is dispatched — see "A Host call asks
+every stop the run has" below, and
+[ADR 0030](adr/0030-a-host-call-asks-the-fuel-limit.md).
 
 **Every stop mode has a maximum, and they are not all the same maximum.**
 `G` below is one gathering — `BACK_EDGE_FUEL` on the VM, and one safepoint's
@@ -448,7 +453,7 @@ turn of the loop in question charges.
 | a bounded call's flag | `Vm::safepoint`, and every Host call | `G + T` of Cove work; no Host effect |
 | the deadline, with no fuel limit | every safepoint, and every Host call | one safepoint; the VM stops before its first instruction |
 | the deadline, beside a fuel limit | every `DEADLINE_CHECK_INTERVAL`th safepoint | `64 × (G + T)` |
-| fuel | a safepoint, and nowhere else | `G + T` of overspend, and one refused extent |
+| fuel | a safepoint, and every Host call | `G + T` of overspend, and one refused extent; no Host effect |
 | `max_host_calls` | every Host call, before it | nothing: the call that would pass it does not happen |
 | `max_call_depth` | every call | nothing: the call that would pass it does not happen |
 | the concurrency limit | every `spawn`, before the thread | nothing: the thread is not taken |
@@ -462,29 +467,45 @@ Host call would be stopped by the clock the boundary reads, rather than on the
 schedule under test — that is 0 and 4,099 fuel on the VM, against a bound of
 4,928, and 10 and 640 on the tree walk against 1,280.
 
-**A Host call is not a safepoint, and it is not meant to become one.** What
-stands in front of it is `Budget::charge_host_call`, which refuses a call from
-a run that was cancelled, past its deadline, or over `max_host_calls`, and
+**A Host call asks every stop the run has.** What stands in front of it is
+`Budget::charge_host_call`, which refuses a call from a run that was
+cancelled, past its deadline, or over `max_host_calls`;
 `crate::interp::stopped_here`, which refuses one from a cancelled task or from
-inside a bounded call that has been asked to stop. Between them that is every
-stop that is a *flag*. Fuel is not one, and is the one thing a Host call does
-not ask about, because a flag costs an atomic load and a budget has to be
-measured — measuring is exactly what charging by the block exists to stop
-doing, and putting it back at every Host call would put it back on
-`benches/hostheavy`'s path for a bound that `max_host_calls` already states
-exactly. So the honest sentence is: **`max_host_calls` bounds effects, fuel
-bounds work, and the deadline bounds time**, and each is checked where it can
-be.
+inside a bounded call that has been asked to stop; and, on the VM,
+`Vm::charge_at_host_boundary`, which hands the fuel charged since the last
+safepoint to the run's `Meter` and asks whether the run may continue. The
+first two are the flags, and each costs an atomic load. The third is a budget,
+and it is there because a budget has to be *measured* — but measuring it costs
+a `mem::take` and a relaxed `fetch_add` since issue #182 made the run's
+counters atomics, on a boundary that already locks a mutex for
+`charge_host_call`, reads the clock inside it, and reads it twice more to time
+the wait.
 
-That has a consequence worth stating plainly rather than leaving to be
-discovered. Every Host call in one straight line is made before the charge
-that line incurred is measured. Forty Host calls with no branch between them
-all happen under a fuel limit of one on the VM, which then stops at the return
-having charged 286 against a budget of 1. The tree walk reaches no safepoint
-between the entry and the return either, so any limit that lets it in at all
-lets all forty through and it answers. The bound is `SAFEPOINT_INTERVAL` of
-standing fuel plus one extent — finite, known before the run, and much larger
-than zero.
+[ADR 0030](adr/0030-a-host-call-asks-the-fuel-limit.md) is where that is
+decided, and it decides one sentence: **no Host call begins once the fuel a
+run has been charged has reached its limit.** It holds on both backends. On
+the VM it holds because of the flush; on the tree walk it holds already,
+because `Interpreter::charge_safepoint` hands `SAFEPOINT_FUEL` over in the
+same call that charges it, so that backend holds no pending fuel and its
+charged total cannot move while a straight line runs.
+
+**That is a statement about the bound and not about the count**, and the
+difference matters. What the two backends still do not share is what a limit
+*admits*: a straight line of Host calls charges the VM about two fuel each and
+charges the tree walk nothing at all, so forty Host calls with no branch
+between them are all refused under a fuel limit of one on the VM and all
+performed under any limit that lets the tree walk in at all. Neither is a Host
+effect made *after* exhaustion. So the honest sentence is still:
+**`max_host_calls` bounds effects, fuel bounds work, and the deadline bounds
+time** — an embedder that wants a number sets `max_host_calls`, because how
+many calls a unit of fuel buys is a property of the program and of the
+backend.
+
+Before ADR 0030 the VM's bound here was `SAFEPOINT_INTERVAL` of standing fuel
+plus one block extent, divided by what a Host call charges. Issue #160
+measured that at 300 effects for a straight line written to have them, at
+every fuel limit tried, because what bounded it was the extent of the block
+and not the limit. It is zero now.
 
 **What a stop may leave behind.** Three things, and the third is the one a
 program can be written around.
@@ -544,8 +565,15 @@ at the same point: a `Budget` is shared by every task of a run, so it holds the
 run's cancellation and not this task's, and not the flag of a bounded call this
 thread is inside. Those two are read here, before the call is dispatched, so
 that a cancelled task and a stopped `clock.timeout` body perform no further
-effect. "What each stop mode may run past it" is where that bound is stated
-and why fuel is not on the same schedule.
+effect. The other thing the registry cannot do is spend the fuel this backend
+has charged and not yet handed over, and `Vm::charge_at_host_boundary` does
+that at the same point, so a Host call is refused once the run has charged
+past its limit. "What each stop mode may run past it" is where those bounds
+are stated.
+
+A re-entrant call meets the same boundary, because it runs on the same `Vm`:
+the callback's Host calls reach `Vm::call_host` with the same pending fuel and
+the same budget as the entry's do.
 
 Reentry — a host running a Cove closure, and
 the same thing a higher-order builtin such as `Result.mapError` does — enters

@@ -1,6 +1,13 @@
 # ADR 0024: A stop is a bound, not a point
 
 - Status: Accepted
+- Superseded in part by
+  [ADR 0030](0030-a-host-call-asks-the-fuel-limit.md), which replaces
+  "A Host call is a stop point for every flag and for no budget" in the one
+  clause that exempts fuel, and the bound that clause states — that Host
+  effects under an exhausted fuel budget are bounded by one straight line's
+  worth of them. A Host call now asks the fuel limit too, and the bound is
+  zero on both backends
 - Date: 2026-08-29
 - Supersedes: [ADR 0003](0003-task-execution-and-runtime-control.md)'s
   decision that the runtime controls are "all checked at defined safepoints —

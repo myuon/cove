@@ -1431,6 +1431,26 @@ impl<'a> Interpreter<'a> {
     /// Dispatches a host call and records its wait against every active
     /// [`Timing`] context, so `EntryExit` and `TaskCompleted` can separate
     /// CPU work from time spent waiting on the host.
+    ///
+    /// # Why there is no fuel flush here
+    ///
+    /// [ADR 0030](../../../docs/adr/0030-a-host-call-asks-the-fuel-limit.md)
+    /// decides that no Host call begins once the fuel a run has been charged
+    /// has reached its limit, and `Vm::charge_at_host_boundary` is
+    /// what makes that true on the other backend. This one needs nothing,
+    /// and could do nothing: [`Interpreter::charge_safepoint`] hands
+    /// [`SAFEPOINT_FUEL`] to the shared budget in the same call that charges
+    /// it, so there is never a charge standing between two safepoints and the
+    /// run's charged total cannot move while a straight line runs. A
+    /// safepoint that reaches the limit stops the run there; nothing after it
+    /// is dispatched.
+    ///
+    /// What that costs is the other half of ADR 0024, which ADR 0030 leaves
+    /// standing: a straight line reaches no safepoint on this backend at all,
+    /// so a limit that lets a body in lets every Host call in it through.
+    /// The property is the same sentence on both backends and the number it
+    /// admits is not, which is why a fuel limit is not portable between them
+    /// and why `max_host_calls` is the control that bounds effects exactly.
     fn call_host(
         &mut self,
         module: &str,

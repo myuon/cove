@@ -19,8 +19,10 @@
 //! backend-specific and the question this file answers is what survives that:
 //! the two are held to the same *shape* of bound, in their own units, and not
 //! to stopping at the same source operation. `docs/adr/0024-a-stop-is-a-bound-not-a-point.md`
-//! is where that is decided; `docs/VM_ARCHITECTURE.md` states each bound in
-//! prose.
+//! is where that is decided, and
+//! `docs/adr/0030-a-host-call-asks-the-fuel-limit.md` is where the fuel
+//! bound at a Host call was narrowed to zero; `docs/VM_ARCHITECTURE.md`
+//! states each bound in prose.
 //!
 //! The instrument is a host module called `probe`, defined below. It is here
 //! rather than borrowed from `clock` because the shipped bounded call —
@@ -126,6 +128,11 @@ struct Probe {
     run: Mutex<Option<Cancellation>>,
     /// The stop flags of the bounded calls in progress, innermost last.
     bounds: Mutex<Vec<Cancellation>>,
+    /// How many `probe.bounded` calls the host actually re-entered Cove
+    /// through. [`Probe::bounds`] is pushed and popped, so it says nothing
+    /// once the run is over; this is the count a test can read afterwards to
+    /// know a callback was reached at all.
+    reentries: AtomicU64,
     arrived: Gate,
     released: Gate,
     /// Whether `probe.watch` saw [`Reentry::is_cancelled`] go true while it
@@ -211,6 +218,7 @@ impl HostApi for Probe {
         // safepoint, and the host turning that stop into the answer it
         // promised rather than letting it end the run.
         let stop = Cancellation::new();
+        self.reentries.fetch_add(1, Ordering::SeqCst);
         self.bounds.lock().unwrap().push(stop.clone());
         let outcome = back.call_until(&args[0], Vec::new(), &stop);
         self.bounds.lock().unwrap().pop();
@@ -283,6 +291,8 @@ struct Run {
     ticks: u64,
     /// Host effects performed after a stop was armed.
     ticks_after_arming: u64,
+    /// How many times the host re-entered Cove through `probe.bounded`.
+    reentries: u64,
     /// What `probe.watch` was told, when a program called it.
     noticed_the_stop: Option<bool>,
 }
@@ -403,6 +413,7 @@ fn go(source: &str, limits: Limits, backend: Backend) -> Run {
         irreversible_writes: hosts.irreversible_writes(),
         ticks: probe.ticks.load(Ordering::SeqCst),
         ticks_after_arming: probe.ticks_after_arming(),
+        reentries: probe.reentries.load(Ordering::SeqCst),
         noticed_the_stop,
     }
 }
@@ -478,10 +489,11 @@ export fn main() -> Result<Int, Error> {
 
 /// [`SPINNER`] with nothing armed and no Host call at all.
 ///
-/// The deadline and `max_host_calls` are read at every Host call as well as
-/// at a safepoint, so a program with a `probe` call in it would be stopped
-/// there rather than on the schedule under test. This is the loop the two
-/// deadline cases and the fuel case measure, for that reason.
+/// The deadline, `max_host_calls` and — since ADR 0030 — fuel are all read at
+/// every Host call as well as at a safepoint, so a program with a `probe`
+/// call in it would be stopped there rather than on the schedule under test.
+/// This is the loop the two deadline cases and the fuel case measure, for
+/// that reason.
 const PURE_SPINNER: &str = "\
 export fn main() -> Result<Int, Error> {
   var i = 0
@@ -946,14 +958,20 @@ fn a_straight_line_is_refused_whole_by_the_vm_and_charged_for_by_neither_half() 
     assert_eq!(walked.answer, "Ok(400)");
 }
 
-/// **A Host call at the end of a block whose budget will not cover it.**
-/// Nothing between the head of a block and its end asks about fuel, so every
-/// Host call in a straight line is made before the budget that the line
-/// exhausts is measured. That is the bound, and it is `SAFEPOINT_INTERVAL`
-/// plus one block rather than zero — which is why `max_host_calls` and not
-/// fuel is the limit that bounds *effects*.
+/// **A Host call in a block whose budget will not cover it.** ADR 0030: no
+/// Host call begins once the fuel a run has been charged has reached its
+/// limit. The two backends make that true differently — the VM hands its
+/// pending charge over at the boundary, the tree walk never holds one — and
+/// what the same limit *admits* differs by orders of magnitude, which is
+/// ADR 0024's "a fuel limit is not portable between backends" and is why
+/// `max_host_calls` is still the only control that bounds effects exactly.
+///
+/// This is the test that used to say the opposite. Under ADR 0024 the VM
+/// made all forty of these calls under a fuel limit of one and stopped at the
+/// return; issue #160 measured that at 300 effects for a straight line
+/// written to have them, at every fuel limit, and decided against it.
 #[test]
-fn host_calls_in_one_straight_line_all_happen_before_the_budget_is_measured() {
+fn no_host_call_begins_once_the_charged_fuel_has_reached_its_limit() {
     let mut source =
         String::from("use probe\n\nexport fn main() -> Result<Int, Error> {\n  var t = 0\n");
     for _ in 0..40 {
@@ -962,8 +980,8 @@ fn host_calls_in_one_straight_line_all_happen_before_the_budget_is_measured() {
     source.push_str("  Ok(t)\n}\n");
 
     // The VM: a limit of one is exhausted by the first block's charge, and
-    // every Host call in that block is made before that charge is measured
-    // at the return.
+    // the first Host call in that block hands the charge over and is refused
+    // before it is dispatched. Zero, not forty.
     let vm = go(
         &source,
         Limits {
@@ -975,13 +993,17 @@ fn host_calls_in_one_straight_line_all_happen_before_the_budget_is_measured() {
     assert!(vm.stopped, "the VM runs out: {}", vm.answer);
     assert_eq!(vm.outcome, RunOutcome::Fuel);
     assert_eq!(
-        vm.ticks, 40,
-        "fuel does not bound the effects inside one straight line"
+        vm.ticks, 0,
+        "{} Host effects followed an exhausted fuel budget",
+        vm.ticks
     );
 
-    // The tree walk reaches no safepoint between entering the entry and
-    // returning from it, so once a limit lets it in at all it cannot be
-    // stopped inside the line — the forty happen and it answers.
+    // The tree walk holds no pending fuel, so the property is already true of
+    // it and there is nothing to hand over. What its schedule costs is the
+    // other half: it reaches no safepoint between entering the entry and
+    // returning from it, so a limit that lets it in at all lets all forty
+    // through — and none of them is *after* exhaustion, because its charged
+    // total does not move while the line runs.
     let walked = go(
         &source,
         Limits {
@@ -1020,6 +1042,98 @@ fn host_calls_in_one_straight_line_all_happen_before_the_budget_is_measured() {
         assert!(run.stopped, "{:?}", run.backend);
         assert_eq!(run.outcome, RunOutcome::HostCalls, "{:?}", run.backend);
         assert_eq!(run.ticks, 7, "{:?}", run.backend);
+    }
+}
+
+/// **A Host call the host re-entered Cove to reach.** ADR 0030 puts the
+/// boundary at the two Host-call entry points, and a callback runs on the
+/// *same* backend state — the same `Vm`, the same pending fuel, the same
+/// budget — so a Host call made from inside reentry is held to what one made
+/// from the entry is held to. Issue #160 asked after this case separately,
+/// because it is the one place the boundary is crossed twice.
+///
+/// The limit is measured rather than guessed: `max_host_calls` of one lets
+/// the `probe.bounded` call through and refuses the first `probe.tick` inside
+/// the callback, and what the run has spent at that moment is exactly the
+/// fuel standing when the first Host effect of the reentry would be made. At
+/// that limit no tick happens; one fuel above it, every tick does. Both
+/// backends, because the property is one both make true — the VM by handing
+/// its pending charge over at the boundary, the tree walk by never holding
+/// one.
+#[test]
+fn a_host_call_inside_reentry_obeys_the_same_boundary() {
+    let mut body = String::new();
+    for _ in 0..40 {
+        body.push_str("    probe.tick()\n");
+    }
+    let source = format!(
+        "use probe\n\nexport fn main() -> Result<Int, Error> {{\n  let outcome = probe.bounded(fn() {{\n{body}  }})\n  Ok(0)\n}}\n"
+    );
+
+    for backend in [Backend::Ast, Backend::Vm] {
+        // What the run has spent when the first Host call of the reentry is
+        // about to be made, read off the one limit that refuses exactly
+        // there.
+        let probed = go(
+            &source,
+            Limits {
+                max_host_calls: Some(1),
+                ..Limits::default()
+            },
+            backend,
+        );
+        assert_eq!(probed.outcome, RunOutcome::HostCalls, "{backend:?}");
+        assert_eq!(probed.reentries, 1, "{backend:?}: the host re-entered Cove");
+        assert_eq!(probed.ticks, 0, "{backend:?}");
+        let standing = probed.fuel_spent;
+        assert!(
+            standing > 0,
+            "{backend:?}: reaching a callback costs fuel on both backends"
+        );
+
+        // At that limit the callback is entered and performs nothing.
+        let refused = go(
+            &source,
+            Limits {
+                fuel: Some(standing),
+                ..Limits::default()
+            },
+            backend,
+        );
+        assert!(refused.stopped, "{backend:?}: {}", refused.answer);
+        assert_eq!(refused.outcome, RunOutcome::Fuel, "{backend:?}");
+        assert_eq!(
+            refused.reentries, 1,
+            "{backend:?}: the host re-entered Cove"
+        );
+        assert_eq!(
+            refused.ticks, 0,
+            "{backend:?}: {} Host effects were made inside a reentry under an \
+             exhausted fuel budget",
+            refused.ticks
+        );
+        // Every `probe` operation is declared an irreversible write, so the
+        // boundary's own count is the check that no *further* one was made:
+        // one for the `probe.bounded` call that got in, and none for the
+        // forty inside it.
+        assert_eq!(refused.irreversible_writes, 1, "{backend:?}");
+
+        // One fuel above it the callback runs, which is what makes the line
+        // above a boundary and not just a program that never got there.
+        let admitted = go(
+            &source,
+            Limits {
+                fuel: Some(standing + 1),
+                ..Limits::default()
+            },
+            backend,
+        );
+        assert_eq!(admitted.reentries, 1, "{backend:?}");
+        assert_eq!(
+            admitted.ticks, 40,
+            "{backend:?}: nothing between two Host calls in a straight line \
+             charges either backend, so one fuel buys all forty"
+        );
     }
 }
 
