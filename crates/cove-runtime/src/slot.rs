@@ -119,12 +119,56 @@
 //! A **handle** is not a counted reference, which is why the same stack is
 //! sound over handles: [`HandleHeap`] traces rather than counts, so a handle
 //! reached from two root locations is marked once and there is no arithmetic
-//! to spoil. The two heaps are therefore kept disjoint. Nothing in this
-//! module mentions [`crate::value::Value`], and no object here can hold one:
-//! an object's payload is [`Slot`] words, and a word is either scalar bits or
-//! a [`Handle`]. The shadow-root stack cannot become a second path to
-//! anything `crate::heap` already yields, because it cannot name anything
-//! `crate::heap` manages.
+//! to spoil. The two heaps are therefore kept disjoint. No object here can
+//! hold a [`Value`]: an object's payload is [`Slot`] words, and a word is
+//! either scalar bits or a [`Handle`]. The shadow-root stack cannot become a
+//! second path to anything `crate::heap` already yields, because it cannot
+//! name anything `crate::heap` manages.
+//!
+//! # The boundary, and where the handover happens
+//!
+//! [`Value`] is named in exactly one place in this module — [`Machine`]'s
+//! materialiser — and that is decision 5's boundary. It is the one place the
+//! two heaps meet, so it is where the paragraph above stops being a claim and
+//! becomes something a test can fail.
+//!
+//! The direction of travel is the whole of the argument. A [`Handle`] goes in
+//! and an owned `Value` comes out. Nothing goes the other way: there is no
+//! constructor here that puts a `Value` into an object, and the `Value` that
+//! comes out holds no handle, no layout id and no index into
+//! [`HandleHeap`]. Decision 5 is what makes that true rather than a
+//! convention — a `Value` "is not a window onto a slot, a heap object or a
+//! dynamic value; it is a separate object with a representation of its own".
+//!
+//! **The handover is per part, and it is a copy.** [`Machine::materialise`]
+//! reads one word of one object, builds the `Value` that word means, and from
+//! the instant that `Value` exists the part is owned by `crate::heap`'s
+//! counted world and by nothing in this one. The reverse holds at the same
+//! instant: nothing in the handle heap changed, so no object here became
+//! reachable from a `Value`.
+//!
+//! **Nothing is double-counted across it**, and there are two directions to
+//! say that in:
+//!
+//! - `crate::heap`'s walk and its `Rc::strong_count` comparison can never see
+//!   a handle, because no `Value` stores one. A materialised `Value` is an
+//!   ordinary `Value` in a Rust local of whoever asked for it, rooted by its
+//!   own count exactly as `Vm::take`'s argument vector is, and #192's rule
+//!   about `Vm::arg_vectors` applies to it unchanged. The handle heap adds no
+//!   reference for `crate::heap` to count and takes none away.
+//! - [`Safepoint::walk`] and [`TempRoots`] can never yield a `Value`, because
+//!   nothing here holds one past the expression that builds it. A root
+//!   location in this module is a [`Slot`] the reference map calls a handle,
+//!   or an entry of the shadow stack, and both are [`Handle`]s.
+//!
+//! So the two root sets are over disjoint universes, and "yielded twice" is a
+//! question that cannot be asked across the seam. What *can* go wrong at the
+//! seam is the failure this module already exists for: the source handle is
+//! in a Rust local for the whole of the materialisation, reading a part is VM
+//! work, and VM work reaches safepoints. That is why
+//! [`Machine::materialise`] is [`Machine::with_root`]'s first real caller and
+//! `the_source_is_swept_mid_materialisation_without_the_root` is what it costs
+//! to forget.
 //!
 //! # The three multiplicities
 //!
@@ -155,7 +199,7 @@
 //!
 //! # What this is not
 //!
-//! Not a migration. `Value` is unchanged, the public API is unchanged, and
+//! Not a migration. [`Value`] is unchanged, the public API is unchanged, and
 //! `Vm::stack`, `Vm::scalars` and `Vm::places` are unchanged. [`Frame`] here
 //! is a stand-in for decision 1's single logical frame — eight-byte untagged
 //! slots plus the reference map that says which of them hold handles — sized
@@ -179,19 +223,29 @@
 //!   `None` and leaves it, so a stale handle names a dead object rather than
 //!   a live one. A heap that runs for longer than a test needs a free list
 //!   and a generation counter, and a handle then stops being a bare index.
-//! - **No layout is chosen for an enum, and there is no `Dynamic`.**
-//!   Decision 2 leaves enum layout to be selected per lowered type and
-//!   requires only that the layout completely determine how to find every
-//!   reference; decision 3's two-slot `Dynamic` needs a witness the reference
-//!   map can read. Neither is here, and both change what a reference map has
-//!   to say.
-//! - **Nothing materialises.** Decision 5's boundary is where a handle
-//!   becomes the `Value` a host is handed, and whatever does that holds a
-//!   handle across a call that can collect — which is the first real caller
-//!   of [`Machine::with_root`] and the first place the discipline will be
-//!   load-bearing rather than demonstrated.
+//! - **No enum layout is *selected*, and there is no `Dynamic`.** [`Shape`]
+//!   gives an enum one layout per case with the case in its header, which is
+//!   the form decision 2 says the prototype may use for implementation
+//!   economy and explicitly must not turn into a default without measuring
+//!   it against an immediate discriminant, typed payload slots or a niche.
+//!   Decision 3's two-slot `Dynamic` needs a witness the reference map can
+//!   read, and it is not here; adding one changes what a reference map has to
+//!   say.
+//! - **No variable-length tail.** A [`Layout`] is a fixed number of words, so
+//!   there is no array, string, map or set shape, and `Value::items`,
+//!   `as_str` and `vector_elements` have nothing to materialise from.
+//!   Decision 7's `Elements` guard is the answer for the ones whose storage
+//!   sits behind a cell, and none of that is exercised here.
+//! - **The boundary is one-way.** Decision 5 says a `Value` is *built* on the
+//!   way out and *consumed* on the way in, and only the first half is here.
+//!   Consuming one — a host's answer becoming slots and objects — is the
+//!   direction that would have to allocate in the handle heap while a
+//!   half-built object is in a Rust local, which is a rooting question of its
+//!   own and a different one.
 //! - **Nothing is measured.** #197's prototype phase ends at a measurement
-//!   gate, and this slice deliberately does not approach it.
+//!   gate, and this slice deliberately does not approach it. Decision 5's
+//!   own cost — "the boundary can only get more expensive" — is the number
+//!   this materialiser most obviously owes, and it is not taken here.
 
 // Nothing outside this module names anything in it, and that is the point:
 // the slice is the prototype #197's measurement gate stands in front of, and
@@ -201,6 +255,8 @@
 #![allow(dead_code)]
 
 use std::collections::HashSet;
+
+use crate::value::Value;
 
 /// One eight-byte untagged VM slot.
 ///
@@ -258,6 +314,91 @@ impl Handle {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct LayoutId(u32);
 
+/// What one word of an object means at decision 5's boundary.
+///
+/// This is decision 2's **payload layout**, at the width the slice needs. It
+/// is not a tag: no object carries one of these, the layout does, and the
+/// layout is reached through the object's [`LayoutId`] — which is decision 4's
+/// rule that "reflection reads metadata, never bits" applied to the boundary
+/// rather than to a `typeOf`. The bits are read as an `Int` because the layout
+/// says the word is an `Int`, and for no other reason.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Part {
+    /// The full signed sixty-four bits.
+    Int,
+    /// The full IEEE-754 bit pattern, every pattern including every NaN.
+    Float,
+    /// Canonical 0 or 1.
+    Bool,
+    /// A [`Handle`], whose object is materialised in turn. This is the only
+    /// `Part` the reference map names.
+    Nested,
+}
+
+impl Part {
+    /// Whether a word of this part is a reference the collector follows.
+    fn is_reference(self) -> bool {
+        matches!(self, Part::Nested)
+    }
+}
+
+/// What a host is handed when an object of this layout crosses decision 5's
+/// boundary.
+///
+/// One variant per Cove value kind the slice materialises, and
+/// [`Shape::Opaque`] for the layouts that never cross — which is most of the
+/// heap, and is what an object the VM keeps for itself looks like.
+///
+/// Nothing about a shape is public and nothing about it reaches a host. What
+/// reaches a host is a [`Value`], and decision 5's phrasing is why the two are
+/// listed separately at all: the promise `Value` keeps is that "each part a
+/// reader answers with is stored as the thing it answers with", and a `Shape`
+/// is the VM-side description that a materialisation *satisfies*, not a second
+/// place the promise lives.
+#[derive(Clone, Debug)]
+pub(crate) enum Shape {
+    /// Not a boundary type. An object of this layout is the VM's own and
+    /// materialising one is a programming error.
+    Opaque,
+    /// One word, materialised as the [`Part`] names.
+    ///
+    /// Decision 1 puts an unboxed `Int` in a *slot*, so this is what a boxed
+    /// or erased scalar looks like rather than what an ordinary one does. It
+    /// is here because it is the smallest thing the boundary can be asked for,
+    /// and a boundary that cannot do the smallest thing is not one.
+    Scalar(Part),
+    /// A declared struct: one named word per field, in declaration order.
+    Struct {
+        type_name: &'static str,
+        fields: Vec<(&'static str, Part)>,
+    },
+    /// One case of a declared enum, with its payload words in the order the
+    /// case declares them.
+    ///
+    /// The case is in the layout rather than in a word, which is decision 2's
+    /// "a heap object with the case in its header": here the header *is* the
+    /// [`LayoutId`], so a two-case enum is two layouts. Decision 2 permits
+    /// that for the prototype and forbids making it the default without
+    /// measurement, and no measurement is taken here.
+    Enum {
+        type_name: &'static str,
+        case: &'static str,
+        payload: Vec<Part>,
+    },
+}
+
+impl Shape {
+    /// The parts of an object of this shape, in word order.
+    fn parts(&self) -> Vec<Part> {
+        match self {
+            Shape::Opaque => Vec::new(),
+            Shape::Scalar(part) => vec![*part],
+            Shape::Struct { fields, .. } => fields.iter().map(|(_, part)| *part).collect(),
+            Shape::Enum { payload, .. } => payload.clone(),
+        }
+    }
+}
+
 /// What the VM owns about one shape of heap object.
 ///
 /// ADR 0028 decision 2 names five things a header or the VM's metadata must
@@ -268,6 +409,14 @@ pub(crate) struct LayoutId(u32);
 /// the Language Card make collection non-moving and decision 2 records that
 /// as an allocator invariant rather than a mandatory word in every header.
 /// [`HandleHeap`] never moves an object.
+///
+/// The payload layout is here now, as [`Layout::shape`], because decision 5's
+/// boundary needs one: reading a word as an `Int` rather than as a `Float` or
+/// a handle is a question only the layout can answer. A layout built from a
+/// [`Shape`] derives its reference map from that payload layout rather than
+/// being told it twice, which is decision 2's required invariant — "the
+/// lowered layout completely determines how to find every reference; runtime
+/// code must not guess" — made true by there being nothing else to consult.
 #[derive(Clone, Debug)]
 pub(crate) struct Layout {
     name: &'static str,
@@ -281,11 +430,14 @@ pub(crate) struct Layout {
     /// by a walk that treats it as a reference", stated for an object's
     /// interior rather than for a frame.
     refs: Vec<usize>,
+    /// What an object of this layout materialises as, and what each of its
+    /// words means on the way.
+    shape: Shape,
 }
 
 impl Layout {
     /// A layout of `words` eight-byte words, of which those at `refs` are
-    /// handles.
+    /// handles, and which never crosses decision 5's boundary.
     pub(crate) fn new(name: &'static str, words: usize, refs: Vec<usize>) -> Layout {
         for &at in &refs {
             assert!(
@@ -293,7 +445,35 @@ impl Layout {
                 "{name}'s reference map names word {at} of {words}"
             );
         }
-        Layout { name, words, refs }
+        Layout {
+            name,
+            words,
+            refs,
+            shape: Shape::Opaque,
+        }
+    }
+
+    /// A layout whose objects a host may be handed: the width its `shape`
+    /// implies, and the reference map that shape derives.
+    ///
+    /// There is no second argument for the reference map, and that is the
+    /// point. Decision 2 requires that "the lowered layout completely
+    /// determines how to find every reference"; here it does so because there
+    /// is nothing else to consult and no way to say something different.
+    pub(crate) fn boundary(name: &'static str, shape: Shape) -> Layout {
+        let parts = shape.parts();
+        let refs = parts
+            .iter()
+            .enumerate()
+            .filter(|(_, part)| part.is_reference())
+            .map(|(at, _)| at)
+            .collect();
+        Layout {
+            name,
+            words: parts.len(),
+            refs,
+            shape,
+        }
     }
 
     /// How many eight-byte words the object holds.
@@ -304,6 +484,11 @@ impl Layout {
     /// The layout's name, for a panic message.
     pub(crate) fn name(&self) -> &'static str {
         self.name
+    }
+
+    /// What an object of this layout materialises as.
+    pub(crate) fn shape(&self) -> &Shape {
+        &self.shape
     }
 }
 
@@ -560,6 +745,15 @@ pub(crate) struct HandleHeap {
     allocations_since_collection: u64,
     next_collection_at: u64,
     collections: u64,
+    /// Whether every safepoint collects, whatever the pacing says.
+    ///
+    /// The standard way to make a rooting bug deterministic instead of lucky,
+    /// and this slice needs it for a reason the rest of the module did not: a
+    /// materialisation reaches a safepoint per part, and which part the heap
+    /// happens to be due at is an accident of what the program allocated
+    /// before the boundary. With this on, *every* part is read after a real
+    /// collection, so a test that survives has survived all of them.
+    stress: bool,
 }
 
 impl HandleHeap {
@@ -571,7 +765,13 @@ impl HandleHeap {
             allocations_since_collection: 0,
             next_collection_at: MIN_ALLOCATIONS_BETWEEN_COLLECTIONS,
             collections: 0,
+            stress: false,
         }
+    }
+
+    /// Turns collection at every safepoint on or off.
+    pub(crate) fn stress(&mut self, on: bool) {
+        self.stress = on;
     }
 
     /// Records a layout and answers the id objects name it by.
@@ -648,7 +848,24 @@ impl HandleHeap {
     /// Whether enough has been allocated since the last collection to be
     /// worth another one — [`crate::heap::Heap::should_collect`]'s rule.
     pub(crate) fn should_collect(&self) -> bool {
-        self.allocations_since_collection >= self.next_collection_at
+        self.stress || self.allocations_since_collection >= self.next_collection_at
+    }
+
+    /// What an object of `handle`'s layout materialises as.
+    ///
+    /// # Panics
+    ///
+    /// If the object has been swept — which is the whole of the negative
+    /// proof: a materialiser that lost its root asks this question first.
+    pub(crate) fn shape_of(&self, handle: Handle) -> &Shape {
+        let object = self.object(handle);
+        self.layouts[object.layout.0 as usize].shape()
+    }
+
+    /// The name of `handle`'s layout, for a panic message.
+    pub(crate) fn layout_name(&self, handle: Handle) -> &'static str {
+        let object = self.object(handle);
+        self.layouts[object.layout.0 as usize].name()
     }
 
     fn object(&self, handle: Handle) -> &Object {
@@ -730,6 +947,15 @@ pub(crate) struct Machine {
     pub(crate) heap: HandleHeap,
     pub(crate) frame: Frame,
     temps: TempRoots,
+    /// Every collection this machine has run, in order.
+    ///
+    /// A collection that happens *inside* [`Machine::materialise`] is
+    /// otherwise unobservable from outside it: the materialiser answers a
+    /// [`Value`] and says nothing about what the heap did on the way. This is
+    /// how a test pins the root depth at the moment a collection ran, which is
+    /// the only way to tell a materialisation that was rooted throughout from
+    /// one that was merely lucky.
+    collections: Vec<HandleCollection>,
 }
 
 impl Machine {
@@ -739,7 +965,13 @@ impl Machine {
             heap: HandleHeap::new(),
             frame: Frame::new(),
             temps: TempRoots::new(),
+            collections: Vec::new(),
         }
+    }
+
+    /// Every collection this machine has run, in order.
+    pub(crate) fn collections(&self) -> &[HandleCollection] {
+        &self.collections
     }
 
     /// Allocates, without collecting. Allocation is not a safepoint here, as
@@ -758,11 +990,7 @@ impl Machine {
         if !self.heap.should_collect() {
             return None;
         }
-        let roots = Safepoint {
-            frame: &self.frame,
-            temps: &self.temps,
-        };
-        Some(self.heap.collect(&roots))
+        Some(self.collect_now())
     }
 
     /// Collects now, whatever the heap's pacing says — for a test that wants
@@ -772,7 +1000,9 @@ impl Machine {
             frame: &self.frame,
             temps: &self.temps,
         };
-        self.heap.collect(&roots)
+        let collection = self.heap.collect(&roots);
+        self.collections.push(collection);
+        collection
     }
 
     /// Runs `body` with `handle` registered as a temporary root.
@@ -801,10 +1031,160 @@ impl Machine {
         answer
     }
 
+    /// Runs `body` with every one of `handles` registered as a temporary root.
+    ///
+    /// [`Machine::with_root`] for the case a boundary crossing actually has.
+    /// `Inst::CallHost` takes *all* of a call's arguments off the operand
+    /// stack before the call is charged, and they are siblings rather than a
+    /// chain, so no one of them roots the others. Truncate-to-depth is what
+    /// makes one scope cover any number of them without a second mechanism.
+    pub(crate) fn with_roots<R>(
+        &mut self,
+        handles: &[Handle],
+        body: impl FnOnce(&mut Machine) -> R,
+    ) -> R {
+        let depth = self.temps.depth();
+        for &handle in handles {
+            self.temps.push(handle);
+        }
+        let answer = body(self);
+        self.temps.truncate(depth);
+        answer
+    }
+
     /// How many handles the shadow stack holds, so a test can check that
     /// [`Machine::with_root`] leaves nothing behind.
     pub(crate) fn rooted(&self) -> usize {
         self.temps.depth()
+    }
+
+    // ------------------------------------------------- decision 5's boundary
+
+    /// Materialises the object `handle` names as the [`Value`] a host is
+    /// handed.
+    ///
+    /// **This is [`Machine::with_root`]'s first real caller**, and the reason
+    /// it is the first is that it is the first thing that has to hold a handle
+    /// across work that can collect. `handle` is a Rust local for the whole of
+    /// the materialisation — nothing in the frame's reference map names it,
+    /// because a boundary is reached with the value already taken off the
+    /// stack — and reading a part is VM work, and VM work reaches safepoints.
+    ///
+    /// What comes back is an owned `Value` in decision 5's sense: "not a
+    /// window onto a slot, a heap object or a dynamic value" but "a separate
+    /// object with a representation of its own, whose parts are stored as the
+    /// things the readers answer with". It shares no storage with
+    /// [`HandleHeap`]. Once it exists, the object it was made from may be
+    /// swept without the `Value` noticing, and
+    /// `a_materialised_value_outlives_the_object_it_was_made_from` is that,
+    /// asserted.
+    ///
+    /// # Panics
+    ///
+    /// If `handle` names a swept object, which is what forgetting the root
+    /// costs; or if its layout is [`Shape::Opaque`], which is a VM object
+    /// nobody outside the VM has any business being handed.
+    pub(crate) fn materialise(&mut self, handle: Handle) -> Value {
+        self.with_root(handle, |machine| machine.materialise_rooted(handle))
+    }
+
+    /// Decision 5's "Host calls — arguments out": the handles standing in
+    /// `count` frame slots from `at`, taken off the stack the way `Vm::take`
+    /// takes them, and materialised.
+    ///
+    /// Every argument is rooted for the whole of the crossing rather than one
+    /// at a time, and that is not caution. Materialising argument *i* reaches
+    /// safepoints, and arguments *i+1* onwards are in a Rust local vector by
+    /// then and in no slot the reference map describes;
+    /// `rooting_one_argument_at_a_time_sweeps_the_others` is what happens if
+    /// the scope is drawn round each in turn instead.
+    pub(crate) fn materialise_args(&mut self, at: usize, count: usize) -> Vec<Value> {
+        let handles: Vec<Handle> = (at..at + count)
+            .map(|slot| self.frame.take_handle(slot))
+            .collect();
+        self.with_roots(&handles, |machine| {
+            handles
+                .iter()
+                .map(|&handle| machine.materialise_rooted(handle))
+                .collect()
+        })
+    }
+
+    /// The body of [`Machine::materialise`], which assumes `handle` is already
+    /// a root.
+    ///
+    /// Separate from the rooting so that the negative test can run *this*
+    /// program rather than a paraphrase of it: the only difference between
+    /// `the_source_survives_a_collection_in_the_middle_of_materialising_it`
+    /// and `the_source_is_swept_mid_materialisation_without_the_root` is the
+    /// [`Machine::with_root`] one of them goes through.
+    fn materialise_rooted(&mut self, handle: Handle) -> Value {
+        // Cloning the shape rather than borrowing it is a prototype artefact:
+        // reading a part needs `&mut self` for the safepoint, and the layout
+        // table lives in the heap. A real boundary would hold the layout table
+        // apart from the object table, which is what decision 2's "VM-owned
+        // metadata" already suggests, and borrow it for the whole crossing.
+        let shape = self.heap.shape_of(handle).clone();
+        match shape {
+            Shape::Opaque => panic!(
+                "{} is the VM's own object and does not cross the boundary",
+                self.heap.layout_name(handle)
+            ),
+            Shape::Scalar(part) => self.part(handle, 0, part),
+            Shape::Struct { type_name, fields } => {
+                let mut materialised = Vec::with_capacity(fields.len());
+                for (at, (name, part)) in fields.into_iter().enumerate() {
+                    materialised.push((name, self.part(handle, at, part)));
+                }
+                Value::structure(type_name, materialised)
+            }
+            Shape::Enum {
+                type_name,
+                case,
+                payload,
+            } => {
+                let mut materialised = Vec::with_capacity(payload.len());
+                for (at, part) in payload.into_iter().enumerate() {
+                    materialised.push(self.part(handle, at, part));
+                }
+                Value::enumeration(type_name, case, materialised)
+            }
+        }
+    }
+
+    /// Materialises word `at` of the object `source` names, reading it as
+    /// `part` says to.
+    ///
+    /// The safepoint is the point of the whole exercise. `Vm` charges fuel and
+    /// calls `Vm::collect_if_due` at `Inst::CallHost` with the arguments
+    /// already drained into a Rust local; this is that, once per part, because
+    /// a boundary is not one instruction but a stretch of VM work whose length
+    /// is the size of what crosses. Whether a collection actually happens
+    /// there is the heap's decision and not the boundary's, which is why
+    /// [`HandleHeap::stress`] exists: so that a test does not have to hope.
+    ///
+    /// Nothing is read out of the bits that the layout did not already say.
+    /// That is decision 4's rule at the boundary — the type comes from the
+    /// metadata, never from the value.
+    fn part(&mut self, source: Handle, at: usize, part: Part) -> Value {
+        // Deliberately discarded: what the collection did is on
+        // `Machine::collections` for a test to read, and the materialiser has
+        // no decision to make about it.
+        let _ = self.safepoint();
+        let bits = self.heap.word(source, at);
+        match part {
+            Part::Int => Value::int(bits as i64),
+            Part::Float => Value::float(f64::from_bits(bits)),
+            Part::Bool => Value::bool(bits != 0),
+            // The handover, recursively. The child is a Rust local of this
+            // frame from here until its own `Value` exists, so it gets a root
+            // of its own. It is *also* reachable from `source`, which is
+            // rooted, so that root is redundant for liveness in this shape —
+            // and it is pushed anyway, because "something else happens to
+            // reach it" is precisely the global argument a shadow root exists
+            // to replace with a local one.
+            Part::Nested => self.materialise(Handle::from_slot(bits)),
+        }
     }
 }
 
@@ -828,6 +1208,66 @@ mod tests {
     /// read as a handle.
     fn pair(heap: &mut HandleHeap) -> LayoutId {
         heap.register(Layout::new("test.Pair", 2, Vec::new()))
+    }
+
+    /// The smallest thing the boundary can be asked for: one word, read as a
+    /// full signed sixty-four bits.
+    fn boxed_int(heap: &mut HandleHeap) -> LayoutId {
+        heap.register(Layout::boundary("test.BoxedInt", Shape::Scalar(Part::Int)))
+    }
+
+    /// One word read three ways, so that a test can show the layout deciding
+    /// and the bits not.
+    fn three_ways(heap: &mut HandleHeap) -> LayoutId {
+        heap.register(Layout::boundary(
+            "test.ThreeWays",
+            Shape::Struct {
+                type_name: "ThreeWays",
+                fields: vec![("n", Part::Int), ("x", Part::Float), ("flag", Part::Bool)],
+            },
+        ))
+    }
+
+    /// A declared struct of two scalar fields: the smallest aggregate with a
+    /// payload.
+    fn point(heap: &mut HandleHeap) -> LayoutId {
+        heap.register(Layout::boundary(
+            "test.Point",
+            Shape::Struct {
+                type_name: "Point",
+                fields: vec![("x", Part::Int), ("y", Part::Int)],
+            },
+        ))
+    }
+
+    /// A declared struct of two *references*: the smallest nested aggregate,
+    /// and the one materialising which holds more than one handle at once.
+    fn segment(heap: &mut HandleHeap) -> LayoutId {
+        heap.register(Layout::boundary(
+            "test.Segment",
+            Shape::Struct {
+                type_name: "Segment",
+                fields: vec![("from", Part::Nested), ("to", Part::Nested)],
+            },
+        ))
+    }
+
+    /// One case of an enum, with the case in the layout — decision 2's "a heap
+    /// object with the case in its header", where the header is the layout id.
+    fn case_of(heap: &mut HandleHeap, case: &'static str, payload: Vec<Part>) -> LayoutId {
+        heap.register(Layout::boundary(
+            "test.Option",
+            Shape::Enum {
+                type_name: "Option",
+                case,
+                payload,
+            },
+        ))
+    }
+
+    /// A `Point` at `x`, `y`, and the handle naming it.
+    fn a_point(machine: &mut Machine, layout: LayoutId, x: i64, y: i64) -> Handle {
+        machine.allocate(layout, vec![x as Slot, y as Slot])
     }
 
     /// Allocates `count` objects nothing points at, which is how a test makes
@@ -1199,5 +1639,432 @@ mod tests {
         let mut frame = Frame::new();
         frame.push_scalar(0);
         frame.handle_at(0);
+    }
+
+    // -------------------------------------------- decision 5's boundary
+
+    /// The smallest crossing there is: one word, one [`Value`], and the full
+    /// `Int` domain decision 1 promises a typed slot preserves surviving it.
+    #[test]
+    fn a_scalar_object_materialises_as_the_value_its_layout_names() {
+        let mut machine = Machine::new();
+        let layout = boxed_int(&mut machine.heap);
+        for n in [0, 1, -1, i64::MAX, i64::MIN] {
+            let handle = machine.allocate(layout, vec![n as Slot]);
+            let value = machine.materialise(handle);
+            assert_eq!(value.as_int(), Some(n), "materialising {n}");
+        }
+        assert_eq!(machine.rooted(), 0);
+    }
+
+    /// Decision 4 at the boundary: the type comes from the metadata and never
+    /// from the value. One bit pattern in three words of one object, read as
+    /// an `Int`, a `Float` and a `Bool` because that is what the layout says
+    /// each word is.
+    #[test]
+    fn the_boundary_reads_the_layout_and_not_the_bits() {
+        let mut machine = Machine::new();
+        let layout = three_ways(&mut machine.heap);
+        let bits = 2.0f64.to_bits();
+        let handle = machine.allocate(layout, vec![bits, bits, bits]);
+
+        let value = machine.materialise(handle);
+        assert_eq!(value.declared_type(), Some("ThreeWays"));
+        assert_eq!(
+            value.field("n").and_then(Value::as_int),
+            Some(4_611_686_018_427_387_904),
+            "the same word as a full signed sixty-four bits"
+        );
+        assert_eq!(
+            value.field("x").and_then(Value::as_float),
+            Some(2.0),
+            "and as an IEEE-754 double"
+        );
+        assert_eq!(value.field("flag").and_then(Value::as_bool), Some(true));
+    }
+
+    /// The promise the ADR names by name. #195's
+    /// `payload() -> Option<&[Value]>` "is specifically a promise that a
+    /// payload stays contiguous", and after decision 5 that promise binds the
+    /// materialisation rather than the VM's object — which here is one word of
+    /// one heap object, with the case in its layout and no `[Value]` anywhere.
+    #[test]
+    fn an_enum_payload_materialises_as_the_contiguous_slice_the_reader_promises() {
+        let mut machine = Machine::new();
+        let points = point(&mut machine.heap);
+        let somes = case_of(&mut machine.heap, "Some", vec![Part::Nested]);
+        let nones = case_of(&mut machine.heap, "None", Vec::new());
+        assert_eq!(
+            machine.heap.layout(nones).words(),
+            0,
+            "a case with no payload"
+        );
+
+        let inner = a_point(&mut machine, points, 1, 2);
+        let some = machine.allocate(somes, vec![inner.to_slot()]);
+        let value = machine.materialise(some);
+        assert_eq!(value.case(), Some("Some"));
+        let payload = value.payload().expect("an enum has a payload");
+        assert_eq!(payload.len(), 1);
+        assert_eq!(payload[0].field("y").and_then(Value::as_int), Some(2));
+
+        let none = machine.allocate(nones, Vec::new());
+        let value = machine.materialise(none);
+        assert_eq!(value.case(), Some("None"));
+        assert_eq!(value.payload().map(<[Value]>::len), Some(0));
+    }
+
+    /// A nested aggregate: two levels, four scalar leaves, and the reference
+    /// map deciding which words are followed at both.
+    #[test]
+    fn a_nested_aggregate_materialises_through_the_reference_map() {
+        let mut machine = Machine::new();
+        let points = point(&mut machine.heap);
+        let segments = segment(&mut machine.heap);
+        let from = a_point(&mut machine, points, 1, 2);
+        let to = a_point(&mut machine, points, 3, 4);
+        let handle = machine.allocate(segments, vec![from.to_slot(), to.to_slot()]);
+
+        let value = machine.materialise(handle);
+        assert_eq!(value.declared_type(), Some("Segment"));
+        let leaf = |field: &str, part: &str| {
+            value
+                .field(field)
+                .and_then(|point| point.field(part))
+                .and_then(Value::as_int)
+        };
+        assert_eq!((leaf("from", "x"), leaf("from", "y")), (Some(1), Some(2)));
+        assert_eq!((leaf("to", "x"), leaf("to", "y")), (Some(3), Some(4)));
+    }
+
+    // ------------------------------- the boundary as `with_root`'s caller
+
+    /// The positive direction. The source handle is out of the frame and in a
+    /// Rust local for the whole crossing, a collection runs before *every*
+    /// part is read, and the object and its contents are still there.
+    #[test]
+    fn the_source_survives_a_collection_in_the_middle_of_materialising_it() {
+        let mut machine = Machine::new();
+        let points = point(&mut machine.heap);
+        let handle = a_point(&mut machine, points, 6, 7);
+        let at = machine.frame.push_handle(handle);
+
+        // Out of the slot and into a Rust local, which is how a boundary is
+        // reached: the value has already come off the stack.
+        let local = machine.frame.take_handle(at);
+        machine.heap.stress(true);
+
+        let value = machine.materialise(local);
+        assert_eq!(value.field("x").and_then(Value::as_int), Some(6));
+        assert_eq!(value.field("y").and_then(Value::as_int), Some(7));
+        assert_eq!(
+            machine.collections().len(),
+            2,
+            "one collection per part read: {:?}",
+            machine.collections()
+        );
+        assert!(
+            machine
+                .collections()
+                .iter()
+                .all(|collection| collection.roots_yielded == 1
+                    && collection.live_objects == 1
+                    && collection.freed_objects == 0),
+            "the shadow root, and nothing else, kept it: {:?}",
+            machine.collections()
+        );
+        assert_eq!(machine.rooted(), 0, "the shadow stack was left as found");
+    }
+
+    /// The negative direction, and it is the same program: the only difference
+    /// from the test above is that this one calls the materialiser's body
+    /// without [`Machine::with_root`] round it. The first safepoint inside the
+    /// crossing sweeps the object out from under the materialiser, and the
+    /// next word read is the use-after-free.
+    #[test]
+    #[should_panic(expected = "names a swept object")]
+    fn the_source_is_swept_mid_materialisation_without_the_root() {
+        let mut machine = Machine::new();
+        let points = point(&mut machine.heap);
+        let handle = a_point(&mut machine, points, 6, 7);
+        let at = machine.frame.push_handle(handle);
+
+        let local = machine.frame.take_handle(at);
+        machine.heap.stress(true);
+
+        machine.materialise_rooted(local);
+    }
+
+    /// The same, without the stress mode: a collection the *heap* chose,
+    /// landing inside a crossing because of what the program allocated before
+    /// it. This is the shape `Inst::CallHost` actually has, where the pacing
+    /// has nothing to do with the boundary.
+    #[test]
+    fn a_collection_the_heap_paced_lands_inside_a_materialisation() {
+        let mut machine = Machine::new();
+        let nodes = node(&mut machine.heap);
+        let points = point(&mut machine.heap);
+        let handle = a_point(&mut machine, points, 6, 7);
+        let at = machine.frame.push_handle(handle);
+        churn(
+            &mut machine,
+            nodes,
+            MIN_ALLOCATIONS_BETWEEN_COLLECTIONS as usize,
+        );
+
+        let local = machine.frame.take_handle(at);
+        assert!(
+            machine.collections().is_empty(),
+            "nothing has collected yet"
+        );
+
+        let value = machine.materialise(local);
+        assert_eq!(value.field("x").and_then(Value::as_int), Some(6));
+        assert_eq!(
+            machine.collections().len(),
+            1,
+            "the boundary's own safepoint is where the heap came due: {:?}",
+            machine.collections()
+        );
+        assert_eq!(
+            machine.collections()[0].freed_objects,
+            MIN_ALLOCATIONS_BETWEEN_COLLECTIONS,
+            "the churn went and the source did not"
+        );
+        assert!(machine.heap.is_live(local));
+    }
+
+    /// Nesting, and it falls out of truncate-to-depth rather than needing a
+    /// case of its own: the depth of the shadow stack at each collection is
+    /// the depth of the materialisation that reached it.
+    ///
+    /// The sequence is the whole assertion. One root while the segment's own
+    /// words are read, two while a point's are, and back to one between the
+    /// two points — which is [`TempRoots`] unwinding to the depth each scope
+    /// recorded, with nothing in [`Machine::materialise`] arranging it.
+    #[test]
+    fn nesting_roots_every_handle_the_crossing_holds_and_unwinds_to_depth() {
+        let mut machine = Machine::new();
+        let points = point(&mut machine.heap);
+        let segments = segment(&mut machine.heap);
+        let from = a_point(&mut machine, points, 1, 2);
+        let to = a_point(&mut machine, points, 3, 4);
+        let handle = machine.allocate(segments, vec![from.to_slot(), to.to_slot()]);
+
+        machine.heap.stress(true);
+        let value = machine.materialise(handle);
+
+        let depths: Vec<u64> = machine
+            .collections()
+            .iter()
+            .map(|collection| collection.roots_yielded)
+            .collect();
+        assert_eq!(
+            depths,
+            vec![1, 2, 2, 1, 2, 2],
+            "the segment's two words at depth one, each point's two at depth two"
+        );
+        assert!(
+            machine
+                .collections()
+                .iter()
+                .all(|collection| collection.live_objects == 3),
+            "all three survived every one of them: {:?}",
+            machine.collections()
+        );
+        assert_eq!(machine.rooted(), 0);
+        assert_eq!(
+            value
+                .field("to")
+                .and_then(|point| point.field("y"))
+                .and_then(Value::as_int),
+            Some(4)
+        );
+    }
+
+    /// Decision 8's three multiplicities, at the seam. A nested aggregate
+    /// whose two fields name one object is **two root storage locations and
+    /// one expansion** while it is being materialised: the crossing must not
+    /// become a second path to something already yielded.
+    #[test]
+    fn a_materialisation_is_not_a_second_path_to_what_it_already_yielded() {
+        let mut machine = Machine::new();
+        let points = point(&mut machine.heap);
+        let segments = segment(&mut machine.heap);
+        let shared = a_point(&mut machine, points, 1, 2);
+        let handle = machine.allocate(segments, vec![shared.to_slot(), shared.to_slot()]);
+
+        machine.heap.stress(true);
+        let value = machine.materialise(handle);
+
+        for collection in machine.collections() {
+            assert_eq!(
+                collection.expansions, collection.live_objects,
+                "an object is expanded once however many roots reach it: {collection:?}"
+            );
+            assert_eq!(collection.live_objects, 2, "{collection:?}");
+        }
+        let depths: Vec<u64> = machine
+            .collections()
+            .iter()
+            .map(|collection| collection.roots_yielded)
+            .collect();
+        assert_eq!(
+            depths,
+            vec![1, 2, 2, 1, 2, 2],
+            "the shared object is rooted twice over, and yielded once per location"
+        );
+
+        // And it is materialised twice, into two `Value`s: the shared identity
+        // is the VM's, and a `Point` is a copy on the way out. Decision 7 is
+        // where the values whose identity *is* observable are named, and none
+        // of them is here.
+        let leaf = |field: &str| {
+            value
+                .field(field)
+                .and_then(|point| point.field("x"))
+                .and_then(Value::as_int)
+        };
+        assert_eq!((leaf("from"), leaf("to")), (Some(1), Some(1)));
+    }
+
+    /// The handover, asserted. Once the crossing is done the `Value` owes the
+    /// handle heap nothing: every object it was made from is swept and the
+    /// `Value` reads exactly as before, because its parts are stored as the
+    /// things the readers answer with and none of them is a [`Handle`].
+    #[test]
+    fn a_materialised_value_outlives_the_object_it_was_made_from() {
+        let mut machine = Machine::new();
+        let points = point(&mut machine.heap);
+        let segments = segment(&mut machine.heap);
+        let from = a_point(&mut machine, points, 1, 2);
+        let to = a_point(&mut machine, points, 3, 4);
+        let handle = machine.allocate(segments, vec![from.to_slot(), to.to_slot()]);
+        machine.frame.push_handle(handle);
+
+        let value = machine.materialise(handle);
+
+        machine.frame.truncate(0);
+        let swept = machine.collect_now();
+        assert_eq!(swept.roots_yielded, 0, "nothing roots the source now");
+        assert_eq!(swept.freed_objects, 3, "the segment and both points");
+        assert!(!machine.heap.is_live(handle));
+
+        assert_eq!(
+            value
+                .field("from")
+                .and_then(|point| point.field("x"))
+                .and_then(Value::as_int),
+            Some(1),
+            "the `Value` shares no storage with the heap it came from"
+        );
+    }
+
+    /// Decision 5's "Host calls — arguments out", which is where more than one
+    /// handle is in a Rust local at once without any of them rooting the
+    /// others.
+    #[test]
+    fn every_argument_is_rooted_for_the_whole_crossing() {
+        let mut machine = Machine::new();
+        let points = point(&mut machine.heap);
+        let first = a_point(&mut machine, points, 1, 2);
+        let second = a_point(&mut machine, points, 3, 4);
+        machine.frame.push_handle(first);
+        machine.frame.push_handle(second);
+
+        machine.heap.stress(true);
+        let args = machine.materialise_args(0, 2);
+
+        assert_eq!(args.len(), 2);
+        assert_eq!(args[0].field("x").and_then(Value::as_int), Some(1));
+        assert_eq!(args[1].field("x").and_then(Value::as_int), Some(3));
+        assert!(
+            machine
+                .collections()
+                .iter()
+                .all(|collection| collection.roots_yielded == 2 && collection.live_objects == 2),
+            "both arguments were roots at every one of them: {:?}",
+            machine.collections()
+        );
+        assert_eq!(machine.rooted(), 0);
+    }
+
+    /// The mutation of the test above, and the bug it is a control for:
+    /// rooting each argument for its own materialisation is not the same as
+    /// rooting all of them for the crossing. The second argument is off the
+    /// stack and in no root while the first crosses, so a safepoint inside the
+    /// first takes it.
+    #[test]
+    #[should_panic(expected = "names a swept object")]
+    fn rooting_one_argument_at_a_time_sweeps_the_others() {
+        let mut machine = Machine::new();
+        let points = point(&mut machine.heap);
+        let first = a_point(&mut machine, points, 1, 2);
+        let second = a_point(&mut machine, points, 3, 4);
+        machine.frame.push_handle(first);
+        machine.frame.push_handle(second);
+
+        machine.heap.stress(true);
+        let a = machine.frame.take_handle(0);
+        let b = machine.frame.take_handle(1);
+        machine.materialise(a);
+        machine.materialise(b);
+    }
+
+    // --------------------------- what the layout decides, on both sides
+
+    /// One word, two readers, one layout. The collector does not follow the
+    /// `Int` field even though its bits name a live object, and the boundary
+    /// reads that same word as the `Int` the layout says it is — and neither
+    /// of them consulted the bits to decide.
+    #[test]
+    fn a_boundary_layouts_reference_map_comes_from_its_payload_layout() {
+        let mut machine = Machine::new();
+        let points = point(&mut machine.heap);
+        let mixed = machine.heap.register(Layout::boundary(
+            "test.Mixed",
+            Shape::Struct {
+                type_name: "Mixed",
+                fields: vec![("n", Part::Int), ("child", Part::Nested)],
+            },
+        ));
+        let hidden = a_point(&mut machine, points, 8, 9);
+        let child = a_point(&mut machine, points, 1, 2);
+        let handle = machine.allocate(mixed, vec![hidden.to_slot(), child.to_slot()]);
+        machine.frame.push_handle(handle);
+
+        let collected = machine.collect_now();
+        assert_eq!(collected.live_objects, 2, "{collected:?}");
+        assert!(machine.heap.is_live(child));
+        assert!(
+            !machine.heap.is_live(hidden),
+            "a scalar word is not an edge"
+        );
+
+        let value = machine.materialise(handle);
+        assert_eq!(
+            value.field("n").and_then(Value::as_int),
+            Some(hidden.to_slot() as i64),
+            "and the boundary read the same word as the Int the layout calls it"
+        );
+        assert_eq!(
+            value
+                .field("child")
+                .and_then(|point| point.field("y"))
+                .and_then(Value::as_int),
+            Some(2)
+        );
+    }
+
+    /// Most of the heap never crosses. An object whose layout is
+    /// [`Shape::Opaque`] is the VM's own, and asking the boundary for one is a
+    /// programming error rather than a value it can answer.
+    #[test]
+    #[should_panic(expected = "test.Node is the VM's own object")]
+    fn an_opaque_object_does_not_cross_the_boundary() {
+        let mut machine = Machine::new();
+        let layout = node(&mut machine.heap);
+        let handle = machine.allocate(layout, vec![7, Handle::NONE.to_slot()]);
+        machine.materialise(handle);
     }
 }
