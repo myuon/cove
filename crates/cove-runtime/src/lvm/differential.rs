@@ -830,6 +830,38 @@ export fn f(n: Int) -> Int {
     );
 }
 
+/// A `Vector` and a `Range` leaving a program are the two families the
+/// boundary has to read out of more than one word: a vector's length is its
+/// header's and not its store's, and a range is three words in the heap and a
+/// range to a reader. Answering either as the representation it has — the
+/// spare room included, or `Range(start: 0, end: 3, inclusive: false)` — would
+/// be a different answer from the oracle's, which is what this asks about.
+#[test]
+fn a_compound_answer_agrees() {
+    let source = "
+export fn ints() -> Vector<Int> {
+  var v = Vector.of(1)
+  v.push(2)
+  v.push(3)
+  v
+}
+export fn exclusive() -> Range { 0..<3 }
+export fn inclusive() -> Range { 0..3 }
+";
+    assert_eq!(
+        agree(source, "ints", vec![]),
+        Answer::Value("[1, 2, 3]".to_string())
+    );
+    assert_eq!(
+        agree(source, "exclusive", vec![]),
+        Answer::Value("0..<3".to_string())
+    );
+    assert_eq!(
+        agree(source, "inclusive", vec![]),
+        Answer::Value("0..3".to_string())
+    );
+}
+
 #[test]
 fn a_vector_agrees() {
     let source = "
@@ -909,6 +941,108 @@ export fn f(n: Int) -> Bool {
 }
 ";
     for n in [0, 1, 2] {
+        agree(source, "f", vec![Value::int(n)]);
+    }
+}
+
+/// A `Range` renders as the operator it was written with. `1..3` and `1..<4`
+/// cover the same values and are two renderings, because `==` on ranges
+/// compares the bounds a program wrote rather than the set they describe.
+#[test]
+fn a_range_renders_as_it_was_written() {
+    let source = r#"
+export fn f(n: Int) -> String {
+  "{0..<n} and {0..n}"
+}
+"#;
+    for n in [0, 3] {
+        agree(source, "f", vec![Value::int(n)]);
+    }
+}
+
+#[test]
+fn a_string_method_agrees() {
+    let source = r#"
+export fn f(s: String) -> String {
+  "{s.length()} {s.toUpper()} {s.trim()} {s.contains("b")} {s.replace("b", "z")}"
+}
+"#;
+    for s in ["  abc  ", "", "aβc"] {
+        let source = source.to_string();
+        let value = Value::string(s);
+        let described = value.as_str().map(|t| t.to_string()).expect("a string");
+        let oracle = {
+            let (source, described) = (source.clone(), described.clone());
+            on_a_deep_stack(move || on_the_oracle(&source, "f", vec![Value::string(described)]))
+        };
+        let machine = {
+            let (source, described) = (source.clone(), described);
+            on_a_deep_stack(move || on_the_machine(&source, "f", vec![Value::string(described)]))
+        };
+        assert_eq!(machine, oracle, "the machine and the interpreter disagree");
+    }
+}
+
+#[test]
+fn a_scalar_method_agrees() {
+    let source = r#"
+export fn f(n: Int, x: Float) -> String {
+  "{n.abs()} {n.min(3)} {n.toFloat()} {x.round()} {x.format(2)}"
+}
+"#;
+    for (n, x) in [(-5, 1.25_f64), (7, -0.5)] {
+        agree(source, "f", vec![Value::int(n), Value::float(x)]);
+    }
+}
+
+#[test]
+fn a_parse_agrees_both_ways() {
+    let source = r#"
+export fn f(s: String) -> String {
+  match Int.parse(s) {
+    Ok(n) => "ok {n}"
+    Err(e) => "err {e}"
+  }
+}
+"#;
+    for text in ["42", "no"] {
+        let source = source.to_string();
+        let text = text.to_string();
+        let oracle = {
+            let (source, text) = (source.clone(), text.clone());
+            on_a_deep_stack(move || on_the_oracle(&source, "f", vec![Value::string(text)]))
+        };
+        let machine = {
+            let (source, text) = (source.clone(), text);
+            on_a_deep_stack(move || on_the_machine(&source, "f", vec![Value::string(text)]))
+        };
+        assert_eq!(machine, oracle, "the machine and the interpreter disagree");
+    }
+}
+
+#[test]
+fn a_duration_reads_and_builds_the_same_way() {
+    let source = r#"
+export fn f() -> String {
+  let d = 1500ms
+  "{d.millis()} {d.seconds()} {Duration.seconds(2)} {Duration.millis(1500)}"
+}
+"#;
+    agree(source, "f", vec![]);
+}
+
+#[test]
+fn an_option_method_agrees() {
+    let source = "
+export fn f(n: Int) -> Int {
+  let v = if n > 0 { Some(n) } else { None }
+  var total = 0
+  if v.isSome() { total = total + 1 }
+  if v.isNone() { total = total + 10 }
+  total + v.unwrapOr(100)
+}
+";
+    for n in [0, 5] {
         agree(source, "f", vec![Value::int(n)]);
     }
 }

@@ -38,6 +38,8 @@ use std::fmt::Write as _;
 use cove_lir::{Builtin, Repr, Shape};
 use cove_schema::builtins::{ERROR, MESSAGE_FIELD};
 
+use crate::lvm::boundary::is_range;
+
 use crate::error::RuntimeError;
 use crate::lvm::exec::Machine;
 
@@ -248,6 +250,20 @@ fn render_object(machine: &Machine, addr: u64, depth: usize) -> Result<String, R
         // That is ADR 0014's whole point, and it is why the layout carries
         // the flag rather than this deriving it.
         Shape::Struct { opaque: true, .. } => out.push_str(&layout.name),
+        // A `Range` renders as the operator it was written with: `1..3` and
+        // `1..<4` cover the same values and are two different renderings,
+        // because they are two different values — `==` on ranges compares the
+        // bounds a program wrote, not the set they describe.
+        Shape::Struct { fields, .. } if is_range(&layout.name, fields) => {
+            let start = machine.payload(addr, 0) as i64;
+            let end = machine.payload(addr, 1) as i64;
+            let operator = if machine.payload(addr, 2) != 0 {
+                ".."
+            } else {
+                "..<"
+            };
+            write!(out, "{start}{operator}{end}").expect("a string never fails to be written to");
+        }
         Shape::Struct { fields, .. } => {
             write!(out, "{}(", layout.name).expect("a string never fails to be written to");
             for (at, field) in fields.iter().enumerate() {

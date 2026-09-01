@@ -52,6 +52,7 @@
 //! between the release and the write that gives the object its real owner.
 
 use cove_lir::{Layout, LayoutId, Program, Repr, Shape};
+use cove_schema::builtins::RANGE;
 
 use crate::error::RuntimeError;
 use crate::lvm::exec::Machine;
@@ -115,6 +116,19 @@ fn object_to_value(machine: &Machine, addr: u64, depth: usize) -> Result<Value, 
             })?;
             Ok(Value::string(text))
         }
+        // A `Range` is a struct in the heap and is not one to a reader: the
+        // oracle answers `Value::range_of`, which prints `0..<3` and compares
+        // by the bounds it was written with. Materialising the three words as
+        // `Range(start: 0, end: 3, inclusive: false)` would be handing a host
+        // this representation instead of the value, so the family is
+        // recognised and answered as what it is.
+        Shape::Struct { fields, .. } if is_range(&layout.name, fields) => {
+            Ok(Value::range_of(
+                machine.payload(addr, RANGE_START) as i64,
+                machine.payload(addr, RANGE_END) as i64,
+                machine.payload(addr, RANGE_INCLUSIVE) != 0,
+            ))
+        }
         Shape::Struct { fields, .. } => {
             let mut out_fields = Vec::with_capacity(fields.len());
             for (at, field) in fields.iter().enumerate() {
@@ -160,6 +174,27 @@ fn object_to_value(machine: &Machine, addr: u64, depth: usize) -> Result<Value, 
                 Value::array(items)
             })
         }
+        // The length is the header's and not the store's. A store is as long
+        // as the last growth made it, and the words past the length are the
+        // spare room a `push` will use rather than elements the value has —
+        // reading the store's own length would hand a host the trailing zeros
+        // as if they were part of the vector.
+        //
+        // A header `freeze()` consumed holds `[0, 0]`, and this answers the
+        // empty vector for it, which is what the oracle answers too: `freeze`
+        // takes the elements out of the storage and leaves it frozen and
+        // empty, and a host that is handed one sees no elements either way.
+        Shape::Vector { elem } => {
+            let len = machine.payload(addr, 0);
+            let store = machine.payload(addr, 1);
+            let len = if store == 0 { 0 } else { len };
+            let mut items = Vec::with_capacity(len as usize);
+            for at in 0..len {
+                let word = machine.payload(store, at as u32);
+                items.push(out(machine, *elem, word, deeper)?);
+            }
+            Ok(Value(crate::value::Repr::Vector(VectorStorage::new(items))))
+        }
         // A box is erasure, and a reader looks through it: `Value::view` and
         // `Display` both look through a `dyn`, so materialising the wrapper
         // would put back something no reader on the far side can see.
@@ -169,6 +204,28 @@ fn object_to_value(machine: &Machine, addr: u64, depth: usize) -> Result<Value, 
                 .ok_or_else(|| RuntimeError::new("this boxed value carries no known type"))?;
             out(machine, repr, machine.payload(addr, 1), deeper)
         }
+        // The one family this backend can make and cannot hand over.
+        //
+        // A public closure is a `Value::Closure` carrying a
+        // `crate::value::ClosureBody`, and the only lowered variant of one
+        // names a function of the *predecessor's* program. Building that here
+        // would mean answering a closure whose body a host's callback would go
+        // looking for in a program this run does not have — a wrong answer
+        // rather than a missing one. `ClosureView` does not rescue it: a host
+        // reads a closure's arity and whether it is `async`, but what it reads
+        // them *for* is deciding whether to call it, and a callback it cannot
+        // call is worth less than a refusal that says so.
+        //
+        // So this refuses, and `Back::call` refuses on the other side for the
+        // same reason. It stops being true when `ClosureBody` can name a
+        // `cove-lir` function, which is a change to `value.rs` and not to this
+        // file.
+        Shape::Closure { .. } => Err(RuntimeError::new(
+            "a closure cannot cross the boundary out of the linear-memory backend",
+        )
+        .with_rule(
+            "A host that is handed a closure may call it back, and only the backend that made one can run it.",
+        )),
         other => Err(RuntimeError::new(format!(
             "a `{}` cannot cross the boundary yet ({other:?})",
             layout.name
@@ -280,7 +337,31 @@ fn object_from_value(
             filled.map(|()| addr)
         }
         ValueView::Array(items) => elements(machine, program, items, false, deeper),
-        ValueView::Vector(items) => elements(machine, program, &items, true, deeper),
+        ValueView::Vector(items) => vector(machine, program, &items, deeper),
+        // The written bounds, not the normalised ones. `ValueView::Range`
+        // answers a half-open [`crate::value::RangeBounds`], which is the
+        // right thing for a host asking what a range *covers* and the wrong
+        // thing to store: `1..3` and `1..<4` cover the same integers and are
+        // still two values, because `==` compares the bounds a range was
+        // written with. The object holds the written pair and a word saying
+        // which operator wrote it, so the variant is read directly — it is the
+        // only place the written form is still visible.
+        ValueView::Range(_) => {
+            let Value(crate::value::Repr::Range {
+                start,
+                end,
+                inclusive_end,
+            }) = *value.erased()
+            else {
+                unreachable!("`ValueView::Range` is what this variant views as");
+            };
+            let id = layout_for_range(program)?;
+            let addr = machine.new_object(id, 0)?;
+            machine.set_payload(addr, RANGE_START, start as u64);
+            machine.set_payload(addr, RANGE_END, end as u64);
+            machine.set_payload(addr, RANGE_INCLUSIVE, inclusive_end as u64);
+            Ok(addr)
+        }
         other => Err(RuntimeError::new(format!(
             "a `{}` cannot cross the boundary into the linear-memory backend yet",
             named(&other)
@@ -312,6 +393,59 @@ fn elements(
     })(machine);
     machine.release_temps(mark);
     filled.map(|()| addr)
+}
+
+/// A `Shape::Vector` header over a `Shape::Elements` store holding `items`.
+///
+/// Two objects, because that is what a `Vector` is: the header is the identity
+/// a program holds and `is` asks about, and the store beneath it is what a
+/// later `push` replaces without moving anything a program is naming. Building
+/// only the store — which is what an `Array` is one flag away from — would
+/// hand back a value nothing could grow.
+///
+/// The store is allocated to exactly these elements, as `Vector.of` does: a
+/// vector that arrived from a host is no more likely to be pushed onto than
+/// one a program wrote down, and spare room nobody asked for is room the run
+/// pays for.
+fn vector(
+    machine: &mut Machine,
+    program: &Program,
+    items: &[Value],
+    depth: usize,
+) -> Result<u64, RuntimeError> {
+    let header_layout = layout_for_vector(program, items)?;
+    let Shape::Vector { elem } = program.layout(header_layout).shape else {
+        unreachable!("`layout_for_vector` answers a vector-shaped layout");
+    };
+    let store_layout = layout_for_store(program, elem)?;
+
+    let store = machine.new_object(store_layout, items.len() as u32)?;
+    // The store exists and nothing walks it, and allocating the header can
+    // collect. It is released the moment the header exists, because the two
+    // writes below cannot allocate and word 1 holds it afterwards.
+    let mark = machine.temps();
+    machine.push_temp(store);
+    let header = machine.new_object(header_layout, 0);
+    machine.release_temps(mark);
+    let header = header?;
+    machine.set_payload(header, 0, items.len() as u64);
+    machine.set_payload(header, 1, store);
+
+    // Rooting the header is enough for the elements: the store is word 1 of
+    // it, and the collector traces a vector's header through exactly that
+    // word. The store's payload is zeroed, so the part not filled in yet
+    // traces nothing and the part that is holds what has been converted.
+    let mark = machine.temps();
+    machine.push_temp(header);
+    let filled = (|machine: &mut Machine| {
+        for (at, item) in items.iter().enumerate() {
+            let word = into(machine, elem, item, depth)?;
+            machine.set_payload(store, at as u32, word);
+        }
+        Ok(())
+    })(machine);
+    machine.release_temps(mark);
+    filled.map(|()| header)
 }
 
 /// A box holding `word`, tagged `repr`.
@@ -402,6 +536,78 @@ fn layout_for_elements(
         is_growable == growable && items.iter().all(|item| fits(elem, item))
     })
     .ok_or_else(|| unknown_family(if growable { "Vector" } else { "Array" }))
+}
+
+/// The layout of a `Vector` header whose elements these items fit.
+///
+/// One layout per element `Repr`, as everywhere else. An empty vector names no
+/// element type and takes the first header the program declared, for the
+/// reason [`layout_for_elements`] gives: an object with no elements has no
+/// element word for the difference to show in.
+fn layout_for_vector(program: &Program, items: &[Value]) -> Result<LayoutId, RuntimeError> {
+    find(program, |layout| {
+        let Shape::Vector { elem } = layout.shape else {
+            return false;
+        };
+        items.iter().all(|item| fits(elem, item))
+    })
+    .ok_or_else(|| unknown_family("Vector"))
+}
+
+/// The layout of the growable store a `Vector` header of `elem` sits over.
+///
+/// A program that describes the header describes the store, because the
+/// lowering interns both together — so a miss here is the same missing family
+/// as a miss on the header and says so in the same words.
+fn layout_for_store(program: &Program, elem: Repr) -> Result<LayoutId, RuntimeError> {
+    find(program, |layout| {
+        matches!(
+            layout.shape,
+            Shape::Elements {
+                elem: e,
+                growable: true
+            } if e == elem
+        )
+    })
+    .ok_or_else(|| unknown_family("Vector"))
+}
+
+/// The one struct-shaped layout a `Range` is.
+fn layout_for_range(program: &Program) -> Result<LayoutId, RuntimeError> {
+    find(program, |layout| match &layout.shape {
+        Shape::Struct { fields, .. } => is_range(&layout.name, fields),
+        _ => false,
+    })
+    .ok_or_else(|| unknown_family(RANGE.name))
+}
+
+/// Payload word 0 of a `Range`: the first value it can yield.
+const RANGE_START: u32 = 0;
+
+/// Payload word 1: the end as it was written — the last value the range
+/// yields when it is inclusive, and the first one past it when it is not.
+const RANGE_END: u32 = 1;
+
+/// Payload word 2: which of the two word 1 is.
+const RANGE_INCLUSIVE: u32 = 2;
+
+/// Whether a struct-shaped layout is the program's `Range`.
+///
+/// `docs/LINEAR_VM.md` fixes the shape as `Struct { start: Int, end: Int,
+/// inclusive: Bool }`, one layout for the program, and the whole of it is
+/// checked rather than only the name — a `Range` is a builtin type a module
+/// cannot redeclare, so the name is the checker's, but a family is the right
+/// one when its fields say so and this is the one place that reads them as a
+/// range's rather than as a struct's.
+pub(crate) fn is_range(name: &str, fields: &[cove_lir::Field]) -> bool {
+    name == RANGE.name
+        && fields.len() == 3
+        && &*fields[0].name == "start"
+        && fields[0].repr == Repr::Int
+        && &*fields[1].name == "end"
+        && fields[1].repr == Repr::Int
+        && &*fields[2].name == "inclusive"
+        && fields[2].repr == Repr::Bool
 }
 
 /// The first layout `wanted` accepts.
@@ -593,6 +799,9 @@ mod tests {
                 growable: false,
             },
         );
+        // The two objects a `Vector` is: the store, and the header over it.
+        // A program that uses one declares both, because the lowering interns
+        // them together.
         build.layout(
             "Vector",
             Shape::Elements {
@@ -600,6 +809,7 @@ mod tests {
                 growable: true,
             },
         );
+        build.layout("Vector", Shape::Vector { elem: Repr::Int });
         let program = build.bare();
         let mut machine = Machine::new(&program, 1 << 12);
 
@@ -617,6 +827,161 @@ mod tests {
         let back = to_value(&machine, Repr::Ref, word).unwrap();
         assert_eq!(back.to_string(), "[1, 2]");
         assert!(matches!(back.view(), ValueView::Vector(_)));
+    }
+
+    /// A vector arrives as the two objects it is, and the header is what a
+    /// reference to it names — so growing it later replaces what is under the
+    /// header rather than moving the value a program is holding.
+    #[test]
+    fn a_vector_arrives_as_a_header_over_a_store() {
+        let mut build = Build::default();
+        let store = build.layout(
+            "Vector",
+            Shape::Elements {
+                elem: Repr::Int,
+                growable: true,
+            },
+        );
+        let header = build.layout("Vector", Shape::Vector { elem: Repr::Int });
+        let program = build.bare();
+        let mut machine = Machine::new(&program, 1 << 12);
+
+        let vector = Value(crate::value::Repr::Vector(VectorStorage::new(vec![
+            Value::int(7),
+            Value::int(8),
+            Value::int(9),
+        ])));
+        let word = from_value(&mut machine, Repr::Ref, &vector).unwrap();
+        assert_eq!(machine.object_layout(word), header);
+        assert_eq!(machine.payload(word, 0), 3);
+        let addr = machine.payload(word, 1);
+        assert_eq!(machine.object_layout(addr), store);
+        // Exactly these elements, as `Vector.of` allocates: spare room nobody
+        // asked for is room the run pays for.
+        assert_eq!(machine.object_len(addr), 3);
+        assert_eq!(machine.payload(addr, 2) as i64, 9);
+    }
+
+    /// The length is the header's word 0, and the store is as long as the last
+    /// growth made it. A boundary that read the store's own length would hand
+    /// a host the spare room as if it were part of the value.
+    #[test]
+    fn a_vector_crosses_out_by_its_header_and_not_its_store() {
+        let mut build = Build::default();
+        let store = build.layout(
+            "Vector",
+            Shape::Elements {
+                elem: Repr::Int,
+                growable: true,
+            },
+        );
+        let header = build.layout("Vector", Shape::Vector { elem: Repr::Int });
+        let program = build.bare();
+        let mut machine = Machine::new(&program, 1 << 12);
+
+        // What a `push` onto a full store of two leaves behind: four words of
+        // room, two of them elements.
+        let addr = machine.new_object(store, 4).unwrap();
+        machine.set_payload(addr, 0, 1);
+        machine.set_payload(addr, 1, 2);
+        machine.set_payload(addr, 2, 99);
+        let word = machine.new_object(header, 0).unwrap();
+        machine.set_payload(word, 0, 2);
+        machine.set_payload(word, 1, addr);
+
+        let back = to_value(&machine, Repr::Ref, word).unwrap();
+        assert_eq!(back.to_string(), "[1, 2]");
+        assert!(matches!(back.view(), ValueView::Vector(_)));
+    }
+
+    /// `freeze()` clears the header's two words, and the oracle's `freeze`
+    /// takes the elements out of the storage it leaves behind. Both sides
+    /// therefore show a host no elements, which is what this pins.
+    #[test]
+    fn a_vector_that_freeze_consumed_crosses_out_empty() {
+        let mut build = Build::default();
+        build.layout(
+            "Vector",
+            Shape::Elements {
+                elem: Repr::Int,
+                growable: true,
+            },
+        );
+        let header = build.layout("Vector", Shape::Vector { elem: Repr::Int });
+        let program = build.bare();
+        let mut machine = Machine::new(&program, 1 << 12);
+
+        let word = machine.new_object(header, 0).unwrap();
+        let back = to_value(&machine, Repr::Ref, word).unwrap();
+        assert_eq!(back.to_string(), "[]");
+        assert!(matches!(back.view(), ValueView::Vector(_)));
+    }
+
+    /// A `Range` is three words in the heap and a range to a reader, both
+    /// ways. `..` and `..<` are two ways of writing one family and stay two
+    /// values, because `==` compares the bounds a range was written with —
+    /// so a round trip that normalised them would answer something the oracle
+    /// says is a different value.
+    #[test]
+    fn a_range_crosses_with_the_bounds_it_was_written_with() {
+        let mut build = Build::default();
+        build.layout(
+            "Range",
+            Shape::Struct {
+                fields: vec![
+                    field("start", Repr::Int),
+                    field("end", Repr::Int),
+                    field("inclusive", Repr::Bool),
+                ],
+                opaque: false,
+            },
+        );
+        let program = build.bare();
+        let mut machine = Machine::new(&program, 1 << 12);
+
+        for (value, shown) in [
+            (Value::range_of(0, 3, false), "0..<3"),
+            (Value::range_of(0, 3, true), "0..3"),
+            (Value::range_of(-2, -2, false), "-2..<-2"),
+        ] {
+            let word = from_value(&mut machine, Repr::Ref, &value).unwrap();
+            let back = to_value(&machine, Repr::Ref, word).unwrap();
+            assert_eq!(back.to_string(), shown);
+            assert!(back.eq_value(&value), "{back} is not {value}");
+        }
+
+        // The written form survives, so the two are still two values.
+        let exclusive = from_value(&mut machine, Repr::Ref, &Value::range_of(1, 4, false)).unwrap();
+        let inclusive = from_value(&mut machine, Repr::Ref, &Value::range_of(1, 3, true)).unwrap();
+        let exclusive = to_value(&machine, Repr::Ref, exclusive).unwrap();
+        let inclusive = to_value(&machine, Repr::Ref, inclusive).unwrap();
+        assert!(!exclusive.eq_value(&inclusive));
+    }
+
+    /// A closure is the one value family this backend makes and cannot hand
+    /// over: a public `Value::Closure` carries a body a host may ask to be
+    /// called back, and this backend has no way to name one that a host's
+    /// callback would find. So it refuses by name rather than answering a
+    /// closure nothing could run.
+    #[test]
+    fn a_closure_is_refused_on_its_way_out() {
+        let mut build = Build::default();
+        let layout = build.layout(
+            "closure",
+            Shape::Closure {
+                function: cove_lir::FunctionId(0),
+                captures: vec![Repr::Int],
+            },
+        );
+        let program = build.bare();
+        let mut machine = Machine::new(&program, 1 << 12);
+        let addr = machine.new_object(layout, 0).unwrap();
+
+        let error = to_value(&machine, Repr::Ref, addr).unwrap_err();
+        assert_eq!(
+            error.message,
+            "a closure cannot cross the boundary out of the linear-memory backend"
+        );
     }
 
     /// An `Any` result is a box, and a reader looks through it.

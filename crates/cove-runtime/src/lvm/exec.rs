@@ -400,10 +400,59 @@ impl<'a> Machine<'a> {
                     pc = 0;
                     code = &program.function(id).code[..];
                 }
-                Inst::CallClosure { .. } => {
-                    fail!(RuntimeError::new(
-                        "this call is not lowered by the linear-memory backend yet"
-                    ))
+                // A closure call is a frame like any other, and that is the
+                // whole of it. The callee is not in the instruction — it is a
+                // word of the object the slot names — and the captures follow
+                // the arguments into the slots `Function::captures` names.
+                // Nothing else differs from [`Inst::Call`]: no Rust frame is
+                // added, so a `map` over a `map` over a `map` nests in the
+                // reserved stack region and nowhere else, which is the
+                // property `docs/LINEAR_VM.md` asks a closure-taking sequence
+                // method to lower to a loop in order to keep.
+                Inst::CallClosure { dst, closure, args } => {
+                    let object = self.mem.slot(base, closure);
+                    let callee = match self.callee_of(object) {
+                        Ok(callee) => callee,
+                        Err(error) => fail!(error),
+                    };
+                    let target = program.function(callee);
+                    let list = program.arg_list(args);
+                    let callee_base = match self.mem.push_frame(target.frame_size()) {
+                        Ok(base) => base,
+                        Err(Overflow) => fail!(self.too_deep_error()),
+                    };
+                    for (slot, src) in list.iter().enumerate() {
+                        let word = self.mem.slot(base, *src);
+                        self.mem.set_slot(callee_base, slot as u32, word);
+                    }
+                    // The object has to stay reachable across every one of
+                    // these reads, and it does, for a reason rather than by
+                    // luck: it is named by slot `closure` of a frame this has
+                    // not left, the verifier holds that slot to `Repr::Ref`,
+                    // and a `Repr::Ref` slot of a live frame is a root. So no
+                    // temporary root is taken here — and nothing between the
+                    // read and the last write allocates, so no collection can
+                    // happen in the window at all.
+                    //
+                    // `Capture::slot` is read rather than re-derived from
+                    // `arity + at`. The two agree, and the verifier is what
+                    // says so: it refuses a capture naming a slot outside the
+                    // frame or holding a different `Repr`.
+                    for (at, capture) in target.captures.iter().enumerate() {
+                        let word = self.mem.payload(object, 1 + at as u32);
+                        self.mem.set_slot(callee_base, capture.slot, word);
+                    }
+                    self.sync(pc);
+                    self.frames.push(Frame {
+                        function: callee,
+                        base: callee_base,
+                        pc: 0,
+                        dst,
+                    });
+                    id = callee;
+                    base = callee_base;
+                    pc = 0;
+                    code = &program.function(id).code[..];
                 }
                 // The one instruction that leaves the machine. Everything it
                 // needs to read out of the frame is read before the call, so
@@ -775,6 +824,58 @@ impl<'a> Machine<'a> {
         Ok(())
     }
 
+    /// The function the closure object at `addr` calls.
+    ///
+    /// Three things have to hold before a frame is pushed, and none of them
+    /// is something a program can get wrong: the object has to be a closure's,
+    /// the callee it names has to be one this program has, and the captures it
+    /// holds have to be the ones that callee reads. The checker resolved the
+    /// callee's type and the verifier holds the slot to `Repr::Ref`, so each
+    /// of the three is a lowering bug — reported for the reason
+    /// [`Machine::checked`] is, because the alternative is a frame whose
+    /// capture slots hold whatever followed the object in the heap.
+    ///
+    /// The id comes from the object rather than from the layout, which carries
+    /// one too. They agree — a layout is one per lowered lambda — and the
+    /// object's word is the one [`Inst::CallClosure`] is defined in terms of.
+    fn callee_of(&self, addr: u64) -> Result<FunctionId, RuntimeError> {
+        if addr == 0 {
+            return Err(null_object());
+        }
+        let program = self.program;
+        let layout = program.layout(self.mem.object_layout(addr));
+        let Shape::Closure { captures, .. } = &layout.shape else {
+            // The oracle's words for a call of something that is not a
+            // function, with the name the layout carries — which is the name
+            // the declaration wrote, and so the one a `Value` of this object
+            // would answer.
+            return Err(RuntimeError::new(format!(
+                "`{}` is not callable",
+                layout.name
+            )));
+        };
+        let word = self.mem.payload(addr, 0);
+        let callee = u32::try_from(word)
+            .ok()
+            .map(FunctionId)
+            .filter(|id| id.index() < program.functions.len())
+            .ok_or_else(|| {
+                RuntimeError::new(format!(
+                    "this closure names function {word}, which this program has not"
+                ))
+            })?;
+        let target = program.function(callee);
+        if target.captures.len() != captures.len() {
+            return Err(RuntimeError::new(format!(
+                "this closure and `{}` disagree about its captures: {} held, {} read",
+                target.qualified(),
+                captures.len(),
+                target.captures.len()
+            )));
+        }
+        Ok(callee)
+    }
+
     /// Turns a language-level index into a payload offset.
     fn element(&self, addr: u64, at: i64) -> Result<u32, RuntimeError> {
         if addr == 0 {
@@ -888,8 +989,11 @@ impl<'a> Machine<'a> {
 /// The way back a host is offered while the linear-memory backend runs.
 ///
 /// A host that was handed a Cove callback calls it through this. This machine
-/// has no closures yet — [`Inst::CallClosure`] is not implemented — so no
-/// callback can reach a host from here and the call arm says what is missing
+/// runs closures — [`Inst::CallClosure`] pushes a frame like any other call —
+/// but it hands none of them out: a `Shape::Closure` object is refused on its
+/// way across [`boundary::to_value`], because a public `Value` has no way to
+/// carry a body this backend could be asked to run. So a host is never holding
+/// one of this machine's closures, and the call arm says what is missing
 /// rather than pretending. What the other three answers are worth is not
 /// conditional on that: a host that waits reads them to decide whether to keep
 /// waiting, and answering "no limit, not cancelled" from a run that has both
@@ -901,7 +1005,7 @@ struct Back<'m> {
 impl Reentry for Back<'_> {
     fn call(&mut self, callee: &Value, _args: Vec<Value>) -> Result<Value, RuntimeError> {
         Err(RuntimeError::new(format!(
-            "this host call cannot run {}, because the linear-memory backend does not run closures yet",
+            "this host call cannot run {}, because the linear-memory backend hands no callback across the boundary",
             callee.type_name()
         )))
     }
@@ -1105,6 +1209,35 @@ pub(crate) mod tests {
             self.program
                 .by_name
                 .insert((Arc::from("t"), Arc::from(name)), id);
+            id
+        }
+
+        /// A function that reads captures: what a lowered lambda is.
+        ///
+        /// The slot each capture lands in is filled in here rather than
+        /// written out per fixture, because it is not a choice a fixture gets
+        /// to make: captures follow the parameters, so the slot is
+        /// `arity + <position>`, and a fixture free to say otherwise could
+        /// agree with a machine that had the rule wrong.
+        pub(crate) fn lambda(
+            &mut self,
+            name: &str,
+            arity: u32,
+            reprs: &[Repr],
+            returns: Repr,
+            captures: &[Repr],
+            code: Vec<Inst>,
+        ) -> FunctionId {
+            let id = self.function(name, arity, reprs, returns, code);
+            self.program.functions[id.index()].captures = captures
+                .iter()
+                .enumerate()
+                .map(|(at, repr)| Capture {
+                    name: Arc::from(format!("c{at}")),
+                    slot: arity + at as u32,
+                    repr: *repr,
+                })
+                .collect();
             id
         }
 
@@ -1381,6 +1514,471 @@ pub(crate) mod tests {
         let program = build.done();
         let error = run(&program, f, &[0]).unwrap_err();
         assert_eq!(error.message, "this call nests too deeply");
+    }
+
+    // ---- closures ------------------------------------------------------
+
+    /// The layout of a lambda that reads `captures`.
+    fn closure_layout(build: &mut Build, function: FunctionId, captures: &[Repr]) -> LayoutId {
+        build.layout(
+            "closure",
+            Shape::Closure {
+                function,
+                captures: captures.to_vec(),
+            },
+        )
+    }
+
+    /// A closure's frame is a callee's frame with two writes rather than one:
+    /// the arguments into slots `0..arity`, and then the captures into the
+    /// slots `Function::captures` names, which are the ones straight after.
+    #[test]
+    fn a_closure_call_copies_the_arguments_then_the_captures() {
+        let mut build = Build::default();
+        // { it -> it + captured }
+        let add = build.lambda(
+            "lambda",
+            1,
+            &[Repr::Int, Repr::Int, Repr::Int],
+            Repr::Int,
+            &[Repr::Int],
+            vec![
+                Inst::Arith {
+                    num: Num::Int,
+                    op: ArithOp::Add,
+                    dst: 2,
+                    a: 0,
+                    b: 1,
+                },
+                Inst::Return { src: 2 },
+            ],
+        );
+        let layout = closure_layout(&mut build, add, &[Repr::Int]);
+        let args = build.args(&[3]);
+        let main = build.function(
+            "main",
+            0,
+            &[Repr::Ref, Repr::Int, Repr::Int, Repr::Int, Repr::Int],
+            Repr::Int,
+            vec![
+                Inst::Alloc {
+                    dst: 0,
+                    layout,
+                    len: Len::Fixed,
+                },
+                Inst::Int {
+                    dst: 1,
+                    value: add.0 as i64,
+                },
+                Inst::SetWord {
+                    obj: 0,
+                    at: 0,
+                    src: 1,
+                },
+                Inst::Int { dst: 2, value: 10 },
+                Inst::SetWord {
+                    obj: 0,
+                    at: 1,
+                    src: 2,
+                },
+                Inst::Int { dst: 3, value: 5 },
+                Inst::CallClosure {
+                    dst: 4,
+                    closure: 0,
+                    args,
+                },
+                Inst::Return { src: 4 },
+            ],
+        );
+        let program = build.done();
+        assert_eq!(run(&program, main, &[]).unwrap() as i64, 15);
+    }
+
+    /// A capture is a `Repr::Ref` slot of the callee's frame, so it is a root
+    /// of that frame like any other — which is what makes a closure need no
+    /// second story for the collector.
+    ///
+    /// The captured object is reachable from nowhere else by the time the call
+    /// happens: the caller cleared its own slot, and it is not a string, so the
+    /// interned table is not quietly holding it either. The body then allocates
+    /// until the heap has to be swept several times over before reading the
+    /// capture back.
+    #[test]
+    fn a_capture_survives_a_collection_in_the_callee() {
+        let mut build = Build::default();
+        let cell = build.layout(
+            "Cell",
+            Shape::Elements {
+                elem: Repr::Int,
+                growable: false,
+            },
+        );
+        let body = build.lambda(
+            "lambda",
+            0,
+            &[
+                Repr::Ref,
+                Repr::Int,
+                Repr::Int,
+                Repr::Bool,
+                Repr::Ref,
+                Repr::Int,
+                Repr::Int,
+                Repr::Int,
+            ],
+            Repr::Int,
+            &[Repr::Ref],
+            vec![
+                Inst::Int { dst: 2, value: 300 },
+                Inst::Int { dst: 1, value: 0 },
+                Inst::Cmp {
+                    on: Compare::Int,
+                    op: CmpOp::Lt,
+                    dst: 3,
+                    a: 1,
+                    b: 2,
+                },
+                Inst::BranchFalse { cond: 3, to: 9 },
+                Inst::Alloc {
+                    dst: 4,
+                    layout: cell,
+                    len: Len::Count(64),
+                },
+                Inst::Clear { slot: 4 },
+                Inst::Int { dst: 5, value: 1 },
+                Inst::Arith {
+                    num: Num::Int,
+                    op: ArithOp::Add,
+                    dst: 1,
+                    a: 1,
+                    b: 5,
+                },
+                Inst::Jump { to: 2 },
+                Inst::Int { dst: 6, value: 0 },
+                Inst::GetElem {
+                    dst: 7,
+                    obj: 0,
+                    index: 6,
+                },
+                Inst::Return { src: 7 },
+            ],
+        );
+        let layout = closure_layout(&mut build, body, &[Repr::Ref]);
+        let none = build.args(&[]);
+        let main = build.function(
+            "main",
+            0,
+            &[
+                Repr::Ref,
+                Repr::Ref,
+                Repr::Int,
+                Repr::Int,
+                Repr::Int,
+                Repr::Int,
+            ],
+            Repr::Int,
+            vec![
+                Inst::Alloc {
+                    dst: 1,
+                    layout: cell,
+                    len: Len::Count(1),
+                },
+                Inst::Int { dst: 3, value: 0 },
+                Inst::Int {
+                    dst: 4,
+                    value: 4242,
+                },
+                Inst::SetElem {
+                    obj: 1,
+                    index: 3,
+                    src: 4,
+                },
+                Inst::Alloc {
+                    dst: 0,
+                    layout,
+                    len: Len::Fixed,
+                },
+                Inst::Int {
+                    dst: 2,
+                    value: body.0 as i64,
+                },
+                Inst::SetWord {
+                    obj: 0,
+                    at: 0,
+                    src: 2,
+                },
+                Inst::SetWord {
+                    obj: 0,
+                    at: 1,
+                    src: 1,
+                },
+                Inst::Clear { slot: 1 },
+                Inst::CallClosure {
+                    dst: 5,
+                    closure: 0,
+                    args: none,
+                },
+                Inst::Return { src: 5 },
+            ],
+        );
+        let program = build.done();
+        let mut machine = Machine::new(&program, 4096);
+        assert_eq!(machine.run(main, &[], &budget()).unwrap() as i64, 4242);
+        assert!(
+            machine.collected().collections > 0,
+            "the body is meant to allocate more than the heap holds"
+        );
+    }
+
+    /// A closure that calls itself through its own capture nests until the
+    /// reserved stack region is full, and stops there — with the message any
+    /// other unbounded recursion gets, because it is the same event. No Rust
+    /// frame is added per turn, so how deep this goes is `STACK_WORDS` and
+    /// nothing else.
+    #[test]
+    fn a_closure_chain_is_bounded_by_the_stack_region() {
+        let mut build = Build::default();
+        let none = build.args(&[]);
+        let body = build.lambda(
+            "lambda",
+            0,
+            &[Repr::Ref, Repr::Ref],
+            Repr::Ref,
+            &[Repr::Ref],
+            vec![
+                Inst::CallClosure {
+                    dst: 1,
+                    closure: 0,
+                    args: none,
+                },
+                Inst::Return { src: 1 },
+            ],
+        );
+        let layout = closure_layout(&mut build, body, &[Repr::Ref]);
+        let main = build.function(
+            "main",
+            0,
+            &[Repr::Ref, Repr::Int, Repr::Ref],
+            Repr::Ref,
+            vec![
+                Inst::Alloc {
+                    dst: 0,
+                    layout,
+                    len: Len::Fixed,
+                },
+                Inst::Int {
+                    dst: 1,
+                    value: body.0 as i64,
+                },
+                Inst::SetWord {
+                    obj: 0,
+                    at: 0,
+                    src: 1,
+                },
+                // The closure captures itself, which is the shortest way to
+                // write a call chain with no bound on it.
+                Inst::SetWord {
+                    obj: 0,
+                    at: 1,
+                    src: 0,
+                },
+                Inst::CallClosure {
+                    dst: 2,
+                    closure: 0,
+                    args: none,
+                },
+                Inst::Return { src: 2 },
+            ],
+        );
+        let program = build.done();
+        let error = run(&program, main, &[]).unwrap_err();
+        assert_eq!(error.message, "this call nests too deeply");
+    }
+
+    /// `fn main() { spin() }`, where `spin` is a closure whose body never
+    /// leaves its loop.
+    ///
+    /// The caller is four instructions and the fifth enters the closure, so
+    /// every safepoint after the first handful is one the closure's own frame
+    /// is executing at.
+    fn spinning_closure(build: &mut Build) -> FunctionId {
+        let body = build.lambda(
+            "lambda",
+            0,
+            &[Repr::Int],
+            Repr::Int,
+            &[],
+            vec![Inst::Int { dst: 0, value: 0 }, Inst::Jump { to: 0 }],
+        );
+        let layout = closure_layout(build, body, &[]);
+        let none = build.args(&[]);
+        build.function(
+            "main",
+            0,
+            &[Repr::Ref, Repr::Int, Repr::Int],
+            Repr::Int,
+            vec![
+                Inst::Alloc {
+                    dst: 0,
+                    layout,
+                    len: Len::Fixed,
+                },
+                Inst::Int {
+                    dst: 1,
+                    value: body.0 as i64,
+                },
+                Inst::SetWord {
+                    obj: 0,
+                    at: 0,
+                    src: 1,
+                },
+                Inst::CallClosure {
+                    dst: 2,
+                    closure: 0,
+                    args: none,
+                },
+                Inst::Return { src: 2 },
+            ],
+        )
+    }
+
+    /// The safepoint is a fact about the loop, not about which frame the loop
+    /// is in: a run spinning inside a closure is cancelled within one stride
+    /// exactly as one spinning in its entry is.
+    #[test]
+    fn a_cancelled_run_stops_at_a_safepoint_inside_a_closure() {
+        let mut build = Build::default();
+        let main = spinning_closure(&mut build);
+        let program = build.done();
+        let cancellation = Cancellation::new();
+        let budget = crate::budget::Budget::with_cancellation(
+            crate::budget::Limits::default(),
+            cancellation.clone(),
+        );
+        cancellation.cancel();
+        let mut machine = Machine::new(&program, 1 << 12);
+        let error = machine.run(main, &[], &budget.meter()).unwrap_err();
+        assert_eq!(error.message, "execution stopped: the run was cancelled");
+        assert!(machine.instructions() <= SAFEPOINT_STRIDE + 1);
+    }
+
+    /// And fuel is charged at the same points, so a closure cannot spend a
+    /// run's budget without the run noticing.
+    #[test]
+    fn fuel_runs_out_at_a_safepoint_inside_a_closure() {
+        let mut build = Build::default();
+        let main = spinning_closure(&mut build);
+        let program = build.done();
+        let budget = crate::budget::Budget::new(crate::budget::Limits {
+            fuel: Some(2 * SAFEPOINT_STRIDE),
+            ..Default::default()
+        });
+        let mut machine = Machine::new(&program, 1 << 12);
+        let error = machine.run(main, &[], &budget.meter()).unwrap_err();
+        assert_eq!(
+            error.message,
+            format!(
+                "execution stopped: fuel budget of {} exhausted",
+                2 * SAFEPOINT_STRIDE
+            )
+        );
+        assert_eq!(machine.instructions(), 2 * SAFEPOINT_STRIDE);
+    }
+
+    /// The callee comes out of a heap object, so the machine checks that the
+    /// object is one a call can be made through rather than reading its first
+    /// word as a function id. Nothing a program can write reaches this; a
+    /// lowering that did would otherwise push a frame for whichever function
+    /// the object's first word happened to name.
+    #[test]
+    fn a_call_through_something_that_is_not_a_closure_is_refused() {
+        let mut build = Build::default();
+        let point = build.layout(
+            "Point",
+            Shape::Struct {
+                fields: vec![cove_lir::Field {
+                    name: Arc::from("x"),
+                    repr: Repr::Int,
+                }],
+                opaque: false,
+            },
+        );
+        let none = build.args(&[]);
+        let main = build.function(
+            "main",
+            0,
+            &[Repr::Ref, Repr::Int],
+            Repr::Int,
+            vec![
+                Inst::Alloc {
+                    dst: 0,
+                    layout: point,
+                    len: Len::Fixed,
+                },
+                Inst::CallClosure {
+                    dst: 1,
+                    closure: 0,
+                    args: none,
+                },
+                Inst::Return { src: 1 },
+            ],
+        );
+        let program = build.done();
+        let error = run(&program, main, &[]).unwrap_err();
+        assert_eq!(error.message, "`Point` is not callable");
+    }
+
+    /// A closure object whose captures are not the ones its callee reads is a
+    /// lowering bug, and copying what it holds would fill the callee's capture
+    /// slots from whatever follows the object in the heap.
+    #[test]
+    fn a_closure_whose_captures_do_not_match_its_callee_is_refused() {
+        let mut build = Build::default();
+        let none = build.args(&[]);
+        let body = build.lambda(
+            "lambda",
+            0,
+            &[Repr::Int, Repr::Int],
+            Repr::Int,
+            &[Repr::Int, Repr::Int],
+            vec![Inst::Return { src: 0 }],
+        );
+        // One capture word, against a callee that reads two.
+        let layout = closure_layout(&mut build, body, &[Repr::Int]);
+        let main = build.function(
+            "main",
+            0,
+            &[Repr::Ref, Repr::Int, Repr::Int],
+            Repr::Int,
+            vec![
+                Inst::Alloc {
+                    dst: 0,
+                    layout,
+                    len: Len::Fixed,
+                },
+                Inst::Int {
+                    dst: 1,
+                    value: body.0 as i64,
+                },
+                Inst::SetWord {
+                    obj: 0,
+                    at: 0,
+                    src: 1,
+                },
+                Inst::CallClosure {
+                    dst: 2,
+                    closure: 0,
+                    args: none,
+                },
+                Inst::Return { src: 2 },
+            ],
+        );
+        let program = build.done();
+        let error = run(&program, main, &[]).unwrap_err();
+        assert_eq!(
+            error.message,
+            "this closure and `t.lambda` disagree about its captures: 1 held, 2 read"
+        );
     }
 
     /// `bump(var total)` adds to the caller's own binding rather than to a
