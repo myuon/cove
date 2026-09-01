@@ -1,4 +1,4 @@
-# ADR 0034: The production VM has one physical word stack
+# ADR 0034: Cove runtime values live in one linear memory
 
 - Status: Accepted
 - Date: 2026-09-01
