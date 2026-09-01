@@ -2006,6 +2006,32 @@ impl<'a> Checker<'a> {
                     }
                 }
                 if let Some(body) = &method.default {
+                    // A default body is a declaration like any other, and a
+                    // consumer holding one needs to know its boundary: what
+                    // its parameters are and what it answers. `check_body`
+                    // records that for every *other* declaration and skips
+                    // these, because a defaulted method is checked here
+                    // instead of once per conforming type — so without this
+                    // line the one kind of body that is shared by several
+                    // types is the one kind whose signature nothing can read.
+                    //
+                    // The receiver and any `Self` in the boundary stay
+                    // `Ty::Param("Self")`, which is what the declaration
+                    // says. Completing it is the reader's job, exactly as for
+                    // a generic declaration's `Ty::Param`.
+                    //
+                    // `resolve::conform` synthesises each conforming type's
+                    // `FnDecl` with `span: method.span`, so a lookup keyed by
+                    // that entry's span finds this.
+                    self.facts.record_signature(
+                        method.span.file,
+                        method.span,
+                        Signature {
+                            receiver: method.receiver.map(|_| Ty::Param(self_param.clone())),
+                            params: sig.params.iter().map(|param| param.ty.clone()).collect(),
+                            ret: sig.ret.clone(),
+                        },
+                    );
                     let expected = Expected::new(
                         sig.ret.clone(),
                         sig.ret_span,

@@ -263,6 +263,21 @@ pub enum Inst {
     SetElem { obj: Slot, index: Slot, src: Slot },
     /// `dst = <obj's header length>`: an element count, or a string's bytes.
     Len { dst: Slot, obj: Slot },
+    /// `dst = <the [`LayoutId`] in obj's header>`, as an `Int`.
+    ///
+    /// The other half of the header word [`Inst::Len`] reads, and it is here
+    /// for the same reason: *what an object is* is a question the object
+    /// answers at run time, from its own header, and a `Ref` slot carries no
+    /// layout of its own.
+    ///
+    /// It exists because a dispatch has to ask it. A `dyn Trait` value's
+    /// implementation is decided by the type behind it, and nothing static
+    /// says which that is; the object's header does. Reading it into a slot
+    /// turns "which implementation" into an ordinary [`Inst::Switch`] over a
+    /// table the lowering builds from the trait's declared conformances,
+    /// which is why there is no dispatch instruction — one general question
+    /// about an object, answered with the control flow that is already here.
+    LayoutOf { dst: Slot, obj: Slot },
 
     // ---- places ----------------------------------------------------------
     /// `dst = &frame[slot]`

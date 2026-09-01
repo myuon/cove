@@ -111,14 +111,4 @@ fn the_forms_this_task_left_out_say_so_one_by_one() {
         refused("fn nap() -> Int {\n  let g = 1\n  fn inner() -> Int { 2 }\n  g\n}"),
         vec!["not yet lowered: a declaration inside a body"]
     );
-    assert_eq!(
-        refused(
-            "struct P { x: Int }\nimpl P {\n  fn get(self) -> Int { self.x }\n}\n\
-             fn read(p: P) -> Int { p.get() }"
-        ),
-        vec![
-            "not yet lowered: a method or associated function",
-            "not yet lowered: a method call",
-        ]
-    );
 }

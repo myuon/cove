@@ -34,6 +34,7 @@
 //! more machinery than the word is worth.
 
 mod collections;
+mod dispatch;
 mod expr;
 mod frame;
 mod gap;
@@ -49,6 +50,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 
 use cove_diag::{Diagnostic, Span};
+use cove_sema::facts::MethodTarget;
 use cove_sema::resolve::{Program as Checked, ResolvedModule};
 use cove_sema::typeck::Ty;
 use cove_syntax::ast::{Expr, FnDecl};
@@ -152,7 +154,18 @@ struct Decl<'a> {
 
 /// A declaration's parameters and answer, as words.
 struct Boundary {
+    /// The words a call passes, **receiver first** where the declaration has
+    /// one. There are no type groups and nothing is permuted; a method's
+    /// receiver is slot 0 because it is the first thing a call supplies.
     params: Vec<Repr>,
+    /// The types those words hold, in the same order.
+    ///
+    /// The word alone is not enough at a call site. A parameter written
+    /// `dyn Trait` and one written `Point` are both a [`Repr::Ref`], and
+    /// only the first is a place where a concrete value is erased — so the
+    /// call site has to read the type the checker settled, not the word this
+    /// lowering derived from it.
+    types: Vec<Ty>,
     returns: Repr,
     /// What the declaration answers, as the checker settled it.
     ///
@@ -160,6 +173,9 @@ struct Boundary {
     /// function's own `Err` or `None` and therefore needs the layout rather
     /// than only the fact that it is a reference.
     ret: Ty,
+    /// Whether slot 0 is the receiver: `self`, or the address `var self`
+    /// names.
+    receiver: bool,
 }
 
 /// Every declaration the package will have a [`Function`] for, numbered.
@@ -167,10 +183,20 @@ struct Boundary {
 /// The order is module then name, both from a `BTreeMap`, so a package
 /// lowers to the same function ids every time it is lowered. A test that
 /// pins a listing is pinning something stable rather than a hash order.
+/// Within a module the free functions come first and the methods follow, so
+/// adding a method to a type does not renumber a package's functions.
 struct Plan<'a> {
     decls: Vec<Decl<'a>>,
     by_name: BTreeMap<(Arc<str>, Arc<str>), FunctionId>,
     lookup: HashMap<(String, String), FunctionId>,
+    /// A method, keyed the way [`MethodTarget`] names one: the module that
+    /// declares the *type*, the type, and the method.
+    ///
+    /// That is not always the module the `impl` block is written in — ADR
+    /// 0006's orphan rule lets a conformance be written where the trait is —
+    /// so this is keyed by what a call site holds rather than by where the
+    /// code ended up.
+    methods: HashMap<(String, String, String), FunctionId>,
 }
 
 impl<'a> Plan<'a> {
@@ -179,37 +205,84 @@ impl<'a> Plan<'a> {
             decls: Vec::new(),
             by_name: BTreeMap::new(),
             lookup: HashMap::new(),
+            methods: HashMap::new(),
         };
         for (name, resolved) in &checked.modules {
             plan.declare_gaps(resolved, errors);
             for (fn_name, entry) in &resolved.functions {
-                let id = FunctionId(plan.decls.len() as u32);
                 let module: Arc<str> = Arc::from(name.as_str());
-                let fn_name_arc: Arc<str> = Arc::from(fn_name.as_str());
-                plan.by_name
-                    .insert((module.clone(), fn_name_arc.clone()), id);
-                plan.lookup.insert((name.clone(), fn_name.clone()), id);
-                plan.decls.push(Decl {
+                let id = plan.declare(
                     module,
-                    name: fn_name_arc,
-                    decl: entry.decl.as_ref(),
-                    boundary: boundary_of(checked, &entry.decl, errors),
-                });
+                    Arc::from(fn_name.as_str()),
+                    entry.decl.as_ref(),
+                    boundary_of(checked, &entry.decl, errors),
+                );
+                plan.lookup.insert((name.clone(), fn_name.clone()), id);
+            }
+            for ((type_name, method), entry) in &resolved.methods {
+                let module: Arc<str> = Arc::from(name.as_str());
+                // A method is named `Type.method` in the module whose `impl`
+                // block writes it. A type and a free function of one name
+                // cannot both be declared in a module, and a `.` is not a
+                // name character, so the two namings cannot collide and
+                // `m.Point.scaled` reads in a diagnostic as it is written.
+                let lowered: Arc<str> = Arc::from(format!("{type_name}.{method}"));
+                let boundary = match &entry.from_trait_default {
+                    // A default body belongs to the trait, and the checker
+                    // checks it once there rather than once per conformance
+                    // — so there is no per-type declaration to read a
+                    // boundary off, and the trait method has none recorded
+                    // either. See `Plan::declare_gaps`.
+                    Some(trait_name) => {
+                        errors.push(gap::gap(
+                            &format!("`{trait_name}.{method}`, a trait method's default body"),
+                            entry.decl.span,
+                        ));
+                        None
+                    }
+                    None => boundary_of(checked, &entry.decl, errors),
+                };
+                let id = plan.declare(module, lowered, entry.decl.as_ref(), boundary);
+                let owner = resolved.owner_of(type_name).unwrap_or(name.as_str());
+                plan.methods
+                    .insert((owner.to_string(), type_name.clone(), method.clone()), id);
             }
         }
         plan
+    }
+
+    /// Numbers one declaration and records the name it answers to.
+    fn declare(
+        &mut self,
+        module: Arc<str>,
+        name: Arc<str>,
+        decl: &'a FnDecl,
+        boundary: Option<Boundary>,
+    ) -> FunctionId {
+        let id = FunctionId(self.decls.len() as u32);
+        self.by_name.insert((module.clone(), name.clone()), id);
+        self.decls.push(Decl {
+            module,
+            name,
+            decl,
+            boundary,
+        });
+        id
     }
 
     /// Reports the declarations that have no code here yet.
     ///
     /// A `struct` and an `enum` are not among them any more: they declare a
     /// [`crate::Shape`] rather than a function, and the shape is built where
-    /// a value of the type is met. What is still reported is the declaration
-    /// whose *shape* this lowering cannot build at all — a generic one,
-    /// whose fields are type parameters and so have no word — and the ones
-    /// that would need code of their own. A type this lowering cannot
-    /// represent is a gap at every use of it as well, but naming the
-    /// declaration once is what says where the work is.
+    /// a value of the type is met. Neither is a `trait` or an `impl` block:
+    /// a trait declares an interface, and a method is an ordinary lowered
+    /// function whose slot 0 is the receiver.
+    ///
+    /// What is still reported is the declaration whose *shape* this lowering
+    /// cannot build at all — a generic one, whose fields are type parameters
+    /// and so have no word. A type this lowering cannot represent is a gap at
+    /// every use of it as well, but naming the declaration once is what says
+    /// where the work is.
     fn declare_gaps(&self, resolved: &ResolvedModule, errors: &mut Vec<Diagnostic>) {
         for entry in resolved.structs.values() {
             if !entry.decl.generics.is_empty() {
@@ -220,12 +293,6 @@ impl<'a> Plan<'a> {
             if !entry.decl.generics.is_empty() {
                 errors.push(gap::gap("a generic `enum` declaration", entry.decl.span));
             }
-        }
-        for entry in resolved.traits.values() {
-            errors.push(gap::gap("a `trait` declaration", entry.decl.span));
-        }
-        for entry in resolved.methods.values() {
-            errors.push(gap::gap("a method or associated function", entry.decl.span));
         }
     }
 
@@ -242,14 +309,58 @@ impl<'a> Plan<'a> {
         self.lookup.get(&(owner.clone(), name.to_string())).copied()
     }
 
-    /// How many words a call to `id` passes and what kind of word it
-    /// answers, as owned values: a call site reads this while it is still
-    /// holding the body it is lowering.
-    fn boundary(&self, id: FunctionId) -> Option<(usize, Repr)> {
-        self.decls[id.index()]
-            .boundary
-            .as_ref()
-            .map(|boundary| (boundary.params.len(), boundary.returns))
+    /// The function a [`MethodTarget`] names.
+    fn method(&self, target: &MethodTarget) -> Option<FunctionId> {
+        self.methods
+            .get(&(
+                target.module.clone(),
+                target.type_name.clone(),
+                target.method.clone(),
+            ))
+            .copied()
+    }
+
+    /// The function `type_module.type_name` answers `method` with.
+    fn method_of(&self, type_module: &str, type_name: &str, method: &str) -> Option<FunctionId> {
+        self.methods
+            .get(&(
+                type_module.to_string(),
+                type_name.to_string(),
+                method.to_string(),
+            ))
+            .copied()
+    }
+
+    /// What a call to `id` passes and answers, as owned values: a call site
+    /// reads this while it is still holding the body it is lowering.
+    fn shape(&self, id: FunctionId) -> Option<CallShape> {
+        let boundary = self.decls[id.index()].boundary.as_ref()?;
+        Some(CallShape {
+            params: boundary.params.clone(),
+            types: boundary.types.clone(),
+            returns: boundary.returns,
+            receiver: boundary.receiver,
+        })
+    }
+}
+
+/// What one call site has to match, held apart from the [`Plan`] so that a
+/// body can read it while it is writing into its own frame.
+///
+/// Not a [`crate::Shape`], which is what a heap object is made of. This is
+/// what a *call* is made of: the words it passes and the word it answers.
+struct CallShape {
+    params: Vec<Repr>,
+    types: Vec<Ty>,
+    returns: Repr,
+    receiver: bool,
+}
+
+impl CallShape {
+    /// How many arguments the call site writes, which is every parameter but
+    /// the receiver.
+    fn arity(&self) -> usize {
+        self.params.len() - usize::from(self.receiver)
     }
 }
 
@@ -290,6 +401,26 @@ fn boundary_of(checked: &Checked, decl: &FnDecl, errors: &mut Vec<Diagnostic>) -
     };
 
     let mut params = Vec::new();
+    let mut types = Vec::new();
+    // The receiver comes first because that is the order a call supplies it
+    // in, and `Signature` records it apart from the parameters so that this
+    // does not have to be inferred from a count.
+    if let Some(receiver) = &signature.receiver {
+        let span = decl.receiver.map_or(decl.span, |it| it.span);
+        match word_of(receiver) {
+            // `var self` is a `var` parameter written in the receiver
+            // position: the method names the caller's storage, so slot 0
+            // holds its address and a write to a field of `self` reaches the
+            // caller's object with no copy back.
+            Some(_) if decl.receiver.is_some_and(|it| it.is_var) => params.push(Repr::Addr),
+            Some(repr) => params.push(repr),
+            None => {
+                errors.push(describe(receiver, span));
+                ok = false;
+            }
+        }
+        types.push(receiver.clone());
+    }
     for (param, ty) in decl.params.iter().zip(&signature.params) {
         match word_of(ty) {
             // A `var` parameter is an ordinary slot whose `Repr` is
@@ -304,6 +435,7 @@ fn boundary_of(checked: &Checked, decl: &FnDecl, errors: &mut Vec<Diagnostic>) -
                 ok = false;
             }
         }
+        types.push(ty.clone());
     }
     let returns = match word_of(&signature.ret) {
         Some(repr) => repr,
@@ -316,7 +448,9 @@ fn boundary_of(checked: &Checked, decl: &FnDecl, errors: &mut Vec<Diagnostic>) -
     };
 
     ok.then_some(Boundary {
+        receiver: signature.receiver.is_some(),
         params,
+        types,
         returns,
         ret: signature.ret.clone(),
     })
@@ -509,8 +643,18 @@ fn lower_function(
     };
 
     body.frame.push_scope();
+    // Slot 0 is the receiver where there is one, so a parameter's slot is
+    // its position shifted past it. Nothing else about a method differs: the
+    // body reads `self` the way it reads any binding, and where slot 0 is an
+    // `Addr` — `var self` — reading it is a `Load` through the word, which
+    // is the same rule a `var` parameter already follows.
+    let mut at = 0;
+    if boundary.receiver {
+        body.frame.bind("self", 0);
+        at = 1;
+    }
     for (index, param) in decl.decl.params.iter().enumerate() {
-        body.frame.bind(&param.name.node, index as Slot);
+        body.frame.bind(&param.name.node, (at + index) as Slot);
     }
     body.block(&decl.decl.body, Some(answer));
     let clears = body.frame.pop_scope();
@@ -693,8 +837,28 @@ impl Body<'_> {
 
     /// Copies an expression's answer into the slot the surrounding form is
     /// assembling its own in.
+    ///
+    /// The one thing this is not is a `Move` in every case. A body whose
+    /// declared return type is `dyn Trait` erases its tail on the way into
+    /// the answer word, because a declared return type is a written type and
+    /// that is where the language's one implicit conversion happens. The
+    /// answer word is taken before any temporary and is never handed to
+    /// anything else, so `dst == self.answer` names exactly the function's
+    /// own tail and no nested form's destination.
     fn store(&mut self, dst: Slot, value: &Val, from: &Expr) {
         if self.diverges(from) || value.slot == dst {
+            return;
+        }
+        if dst == self.answer && self.erases_into(&self.returns.clone(), from) {
+            let repr = self.frame.repr(value.slot);
+            self.emit(
+                Inst::Box {
+                    dst,
+                    src: value.slot,
+                    repr,
+                },
+                from.span,
+            );
             return;
         }
         self.emit(
@@ -704,6 +868,12 @@ impl Body<'_> {
             },
             from.span,
         );
+    }
+
+    /// Whether a value of `from`'s type is erased on the way into `into`.
+    fn erases_into(&self, into: &Ty, from: &Expr) -> bool {
+        matches!(into, Ty::Dyn(_))
+            && !matches!(self.ty(from), Some(Ty::Dyn(_)) | Some(Ty::Never) | None)
     }
 
     /// A slot for a value nothing will produce, so that a diverging

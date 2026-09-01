@@ -52,11 +52,11 @@
 //! between the release and the write that gives the object its real owner.
 
 use cove_lir::{Layout, LayoutId, Program, Repr, Shape};
-use cove_schema::builtins::RANGE;
+use cove_schema::builtins::{MAP, RANGE, SET};
 
 use crate::error::RuntimeError;
 use crate::lvm::exec::Machine;
-use crate::value::{Value, ValueView, VectorStorage};
+use crate::value::{MapKey, Value, ValueView, VectorStorage};
 
 /// How deep a value may nest as it crosses.
 ///
@@ -194,6 +194,37 @@ fn object_to_value(machine: &Machine, addr: u64, depth: usize) -> Result<Value, 
                 items.push(out(machine, *elem, word, deeper)?);
             }
             Ok(Value(crate::value::Repr::Vector(VectorStorage::new(items))))
+        }
+        // A set materialises as a set and not as the run of words it is:
+        // `Value::set` takes `MapKey`s, which is the restriction the language
+        // puts on what may be one, showing through. Every member passed
+        // `builtins::key`'s check before it was written, so a member that is
+        // not a key is a heap that stopped being a set.
+        //
+        // The members are already ascending — that is what the shape means —
+        // and `MapKey`'s own `Ord` is what the `BTreeSet` re-sorts them by.
+        // Nothing changes places unless the two orders disagree, which is the
+        // one thing that would say `builtins::key` has drifted from the
+        // oracle.
+        Shape::Members { elem } => {
+            let len = machine.object_len(addr);
+            let mut items = Vec::with_capacity(len as usize);
+            for at in 0..len {
+                let member = out(machine, *elem, machine.payload(addr, at), deeper)?;
+                items.push(as_key(&member)?);
+            }
+            Ok(Value::set(items))
+        }
+        // Two words an entry, and only the key carries the restriction.
+        Shape::Entries { key, value } => {
+            let len = machine.object_len(addr);
+            let mut entries = Vec::with_capacity(len as usize);
+            for at in 0..len {
+                let one = out(machine, *key, machine.payload(addr, at * 2), deeper)?;
+                let other = out(machine, *value, machine.payload(addr, at * 2 + 1), deeper)?;
+                entries.push((as_key(&one)?, other));
+            }
+            Ok(Value::map(entries))
         }
         // A box is erasure, and a reader looks through it: `Value::view` and
         // `Display` both look through a `dyn`, so materialising the wrapper
@@ -338,6 +369,17 @@ fn object_from_value(
         }
         ValueView::Array(items) => elements(machine, program, items, false, deeper),
         ValueView::Vector(items) => vector(machine, program, &items, deeper),
+        ValueView::Set(items) => {
+            let items: Vec<Value> = items.iter().map(MapKey::to_value).collect();
+            members(machine, program, &items, deeper)
+        }
+        ValueView::Map(held) => {
+            let held: Vec<(Value, Value)> = held
+                .iter()
+                .map(|(key, value)| (key.to_value(), value.clone()))
+                .collect();
+            entries(machine, program, &held, deeper)
+        }
         // The written bounds, not the normalised ones. `ValueView::Range`
         // answers a half-open [`crate::value::RangeBounds`], which is the
         // right thing for a host asking what a range *covers* and the wrong
@@ -446,6 +488,67 @@ fn vector(
     })(machine);
     machine.release_temps(mark);
     filled.map(|()| header)
+}
+
+/// A `Shape::Members` object holding `items`.
+///
+/// The elements arrive ascending, because a `BTreeSet<MapKey>` iterates that
+/// way and [`crate::lvm::builtins::key`] reproduces the order it iterates in.
+/// So the run is sorted as it is written and nothing sorts it afterwards,
+/// which is the invariant the shape promises and every builtin over it relies
+/// on.
+fn members(
+    machine: &mut Machine,
+    program: &Program,
+    items: &[Value],
+    depth: usize,
+) -> Result<u64, RuntimeError> {
+    let id = layout_for_members(program, items)?;
+    let Shape::Members { elem } = program.layout(id).shape else {
+        unreachable!("`layout_for_members` answers a members-shaped layout");
+    };
+    let addr = machine.new_object(id, items.len() as u32)?;
+    let mark = machine.temps();
+    machine.push_temp(addr);
+    let filled = (|machine: &mut Machine| {
+        for (at, item) in items.iter().enumerate() {
+            let word = into(machine, elem, item, depth)?;
+            machine.set_payload(addr, at as u32, word);
+        }
+        Ok(())
+    })(machine);
+    machine.release_temps(mark);
+    filled.map(|()| addr)
+}
+
+/// A `Shape::Entries` object holding `held`, key then value.
+///
+/// Ascending by key, for the reason [`members`] is ascending by element.
+fn entries(
+    machine: &mut Machine,
+    program: &Program,
+    held: &[(Value, Value)],
+    depth: usize,
+) -> Result<u64, RuntimeError> {
+    let id = layout_for_entries(program, held)?;
+    let Shape::Entries { key, value } = program.layout(id).shape else {
+        unreachable!("`layout_for_entries` answers an entries-shaped layout");
+    };
+    let addr = machine.new_object(id, held.len() as u32)?;
+    let mark = machine.temps();
+    machine.push_temp(addr);
+    let filled = (|machine: &mut Machine| {
+        for (at, (one, other)) in held.iter().enumerate() {
+            let at = at as u32;
+            let word = into(machine, key, one, depth)?;
+            machine.set_payload(addr, at * 2, word);
+            let word = into(machine, value, other, depth)?;
+            machine.set_payload(addr, at * 2 + 1, word);
+        }
+        Ok(())
+    })(machine);
+    machine.release_temps(mark);
+    filled.map(|()| addr)
 }
 
 /// A box holding `word`, tagged `repr`.
@@ -572,6 +675,41 @@ fn layout_for_store(program: &Program, elem: Repr) -> Result<LayoutId, RuntimeEr
     .ok_or_else(|| unknown_family("Vector"))
 }
 
+/// The layout of a `Set` these elements fit.
+///
+/// One layout per element `Repr`, and an empty set names no element type and
+/// takes the first the program declared — for the reason
+/// [`layout_for_elements`] gives, that an object with no elements has no
+/// element word for the difference to show in.
+fn layout_for_members(program: &Program, items: &[Value]) -> Result<LayoutId, RuntimeError> {
+    find(program, |layout| {
+        let Shape::Members { elem } = layout.shape else {
+            return false;
+        };
+        items.iter().all(|item| fits(elem, item))
+    })
+    .ok_or_else(|| unknown_family(SET.name))
+}
+
+/// The layout of a `Map` these entries fit.
+///
+/// One layout per *pair* of `Repr`s, matched on both halves: a
+/// `Map<String, Int>` and a `Map<String, String>` are two families and only
+/// the values tell them apart.
+fn layout_for_entries(
+    program: &Program,
+    held: &[(Value, Value)],
+) -> Result<LayoutId, RuntimeError> {
+    find(program, |layout| {
+        let Shape::Entries { key, value } = layout.shape else {
+            return false;
+        };
+        held.iter()
+            .all(|(one, other)| fits(key, one) && fits(value, other))
+    })
+    .ok_or_else(|| unknown_family(MAP.name))
+}
+
 /// The one struct-shaped layout a `Range` is.
 fn layout_for_range(program: &Program) -> Result<LayoutId, RuntimeError> {
     find(program, |layout| match &layout.shape {
@@ -648,8 +786,11 @@ fn fits(repr: Repr, value: &Value) -> bool {
                 | ValueView::Str(_)
                 | ValueView::Array(_)
                 | ValueView::Vector(_)
+                | ValueView::Set(_)
+                | ValueView::Map(_)
                 | ValueView::Struct(_)
                 | ValueView::Enum(_)
+                | ValueView::Range(_)
         ),
         // Neither is a value a host holds. See `to_value`.
         Repr::Addr | Repr::Host => false,
@@ -692,6 +833,25 @@ fn unknown_family(name: &str) -> RuntimeError {
     .with_rule(
         "A layout describes a family of values, and a program declares the families it uses.",
     )
+}
+
+/// A member of a sorted run that is not a value a key may be.
+///
+/// Not the oracle's, and not something a program reaches: a `Set`'s elements
+/// and a `Map`'s keys are `MapKey`s on that side by construction, and here
+/// every one of them passed [`crate::lvm::builtins::key`]'s check before it
+/// was written. This reports a heap that stopped being a set, and it carries
+/// the rule the refusal would have carried so that a reader is told which of
+/// the two restrictions was broken.
+fn as_key(value: &Value) -> Result<MapKey, RuntimeError> {
+    MapKey::from_value(value).map_err(|invalid| {
+        RuntimeError::new(format!(
+            "a `{}` cannot be a `Map` key or a `Set` element",
+            invalid.type_name
+        ))
+        .with_rule(invalid.rule())
+        .with_help(invalid.help())
+    })
 }
 
 fn too_deep() -> RuntimeError {
@@ -827,6 +987,100 @@ mod tests {
         let back = to_value(&machine, Repr::Ref, word).unwrap();
         assert_eq!(back.to_string(), "[1, 2]");
         assert!(matches!(back.view(), ValueView::Vector(_)));
+    }
+
+    /// A set and a map cross as themselves, and the run they arrive as is
+    /// sorted because it was written in the order it arrived in: a
+    /// `BTreeSet<MapKey>` iterates ascending, and
+    /// [`crate::lvm::builtins::key`] is the same order over words.
+    #[test]
+    fn a_set_and_a_map_round_trip_in_ascending_order() {
+        let mut build = Build::default();
+        build.layout("Set", Shape::Members { elem: Repr::Int });
+        build.layout(
+            "Map",
+            Shape::Entries {
+                key: Repr::Ref,
+                value: Repr::Int,
+            },
+        );
+        let program = build.bare();
+        let mut machine = Machine::new(&program, 1 << 12);
+
+        // Written out of order on the way in, and ascending in the object.
+        let items = Value::set([MapKey::Int(3), MapKey::Int(1), MapKey::Int(2)]);
+        let word = from_value(&mut machine, Repr::Ref, &items).unwrap();
+        assert_eq!(
+            (0..machine.object_len(word))
+                .map(|at| machine.payload(word, at))
+                .collect::<Vec<_>>(),
+            vec![1, 2, 3]
+        );
+        let back = to_value(&machine, Repr::Ref, word).unwrap();
+        assert_eq!(back.to_string(), "{1, 2, 3}");
+        assert!(matches!(back.view(), ValueView::Set(_)));
+
+        let held = Value::map([
+            (MapKey::Str("b".to_string()), Value::int(2)),
+            (MapKey::Str("a".to_string()), Value::int(1)),
+        ]);
+        let word = from_value(&mut machine, Repr::Ref, &held).unwrap();
+        assert_eq!(machine.object_len(word), 2);
+        assert_eq!(machine.payload(word, 1), 1, "the lowest key is first");
+        let back = to_value(&machine, Repr::Ref, word).unwrap();
+        assert_eq!(back.to_string(), "{a: 1, b: 2}");
+        assert!(matches!(back.view(), ValueView::Map(_)));
+    }
+
+    /// The order this machine keeps a set in is the order `MapKey`'s `Ord`
+    /// puts it in, which is what makes the two halves of the language's one
+    /// ordering rule agree. A member that changed places on the way out would
+    /// be the two having drifted.
+    #[test]
+    fn the_order_a_set_crosses_out_in_is_the_order_it_was_held_in() {
+        let mut build = Build::default();
+        build.layout("Set", Shape::Members { elem: Repr::Ref });
+        build.layout(
+            "Point",
+            Shape::Struct {
+                fields: vec![field("x", Repr::Int)],
+                opaque: false,
+            },
+        );
+        build.layout(
+            "Array",
+            Shape::Elements {
+                elem: Repr::Int,
+                growable: false,
+            },
+        );
+        let program = build.bare();
+        let mut machine = Machine::new(&program, 1 << 12);
+
+        // One of each family a key may be that is a reference, in the order
+        // `key`'s table gives them: a string, a struct, an array.
+        let text = machine.new_string("a").unwrap();
+        let point = machine.new_object(named(&program, "Point"), 0).unwrap();
+        machine.set_payload(point, 0, 1);
+        let items = machine.new_object(named(&program, "Array"), 1).unwrap();
+        machine.set_payload(items, 0, 1);
+        let members = machine.new_object(named(&program, "Set"), 3).unwrap();
+        for (at, word) in [text, point, items].into_iter().enumerate() {
+            machine.set_payload(members, at as u32, word);
+        }
+
+        let back = to_value(&machine, Repr::Ref, members).unwrap();
+        assert_eq!(back.to_string(), "{a, Point(x: 1), [1]}");
+    }
+
+    /// The first layout whose name is `name`.
+    fn named(program: &Program, name: &str) -> LayoutId {
+        program
+            .layouts
+            .iter()
+            .position(|layout| &*layout.name == name)
+            .map(|at| LayoutId(at as u32))
+            .expect("the fixture declares every family")
     }
 
     /// A vector arrives as the two objects it is, and the header is what a

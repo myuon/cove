@@ -70,6 +70,11 @@ pub(super) fn word_of(ty: &Ty) -> Option<Repr> {
         // an object it could not build.
         Ty::Array(elem) | Ty::Vector(elem) => word_of(elem).map(|_| Repr::Ref),
         Ty::Struct(_, args) | Ty::Enum(_, args) if args.is_empty() => Some(Repr::Ref),
+        // A `dyn Trait` is erased on purpose, and erasure is a reference to
+        // an object carrying its own description. That is the one thing
+        // `docs/LINEAR_VM.md` separates from a `Ty::Unknown`, which is the
+        // checker declining and has no word at all.
+        Ty::Dyn(_) => Some(Repr::Ref),
         _ => None,
     }
 }
@@ -170,6 +175,15 @@ impl Shapes {
         let name = nominal(checked, module, ty)?;
         match ty {
             Ty::Str => Some(STR),
+            // One `Boxed` layout for the whole program, whatever trait was
+            // written: what is inside is a question the box answers, from
+            // the `Repr` tag in its own payload word 0. A layout per trait
+            // would be a runtime type universe keyed by a static name, which
+            // is exactly the table a family-shaped layout exists to avoid.
+            Ty::Dyn(_) => Some(self.intern(Layout {
+                name,
+                shape: Shape::Boxed,
+            })),
             Ty::Error | Ty::Struct(..) => {
                 let declared = struct_fields(checked, module, ty)?;
                 let mut fields = Vec::with_capacity(declared.len());
@@ -278,6 +292,10 @@ fn nominal(checked: &Checked, module: &str, ty: &Ty) -> Option<Arc<str>> {
         Ty::Range => Arc::from("Range"),
         Ty::Array(_) => Arc::from("Array"),
         Ty::Vector(_) => Arc::from("Vector"),
+        // Not the trait's name: one layout describes every erased value, and
+        // naming it after one trait would say a value of another trait is of
+        // a family it is not.
+        Ty::Dyn(_) => Arc::from("Dyn"),
         Ty::Struct(name, args) | Ty::Enum(name, args) if args.is_empty() => {
             let (_, short) = declaring(checked, module, name)?;
             Arc::from(short)
@@ -291,7 +309,7 @@ fn nominal(checked: &Checked, module: &str, ty: &Ty) -> Option<Arc<str>> {
 /// A type the checker settled carries either a bare name — one this module
 /// declares — or a key another module's declaration is known by. Both are
 /// answered here so that no caller has to know which it is holding.
-fn declaring(checked: &Checked, module: &str, name: &str) -> Option<(String, String)> {
+pub(super) fn declaring(checked: &Checked, module: &str, name: &str) -> Option<(String, String)> {
     if let Some((owner, short)) = name.rsplit_once('.') {
         return Some((owner.to_string(), short.to_string()));
     }

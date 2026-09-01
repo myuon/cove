@@ -538,6 +538,18 @@ impl<'a> Machine<'a> {
                     let len = self.mem.object_len(addr) as i64;
                     self.mem.set_slot(base, dst, len as u64);
                 }
+                // The other half of the header word `Len` reads. What an
+                // object *is* is a question the object answers, and this is
+                // that answer as an `Int`, so that a dispatch over it is an
+                // ordinary `Switch` rather than an instruction of its own.
+                Inst::LayoutOf { dst, obj } => {
+                    let addr = self.mem.slot(base, obj);
+                    if addr == 0 {
+                        fail!(null_object());
+                    }
+                    let layout = self.mem.object_layout(addr).0 as i64;
+                    self.mem.set_slot(base, dst, layout as u64);
+                }
 
                 // ---- places --------------------------------------------------
                 Inst::AddrOfSlot { dst, slot } => self.mem.set_slot(base, dst, base + slot as u64),

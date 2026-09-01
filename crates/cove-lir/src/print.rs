@@ -159,6 +159,7 @@ pub fn one(program: &Program, f: &Function, inst: &Inst) -> String {
             format!("set-elem {} {} {}", s(*obj), s(*index), s(*src))
         }
         Inst::Len { dst, obj } => format!("len {} {}", s(*dst), s(*obj)),
+        Inst::LayoutOf { dst, obj } => format!("layout-of {} {}", s(*dst), s(*obj)),
         Inst::AddrOfSlot { dst, slot } => format!("addr-of-slot {} {}", s(*dst), s(*slot)),
         Inst::AddrOfWord { dst, obj, at } => format!("addr-of-word {} {} +{at}", s(*dst), s(*obj)),
         Inst::AddrOfElem { dst, obj, index } => {

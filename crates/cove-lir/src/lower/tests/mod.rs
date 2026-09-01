@@ -13,6 +13,7 @@
 mod calls;
 mod collections;
 mod control;
+mod dispatch;
 mod enums;
 mod gaps;
 mod hosts;

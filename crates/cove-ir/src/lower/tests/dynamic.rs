@@ -143,7 +143,11 @@ fn a_trait_default_body_dispatches_on_self() {
              fn f(v: dyn Show) -> String {\n  v.loud()\n}\n",
             "A.loud"
         ),
-        "fn m.A.loud arity=1 frame=0/1 params=[value] receiver -> value\n\
+        // The return word is `String` rather than `value` because the
+        // checker now records a signature for a trait's default body. It
+        // always knew the type; nothing was recording it, so every reader
+        // had to fall back to the general representation.
+        "fn m.A.loud arity=1 frame=0/1 params=[value] receiver -> String\n\
          \x20  0  const Str(\"!\")\n\
          \x20  1  load 0\n\
          \x20  2  call-dyn m.Show.show argc=1 [m.A]\n\

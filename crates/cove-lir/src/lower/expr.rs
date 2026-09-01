@@ -659,8 +659,12 @@ impl Body<'_> {
         // order, because an initializer's arguments are ordinary
         // expressions and one of them may do something the next one sees.
         let mut held = Vec::with_capacity(args.len());
-        for arg in args {
-            held.push(self.expr(&arg.value));
+        for (arg, at) in args.iter().zip(&order) {
+            let value = self.expr(&arg.value);
+            // A field written `dyn Trait` is where a concrete value is
+            // erased, exactly as a parameter written that way is.
+            let value = self.erase(value, &arg.value, &fields[*at as usize].1);
+            held.push(value);
         }
         let dst = self.frame.alloc(Repr::Ref);
         self.emit(
@@ -745,8 +749,10 @@ impl Body<'_> {
         }
 
         let mut held = Vec::with_capacity(args.len());
-        for arg in args {
-            held.push(self.expr(&arg.value));
+        for (arg, ty) in args.iter().zip(&payload) {
+            let value = self.expr(&arg.value);
+            let value = self.erase(value, &arg.value, ty);
+            held.push(value);
         }
         let dst = self.frame.alloc(Repr::Ref);
         self.emit(
@@ -1062,6 +1068,10 @@ impl Body<'_> {
         match value {
             Some(value) => {
                 let answer = self.expr(value);
+                // A declared return type is a written type, so a `dyn Trait`
+                // one erases here.
+                let returns = self.returns.clone();
+                let answer = self.erase(answer, value, &returns);
                 // `return return x` leaves through the inner one, and the
                 // outer has no word to name.
                 if !self.diverges(value) {
@@ -1165,15 +1175,34 @@ impl Body<'_> {
             ExprKind::Ident(name) if self.frame.lookup(name).is_none() => {
                 self.call_named(expr, name, args)
             }
-            ExprKind::Field { base, name } if self.is_namespace(base) => {
-                self.call_qualified(expr, base, &name.node, args)
-            }
             ExprKind::Ident(_) => self.gap("a call through a function value", expr),
-            ExprKind::Field { base, name } => {
-                self.call_builtin_method(expr, base, &name.node, args)
-            }
+            ExprKind::Field { base, name } => self.call_through(expr, base, &name.node, args),
             _ => self.gap("a call to something other than a declared function", expr),
         }
+    }
+
+    /// A call written with a `.`: a method, an associated function, a
+    /// builtin's operation, an enum's case, or a host module's.
+    ///
+    /// The checker settled which of those it is, so the order here reads its
+    /// answers rather than guessing from the shape of the source. A recorded
+    /// [`MethodTarget`](cove_sema::facts::MethodTarget) names a declaration
+    /// of this package and is asked first, because it is the one answer
+    /// nothing else can produce: the receiver's type decided it, and `Array`
+    /// and a declared `Point` may both declare a `length`.
+    fn call_through(&mut self, expr: &Expr, base: &Expr, name: &str, args: &[Arg]) -> Val {
+        if let Some(target) = self.checked.facts.target(expr.span.file, expr.id).cloned() {
+            return self.call_declared_method(expr, &target, base, args);
+        }
+        // A `dyn Trait` receiver names no declaration, because which one it
+        // reaches is a fact about the value rather than about the source.
+        if let Some(Ty::Dyn(trait_name)) = self.ty(base).cloned() {
+            return self.call_dyn(expr, base, &trait_name, name, args);
+        }
+        if self.is_namespace(base) {
+            return self.call_qualified(expr, base, name, args);
+        }
+        self.call_builtin_method(expr, base, name, args)
     }
 
     /// A call written as a bare name.
@@ -1233,62 +1262,7 @@ impl Body<'_> {
 
     /// A call to a declared function of this package.
     fn call_declared(&mut self, expr: &Expr, id: crate::FunctionId, args: &[Arg]) -> Val {
-        let Some((arity, returns)) = self.plan.boundary(id) else {
-            // The declaration itself is a gap, already reported where it is
-            // written. Saying so again at every call site would bury it.
-            return self.dead(expr);
-        };
-        for arg in args {
-            let what = if arg.label.is_some() {
-                "a labelled argument"
-            } else if arg.spread {
-                "a spread argument"
-            } else {
-                continue;
-            };
-            return self.gap(what, expr);
-        }
-        if args.len() != arity {
-            return self.gap("a call that leaves a parameter to its default", expr);
-        }
-
-        // Each argument is evaluated in source order into a temporary of its
-        // own, and every one is held until the call is emitted: the list
-        // `Call` names has to be live all at once, because the machine
-        // copies it into the callee's frame.
-        let mut held = Vec::with_capacity(args.len());
-        let mut bases = Vec::new();
-        for arg in args {
-            if arg.is_var {
-                let (address, base) = self.address_of(&arg.value);
-                held.push(address);
-                bases.extend(base);
-            } else {
-                held.push(self.expr(&arg.value));
-            }
-        }
-        let slots: Vec<Slot> = held.iter().map(|value| value.slot).collect();
-        let list = self.pool.args.intern(slots);
-        let dst = self.frame.alloc(returns);
-        self.emit(
-            Inst::Call {
-                dst,
-                callee: id,
-                args: list,
-            },
-            expr.span,
-        );
-        for value in held.into_iter().rev() {
-            self.release(value, expr.span);
-        }
-        // The object an interior address points into is kept alive by this
-        // slot for exactly the address's live range, and dies with it. The
-        // heap does not move, so the address stays correct across a
-        // collection for as long as it is live and no longer.
-        for base in bases.into_iter().rev() {
-            self.release(base, expr.span);
-        }
-        Val::temp(dst)
+        self.call_target(expr, id, None, args)
     }
 
     /// A call across the boundary.
@@ -1386,7 +1360,7 @@ impl Body<'_> {
     /// object has to be held in a reference slot for as long as the address
     /// can be used — which the caller does by releasing the second answer
     /// after the call.
-    fn address_of(&mut self, place: &Expr) -> (Val, Option<Val>) {
+    pub(super) fn address_of(&mut self, place: &Expr) -> (Val, Option<Val>) {
         match &place.kind {
             ExprKind::Ident(name) => match self.frame.lookup(name) {
                 // A `var` parameter is already an address, and passing it on

@@ -28,7 +28,7 @@
 
 use cove_lir::{Layout, LayoutId, Program, Repr, Shape};
 use cove_schema::builtins::{
-    ERROR, ERR_CASE, MESSAGE_FIELD, NONE_CASE, OK_CASE, OPTION, RESULT, SOME_CASE,
+    ERROR, ERR_CASE, MAP, MESSAGE_FIELD, NONE_CASE, OK_CASE, OPTION, RESULT, SET, SOME_CASE,
 };
 
 use crate::error::RuntimeError;
@@ -69,6 +69,33 @@ pub(super) fn vector(program: &Program, elem: Repr) -> Result<LayoutId, RuntimeE
         |layout| matches!(layout.shape, Shape::Vector { elem: e } if e == elem),
     )
     .ok_or_else(|| operand::unknown_family("Vector"))
+}
+
+/// The layout of a `Set` of `elem`.
+///
+/// One layout per element `Repr`, as everywhere else, and it is its own shape
+/// rather than an `Elements` with a name because "these words are sorted and
+/// distinct" is an invariant [`super::keyed`] relies on and an array's words
+/// are neither.
+pub(super) fn members(program: &Program, elem: Repr) -> Result<LayoutId, RuntimeError> {
+    find(
+        program,
+        |layout| matches!(layout.shape, Shape::Members { elem: e } if e == elem),
+    )
+    .ok_or_else(|| operand::unknown_family(SET.name))
+}
+
+/// The layout of a `Map` from `key` to `value`.
+///
+/// One layout per *pair* of `Repr`s: a `Map<String, Int>` traces half its
+/// words and a `Map<Int, Int>` none of them, and the collector is told which
+/// by the layout rather than by looking.
+pub(super) fn entries(program: &Program, key: Repr, value: Repr) -> Result<LayoutId, RuntimeError> {
+    find(
+        program,
+        |layout| matches!(layout.shape, Shape::Entries { key: k, value: v } if k == key && v == value),
+    )
+    .ok_or_else(|| operand::unknown_family(MAP.name))
 }
 
 /// The layout of the builtin `Error` struct.

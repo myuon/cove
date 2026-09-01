@@ -157,6 +157,47 @@ fn objects(machine: &Machine, a: u64, b: u64, depth: usize) -> Result<bool, Runt
             }
             true
         }
+        // Two sorted runs line up member for member, which is what the
+        // oracle's `BTreeSet` equality does with the same two runs — the
+        // order is part of the value, so there is nothing to search.
+        (Shape::Members { elem: x }, Shape::Members { elem: y }) => {
+            let len = machine.object_len(a);
+            if len != machine.object_len(b) {
+                return Ok(false);
+            }
+            for at in 0..len {
+                let one = (*x, machine.payload(a, at));
+                let other = (*y, machine.payload(b, at));
+                if !same(machine, one, other, deeper)? {
+                    return Ok(false);
+                }
+            }
+            true
+        }
+        // And two maps line up entry for entry, key before value, because
+        // both are in their one true ascending order.
+        (Shape::Entries { key: kx, value: vx }, Shape::Entries { key: ky, value: vy }) => {
+            let len = machine.object_len(a);
+            if len != machine.object_len(b) {
+                return Ok(false);
+            }
+            for at in 0..len {
+                let keys = (
+                    (*kx, machine.payload(a, at * 2)),
+                    (*ky, machine.payload(b, at * 2)),
+                );
+                let values = (
+                    (*vx, machine.payload(a, at * 2 + 1)),
+                    (*vy, machine.payload(b, at * 2 + 1)),
+                );
+                if !same(machine, keys.0, keys.1, deeper)?
+                    || !same(machine, values.0, values.1, deeper)?
+                {
+                    return Ok(false);
+                }
+            }
+            true
+        }
         // A closure is not equal to anything, itself included: the language
         // gives `fn` no equality, and the oracle's `eq_value` falls through
         // to `false` for it rather than comparing captures.
@@ -194,7 +235,11 @@ fn run(machine: &Machine, addr: u64) -> Option<Run> {
 }
 
 /// The `Repr` and the word inside a box, if `operand` is one.
-fn unboxed(machine: &Machine, operand: Operand) -> Option<Operand> {
+///
+/// `pub(super)` because looking through erasure is one rule and not this
+/// file's: [`super::key`] orders a `dyn Display` holding `1` exactly where it
+/// orders the `Int` `1`, for the reason this compares them equal.
+pub(super) fn unboxed(machine: &Machine, operand: Operand) -> Option<Operand> {
     if operand.0 != Repr::Ref || operand.1 == 0 {
         return None;
     }
@@ -211,7 +256,11 @@ fn unboxed(machine: &Machine, operand: Operand) -> Option<Operand> {
     Some((repr, machine.payload(operand.1, 1)))
 }
 
-fn too_deep() -> RuntimeError {
+/// A walk that met a graph deeper than it can follow.
+///
+/// `pub(super)` for [`super::key`], which walks the same graphs to the same
+/// depth and stops at it for the same reason.
+pub(super) fn too_deep() -> RuntimeError {
     RuntimeError::new("this value nests too deeply to compare")
 }
 
@@ -376,6 +425,51 @@ mod tests {
         let empty = make::none(&mut machine, Repr::Ref).unwrap();
         assert_ne!(machine.object_layout(none), machine.object_layout(empty));
         assert!(equal(&mut machine, (Repr::Ref, none), (Repr::Ref, empty)));
+    }
+
+    /// Two sorted runs are equal when they line up, which is what makes a
+    /// set's equality a walk rather than a search: both are already in the one
+    /// ascending order the language gives them.
+    #[test]
+    fn a_set_and_a_map_compare_run_for_run() {
+        let program = world();
+        let mut machine = Machine::new(&program, 1 << 14);
+
+        let members = |machine: &mut Machine, words: &[u64]| {
+            let layout = make::members(machine.program(), Repr::Int).unwrap();
+            let addr = machine.new_object(layout, words.len() as u32).unwrap();
+            for (at, word) in words.iter().enumerate() {
+                machine.set_payload(addr, at as u32, *word);
+            }
+            addr
+        };
+        let a = members(&mut machine, &[1, 2]);
+        let b = members(&mut machine, &[1, 2]);
+        let short = members(&mut machine, &[1]);
+        let other = members(&mut machine, &[1, 3]);
+        assert!(equal(&mut machine, (Repr::Ref, a), (Repr::Ref, b)));
+        assert!(!equal(&mut machine, (Repr::Ref, a), (Repr::Ref, short)));
+        assert!(!equal(&mut machine, (Repr::Ref, a), (Repr::Ref, other)));
+        // A different family answers `false` rather than raising, as
+        // everywhere else here.
+        let items = array(&mut machine, Repr::Int, &[1, 2]);
+        assert!(!equal(&mut machine, (Repr::Ref, a), (Repr::Ref, items)));
+
+        let entries = |machine: &mut Machine, words: &[u64]| {
+            let layout = make::entries(machine.program(), Repr::Int, Repr::Int).unwrap();
+            let addr = machine.new_object(layout, words.len() as u32 / 2).unwrap();
+            for (at, word) in words.iter().enumerate() {
+                machine.set_payload(addr, at as u32, *word);
+            }
+            addr
+        };
+        let a = entries(&mut machine, &[1, 10, 2, 20]);
+        let b = entries(&mut machine, &[1, 10, 2, 20]);
+        let valued = entries(&mut machine, &[1, 10, 2, 21]);
+        let keyed = entries(&mut machine, &[1, 10, 3, 20]);
+        assert!(equal(&mut machine, (Repr::Ref, a), (Repr::Ref, b)));
+        assert!(!equal(&mut machine, (Repr::Ref, a), (Repr::Ref, valued)));
+        assert!(!equal(&mut machine, (Repr::Ref, a), (Repr::Ref, keyed)));
     }
 
     /// Erasure is looked through on either side, so where the checker put a

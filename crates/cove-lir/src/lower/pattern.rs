@@ -45,7 +45,7 @@ use crate::repr::Repr;
 
 /// The table id a [`Inst::Switch`] carries until its arms have been laid out
 /// and their entry points are known.
-const UNPLACED: TableId = TableId(u32::MAX);
+pub(super) const UNPLACED: TableId = TableId(u32::MAX);
 
 /// Which values of the scrutinee an arm can match.
 enum Reach {
@@ -538,7 +538,7 @@ impl Body<'_> {
 
     /// Fills in a [`Inst::Switch`]'s table, once the arms it jumps into have
     /// been laid out.
-    fn place_table(&mut self, at: Pc, id: TableId) {
+    pub(super) fn place_table(&mut self, at: Pc, id: TableId) {
         match &mut self.code[at as usize] {
             Inst::Switch { table, .. } => *table = id,
             other => unreachable!("placed a table on a {other:?}, which is not a switch"),

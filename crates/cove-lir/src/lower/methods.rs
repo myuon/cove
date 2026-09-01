@@ -84,8 +84,13 @@ impl Body<'_> {
             Ty::Option(_) | Ty::Result(..) => self.answer_method(expr, base, &ty, name, args),
             _ => {
                 let Some(receiver) = receiver_name(&ty) else {
-                    // A declared type's methods are a gap of their own,
-                    // already reported where the `impl` is written.
+                    // A declared type's methods do not come here: the
+                    // checker recorded which declaration such a call
+                    // resolved to, and `Body::call_through` reads that
+                    // before anything else. What is left is a receiver
+                    // whose type this lowering has no methods for at all —
+                    // a type parameter, a function value — and naming the
+                    // call is the most that can be said about it.
                     return self.gap("a method call", expr);
                 };
                 if !MACHINE_METHODS.contains(&(receiver, name)) {
@@ -511,9 +516,10 @@ fn answers(ty: &Ty, ok: &Ty) -> bool {
 /// `Array.map`.
 ///
 /// A declared `struct` or `enum` answers `None` rather than its own name.
-/// Its methods are not the machine's and never will be — an `impl` is a
-/// declaration this lowering has not been taught, reported where it is
-/// written — so naming one here would point at the wrong work.
+/// Its methods are not the machine's and never will be — they are lowered
+/// functions of the package, reached through
+/// [`Facts::target`](cove_sema::Facts::target) — so naming one here would
+/// point at the wrong work.
 fn receiver_name(ty: &Ty) -> Option<&'static str> {
     Some(match ty {
         Ty::Unit => "Unit",

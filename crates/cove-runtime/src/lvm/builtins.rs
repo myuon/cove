@@ -44,6 +44,8 @@ use crate::error::RuntimeError;
 use crate::lvm::exec::Machine;
 
 mod equal;
+mod key;
+mod keyed;
 mod make;
 mod operand;
 mod scalar;
@@ -126,6 +128,29 @@ pub(crate) fn call(
         ("Vector", "isEmpty") => seq::vector_is_empty(machine, operands),
         ("Vector", "toArray") => seq::vector_to_array(machine, operands),
         ("Vector", "freeze") => seq::vector_freeze(machine, operands),
+
+        // ---- Set ---------------------------------------------------------
+        //
+        // A `Set` and a `Map` are sorted runs, so every one of these is a
+        // binary search over `key`'s order or a walk of a run already in it.
+        ("Set", "of") => keyed::set_of(machine, operands),
+        ("Set", "length") => keyed::set_length(machine, operands),
+        ("Set", "isEmpty") => keyed::set_is_empty(machine, operands),
+        ("Set", "contains") => keyed::set_contains(machine, operands),
+        ("Set", "toArray") => keyed::set_to_array(machine, operands),
+        ("Set", "inserted") => keyed::set_inserted(machine, operands),
+        ("Set", "removed") => keyed::set_removed(machine, operands),
+
+        // ---- Map ---------------------------------------------------------
+        ("Map", "of") => keyed::map_of(machine, operands),
+        ("Map", "get") => keyed::map_get(machine, operands),
+        ("Map", "contains") => keyed::map_contains(machine, operands),
+        ("Map", "length") => keyed::map_length(machine, operands),
+        ("Map", "isEmpty") => keyed::map_is_empty(machine, operands),
+        ("Map", "keys") => keyed::map_keys(machine, operands),
+        ("Map", "values") => keyed::map_values(machine, operands),
+        ("Map", "inserted") => keyed::map_inserted(machine, operands),
+        ("Map", "removed") => keyed::map_removed(machine, operands),
 
         // ---- String ------------------------------------------------------
         ("String", "length") => text::length(machine, operands),
@@ -545,6 +570,43 @@ mod tests {
             },
         );
         build.layout("Boxed", Shape::Boxed);
+        // A `Range` is a struct with the three fields the design fixes, and
+        // it is in here because a key sorts after every other family when it
+        // is one.
+        build.layout(
+            "Range",
+            Shape::Struct {
+                fields: vec![
+                    field("start", Repr::Int),
+                    field("end", Repr::Int),
+                    field("inclusive", Repr::Bool),
+                ],
+                opaque: false,
+            },
+        );
+        build.layout("Set", Shape::Members { elem: Repr::Int });
+        build.layout("Set", Shape::Members { elem: Repr::Ref });
+        build.layout(
+            "Map",
+            Shape::Entries {
+                key: Repr::Int,
+                value: Repr::Int,
+            },
+        );
+        build.layout(
+            "Map",
+            Shape::Entries {
+                key: Repr::Ref,
+                value: Repr::Int,
+            },
+        );
+        build.layout(
+            "MapEntry",
+            Shape::Struct {
+                fields: vec![field("key", Repr::Int), field("value", Repr::Int)],
+                opaque: false,
+            },
+        );
         build.done()
     }
 

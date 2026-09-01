@@ -58,8 +58,20 @@ impl Body<'_> {
 
     fn stmt(&mut self, stmt: &Stmt) {
         match &stmt.kind {
-            StmtKind::Let { name, value, .. } => {
+            StmtKind::Let {
+                name, ty, value, ..
+            } => {
                 let value_slot = self.expr(value);
+                // An annotation is a written type, and `let it: dyn Trait =
+                // concrete` is one of the four places the language's one
+                // implicit conversion happens. Only the `dyn` case is read
+                // off the annotation: what a name means is the checker's to
+                // say, and every other annotation is one the checker already
+                // agreed with the initialiser about.
+                let value_slot = match ty.as_ref().and_then(|ty| self.written_dyn(ty)) {
+                    Some(erased) => self.erase(value_slot, value, &erased),
+                    None => value_slot,
+                };
                 // A binding whose initialiser made a temporary takes that
                 // slot over instead of copying out of it: the temporary is
                 // dead the moment the binding is alive, so a `Move` between
@@ -75,7 +87,7 @@ impl Body<'_> {
                 let slot = if value_slot.temp {
                     value_slot.slot
                 } else {
-                    let repr = self.word(value);
+                    let repr = self.frame.repr(value_slot.slot);
                     let slot = self.frame.alloc(repr);
                     self.emit(
                         Inst::Move {

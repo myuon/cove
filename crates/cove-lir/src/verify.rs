@@ -288,6 +288,10 @@ impl Check<'_> {
                 self.expect(at, obj, &[Repr::Ref]);
                 self.expect(at, dst, &[Repr::Int]);
             }
+            Inst::LayoutOf { dst, obj } => {
+                self.expect(at, obj, &[Repr::Ref]);
+                self.expect(at, dst, &[Repr::Int]);
+            }
             Inst::AddrOfSlot { dst, slot } => {
                 self.expect(at, dst, &[Repr::Addr]);
                 self.repr(at, slot);
