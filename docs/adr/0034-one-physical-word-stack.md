@@ -11,11 +11,11 @@
   stores by treating the older texts as concurrently binding
 - Decides: issue #162's physical realization and replaces the representation
   decisions previously spread across issues #197 and #218
-- Implementation status: the current FrameVm is evidence and migration code,
-  not the final architecture. The first migration may keep stack and heap in
-  separate Rust allocations. The final target places both regions in one VM
-  linear-memory block; no public or IR contract may depend on the temporary
-  separation
+- Implementation status: not implemented. The current executable IR, Vm and
+  FrameVm are predecessor implementations and evidence, not foundations that
+  the replacement must preserve. The new backend may initially keep stack and
+  heap in separate Rust allocations, but its IR and address model target one
+  linear memory from the start
 
 ## Context
 
@@ -180,38 +180,71 @@ may reject that crossing, expose an immutable Array snapshot, or define an
 explicit rooted borrow or handle; the ordinary runtime storage remains the VM
 heap in every case.
 
-### Migration completes rather than adding a backend
+### Replace the execution backend; do not renovate it
 
-The existing FrameVm is a migration vehicle, not a third permanent backend.
-Implementation proceeds by moving its word-stack machinery into the
-production Vm, not by completing two dispatch loops independently.
+The production implementation is a clean replacement of the executable IR,
+lowering and VM backend. It is not a continuation of FrameVm's admission
+experiment and does not preserve the old IR for compatibility.
 
-The migration is complete only when:
+The replacement keeps:
 
-1. production execution uses the one word stack region for frames and
-   operands;
-2. the old independent value/scalar/place stacks and their bases are removed;
-3. runtime Place root/path objects and place storage are removed; compiler
-   place analysis lowers to one-word addresses;
-4. Vector, Shared and every other Cove-owned object use the one VM heap rather
+- the lexer, parser and source AST;
+- name resolution, type checking and the checked semantic facts;
+- the tree-walking interpreter as the semantic oracle;
+- the public Host API and materialised Value boundary;
+- the conformance corpus, error/span expectations and trace semantics;
+- the language contracts for capability, fuel and cancellation.
+
+The replacement does not inherit:
+
+- value/scalar/place regions or independent frame sizes and bases;
+- ValueToScalar, ScalarToValue, StoreScalar, PlaceLocal, PlaceScalar or other
+  instructions whose purpose is crossing predecessor representations;
+- runtime Place root/path objects;
+- an internal Vec<Value> operand, argument, spill or boundary store;
+- FrameVm's admits predicate or partial-backend fallback;
+- duplicate dispatch loops, heaps or GC root models;
+- one ValueKind case or special side table per corpus refusal.
+
+The new lowering starts from checked source facts and emits an executable IR
+that directly describes typed words, layouts, addresses, allocations, calls
+and control flow in the memory model decided here. Unsupported language
+features are implementation work in the replacement; they are not represented
+by a permanent admission predicate.
+
+The old and new execution backends may coexist only during the bounded
+replacement period needed for differential testing. New language features and
+optimisations are implemented in the replacement rather than added to both
+backends.
+
+The replacement is complete only when:
+
+1. the new executable IR contains no predecessor storage regions or conversion
+   instructions;
+2. the new VM executes frames and operands on one word-stack region and stores
+   every Cove-owned indirect value in its one heap region;
+3. compiler places lower to one-word addresses and no runtime Place storage
+   remains;
+4. ordinary Cove-to-Cove execution never materialises or stores a public
+   Value;
+5. Vector, Shared and every other Cove-owned object use the VM heap rather
    than an identity or side store;
-5. internal boundary Vec<Value> storage is limited to explicit host/oracle
-   materialization and is absent from ordinary Cove-to-Cove execution;
-6. the experimental FrameVm, duplicate dispatch loop and admission fallback
-   are removed or folded into the production implementation;
-7. the differential corpus, GC stress tests, recursion, closures, mutable
-   places, tasks, cancellation, host reentry, tracing and runtime errors pass
-   on the production path;
-8. the existing representative performance gates show no order-of-magnitude
-   or repeated multi-fold regression;
-9. the temporary separation between the stack and heap backing allocations is
-   recorded as unfinished migration work, and nothing in IR or public APIs
-   depends on it.
+6. the full differential corpus agrees with the tree-walking oracle, including
+   values, errors, source spans and trace events;
+7. GC stress, recursion, closures, mutable references, collections, tasks,
+   cancellation, Host reentry and fuel contracts pass on the replacement;
+8. the replacement becomes the production path and the predecessor executable
+   IR, Vm, FrameVm, admits mechanism, duplicate heap and migration machinery
+   are deleted;
+9. representative performance gates show no order-of-magnitude or repeated
+   multi-fold regression;
+10. temporary separate backing allocations for stack and heap are recorded as
+    the remaining step toward the final single linear-memory block, and
+    nothing in IR or public APIs depends on that separation.
 
-Coverage measurements may identify missing lowering or layout facts. They do
-not justify an indefinite sequence of refusal-specific experimental backends:
-facts shared by a family of values are represented generally in IR and layout
-metadata.
+Coverage and profiling may reveal missing semantic facts. They guide the
+replacement implementation but do not justify further refusal-specific
+extensions to the predecessor backend.
 
 ## Consequences
 
