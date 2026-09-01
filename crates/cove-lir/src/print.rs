@@ -67,6 +67,7 @@ pub fn one(program: &Program, f: &Function, inst: &Inst) -> String {
         Inst::Float { dst, bits } => format!("float {} {}", s(*dst), f64::from_bits(*bits)),
         Inst::Str { dst, text } => format!("str {} {:?}", s(*dst), program.string(*text)),
         Inst::Move { dst, src } => format!("move {} {}", s(*dst), s(*src)),
+        Inst::Duplicate { dst, src } => format!("duplicate {} {}", s(*dst), s(*src)),
         Inst::Clear { slot } => format!("clear {}", s(*slot)),
         Inst::Neg { num, dst, a } => format!("neg.{} {} {}", num_name(*num), s(*dst), s(*a)),
         Inst::Arith { num, op, dst, a, b } => format!(
@@ -165,6 +166,7 @@ pub fn one(program: &Program, f: &Function, inst: &Inst) -> String {
         Inst::AddrOfElem { dst, obj, index } => {
             format!("addr-of-elem {} {} {}", s(*dst), s(*obj), s(*index))
         }
+        Inst::Unshare { dst, addr } => format!("unshare {} {}", s(*dst), s(*addr)),
         Inst::Load { dst, addr } => format!("load {} {}", s(*dst), s(*addr)),
         Inst::Store { addr, src } => format!("store {} {}", s(*addr), s(*src)),
         Inst::Box { dst, src, repr } => format!("box {} {} {repr}", s(*dst), s(*src)),

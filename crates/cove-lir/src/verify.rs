@@ -170,6 +170,17 @@ impl Check<'_> {
                     }
                 }
             }
+            Inst::Duplicate { dst, src } => {
+                if let (Some(d), Some(s)) = (self.repr(at, dst), self.repr(at, src)) {
+                    if d != s {
+                        self.fault(at, format!("copies {s} into a slot that holds {d}"));
+                    }
+                }
+            }
+            Inst::Unshare { dst, addr } => {
+                self.expect(at, dst, &[Repr::Ref]);
+                self.expect(at, addr, &[Repr::Addr]);
+            }
             Inst::Clear { slot } => {
                 // Clearing anything else would be a store of zero into a
                 // scalar, which is a lowering bug rather than a cheap no-op.

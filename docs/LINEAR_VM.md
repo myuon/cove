@@ -241,6 +241,89 @@ therefore depends on the case, and the collector reads word 0 to find out.
 That is a fact about an object, answered by the object; it is not a static
 kind per case, and no case is added because a program was refused.
 
+## Value semantics: transfer, duplicate, and one bit
+
+ADR 0001 decides the language rule and [issue #240](https://github.com/myuon/cove/issues/240)
+decides the implementation. The rule: assignment and ordinary argument passing
+are field-wise shallow copies; primitives, strings, enums and structs have
+value semantics; `Array`, `Map` and `Set` share storage, which is unobservable
+because none can be mutated; `Vector` and `Shared` share storage that *can* be
+mutated, so a copy of either is an alias; a `var` parameter is the one
+inout-alias exception. Cove has no move semantics.
+
+In a linear memory a slot holds an address, so copying the word aliases. The
+implementation therefore separates **language copy semantics** from
+**unobservable copy elision**, and the separation is in the instruction set so
+that a missed case is loud:
+
+- `Duplicate { dst, src }` — the source stays observable. This is the
+  language's copy, and the machine applies the source object's copy policy.
+- `Move { dst, src }` — the source is a fresh temporary, or is cleared as part
+  of the same step. Nothing can observe that the address was not copied, so
+  nothing is done. **This is copy elision, not a move.**
+
+`let` and `var` are lowered the same way, because ADR 0001 says they do not
+change expression semantics. What decides transfer against duplicate is where
+the value came from, never where it is going. The first lowering is
+conservative: a fresh temporary transfers; an existing binding, a field or a
+container element duplicates. Last-use elision for a binding can be added
+later as an optimisation that must stay observationally equivalent.
+
+### The copy policy belongs to the layout
+
+| policy | families | on duplicate |
+|---|---|---|
+| `Immutable` | `String`, `Array`, `Map`, `Set`, closure, box | copy the address |
+| `CopyOnWrite` | `struct`, `enum` | copy the address, mark possibly shared |
+| `Identity` | `Vector`, `Shared` | copy the address, keep the identity |
+
+An enum is copy-on-write although nothing writes to one today. The cost of
+being wrong runs one way: a family wrongly called immutable turns value
+semantics into alias semantics silently, and one wrongly called copy-on-write
+sets a bit nobody reads.
+
+One place applies the policy — a single machine helper that `Duplicate`,
+`GetWord` and `GetElem` all go through. Scattering "set the bit" across
+lowering sites would mean a forgotten call quietly aliases, and the program
+that noticed would be one that wrote through a copy, which is the program
+nobody writes a test for.
+
+### The bit
+
+One sticky bit in the existing object header, taken from the layout-id field.
+A 31-bit layout space is more than a program will reach, and widening every
+header — a string's included — to carry a bit that only two families read
+would be the wrong trade. Encoding and masking live in one helper.
+
+What it records is the same fact under both policies: *this object's address
+was duplicated*. Under `CopyOnWrite` it means "copy before writing"; under
+`Identity` it means "this vector has been aliased, so `freeze()` cannot claim
+uniqueness". It is cleared only by making a new object.
+
+### Unsharing a write path
+
+`b.p.x = 7` is one `Unshare` per level: unshare what `b` names, then what its
+`p` field names, then write `x`. Each step reads the reference at an address,
+copies the object if it is copy-on-write and possibly shared, marks the
+copy's own copy-on-write children possibly shared, and writes the copy back
+through the address it read from. The chain ends with a path no other name
+reaches, so `a.p.x` is untouched — which is what the shallow-copy rule
+requires once you notice that a shallow copy of a value-semantic field is
+itself value-semantic.
+
+This is why a place is a one-word address rather than a root and a path: the
+write-back *is* a `Store` through the address that was already there.
+
+### `Vector.freeze` keeps its uniqueness check
+
+`freeze()` is O(1) because it consumes. The same duplicate/transfer
+information supports it without making `Vector` copy-on-write: duplication
+marks the vector aliased, transfer does not, and `freeze()` refuses when
+uniqueness cannot be established. `toArray()` is the O(n) fallback. That is
+conservative — it may refuse after an alias has died — and it keeps the
+language's decision rather than replacing it with what the representation
+found convenient.
+
 ## A builtin never calls back into Cove
 
 `xs.map { it * 2 }` runs Cove code once per element. There are two places that

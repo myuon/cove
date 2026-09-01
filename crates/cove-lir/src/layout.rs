@@ -172,6 +172,39 @@ pub enum Shape {
     Boxed,
 }
 
+/// What happens to a reference when it is duplicated.
+///
+/// ADR 0001 decides the language rule and issue #240 decides how it is
+/// implemented: *"assignment and ordinary argument passing are field-wise
+/// shallow copies. Primitives, strings, enums, and structs have value
+/// semantics; `Array`, `Map`, and `Set` share their storage, which is
+/// unobservable because none of them can be mutated. `Vector` and `Shared`
+/// share storage that can be mutated, so a copy of either is an alias."*
+///
+/// Three families, three answers, and the policy belongs to the layout so
+/// that one place decides rather than every site that copies a word.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Copy {
+    /// Copy the address. Nothing more is needed, because nothing can write
+    /// to the object: a `String`, an `Array`, a `Map`, a `Set` and a closure
+    /// are the same value however many names reach them.
+    Immutable,
+    /// Copy the address and mark the object possibly shared.
+    ///
+    /// A later write through any path into it copies first, so the two names
+    /// stop being one object at the moment that would have become
+    /// observable. This is `Rc::make_mut` with a one-bit refcount: "exactly
+    /// one holder" against "possibly more".
+    CopyOnWrite,
+    /// Copy the address and keep the identity.
+    ///
+    /// A `Vector` and a `Shared` are *meant* to alias — mutation through one
+    /// copy is visible through every other, and `is` asks which two handles
+    /// are the same storage. Copying one on write would be the bug, not the
+    /// fix.
+    Identity,
+}
+
 /// The description of one family of heap objects.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Layout {
@@ -240,6 +273,31 @@ impl Layout {
             // A boxed word is a reference exactly when its tag says so, and
             // the tag is in the object. The collector has to look.
             Shape::Boxed => true,
+        }
+    }
+
+    /// What happens to a reference to an object of this layout when it is
+    /// duplicated.
+    ///
+    /// Derived from the shape rather than stored beside it, because it *is*
+    /// a fact about the shape and a second field could disagree with the
+    /// first.
+    ///
+    /// An enum is copy-on-write although no instruction writes to one today.
+    /// The cost of being wrong runs one way: a family wrongly called
+    /// immutable turns value semantics into alias semantics silently, and a
+    /// family wrongly called copy-on-write sets a bit nobody reads.
+    pub fn copy(&self) -> Copy {
+        match &self.shape {
+            Shape::Struct { .. } | Shape::Enum { .. } => Copy::CopyOnWrite,
+            Shape::Vector { .. } => Copy::Identity,
+            Shape::Free
+            | Shape::Str
+            | Shape::Elements { .. }
+            | Shape::Members { .. }
+            | Shape::Entries { .. }
+            | Shape::Closure { .. }
+            | Shape::Boxed => Copy::Immutable,
         }
     }
 

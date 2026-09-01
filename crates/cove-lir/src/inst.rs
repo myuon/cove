@@ -131,6 +131,28 @@ pub enum Inst {
     Str { dst: Slot, text: StrId },
     /// `dst = src`
     Move { dst: Slot, src: Slot },
+    /// `dst = src`, where `src` stays observable afterwards.
+    ///
+    /// This is the language's copy. ADR 0001 says assignment and ordinary
+    /// argument passing are field-wise shallow copies and that structs and
+    /// enums have value semantics; issue #240 decides how: the machine
+    /// applies the source object's [`Copy`](crate::Copy) policy in one
+    /// place, so a family that copies on write is marked possibly shared
+    /// here and copied at the write that would have made the sharing
+    /// observable.
+    ///
+    /// [`Inst::Move`] is the other half of the pair and is *not* a language
+    /// operation: it is copy elision, used only where the source is a fresh
+    /// temporary or is cleared as part of the same step, so nothing can
+    /// observe that the address was not copied. Cove has no move semantics;
+    /// the distinction is entirely below the language.
+    ///
+    /// Splitting them is what makes a missed case loud. If one instruction
+    /// did both and the lowering had to remember to mark, a forgotten mark
+    /// would silently turn value semantics into alias semantics — and the
+    /// program that noticed would be one that wrote through a copy, which is
+    /// exactly the program nobody writes a test for.
+    Duplicate { dst: Slot, src: Slot },
     /// `slot = 0`
     ///
     /// A slot whose value is dead. The lowering emits one at the end of the
@@ -298,6 +320,22 @@ pub enum Inst {
     AddrOfWord { dst: Slot, obj: Slot, at: u32 },
     /// `dst = &obj[index]`
     AddrOfElem { dst: Slot, obj: Slot, index: Slot },
+    /// `dst = <the object at `*addr`, made private to this path>`
+    ///
+    /// Reads the reference at `addr`; if the object it names is copy-on-write
+    /// and possibly shared, copies it, marks the copy's own copy-on-write
+    /// children possibly shared, and **writes the copy's address back through
+    /// `addr`**. Answers the address of the object the caller should carry
+    /// on from, which is the copy when one was made and the original when it
+    /// was not.
+    ///
+    /// This is the write half of value semantics, and it is why a place is a
+    /// one-word address rather than a root and a path. `b.p.x = 7` is one of
+    /// these per level: unshare what `b` names, then unshare what its `p`
+    /// field names, then write `x`. Each step writes its copy back into the
+    /// word above it, so the chain ends with a path that no other name
+    /// reaches — and `a.p.x` is untouched, which is what ADR 0001 requires.
+    Unshare { dst: Slot, addr: Slot },
     /// `dst = *addr`
     Load { dst: Slot, addr: Slot },
     /// `*addr = src`
