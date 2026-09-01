@@ -70,6 +70,46 @@ impl Repr {
         matches!(self, Repr::Ref)
     }
 
+    /// The discriminant a [`Shape::Boxed`](crate::Shape::Boxed) object stores
+    /// beside the word it describes.
+    ///
+    /// The values are written out rather than derived, because they are not an
+    /// implementation detail of this enum: they are in the heap, and the
+    /// collector reads one to decide whether the word beside it is an address.
+    /// Reordering the variants must not change what a box means, so the tag is
+    /// stated where a reorder cannot silently rewrite it.
+    pub fn tag(self) -> u64 {
+        match self {
+            Repr::Unit => 0,
+            Repr::Bool => 1,
+            Repr::Int => 2,
+            Repr::Float => 3,
+            Repr::Duration => 4,
+            Repr::Ref => 5,
+            Repr::Addr => 6,
+            Repr::Host => 7,
+        }
+    }
+
+    /// The `Repr` a stored tag names, if it names one.
+    ///
+    /// `None` rather than a panic: the caller is the collector, reading a word
+    /// out of the heap, and a collection is the worst place to discover a bad
+    /// one by unwinding.
+    pub fn from_tag(tag: u64) -> Option<Repr> {
+        Some(match tag {
+            0 => Repr::Unit,
+            1 => Repr::Bool,
+            2 => Repr::Int,
+            3 => Repr::Float,
+            4 => Repr::Duration,
+            5 => Repr::Ref,
+            6 => Repr::Addr,
+            7 => Repr::Host,
+            _ => return None,
+        })
+    }
+
     /// The name this `Repr` prints under in a disassembly.
     pub fn name(self) -> &'static str {
         match self {
@@ -208,6 +248,27 @@ mod tests {
         assert!(!Repr::Addr.is_ref());
         assert!(!Repr::Host.is_ref());
         assert!(Repr::Ref.is_ref());
+    }
+
+    #[test]
+    fn a_tag_round_trips_and_nothing_else_is_one() {
+        // What a boxed value stores: the tag is read back out of the heap, so
+        // every `Repr` must survive the trip and no other word may be mistaken
+        // for one.
+        for repr in [
+            Repr::Unit,
+            Repr::Bool,
+            Repr::Int,
+            Repr::Float,
+            Repr::Duration,
+            Repr::Ref,
+            Repr::Addr,
+            Repr::Host,
+        ] {
+            assert_eq!(Repr::from_tag(repr.tag()), Some(repr));
+        }
+        assert_eq!(Repr::from_tag(8), None);
+        assert_eq!(Repr::from_tag(u64::MAX), None);
     }
 
     #[test]

@@ -15,6 +15,9 @@ pub mod interp;
 // Private: what it holds is one check both backends make, and the public
 // surface of it is `Interpreter::invoke` and `Vm::invoke`.
 mod invoke;
+// Private while it is built: the ADR 0034 replacement for `vm` and `frame`,
+// which are frozen until the cutover deletes them.
+mod lvm;
 pub mod process;
 pub mod runtime;
 pub mod schema;
