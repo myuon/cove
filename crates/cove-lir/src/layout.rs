@@ -31,7 +31,7 @@ use crate::FunctionId;
 /// `LayoutId(0)` is reserved for [`Layout::free`]: the sweeper writes it into
 /// the header of a reclaimed run of words so the heap stays a walkable
 /// sequence of objects. No Cove value ever has it.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct LayoutId(pub u32);
 
 impl LayoutId {

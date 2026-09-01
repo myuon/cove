@@ -193,6 +193,15 @@ pub struct Program {
     pub tables: Vec<Table>,
     pub host_ops: Vec<HostOp>,
     pub builtins: Vec<Builtin>,
+    /// The layout every string object shares.
+    ///
+    /// One field rather than a layout in each [`Inst::Str`], because every
+    /// string in a program has the same shape and the machine should not
+    /// have to be told it once per literal. A program that mentions no
+    /// string still declares it: the machine allocates one for a host's
+    /// answer, and a table it has to check for emptiness first is a branch
+    /// on a path that always takes the same side.
+    pub str_layout: LayoutId,
     /// `module.name` to id, for an entry point named on a command line.
     pub by_name: BTreeMap<(Arc<str>, Arc<str>), FunctionId>,
 }

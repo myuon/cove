@@ -8,12 +8,14 @@
 //! oracle and the differential gate usable — and deleted at the cutover, when
 //! `cove-lir` and `lvm` take the names `cove-ir` and `vm`.
 //!
-//! Only the memory exists so far. The dispatch loop that will drive it is the
-//! next piece, which is why the whole module is allowed to be dead code: every
-//! item below is reached from its own tests and from nothing else yet. The
-//! allowance comes out with the loop that consumes them, and it is deliberately
-//! one line in one place rather than an attribute per item, so that removing it
-//! is a single edit whose failure lists exactly what is still unused.
+//! The memory and the dispatch loop exist; the boundary above them — the
+//! type an embedder holds, which materialises a public `Value` on the way in
+//! and out — does not yet. That is why the whole module is allowed to be dead
+//! code: every item below is reached from its own tests and from nothing else.
+//! The allowance comes out with that boundary, and it is deliberately one line
+//! in one place rather than an attribute per item, so that removing it is a
+//! single edit whose failure lists exactly what is still unused.
 #![allow(dead_code)]
 
+pub(crate) mod exec;
 pub(crate) mod mem;
