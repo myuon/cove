@@ -26,7 +26,7 @@ pub(super) fn ends_a_block(inst: Inst) -> bool {
             | Inst::Call { .. }
             | Inst::CallValue { .. }
             | Inst::CallDyn { .. }
-            | Inst::Try
+            | Inst::Try { .. }
             | Inst::Return
             | Inst::ReturnScalar
             | Inst::NoMatch

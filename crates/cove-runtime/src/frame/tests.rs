@@ -3194,3 +3194,245 @@ fn an_ok_string_payload_bound_by_a_match_arm_is_still_refused_and_names_the_valu
         refused.what
     );
 }
+
+// ------------------------------------------------ a `?` over a scalar payload
+
+/// **The defect this file was written to catch.** `Inst::Try`'s success path
+/// used to push the unwrapped payload into the boundary buffer
+/// unconditionally, whatever the payload's own settled kind was — correct
+/// for a `Value`, wrong for an `Int` or a `Bool`, because `Inst::ValueToScalar`
+/// right after it is a no-op that trusts the word is already standing on the
+/// one stack. `g`'s `Ok(1)` crosses the call boundary as a materialised
+/// `Value` (`g`'s own return type is not `SlotKind::Scalar`), so `x`'s
+/// `let` routes through `Body::expr_scalar`'s fallback exactly the way
+/// `main_of`'s callers never do: `moved_to_scalar` emits `Try` and then
+/// `ValueToScalar`, and the second used to read a stale word off the one
+/// stack rather than the `1` still sitting in the boundary buffer.
+///
+/// `Inst::Try`'s own `payload` field is what fixes it: `x`'s slot is
+/// `SlotKind::Scalar(Int)`, which is also the `try` expression's own settled
+/// type, so the instruction now knows to push a scalar word instead.
+#[test]
+fn a_try_over_a_calls_int_result_stored_in_a_local_agrees_and_does_not_panic() {
+    agree(
+        "fn g() -> Result<Int, Error> {\n  Ok(1)\n}\n\n\
+         export fn main() -> Result<Unit, Error> {\n  \
+         let x = g()?\n  \
+         assertEqual(x + 1, 2)?\n  \
+         Ok(())\n}\n",
+    );
+}
+
+/// The same shape, with the payload used the moment it is unwrapped rather
+/// than stored first — `moved_to_scalar` reaches `Try` through
+/// `assertEqual`'s own scalar argument this time, not through a `let`, so
+/// this is a different lowering path to the same instruction pair.
+#[test]
+fn a_try_over_a_calls_int_result_used_immediately_agrees() {
+    agree(
+        "fn g() -> Result<Int, Error> {\n  Ok(1)\n}\n\n\
+         export fn main() -> Result<Unit, Error> {\n  \
+         assertEqual(g()? + 1, 2)?\n  \
+         Ok(())\n}\n",
+    );
+}
+
+/// The `Bool` half of [`SlotKind::Scalar`], stored in a local: `Word::of_bool`
+/// rather than `Word::of_int` is what `Inst::Try`'s new arm pushes, and nothing
+/// beside the codec differs from the `Int` case above.
+#[test]
+fn a_try_over_a_calls_bool_result_stored_in_a_local_agrees() {
+    agree(
+        "fn g() -> Result<Bool, Error> {\n  Ok(true)\n}\n\n\
+         export fn main() -> Result<Unit, Error> {\n  \
+         let x = g()?\n  \
+         assertEqual(x, true)?\n  \
+         Ok(())\n}\n",
+    );
+}
+
+/// `?` over a `String` payload, stored in a local: `Inst::Try`'s `payload`
+/// field is `SlotKind::Value` here, because a `String` is not one of
+/// [`SlotKind::Scalar`]'s two kinds, so nothing about this file's fix changes
+/// what happens to it — it still stands only in the boundary buffer, and
+/// `Inst::StoreLocal` still cannot show that a word it never receives is a
+/// reference. This is the same refusal
+/// `an_ok_string_payload_bound_by_a_match_arm_is_still_refused_and_names_the_value_slot`
+/// already covers for a `match` arm, pinned here for `?` instead so that a
+/// reader of this file does not have to trust that the two constructs stay
+/// in step with each other.
+#[test]
+fn a_try_over_a_calls_string_result_stored_in_a_local_is_still_refused() {
+    let ready = ready(
+        "fn g() -> Result<String, Error> {\n  Ok(\"hi\")\n}\n\n\
+         export fn main() -> Result<Unit, Error> {\n  \
+         let x = g()?\n  \
+         assertEqual(x, \"hi\")?\n  \
+         Ok(())\n}\n",
+    );
+    let refused = match ready.admitted() {
+        Ok(id) => {
+            panic!("a `?`'s `String` payload stored in a local is refused, and it admitted {id:?}")
+        }
+        Err(refused) => refused,
+    };
+    assert!(
+        refused.what.contains("a heap object") || refused.what.contains("a general value slot"),
+        "it was refused for `{}`, and a general value slot / heap object refusal was expected",
+        refused.what
+    );
+}
+
+/// The same, over a payload that is a struct rather than a `String` —
+/// `Inst::Try`'s `payload` field is `SlotKind::Value` for exactly the same
+/// reason, and the refusal is the same one a struct meets everywhere else
+/// this backend cannot show a word is a reference.
+#[test]
+fn a_try_over_a_calls_struct_result_stored_in_a_local_is_still_refused() {
+    let ready = ready(
+        "struct Cell {\n  at: Int\n}\n\n\
+         fn g() -> Result<Cell, Error> {\n  Ok(Cell(at: 1))\n}\n\n\
+         export fn main() -> Result<Int, Error> {\n  \
+         let x = g()?\n  \
+         Ok(x.at)\n}\n",
+    );
+    let refused = match ready.admitted() {
+        Ok(id) => {
+            panic!("a `?`'s struct payload stored in a local is refused, and it admitted {id:?}")
+        }
+        Err(refused) => refused,
+    };
+    assert!(
+        refused.what.contains("a heap object") || refused.what.contains("a general value slot"),
+        "it was refused for `{}`, and a general value slot / heap object refusal was expected",
+        refused.what
+    );
+}
+
+/// `?` over an `Err`, so the failure path beside the fixed success path is
+/// exercised too — `agree` checks the whole `Outcome`, so the message and the
+/// span the VM raises with are part of what this pins, not only the fact that
+/// all three backends fail.
+///
+/// The error type is `String` rather than the builtin `Error`, the same
+/// recipe `try_over_a_word_built_ok_and_a_word_built_err_agrees` already
+/// uses: `Error("boom")` is itself a `make-builtin` whose own answer this
+/// backend cannot show a `Kind` for, so passing it as `Err`'s argument is
+/// refused independently of anything `?` does — a real limit, but not this
+/// section's. `Err("boom")` has no such second call standing under it, so
+/// `g`'s failure is admitted and this test is free to be about `Inst::Try`'s
+/// failure arm and nothing else. `x`'s `let` is never reached at run time,
+/// because `g` always fails here, but it is still what `admits` sees at this
+/// `pc` — `g()?`'s success continuation is reachable in general, so it is
+/// checked whether or not this particular run takes it, exactly as
+/// `cove_ir::lower::validate`'s own reachability proof is asked once per
+/// program and not once per input.
+#[test]
+fn a_try_over_a_calls_err_result_agrees_on_message_and_span() {
+    agree(
+        "fn g() -> Result<Int, String> {\n  Err(\"boom\")\n}\n\n\
+         export fn main() -> Result<Int, String> {\n  \
+         let x = g()?\n  \
+         Ok(x + 1)\n}\n",
+    );
+}
+
+/// `?` over a Host call's answer — where the boundary buffer and the word
+/// path actually meet, because `Inst::CallHost`'s own answer is a
+/// `Kind::Enum` word rather than a call to another Cove function, and
+/// `Inst::Try` pops it off the one stack through `crosses_as_an_enum` before
+/// this test's own fix ever runs. `x` is scalar and stored, so this is the
+/// same success-path arm the rest of this section pins, reached the one
+/// other way `admits` lets it be reached.
+#[test]
+fn a_try_over_a_host_calls_int_answer_stored_in_a_local_agrees() {
+    agree_with_echo(
+        "use echo\n\nexport fn main() -> Result<Unit, Error> {\n  \
+         let x = echo.int(42)?\n  \
+         assertEqual(x + 1, 43)?\n  \
+         Ok(())\n}\n",
+        true,
+    );
+}
+
+/// A collection taken while a scalar `?` payload is the only thing standing
+/// in its frame slot, with [`crate::slot::HandleHeap::stress`] on. `x` is
+/// bound before two hundred throwaway `Junk` structs are allocated and
+/// dropped in a loop, so a run with a collector at every safepoint frees real
+/// garbage while `x`'s slot stands beside it the whole time — the coverage
+/// this file's own `a_string_kept_alive_by_nothing_but_a_frame_slot_survives_every_collection`
+/// gives a reference payload, asked of a scalar one instead.
+///
+/// What this actually proves is a different half of the same invariant:
+/// `push_scalar`, not `push_reference`, is what `Inst::Try`'s new arm calls,
+/// so the frame's own reference bitmap never calls `x`'s slot a handle.
+/// Getting that backwards would not fail quietly — the collector would walk
+/// `x`'s raw `Int` bits as a `Handle` the moment it collected, which is
+/// exactly the wrong-acceptance shape this whole file exists to catch, one
+/// layer further in.
+#[test]
+fn a_scalar_try_payload_survives_a_collection_with_stress_on() {
+    let ready = ready(
+        "struct Junk {\n  at: Int\n}\n\n\
+         fn g() -> Result<Int, Error> {\n  Ok(41)\n}\n\n\
+         export fn main() -> Result<Unit, Error> {\n  \
+         let x = g()?\n  \
+         var i = 0\n  \
+         while i < 200 {\n    \
+         var junk = Junk(at: i)\n    \
+         i = junk.at + 1\n  \
+         }\n  \
+         assertEqual(x + 1, 42)?\n  \
+         Ok(())\n}\n",
+    );
+    let collected = crate::on_cove_stack(|| ready.on_frame_collecting(RootScope::EveryWord))
+        .expect("a thread to run Cove on");
+    assert_eq!(
+        collected.outcome,
+        Outcome::Answered(format!("{:?}", Value::ok(Value::unit()))),
+        "a scalar `?` payload disagreed under a collector running at every safepoint"
+    );
+    assert!(
+        collected.collections > 0,
+        "the run collected {} time(s), so nothing here proves the collector ran beside the \
+         scalar payload",
+        collected.collections
+    );
+}
+
+/// Nested `?` in one expression: `g`'s answer is a `Result` whose own payload
+/// is another `Result`, so the inner `Try` opens a `Kind::Enum` word into a
+/// materialised `Value` — its own payload is `SlotKind::Value`, because a raw
+/// `Result` is never one of [`SlotKind::Scalar`]'s two kinds — and the outer
+/// `Try` opens *that* into the scalar `Int` this file's fix is about, over an
+/// operand the inner `Try` produced rather than one `Inst::MakeBuiltin` or
+/// `Inst::CallHost` produced directly. `leaves_a_boundary_value`'s own
+/// `Inst::Try` arm has to answer correctly for both instances beside each
+/// other, at two different `payload`s, or this is where the two would come
+/// apart.
+#[test]
+fn a_nested_try_over_an_int_payload_agrees() {
+    agree(
+        "fn g() -> Result<Result<Int, Error>, Error> {\n  Ok(Ok(1))\n}\n\n\
+         export fn main() -> Result<Unit, Error> {\n  \
+         let x = g()??\n  \
+         assertEqual(x + 1, 2)?\n  \
+         Ok(())\n}\n",
+    );
+}
+
+/// The shape `Inst::Pop` meets, not `Inst::ValueToScalar`: a scalar `?`
+/// payload that is computed and then thrown away, as a bare statement.
+/// `leaves_a_boundary_value`'s `Inst::Try` arm is asked here too — `Inst::Pop`
+/// reads it to decide which of the two stacks the word it is about to discard
+/// stands on — so a scalar payload discarded this way is the other place the
+/// fix in this file has to hold, beside `ValueToScalar`.
+#[test]
+fn a_try_over_an_int_payload_discarded_as_a_statement_agrees() {
+    agree(
+        "fn g() -> Result<Int, Error> {\n  Ok(1)\n}\n\n\
+         export fn main() -> Result<Unit, Error> {\n  \
+         g()?\n  \
+         Ok(())\n}\n",
+    );
+}

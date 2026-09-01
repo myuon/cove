@@ -64,7 +64,16 @@ impl<'a, 'l> Body<'a, 'l> {
         self.open_scopes -= 1;
         lowered?;
         self.emit(Inst::LeaveScope, span);
-        self.emit(Inst::Try, span);
+        // The scope's own block was lowered at `Position::Value` a few
+        // lines up, whatever its tail's type is, so what this `Try` opens on
+        // success is always a `SlotKind::Value` — the same reasoning the
+        // `for`-loop's own `Try` carries for its `element` slot.
+        self.emit(
+            Inst::Try {
+                payload: SlotKind::Value,
+            },
+            span,
+        );
         self.release(mark);
         if position == Position::Effect {
             self.emit(Inst::Pop, span);

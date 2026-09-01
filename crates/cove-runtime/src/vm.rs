@@ -1886,7 +1886,7 @@ impl<'a> Vm<'a> {
                     let value = self.pop();
                     return Err(crate::interp::no_match(&value, span));
                 }
-                Inst::Try => {
+                Inst::Try { .. } => {
                     let span = running.span_at(pc);
                     let value = self.pop();
                     match opened(value, span)? {

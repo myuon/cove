@@ -277,6 +277,22 @@
 //!   "An enum is a heap object" below — so what still reaches this buffer
 //!   from those two is an assertion's answer, `Error`, `Shared`, and a Host
 //!   answer this backend cannot show a word for.
+//! - **A `?`'s own success payload may leave that buffer the instant it is
+//!   opened, rather than stand in it.** `Inst::Try` carries the checker's
+//!   settled [`SlotKind`] for what it unwraps — the same fact
+//!   `Inst::GetFieldAt` and `Inst::GetPayload` carry for a field and a case's
+//!   payload, asked of a `?` instead — so a payload proven `Int` or `Bool` is
+//!   pushed onto the one stack as a scalar word rather than staying a
+//!   materialised `Value`, the crossing taken in reverse by the same
+//!   instruction that just took it inward. This was not always true, and
+//!   getting it wrong was not a refusal: `Inst::ValueToScalar`, which
+//!   `Inst::Try`'s own success path is almost always followed by, is a
+//!   no-op that trusts its operand is already a word standing on the one
+//!   stack. A `Try` that left a scalar payload in the boundary buffer
+//!   instead handed `ValueToScalar` a stale word off the one stack in its
+//!   place — a wrong acceptance, not a refusal, and `crates/cove-runtime/src/frame/tests.rs`'s
+//!   `a_try_over_a_calls_int_result_stored_in_a_local_agrees_and_does_not_panic`
+//!   is the case it was found from.
 //! - **A `String` is the one word a `try`, a `pop` or a `return` may also
 //!   materialise straight off the one stack**, rather than only off that
 //!   buffer: `crosses_as_a_string` is the static proof, asked the same way
@@ -786,7 +802,14 @@ fn leaves_a_boundary_value(program: &Program, function: &cove_ir::Function, pc: 
         Some(inst @ (Inst::MakeBuiltin { .. } | Inst::CallHost { .. })) => {
             pushed_kind(program, *inst) != Some(Kind::Enum)
         }
-        Some(Inst::Try) => true,
+        // `try` used to be unconditional here too, and for the same reason
+        // the two above are not: a `?` over a payload the checker settled as
+        // `Int` or `Bool` leaves a scalar word on the one stack instead of a
+        // materialised `Value` in the boundary buffer -- `Inst::Try`'s own
+        // `payload` field is what makes that a static fact rather than
+        // something only the object popped at run time could answer, and
+        // `pushed_kind` reads it the same way it reads every other site's.
+        Some(inst @ Inst::Try { .. }) => pushed_kind(program, *inst).is_none(),
         Some(Inst::Call {
             function: target, ..
         }) => !matches!(program.function(*target).returns, SlotKind::Scalar(_)),
@@ -1179,7 +1202,7 @@ fn walk_function<S: Sink>(
             // enum, or anything else this backend has never had to name to
             // admit a discard of it.
             Inst::Pop => {}
-            Inst::Try | Inst::Return => {
+            Inst::Try { .. } | Inst::Return => {
                 if !leaves_a_boundary_value(program, function, pc)
                     && !crosses_as_a_string(&operands, pc)
                     && !crosses_as_an_enum(&operands, pc)
@@ -1188,7 +1211,7 @@ fn walk_function<S: Sink>(
                         format!(
                             "{} in {}, over something that is a word rather than a value",
                             match inst {
-                                Inst::Try => "a `?`",
+                                Inst::Try { .. } => "a `?`",
                                 _ => "a `return`",
                             },
                             named()
@@ -2556,6 +2579,25 @@ fn pushed_kind(program: &Program, inst: Inst) -> Held {
         // A case test's answer is a canonical `Bool` bit, exactly as a
         // comparison's is.
         Inst::TestCase(_) => Some(Kind::Bool),
+        // **Unlike `Inst::GetFieldAt`'s and `Inst::GetPayload`'s own
+        // `SlotKind::Value` arms, a `Value`-typed `Try` payload proves
+        // nothing here.** Those two always leave a word on the one stack --
+        // a struct's field or a case's payload is inline in the object
+        // either way -- so a reference the frame map calls a handle is
+        // provably one. A `?`'s `Value` case is not: `FrameVm::execute`'s
+        // own `Inst::Try` arm leaves that payload standing in the boundary
+        // buffer, never on the one stack, so there is no word here for a
+        // bitmap to be right or wrong about. Only the scalar case ever
+        // reaches `self.words`, which is the same fact
+        // `leaves_a_boundary_value` reads off this field on the instruction
+        // standing before it.
+        Inst::Try {
+            payload: SlotKind::Scalar(Scalar::Int),
+        } => Some(Kind::Int),
+        Inst::Try {
+            payload: SlotKind::Scalar(Scalar::Bool),
+        } => Some(Kind::Bool),
+        Inst::Try { .. } => None,
         _ => None,
     }
 }
@@ -2859,7 +2901,7 @@ fn describe(inst: &Inst) -> &'static str {
         | Inst::MakeBuiltin { .. }
         | Inst::CallHost { .. }
         | Inst::CallResource { .. }
-        | Inst::Try
+        | Inst::Try { .. }
         | Inst::Call { .. }
         | Inst::Return
         | Inst::ReturnScalar => "an admitted instruction",
@@ -4005,14 +4047,47 @@ impl<'a> FrameVm<'a> {
                         }
                     }
                 }
-                Inst::Try => {
+                Inst::Try { payload } => {
                     let span = running.span_at(pc);
                     let here = self.frames.last().expect("a frame stands").function;
                     let value = self.pop_boundary_value(here, pc);
                     self.materialized += 1;
                     match opened(value, span)? {
-                        Ok(payload) => {
-                            self.boundary.push(payload);
+                        Ok(answer) => {
+                            // Where the success payload lands is the same
+                            // fact `pushed_kind` and `leaves_a_boundary_value`
+                            // both read off this instruction's own `payload`
+                            // field, asked the same way: a scalar payload is
+                            // a word this backend pushes straight onto the
+                            // one stack, so it is never boxed into the
+                            // boundary buffer at all, and the instruction
+                            // that runs next -- `Inst::ValueToScalar`, most
+                            // often, or a `Inst::StoreScalar` that fuses it
+                            // away -- finds the word exactly where the
+                            // static answer said it would be.
+                            match payload {
+                                SlotKind::Scalar(Scalar::Int) => {
+                                    let Value(Repr::Int(int)) = answer else {
+                                        unreachable!(
+                                            "`Inst::Try`'s own `payload` field said `Int`, and \
+                                             the payload it opened was {answer:?}"
+                                        );
+                                    };
+                                    self.push_scalar(Word::of_int(int));
+                                }
+                                SlotKind::Scalar(Scalar::Bool) => {
+                                    let Value(Repr::Bool(flag)) = answer else {
+                                        unreachable!(
+                                            "`Inst::Try`'s own `payload` field said `Bool`, and \
+                                             the payload it opened was {answer:?}"
+                                        );
+                                    };
+                                    self.push_scalar(Word::of_bool(flag));
+                                }
+                                SlotKind::Value | SlotKind::Place => {
+                                    self.boundary.push(answer);
+                                }
+                            }
                             self.charge(blocks[pc + 1], || running.span_at(pc + 1))?;
                         }
                         Err(failure) => {

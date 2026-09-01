@@ -333,7 +333,18 @@ impl<'a, 'l> Body<'a, 'l> {
             }
             ExprKind::Try(inner) => {
                 self.expr(inner)?;
-                self.emit(Inst::Try, span);
+                // The whole `try` expression's own settled type is the
+                // payload's — the same question `Body::slot_kind` answers
+                // for a `let` binding built from any other expression,
+                // asked of this one instead, because `Inst::Try` needs the
+                // same fact a backend cannot read off the instruction that
+                // pushed its operand.
+                self.emit(
+                    Inst::Try {
+                        payload: self.slot_kind(expr),
+                    },
+                    span,
+                );
             }
             ExprKind::Block(block) => return self.block_at(block, position),
             ExprKind::If {
@@ -1281,7 +1292,18 @@ impl<'a, 'l> Body<'a, 'l> {
                 // back is a `Some`. `Try` is the instruction that opens one,
                 // and it is used here rather than `unwrapOr` because there is
                 // no element value the lowering could invent as a fallback.
-                self.emit(Inst::Try, span);
+                //
+                // `element` is declared `SlotKind::Value` a few lines below,
+                // whatever `for`'s own element type is — a `for` binding is
+                // never routed to the scalar stack — so this `Try`'s payload
+                // is that same `SlotKind::Value`, not the checker's answer
+                // for the sequence's element type.
+                self.emit(
+                    Inst::Try {
+                        payload: SlotKind::Value,
+                    },
+                    span,
+                );
             }
         }
         self.emit(Inst::StoreLocal(element), span);
