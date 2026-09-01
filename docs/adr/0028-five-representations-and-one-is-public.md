@@ -1,6 +1,11 @@
 # ADR 0028: Five representations, and one of them is public
 
-- Status: Accepted. [Issue #197](https://github.com/myuon/cove/issues/197)
+- Status: Accepted. Superseded in part by
+  [ADR 0034](0034-one-physical-word-stack.md), which closes decision 1's
+  physical-arrangement question by requiring one contiguous word stack in the
+  production VM. The eight-byte untagged slot, one logical numbering, heap,
+  Dynamic, boundary and sealing decisions remain in force.
+- [Issue #197](https://github.com/myuon/cove/issues/197)
   made acceptance the gate — "the first deliverable is an ADR; do not
   implement or migrate the runtime representation before the ADR is reviewed
   and accepted" — so this ADR was written and merged as `Proposed`, which no
@@ -279,13 +284,12 @@ same thing: **every word has one slot index, while one logical value may occupy
 several adjacent slot indices.** This is what #162's title asks for and what
 ADR 0027 explicitly did not decide.
 
-**The physical arrangement is a measurement question and is not decided here.**
-One word-wide array is the obvious realization of the paragraph above and it
-is not mandated, because #179 says why a cross-build absolute on this
-workspace is not evidence and this ADR makes no performance claim it has not
-measured. A physically split realization is legal only if it presents the
-same single logical numbering and derives every physical offset from the one
-frame layout; three independently numbered stacks and three independent frame
+**The physical arrangement was left to measurement here and is now decided by
+[ADR 0034](0034-one-physical-word-stack.md).**
+At the time of this decision, one word-wide array was the obvious realization
+but was not mandated, because #179 says why a cross-build absolute on this
+workspace is not evidence. ADR 0034 now mandates that realization for the
+production VM and disallows a physically split production frame; three independently numbered stacks and three independent frame
 bases are not one logical frame. What *is* decided is the invariant any
 physical arrangement must satisfy: **a slot the layout calls scalar must never
 be reachable by a walk that treats it as a reference, and a slot must not be
@@ -876,14 +880,11 @@ crate may depend on it.
 
 ## What is not decided here
 
-**The physical arrangement of the frame.** Decision 1 decides one logical
-frame, one numbering, one base, 8-byte slots, and value layouts that may span
-adjacent slots. Whether that is one word-wide `Vec` with a reference bitmap
-or typed physical regions derived from the same logical layout is a
-measurement question, and #179 is why an unmeasured answer would be worse than
-an acknowledged gap. The current three independently based stacks are not the
-decided logical model; #162 stays open until a physical realization is
-measured.
+**The physical arrangement of the frame was left open here and is closed by
+ADR 0034.** Decision 1 decides one logical frame, one numbering, one base,
+8-byte slots, and value layouts that may span adjacent slots. ADR 0034 selects
+one contiguous word stack with layout-derived reference metadata for the
+production VM and requires the independently based stacks to be removed.
 
 **Every number.** This ADR makes no performance claim it has not measured, and
 the two it cites are #109's width table and #123's crossing cost. The

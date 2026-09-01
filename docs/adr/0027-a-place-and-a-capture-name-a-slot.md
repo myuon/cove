@@ -1,6 +1,8 @@
 # ADR 0027: A place and a capture name a slot, not a stack
 
-- Status: Accepted
+- Status: Accepted. Its open question about a single physical frame is decided by
+  [ADR 0034](0034-one-physical-word-stack.md); the place and capture decisions
+  remain in force
 - Date: 2026-08-30
 - Supersedes: nothing. It completes
   [ADR 0019](0019-executable-ir-and-vm.md)'s "Slots, not names" rather than
@@ -171,12 +173,13 @@ cost and this decision does not address it.
 
 ## What is not decided here
 
-**A single physical frame.** Issue #162's title asks to unify the VM's
+**A single physical frame (decided by ADR 0034).** Issue #162's title asks to unify the VM's
 logical stack and frame layout, and this ADR unifies the *identity* of a slot
 without unifying its storage: there are still three stacks, three bases per
 frame, and three counts on a call. Design B of that issue — one compact
-word-wide slot stack with a GC bitmap — is not built, not measured, and not
-refused here. What this change removes is the reason it looked mandatory: the
+word-wide slot stack with a GC bitmap — was not built, measured or refused by
+this ADR. [ADR 0034](0034-one-physical-word-stack.md) later selected it for the
+production VM. What this change removes is the reason it looked mandatory: the
 two costs #116 handed to #162 were both consequences of a slot's *role*
 deciding its representation, and neither needed one physical stack to fix.
 
