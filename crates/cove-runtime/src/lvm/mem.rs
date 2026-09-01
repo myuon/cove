@@ -333,6 +333,36 @@ impl Memory {
         None
     }
 
+    /// Re-labels the object at `addr` as `layout` with header length `len`,
+    /// releasing the `spare` words the shorter object gives up.
+    ///
+    /// One operation rather than a header write, because the two halves are
+    /// one invariant: the heap is a walkable sequence of objects from
+    /// [`STACK_WORDS`] to the bump pointer, so a run of words an object stops
+    /// occupying has to become a free block of its own rather than silently
+    /// disappear. The caller must pass exactly the words the new object gives
+    /// up — `1 + payload_words(before)` less `1 + payload_words(after)` — and
+    /// a disagreement makes the heap unwalkable in the same way a wrong
+    /// `payload_words` at [`Memory::alloc`] does.
+    ///
+    /// `Vector.freeze()` is what needs it: a growable store becomes the
+    /// immutable array it is already holding, in place, so that the one O(1)
+    /// sequence conversion the language has is O(1) here too. Nothing else
+    /// re-labels an object, and nothing may re-label one *upward* — the new
+    /// object has to fit in the words the old one had.
+    ///
+    /// The released block does not join [`Memory::free`]: the next sweep
+    /// walks the heap and rebuilds that list, and until then the words are
+    /// neither reachable nor handed out.
+    pub(crate) fn relabel(&mut self, addr: u64, layout: LayoutId, len: u32, spare: u32) {
+        self.write(addr, header(layout, len));
+        if spare > 0 {
+            // The block is a header and `spare - 1` payload words, which is
+            // the smallest thing a free run can be when `spare` is one.
+            self.write(addr + 1 + len as u64, header(LayoutId::FREE, spare - 1));
+        }
+    }
+
     /// The layout of the object whose header is at `addr`.
     #[inline]
     pub(crate) fn object_layout(&self, addr: u64) -> LayoutId {

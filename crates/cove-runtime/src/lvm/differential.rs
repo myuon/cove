@@ -716,3 +716,199 @@ export fn f() -> String {
         Answer::Value("Token".to_string())
     );
 }
+
+#[test]
+fn an_array_agrees() {
+    let source = "
+fn at(xs: Array<Int>, i: Int) -> Int {
+  match xs.get(i) {
+    Some(v) => v
+    None => 0
+  }
+}
+export fn f(n: Int) -> Int {
+  let xs = [n, n + 1, n + 2]
+  at(xs, 0) + at(xs, 2) + at(xs, 9) + xs.length()
+}
+";
+    assert_eq!(
+        agree(source, "f", vec![Value::int(10)]),
+        // 10 + 12, an out-of-range `get` answering `None`, and the length.
+        Answer::Value("25".to_string())
+    );
+}
+
+#[test]
+fn an_array_renders_the_same_way() {
+    let source = r#"
+export fn f() -> String {
+  "{[1, 2, 3]}"
+}
+"#;
+    agree(source, "f", vec![]);
+}
+
+#[test]
+fn a_for_over_an_array_agrees() {
+    let source = "
+export fn f(n: Int) -> Int {
+  var total = 0
+  for x in [n, n * 2, n * 3] {
+    total = total + x
+  }
+  total
+}
+";
+    assert_eq!(
+        agree(source, "f", vec![Value::int(4)]),
+        Answer::Value("24".to_string())
+    );
+}
+
+#[test]
+fn a_for_over_a_range_agrees() {
+    let source = "
+export fn f(n: Int) -> Int {
+  var total = 0
+  for i in 0..<n {
+    total = total + i
+  }
+  for i in 0..n {
+    total = total + i
+  }
+  total
+}
+";
+    for n in [0, 1, 10] {
+        agree(source, "f", vec![Value::int(n)]);
+    }
+}
+
+/// An empty or reversed range iterates zero times, and both backends have to
+/// agree that it does rather than each having its own answer for it.
+#[test]
+fn an_empty_range_agrees() {
+    let source = "
+export fn f(n: Int) -> Int {
+  var turns = 0
+  for i in n..<0 {
+    turns = turns + 1
+  }
+  turns
+}
+";
+    for n in [3, 0, -2] {
+        agree(source, "f", vec![Value::int(n)]);
+    }
+}
+
+/// A `continue` on the last turn of a loop used to leave the element binding
+/// holding its object for the rest of the frame. The lowering clears it on
+/// every way out of a turn, and this walks a large array under a heap that
+/// cannot hold it all.
+#[test]
+fn a_loop_that_skips_still_releases_its_element() {
+    let source = r#"
+export fn f(n: Int) -> Int {
+  var kept = 0
+  var i = 0
+  while i < n {
+    let text = "element {i}"
+    if i % 3 == 0 {
+      i = i + 1
+      continue
+    }
+    kept = kept + 1
+    i = i + 1
+  }
+  kept
+}
+"#;
+    assert_eq!(
+        agree(source, "f", vec![Value::int(300)]),
+        Answer::Value("200".to_string())
+    );
+}
+
+#[test]
+fn a_vector_agrees() {
+    let source = "
+export fn f(n: Int) -> Int {
+  var v = Vector.of(n)
+  v.push(n + 1)
+  v.push(n + 2)
+  var total = 0
+  for x in v {
+    total = total + x
+  }
+  total + v.length()
+}
+";
+    assert_eq!(
+        agree(source, "f", vec![Value::int(1)]),
+        Answer::Value("9".to_string())
+    );
+}
+
+/// A `Vector` shares storage that can be mutated, so a copy of one is an
+/// alias and mutation through either is visible through the other. That is
+/// the opposite of a struct's rule, and it is what `is` asks about.
+#[test]
+fn a_vector_copy_is_an_alias() {
+    let source = "
+export fn f() -> Int {
+  var a = Vector.of(1)
+  var b = a
+  b.push(2)
+  a.length()
+}
+";
+    assert_eq!(agree(source, "f", vec![]), Answer::Value("2".to_string()));
+}
+
+#[test]
+fn identity_agrees() {
+    let source = "
+export fn f() -> Bool {
+  let a = Vector.of(1)
+  let b = a
+  let c = Vector.of(1)
+  (a is b) && !(a is c)
+}
+";
+    assert_eq!(
+        agree(source, "f", vec![]),
+        Answer::Value("true".to_string())
+    );
+}
+
+#[test]
+fn structural_equality_agrees() {
+    let source = r#"
+struct P { x: Int, y: String }
+export fn f() -> Bool {
+  let a = P(x: 1, y: "one")
+  let b = P(x: 1, y: "one")
+  let c = P(x: 2, y: "one")
+  (a == b) && (a != c) && ([1, 2] == [1, 2]) && ([1, 2] != [1, 3])
+}
+"#;
+    assert_eq!(
+        agree(source, "f", vec![]),
+        Answer::Value("true".to_string())
+    );
+}
+
+#[test]
+fn enum_equality_agrees() {
+    let source = "
+export fn f(n: Int) -> Bool {
+  let a = if n > 0 { Some(n) } else { None }
+  let b = Some(1)
+  a == b
+}
+";
+    for n in [0, 1, 2] {
+        agree(source, "f", vec![Value::int(n)]);
+    }
+}

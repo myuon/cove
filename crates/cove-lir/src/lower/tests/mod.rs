@@ -11,6 +11,7 @@
 //! be caught only when something ran it.
 
 mod calls;
+mod collections;
 mod control;
 mod enums;
 mod gaps;

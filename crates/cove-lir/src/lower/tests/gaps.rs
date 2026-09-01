@@ -42,8 +42,16 @@ fn a_declaration_this_lowering_has_no_frame_for_is_named_once() {
         vec!["not yet lowered: a value of type `fn(Int) -> Int`"]
     );
     assert_eq!(
-        refused("fn hold(items: Vector<Int>) -> Int { 0 }"),
-        vec!["not yet lowered: a value of type `Vector<Int>`"]
+        refused("fn hold(items: Map<String, Int>) -> Int { 0 }"),
+        vec!["not yet lowered: a value of type `Map<String, Int>`"]
+    );
+    // A sequence is one reference whatever it holds, but its element's word
+    // is what its layout is keyed by — so an element with no word is a
+    // sequence this lowering cannot describe rather than a reference to an
+    // object it could not build.
+    assert_eq!(
+        refused("fn hold(rows: Array<Map<String, Int>>) -> Int { 0 }"),
+        vec!["not yet lowered: a value of type `Array<Map<String, Int>>`"]
     );
 }
 
@@ -96,22 +104,12 @@ fn a_test_is_lowered_like_any_declaration() {
 #[test]
 fn the_forms_this_task_left_out_say_so_one_by_one() {
     assert_eq!(
-        refused(
-            "fn each(n: Int) -> Int {\n  var total = 0\n  for i in 0..n { total += i }\n  total\n}"
-        ),
-        vec!["not yet lowered: `for`"]
-    );
-    assert_eq!(
         refused("fn later() -> Int {\n  let f = fn(x: Int) { x }\n  1\n}"),
         vec!["not yet lowered: a lambda"]
     );
     assert_eq!(
         refused("fn nap() -> Int {\n  let g = 1\n  fn inner() -> Int { 2 }\n  g\n}"),
         vec!["not yet lowered: a declaration inside a body"]
-    );
-    assert_eq!(
-        refused("fn first() -> Int {\n  let items = [1, 2]\n  1\n}"),
-        vec!["not yet lowered: an array literal"]
     );
     assert_eq!(
         refused(
@@ -122,9 +120,5 @@ fn the_forms_this_task_left_out_say_so_one_by_one() {
             "not yet lowered: a method or associated function",
             "not yet lowered: a method call",
         ]
-    );
-    assert_eq!(
-        refused("struct P { x: Int }\nfn same(a: P, b: P) -> Bool { a == b }"),
-        vec!["not yet lowered: a comparison of two heap values"]
     );
 }

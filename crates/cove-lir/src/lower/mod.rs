@@ -33,6 +33,7 @@
 //! would mean tracking which pending patches point past the end, which is
 //! more machinery than the word is worth.
 
+mod collections;
 mod expr;
 mod frame;
 mod gap;
@@ -437,6 +438,14 @@ struct Loop {
     depth: usize,
     /// Jumps emitted by `break` with nowhere to go yet.
     breaks: Vec<Pc>,
+    /// The slot a `for` binds each turn, when it holds a reference.
+    ///
+    /// The loop owns it rather than the per-turn scope, because the scope
+    /// gives its slots back when it ends and the next turn writes this one
+    /// again. That leaves nobody to clear it on the one path that does not
+    /// reach the end of a turn, which is what this is: a `break` clears the
+    /// element it was holding on its way out.
+    element: Option<Slot>,
 }
 
 /// The state of lowering one function body.

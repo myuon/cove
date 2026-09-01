@@ -62,11 +62,61 @@ pub(super) fn word_of(ty: &Ty) -> Option<Repr> {
         Ty::Int => Some(Repr::Int),
         Ty::Float => Some(Repr::Float),
         Ty::Duration => Some(Repr::Duration),
-        Ty::Str | Ty::Error | Ty::Option(_) | Ty::Result(..) => Some(Repr::Ref),
+        Ty::Str | Ty::Error | Ty::Option(_) | Ty::Result(..) | Ty::Range => Some(Repr::Ref),
+        // A sequence is one reference whatever it holds, but its element's
+        // word is what its layout is keyed by — `Array<Int>` and
+        // `Array<Duration>` are two families — so an element with no word is
+        // a sequence this lowering cannot describe rather than a reference to
+        // an object it could not build.
+        Ty::Array(elem) | Ty::Vector(elem) => word_of(elem).map(|_| Repr::Ref),
         Ty::Struct(_, args) | Ty::Enum(_, args) if args.is_empty() => Some(Repr::Ref),
         _ => None,
     }
 }
+
+/// Payload word 0 of a [`Shape::Vector`] object: how many elements it holds.
+///
+/// The count is in the header rather than in the store, because a store is as
+/// long as the last growth made it and the elements past the count are spare
+/// room rather than value.
+pub(super) const VECTOR_LEN: u32 = 0;
+
+/// Payload word 1 of a [`Shape::Vector`] object: the
+/// [`Shape::Elements`] object holding them.
+pub(super) const VECTOR_STORE: u32 = 1;
+
+/// The fields of the one struct-shaped layout a `Range` is.
+///
+/// `docs/LINEAR_VM.md` fixes it as `Struct { start: Int, end: Int,
+/// inclusive: Bool }`, one layout for the program: `..` and `..<` are two
+/// ways of writing one value, and which one a range was written with is a
+/// word of the object rather than two families.
+fn range_fields() -> Vec<Field> {
+    vec![
+        Field {
+            name: Arc::from("start"),
+            repr: Repr::Int,
+        },
+        Field {
+            name: Arc::from("end"),
+            repr: Repr::Int,
+        },
+        Field {
+            name: Arc::from("inclusive"),
+            repr: Repr::Bool,
+        },
+    ]
+}
+
+/// The word a `Range` holds its first value in.
+pub(super) const RANGE_START: u32 = 0;
+
+/// The word a `Range` holds its written end in — the last value it yields
+/// when it is inclusive, and the first one past it when it is not.
+pub(super) const RANGE_END: u32 = 1;
+
+/// The word that says which of the two [`RANGE_END`] is.
+pub(super) const RANGE_INCLUSIVE: u32 = 2;
 
 /// The program's layout table, being built.
 pub(super) struct Shapes {
@@ -137,6 +187,37 @@ impl Shapes {
                     },
                 }))
             }
+            Ty::Range => Some(self.intern(Layout {
+                name,
+                shape: Shape::Struct {
+                    fields: range_fields(),
+                    opaque: false,
+                },
+            })),
+            Ty::Array(elem) => {
+                let elem = word_of(elem)?;
+                Some(self.intern(Layout {
+                    name,
+                    shape: Shape::Elements {
+                        elem,
+                        growable: false,
+                    },
+                }))
+            }
+            // A vector is two layouts, and both are declared here because the
+            // machine has to find the second without being told: growing
+            // replaces the store beneath a header that stays where it is, and
+            // the only thing that says what a new store looks like is this
+            // table. Interning the store beside the header is what makes
+            // `Shape::Vector { elem }` enough to name it.
+            Ty::Vector(elem) => {
+                let elem = word_of(elem)?;
+                self.store_of(elem);
+                Some(self.intern(Layout {
+                    name,
+                    shape: Shape::Vector { elem },
+                }))
+            }
             Ty::Option(_) | Ty::Result(..) | Ty::Enum(..) => {
                 let declared = enum_cases(checked, module, ty)?;
                 let mut cases = Vec::with_capacity(declared.len());
@@ -154,6 +235,24 @@ impl Shapes {
             }
             _ => None,
         }
+    }
+
+    /// The layout of the run of words a [`Shape::Vector`] over `elem` keeps
+    /// its elements in.
+    ///
+    /// It is the same [`Shape::Elements`] an `Array` is, with `growable` set:
+    /// one shape covers both, and the flag is what a reader consults to tell
+    /// an array from the store beneath a vector. It is named `Vector` because
+    /// a store that reached a boundary would be shown as the value it belongs
+    /// to.
+    pub(super) fn store_of(&mut self, elem: Repr) -> LayoutId {
+        self.intern(Layout {
+            name: Arc::from("Vector"),
+            shape: Shape::Elements {
+                elem,
+                growable: true,
+            },
+        })
     }
 }
 
@@ -176,6 +275,9 @@ fn nominal(checked: &Checked, module: &str, ty: &Ty) -> Option<Arc<str>> {
         Ty::Error => Arc::from("Error"),
         Ty::Option(_) => Arc::from("Option"),
         Ty::Result(..) => Arc::from("Result"),
+        Ty::Range => Arc::from("Range"),
+        Ty::Array(_) => Arc::from("Array"),
+        Ty::Vector(_) => Arc::from("Vector"),
         Ty::Struct(name, args) | Ty::Enum(name, args) if args.is_empty() => {
             let (_, short) = declaring(checked, module, name)?;
             Arc::from(short)

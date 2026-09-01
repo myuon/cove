@@ -41,6 +41,13 @@ use cove_schema::builtins::{ERROR, MESSAGE_FIELD};
 use crate::error::RuntimeError;
 use crate::lvm::exec::Machine;
 
+mod equal;
+mod make;
+mod operand;
+mod scalar;
+mod seq;
+mod text;
+
 /// How deep a rendering may nest.
 ///
 /// For the reason [`crate::lvm::boundary`]'s limit exists: an object graph
@@ -64,7 +71,7 @@ pub(crate) fn call(
     match (&*builtin.receiver, &*builtin.operation) {
         ("String", "text") => {
             let [(repr, word)] = operands else {
-                return Err(arity("String.text", 1, operands.len()));
+                return Err(operand::operands("String.text", 1, operands.len()));
             };
             let text = render(machine, *repr, *word, 0)?;
             machine.new_string(&text)
@@ -88,6 +95,94 @@ pub(crate) fn call(
             }
             machine.new_string(&text)
         }
+
+        // ---- Array -------------------------------------------------------
+        //
+        // Every arm below is one line, so that the whole set of operations
+        // this backend has been taught reads as a table. What each one means
+        // is in the module it delegates to, beside the reading of the oracle
+        // it follows.
+        ("Array", "get") => seq::array_get(machine, operands),
+        ("Array", "length") => seq::array_length(machine, operands),
+        ("Array", "isEmpty") => seq::array_is_empty(machine, operands),
+        ("Array", "contains") => seq::array_contains(machine, operands),
+        ("Array", "indexOf") => seq::array_index_of(machine, operands),
+        ("Array", "slice") => seq::array_slice(machine, operands),
+        ("Array", "toVector") => seq::array_to_vector(machine, operands),
+
+        // ---- Vector ------------------------------------------------------
+        ("Vector", "of") => seq::vector_of(machine, operands),
+        ("Vector", "push") => seq::vector_push(machine, operands),
+        ("Vector", "set") => seq::vector_set(machine, operands),
+        ("Vector", "pop") => seq::vector_pop(machine, operands),
+        ("Vector", "remove") => seq::vector_remove(machine, operands),
+        ("Vector", "get") => seq::vector_get(machine, operands),
+        ("Vector", "contains") => seq::vector_contains(machine, operands),
+        ("Vector", "indexOf") => seq::vector_index_of(machine, operands),
+        ("Vector", "slice") => seq::vector_slice(machine, operands),
+        ("Vector", "length") => seq::vector_length(machine, operands),
+        ("Vector", "isEmpty") => seq::vector_is_empty(machine, operands),
+        ("Vector", "toArray") => seq::vector_to_array(machine, operands),
+        ("Vector", "freeze") => seq::vector_freeze(machine, operands),
+
+        // ---- String ------------------------------------------------------
+        ("String", "length") => text::length(machine, operands),
+        ("String", "isEmpty") => text::is_empty(machine, operands),
+        ("String", "words") => text::words(machine, operands),
+        ("String", "chars") => text::chars(machine, operands),
+        ("String", "split") => text::split(machine, operands),
+        ("String", "join") => text::join(machine, operands),
+        ("String", "slice") => text::slice(machine, operands),
+        ("String", "trim") => text::trim(machine, operands),
+        ("String", "contains") => text::contains(machine, operands),
+        ("String", "startsWith") => text::starts_with(machine, operands),
+        ("String", "endsWith") => text::ends_with(machine, operands),
+        ("String", "indexOf") => text::index_of(machine, operands),
+        ("String", "replace") => text::replace(machine, operands),
+        ("String", "toUpper") => text::to_upper(machine, operands),
+        ("String", "toLower") => text::to_lower(machine, operands),
+        ("String", "fromCodePoint") => text::from_code_point(machine, operands),
+
+        // ---- Int ---------------------------------------------------------
+        ("Int", "toFloat") => scalar::int_to_float(machine, operands),
+        ("Int", "abs") => scalar::int_abs(machine, operands),
+        ("Int", "min") => scalar::int_min(machine, operands),
+        ("Int", "max") => scalar::int_max(machine, operands),
+        ("Int", "parse") => scalar::int_parse(machine, operands),
+        ("Int", "parseRadix") => scalar::int_parse_radix(machine, operands),
+
+        // ---- Float -------------------------------------------------------
+        ("Float", "toInt") => scalar::float_to_int(machine, operands),
+        ("Float", "round") => scalar::float_round(machine, operands),
+        ("Float", "abs") => scalar::float_abs(machine, operands),
+        ("Float", "min") => scalar::float_min(machine, operands),
+        ("Float", "max") => scalar::float_max(machine, operands),
+        ("Float", "format") => scalar::float_format(machine, operands),
+        ("Float", "parse") => scalar::float_parse(machine, operands),
+
+        // ---- Duration ----------------------------------------------------
+        //
+        // Six names, each of which is both a reader and a builder. The guard
+        // is the whole of what tells a `Duration` operation from any other
+        // name on the same receiver; which of the two it is, is the operand's
+        // `Repr`, and `scalar::duration` is where that is read.
+        //
+        // `Bool` is not below this line because `Bool` has no operations: the
+        // schema gives it none beyond `snapshot`, and `!`, `&&` and `||` are
+        // instructions rather than builtins.
+        ("Duration", name) if scalar::unit(name).is_some() => {
+            scalar::duration(machine, name, operands)
+        }
+
+        // ---- equality ----------------------------------------------------
+        //
+        // `==` on anything that is not one word of scalar bits. The receiver
+        // is `Any` because the operation is one rule over every value the
+        // language gives an equality, rather than a method a type declares —
+        // `crates/cove-runtime/src/builtins.rs` has no entry for it, and
+        // `crate::interp` reaches it as an operator.
+        ("Any", "equals") => equal::equals(machine, operands),
+
         (receiver, operation) => Err(RuntimeError::new(format!(
             "`{receiver}.{operation}` is not an operation this backend has been taught"
         ))
@@ -241,7 +336,7 @@ fn render_object(machine: &Machine, addr: u64, depth: usize) -> Result<String, R
 }
 
 /// Whether the object at `addr` is a string.
-fn is_string(machine: &Machine, addr: u64) -> bool {
+pub(super) fn is_string(machine: &Machine, addr: u64) -> bool {
     addr != 0
         && matches!(
             machine.program().layout(machine.object_layout(addr)).shape,
@@ -250,7 +345,7 @@ fn is_string(machine: &Machine, addr: u64) -> bool {
 }
 
 /// The text of the string object at `addr`.
-fn string_of(machine: &Machine, addr: u64) -> Result<String, RuntimeError> {
+pub(super) fn string_of(machine: &Machine, addr: u64) -> Result<String, RuntimeError> {
     String::from_utf8(machine.string_bytes(addr))
         .map_err(|_| RuntimeError::new("this string's bytes are not valid UTF-8"))
 }
@@ -297,12 +392,6 @@ fn duration(ns: i64) -> String {
     unreachable!("every duration is divisible by one nanosecond")
 }
 
-fn arity(shown: &str, wanted: usize, given: usize) -> RuntimeError {
-    RuntimeError::new(format!(
-        "`{shown}` takes {wanted} operand(s), but {given} were given"
-    ))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -315,6 +404,183 @@ mod tests {
             name: Arc::from(name),
             repr,
         }
+    }
+
+    fn case(name: &str, payload: Vec<Repr>) -> Case {
+        Case {
+            name: Arc::from(name),
+            payload,
+        }
+    }
+
+    /// The program every builtin test is run against.
+    ///
+    /// One fixture with every family a builtin reaches for, because a builtin
+    /// that answers an `Option<Int>` has to find one in the layout table and a
+    /// test that declared only the families it thought it needed would be
+    /// testing its own fixture. `pub(super)` so that each module's tests build
+    /// their objects into the same world; a hand-written program is the only
+    /// kind any of them uses, for the reason
+    /// [`crate::lvm::exec::tests::Build`] gives.
+    pub(super) fn world() -> Program {
+        let mut build = Build::default();
+        let string = build.layout("String", Shape::Str);
+        build.program.str_layout = string;
+        build.layout(
+            "Error",
+            Shape::Struct {
+                fields: vec![field("message", Repr::Ref)],
+                opaque: false,
+            },
+        );
+        build.layout(
+            "Point",
+            Shape::Struct {
+                fields: vec![field("x", Repr::Int), field("y", Repr::Int)],
+                opaque: false,
+            },
+        );
+        build.layout(
+            "Array",
+            Shape::Elements {
+                elem: Repr::Ref,
+                growable: false,
+            },
+        );
+        build.layout(
+            "Array",
+            Shape::Elements {
+                elem: Repr::Int,
+                growable: false,
+            },
+        );
+        build.layout(
+            "Vector",
+            Shape::Elements {
+                elem: Repr::Ref,
+                growable: true,
+            },
+        );
+        build.layout(
+            "Vector",
+            Shape::Elements {
+                elem: Repr::Int,
+                growable: true,
+            },
+        );
+        build.layout("Vector", Shape::Vector { elem: Repr::Ref });
+        build.layout("Vector", Shape::Vector { elem: Repr::Int });
+        build.layout(
+            "Option",
+            Shape::Enum {
+                cases: vec![case("None", vec![]), case("Some", vec![Repr::Ref])],
+            },
+        );
+        build.layout(
+            "Option",
+            Shape::Enum {
+                cases: vec![case("None", vec![]), case("Some", vec![Repr::Int])],
+            },
+        );
+        build.layout(
+            "Result",
+            Shape::Enum {
+                cases: vec![case("Ok", vec![Repr::Int]), case("Err", vec![Repr::Ref])],
+            },
+        );
+        build.layout(
+            "Result",
+            Shape::Enum {
+                cases: vec![case("Ok", vec![Repr::Float]), case("Err", vec![Repr::Ref])],
+            },
+        );
+        build.layout(
+            "Result",
+            Shape::Enum {
+                cases: vec![case("Ok", vec![Repr::Ref]), case("Err", vec![Repr::Ref])],
+            },
+        );
+        build.layout("Boxed", Shape::Boxed);
+        build.done()
+    }
+
+    /// Calls `receiver.operation` over hand-built operands.
+    ///
+    /// Direct rather than through the dispatch loop: what a builtin reads is
+    /// words and heap objects, so building those by hand is what makes a
+    /// failure unambiguously the operation's rather than the lowering's or the
+    /// loop's. `result` is not read by [`call`] and is `Repr::Ref` throughout.
+    pub(super) fn run(
+        machine: &mut Machine,
+        receiver: &str,
+        operation: &str,
+        operands: &[(Repr, u64)],
+    ) -> Result<u64, RuntimeError> {
+        call(
+            machine,
+            &Builtin {
+                receiver: Arc::from(receiver),
+                operation: Arc::from(operation),
+                result: Repr::Ref,
+            },
+            operands,
+        )
+    }
+
+    /// The text of the string object at `addr`.
+    pub(super) fn read(machine: &Machine, addr: u64) -> String {
+        String::from_utf8(machine.string_bytes(addr)).expect("a builtin writes valid UTF-8")
+    }
+
+    /// The layout of a run of `elem` elements, as a test builds one.
+    pub(super) fn elements(program: &Program, elem: Repr, growable: bool) -> LayoutId {
+        super::make::elements(program, elem, growable).expect("the fixture declares every family")
+    }
+
+    /// The layout of a `Vector` header over `elem` elements.
+    pub(super) fn vector(program: &Program, elem: Repr) -> LayoutId {
+        super::make::vector(program, elem).expect("the fixture declares every family")
+    }
+
+    /// The first layout the fixture declares under `name`.
+    pub(super) fn named(program: &Program, name: &str) -> LayoutId {
+        program
+            .layouts
+            .iter()
+            .position(|layout| &*layout.name == name)
+            .map(|at| LayoutId(at as u32))
+            .expect("the fixture declares every family")
+    }
+
+    /// The case name and payload words of the enum object at `addr`.
+    ///
+    /// What every `Option` and `Result` a builtin answers is checked through,
+    /// so that a test asserts on the value rather than on a case index it
+    /// would have had to read out of the fixture.
+    pub(super) fn case_of(machine: &Machine, addr: u64) -> (String, Vec<u64>) {
+        let layout = machine.program().layout(machine.object_layout(addr));
+        let Shape::Enum { cases } = &layout.shape else {
+            panic!("`{}` is not an enum", layout.name);
+        };
+        let case = &cases[machine.payload(addr, 0) as usize];
+        let payload = (0..case.payload.len())
+            .map(|at| machine.payload(addr, 1 + at as u32))
+            .collect();
+        (case.name.to_string(), payload)
+    }
+
+    /// The message of the `Error` the `Result` at `addr` failed with.
+    pub(super) fn message_of(machine: &Machine, addr: u64) -> String {
+        let (case, payload) = case_of(machine, addr);
+        assert_eq!(case, "Err", "this `Result` did not fail");
+        read(machine, machine.payload(payload[0], 0))
+    }
+
+    /// The element words of the `Shape::Elements` object at `addr`.
+    pub(super) fn words_of(machine: &Machine, addr: u64) -> Vec<u64> {
+        (0..machine.object_len(addr))
+            .map(|at| machine.payload(addr, at))
+            .collect()
     }
 
     /// A one-argument builtin over a value the program can build, run through

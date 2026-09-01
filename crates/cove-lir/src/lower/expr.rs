@@ -30,6 +30,7 @@ use cove_diag::Span;
 use cove_sema::typeck::Ty;
 use cove_syntax::ast::{Arg, BinaryOp, Block, Expr, ExprKind, StrPart, Type, UnaryOp};
 
+use super::collections;
 use super::frame::Val;
 use super::gap;
 use super::shapes;
@@ -124,12 +125,24 @@ impl Body<'_> {
             ExprKind::Field { base, name } => self.field(expr, base, &name.node),
             ExprKind::Try(inner) => self.try_expr(expr, inner),
 
-            ExprKind::ArrayLit(_) => self.gap("an array literal", expr),
+            ExprKind::ArrayLit(items) => self.array_literal(expr, items),
+            ExprKind::Range {
+                start,
+                end,
+                inclusive_end,
+            } => self.range_literal(expr, start, end, *inclusive_end),
+            ExprKind::For {
+                binding,
+                iterable,
+                body,
+            } => {
+                self.for_expr(binding, iterable, body, span);
+                self.unit_value(span)
+            }
+
             ExprKind::Await(_) => self.gap("`await`", expr),
-            ExprKind::For { .. } => self.gap("`for`", expr),
             ExprKind::Lambda { .. } => self.gap("a lambda", expr),
             ExprKind::Scope { .. } => self.gap("`scope`", expr),
-            ExprKind::Range { .. } => self.gap("a range", expr),
         }
     }
 
@@ -156,6 +169,11 @@ impl Body<'_> {
                 None,
             ),
             ExprKind::While { condition, body } => self.while_expr(condition, body, expr.span),
+            ExprKind::For {
+                binding,
+                iterable,
+                body,
+            } => self.for_expr(binding, iterable, body, expr.span),
             ExprKind::Match { scrutinee, arms } => {
                 self.match_expr(scrutinee, arms, expr.span, None)
             }
@@ -307,7 +325,7 @@ impl Body<'_> {
         match op {
             BinaryOp::And => self.short_circuit(expr, lhs, rhs, true),
             BinaryOp::Or => self.short_circuit(expr, lhs, rhs, false),
-            BinaryOp::Is => self.gap("`is`", expr),
+            BinaryOp::Is => self.identity(expr, lhs, rhs),
             _ => self.operator(expr, op, lhs, rhs),
         }
     }
@@ -327,6 +345,15 @@ impl Body<'_> {
         let operand = self.frame.repr(a.slot);
         let repr = self.word(expr);
         let dst = self.frame.alloc(repr);
+        // Two objects are compared by walking them, which is a call rather
+        // than an instruction, so this one case emits its own code and the
+        // rest is one instruction chosen from the operands' kind.
+        if operand == Repr::Ref && arith_of(op).is_none() {
+            self.compare_objects(expr, op == BinaryOp::Eq, lhs, dst, a.slot, b.slot);
+            self.release(b, expr.span);
+            self.release(a, expr.span);
+            return Val::temp(dst);
+        }
         let inst = match arith_of(op) {
             Some(op) => Inst::Arith {
                 num: num_of(operand),
@@ -342,24 +369,6 @@ impl Body<'_> {
                 dst,
                 value: op == BinaryOp::Eq,
             },
-            None if operand == Repr::Ref => {
-                // A string compares by its bytes. Every other object the
-                // language lets `==` see would compare by walking its
-                // fields, which is a builtin this lowering has not been
-                // taught; the instruction is emitted anyway so the listing
-                // stays well formed, and the gap is what stops the program.
-                if !matches!(self.ty(lhs), Some(Ty::Str)) {
-                    self.errors
-                        .push(gap::gap("a comparison of two heap values", expr.span));
-                }
-                Inst::Cmp {
-                    on: Compare::Str,
-                    op: cmp_of(op),
-                    dst,
-                    a: a.slot,
-                    b: b.slot,
-                }
-            }
             None => Inst::Cmp {
                 on: compare_of(operand),
                 op: cmp_of(op),
@@ -1035,6 +1044,7 @@ impl Body<'_> {
             head,
             depth: self.frame.depth(),
             breaks: Vec::new(),
+            element: None,
         });
         self.scoped_block(body, None);
         self.emit(Inst::Jump { to: head }, span);
@@ -1077,12 +1087,11 @@ impl Body<'_> {
         if let Some(value) = value {
             self.discard(value);
         }
-        let Some(depth) = self.loops.last().map(|it| it.depth) else {
+        let Some((depth, element)) = self.loops.last().map(|it| (it.depth, it.element)) else {
             self.errors.push(gap::gap("a `break` outside a loop", span));
             return;
         };
-        let clears = self.frame.refs_within(depth);
-        self.clear(&clears, span);
+        self.leave_turn(depth, element, span);
         let at = self.emit(Inst::Jump { to: PENDING }, span);
         self.loops
             .last_mut()
@@ -1092,14 +1101,38 @@ impl Body<'_> {
     }
 
     fn continue_expr(&mut self, span: Span) {
-        let Some((head, depth)) = self.loops.last().map(|it| (it.head, it.depth)) else {
+        let Some((head, depth, element)) =
+            self.loops.last().map(|it| (it.head, it.depth, it.element))
+        else {
             self.errors
                 .push(gap::gap("a `continue` outside a loop", span));
             return;
         };
+        self.leave_turn(depth, element, span);
+        self.emit(Inst::Jump { to: head }, span);
+    }
+
+    /// Ends the live range of everything a turn of a loop was holding, for a
+    /// `break` or a `continue` that leaves it part way through.
+    ///
+    /// The scopes inside `depth` are left without being ended, and the loop
+    /// goes on running or is about to be left, so a reference in one of them
+    /// would be retained for the rest of the frame rather than for the rest
+    /// of the turn.
+    ///
+    /// A `for` binding is not in any of those scopes — the loop owns the
+    /// slot, because the scope gives its slots back when it ends and the next
+    /// turn writes this one again — so it is cleared here beside them. A
+    /// `continue` clears it too, and not only because the last turn of a loop
+    /// may be the one that continues: the rule is that a binding dies when
+    /// the turn it belonged to does, and a lowering that relied on the next
+    /// turn's overwrite would be relying on there being one.
+    fn leave_turn(&mut self, depth: usize, element: Option<Slot>, span: Span) {
         let clears = self.frame.refs_within(depth);
         self.clear(&clears, span);
-        self.emit(Inst::Jump { to: head }, span);
+        if let Some(element) = element {
+            self.emit(Inst::Clear { slot: element }, span);
+        }
     }
 
     // ---- calls -------------------------------------------------------------
@@ -1135,7 +1168,9 @@ impl Body<'_> {
                 self.call_qualified(expr, base, &name.node, args)
             }
             ExprKind::Ident(_) => self.gap("a call through a function value", expr),
-            ExprKind::Field { .. } => self.gap("a method call", expr),
+            ExprKind::Field { base, name } => {
+                self.call_builtin_method(expr, base, &name.node, args)
+            }
             _ => self.gap("a call to something other than a declared function", expr),
         }
     }
@@ -1180,6 +1215,11 @@ impl Body<'_> {
         if let Some(ty) = self.ty(expr).cloned() {
             if shapes::case_at(self.checked, self.module, &ty, name).is_some() {
                 return self.enum_case(expr, &ty, name, args);
+            }
+            // `Vector.of(1, 2)`: an associated function of a builtin type,
+            // written through the type's own name rather than through a value.
+            if name == "of" && collections::namespace_of(head, &ty) {
+                return self.vector_of(expr, args);
             }
         }
         self.gap("a call to a method or an associated function", expr)

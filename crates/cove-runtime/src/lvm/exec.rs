@@ -867,6 +867,12 @@ impl<'a> Machine<'a> {
         self.mem.set_payload(addr, at, word);
     }
 
+    /// Re-labels the object at `addr`, releasing the `spare` words it gives
+    /// up. See [`Memory::relabel`].
+    pub(crate) fn relabel(&mut self, addr: u64, layout: LayoutId, len: u32, spare: u32) {
+        self.mem.relabel(addr, layout, len, spare);
+    }
+
     /// A new object of `layout` with header length `len`, collecting once if
     /// the first attempt does not fit.
     ///
