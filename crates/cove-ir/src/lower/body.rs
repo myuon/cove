@@ -39,10 +39,11 @@ use cove_schema::hosts;
 use cove_sema::typeck::Ty;
 use cove_sema::MethodTarget;
 use cove_syntax::ast::{
-    BinaryOp as SourceBinary, Expr, ExprId, ExprKind, GenericParam, Param, StructDecl, Type,
+    BinaryOp as SourceBinary, EnumDecl, Expr, ExprId, ExprKind, GenericParam, Param, StructDecl,
+    Type,
 };
 
-use crate::{BinaryOp, Const, Inst, IntOp, Scalar, SlotKind, Unsupported};
+use crate::{BinaryOp, Const, EnumId, Inst, IntOp, Scalar, SlotKind, Unsupported};
 
 use super::convention::scalar_of_ty;
 use super::index::{Key, Lowering};
@@ -1226,6 +1227,69 @@ impl<'a, 'l> Body<'a, 'l> {
     pub(super) fn scalar_field(&self, field: &Expr, receiver: &'a Expr, name: &str) -> Option<u32> {
         self.scalar_of(field)?;
         self.field_position(receiver, name)
+    }
+
+    /// The declared enum and the case within it that `subject`'s settled
+    /// type names `case_name` as, if the checker settled `subject` as a
+    /// type this package declares.
+    ///
+    /// Mirrors [`Body::field_of`] exactly, over [`Ty::Enum`] in place of
+    /// [`Ty::Struct`]: a bare name is read against this body's own module
+    /// and a qualified one against the module it names, the same rule a
+    /// source-level `Status.Confirmed` reads by. `Result` and `Option` are
+    /// not this package's declarations — a `subject` of [`Ty::Option`] or
+    /// [`Ty::Result`] answers `None` here, which is what leaves
+    /// [`Inst::GetPayload`]'s `of` unset for them; see that variant's own
+    /// doc comment for why closing that gap would cost this backend the
+    /// precision it already has for `Ok(1)`.
+    pub(super) fn variant_case(
+        &mut self,
+        subject: &Ty,
+        case_name: &str,
+    ) -> Option<(EnumId, u32, &'a EnumDecl)> {
+        let Ty::Enum(named, _) = subject else {
+            return None;
+        };
+        let checked = self.outer.checked;
+        let (owner, decl) = match named.split_once('.') {
+            Some((module, type_name)) => {
+                let (module, resolved) = checked.modules.get_key_value(module)?;
+                (module.as_str(), &*resolved.enums.get(type_name)?.decl)
+            }
+            None => self.outer.enum_of(self.module, named)?,
+        };
+        let case_index = decl
+            .cases
+            .iter()
+            .position(|case| case.name.node == case_name)?;
+        let (of, _) = self.outer.enum_type(owner, decl);
+        Some((of, case_index as u32, decl))
+    }
+
+    /// The checker's settlement of payload position `at` of case `case_index`
+    /// of `decl`, as a full [`Ty`] rather than the [`SlotKind`] alone
+    /// [`crate::lower::index::Lowering::enum_type`] keeps.
+    ///
+    /// Read off the same per-case `cove_sema::Signature` that function reads a
+    /// [`SlotKind`] out of — case span keyed, for the reason its own doc
+    /// comment gives — but kept whole here, because a *nested* pattern
+    /// needs to know what the position is (an enum, and which one) to
+    /// resolve its own [`Inst::GetPayload`], not merely whether it is a
+    /// reference.
+    pub(super) fn case_payload_ty(
+        &self,
+        decl: &'a EnumDecl,
+        case_index: u32,
+        at: usize,
+    ) -> Option<Ty> {
+        let case_span = decl.cases.get(case_index as usize)?.span;
+        self.outer
+            .checked
+            .facts
+            .signature(case_span.file, case_span)?
+            .params
+            .get(at)
+            .cloned()
     }
 
     /// The declaration the checker recorded this call as reaching.

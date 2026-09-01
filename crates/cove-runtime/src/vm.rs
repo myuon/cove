@@ -1841,7 +1841,7 @@ impl<'a> Vm<'a> {
                     let subject = self.stack.last().expect("`test-case` has a value to test");
                     self.stack.push(Value(Repr::Bool(is_case(subject, case))));
                 }
-                Inst::GetPayload(index) => {
+                Inst::GetPayload { at: index, .. } => {
                     let span = running.span_at(pc);
                     let subject = self
                         .stack

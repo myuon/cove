@@ -2694,11 +2694,11 @@ fn ok_err_some_and_none_are_built_and_returned() {
 /// The same four, built and then matched in the same function: `Ok(5)` and
 /// `Err(9)` held in a local, read back, and asked which case they are.
 ///
-/// The payload is not bound: `Inst::GetPayload` carries no case id the way
-/// `Inst::GetFieldAt` carries a `StructId`, so [`Kind::Enum`] cannot say
-/// whether a given payload position is a word this backend must show is a
-/// reference before storing it, and a bound arm is refused for exactly the
-/// reason `a_bound_string_payload_is_still_refused_and_names_the_value_slot`
+/// The payload is not bound: `Ok` and `Err` are `Result`, and their case's
+/// payload type is generic, so [`Kind::Enum`] cannot say whether a given
+/// payload position is a word this backend must show is a reference before
+/// storing it -- a bound arm is refused for exactly the reason
+/// `an_ok_string_payload_bound_by_a_match_arm_is_still_refused_and_names_the_value_slot`
 /// pins. Which arm ran is still the proof this backend answers, because
 /// `Inst::TestCase` reads the case straight off the handle's own layout.
 #[test]
@@ -2760,13 +2760,15 @@ fn try_over_a_word_built_ok_and_a_word_built_err_agrees() {
 }
 
 /// A declared enum with no payload, one with a single `Int` payload, and one
-/// with two -- one type, three cases, each built and then matched, over
-/// which arm ran rather than over a bound payload, for the reason
-/// `ok_and_err_are_built_and_matched` gives. `Status.Empty` exercises
-/// `Inst::MakeEnum` with `argc` zero, `Status.Single` with one payload word,
-/// and `Status.Pair` with two -- so all three of `Inst::MakeEnum`'s shapes
-/// this backend admits are reached in one program, each one matched against
-/// every case so the false arms are exercised as well as the true one.
+/// with two -- one type, three cases, each built and then matched over which
+/// arm ran rather than over a bound payload, because that is what this test
+/// is *for*: `Status.Empty` exercises `Inst::MakeEnum` with `argc` zero,
+/// `Status.Single` with one payload word, and `Status.Pair` with two -- so
+/// all three of `Inst::MakeEnum`'s shapes this backend admits are reached in
+/// one program, each one matched against every case so the false arms are
+/// exercised as well as the true one.
+/// `a_declared_enum_with_several_payload_positions_is_bound_and_used_at_each`
+/// is the sibling that binds instead of testing.
 #[test]
 fn a_declared_enum_with_no_one_and_several_payloads_is_built_and_matched() {
     let source = "\
@@ -2852,10 +2854,9 @@ export fn main() -> Int {
 /// into that payload: `crate::slot::Layout::with_case`'s reference map, read
 /// off `cove_ir::EnumCase::payload`, is what `heap.register` builds it from.
 ///
-/// This does not extract the payload's bytes back out -- see
-/// `crate::frame::pushed_kind`'s `Inst::GetPayload` arm for why a bound
-/// payload cannot yet be read further here -- so the proof is structural, the
-/// same shape `a_struct_in_a_frame_slot_survives_every_collection_of_a_run`
+/// This does not extract the payload's bytes back out -- the wildcard
+/// sub-pattern leaves the `String` inside the enum object, so the proof is
+/// structural, the same shape `a_struct_in_a_frame_slot_survives_every_collection_of_a_run`
 /// already gives a struct field: the mark phase expands strictly more objects
 /// than the frame alone would hold if the `String` were never walked, and the
 /// sweep frees something, so a run that answers cleanly under `stress()` did
@@ -2864,6 +2865,10 @@ export fn main() -> Int {
 /// own reason: a `String` constant is rooted by `FrameRoots::constants`
 /// whether or not the enum's own reference map is right, and would prove
 /// nothing about it.
+///
+/// `a_bound_string_payload_kept_alive_by_nothing_but_its_own_slot_survives_every_collection`
+/// is the sibling that extracts the payload with a binder instead, and
+/// proves the *extracted* word is rooted rather than the enum that held it.
 #[test]
 fn a_declared_enums_string_payload_is_a_root_the_collector_follows() {
     let source = "\
@@ -2951,25 +2956,241 @@ fn a_host_calls_option_answer_is_stored_in_a_local_and_matched() {
     );
 }
 
-/// A program still refused: a declared enum's `String` payload bound by a
-/// `match` arm and used, which `Inst::GetPayload`'s own scope does not reach
-/// -- see its doc comment in `crate::frame::pushed_kind` -- names the same
-/// refusal `Inst::StoreLocal` already gives a heap object it cannot show is a
-/// reference, so the roadmap still points at the right instruction rather
-/// than a new one invented for this case.
+/// A declared enum's scalar payload, bound by a `match` arm and used --
+/// `Inst::GetPayload` now names the case, so `pushed_kind` answers
+/// `Kind::Int` for the position `Boxed.Full`'s own `Int` payload settles as,
+/// and `n + 1` is an ordinary arithmetic operand rather than an unproven
+/// word. The wildcard arm is there for the reason every match in this file
+/// has one: without it `Inst::NoMatch` is a reachable refusal in its own
+/// right, and this test is not about that one.
 #[test]
-fn a_bound_string_payload_is_still_refused_and_names_the_value_slot() {
+fn a_declared_enums_scalar_payload_is_bound_and_used() {
+    agree(
+        "enum Boxed {\n  Full(Int)\n}\n\n\
+         export fn main() -> Int {\n  \
+         match Boxed.Full(41) {\n    \
+         Boxed.Full(n) => n + 1,\n    \
+         _ => 0 - 1,\n  \
+         }\n}\n",
+    );
+}
+
+/// The `String` counterpart: `Inst::GetPayload` answers `Kind::Reference` for
+/// `Boxed.Full`'s payload position, so the bound `text` is a provable
+/// reference `Inst::StoreLocal` and the comparison both accept, closing the
+/// gap `a_bound_string_payload_is_still_refused_and_names_the_value_slot`
+/// used to name.
+///
+/// Both arms answer `Bool` rather than `String`: a fresh `Kind::Str`
+/// constant in the wildcard arm and `Kind::Reference` loaded back out of
+/// `text`'s slot in the bound one are two different `Kind`s for `merge` to
+/// agree on, and disagreeing is what `merge` is for -- an *unrelated* gap
+/// this test does not exist to cover, over how a `match`'s two arms answer
+/// one value.
+#[test]
+fn a_declared_enums_string_payload_is_bound_and_used() {
+    agree(
+        "enum Boxed {\n  Full(String)\n}\n\n\
+         export fn main() -> Bool {\n  \
+         match Boxed.Full(\"hi\") {\n    \
+         Boxed.Full(text) => text == \"hi\",\n    \
+         _ => false,\n  \
+         }\n}\n",
+    );
+}
+
+/// One type, two cases with payload, each bound at every position it
+/// carries and the bindings actually used -- `Status.Single`'s one `Int` and
+/// `Status.Pair`'s two, added together, over the sibling of
+/// `a_declared_enum_with_no_one_and_several_payloads_is_built_and_matched`
+/// that tests rather than binds.
+#[test]
+fn a_declared_enum_with_several_payload_positions_is_bound_and_used_at_each() {
+    agree(
+        "enum Status {\n  \
+         Empty\n  \
+         Single(Int)\n  \
+         Pair(Int, Int)\n\
+         }\n\n\
+         export fn main() -> Int {\n  \
+         let b = Status.Single(5)\n  \
+         let c = Status.Pair(7, 9)\n  \
+         (match b {\n    \
+         Status.Single(n) => n,\n    \
+         _ => 0 - 1,\n  \
+         }) + (match c {\n    \
+         Status.Pair(x, y) => x + y,\n    \
+         _ => 0 - 1,\n  \
+         })\n\
+         }\n",
+    );
+}
+
+/// A payload bound by a `match` arm, stored in a `var`, and read back after a
+/// call that is a safepoint -- the enum shape of
+/// `a_string_held_in_a_frame_slot_across_a_call_survives_and_compares_equal`,
+/// over the *extracted* word rather than a literal, so what survives the
+/// call is `Inst::GetPayload`'s own answer standing alone in a slot with
+/// nothing else keeping it alive.
+///
+/// The wildcard arm answers `fallback`, a `var` declared just above, rather
+/// than a fresh string constant: a constant is `Kind::Str` and the bound arm
+/// is `Kind::Reference`, and `merge` does not agree those are the same
+/// `Kind` -- the same reason `a_declared_enums_string_payload_is_bound_and_used`
+/// compares inside each arm instead of joining two different `Kind`s into
+/// one `var`. Loading `fallback` back out of its own slot is `Kind::Reference`
+/// too, so the two arms agree and `text`'s own store is provable.
+#[test]
+fn a_payload_bound_from_a_declared_case_survives_a_call() {
+    agree(
+        "enum Boxed {\n  Full(String)\n}\n\n\
+         fn helper(n: Int) -> Int {\n  n + 1\n}\n\n\
+         export fn main() -> Bool {\n  \
+         var fallback = \"\"\n  \
+         var text = match Boxed.Full(\"payload held across a call\") {\n    \
+         Boxed.Full(t) => t,\n    \
+         _ => fallback,\n  \
+         }\n  \
+         var n = helper(41)\n  \
+         text == \"payload held across a call\" && n == 42\n\
+         }\n",
+    );
+}
+
+/// **The positive rooting proof for a *bound* payload.** The counterpart of
+/// `a_declared_enums_string_payload_is_a_root_the_collector_follows`, which
+/// leaves the `String` inside the enum object: this one extracts it with a
+/// binder every turn and holds only the extracted word in `text` across two
+/// hundred collecting safepoints, so what a mark phase must walk to keep it
+/// alive is the frame slot `Inst::GetPayload` and `Inst::StoreLocal` filled,
+/// with the enum object itself already garbage by the next turn.
+///
+/// `fallback` is what `a_payload_bound_from_a_declared_case_survives_a_call`
+/// uses it for: a `Kind::Reference` the wildcard arm can answer that agrees
+/// with the bound arm's, so the two-arm `merge` settles on one `Kind` rather
+/// than losing it to a fresh string constant's different one.
+#[test]
+fn a_bound_string_payload_kept_alive_by_nothing_but_its_own_slot_survives_every_collection() {
+    let source = "\
+enum Boxed {
+  Full(String)
+}
+
+export fn main() -> Int {
+  var fallback = \"\"
+  var text = match Boxed.Full(\"kept alive {0}\") {
+    Boxed.Full(t) => t,
+    _ => fallback,
+  }
+  var total = 0
+  while total < 200 {
+    text = match Boxed.Full(\"kept alive {total}\") {
+      Boxed.Full(t) => t,
+      _ => fallback,
+    }
+    total = total + 1
+  }
+  if text == \"\" { 0 - 1 } else { total }
+}
+";
+    let ready = ready(source);
+    let (vm, collected) = crate::on_cove_stack(|| {
+        (
+            ready.on_vm(),
+            ready.on_frame_collecting(RootScope::EveryWord),
+        )
+    })
+    .expect("a thread to run Cove on");
+    assert_eq!(
+        collected.outcome, vm,
+        "the VM and the 8-byte frame disagreed over a bound `String` payload"
+    );
+    assert!(
+        collected.collections > 0,
+        "the run collected {} time(s), so it proves nothing about rooting",
+        collected.collections
+    );
+    assert!(
+        collected.freed_objects > 0,
+        "the sweep reclaimed nothing, so nothing that survived had to"
+    );
+}
+
+/// **The negative half, over a bound scalar.** The counterpart of
+/// `a_declared_enums_int_payload_is_never_read_as_a_reference`, which leaves
+/// the `Int` inside the enum object: this one extracts it with a binder every
+/// turn and carries only the extracted scalar word from one turn to the next,
+/// so a mark phase that mistook it for a reference would hand
+/// `crate::slot::HandleHeap` a bit pattern that is not a handle at all,
+/// rather than merely one it never happened to visit.
+#[test]
+fn a_bound_scalar_payload_is_never_read_as_a_reference() {
+    let source = "\
+enum Boxed {
+  Full(Int)
+}
+
+export fn main() -> Int {
+  var total = 0
+  while total < 200 {
+    var n = match Boxed.Full(total) {
+      Boxed.Full(v) => v,
+      _ => 0 - 1,
+    }
+    total = n + 1
+  }
+  total
+}
+";
+    let ready = ready(source);
+    let (vm, collected) = crate::on_cove_stack(|| {
+        (
+            ready.on_vm(),
+            ready.on_frame_collecting(RootScope::EveryWord),
+        )
+    })
+    .expect("a thread to run Cove on");
+    assert_eq!(
+        collected.outcome, vm,
+        "the VM and the 8-byte frame disagreed over a bound `Int` payload"
+    );
+    assert!(
+        collected.collections > 0,
+        "the run collected {} time(s), so nothing here proves a collection ran over a bound \
+         scalar payload",
+        collected.collections
+    );
+}
+
+/// A program still refused, and the refusal names what it saw. `Ok`'s
+/// payload type is generic -- `cove_schema::builtins`' `Ok(T)` records no `T`
+/// a single table entry could settle a `Kind` for, unlike `Boxed.Full`'s own
+/// declared payload positions above -- so a `String` bound out of it is
+/// still the same "general value slot" `Inst::StoreLocal` refuses for any
+/// other unproven reference.
+///
+/// An `Int` payload is not this coverage: `Ok(5)`'s `n` routes to the scalar
+/// stack the same way `a_declared_enums_scalar_payload_is_bound_and_used`'s
+/// declared one does, because `Body::bind_top` asks the checker's settlement
+/// of the *site*, not a case table -- so `Ok(5)`'s scalar payload is bound
+/// and used today, admitted rather than refused, and is not this test's
+/// concern to prove twice.
+#[test]
+fn an_ok_string_payload_bound_by_a_match_arm_is_still_refused_and_names_the_value_slot() {
     let ready = ready(
-        "enum Boxed {\n  Full(String)\n}\n\nexport fn main() -> String {\n  \
-         match Boxed.Full(\"hi\") {\n    Boxed.Full(text) => text,\n  }\n}\n",
+        "export fn main() -> Bool {\n  \
+         match Ok(\"hi\") {\n    \
+         Ok(s) => s == \"hi\",\n    \
+         _ => false,\n  \
+         }\n}\n",
     );
     let refused = match ready.admitted() {
-        Ok(id) => panic!("a bound `String` payload is refused, and it admitted {id:?}"),
+        Ok(id) => panic!("a bound `Ok` `String` payload is refused, and it admitted {id:?}"),
         Err(refused) => refused,
     };
     assert!(
-        refused.what.contains("a heap object"),
-        "it was refused for `{}`, and `a heap object` was expected",
+        refused.what.contains("a heap object") || refused.what.contains("a general value slot"),
+        "it was refused for `{}`, and a general value slot / heap object refusal was expected",
         refused.what
     );
 }
