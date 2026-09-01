@@ -25,9 +25,15 @@
 //! # What is inline and what is an address
 //!
 //! A value has a static width or it lives in the heap. Scalars, structs and
-//! enums have one; strings, collections, closures, boxed values and
-//! deliberately boxed recursive layouts do not, and a value of one of those
-//! families is a single [`Repr::Ref`] word.
+//! enums have one; strings, collections, closures and erased values do not,
+//! and a value of one of those families is a single [`Repr::Ref`] word.
+//!
+//! There is no fourth case. A declaration whose layout would contain itself
+//! has no static width either, and
+//! [ADR 0035](../../../docs/adr/0035-a-value-type-may-not-contain-itself.md)
+//! decides that it is a checker error rather than something quietly given a
+//! heap representation — so a recursive cycle passes through one of the
+//! families above and is finite because that family is one word.
 //!
 //! A heap object's payload is described by a layout in exactly the same way,
 //! so a struct stored in an array element or a closure environment is inline
@@ -178,10 +184,15 @@ pub enum Shape {
     /// Payload word 0 is a [`LayoutId`]; the words after it are a value of
     /// that layout, inline.
     ///
-    /// This is what an intentionally erased value occupies: `dyn Trait`, a
-    /// Host result a schema declared `Any`, and a recursive layout that had
-    /// to be broken. Erasure is where a value stops having a static width,
-    /// and a heap object is where a value without a static width lives.
+    /// This is what an intentionally erased value occupies, and it is the
+    /// only thing it is: `dyn Trait`, and a Host result a schema declared
+    /// `Any`. Erasure is where a value stops having a static width, and a
+    /// heap object is where a value without a static width lives.
+    ///
+    /// A recursive layout used to share this shape, and ADR 0035 took that
+    /// away: an implicitly recursive value type is a checker error, so
+    /// erasure and recursion no longer share a mechanism and this has one
+    /// meaning.
     Boxed,
 }
 

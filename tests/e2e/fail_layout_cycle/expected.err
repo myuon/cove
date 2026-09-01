@@ -1,0 +1,12 @@
+error[cove::type::layout_cycle]: `Node` contains itself by value, through field `next`
+  --> <e2e>/fail_layout_cycle/main/main.cove:15:8
+   |
+15 | struct Node {
+   |        ^^^^
+  --> <e2e>/fail_layout_cycle/main/main.cove:17:9
+   |
+17 |   next: Option<Node>,
+   |         ^^^^^^^^^^^^ field `next` puts `Node` inside `Node`
+  rule: A value type may not contain itself. A recursive cycle must pass through a type whose value is a reference: `String`, `Array`, `Map`, `Set`, `Vector`, `Shared`, a closure, or a `dyn` trait object.
+  help: break the cycle by holding one of its steps behind a reference: `Array<Node>`, `Vector<Node>` and `Shared<Node>` are each one word, so a cycle that passes through one has a finite width
+1 error(s)

@@ -624,6 +624,22 @@ implicit deep copy; `vector.freeze()` and `vector.toArray()` produce an
 independent array, and any other independent copy is an explicit
 `impl Snapshot for Type`.
 
+A value type may not contain itself. A `struct` or an `enum` whose layout
+would hold its own value — directly, through another declaration, or through
+an `Option` or a `Result` — is refused by the checker
+(`cove::type::layout_cycle`), because a value is laid out where it stands and
+a declaration that contains itself has no finite width. A recursive cycle must
+pass through a type whose value is a reference: `String`, `Array`, `Map`,
+`Set`, `Vector`, `Shared`, a closure, or a `dyn` trait object. So
+`struct Node { label: String, peers: Vector<Node> }` and
+`enum Json { Null, Items(Array<Json>), Fields(Map<String, Json>) }` are both
+admitted, and `struct Node { value: Int, next: Option<Node> }` is not: the
+indirection a cycle needs is written down rather than inserted by a layout,
+so whether a write through one copy is visible through another never depends
+on a type happening to be recursive. A generic declaration is checked as it
+is written, with its type parameters standing for whatever they hold, so
+`Cell<T> { it: T }` is admitted and a `Cell<Node>` inside a `Node` is not.
+
 A `var` parameter is a non-escaping inout alias, marked at the declaration and
 at the call site. A mutating receiver is `var self`.
 

@@ -30,9 +30,12 @@
 //! and a branch. Both are lowered here, directly, because a builtin for
 //! either would be a call into the runtime to read one word the instruction
 //! set reads on its own — and the receiver would have to be held across it.
-//! `mapError` is not, because it takes a closure: `docs/LINEAR_VM.md` says a
-//! closure-taking method lowers to a loop in the IR rather than to a builtin
-//! that calls back, and a call through a function value is a gap of its own.
+//! `mapError` is not, because it takes a closure and there is no loop in it
+//! to lower to: a `Result` is one value rather than a sequence, so what
+//! `docs/LINEAR_VM.md` asks for — a walk in the IR rather than a builtin that
+//! calls back — is a branch and one [`Inst::CallClosure`] here, and that is
+//! work this lowering has not done. `cove_lir::lower::walks` is where the
+//! three that *are* walks live.
 
 use cove_diag::Span;
 use cove_sema::typeck::Ty;
@@ -277,7 +280,7 @@ impl Body<'_> {
     /// value's own location and nothing is read out of anything.
     fn case_test(&mut self, expr: &Expr, base: &Expr, ty: &Ty, case: &str) -> Val {
         let Some((index, _)) = shapes::case_at(self.checked, self.module, ty, case) else {
-            self.errors.push(super::describe(ty, expr.span));
+            self.report(ty, expr.span);
             return self.dead(expr);
         };
         let obj = self.expr(base);
@@ -323,7 +326,7 @@ impl Body<'_> {
         fallback: &Expr,
     ) -> Val {
         let Some((index, _)) = shapes::case_at(self.checked, self.module, ty, carrier) else {
-            self.errors.push(super::describe(ty, expr.span));
+            self.report(ty, expr.span);
             return self.dead(expr);
         };
         let layout = self.layout_of(expr);

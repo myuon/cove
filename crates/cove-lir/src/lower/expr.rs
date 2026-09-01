@@ -15,10 +15,10 @@
 //! slot because the same walk has to serve a read, a write and a `var`
 //! argument.
 //!
-//! Only two places are not a run of this frame: what a `var` parameter names
-//! — an address, which no instruction can offset, so a write to a field
-//! through one is a load, a write and a store back — and a field of a heap
-//! object, which is what a broken recursive layout needs.
+//! One place is not a run of this frame: what a `var` parameter names, which
+//! is an address. A field of one is that address plus the field's offset,
+//! which is the same arithmetic done to an address instead of to a slot
+//! number.
 //!
 //! # Short-circuiting is control flow
 //!
@@ -77,26 +77,12 @@ pub(super) enum Place {
         at: u32,
         layout: LayoutId,
     },
-    /// A field of a heap object: what a broken recursive layout needs.
-    ///
-    /// `obj` holds the reference and `at` is a payload word index. A
-    /// [`Shape::Boxed`](crate::Shape::Boxed) object keeps the value it holds
-    /// inline after one word naming its layout, so a field of a boxed
-    /// `Node` is payload word `1 + Field::at` — the same arithmetic as an
-    /// inline field, done against an object's payload instead of the frame.
-    Field {
-        obj: Slot,
-        at: u32,
-        layout: LayoutId,
-    },
 }
 
 impl Place {
     fn layout(&self) -> LayoutId {
         match self {
-            Place::Here { layout, .. }
-            | Place::Through { layout, .. }
-            | Place::Field { layout, .. } => *layout,
+            Place::Here { layout, .. } | Place::Through { layout, .. } => *layout,
         }
     }
 }
@@ -200,7 +186,11 @@ impl Body<'_> {
             }
 
             ExprKind::Await(_) => self.gap("`await`", expr),
-            ExprKind::Lambda { .. } => self.gap("a lambda", expr),
+            ExprKind::Lambda {
+                is_async,
+                params,
+                body,
+            } => self.lambda(expr, *is_async, params, body),
             ExprKind::Scope { .. } => self.gap("`scope`", expr),
         }
     }
@@ -297,6 +287,18 @@ impl Body<'_> {
         if let Some(ty) = self.ty(expr).cloned() {
             if shapes::case_at(self.checked, self.module, &ty, name).is_some() {
                 return self.enum_case(expr, &ty, name, &[]);
+            }
+            // A declaration written where a value goes. It becomes an
+            // environment with no captures, which is the other half of
+            // `Body::lambda` — see `Body::function_value`.
+            if matches!(ty, Ty::Fn(_)) {
+                if let Some(id) = self.plan.resolve(self.checked, self.module, name) {
+                    return self.function_value(expr, id);
+                }
+                return self.gap(
+                    &format!("`{name}`, a host operation used as a function value"),
+                    expr,
+                );
             }
         }
         self.gap("a name that is not a local binding", expr)
@@ -547,17 +549,8 @@ impl Body<'_> {
             }
             ExprKind::Field { base, name } => {
                 let outer = self.place_of(base)?;
-                // A recursive layout is one reference, and what it names
-                // holds the type's own inline words. Reaching a field of one
-                // is the same offset arithmetic against the object's
-                // payload, which begins one word after the layout the box
-                // records.
                 let held = outer.layout();
-                let (inside, shift) = match self.pool.shapes.unboxed(held) {
-                    Some(inline) => (inline, 1),
-                    None => (held, 0),
-                };
-                let field = match self.field_of(inside, &name.node) {
+                let field = match self.field_of(held, &name.node) {
                     Some(field) => field,
                     None => {
                         let named = self.pool.shapes.layout(held).name.clone();
@@ -568,37 +561,16 @@ impl Body<'_> {
                         return None;
                     }
                 };
-                Some(match (outer, shift) {
-                    (Place::Here { slot, .. }, 0) => Place::Here {
+                Some(match outer {
+                    Place::Here { slot, .. } => Place::Here {
                         slot: slot + field.at,
                         layout: field.layout,
                     },
-                    (Place::Here { slot, .. }, _) => Place::Field {
-                        obj: slot,
-                        at: 1 + field.at,
-                        layout: field.layout,
-                    },
-                    (Place::Through { addr, at, .. }, 0) => Place::Through {
+                    Place::Through { addr, at, .. } => Place::Through {
                         addr,
                         at: at + field.at,
                         layout: field.layout,
                     },
-                    (Place::Field { obj, at, .. }, 0) => Place::Field {
-                        obj,
-                        at: at + field.at,
-                        layout: field.layout,
-                    },
-                    _ => {
-                        // A box reached through an address, or a box inside
-                        // a box: both need the reference in a slot of its
-                        // own before the field can be named, and finding a
-                        // place must not be the thing that allocates one.
-                        self.errors.push(gap::gap(
-                            "a field of a recursive value reached through another one",
-                            expr.span,
-                        ));
-                        return None;
-                    }
                 })
             }
             _ => None,
@@ -614,19 +586,6 @@ impl Body<'_> {
     fn read_place(&mut self, place: Place, span: Span) -> Val {
         match place {
             Place::Here { slot, layout } => Val::borrowed(slot, layout),
-            Place::Field { obj, at, layout } => {
-                let dst = self.temp(layout);
-                self.emit(
-                    Inst::LoadField {
-                        dst: dst.slot,
-                        obj,
-                        at,
-                        layout,
-                    },
-                    span,
-                );
-                dst
-            }
             Place::Through { addr, at, layout } => {
                 let addr = self.part_address(addr, at, span);
                 let dst = self.temp(layout);
@@ -679,17 +638,6 @@ impl Body<'_> {
     fn write_place(&mut self, place: Place, value: &Val, span: Span) {
         match place {
             Place::Here { slot, layout } => self.copy(slot, value.slot, layout, span),
-            Place::Field { obj, at, layout } => {
-                self.emit(
-                    Inst::StoreField {
-                        obj,
-                        at,
-                        src: value.slot,
-                        layout,
-                    },
-                    span,
-                );
-            }
             Place::Through { addr, at, layout } => {
                 let addr = self.part_address(addr, at, span);
                 self.emit(
@@ -805,11 +753,7 @@ impl Body<'_> {
         // evaluated first, and then the field is an offset into the
         // temporary it left behind.
         let obj = self.expr(base);
-        let (inside, shift) = match self.pool.shapes.unboxed(obj.layout) {
-            Some(inline) => (inline, 1),
-            None => (obj.layout, 0),
-        };
-        let Some(field) = self.field_of(inside, name) else {
+        let Some(field) = self.field_of(obj.layout, name) else {
             let held = self.pool.shapes.layout(obj.layout).name.clone();
             self.release(obj, expr.span);
             return self.gap(
@@ -818,19 +762,7 @@ impl Body<'_> {
             );
         };
         let dst = self.temp(field.layout);
-        if shift == 0 {
-            self.copy(dst.slot, obj.slot + field.at, field.layout, expr.span);
-        } else {
-            self.emit(
-                Inst::LoadField {
-                    dst: dst.slot,
-                    obj: obj.slot,
-                    at: 1 + field.at,
-                    layout: field.layout,
-                },
-                expr.span,
-            );
-        }
+        self.copy(dst.slot, obj.slot + field.at, field.layout, expr.span);
         self.release(obj, expr.span);
         dst
     }
@@ -842,14 +774,13 @@ impl Body<'_> {
     /// of them may do something the next one sees.
     fn struct_literal(&mut self, expr: &Expr, ty: &Ty, args: &[Arg]) -> Val {
         let Some(declared) = shapes::struct_fields(self.checked, self.module, ty) else {
-            self.errors.push(super::describe(ty, expr.span));
+            self.report(ty, expr.span);
             return self.dead(expr);
         };
         let Some(layout) = self.layout(ty, expr.span) else {
             return self.dead(expr);
         };
-        let inline = self.pool.shapes.unboxed(layout).unwrap_or(layout);
-        let Some(fields) = self.fields_of(inline) else {
+        let Some(fields) = self.fields_of(layout) else {
             return self.gap("an initializer for something that is not a struct", expr);
         };
         let Some(order) = self.labelled(args, &declared, expr) else {
@@ -869,14 +800,14 @@ impl Body<'_> {
             let field = fields[*at as usize].clone();
             fitted.push((self.fit(value, field.layout, expr.span), field));
         }
-        let dst = self.temp(inline);
+        let dst = self.temp(layout);
         for (value, field) in &fitted {
             self.copy(dst.slot + field.at, value.slot, field.layout, expr.span);
         }
         for (value, _) in fitted.into_iter().rev() {
             self.release(value, expr.span);
         }
-        self.enclose(dst, layout, expr.span)
+        dst
     }
 
     /// Which field each argument of an initializer fills.
@@ -927,7 +858,7 @@ impl Body<'_> {
     /// traces nothing from it.
     fn enum_case(&mut self, expr: &Expr, ty: &Ty, case: &str, args: &[Arg]) -> Val {
         let Some((index, payload)) = shapes::case_at(self.checked, self.module, ty, case) else {
-            self.errors.push(super::describe(ty, expr.span));
+            self.report(ty, expr.span);
             return self.dead(expr);
         };
         let Some(layout) = self.layout(ty, expr.span) else {
@@ -937,8 +868,7 @@ impl Body<'_> {
             return self.gap("a case given a payload of another length", expr);
         }
 
-        let inline = self.pool.shapes.unboxed(layout).unwrap_or(layout);
-        let Some((parts, _)) = self.case_of(inline, index) else {
+        let Some((parts, _)) = self.case_of(layout, index) else {
             return self.gap("a case of something that is not an enum", expr);
         };
         let mut held = Vec::with_capacity(args.len());
@@ -947,35 +877,11 @@ impl Body<'_> {
             let value = self.erase(value, &arg.value, ty);
             held.push(self.fit(value, part.layout, arg.value.span));
         }
-        let dst = self.temp(inline);
-        self.write_case(dst.slot, inline, index, &held, expr.span);
+        let dst = self.temp(layout);
+        self.write_case(dst.slot, layout, index, &held, expr.span);
         for value in held.into_iter().rev() {
             self.release(value, expr.span);
         }
-        self.enclose(dst, layout, expr.span)
-    }
-
-    /// Puts a freshly built value in the box its layout says it lives in.
-    ///
-    /// A declaration whose layout contained itself is one heap address
-    /// wherever it is mentioned, so the words are built in the frame and
-    /// then moved into an object of the layout the cycle was broken with.
-    /// A declaration that is not recursive is already what it is, and this
-    /// answers it unchanged.
-    fn enclose(&mut self, built: Val, layout: LayoutId, span: Span) -> Val {
-        if built.layout == layout {
-            return built;
-        }
-        let dst = self.temp(layout);
-        self.emit(
-            Inst::Box {
-                dst: dst.slot,
-                src: built.slot,
-                layout: built.layout,
-            },
-            span,
-        );
-        self.release(built, span);
         dst
     }
 
@@ -1068,7 +974,7 @@ impl Body<'_> {
             }
         };
         let Some((index, _)) = shapes::case_at(self.checked, self.module, &ty, carries) else {
-            self.errors.push(super::describe(&ty, expr.span));
+            self.report(&ty, expr.span);
             return self.dead(expr);
         };
 
@@ -1348,11 +1254,21 @@ impl Body<'_> {
         if trailing {
             return self.gap("a call with a trailing lambda", expr);
         }
+        // A callee the checker gave a function type to is a value, and a call
+        // through one is an [`Inst::CallClosure`] whatever its shape. The
+        // question is asked of the *checker's* answer rather than of the
+        // source, because that is the one place both `g(1)` and
+        // `handlers.get(0)(1)` are already settled — and it is asked first
+        // because the arms below resolve names, which a value has already
+        // stopped being. A method call is not among them: the checker takes
+        // its own `Field` arm for one and never types `xs.map` on its own.
+        if matches!(self.ty(callee), Some(Ty::Fn(_))) {
+            return self.call_value(expr, callee, args);
+        }
         match &callee.kind {
             ExprKind::Ident(name) if self.frame.lookup(name).is_none() => {
                 self.call_named(expr, name, args)
             }
-            ExprKind::Ident(_) => self.gap("a call through a function value", expr),
             ExprKind::Field { base, name } => self.call_through(expr, base, &name.node, args),
             _ => self.gap("a call to something other than a declared function", expr),
         }
@@ -1540,18 +1456,6 @@ impl Body<'_> {
                     Inst::AddrOfSlot {
                         dst: dst.slot,
                         slot,
-                    },
-                    place.span,
-                );
-                dst
-            }
-            Place::Field { obj, at, .. } => {
-                let dst = self.temp(shapes::ADDR);
-                self.emit(
-                    Inst::AddrOfField {
-                        dst: dst.slot,
-                        obj,
-                        at,
                     },
                     place.span,
                 );

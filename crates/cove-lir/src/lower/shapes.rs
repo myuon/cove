@@ -25,19 +25,40 @@
 //! words differ and a boundary has to know which. [`Shapes`] interns them,
 //! so one shape is one [`LayoutId`] however many times the source writes it.
 //!
-//! # Recursion is where boxing is decided
+//! # Recursion is finite exactly when it passes through a reference
 //!
 //! `struct Node { value: Int, next: Option<Node> }` has no finite inline
-//! width. [`Shapes::of`] holds the nominal declarations it is part way
-//! through, and an occurrence of one of those inside its own layout is
-//! answered with a [`Shape::Boxed`] layout — one `Ref` word naming an object
-//! whose payload is the type's own inline words. The cycle is broken at that
-//! occurrence and nowhere else, so nothing about a `Point` changes because a
-//! `Node` exists.
+//! width. [ADR 0035](../../../../docs/adr/0035-a-value-type-may-not-contain-itself.md)
+//! decides what happens to it: it is a **checker** error, so that both
+//! execution backends agree on which programs exist. A recursive cycle must
+//! pass through a type whose values are a reference — `Array`, `Vector`,
+//! `Map`, `Set`, `String`, `Shared`, a closure, a `dyn` — and
+//! `Node { peers: Vector<Node> }` is the shape a program writes instead.
 //!
-//! Which types that happened to is recorded in [`Shapes::boxed`], and
-//! [`Shapes::unboxed`] answers what a box holds — the pair a `Box`/`Unbox`
-//! at a use site is emitted from.
+//! An earlier version of this module inserted a box wherever it found a
+//! cycle. That made an ordinary assignment share mutation — copying the
+//! location copied the address — so whether `b.value = 7` was visible through
+//! `a` depended on whether the type happened to mention itself. A
+//! representation was deciding the language's semantics, which is exactly
+//! what ADR 0035 refuses. It is gone, and [`Shape::Boxed`] is left with one
+//! meaning: a value whose type was *intentionally* erased.
+//!
+//! What is left here is the two questions the *table* has to answer, and
+//! [`Shapes::reached`] is where they are told apart.
+//!
+//! A cycle through a reference is finite and has to be built. `Node`'s
+//! layout names `Vector<Node>`'s and `Vector<Node>`'s names `Node`'s, so
+//! neither can be finished first — but a collection's own layout is one
+//! `Repr::Ref` word *whatever it holds*, so it needs the element's
+//! [`LayoutId`] and never the element's words. So a declaration's id is
+//! **reserved** before its fields are resolved and filled in on the way back
+//! out, and a mention of it from behind a reference answers the reserved id.
+//!
+//! A cycle that is not behind one cannot be built, and by ADR 0035 it is not
+//! a program. The checker rejects it; this records it in
+//! [`Shapes::recursive`] and answers `None`, which every caller turns into a
+//! gap naming the type — because the walk still has to terminate if one ever
+//! reaches here.
 //!
 //! # It reads the checker's answers
 //!
@@ -46,7 +67,7 @@
 //! annotation, because an annotation is a name and only the checker knows
 //! what the name meant in the module it was written in.
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::sync::Arc;
 
 use cove_sema::resolve::Program as Checked;
@@ -54,6 +75,7 @@ use cove_sema::typeck::Ty;
 
 use crate::layout::{enum_layout, struct_layout, Layout, LayoutId, Shape};
 use crate::repr::Repr;
+use crate::FunctionId;
 
 /// The layout every string object shares.
 pub(super) const STR: LayoutId = LayoutId(1);
@@ -98,6 +120,13 @@ pub(super) const HOST: LayoutId = LayoutId(9);
 /// search first is a search that has to answer something when it fails.
 pub(super) const BOXED: LayoutId = LayoutId(10);
 
+/// Payload word 0 of a [`Shape::Closure`] object: the callee's `FunctionId`.
+pub(super) const CLOSURE_CALLEE: u32 = 0;
+
+/// Where a [`Shape::Closure`] object's captures begin, each inline at its own
+/// layout's width.
+pub(super) const CLOSURE_CAPTURES: u32 = 1;
+
 /// Payload word 0 of a [`Shape::Vector`] object: how many elements it holds.
 pub(super) const VECTOR_LEN: u32 = 0;
 
@@ -119,12 +148,29 @@ pub(super) const RANGE_INCLUSIVE: u32 = 2;
 pub(super) struct Shapes {
     layouts: Vec<Layout>,
     /// The nominal declarations a call to [`Shapes::of`] is part way
-    /// through, innermost last. An occurrence of one of these inside its own
-    /// layout is the cycle, and the place it is broken.
-    building: Vec<String>,
-    /// The boxed layout standing in for each recursive declaration, and the
-    /// inline layout the box holds once it has been built.
-    boxed: HashMap<String, (LayoutId, Option<LayoutId>)>,
+    /// through, innermost last: the key, the [`LayoutId`] reserved for it,
+    /// and how many reference-shaped families the walk was inside when it
+    /// began.
+    ///
+    /// Meeting one of these again is the recursion, and the third field is
+    /// what says which kind. See [`Shapes::reached`].
+    building: Vec<(String, LayoutId, u32)>,
+    /// How many reference-shaped families this walk is currently inside.
+    behind: u32,
+    /// The [`LayoutId`] of each nominal declaration, once it is settled.
+    ///
+    /// A memo rather than a second table: [`Shapes::intern`] would answer the
+    /// same id, and this is here because a declaration's id is *reserved*
+    /// before its fields are resolved and so cannot be found by comparing
+    /// layouts while it is being built.
+    named: HashMap<String, LayoutId>,
+    /// The declarations whose layout was found to contain itself.
+    ///
+    /// Each is recorded twice, under the key a layout is named by and under
+    /// the name the source wrote, so that [`Shapes::contains_itself`] is a
+    /// set lookup rather than a match on how a type happens to be spelled at
+    /// the place it was met.
+    recursive: BTreeSet<String>,
 }
 
 impl Shapes {
@@ -152,7 +198,9 @@ impl Shapes {
         Shapes {
             layouts,
             building: Vec::new(),
-            boxed: HashMap::new(),
+            behind: 0,
+            named: HashMap::new(),
+            recursive: BTreeSet::new(),
         }
     }
 
@@ -181,18 +229,15 @@ impl Shapes {
             .any(|repr| matches!(repr, Repr::Ref | Repr::Addr))
     }
 
-    /// What a [`Shape::Boxed`] layout built for a recursive declaration
-    /// holds, inline.
+    /// Whether the declaration `name` was found to contain itself.
     ///
-    /// `None` for the `Boxed` layout an *erased* value uses: what a `dyn`
-    /// box holds is a question the box answers at run time, and that is the
-    /// whole difference between erasure and a broken cycle. A recursive
-    /// declaration's box holds one known layout, and this is it.
-    pub(super) fn unboxed(&self, id: LayoutId) -> Option<LayoutId> {
-        self.boxed
-            .values()
-            .find(|(boxed, _)| *boxed == id)
-            .and_then(|(_, inline)| *inline)
+    /// What it decides is one word of a diagnostic: a type with no layout is
+    /// a gap either way, and this is what lets the gap say *why* rather than
+    /// leaving a reader to work out that `Node` is not merely unimplemented.
+    /// ADR 0035 makes this the checker's refusal; until that lands, the
+    /// sentence is written here.
+    pub(super) fn contains_itself(&self, name: &str) -> bool {
+        self.recursive.contains(name)
     }
 
     /// The id of a layout, adding it only if the table does not hold it.
@@ -260,7 +305,7 @@ impl Shapes {
                 )))
             }
             Ty::Array(elem) => {
-                let elem = self.of(checked, module, elem)?;
+                let elem = self.element(checked, module, elem)?;
                 Some(self.intern(Layout::object(
                     "Array",
                     Shape::Elements {
@@ -275,7 +320,7 @@ impl Shapes {
             // it is, and the only thing that says what a new store looks
             // like is this table.
             Ty::Vector(elem) => {
-                let elem = self.of(checked, module, elem)?;
+                let elem = self.element(checked, module, elem)?;
                 self.store_of(elem);
                 Some(self.intern(Layout::object("Vector", Shape::Vector { elem })))
             }
@@ -297,6 +342,14 @@ impl Shapes {
                     &[(Arc::from("Ok"), vec![ok]), (Arc::from("Err"), vec![err])],
                 )
             }
+            // A function value is one word holding the address of its
+            // environment, and that is true of every one of them — so this
+            // is one layout for the whole program, the way `Array<String>`
+            // and `Array<Point>` are one layout because a reference is a
+            // reference. Which function a particular value calls and what it
+            // captured are facts about the *object*, in the
+            // [`Shape::Closure`] layout its own header names.
+            Ty::Fn(_) => Some(self.function_value()),
             Ty::Struct(name, args) if args.is_empty() => {
                 self.declared_struct(checked, module, name)
             }
@@ -331,44 +384,128 @@ impl Shapes {
         ))
     }
 
-    /// The box that breaks the cycle a declaration's layout contains.
+    /// The layout of a *location* holding a function value.
     ///
-    /// It is created the first time the declaration is met inside its own
-    /// layout, and answered for *every* mention of the type afterwards — the
-    /// top-level ones too. `docs/LINEAR_VM.md`'s table says a recursive
-    /// layout is one word holding a heap address, and a type that were one
-    /// word inside itself and several words outside would be two
-    /// representations of one type, which is the thing a boundary and a
-    /// copy both have to agree about.
-    fn box_for(&mut self, key: &str) -> LayoutId {
-        if let Some((boxed, _)) = self.boxed.get(key) {
-            return *boxed;
-        }
-        let boxed = self.intern(Layout::object(format!("box {key}"), Shape::Boxed));
-        self.boxed.insert(key.to_string(), (boxed, None));
-        boxed
+    /// One word, and one layout for every signature. See [`Shapes::of`].
+    pub(super) fn function_value(&mut self) -> LayoutId {
+        self.intern(Layout::word("fn", Repr::Ref))
     }
 
-    fn enum_of(&mut self, name: &str, cases: &[(Arc<str>, Vec<LayoutId>)]) -> Option<LayoutId> {
+    /// The layout of the environment object one lowered lambda allocates.
+    ///
+    /// One per lowered lambda, because payload word 0 is *that* lambda's
+    /// [`FunctionId`] and the captures after it are the ones *that* body
+    /// reads. It describes the object rather than the location: a location
+    /// holding a function value is [`Shapes::function_value`], one word,
+    /// whichever environment the word happens to name.
+    pub(super) fn closure_of(
+        &mut self,
+        name: &str,
+        function: FunctionId,
+        captures: Vec<LayoutId>,
+    ) -> LayoutId {
+        self.intern(Layout::object(
+            format!("closure {name}"),
+            Shape::Closure { function, captures },
+        ))
+    }
+
+    /// The layout of what a family whose values are one reference holds.
+    ///
+    /// This is where "the cycle passes through a reference" is recorded. Such
+    /// a family's own layout is one `Repr::Ref` word *whatever it holds*, so
+    /// it needs the element's [`LayoutId`] and never the element's words —
+    /// which is exactly what lets a declaration reached from inside one
+    /// answer the id reserved for it before its own fields are resolved.
+    fn element(&mut self, checked: &Checked, module: &str, ty: &Ty) -> Option<LayoutId> {
+        self.behind += 1;
+        let id = self.of(checked, module, ty);
+        self.behind -= 1;
+        id
+    }
+
+    /// What a mention of the declaration `key` answers before its fields are
+    /// walked: its settled id, its reserved one, `None` for a cycle ADR 0035
+    /// forbids, or nothing at all when it has to be built.
+    ///
+    /// The one question is whether the walk has passed through a
+    /// reference-shaped family since this declaration began. If it has, the
+    /// recursion is finite and the reserved id is the answer. If it has not,
+    /// the declaration contains itself by value: the checker rejects it, and
+    /// this records it and stops so that the walk terminates.
+    fn reached(&mut self, key: &str, name: &str) -> Option<Option<LayoutId>> {
+        if let Some((_, id, depth)) = self.building.iter().find(|(held, _, _)| held == key) {
+            let (id, depth) = (*id, *depth);
+            if self.behind > depth {
+                return Some(Some(id));
+            }
+            return Some(self.cycle(key, name));
+        }
+        self.named.get(key).copied().map(Some)
+    }
+
+    /// Takes the [`LayoutId`] a declaration will have, before it is known
+    /// what is in it.
+    ///
+    /// The placeholder's words are never read: the only thing that can name
+    /// this id before [`Shapes::settle`] fills it in is a family whose own
+    /// layout is one `Repr::Ref` however wide its elements are.
+    fn reserve(&mut self, key: &str) -> LayoutId {
+        let id = LayoutId(self.layouts.len() as u32);
+        self.layouts.push(Layout::inline(
+            format!("<building {key}>"),
+            Shape::Free,
+            Vec::new(),
+        ));
+        self.building.push((key.to_string(), id, self.behind));
+        id
+    }
+
+    /// Fills in a reserved id, and remembers it so the declaration is built
+    /// once.
+    fn settle(&mut self, key: &str, id: LayoutId, layout: Layout) -> LayoutId {
+        self.layouts[id.index()] = layout;
+        self.named.insert(key.to_string(), id);
+        id
+    }
+
+    /// Records that `key`, written `name` where it was met, has a layout
+    /// that contains itself — and answers `None`, which is what stops the
+    /// walk.
+    fn cycle(&mut self, key: &str, name: &str) -> Option<LayoutId> {
+        self.recursive.insert(key.to_string());
+        self.recursive.insert(name.to_string());
+        None
+    }
+
+    /// A discriminant word and a payload region, as a layout.
+    fn enum_shape(&self, name: &str, cases: &[(Arc<str>, Vec<LayoutId>)]) -> Layout {
         let (cases, payload) = enum_layout(cases, &self.layouts);
         let mut words = Vec::with_capacity(1 + payload.len());
         words.push(Repr::Int);
         words.extend_from_slice(&payload);
-        Some(self.intern(Layout::inline(name, Shape::Enum { cases, payload }, words)))
+        Layout::inline(name, Shape::Enum { cases, payload }, words)
+    }
+
+    /// The same, interned: `Option` and `Result` are families rather than
+    /// declarations, so one shape is one id and there is no id to reserve.
+    fn enum_of(&mut self, name: &str, cases: &[(Arc<str>, Vec<LayoutId>)]) -> Option<LayoutId> {
+        let layout = self.enum_shape(name, cases);
+        Some(self.intern(layout))
     }
 
     fn declared_struct(&mut self, checked: &Checked, module: &str, name: &str) -> Option<LayoutId> {
         let (owner, short) = declaring(checked, module, name)?;
         let key = format!("{owner}.{short}");
-        if self.building.contains(&key) {
-            return Some(self.box_for(&key));
+        if let Some(answer) = self.reached(&key, name) {
+            return answer;
         }
         let declared = struct_fields(checked, module, &Ty::Struct(Arc::from(name), Vec::new()))?;
-        self.building.push(key.clone());
+        let id = self.reserve(&key);
         let mut placed = Vec::with_capacity(declared.len());
         for (field, ty) in &declared {
             match self.of(checked, module, ty) {
-                Some(id) => placed.push((field.clone(), id)),
+                Some(held) => placed.push((field.clone(), held)),
                 None => {
                     self.building.pop();
                     return None;
@@ -378,28 +515,24 @@ impl Shapes {
         self.building.pop();
         let (fields, words) = struct_layout(&placed, &self.layouts);
         let opaque = struct_is_opaque(checked, module, name);
-        let id = self.intern(Layout::inline(
-            key.clone(),
-            Shape::Struct { fields, opaque },
-            words,
-        ));
-        Some(self.record_box(&key, id))
+        let layout = Layout::inline(key.clone(), Shape::Struct { fields, opaque }, words);
+        Some(self.settle(&key, id, layout))
     }
 
     fn declared_enum(&mut self, checked: &Checked, module: &str, name: &str) -> Option<LayoutId> {
         let (owner, short) = declaring(checked, module, name)?;
         let key = format!("{owner}.{short}");
-        if self.building.contains(&key) {
-            return Some(self.box_for(&key));
+        if let Some(answer) = self.reached(&key, name) {
+            return answer;
         }
         let declared = enum_cases(checked, module, &Ty::Enum(Arc::from(name), Vec::new()))?;
-        self.building.push(key.clone());
+        let id = self.reserve(&key);
         let mut placed = Vec::with_capacity(declared.len());
         for (case, types) in &declared {
             let mut parts = Vec::with_capacity(types.len());
             for ty in types {
                 match self.of(checked, module, ty) {
-                    Some(id) => parts.push(id),
+                    Some(held) => parts.push(held),
                     None => {
                         self.building.pop();
                         return None;
@@ -409,25 +542,8 @@ impl Shapes {
             placed.push((case.clone(), parts));
         }
         self.building.pop();
-        let id = self.enum_of(&key, &placed)?;
-        Some(self.record_box(&key, id))
-    }
-
-    /// Records what the box built for `key` holds, once the inline layout it
-    /// stands in for exists, and answers what a mention of the type is.
-    ///
-    /// A declaration whose layout did not contain itself is its own inline
-    /// words. One that did is the box: nothing about a `Point` changes
-    /// because a `Node` exists, and everything about a `Node` is decided
-    /// once.
-    fn record_box(&mut self, key: &str, inline: LayoutId) -> LayoutId {
-        match self.boxed.get_mut(key) {
-            Some(entry) => {
-                entry.1 = Some(inline);
-                entry.0
-            }
-            None => inline,
-        }
+        let layout = self.enum_shape(&key, &placed);
+        Some(self.settle(&key, id, layout))
     }
 }
 

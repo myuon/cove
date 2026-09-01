@@ -62,7 +62,7 @@ memory[frame_base + slot]
 ~~~
 
 There is no second stack. Parameters, locals, temporaries and captures are all
-slots in one numbering, which is `Function::slots`.
+slots in one numbering, which is `Function::reprs`.
 
 ### The heap region
 
@@ -167,7 +167,6 @@ rather than reconstructed.
 | `Vector`, `Shared` | one word: a heap address, **identity** storage |
 | a closure | one word: a heap address of its environment |
 | `dyn`, `Any` | one word: a heap address of a boxed value |
-| a recursive layout | one word: a heap address, decided statically |
 
 A `Vector` and a `Shared` are the two families whose storage is both shared
 and mutable, so ADR 0001 makes a copy of either an alias — and their rule
@@ -216,15 +215,23 @@ The cost is that a payload region can be wider than the widest case. That is
 the price of a static map, and it is paid in words rather than in a run-time
 question.
 
-### Recursion is where boxing is decided
+### Recursion is rejected, not boxed
 
-`struct Node { value: Int, next: Option<Node> }` has no finite inline width.
-A layout that would contain itself is boxed: the field becomes one `Ref` word
-and the object it names has the struct's own inline layout as its payload.
+`struct Node { value: Int, next: Option<Node> }` has no finite inline width,
+and [ADR 0035](adr/0035-a-value-type-may-not-contain-itself.md) decides what
+happens to it: **the checker rejects it.** A recursive cycle must pass through
+a type whose values are a reference — `String`, `Array`, `Map`, `Set`,
+`Vector`, `Shared`, a closure or a `dyn` trait object — and every recursive
+declaration in the corpus already does.
 
-**Boxing is a static layout decision, not a representation for structs.** A
-type is boxed because its layout demands it, and the lowering records which
-ones, so nothing about a `Point` changes because a `Node` exists.
+The lowering therefore has no implicit boxing to do. That was the first
+implementation's answer and it is the one the ADR rejects: it would make
+whether a write through a copy is visible depend on whether a type happens to
+mention itself, which is a representation deciding the language's semantics.
+
+What that leaves is worth naming, because it is the reason the rule is worth
+having: **`Shape::Boxed` has exactly one meaning — a value whose type was
+*intentionally* erased.** Erasure and recursion no longer share a mechanism.
 
 ### A layout describes a family, and both regions use it
 
@@ -255,8 +262,20 @@ and reference maps.
 | `Set<T>` | `Members`, sorted and distinct | element layout |
 | `Map<K, V>` | `Entries`, sorted by key | key/value layout pair |
 | `Range` | `Struct { start: Int, end: Int, inclusive: Bool }` | the program |
-| a closure | `Closure`, captures inline | lowered lambda |
+| a function value | one `Ref` word, `Word(Ref)` | the program |
+| a closure environment | `Closure`, captures inline | lowered lambda |
 | `dyn`, `Any` | `Boxed` | the program |
+
+A function value and its environment are **two** layouts, and the distinction
+is load-bearing: the location holding a function value is one `Ref` word under
+one layout for every signature, because a reference is a reference and which
+environment a word names is the object header's business. The environment is
+one layout per lowered lambda, with the callee's id in payload word 0 and the
+captures inline after it.
+
+A *declared* function used as a value is the same environment with no
+captures. One shape rather than two means a call through a value has one thing
+to read, and `xs.map(double)` and `xs.map(fn(x) { ... })` are one lowering.
 
 A `Set` and a `Map` are sorted runs rather than hash tables, because the
 language says they iterate in ascending order and render that way: the order
@@ -466,8 +485,8 @@ program did anything.
 
 So a closure-taking sequence method **lowers to a loop in the IR**. `map`
 allocates the result and calls the closure per element with an ordinary
-`CallClosure`; `filter`, `fold`, `each` and `sorted` are the same shape with a
-different body. Three things follow, and all three are the reason:
+`CallClosure`; `filter` and `fold` are the same shape with a different body, and
+`sorted` is the same idea over two runs. Three things follow, and all three are the reason:
 
 - `builtins` stays a library over words with no reentry and no knowledge of
   frames. Nothing in it can call anything.
@@ -495,7 +514,10 @@ a place a Cove value may be put to avoid giving it a heap representation.
 ## Erasure: `dyn`, `Any`, and what the checker settled
 
 A value whose type is *intentionally* erased — `dyn Trait`, a Host result a
-schema declared `Any` — is one `Ref` word naming a `Boxed` object. The object
+schema declared `Any` — is one `Ref` word naming a `Boxed` object. That is
+the only thing a `Boxed` object is: a recursive layout is a compile error
+under [ADR 0035](adr/0035-a-value-type-may-not-contain-itself.md) rather than
+something quietly boxed, so nothing else shares this mechanism. The object
 records the layout of what it holds and holds that value's words inline, so a
 boxed `Point` is a two-word payload rather than a reference to somewhere else
 again.

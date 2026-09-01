@@ -11,6 +11,7 @@
 //! be caught only when something ran it.
 
 mod calls;
+mod closures;
 mod collections;
 mod control;
 mod dispatch;
@@ -24,6 +25,7 @@ mod slots;
 mod strings;
 mod structs;
 mod values;
+mod walks;
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -81,10 +83,19 @@ fn rendered(sources: &SourceMap, items: &[cove_diag::Diagnostic]) -> String {
 }
 
 /// The disassembly of one lowered function.
+///
+/// The search is over the functions rather than over
+/// [`crate::Program::by_name`], because a lambda is a function of this module
+/// too and is not an entry point: it is named after the body that wrote it —
+/// `f#0` — and it takes captures, so nothing outside the program that made it
+/// could name it on a command line.
 fn listing(source: &str, name: &str) -> String {
     let program = lower(&checked(source)).expect("the program lowers");
     let id = program
-        .function_named("m", name)
+        .functions
+        .iter()
+        .position(|f| &*f.module == "m" && &*f.name == name)
+        .map(|at| crate::FunctionId(at as u32))
         .unwrap_or_else(|| panic!("`{name}` was lowered"));
     crate::print::function(&program, id)
 }

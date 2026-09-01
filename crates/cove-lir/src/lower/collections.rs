@@ -313,6 +313,12 @@ impl Body<'_> {
                 self.release(obj, expr.span);
                 answer
             }
+            ("map", 1) | ("filter", 1) | ("fold", 2) => {
+                let elem = elem.clone();
+                let items = self.expr(base);
+                let obj = self.own_iterable(items, expr.span);
+                self.walk_with(expr, obj, &elem, name, args)
+            }
             _ if HANDED_OVER.contains(&("Array", name)) => {
                 self.machine_call(expr, Some(base), "Array", name, args)
             }
@@ -365,6 +371,20 @@ impl Body<'_> {
                 self.release(index, expr.span);
                 self.release(obj, expr.span);
                 answer
+            }
+            // The elements come out before the first call, because a
+            // `Vector` shares its storage and the callback may reach the very
+            // vector being walked. That is `Vector.toArray`, which is the
+            // copy the oracle makes for the same reason at the same point.
+            ("map", 1) | ("filter", 1) | ("fold", 2) => {
+                let elem = elem.clone();
+                let items = self.expr(base);
+                let Some(snapshot) = self.vector_snapshot(&items, &elem, base.span) else {
+                    self.release(items, expr.span);
+                    return self.dead(expr);
+                };
+                self.release(items, expr.span);
+                self.walk_with(expr, snapshot, &elem, name, args)
             }
             _ if HANDED_OVER.contains(&("Vector", name)) => {
                 self.machine_call(expr, Some(base), "Vector", name, args)
@@ -1012,8 +1032,11 @@ impl Body<'_> {
 /// Each of them either builds an object whose family only the layout table
 /// knows — `slice`, `toVector`, `toArray` — or walks the elements with the
 /// language's own equality, which is not something an instruction expresses.
-/// The four that take a closure are not here: a call through a function value
-/// is a gap of its own, and adding them would report the wrong one.
+/// The four that take a closure are not here and never will be. A builtin
+/// that invoked the closure would re-enter the dispatch loop from inside a
+/// Rust function, which is the one thing `docs/LINEAR_VM.md` asks this
+/// backend not to do — so `map`, `filter` and `fold` are loops in the IR, in
+/// `cove_lir::lower::walks`, and `sorted` is a gap naming itself.
 ///
 /// It is a list rather than a fall-through, because what this lowering emits
 /// is a contract the machine is written against: a name that reached the

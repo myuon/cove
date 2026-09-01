@@ -1,0 +1,3 @@
+[run.fail_layout_cycle]
+entry = "main.main"
+allow = ["console"]

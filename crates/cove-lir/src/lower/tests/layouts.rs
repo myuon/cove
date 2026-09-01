@@ -127,49 +127,83 @@ fn a_layout_describes_a_family_rather_than_an_instantiation() {
 }
 
 #[test]
-fn a_layout_that_would_contain_itself_is_broken_with_a_box() {
-    // `struct Node { value: Int, next: Option<Node> }` has no finite inline
-    // width. The cycle is broken at the occurrence *inside* the layout, and
-    // the decision is recorded where a reader can see it: the table holds a
-    // `Shape::Boxed` layout called `box m.Node` and, beside it, the inline
-    // words that box holds.
-    let held = layouts(
-        "struct Node { value: Int, next: Option<Node> }\n\
-         fn f(n: Node) -> Int { n.value }",
-    );
-    let boxed = held
-        .iter()
-        .find(|it| &*it.name == "box m.Node")
-        .expect("the cycle was broken with a box");
-    assert!(matches!(boxed.shape, Shape::Boxed));
-    // One `Ref` word wherever a `Node` is mentioned, which is what
-    // `docs/LINEAR_VM.md`'s table says a recursive layout is.
-    assert_eq!(boxed.words, vec![Repr::Ref]);
-
-    let inline = held
-        .iter()
-        .find(|it| &*it.name == "m.Node")
-        .expect("the box holds the struct's own inline layout");
+fn a_recursion_that_passes_through_a_reference_is_inline_words_and_one_address() {
+    // ADR 0035 makes an *implicitly* recursive value layout a checker error,
+    // so nothing here breaks a cycle any more. What is left is the shape the
+    // ADR says a recursive declaration must be written in: the cycle passes
+    // through a family whose values are a reference, and the layout is
+    // finite because that family is one word.
     assert_eq!(
-        inline.words,
-        // `value`, then the `Option`'s discriminant and its one `Ref`.
-        vec![Repr::Int, Repr::Int, Repr::Ref]
+        words(
+            "struct Node { value: Int, peers: Vector<Node> }\n\
+             fn f(n: Node) -> Int { n.value }",
+            "m.Node"
+        ),
+        vec![Repr::Int, Repr::Ref]
     );
 }
 
 #[test]
-fn nothing_about_a_point_changes_because_a_node_exists() {
-    // Boxing is a *layout* decision about one declaration, not a
-    // representation for structs.
-    assert_eq!(
-        words(
-            "struct Node { value: Int, next: Option<Node> }\n\
-             struct Point { x: Int, y: Int }\n\
-             fn f(n: Node, p: Point) -> Int { n.value + p.x }",
-            "m.Point"
-        ),
-        vec![Repr::Int, Repr::Int]
+fn the_only_boxed_layout_is_the_one_erasure_uses() {
+    // The point of ADR 0035, as a table: `Shape::Boxed` has exactly one
+    // meaning — a value whose type was *intentionally* erased. Erasure and
+    // recursion no longer share a mechanism, so a program that erases nothing
+    // has one `Boxed` layout and it is the program-wide `Any`.
+    let held = layouts(
+        "struct Node { value: Int, peers: Vector<Node> }\n\
+         fn f(n: Node) -> Int { n.value }",
     );
+    let boxes: Vec<&str> = held
+        .iter()
+        .filter(|it| matches!(it.shape, Shape::Boxed))
+        .map(|it| &*it.name)
+        .collect();
+    assert_eq!(boxes, vec!["Any"]);
+}
+
+#[test]
+fn a_function_value_is_one_word_whatever_its_signature() {
+    // A location holding a function value is one address, and one layout
+    // covers every signature for the reason `Array<Int>` and `Array<String>`
+    // are one: a reference is a reference. Which environment a word names is
+    // a question the object's own header answers.
+    let held =
+        layouts("fn apply(g: fn(Int) -> Int, h: fn(String) -> Bool, n: Int) -> Int { g(n) }");
+    let values: Vec<&Layout> = held.iter().filter(|it| &*it.name == "fn").collect();
+    assert_eq!(values.len(), 1);
+    assert_eq!(values[0].words, vec![Repr::Ref]);
+}
+
+#[test]
+fn a_closure_environment_is_one_layout_per_lowered_lambda() {
+    // The *object* is the other half, and it is an identity rather than a
+    // family: payload word 0 is that lambda's own `FunctionId` and the
+    // captures after it are the ones that body reads.
+    let held = layouts(
+        "fn f(n: Int) -> Int {\n  \
+           let a = fn() { n + 1 }\n  \
+           let b = fn() { 2 }\n  \
+           a() + b()\n}",
+    );
+    let closures: Vec<(&str, &Shape)> = held
+        .iter()
+        .filter(|it| matches!(it.shape, Shape::Closure { .. }))
+        .map(|it| (&*it.name, &it.shape))
+        .collect();
+    assert_eq!(
+        closures.iter().map(|(name, _)| *name).collect::<Vec<_>>(),
+        vec!["closure m.f#0", "closure m.f#1"]
+    );
+    // The first captures `n` inline; the second captures nothing, and is the
+    // same shape with the list empty rather than a shape of its own.
+    let widths: Vec<usize> = closures
+        .iter()
+        .map(|(_, shape)| match shape {
+            Shape::Closure { captures, .. } => captures.len(),
+            _ => unreachable!(),
+        })
+        .collect();
+    assert_eq!(widths, vec![1, 0]);
 }
 
 #[test]

@@ -371,6 +371,8 @@ pub const UNKNOWN_HOST_OPERATION: &str = "cove::type::unknown_host_operation";
 pub const TYPE_ARGUMENTS: &str = "cove::type::type_arguments";
 /// A type alias expands to itself.
 pub const ALIAS_CYCLE: &str = "cove::type::alias_cycle";
+/// A `struct` or an `enum` whose value layout would contain itself.
+pub const LAYOUT_CYCLE: &str = "cove::type::layout_cycle";
 /// A field access names no field of the receiver's type.
 pub const UNKNOWN_FIELD: &str = "cove::type::unknown_field";
 /// A field of an `export opaque struct` is named outside the module that
@@ -479,6 +481,11 @@ pub const UNCONSTRAINED: &str = "cove::type::unconstrained";
 /// not depend on the runtime, so the sentence appears in both places, and it
 /// is the card's own words in both.
 const TASK_SAFETY_RULE: &str = "Immutable task-safe values such as arrays may cross task boundaries. A vector cannot cross, even through `let`; finish it as an array or wrap mutable state in `Shared` or another synchronized type. Closures are task-safe only when every capture is.";
+
+/// The one sentence ADR 0035 decides, said the way a reader has to act on
+/// it: the rejection is what makes every finite value copy by word range,
+/// and the list is the whole set of escapes the language has today.
+const LAYOUT_CYCLE_RULE: &str = "A value type may not contain itself. A recursive cycle must pass through a type whose value is a reference: `String`, `Array`, `Map`, `Set`, `Vector`, `Shared`, a closure, or a `dyn` trait object.";
 
 /// Type-checks a resolved program.
 ///
@@ -1373,6 +1380,104 @@ struct CaseSig {
     span: Span,
 }
 
+/// One field, or one payload of one enum case: the type it holds, how a
+/// diagnostic names it, and where that type is written.
+///
+/// A declaration is a list of these, and the layout-cycle analysis reads
+/// nothing else about it. Struct and enum are the same shape to it because
+/// the rule is the same for both: a case's payload sits in the value the way
+/// a field does.
+#[derive(Clone, Debug)]
+struct LayoutMember {
+    /// The member's type as the declaration writes it, so a type parameter
+    /// is still a [`Ty::Param`] here.
+    ty: Ty,
+    /// `` field `next` `` or `` case `Cons` ``.
+    label: String,
+    /// The written type, which is the thing a correction changes.
+    span: Span,
+}
+
+/// One edge of a layout cycle: the member that carries a declaration's layout
+/// into another declaration.
+#[derive(Clone, Debug)]
+struct LayoutStep {
+    /// The declaration this step leaves.
+    owner: String,
+    /// [`LayoutMember::label`] of the member it leaves through.
+    member: String,
+    /// The declaration it reaches.
+    reaches: String,
+    span: Span,
+}
+
+/// Which of a declaration's type parameters its own layout holds by value,
+/// by position, keyed the way [`Checker::structs`] keys a declaration.
+///
+/// `Cell<T> { it: T }` holds its parameter; `Holder<T> { it: Vector<T> }`
+/// does not, because a vector is one reference word whatever it holds. The
+/// distinction is what lets `Cell<Node>` count as containing a `Node` while
+/// `Vector<Node>` does not, without the analysis having to instantiate
+/// anything.
+type LayoutParams = BTreeMap<String, BTreeSet<usize>>;
+
+/// What a type holds *in* the value, rather than behind a reference.
+#[derive(Debug, Default)]
+struct InlineReach {
+    /// Every declaration whose own layout is part of this type, in the order
+    /// the type mentions them.
+    declarations: Vec<String>,
+    /// Every type parameter that is part of this type.
+    params: BTreeSet<Arc<str>>,
+}
+
+/// Collects what `ty` holds inline, given what each declaration holds inline.
+///
+/// This is the whole of ADR 0035's model of the layout. A value is a run of
+/// consecutive words laid out where the value is, so a struct, an enum, and
+/// the enum-shaped builtins — `Option`, `Result`, and the `MapEntry` a `for`
+/// over a `Map` binds — put what they hold *inside* the value and are walked
+/// through. Everything else stops the walk, because everything else is one
+/// word: `String`, `Array`, `Map`, `Set`, `Vector`, `Shared`, a closure, a
+/// `dyn` trait object and a host value are each a single address, and a
+/// primitive holds nothing. ADR 0035 names every one of those but the host
+/// value and the `Task`, which are added here: a host value is the host's,
+/// and a task handle names a computation running elsewhere and holds no more
+/// of its result than a `Vector` holds of its elements.
+///
+/// A generic type's arguments are followed only into the positions that
+/// declaration holds inline, which is what `params` records. That is why
+/// `Vector<Node>` reaches nothing — a vector holds its element behind an
+/// address — while `Cell<Node>` reaches `Node`.
+fn inline_reach(ty: &Ty, params: &LayoutParams, out: &mut InlineReach) {
+    match ty {
+        Ty::Param(name) => {
+            out.params.insert(name.clone());
+        }
+        Ty::Struct(name, args) | Ty::Enum(name, args) => {
+            out.declarations.push(name.to_string());
+            let Some(inline) = params.get(&**name) else {
+                return;
+            };
+            for (position, arg) in args.iter().enumerate() {
+                if inline.contains(&position) {
+                    inline_reach(arg, params, out);
+                }
+            }
+        }
+        Ty::Option(inner) => inline_reach(inner, params, out),
+        Ty::Result(ok, err) => {
+            inline_reach(ok, params, out);
+            inline_reach(err, params, out);
+        }
+        Ty::MapEntry(key, value) => {
+            inline_reach(key, params, out);
+            inline_reach(value, params, out);
+        }
+        _ => {}
+    }
+}
+
 /// What a binding in a body means.
 #[derive(Clone, Debug)]
 struct Binding {
@@ -2090,6 +2195,10 @@ impl<'a> Checker<'a> {
             self.enums.insert(name, sig);
         }
 
+        // Every declaration's members are resolved by here, which is all the
+        // layout-cycle analysis reads. ADR 0035.
+        self.check_layout_cycles();
+
         let fn_names: Vec<String> = self.module.functions.keys().cloned().collect();
         for name in fn_names {
             let decl = self.module.functions[&name].decl.clone();
@@ -2311,6 +2420,264 @@ impl<'a> Checker<'a> {
             .collect();
         self.type_params = outer;
         EnumSig { generics, cases }
+    }
+
+    // -------------------------------------------- recursive value layouts
+    //
+    // ADR 0035. A Cove value is a run of consecutive words laid out where
+    // the value is, which is what makes an assignment a word-range copy and
+    // is why no sharing bit is needed to keep one from becoming an alias. A
+    // declaration that contains itself has no finite width under that model,
+    // and the three ways of rescuing it — box it where the cycle is found,
+    // deep-copy the box on assignment, copy it on write — each decide the
+    // language's semantics from a representation. So the checker refuses the
+    // declaration instead, and a program that wants a cycle writes an
+    // indirection the reader can see.
+    //
+    // The analysis is a graph over declarations, not over uses: it runs once
+    // per module, in `prepare`, and costs nothing per call site.
+
+    /// Reports every struct or enum of this module whose value layout would
+    /// contain itself.
+    ///
+    /// The graph is over the module's *own* declarations, and that loses
+    /// nothing: a cycle that left the module would need the module it left
+    /// for to reach back, and resolution already refuses a package whose
+    /// modules import in a cycle. An imported declaration is still read —
+    /// `Cell<Node>` has to be followed into `Cell` to find the `Node` — but
+    /// it is never a node of the graph.
+    ///
+    /// One declaration is reported per cycle. The rest of the cycle's
+    /// members are named in the message and labelled at their own fields, and
+    /// reporting each of them again would say the same thing as many times as
+    /// the cycle is long.
+    fn check_layout_cycles(&mut self) {
+        let visible: Vec<String> = self
+            .structs
+            .keys()
+            .chain(self.enums.keys())
+            .cloned()
+            .collect();
+        let params = self.layout_parameters(&visible);
+        let declared: Vec<String> = self
+            .module
+            .structs
+            .keys()
+            .chain(self.module.enums.keys())
+            .cloned()
+            .collect();
+        // A declaration proved finite once is finite for every later root,
+        // so the walk visits each declaration a bounded number of times.
+        let mut finite: BTreeSet<String> = BTreeSet::new();
+        let mut reported: BTreeSet<String> = BTreeSet::new();
+        for name in &declared {
+            if finite.contains(name) || reported.contains(name) {
+                continue;
+            }
+            let mut path = vec![name.clone()];
+            let mut steps: Vec<LayoutStep> = Vec::new();
+            let found = self.layout_cycle(name, &params, &mut path, &mut steps, &mut finite);
+            let Some(cycle) = found else {
+                finite.insert(name.clone());
+                continue;
+            };
+            reported.extend(cycle.iter().map(|step| step.owner.clone()));
+            let diagnostic = self.layout_cycle_diagnostic(&cycle);
+            self.diagnostics.push(diagnostic);
+        }
+    }
+
+    /// Which type parameters each visible declaration holds by value.
+    ///
+    /// This is a least fixed point because the answer for one declaration is
+    /// the answer for the ones it holds: `Pair<T> { first: Wrap<T> }` holds
+    /// its parameter exactly when `Wrap` holds its own. Starting from "holds
+    /// none" and growing to a fixed point can only under-report, and it can
+    /// only under-report for a declaration that is part of a cycle — which is
+    /// the thing being looked for, and is reported by the walk below whatever
+    /// this says about it.
+    fn layout_parameters(&self, visible: &[String]) -> LayoutParams {
+        let mut params: LayoutParams = visible
+            .iter()
+            .map(|name| (name.clone(), BTreeSet::new()))
+            .collect();
+        loop {
+            let mut changed = false;
+            for name in visible {
+                let generics = self.layout_generics(name);
+                if generics.is_empty() {
+                    continue;
+                }
+                let mut reach = InlineReach::default();
+                for member in self.layout_members(name) {
+                    inline_reach(&member.ty, &params, &mut reach);
+                }
+                let held: BTreeSet<usize> = generics
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, param)| reach.params.contains(*param))
+                    .map(|(position, _)| position)
+                    .collect();
+                let entry = params.entry(name.clone()).or_default();
+                if !held.is_subset(entry) {
+                    entry.extend(held);
+                    changed = true;
+                }
+            }
+            if !changed {
+                return params;
+            }
+        }
+    }
+
+    /// The first cycle reachable from `key`, as the steps that close it.
+    ///
+    /// `path` is the declarations entered and not yet left, and `steps` the
+    /// edges between them, so `steps[i]` leaves `path[i]`. Reaching a
+    /// declaration already on the path is the cycle, and the steps from where
+    /// it was entered are the whole of it.
+    ///
+    /// It terminates because a declaration is entered at most once per path
+    /// and there are finitely many; nothing here instantiates a type, so no
+    /// type term grows.
+    fn layout_cycle(
+        &self,
+        key: &str,
+        params: &LayoutParams,
+        path: &mut Vec<String>,
+        steps: &mut Vec<LayoutStep>,
+        finite: &mut BTreeSet<String>,
+    ) -> Option<Vec<LayoutStep>> {
+        for member in self.layout_members(key) {
+            let mut reach = InlineReach::default();
+            inline_reach(&member.ty, params, &mut reach);
+            for target in reach.declarations {
+                if !self.module.structs.contains_key(&target)
+                    && !self.module.enums.contains_key(&target)
+                {
+                    continue;
+                }
+                let step = LayoutStep {
+                    owner: key.to_string(),
+                    member: member.label.clone(),
+                    reaches: target.clone(),
+                    span: member.span,
+                };
+                if let Some(entered) = path.iter().position(|name| *name == target) {
+                    let mut cycle = steps[entered..].to_vec();
+                    cycle.push(step);
+                    return Some(cycle);
+                }
+                if finite.contains(&target) {
+                    continue;
+                }
+                path.push(target.clone());
+                steps.push(step);
+                let found = self.layout_cycle(&target, params, path, steps, finite);
+                steps.pop();
+                path.pop();
+                if found.is_some() {
+                    return found;
+                }
+                finite.insert(target);
+            }
+        }
+        None
+    }
+
+    /// The type parameters the declaration `key` binds.
+    fn layout_generics(&self, key: &str) -> Vec<Arc<str>> {
+        if let Some(sig) = self.structs.get(key) {
+            return sig.generics.clone();
+        }
+        if let Some(sig) = self.enums.get(key) {
+            return sig.generics.clone();
+        }
+        Vec::new()
+    }
+
+    /// Every field and every case payload of the declaration `key`.
+    ///
+    /// The span is the member's written *type* where this module declares it,
+    /// since that is what a correction rewrites, and the member's name
+    /// otherwise — an imported declaration is read for its types and never
+    /// pointed at, because the cycle being reported is not its module's.
+    fn layout_members(&self, key: &str) -> Vec<LayoutMember> {
+        let mut members = Vec::new();
+        if let Some(sig) = self.structs.get(key) {
+            let decl = self.module.structs.get(key).map(|entry| &entry.decl);
+            for (position, field) in sig.fields.iter().enumerate() {
+                members.push(LayoutMember {
+                    ty: field.ty.clone(),
+                    label: format!("field `{}`", field.name),
+                    span: decl
+                        .and_then(|decl| decl.fields.get(position))
+                        .map_or(field.span, |field| field.ty.span),
+                });
+            }
+        }
+        if let Some(sig) = self.enums.get(key) {
+            let decl = self.module.enums.get(key).map(|entry| &entry.decl);
+            for (position, case) in sig.cases.iter().enumerate() {
+                for (index, payload) in case.payload.iter().enumerate() {
+                    members.push(LayoutMember {
+                        ty: payload.clone(),
+                        label: format!("case `{}`", case.name),
+                        span: decl
+                            .and_then(|decl| decl.cases.get(position))
+                            .and_then(|case| case.payload.get(index))
+                            .map_or(case.span, |payload| payload.span),
+                    });
+                }
+            }
+        }
+        members
+    }
+
+    /// The one diagnostic ADR 0035 asks for.
+    ///
+    /// It is the only place a reader learns the rule, so it says three
+    /// things: which declaration has no finite width, which member closes the
+    /// cycle — every step of it, labelled where the type is written, when the
+    /// cycle is longer than one — and what to write instead.
+    fn layout_cycle_diagnostic(&self, cycle: &[LayoutStep]) -> Diagnostic {
+        let start = cycle[0].owner.clone();
+        let closing = &cycle[cycle.len() - 1];
+        let message = if cycle.len() == 1 {
+            format!(
+                "`{start}` contains itself by value, through {}",
+                closing.member
+            )
+        } else {
+            let mut names: Vec<String> = cycle
+                .iter()
+                .map(|step| format!("`{}`", step.owner))
+                .collect();
+            names.push(format!("`{start}`"));
+            format!("`{start}` contains itself by value: {}", names.join(" -> "))
+        };
+        let mut diagnostic = Diagnostic::error(LAYOUT_CYCLE, message)
+            .at(self.layout_declaration_span(&start).unwrap_or(closing.span));
+        for step in cycle {
+            diagnostic = diagnostic.label(
+                step.span,
+                format!(
+                    "{} puts `{}` inside `{}`",
+                    step.member, step.reaches, step.owner
+                ),
+            );
+        }
+        diagnostic.rule(LAYOUT_CYCLE_RULE).help(format!(
+            "break the cycle by holding one of its steps behind a reference: `Array<{start}>`, `Vector<{start}>` and `Shared<{start}>` are each one word, so a cycle that passes through one has a finite width"
+        ))
+    }
+
+    /// Where this module declares `name`, for the diagnostic's primary span.
+    fn layout_declaration_span(&self, name: &str) -> Option<Span> {
+        if let Some(entry) = self.module.structs.get(name) {
+            return Some(entry.decl.name.span);
+        }
+        Some(self.module.enums.get(name)?.decl.name.span)
     }
 
     /// The signature of a free function, or of a method of `receiver_type`.
@@ -11219,6 +11586,147 @@ fn run() -> Int {
             error.rule.unwrap(),
             "A type alias names an existing type; it cannot be defined in terms of itself."
         );
+    }
+
+    // ------------------------------------------- recursive value layouts
+    //
+    // ADR 0035: a value type may not contain itself, because a value is a
+    // run of words laid out where the value is and a declaration that
+    // contains itself has no finite width. The escape is a type whose value
+    // is a reference, and every recursive declaration in the corpus already
+    // takes one.
+
+    #[test]
+    fn rejects_a_struct_that_contains_itself() {
+        let error = rejects("struct Node {\n  value: Int,\n  next: Node,\n}\n");
+        assert_eq!(error.code, LAYOUT_CYCLE);
+        assert_eq!(
+            error.message,
+            "`Node` contains itself by value, through field `next`"
+        );
+        assert_eq!(error.rule.unwrap(), LAYOUT_CYCLE_RULE);
+        assert_eq!(
+            error.help.unwrap(),
+            "break the cycle by holding one of its steps behind a reference: `Array<Node>`, `Vector<Node>` and `Shared<Node>` are each one word, so a cycle that passes through one has a finite width"
+        );
+    }
+
+    #[test]
+    fn rejects_a_struct_that_contains_itself_through_an_option() {
+        let error = rejects("struct Node {\n  value: Int,\n  next: Option<Node>,\n}\n");
+        assert_eq!(error.code, LAYOUT_CYCLE);
+        assert_eq!(
+            error.message,
+            "`Node` contains itself by value, through field `next`"
+        );
+    }
+
+    #[test]
+    fn rejects_an_enum_whose_case_carries_itself() {
+        let error = rejects("enum List {\n  Empty,\n  Cons(Int, List),\n}\n");
+        assert_eq!(error.code, LAYOUT_CYCLE);
+        assert_eq!(
+            error.message,
+            "`List` contains itself by value, through case `Cons`"
+        );
+    }
+
+    #[test]
+    fn rejects_two_structs_that_contain_each_other() {
+        let error = rejects("struct A {\n  b: B,\n}\n\nstruct B {\n  a: A,\n}\n");
+        assert_eq!(error.code, LAYOUT_CYCLE);
+        assert_eq!(
+            error.message,
+            "`A` contains itself by value: `A` -> `B` -> `A`"
+        );
+        let labels: Vec<&str> = error
+            .labels
+            .iter()
+            .map(|label| label.message.as_str())
+            .collect();
+        assert_eq!(
+            labels,
+            vec![
+                "field `b` puts `B` inside `A`",
+                "field `a` puts `A` inside `B`"
+            ]
+        );
+    }
+
+    #[test]
+    fn rejects_a_three_step_cycle() {
+        let error = rejects(
+            "struct A {\n  b: B,\n}\n\nstruct B {\n  c: C,\n}\n\nstruct C {\n  a: Option<A>,\n}\n",
+        );
+        assert_eq!(error.code, LAYOUT_CYCLE);
+        assert_eq!(
+            error.message,
+            "`A` contains itself by value: `A` -> `B` -> `C` -> `A`"
+        );
+    }
+
+    #[test]
+    fn a_cycle_is_reported_once_however_many_declarations_it_runs_through() {
+        let errors = errors_of("struct A {\n  b: B,\n}\n\nstruct B {\n  a: A,\n}\n");
+        assert_eq!(errors.len(), 1);
+    }
+
+    #[test]
+    fn a_struct_holds_itself_through_a_vector() {
+        accepts("struct Node {\n  label: String,\n  peers: Vector<Node>,\n}\n");
+    }
+
+    #[test]
+    fn an_enum_holds_itself_through_an_array_and_a_map() {
+        accepts("enum Json {\n  Null,\n  Items(Array<Json>),\n  Fields(Map<String, Json>),\n}\n");
+    }
+
+    #[test]
+    fn a_cycle_through_a_closure_or_a_trait_object_is_a_reference() {
+        accepts("trait Render {\n  fn render(self) -> String\n}\n\nstruct Node {\n  child: dyn Render,\n  make: fn() -> Node,\n}\n");
+    }
+
+    #[test]
+    fn a_generic_declaration_that_holds_its_parameter_carries_the_cycle() {
+        let error =
+            rejects("struct Cell<T> {\n  it: T,\n}\n\nstruct Loop {\n  cell: Cell<Loop>,\n}\n");
+        assert_eq!(error.code, LAYOUT_CYCLE);
+        assert_eq!(
+            error.message,
+            "`Loop` contains itself by value, through field `cell`"
+        );
+    }
+
+    #[test]
+    fn a_generic_declaration_that_holds_its_parameter_behind_a_reference_does_not() {
+        accepts(
+            "struct Holder<T> {\n  it: Vector<T>,\n}\n\nstruct Node {\n  held: Holder<Node>,\n}\n",
+        );
+    }
+
+    #[test]
+    fn a_cycle_through_an_imported_generic_is_still_a_cycle() {
+        // A cycle cannot leave a module and come back — resolution refuses a
+        // package whose modules import in a cycle — but an imported
+        // declaration can still carry one, because what it holds by value is
+        // read from the module that declares it.
+        let error = rejects_modules(&[
+            ("cell", "/// A box.\nexport struct Cell<T> {\n  it: T,\n}\n"),
+            (
+                "app",
+                "use cell.Cell\n\nstruct Loop {\n  cell: Cell<Loop>,\n}\n",
+            ),
+        ]);
+        assert_eq!(error.code, LAYOUT_CYCLE);
+        assert_eq!(
+            error.message,
+            "`Loop` contains itself by value, through field `cell`"
+        );
+    }
+
+    #[test]
+    fn nesting_one_generic_inside_itself_is_finite() {
+        accepts("struct Cell<T> {\n  it: T,\n}\n\nstruct Twice {\n  it: Cell<Cell<Int>>,\n}\n");
     }
 
     // ------------------------------------------------- the Host API schema

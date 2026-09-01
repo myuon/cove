@@ -1,0 +1,24 @@
+use console.println
+
+/// A linked list written the way a value type cannot be written.
+///
+/// A Cove value is a run of consecutive words laid out where the value is,
+/// so a declaration that contains itself has no finite width. ADR 0035
+/// refuses it in the checker rather than letting a representation box it,
+/// because a box would decide whether a write through one copy is visible
+/// through another — which is the language's semantics, not a layout's. The
+/// indirection has to be written, and `peers: Vector<Node>` is what the rest
+/// of the corpus writes.
+///
+/// This case lives in its own package so that a check-time failure cannot
+/// take down every other case.
+struct Node {
+  value: Int,
+  next: Option<Node>,
+}
+
+/// Entry point, never reached: the package does not check.
+export fn main() -> Result<Unit, Error> {
+  println("unreachable")?
+  Ok(())
+}

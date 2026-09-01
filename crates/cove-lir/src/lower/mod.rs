@@ -43,6 +43,7 @@
 //! would mean tracking which pending patches point past the end, which is
 //! more machinery than the word is worth.
 
+mod closures;
 mod collections;
 mod dispatch;
 mod expr;
@@ -52,6 +53,7 @@ mod methods;
 mod pattern;
 mod shapes;
 mod stmt;
+mod walks;
 
 #[cfg(test)]
 mod tests;
@@ -118,6 +120,16 @@ pub fn lower(checked: &Checked) -> Result<Program, Vec<Diagnostic>> {
     for id in 0..plan.decls.len() {
         functions.push(lower_function(checked, &plan, id, &mut pool, &mut errors));
     }
+    // A lambda is a `Function` of its own, numbered after every declaration
+    // and discovered while a body is being walked rather than by the plan. A
+    // nested lambda is appended while its enclosing one is being lowered, so
+    // this list is complete only once the loop above has finished — which is
+    // why it is drained here and not built beside `plan.decls`.
+    functions.extend(
+        pool.lambdas
+            .drain(..)
+            .map(|held| held.expect("every reserved lambda was lowered into its own slot")),
+    );
 
     let program = Program {
         functions,
@@ -453,7 +465,7 @@ fn boundary_of(
             Some(_) if decl.receiver.is_some_and(|it| it.is_var) => params.push(shapes::ADDR),
             Some(layout) => params.push(layout),
             None => {
-                errors.push(describe(receiver, span));
+                errors.push(describe(&pool.shapes, receiver, span));
                 ok = false;
             }
         }
@@ -469,7 +481,7 @@ fn boundary_of(
             Some(_) if param.is_var => params.push(shapes::ADDR),
             Some(layout) => params.push(layout),
             None => {
-                errors.push(describe(ty, param.span));
+                errors.push(describe(&pool.shapes, ty, param.span));
                 ok = false;
             }
         }
@@ -479,7 +491,7 @@ fn boundary_of(
         Some(layout) => layout,
         None => {
             let span = decl.return_type.as_ref().map_or(decl.span, |ty| ty.span);
-            errors.push(describe(&signature.ret, span));
+            errors.push(describe(&pool.shapes, &signature.ret, span));
             ok = false;
             shapes::UNIT
         }
@@ -494,11 +506,21 @@ fn boundary_of(
     })
 }
 
-/// Why a type has no layout here: the checker settled nothing, or it settled
-/// something this task has not reached.
-fn describe(ty: &Ty, span: Span) -> Diagnostic {
+/// Why a type has no layout here: the checker settled nothing, it settled a
+/// declaration whose layout contains itself, or it settled something this
+/// task has not reached.
+///
+/// The middle one is separated because it is not the same kind of thing.
+/// [ADR 0035](../../../../docs/adr/0035-a-value-type-may-not-contain-itself.md)
+/// makes an implicitly recursive value layout a *checker* error, so this is a
+/// program that will stop being a program — and saying only "a value of type
+/// `Node`" would read as a piece of work someone here still owes.
+fn describe(shapes: &Shapes, ty: &Ty, span: Span) -> Diagnostic {
     match ty {
         Ty::Unknown(_) => gap::unknown(ty, span),
+        Ty::Struct(name, _) | Ty::Enum(name, _) if shapes.contains_itself(name) => {
+            gap::gap(&format!("`{name}`, whose layout contains itself"), span)
+        }
         _ => gap::gap(&format!("a value of type `{ty}`"), span),
     }
 }
@@ -546,6 +568,15 @@ struct Pool {
     host_ops: Vec<HostOp>,
     builtins: Vec<Builtin>,
     shapes: Shapes,
+    /// The functions the lambdas lowered to, numbered after every
+    /// declaration.
+    ///
+    /// A slot is reserved — `None` — before the lambda's body is lowered,
+    /// because that body may make a closure of its own and the inner one has
+    /// to be numbered after the outer. So the entry is filled in on the way
+    /// back out, and a `None` left at the end would be a lowering that
+    /// reserved a number and never used it.
+    lambdas: Vec<Option<Function>>,
 }
 
 impl Pool {
@@ -557,6 +588,7 @@ impl Pool {
             host_ops: Vec::new(),
             builtins: Vec::new(),
             shapes: Shapes::new(),
+            lambdas: Vec::new(),
         }
     }
 
@@ -630,6 +662,12 @@ struct Body<'a> {
     /// The module the body is written in, which is what an unqualified name
     /// in it is resolved against.
     module: &'a str,
+    /// What this body is called, which is what a lambda written inside it is
+    /// named after: `f#0`, and `f#0#0` for one nested in that.
+    name: Arc<str>,
+    /// How many lambdas this body has already made, which is the number the
+    /// next one is given.
+    lambdas: u32,
     frame: Frame,
     code: Vec<Inst>,
     spans: Vec<Span>,
@@ -676,6 +714,8 @@ fn lower_function(
         pool,
         errors,
         module: &decl.module,
+        name: decl.name.clone(),
+        lambdas: 0,
         frame,
         code: Vec::new(),
         spans: Vec::new(),
@@ -826,8 +866,7 @@ impl Body<'_> {
     ///
     /// There is one conversion in the language and it is erasure, so the
     /// only difference this bridges is a box: a concrete value on its way
-    /// into a `dyn` location, and a value of a type whose layout contained
-    /// itself on its way into the field that broke the cycle.
+    /// into a `dyn` location.
     ///
     /// Anything else is a copy of the wrong width. It is reported as a gap
     /// rather than emitted, because `lower` answers `Err` before the
@@ -971,10 +1010,16 @@ impl Body<'_> {
         match self.pool.shapes.of(self.checked, self.module, ty) {
             Some(id) => Some(id),
             None => {
-                self.errors.push(describe(ty, span));
+                self.report(ty, span);
                 None
             }
         }
+    }
+
+    /// Says why a type has no layout here, in the words [`describe`] chooses.
+    fn report(&mut self, ty: &Ty, span: Span) {
+        let item = describe(&self.pool.shapes, ty, span);
+        self.errors.push(item);
     }
 
     // ---- reading the checker's answers -----------------------------------
