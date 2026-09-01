@@ -275,54 +275,13 @@ impl Body<'_> {
 
     // ---- methods -----------------------------------------------------------
 
-    /// A method call on a value of a builtin type.
-    ///
-    /// Which type the receiver is decides everything, and the checker already
-    /// settled it, so this reads that answer rather than resolving the name a
-    /// second time. A receiver whose methods this lowering has not been
-    /// taught is a gap naming the method, because that is the sentence that
-    /// says where the next piece of work is.
-    pub(super) fn call_builtin_method(
-        &mut self,
-        expr: &Expr,
-        base: &Expr,
-        name: &str,
-        args: &[Arg],
-    ) -> Val {
-        let Some(ty) = self.owned_ty(base) else {
-            return self.dead(expr);
-        };
-        if let Some(bad) = self.plain_arguments(args) {
-            return self.gap(bad, expr);
-        }
-        // Meeting a value of the type is what declares its layout, and a
-        // method call is meeting one. It matters for a vector: the machine
-        // finds the store to grow into by looking the family up in this
-        // table, and a program that only ever receives a vector from
-        // somewhere else would otherwise declare no store for it.
-        if matches!(ty, Ty::Array(_) | Ty::Vector(_)) && self.layout(&ty, base.span).is_none() {
-            return self.dead(expr);
-        }
-        match &ty {
-            Ty::Array(elem) => {
-                let elem = (**elem).clone();
-                self.array_method(expr, base, &elem, name, args)
-            }
-            Ty::Vector(elem) => {
-                let elem = (**elem).clone();
-                self.vector_method(expr, base, &elem, name, args)
-            }
-            _ => self.gap("a method call", expr),
-        }
-    }
-
     /// `items.length()`, `items.isEmpty()`, `items.get(i)`.
     ///
     /// An `Array` keeps its elements in the object, so its length is the
     /// object's own header length and an element is one [`Inst::GetElem`].
     /// There is no element assignment beside them: an `Array` is immutable,
     /// and the growable sequence is a `Vector`.
-    fn array_method(
+    pub(super) fn array_method(
         &mut self,
         expr: &Expr,
         base: &Expr,
@@ -362,7 +321,7 @@ impl Body<'_> {
                 answer
             }
             _ if HANDED_OVER.contains(&("Array", name)) => {
-                self.call_receiver(expr, base, "Array", name, args)
+                self.machine_call(expr, Some(base), "Array", name, args)
             }
             _ => self.gap(&format!("`Array.{name}`"), expr),
         }
@@ -377,7 +336,7 @@ impl Body<'_> {
     /// full, and `toArray`, which builds an immutable copy. Neither is
     /// something an instruction expresses, and both are one
     /// [`Inst::CallBuiltin`] whose first operand is the vector.
-    fn vector_method(
+    pub(super) fn vector_method(
         &mut self,
         expr: &Expr,
         base: &Expr,
@@ -412,55 +371,10 @@ impl Body<'_> {
                 answer
             }
             _ if HANDED_OVER.contains(&("Vector", name)) => {
-                self.call_receiver(expr, base, "Vector", name, args)
+                self.machine_call(expr, Some(base), "Vector", name, args)
             }
             _ => self.gap(&format!("`Vector.{name}`"), expr),
         }
-    }
-
-    /// An operation the machine performs, over a receiver and its arguments.
-    ///
-    /// The receiver is the first operand and the arguments follow it in
-    /// source order, which is the one shape every one of them has. The result
-    /// is the word the checker settled for the call, and when that word is a
-    /// reference the family behind it is interned here: the machine builds
-    /// the answer, and the only thing that says what a `Vector<Int>`, an
-    /// `Array<String>` or an `Option<Point>` looks like is the layout table.
-    fn call_receiver(
-        &mut self,
-        expr: &Expr,
-        base: &Expr,
-        receiver: &str,
-        operation: &str,
-        args: &[Arg],
-    ) -> Val {
-        let Some(ty) = self.owned_ty(expr) else {
-            return self.dead(expr);
-        };
-        let Some(result) = word_of(&ty) else {
-            self.errors.push(super::describe(&ty, expr.span));
-            return self.dead(expr);
-        };
-        if result == Repr::Ref && self.layout(&ty, expr.span).is_none() {
-            return self.dead(expr);
-        }
-
-        let obj = self.expr(base);
-        let mut held = Vec::with_capacity(args.len());
-        for arg in args {
-            held.push(self.expr(&arg.value));
-        }
-        let mut slots = Vec::with_capacity(args.len() + 1);
-        slots.push(obj.slot);
-        slots.extend(held.iter().map(|value| value.slot));
-
-        let dst = self.frame.alloc(result);
-        self.call_vector(dst, receiver, operation, &slots, result, expr.span);
-        for value in held.into_iter().rev() {
-            self.release(value, expr.span);
-        }
-        self.release(obj, expr.span);
-        Val::temp(dst)
     }
 
     /// The length itself, or whether it is zero.
@@ -659,47 +573,8 @@ impl Body<'_> {
         let array = Ty::Array(Box::new(elem.clone()));
         self.layout(&array, span)?;
         let dst = self.frame.alloc(Repr::Ref);
-        self.call_vector(dst, "Vector", "toArray", &[obj], Repr::Ref, span);
+        self.emit_builtin(dst, "Vector", "toArray", &[obj], Repr::Ref, span);
         Some(dst)
-    }
-
-    /// One operation of the machine's, over a receiver.
-    ///
-    /// Every one of them takes the receiver as its first operand, so the
-    /// machine reads the layout off the object it was handed rather than
-    /// being told which family it is working in.
-    fn call_vector(
-        &mut self,
-        dst: Slot,
-        receiver: &str,
-        operation: &str,
-        args: &[Slot],
-        result: Repr,
-        span: Span,
-    ) {
-        let builtin = self.pool.builtin(Builtin {
-            receiver: receiver.into(),
-            operation: operation.into(),
-            result,
-        });
-        let args = self.pool.args.intern(args.to_vec());
-        self.emit(Inst::CallBuiltin { dst, builtin, args }, span);
-    }
-
-    /// The argument shapes a builtin method has no place for, named as the
-    /// source writes them.
-    fn plain_arguments(&self, args: &[Arg]) -> Option<&'static str> {
-        args.iter().find_map(|arg| {
-            if arg.label.is_some() {
-                Some("a labelled argument to a builtin method")
-            } else if arg.is_var {
-                Some("a `var` argument to a builtin method")
-            } else if arg.spread {
-                Some("a spread argument to a builtin method")
-            } else {
-                None
-            }
-        })
     }
 
     // ---- `for` ---------------------------------------------------------------

@@ -33,6 +33,7 @@ use cove_syntax::ast::{Arg, BinaryOp, Block, Expr, ExprKind, StrPart, Type, Unar
 use super::collections;
 use super::frame::Val;
 use super::gap;
+use super::methods;
 use super::shapes;
 use super::{Body, Loop, PENDING};
 use crate::inst::{ArithOp, CmpOp, Compare, Inst, Len, Num, Slot};
@@ -1220,6 +1221,11 @@ impl Body<'_> {
             // written through the type's own name rather than through a value.
             if name == "of" && collections::namespace_of(head, &ty) {
                 return self.vector_of(expr, args);
+            }
+            // `Int.parse(text)`, `Duration.millis(n)`: the rest of them,
+            // which the machine performs rather than the instruction set.
+            if methods::associated(head, name, &ty) {
+                return self.call_associated(expr, head, name, args);
             }
         }
         self.gap("a call to a method or an associated function", expr)

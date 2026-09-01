@@ -231,6 +231,31 @@ therefore depends on the case, and the collector reads word 0 to find out.
 That is a fact about an object, answered by the object; it is not a static
 kind per case, and no case is added because a program was refused.
 
+## A builtin never calls back into Cove
+
+`xs.map { it * 2 }` runs Cove code once per element. There are two places that
+could live, and only one of them works here.
+
+A builtin that invoked the closure itself would have to re-enter the dispatch
+loop from inside a Rust function — which puts a Rust frame under every Cove
+frame the closure creates, and gives back the property the loop was built to
+have: that how deep a Cove program may nest is decided by the reserved stack
+region and not by how large a Rust frame the interpreter compiled to. A `map`
+over a `map` over a `map` would then be three Rust frames deep before the
+program did anything.
+
+So a closure-taking sequence method **lowers to a loop in the IR**. `map`
+allocates the result and calls the closure per element with an ordinary
+`CallClosure`; `filter`, `fold`, `each` and `sorted` are the same shape with a
+different body. Three things follow, and all three are the reason:
+
+- `builtins` stays a library over words with no reentry and no knowledge of
+  frames. Nothing in it can call anything.
+- The closure's calls are frames like any other, so depth, fuel, cancellation
+  and the collector's roots all work without a second story for them.
+- The element binding gets the same `Clear` discipline a `for` gets, because
+  it *is* the same lowering.
+
 ## Ownership: what is in the heap and what is not
 
 There is **one object heap per run**, shared by the run's task threads, not one

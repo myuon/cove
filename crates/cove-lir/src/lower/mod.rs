@@ -37,6 +37,7 @@ mod collections;
 mod expr;
 mod frame;
 mod gap;
+mod methods;
 mod pattern;
 mod shapes;
 mod stmt;

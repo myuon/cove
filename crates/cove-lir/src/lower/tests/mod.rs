@@ -16,6 +16,7 @@ mod control;
 mod enums;
 mod gaps;
 mod hosts;
+mod methods;
 mod patterns;
 mod slots;
 mod strings;
