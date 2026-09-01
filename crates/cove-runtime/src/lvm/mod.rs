@@ -17,5 +17,8 @@
 //! single edit whose failure lists exactly what is still unused.
 #![allow(dead_code)]
 
+pub(crate) mod boundary;
+#[cfg(test)]
+mod differential;
 pub(crate) mod exec;
 pub(crate) mod mem;

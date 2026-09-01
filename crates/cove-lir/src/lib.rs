@@ -43,6 +43,7 @@
 
 pub mod inst;
 pub mod layout;
+pub mod lower;
 pub mod print;
 pub mod program;
 pub mod repr;
@@ -50,6 +51,7 @@ pub mod verify;
 
 pub use inst::{ArithOp, CmpOp, Compare, Convert, Inst, Len, Num, Pc, Slot};
 pub use layout::{Case, Field, Layout, LayoutId, Shape};
+pub use lower::lower;
 pub use program::{
     ArgsId, Builtin, BuiltinId, Capture, Function, FunctionId, HostOp, HostOpId, Program, StrId,
     Table, TableId,

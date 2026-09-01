@@ -534,13 +534,7 @@ impl<'a> Machine<'a> {
         }
         let bytes = self.program.string(text).clone();
         let addr = self.allocate(self.program.str_layout, bytes.len() as u32)?;
-        for (at, chunk) in bytes.as_bytes().chunks(8).enumerate() {
-            let mut word = 0u64;
-            for (i, byte) in chunk.iter().enumerate() {
-                word |= (*byte as u64) << (i * 8);
-            }
-            self.mem.set_payload(addr, at as u32, word);
-        }
+        self.write_bytes(addr, bytes.as_bytes());
         self.interned[text.index()] = addr;
         Ok(addr)
     }
@@ -595,24 +589,63 @@ impl<'a> Machine<'a> {
 
     /// Orders two string objects by their bytes.
     fn compare_strings(&self, a: u64, b: u64) -> std::cmp::Ordering {
-        let bytes = |addr: u64| -> Vec<u8> {
-            if addr == 0 {
-                return Vec::new();
-            }
-            let len = self.mem.object_len(addr) as usize;
-            let mut out = Vec::with_capacity(len);
-            for at in 0..len.div_ceil(8) {
-                let word = self.mem.payload(addr, at as u32);
-                for i in 0..8 {
-                    if out.len() == len {
-                        break;
-                    }
-                    out.push((word >> (i * 8)) as u8);
+        self.string_bytes(a).cmp(&self.string_bytes(b))
+    }
+
+    /// The bytes of the string object at `addr`.
+    ///
+    /// A null address answers the empty string rather than failing: the one
+    /// caller that can see one is the comparison, and two strings one of
+    /// which does not exist is a lowering bug the verifier will catch
+    /// elsewhere, not something to unwind a comparison for.
+    pub(crate) fn string_bytes(&self, addr: u64) -> Vec<u8> {
+        if addr == 0 {
+            return Vec::new();
+        }
+        let len = self.mem.object_len(addr) as usize;
+        let mut out = Vec::with_capacity(len);
+        for at in 0..len.div_ceil(8) {
+            let word = self.mem.payload(addr, at as u32);
+            for byte in 0..8 {
+                if out.len() == len {
+                    break;
                 }
+                out.push((word >> (byte * 8)) as u8);
             }
-            out
-        };
-        bytes(a).cmp(&bytes(b))
+        }
+        out
+    }
+
+    /// A new string object holding `text`.
+    ///
+    /// Unlike [`Machine::intern`] this allocates every time. Interning is for
+    /// a literal, which the program named statically and can name again; a
+    /// string that arrived from outside has no such name and retaining every
+    /// one a host ever answered would be a leak with a table in front of it.
+    pub(crate) fn new_string(&mut self, text: &str) -> Result<u64, RuntimeError> {
+        let addr = self.allocate(self.program.str_layout, text.len() as u32)?;
+        self.write_bytes(addr, text.as_bytes());
+        Ok(addr)
+    }
+
+    fn write_bytes(&mut self, addr: u64, bytes: &[u8]) {
+        for (at, chunk) in bytes.chunks(8).enumerate() {
+            let mut word = 0u64;
+            for (byte, value) in chunk.iter().enumerate() {
+                word |= (*value as u64) << (byte * 8);
+            }
+            self.mem.set_payload(addr, at as u32, word);
+        }
+    }
+
+    /// The program this machine runs.
+    pub(crate) fn program(&self) -> &'a Program {
+        self.program
+    }
+
+    /// What the object at `addr` is, for a boundary that has to name it.
+    pub(crate) fn object_layout(&self, addr: u64) -> LayoutId {
+        self.mem.object_layout(addr)
     }
 }
 
