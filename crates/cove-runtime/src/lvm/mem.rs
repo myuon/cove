@@ -522,6 +522,26 @@ impl Memory {
             // says what its elements are. A vector's header is a leaf apart
             // from the one reference that makes it growable.
             Shape::Vector { .. } => self.enqueue(self.payload(addr, 1), work),
+            Shape::Members { elem } => {
+                if elem.is_ref() {
+                    for at in 0..self.object_len(addr) {
+                        self.enqueue(self.payload(addr, at), work);
+                    }
+                }
+            }
+            // Two words an entry, key then value, and each is traced only if
+            // its own `Repr` says so: a `Map<String, Int>` scans half its
+            // words and a `Map<Int, Int>` none of them.
+            Shape::Entries { key, value } => {
+                for at in 0..self.object_len(addr) {
+                    if key.is_ref() {
+                        self.enqueue(self.payload(addr, at * 2), work);
+                    }
+                    if value.is_ref() {
+                        self.enqueue(self.payload(addr, at * 2 + 1), work);
+                    }
+                }
+            }
             Shape::Closure { captures, .. } => {
                 for (at, repr) in captures.iter().enumerate() {
                     if repr.is_ref() {

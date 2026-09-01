@@ -213,10 +213,20 @@ to know which. The lowering interns layouts, so the same shape is the same
 | `Result<T, E>` | `Enum`, cases `Ok`, `Err` | payload `Repr` pair |
 | `Array<T>` | `Elements { growable: false }` | element `Repr` |
 | `Vector<T>` | `Vector`, payload `[len, store]`, over an `Elements { growable: true }` store | element `Repr` |
+| `Set<T>` | `Members`, sorted and distinct | element `Repr` |
+| `Map<K, V>` | `Entries`, two words each, sorted by key | key/value `Repr` pair |
 | `Range` | `Struct { start: Int, end: Int, inclusive: Bool }` | the program |
 | `MapEntry<K, V>` | `Struct { key, value }` | field `Repr` pair |
 | a lambda | `Closure` | lowered lambda |
 | `dyn`, `Any` | `Boxed` | the program |
+
+A `Set` and a `Map` are sorted runs rather than hash tables, because the
+language says they iterate in ascending order and render that way: the order
+is part of the value, not an implementation's leftovers. Membership and lookup
+are a binary search, which is what a sorted run is for. Each is a shape of its
+own rather than an `Elements` with a name, because "these words are sorted and
+distinct" is an invariant a builtin may rely on and an array's words are
+neither.
 
 A `Vector` is the one family with an indirection, and it earns it: its
 identity is observable — `is` is defined for it, and mutation through one copy

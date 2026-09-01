@@ -193,6 +193,8 @@ fn object_name(machine: &Machine, addr: u64, depth: usize) -> String {
         Shape::Struct { .. } | Shape::Enum { .. } => layout.name.to_string(),
         Shape::Elements { growable, .. } => if *growable { "Vector" } else { "Array" }.to_string(),
         Shape::Vector { .. } => "Vector".to_string(),
+        Shape::Members { .. } => "Set".to_string(),
+        Shape::Entries { .. } => "Map".to_string(),
         Shape::Closure { .. } => "fn".to_string(),
         // Erasure is looked through, because `Value::type_name` is asked of
         // an `erased()` value everywhere a comparison or a refusal asks it.

@@ -233,6 +233,8 @@ fn shape_name(shape: &Shape) -> &'static str {
         } => "array",
         Shape::Elements { growable: true, .. } => "store",
         Shape::Vector { .. } => "vector",
+        Shape::Members { .. } => "set",
+        Shape::Entries { .. } => "map",
         Shape::Closure { .. } => "closure",
         Shape::Boxed => "boxed",
     }

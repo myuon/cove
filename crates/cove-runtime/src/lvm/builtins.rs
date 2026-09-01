@@ -335,6 +335,34 @@ fn render_object(machine: &Machine, addr: u64, depth: usize) -> Result<String, R
         // Erasure is looked through: a `dyn Display` shows the value it
         // holds, because the wrapper is a representation and not something
         // the program put there.
+        // A set and a map both render inside braces, which is how the
+        // language writes them and why they are ordered families rather than
+        // hashed ones: the order is part of what a program sees.
+        Shape::Members { elem } => {
+            out.push('{');
+            for at in 0..machine.object_len(addr) {
+                if at > 0 {
+                    out.push_str(", ");
+                }
+                let word = machine.payload(addr, at);
+                out.push_str(&render(machine, *elem, word, deeper)?);
+            }
+            out.push('}');
+        }
+        Shape::Entries { key, value } => {
+            out.push('{');
+            for at in 0..machine.object_len(addr) {
+                if at > 0 {
+                    out.push_str(", ");
+                }
+                let k = machine.payload(addr, at * 2);
+                let v = machine.payload(addr, at * 2 + 1);
+                out.push_str(&render(machine, *key, k, deeper)?);
+                out.push_str(": ");
+                out.push_str(&render(machine, *value, v, deeper)?);
+            }
+            out.push('}');
+        }
         Shape::Boxed => {
             let tag = machine.payload(addr, 0);
             let repr = Repr::from_tag(tag)

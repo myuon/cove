@@ -142,6 +142,26 @@ pub enum Shape {
         function: FunctionId,
         captures: Vec<Repr>,
     },
+    /// The header's `len` members, one word of `elem` each, in ascending
+    /// order with no duplicates.
+    ///
+    /// A `Set` is a sorted run rather than a hash table because the language
+    /// says it iterates in ascending order and renders that way, so the order
+    /// is part of the value and not an implementation's leftovers. Membership
+    /// is a binary search, which is what a sorted run is for.
+    ///
+    /// It is a shape of its own rather than an [`Shape::Elements`] with a
+    /// name, because "these words are sorted and distinct" is an invariant a
+    /// builtin may rely on and an array's words are neither.
+    Members { elem: Repr },
+    /// The header's `len` entries, two words each — key then value — in
+    /// ascending key order with no duplicate keys.
+    ///
+    /// The same reasoning as [`Shape::Members`], with a second word per
+    /// entry. A `Map` is ordered by its keys in the language, so a lookup is
+    /// a binary search over the key words and an iteration walks them in
+    /// place.
+    Entries { key: Repr, value: Repr },
     /// Payload word 0 is a [`Repr`] discriminant; word 1 is the value.
     ///
     /// This is what a value whose static type the checker did not settle
@@ -183,6 +203,8 @@ impl Layout {
             Shape::Enum { cases } => 1 + Self::widest_case(cases),
             Shape::Elements { .. } => len,
             Shape::Vector { .. } => 2,
+            Shape::Members { .. } => len,
+            Shape::Entries { .. } => len * 2,
             Shape::Closure { captures, .. } => 1 + captures.len() as u32,
             Shape::Boxed => 2,
         }
@@ -212,6 +234,8 @@ impl Layout {
             // Word 1 is always a reference to the store, whatever the
             // elements are.
             Shape::Vector { .. } => true,
+            Shape::Members { elem } => elem.is_ref(),
+            Shape::Entries { key, value } => key.is_ref() || value.is_ref(),
             Shape::Closure { captures, .. } => captures.iter().any(|repr| repr.is_ref()),
             // A boxed word is a reference exactly when its tag says so, and
             // the tag is in the object. The collector has to look.
