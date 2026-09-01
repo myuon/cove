@@ -1,4 +1,4 @@
-//! Arrays, ranges, vectors, and the `for` that walks them.
+//! Arrays, ranges, vectors, sets, maps, and the `for` that walks them.
 
 use super::listing;
 
@@ -391,6 +391,230 @@ fn0 m.same(Vector Vector) -> Bool
      0  eq.identity s3:bool s0:ref s1:ref
      1  copy s2:bool s3:bool Bool
      2  return s2:bool
+"
+    );
+}
+
+// ------------------------------------------------------------ `Set` and `Map`
+
+/// A set literal is one call, because everything a `Set` is happens in it:
+/// each element is placed where it belongs as it arrives, so the run is
+/// sorted at every step and a duplicate is refused rather than collapsed.
+///
+/// None of that is something an instruction expresses, and the ascending
+/// order is part of the value rather than an implementation's leftovers —
+/// the language says a set iterates and renders that way.
+#[test]
+fn a_set_literal_is_one_call_over_its_elements() {
+    assert_eq!(
+        listing("fn f() -> Set<Int> { Set.of(3, 1, 2) }", "f"),
+        "\
+fn0 m.f() -> Set
+  frame 5: s0:ref s1:int s2:int s3:int s4:ref
+     0  int s1:int 3
+     1  int s2:int 1
+     2  int s3:int 2
+     3  call-builtin s4:ref Set.of (s1:Int s2:Int s3:Int)
+     4  copy s0:ref s4:ref Set
+     5  clear s4:ref Set
+     6  return s0:ref
+"
+    );
+}
+
+/// A map literal's operands are the `MapEntry` values it was written with,
+/// and a `MapEntry` is an ordinary inline struct: two words here, the key's
+/// address and the value.
+///
+/// That is the same run one entry of the map occupies, which is what makes a
+/// `for` over a map a single load — see
+/// [`a_for_over_a_map_binds_one_entry_at_the_layout_s_width`].
+#[test]
+fn a_map_literal_passes_its_entries_as_inline_pairs() {
+    assert_eq!(
+        listing(
+            "fn f() -> Map<String, Int> { Map.of(MapEntry(key: \"a\", value: 1)) }",
+            "f"
+        ),
+        "\
+fn0 m.f() -> Map
+  frame 5: s0:ref s1:ref s2:int s3:ref s4:int
+     0  str s1:ref \"a\"
+     1  int s2:int 1
+     2  copy s3:ref s1:ref String
+     3  copy s4:int s2:int Int
+     4  clear s1:ref String
+     5  call-builtin s1:ref Map.of (s3:MapEntry)
+     6  clear s3:ref MapEntry
+     7  copy s0:ref s1:ref Map
+     8  clear s1:ref Map
+     9  return s0:ref
+"
+    );
+}
+
+/// A `Set` keeps its members in the object, so its length is the object's own
+/// header length and reading it is one instruction.
+///
+/// The machine's table has a `Set.length` and the two agree about the answer;
+/// what differs is that the lowering already knows where to read it. That is
+/// the same split an `Array` is under.
+#[test]
+fn a_set_reports_its_length_from_its_own_header() {
+    assert_eq!(
+        listing("fn f(s: Set<Int>) -> Int { s.length() }", "f"),
+        "\
+fn0 m.f(Set) -> Int
+  frame 3: s0!:ref s1:int s2:int
+     0  len s2:int s0:ref
+     1  copy s1:int s2:int Int
+     2  return s1:int
+"
+    );
+}
+
+/// An immutable update is a new object, and the machine builds it: the search
+/// that finds where the element goes also answers whether it was already
+/// there, so the run is allocated to its final length and filled sorted in
+/// one pass.
+#[test]
+fn an_immutable_update_is_the_machine_s_and_answers_a_new_set() {
+    assert_eq!(
+        listing("fn f(s: Set<Int>) -> Set<Int> { s.inserted(4) }", "f"),
+        "\
+fn0 m.f(Set) -> Set
+  frame 4: s0!:ref s1:ref s2:int s3:ref
+     0  int s2:int 4
+     1  call-builtin s3:ref Set.inserted (s0:Set s2:Int)
+     2  copy s1:ref s3:ref Set
+     3  clear s3:ref Set
+     4  return s1:ref
+"
+    );
+}
+
+/// `get` answers an `Option`, which is a fixed-size enum and therefore
+/// **inline**: two words at `s4`, a discriminant and the value.
+///
+/// So the builtin answers a run of words the caller copies into its
+/// destination the way a `Copy` writes one, rather than an address.
+#[test]
+fn a_map_lookup_answers_the_option_s_words_rather_than_an_object() {
+    assert_eq!(
+        listing(
+            "fn f(m: Map<String, Int>) -> Option<Int> { m.get(\"a\") }",
+            "f"
+        ),
+        "\
+fn0 m.f(Map) -> Option
+  frame 6: s0!:ref s1:int s2:int s3:ref s4:int s5:int
+     0  str s3:ref \"a\"
+     1  call-builtin s4:int Map.get (s0:Map s3:String)
+     2  clear s3:ref String
+     3  copy s1:int s4:int Option
+     4  return s1:int
+"
+    );
+}
+
+/// `keys` and `values` answer `Array`s in ascending key order, which is the
+/// order the entries are already in — so the machine copies rather than
+/// sorts.
+#[test]
+fn a_map_answers_its_keys_as_an_array() {
+    assert_eq!(
+        listing(
+            "fn f(m: Map<String, Int>) -> Array<String> { m.keys() }",
+            "f"
+        ),
+        "\
+fn0 m.f(Map) -> Array
+  frame 3: s0!:ref s1:ref s2:ref
+     0  call-builtin s2:ref Map.keys (s0:Map)
+     1  copy s1:ref s2:ref Array
+     2  clear s2:ref Array
+     3  return s1:ref
+"
+    );
+}
+
+/// A `Set` is a run of members in ascending order, and `interp::items_of`
+/// says that is exactly what a `for` over one sees — so the walk is the
+/// walk an `Array` gets, over the members object itself.
+///
+/// Nothing is copied first. An `Array` is walked without a snapshot because
+/// it cannot change; a `Set` is immutable for the same reason — `inserted`
+/// and `removed` are past participles and answer new objects — so holding the
+/// object *is* the snapshot. Only a `Vector` shares its storage.
+#[test]
+fn a_for_over_a_set_walks_the_members_in_place() {
+    assert_eq!(
+        listing(
+            "fn f(s: Set<Int>) -> Int {\n  var n = 0\n  for x in s { n = n + x }\n  n\n}",
+            "f"
+        ),
+        "\
+fn0 m.f(Set) -> Int
+  frame 10: s0!:ref s1:int s2:int s3:ref s4:int s5:int s6:int s7:bool s8:int s9:int
+     0  int s2:int 0
+     1  copy s3:ref s0:ref Set
+     2  len s4:int s3:ref
+     3  int s5:int 0
+     4  int s6:int 1
+     5  jump 7
+     6  add.int s5:int s5:int s6:int
+     7  lt.int s7:bool s5:int s4:int
+     8  branch-false s7:bool 13
+     9  load-elem s8:int s3:ref s5:int Int
+    10  add.int s9:int s2:int s8:int
+    11  copy s2:int s9:int Int
+    12  jump 6
+    13  clear s3:ref Set
+    14  copy s1:int s2:int Int
+    15  return s1:int
+"
+    );
+}
+
+/// `interp::items_of` says a `for` over a `Map` binds a `MapEntry` per pair,
+/// in ascending key order, and that function exists so both backends walk a
+/// collection the same way.
+///
+/// Here it costs nothing to keep: one entry of a `Shape::Entries` run is the
+/// key's words then the value's, and that is exactly the `MapEntry` struct's
+/// own layout — so the binding is one `load-elem` at that layout's width and
+/// nothing is built per turn. `s8` is the entry's two words, `s8` the key and
+/// `s9` the value, so `e.value` is slot arithmetic and emits nothing.
+///
+/// The entry holds a reference, so it is cleared at the end of every turn —
+/// the same discipline every other element binding is under.
+#[test]
+fn a_for_over_a_map_binds_one_entry_at_the_layout_s_width() {
+    assert_eq!(
+        listing(
+            "fn f(m: Map<String, Int>) -> Int {\n  var n = 0\n  for e in m { n = n + e.value }\n  n\n}",
+            "f"
+        ),
+        "\
+fn0 m.f(Map) -> Int
+  frame 11: s0!:ref s1:int s2:int s3:ref s4:int s5:int s6:int s7:bool s8:ref s9:int s10:int
+     0  int s2:int 0
+     1  copy s3:ref s0:ref Map
+     2  len s4:int s3:ref
+     3  int s5:int 0
+     4  int s6:int 1
+     5  jump 7
+     6  add.int s5:int s5:int s6:int
+     7  lt.int s7:bool s5:int s4:int
+     8  branch-false s7:bool 14
+     9  load-elem s8:ref s3:ref s5:int MapEntry
+    10  add.int s10:int s2:int s9:int
+    11  copy s2:int s10:int Int
+    12  clear s8:ref MapEntry
+    13  jump 6
+    14  clear s3:ref Map
+    15  copy s1:int s2:int Int
+    16  return s1:int
 "
     );
 }

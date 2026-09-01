@@ -76,7 +76,9 @@ flags:
                         allow more, and omit to allow none
   --backend <ast|vm>    which backend the binary runs on: `vm`, the dedicated
                         VM and the default, or `ast`, the tree-walking
-                        interpreter
+                        interpreter. `lvm` is not one of them: a built binary
+                        embeds its backend, and the linear-memory backend of
+                        ADR 0034 is not one an embedded runtime can be yet
 
 `--backend` is baked in like everything else, because a built binary honours
 no flag of its own. A program the VM cannot run is refused here, at build
@@ -197,9 +199,29 @@ fn parse_build_flags(args: &[String]) -> Result<BuildFlags, CliError> {
                 let value = flag_value(args, &mut i, "--backend")?;
                 flags.backend = Backend::parse(&value).ok_or_else(|| {
                     CliError::Message(format!(
-                        "`--backend` must be `ast` or `vm`, found `{value}`"
+                        "`--backend` must be {}, found `{value}`",
+                        Backend::NAMES
                     ))
                 })?;
+                // The one command the third backend is not offered to, and
+                // the refusal is here rather than a silent fall back to the
+                // default: a built binary embeds an evaluator and has no
+                // flag to change it, so `cove build --backend lvm` would
+                // have to write a binary that runs on something else, and
+                // ADR 0009's "a built binary must not defer an error to
+                // whoever runs it" is the same rule read one step earlier.
+                // `cove_runtime::embed::EmbeddedBackend` names the two the
+                // embedded runtime can be, and widening it is work the
+                // cutover does by deleting one of them rather than work this
+                // window should pay for twice.
+                if flags.backend == Backend::Lvm {
+                    return Err(CliError::Message(format!(
+                        "`cove build --backend {}` is not supported: a built binary embeds the backend it runs on, and the linear-memory backend is not one an embedded runtime can be yet\n  \
+                         run it with `cove run --backend {}`, or build it on `vm`",
+                        Backend::Lvm,
+                        Backend::Lvm,
+                    )));
+                }
             }
             "--allow-exec" => {
                 let value = flag_value(args, &mut i, "--allow-exec")?;
@@ -580,6 +602,13 @@ fn main() -> std::process::ExitCode {{
         backend = match plan.backend {
             Backend::Ast => "Ast",
             Backend::Vm => "Vm",
+            // `parse_build_flags` is where this is refused, before a package
+            // is loaded and long before a crate is written, so a plan naming
+            // it cannot exist. Falling back to a spelling the embedded
+            // runtime does understand would build a binary that runs on a
+            // backend nobody asked for.
+            Backend::Lvm =>
+                unreachable!("`cove build --backend lvm` is refused when the flag is parsed"),
         },
     )
 }

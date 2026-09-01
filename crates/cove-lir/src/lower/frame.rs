@@ -103,6 +103,16 @@ struct Scope {
     /// occupies. The width is carried rather than looked up, because ending
     /// a scope must not need the layout table the caller is holding.
     owned: Vec<(Slot, LayoutId, u32)>,
+    /// Whether a lookup that reaches this scope stops here.
+    ///
+    /// One thing is lowered in a frame that is not its own: a parameter's
+    /// default. The oracle evaluates it in the *callee's* environment, whose
+    /// parent is the callee's module and not the caller's body — so a default
+    /// that reads a name must find the callee's parameters and the module's
+    /// declarations, and must not find whatever the caller happened to bind
+    /// under that name. The words are still allocated here, because that is
+    /// where the argument has to end up; only the *names* are the callee's.
+    isolated: bool,
 }
 
 pub(crate) struct Frame {
@@ -176,6 +186,17 @@ impl Frame {
         self.scopes.push(Scope::default());
     }
 
+    /// Opens a scope that a lookup does not see past.
+    ///
+    /// See [`Scope::isolated`]. It is closed with [`Frame::pop_scope`] like
+    /// any other, and what it owns is given back the same way.
+    pub fn push_isolated_scope(&mut self) {
+        self.scopes.push(Scope {
+            isolated: true,
+            ..Scope::default()
+        });
+    }
+
     /// Ends the innermost scope, answering the locations it owned that hold
     /// a reference.
     ///
@@ -227,15 +248,23 @@ impl Frame {
             .push((slot, layout, width));
     }
 
-    /// The location `name` denotes, searching inwards out.
+    /// The location `name` denotes, searching inwards out — and no further
+    /// than the innermost isolated scope.
     pub fn lookup(&self, name: &str) -> Option<(Slot, LayoutId)> {
-        self.scopes.iter().rev().find_map(|scope| {
-            scope
+        for scope in self.scopes.iter().rev() {
+            let found = scope
                 .names
                 .iter()
                 .rev()
                 .find(|(bound, _, _)| bound == name)
-                .map(|(_, slot, layout)| (*slot, *layout))
-        })
+                .map(|(_, slot, layout)| (*slot, *layout));
+            if found.is_some() {
+                return found;
+            }
+            if scope.isolated {
+                return None;
+            }
+        }
+        None
     }
 }

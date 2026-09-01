@@ -214,3 +214,212 @@ fn0 m.f() -> Int
 "
     );
 }
+
+// ------------------------------------- variadic parameters and their defaults
+
+/// A variadic parameter is an immutable `Array<T>` inside the body whatever
+/// the call wrote, and **the caller builds it**.
+///
+/// `interp::bind_params` says so: the arguments no earlier parameter took are
+/// collected and bound as one array. Nothing about the callee's frame changes
+/// for it — a variadic parameter is one ordinary location holding one
+/// ordinary array — so the calling convention has nothing to say about how it
+/// was filled, and this is an array literal by another spelling.
+#[test]
+fn a_variadic_parameter_collects_its_arguments_into_an_array() {
+    assert_eq!(
+        listing(
+            "fn total(items: Int...) -> Int { items.length() }\nfn f() -> Int { total(1, 2, 3) }",
+            "f"
+        ),
+        "\
+fn0 m.f() -> Int
+  frame 7: s0:int s1:int s2:int s3:int s4:ref s5:int s6:int
+     0  int s1:int 1
+     1  int s2:int 2
+     2  int s3:int 3
+     3  alloc s4:ref Array<array> x3
+     4  int s5:int 1
+     5  int s6:int 0
+     6  store-elem s4:ref s6:int s1:int Int
+     7  add.int s6:int s6:int s5:int
+     8  store-elem s4:ref s6:int s2:int Int
+     9  add.int s6:int s6:int s5:int
+    10  store-elem s4:ref s6:int s3:int Int
+    11  add.int s6:int s6:int s5:int
+    12  call s1:int m.total (s4:Array)
+    13  clear s4:ref Array
+    14  copy s0:int s1:int Int
+    15  return s0:int
+"
+    );
+}
+
+/// A variadic parameter given nothing is an empty `Array<T>`, which is the
+/// one collection literal the lowering allocates outright: there is nothing
+/// to count and nothing to step.
+#[test]
+fn a_variadic_parameter_given_nothing_is_an_empty_array() {
+    assert_eq!(
+        listing(
+            "fn total(items: Int...) -> Int { items.length() }\nfn f() -> Int { total() }",
+            "f"
+        ),
+        "\
+fn0 m.f() -> Int
+  frame 3: s0:int s1:ref s2:int
+     0  alloc s1:ref Array<array> x0
+     1  call s2:int m.total (s1:Array)
+     2  clear s1:ref Array
+     3  copy s0:int s2:int Int
+     4  return s0:int
+"
+    );
+}
+
+/// A spread contributes the *elements* of the sequence it names rather than
+/// the sequence, so the length stops being a fact the lowering knows.
+///
+/// It is counted first — one for each plain argument at 2, one `len` per
+/// spread at 3 — and then the run is filled, with a walk per spread. 12–18 is
+/// that walk, and 19 is the plain argument that comes after it: one index
+/// runs through the whole of it, so the two kinds of argument write into the
+/// same counter and no joined list is ever built.
+#[test]
+fn a_spread_argument_is_counted_and_then_walked_into_the_run() {
+    assert_eq!(
+        listing(
+            "fn total(items: Int...) -> Int { items.length() }\n\
+             fn f(xs: Array<Int>) -> Int { total(0, ...xs, 9) }",
+            "f"
+        ),
+        "\
+fn0 m.f(Array) -> Int
+  frame 12: s0!:ref s1:int s2:int s3:int s4:int s5:int s6:ref s7:int s8:int s9:int s10:bool s11:int
+     0  int s2:int 0
+     1  int s3:int 9
+     2  int s4:int 2
+     3  len s5:int s0:ref
+     4  add.int s4:int s4:int s5:int
+     5  alloc s6:ref Array<array> xs4:int
+     6  int s5:int 1
+     7  int s7:int 0
+     8  store-elem s6:ref s7:int s2:int Int
+     9  add.int s7:int s7:int s5:int
+    10  len s8:int s0:ref
+    11  int s9:int 0
+    12  lt.int s10:bool s9:int s8:int
+    13  branch-false s10:bool 19
+    14  load-elem s11:int s0:ref s9:int Int
+    15  store-elem s6:ref s7:int s11:int Int
+    16  add.int s9:int s9:int s5:int
+    17  add.int s7:int s7:int s5:int
+    18  jump 12
+    19  store-elem s6:ref s7:int s3:int Int
+    20  add.int s7:int s7:int s5:int
+    21  call s2:int m.total (s6:Array)
+    22  clear s6:ref Array
+    23  copy s1:int s2:int Int
+    24  return s1:int
+"
+    );
+}
+
+/// A `Vector` spread is copied out with `Vector.toArray` before it is walked,
+/// which is the clone `bind_params` makes of `storage.elements` and for the
+/// same reason: what is spread is the elements the vector had.
+#[test]
+fn a_vector_spread_is_copied_out_before_it_is_walked() {
+    let text = listing(
+        "fn total(items: Int...) -> Int { items.length() }\n\
+         fn f(xs: Vector<Int>) -> Int { total(...xs) }",
+        "f",
+    );
+    assert!(
+        text.contains("     0  call-builtin s2:ref Vector.toArray (s0:Vector)\n"),
+        "{text}"
+    );
+}
+
+/// A default is evaluated **in the callee's scope**, and 2 is the whole of
+/// what that means: `n` is the parameter before it, at the location the call
+/// has already evaluated its argument into.
+///
+/// `interp::bind_params` puts it there — *"Default arguments are evaluated by
+/// the callee"*, with the parameters before this one already declared in the
+/// environment it is evaluated in. The words are the caller's, because the
+/// argument has to end up in the caller's frame either way; only the names
+/// are the callee's.
+#[test]
+fn a_default_reads_the_parameters_before_it() {
+    assert_eq!(
+        listing(
+            "fn near(n: Int, by: Int = n + 1) -> Int { by }\nfn f() -> Int { near(3) }",
+            "f"
+        ),
+        "\
+fn0 m.f() -> Int
+  frame 4: s0:int s1:int s2:int s3:int
+     0  int s1:int 3
+     1  int s2:int 1
+     2  add.int s3:int s1:int s2:int
+     3  call s2:int m.near (s1:Int s3:Int)
+     4  copy s0:int s2:int Int
+     5  return s0:int
+"
+    );
+}
+
+/// The other half of "in the callee's scope": a name the *caller* binds does
+/// not shadow the one the declaration meant.
+///
+/// `f` has a local `base`, and `scaled`'s default was written where `base` is
+/// the module's declaration — so 4 calls `m.base` and not the closure `f`
+/// built. What arranges it is an isolated scope: a lookup inside a default
+/// sees the callee's parameters and then stops, and everything past that is
+/// resolved against the callee's module rather than the caller's frame.
+#[test]
+fn a_default_does_not_see_what_the_caller_happens_to_have_bound() {
+    assert_eq!(
+        listing(
+            "fn base() -> Int { 7 }\n\
+             fn scaled(n: Int, by: Int = base()) -> Int { n * by }\n\
+             fn f() -> Int {\n  let base = fn() { 100 }\n  scaled(3)\n}",
+            "f"
+        ),
+        "\
+fn1 m.f() -> Int
+  frame 5: s0:int s1:ref s2:int s3:int s4:int
+     0  alloc s1:ref closure m.f#0<closure>
+     1  int s2:int 3
+     2  store-field s1:ref +0 s2:int Int
+     3  int s2:int 3
+     4  call s3:int m.base ()
+     5  call s4:int m.scaled (s2:Int s3:Int)
+     6  copy s0:int s4:int Int
+     7  clear s1:ref fn
+     8  return s0:int
+"
+    );
+}
+
+/// A method's default may read the receiver, because the receiver is a
+/// parameter and it is bound before the ones that follow it.
+#[test]
+fn a_default_on_a_method_reads_the_receiver() {
+    assert_eq!(
+        listing(
+            "struct P { x: Int }\n\
+             impl P { fn scaled(self, by: Int = self.x) -> Int { self.x * by } }\n\
+             fn f(p: P) -> Int { p.scaled() }",
+            "f"
+        ),
+        "\
+fn0 m.f(m.P) -> Int
+  frame 3: s0!:int s1:int s2:int
+     0  call s2:int m.P.scaled (s0:m.P s0:Int)
+     1  copy s1:int s2:int Int
+     2  return s1:int
+"
+    );
+}

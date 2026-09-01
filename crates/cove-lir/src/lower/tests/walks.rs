@@ -1,5 +1,5 @@
-//! `map`, `filter` and `fold`, which are loops in the IR rather than
-//! builtins.
+//! `map`, `filter`, `fold` and `sorted`, which are loops in the IR rather
+//! than builtins.
 //!
 //! `docs/LINEAR_VM.md` gives the reason: a builtin that invoked the closure
 //! would re-enter the dispatch loop from inside a Rust function, putting a
@@ -274,4 +274,134 @@ fn0 m.f(Array) -> Array
     20  return s1:ref
 "
     );
+}
+
+/// `sorted` is a bottom-up stable merge, written out in the IR.
+///
+/// The oracle's `merge_sort` gives both halves of why it is a merge rather
+/// than a call to one. `by` is a Cove closure, so it can fail or be
+/// cancelled, and a `FnMut(&T, &T) -> Ordering` has nowhere to put a failure;
+/// and `by` can contradict itself, where the schema promises *some*
+/// permutation and nothing more — so there is no invariant here to break.
+///
+/// The shape, in slots: `s6` is `source`, the working copy `Array.slice`
+/// makes of the receiver, and `s2` is `merged`, the run of the same length
+/// the pass fills. `s8` is `width`, which doubles at 62; `s10` is `start`,
+/// `s11` and `s12` the block's `middle` and `end` after the two clamps at
+/// 19–24, and `s13`/`s14` the two runs' cursors.
+///
+/// Three loops make one pass over the blocks. 27–41 is the merge: the right
+/// run's element is taken only when `by` answers **true** for it against the
+/// left run's, which is the oracle's own operand order at 33 and is what
+/// makes the sort stable — equal elements meet with the earlier one on the
+/// left and 34 falls through to 38, which takes the left. 42–48 and 49–55
+/// are the two tails, of which at most one runs.
+///
+/// 58–61 swap the two runs rather than copying one back, so what was merged
+/// is what the next pass reads. `while width < len` at 11 is the outer test,
+/// so a receiver of nothing or of one element makes no pass at all and
+/// answers the copy — which is also why the receiver is never written
+/// through on any path.
+#[test]
+fn sorted_is_a_bottom_up_stable_merge_over_two_runs() {
+    assert_eq!(
+        listing(
+            "fn f(xs: Array<Int>) -> Array<Int> { xs.sorted(by: fn(a, b) { a < b }) }",
+            "f"
+        ),
+        "\
+fn0 m.f(Array) -> Array
+  frame 20: s0!:ref s1:ref s2:ref s3:ref s4:int s5:int s6:ref s7:int s8:int s9:int s10:int s11:int s12:int s13:int s14:int s15:bool s16:int s17:int s18:bool s19:ref
+     0  copy s2:ref s0:ref Array
+     1  alloc s3:ref closure m.f#0<closure>
+     2  int s4:int 1
+     3  store-field s3:ref +0 s4:int Int
+     4  len s4:int s2:ref
+     5  int s5:int 0
+     6  call-builtin s6:ref Array.slice (s2:Array s5:Int s4:Int)
+     7  clear s2:ref Array
+     8  alloc s2:ref Array<array> xs4:int
+     9  int s7:int 1
+    10  int s8:int 1
+    11  lt.int s15:bool s8:int s4:int
+    12  branch-false s15:bool 64
+    13  copy s9:int s5:int Int
+    14  copy s10:int s5:int Int
+    15  lt.int s15:bool s10:int s4:int
+    16  branch-false s15:bool 58
+    17  add.int s11:int s10:int s8:int
+    18  add.int s12:int s11:int s8:int
+    19  gt.int s18:bool s11:int s4:int
+    20  branch-false s18:bool 22
+    21  copy s11:int s4:int Int
+    22  gt.int s18:bool s12:int s4:int
+    23  branch-false s18:bool 25
+    24  copy s12:int s4:int Int
+    25  copy s13:int s10:int Int
+    26  copy s14:int s11:int Int
+    27  lt.int s15:bool s13:int s11:int
+    28  branch-false s15:bool 42
+    29  lt.int s15:bool s14:int s12:int
+    30  branch-false s15:bool 42
+    31  load-elem s16:int s6:ref s14:int Int
+    32  load-elem s17:int s6:ref s13:int Int
+    33  call-closure s15:bool s3:ref (s16:Int s17:Int)
+    34  branch-false s15:bool 38
+    35  store-elem s2:ref s9:int s16:int Int
+    36  add.int s14:int s14:int s7:int
+    37  jump 40
+    38  store-elem s2:ref s9:int s17:int Int
+    39  add.int s13:int s13:int s7:int
+    40  add.int s9:int s9:int s7:int
+    41  jump 27
+    42  lt.int s18:bool s13:int s11:int
+    43  branch-false s18:bool 49
+    44  load-elem s16:int s6:ref s13:int Int
+    45  store-elem s2:ref s9:int s16:int Int
+    46  add.int s13:int s13:int s7:int
+    47  add.int s9:int s9:int s7:int
+    48  jump 42
+    49  lt.int s18:bool s14:int s12:int
+    50  branch-false s18:bool 56
+    51  load-elem s16:int s6:ref s14:int Int
+    52  store-elem s2:ref s9:int s16:int Int
+    53  add.int s14:int s14:int s7:int
+    54  add.int s9:int s9:int s7:int
+    55  jump 49
+    56  copy s10:int s12:int Int
+    57  jump 15
+    58  copy s19:ref s6:ref Array
+    59  copy s6:ref s2:ref Array
+    60  copy s2:ref s19:ref Array
+    61  clear s19:ref Array
+    62  add.int s8:int s8:int s8:int
+    63  jump 11
+    64  clear s2:ref Array
+    65  clear s3:ref fn
+    66  copy s1:ref s6:ref Array
+    67  clear s6:ref Array
+    68  return s1:ref
+"
+    );
+}
+
+/// A sort over elements that hold a reference clears both of the two the
+/// comparison was holding, at the end of every comparison and of every tail
+/// step.
+///
+/// The same discipline every other walk's element is under, for the same
+/// reason: a sort of a large sequence must hold two elements at a time
+/// rather than every element it has compared. `clear s16`/`clear s17` at
+/// 41–42 are the merge's, and `clear s16` at 47 and 55 the two tails'.
+#[test]
+fn a_sort_of_references_clears_both_elements_it_compared() {
+    let text = listing(
+        "fn f(xs: Array<String>) -> Array<String> { xs.sorted(by: fn(a, b) { a < b }) }",
+        "f",
+    );
+    assert!(
+        text.contains("    41  clear s17:ref String\n    42  clear s16:ref String\n"),
+        "{text}"
+    );
+    assert_eq!(text.matches("clear s16:ref String").count(), 3, "{text}");
 }

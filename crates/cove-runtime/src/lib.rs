@@ -15,8 +15,12 @@ pub mod interp;
 // Private: what it holds is one check both backends make, and the public
 // surface of it is `Interpreter::invoke` and `Vm::invoke`.
 mod invoke;
-// Private while it is built: the ADR 0034 replacement for `vm` and `frame`,
-// which are frozen until the cutover deletes them.
+// Private, with one type re-exported below: the ADR 0034 replacement for
+// `vm` and `frame`, which are frozen until the cutover deletes them. The
+// module stays private so that what a caller can name is decided here rather
+// than by which items inside it happen to be `pub` — the words, the layouts,
+// the memory and the dispatch loop are the representation this boundary
+// exists to keep in.
 mod lvm;
 pub mod process;
 pub mod runtime;
@@ -45,6 +49,7 @@ pub use host::{
 };
 pub use http::{Http, ScriptedRequest, Served};
 pub use interp::{on_cove_stack, STACK_SIZE};
+pub use lvm::Lvm;
 pub use process::{Process, ProcessLog};
 pub use runtime::{Runtime, ENTRY_TASK};
 pub use schema::{

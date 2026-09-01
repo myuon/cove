@@ -9,19 +9,6 @@
 use super::refused;
 
 #[test]
-fn a_sort_in_the_ir_is_the_one_sequence_walk_still_named() {
-    // `map`, `filter` and `fold` are loops now. `sorted` is not, because a
-    // stable merge under a Cove comparison is a second data structure and a
-    // merge step in the IR rather than a counter and a call. The operation is
-    // what is named, not the lambda: the message is what says where the next
-    // piece of work is.
-    assert_eq!(
-        refused("fn f(xs: Array<Int>) -> Array<Int> { xs.sorted(fn(a, b) { a < b }) }"),
-        vec!["not yet lowered: `Array.sorted`"]
-    );
-}
-
-#[test]
 fn a_shared_stops_at_the_boundary_rather_than_at_its_lock() {
     // `Shared.lock` is not a call through a closure that happens to be
     // missing, and this is the sentence that says so: `Shared` has no layout
@@ -73,15 +60,31 @@ fn an_async_function_value_is_a_gap_of_its_own() {
     );
 }
 
+/// An empty collection literal stops here, and what stops it is the
+/// *checker*: `Set.of()` and `Map.of()` — and `Vector.of()`, which has been
+/// this way since the family was taught — are typed `Set<_>`, with the
+/// element type left an unresolved variable even where an annotation, a
+/// parameter or a field states it.
+///
+/// The lowering has already been taught what to do with one: an empty
+/// literal is [`crate::Inst::Alloc`] rather than a call, because the machine
+/// refuses `Set.of()` with no operands — a word says nothing about its family
+/// and the element layout is what the collector traces by, so the empty one
+/// has to be built where the layout is known. What is missing is the layout,
+/// and only the checker can settle it.
+///
+/// It is named here rather than left to be met at a call site because
+/// `docs/LINEAR_VM.md` says every valid checked program lowers, and this is a
+/// valid checked program that does not.
 #[test]
-fn a_map_and_a_set_have_no_layout_yet() {
+fn an_empty_collection_literal_waits_on_the_checker_for_its_element_type() {
     assert_eq!(
-        refused("fn f(m: Map<String, Int>) -> Int { m.length() }"),
-        vec!["not yet lowered: a value of type `Map<String, Int>`"]
+        refused("fn f() -> Set<Int> { Set.of() }"),
+        vec!["not yet lowered: a value of type `Set<_>`"]
     );
     assert_eq!(
-        refused("fn f(s: Set<Int>) -> Int { s.length() }"),
-        vec!["not yet lowered: a value of type `Set<Int>`"]
+        refused("fn f() -> Map<String, Int> { Map.of() }"),
+        vec!["not yet lowered: a value of type `Map<_, _>`"]
     );
 }
 
@@ -144,4 +147,51 @@ fn a_declaration_taking_a_var_parameter_cannot_be_used_as_a_function_value() {
         refused("fn bump(var n: Int) { n = n + 1 }\nfn f() -> Int {\n  let g = bump\n  0\n}"),
         vec!["not yet lowered: `bump`, which takes a `var` parameter, used as a function value"]
     );
+}
+
+/// The converse: a run of programs over the families and the parameter
+/// shapes this lowering has been taught, asserted only to *lower*.
+///
+/// Every other case in these tests pins a listing, and this one deliberately
+/// does not. What it is for is the check `lower` makes on the way out —
+/// [`crate::verify`], which panics rather than reporting, so a program whose
+/// locations, jumps or argument widths this lowering got wrong fails here
+/// with the fault named. One listing per line of this would say the same
+/// thing at twenty times the length, and the shapes that are worth pinning
+/// are pinned above.
+#[test]
+fn the_shapes_these_families_are_written_in_all_lower() {
+    let cases = [
+        "fn f(s: Set<String>) -> Array<String> { s.toArray() }",
+        "fn f(s: Set<Int>) -> Bool { s.contains(1) }",
+        "fn f(s: Set<Int>) -> Set<Int> { s.removed(1) }",
+        "fn f(m: Map<String, Int>) -> Map<String, Int> { m.inserted(\"a\", 1) }",
+        "fn f(m: Map<String, Int>) -> Map<String, Int> { m.removed(\"a\") }",
+        "fn f(m: Map<String, Int>) -> Array<Int> { m.values() }",
+        "fn f(m: Map<String, Int>) -> Bool { m.isEmpty() }",
+        "struct P { x: Int, y: Int }\nfn f(s: Set<P>) -> Int { s.length() }",
+        "struct P { x: Int, y: Int }\nfn f(m: Map<Int, P>) -> Int {\n  var n = 0\n  for e in m { n = n + e.value.x }\n  n\n}",
+        "fn f(m: Map<String, Int>) -> Int {\n  for e in m { if e.value > 0 { break } }\n  0\n}",
+        "fn f(xs: Vector<Int>) -> Array<Int> { xs.sorted(by: fn(a, b) { a < b }) }",
+        "struct P { x: Int }\nfn f(xs: Array<P>) -> Array<P> { xs.sorted(by: fn(a, b) { a.x < b.x }) }",
+        "fn total(items: String...) -> Int { items.length() }\nfn f() -> Int { total(\"a\", \"b\") }",
+        "fn total(items: String...) -> Int { items.length() }\nfn f(a: Array<String>, b: Array<String>) -> Int { total(...a, ...b) }",
+        "trait D { fn shown(self) -> String }\nstruct P { x: Int }\nimpl D for P { fn shown(self) -> String { \"p\" } }\nfn take(items: dyn D...) -> Int { items.length() }\nfn f(p: P) -> Int { take(p, p) }",
+        "fn tag(n: Int, label: String = \"n\") -> String { label }\nfn f() -> String { tag(1) }",
+        "fn tag(n: Int, label: String = \"n\") -> String { label }\nfn f() -> String { tag(1, label: \"x\") }",
+        "fn tag(n: Int = 1, label: String = \"n\") -> String { label }\nfn f() -> String { tag() }",
+        "fn each(xs: Array<Int>, extra: Int = xs.length()) -> Int { extra }\nfn f(a: Array<Int>) -> Int { each(a) }",
+        "fn f(m: Map<String, Int>, n: Map<String, Int>) -> Bool { m == n }",
+        "fn f(s: Set<Int>) -> String { \"{s}\" }",
+    ];
+    let mut bad = Vec::new();
+    for src in cases {
+        if let Err(items) = crate::lower(&super::checked(src)) {
+            bad.push(format!(
+                "{src}\n  -> {:?}",
+                items.iter().map(|i| i.message.clone()).collect::<Vec<_>>()
+            ));
+        }
+    }
+    assert!(bad.is_empty(), "{}", bad.join("\n"));
 }

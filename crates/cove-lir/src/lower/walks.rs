@@ -1,4 +1,5 @@
-//! `map`, `filter` and `fold`: the sequence methods that take a closure.
+//! `map`, `filter`, `fold` and `sorted`: the sequence methods that take a
+//! closure.
 //!
 //! # A builtin never calls back into Cove
 //!
@@ -11,7 +12,7 @@
 //! interpreter compiled to. A `map` over a `map` over a `map` would be three
 //! Rust frames deep before the program did anything.
 //!
-//! So each of the three **lowers to a loop in the IR**, and the closure's
+//! So each of the four **lowers to a loop in the IR**, and the closure's
 //! calls are [`Inst::CallClosure`] frames like any other: depth, the
 //! collector's roots and a stack overflow all work without a second story.
 //! `cove_runtime::lvm::builtins` stays a library over words with nothing in
@@ -34,7 +35,11 @@
 //! - **each is empty-safe by construction.** An empty receiver is a `count`
 //!   of zero, the test fails on the first turn, and the answer is the empty
 //!   array the loop allocated — or, for `fold`, the initial value nothing
-//!   overwrote.
+//!   overwrote, or, for `sorted`, the copy no pass ever ran over.
+//!
+//! `sorted` is the fourth and the one that is not a single counter: it is a
+//! bottom-up stable merge over two runs, and `Body::walk_sorted` says why it
+//! is written out rather than handed over.
 //!
 //! # A callback that fails takes the whole call with it
 //!
@@ -63,7 +68,7 @@ use cove_syntax::ast::{Arg, Expr};
 use super::frame::Val;
 use super::shapes;
 use super::{Body, PENDING};
-use crate::inst::{ArithOp, CmpOp, Compare, Inst, Len, Num, Pc};
+use crate::inst::{ArithOp, CmpOp, Compare, Inst, Len, Num, Pc, Slot};
 use crate::layout::LayoutId;
 
 /// The locations a walk over a run of words keeps for as long as it runs.
@@ -83,7 +88,7 @@ struct Walk {
 }
 
 impl Body<'_> {
-    /// One of the three, over elements this caller has already settled.
+    /// One of the four, over elements this caller has already settled.
     ///
     /// `obj` is a location the walk owns — an `Array` copied out of whatever
     /// named it, or the copy a `Vector` is walked through — and this ends its
@@ -99,6 +104,7 @@ impl Body<'_> {
         match name {
             "map" => self.walk_map(expr, obj, elem, &args[0].value),
             "filter" => self.walk_filter(expr, obj, elem, &args[0].value),
+            "sorted" => self.walk_sorted(expr, obj, elem, &args[0].value),
             _ => self.walk_fold(expr, obj, elem, &args[0].value, &args[1].value),
         }
     }
@@ -388,6 +394,347 @@ impl Body<'_> {
         self.release(closure, span);
         self.release(obj, span);
         total
+    }
+
+    // ---- sorted ---------------------------------------------------------------
+
+    /// `items.sorted(by)`: a **stable** sort under the caller's own ordering,
+    /// as a bottom-up merge in the IR.
+    ///
+    /// # Why a merge, and why written out here
+    ///
+    /// `cove_runtime::builtins::merge_sort` is the oracle and gives both
+    /// halves of the reason. `by` is a Cove closure, so it can fail, be
+    /// cancelled or run out of fuel — and a builtin that called it would be
+    /// the re-entry `docs/LINEAR_VM.md` asks this backend not to make. And
+    /// `by` can contradict itself: the schema says an ordering where `by(a,b)`
+    /// and `by(b,a)` are both true gets *some* permutation and no promise
+    /// about which, so there is no invariant here to break and nothing to
+    /// panic about. A merge answers a permutation whatever `by` does.
+    ///
+    /// Because the only promise on a contradictory ordering is "some
+    /// permutation", the two backends are free to disagree about which one —
+    /// and on a consistent ordering a stable sort is fully determined, so
+    /// they agree there without being written the same way.
+    ///
+    /// # The shape
+    ///
+    /// Two runs of the receiver's length and passes of doubling width, which
+    /// is `merge_sort` exactly:
+    ///
+    /// - `source` is `Array.slice(items, 0, len)` — the copy the sort works
+    ///   in, made by the one builtin that already answers a part of a
+    ///   sequence as a finished one. The receiver is never written through.
+    /// - `merged` is an allocation of the same length, and the two are
+    ///   **swapped** at the end of each pass rather than copied back.
+    /// - A pass walks blocks of `width * 2`, merging the two runs inside
+    ///   each. The right run's element is taken only when `by` says it comes
+    ///   *strictly* before the left run's, which is what makes the sort
+    ///   stable: equal elements meet with the earlier one on the left and the
+    ///   earlier one is kept.
+    /// - The tails are two loops, of which at most one runs.
+    ///
+    /// `while width < len` is the outer test, so a receiver of nothing or of
+    /// one element makes no pass at all and answers the copy.
+    ///
+    /// # The elements are cleared per comparison
+    ///
+    /// `a` and `b` hold one element each for the length of one comparison,
+    /// and both are cleared at the end of it — the same discipline every
+    /// other walk's element is under, for the same reason: a sort of a large
+    /// sequence must hold two elements at a time rather than every element it
+    /// has compared.
+    fn walk_sorted(&mut self, expr: &Expr, obj: Val, elem: &Ty, callback: &Expr) -> Val {
+        let Some(answer) = self.owned_ty(expr) else {
+            self.release(obj, expr.span);
+            return self.dead(expr);
+        };
+        let (Some(result), Some(element)) = (
+            self.layout(&answer, expr.span),
+            self.layout(elem, expr.span),
+        ) else {
+            self.release(obj, expr.span);
+            return self.dead(expr);
+        };
+        let Some((closure, params, returns)) = self.callback_of(callback) else {
+            self.release(obj, expr.span);
+            return self.dead(expr);
+        };
+        if !self.callback_matches(
+            callback,
+            &params,
+            returns,
+            &[element, element],
+            shapes::BOOL,
+        ) {
+            self.release(closure, expr.span);
+            self.release(obj, expr.span);
+            return self.dead(expr);
+        }
+        let span = expr.span;
+
+        let count = self.length_of(&obj, span);
+        let zero = self.int(0, span);
+        // The working copy. `Array.slice` is the language's own "a part of a
+        // sequence is a finished sequence", and the whole of one is a part of
+        // it — so the copy the sort needs is a call this lowering already
+        // makes rather than a loop of its own.
+        let source = self.temp(result);
+        self.emit_builtin(
+            source.slot,
+            "Array",
+            "slice",
+            &[obj.arg(), zero.arg(), count.arg()],
+            result,
+            span,
+        );
+        self.release(obj, span);
+        let merged = self.temp(result);
+        self.emit(
+            Inst::Alloc {
+                dst: merged.slot,
+                layout: result,
+                len: Len::Slot(count.slot),
+            },
+            span,
+        );
+
+        let one = self.int(1, span);
+        let width = self.int(1, span);
+        let out = self.temp(shapes::INT);
+        let start = self.temp(shapes::INT);
+        let middle = self.temp(shapes::INT);
+        let end = self.temp(shapes::INT);
+        let left = self.temp(shapes::INT);
+        let right = self.temp(shapes::INT);
+        let more = self.temp(shapes::BOOL);
+        let a = self.temp(element);
+        let b = self.temp(element);
+
+        // ---- one pass per doubling of `width`
+        let pass = self.here();
+        self.compare(CmpOp::Lt, more.slot, width.slot, count.slot, span);
+        let done = self.branch(more.slot, span);
+        self.set(out.slot, zero.slot, span);
+        self.set(start.slot, zero.slot, span);
+
+        // ---- one block per `width * 2` elements
+        let block = self.here();
+        self.compare(CmpOp::Lt, more.slot, start.slot, count.slot, span);
+        let swap = self.branch(more.slot, span);
+        self.add(middle.slot, start.slot, width.slot, span);
+        self.add(end.slot, middle.slot, width.slot, span);
+        self.clamp(middle.slot, count.slot, span);
+        self.clamp(end.slot, count.slot, span);
+        self.set(left.slot, start.slot, span);
+        self.set(right.slot, middle.slot, span);
+
+        // ---- the merge itself, while both runs have something left
+        let merge = self.here();
+        self.compare(CmpOp::Lt, more.slot, left.slot, middle.slot, span);
+        let left_spent = self.branch(more.slot, span);
+        self.compare(CmpOp::Lt, more.slot, right.slot, end.slot, span);
+        let right_spent = self.branch(more.slot, span);
+        self.load_elem(a.slot, source.slot, right.slot, element, span);
+        self.load_elem(b.slot, source.slot, left.slot, element, span);
+        // `by(right, left)`: the right run's element goes first only when it
+        // comes strictly before the left run's, which is the oracle's own
+        // operand order and is what makes the sort stable.
+        self.call_closure(more.slot, closure.slot, vec![a.arg(), b.arg()], span);
+        let take_left = self.branch(more.slot, span);
+        self.store_elem(merged.slot, out.slot, a.slot, element, span);
+        self.add(right.slot, right.slot, one.slot, span);
+        let advance = self.emit(Inst::Jump { to: PENDING }, span);
+        let otherwise = self.here();
+        self.patch(take_left, otherwise);
+        self.store_elem(merged.slot, out.slot, b.slot, element, span);
+        self.add(left.slot, left.slot, one.slot, span);
+        let taken = self.here();
+        self.patch(advance, taken);
+        self.add(out.slot, out.slot, one.slot, span);
+        self.end_turn(&[b, a], span);
+        self.emit(Inst::Jump { to: merge }, span);
+
+        // ---- whichever run still has something, copied straight across
+        let tails = self.here();
+        self.patch(left_spent, tails);
+        self.patch(right_spent, tails);
+        self.tail(
+            source.slot,
+            merged.slot,
+            left.slot,
+            middle.slot,
+            out.slot,
+            one.slot,
+            a,
+            element,
+            span,
+        );
+        self.tail(
+            source.slot,
+            merged.slot,
+            right.slot,
+            end.slot,
+            out.slot,
+            one.slot,
+            a,
+            element,
+            span,
+        );
+        self.set(start.slot, end.slot, span);
+        self.emit(Inst::Jump { to: block }, span);
+
+        // ---- the pass is over: what was merged becomes what is read
+        let swapping = self.here();
+        self.patch(swap, swapping);
+        let handle = self.temp(result);
+        self.copy(handle.slot, source.slot, result, span);
+        self.copy(source.slot, merged.slot, result, span);
+        self.copy(merged.slot, handle.slot, result, span);
+        self.release(handle, span);
+        // The next pass merges runs twice as long.
+        self.add(width.slot, width.slot, width.slot, span);
+        self.emit(Inst::Jump { to: pass }, span);
+
+        let end_at = self.here();
+        self.patch(done, end_at);
+        self.release(merged, span);
+        self.release(closure, span);
+        self.give_back(b.slot, b.layout);
+        self.give_back(a.slot, a.layout);
+        self.give_back(more.slot, more.layout);
+        self.give_back(right.slot, right.layout);
+        self.give_back(left.slot, left.layout);
+        self.give_back(end.slot, end.layout);
+        self.give_back(middle.slot, middle.layout);
+        self.give_back(start.slot, start.layout);
+        self.give_back(out.slot, out.layout);
+        self.give_back(width.slot, width.layout);
+        self.give_back(one.slot, one.layout);
+        self.give_back(zero.slot, zero.layout);
+        self.give_back(count.slot, count.layout);
+        source
+    }
+
+    /// One of a merge's two tails: `while at < limit`, copy across and step.
+    ///
+    /// At most one of the two runs, because the merge above stopped when one
+    /// of them was spent — but which one is a fact about the data, so both
+    /// are emitted and the one that has nothing left tests once and leaves.
+    #[allow(clippy::too_many_arguments)]
+    fn tail(
+        &mut self,
+        source: Slot,
+        merged: Slot,
+        at: Slot,
+        limit: Slot,
+        out: Slot,
+        one: Slot,
+        held: Val,
+        element: LayoutId,
+        span: Span,
+    ) {
+        let more = self.temp(shapes::BOOL);
+        let test = self.here();
+        self.compare(CmpOp::Lt, more.slot, at, limit, span);
+        let spent = self.branch(more.slot, span);
+        self.load_elem(held.slot, source, at, element, span);
+        self.store_elem(merged, out, held.slot, element, span);
+        self.end_turn(&[held], span);
+        self.add(at, at, one, span);
+        self.add(out, out, one, span);
+        self.emit(Inst::Jump { to: test }, span);
+        let rest = self.here();
+        self.patch(spent, rest);
+        self.give_back(more.slot, more.layout);
+    }
+
+    // ---- the small instructions the merge is written in ------------------------
+
+    /// A location holding a constant `Int`.
+    fn int(&mut self, value: i64, span: Span) -> Val {
+        let dst = self.temp(shapes::INT);
+        self.emit(
+            Inst::Int {
+                dst: dst.slot,
+                value,
+            },
+            span,
+        );
+        dst
+    }
+
+    /// `dst = a op b`, as `Int`s.
+    fn compare(&mut self, op: CmpOp, dst: Slot, a: Slot, b: Slot, span: Span) {
+        self.emit(
+            Inst::Cmp {
+                on: Compare::Int,
+                op,
+                dst,
+                a,
+                b,
+            },
+            span,
+        );
+    }
+
+    /// A [`Inst::BranchFalse`] whose target is not known yet.
+    fn branch(&mut self, cond: Slot, span: Span) -> Pc {
+        self.emit(Inst::BranchFalse { cond, to: PENDING }, span)
+    }
+
+    /// `dst = a + b`, as `Int`s.
+    pub(super) fn add(&mut self, dst: Slot, a: Slot, b: Slot, span: Span) {
+        self.emit(
+            Inst::Arith {
+                num: Num::Int,
+                op: ArithOp::Add,
+                dst,
+                a,
+                b,
+            },
+            span,
+        );
+    }
+
+    /// `dst = src`, one `Int` word.
+    fn set(&mut self, dst: Slot, src: Slot, span: Span) {
+        self.copy(dst, src, shapes::INT, span);
+    }
+
+    /// `if dst > limit { dst = limit }`: the `min` a block's bounds need.
+    fn clamp(&mut self, dst: Slot, limit: Slot, span: Span) {
+        let over = self.temp(shapes::BOOL);
+        self.compare(CmpOp::Gt, over.slot, dst, limit, span);
+        let within = self.branch(over.slot, span);
+        self.set(dst, limit, span);
+        let rest = self.here();
+        self.patch(within, rest);
+        self.give_back(over.slot, over.layout);
+    }
+
+    fn load_elem(&mut self, dst: Slot, obj: Slot, index: Slot, layout: LayoutId, span: Span) {
+        self.emit(
+            Inst::LoadElem {
+                dst,
+                obj,
+                index,
+                layout,
+            },
+            span,
+        );
+    }
+
+    fn store_elem(&mut self, obj: Slot, index: Slot, src: Slot, layout: LayoutId, span: Span) {
+        self.emit(
+            Inst::StoreElem {
+                obj,
+                index,
+                src,
+                layout,
+            },
+            span,
+        );
     }
 
     // ---- the shared loop -----------------------------------------------------

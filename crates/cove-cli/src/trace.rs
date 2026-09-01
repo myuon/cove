@@ -278,7 +278,7 @@ fn parse_header(line: &str) -> Result<Header, String> {
     }
     let backend = string_field(&json, "backend")?;
     let backend = RecordingBackend::parse(&backend)
-        .ok_or_else(|| format!("`backend` must be `ast` or `vm`, found `{backend}`"))?;
+        .ok_or_else(|| format!("`backend` must be `ast`, `vm` or `lvm`, found `{backend}`"))?;
     let values = string_field(&json, "values")?;
     let values = ValueCapture::parse(&values)
         .ok_or_else(|| format!("`values` must be `full` or `redacted`, found `{values}`"))?;
@@ -1277,15 +1277,19 @@ mod tests {
             r#"{"event":"trace_header","version":3,"backend":"jit","values":"full","entry":"a.b","args":[]}"#,
         ]);
         assert!(
-            message.contains("`backend` must be `ast` or `vm`, found `jit`"),
+            message.contains("`backend` must be `ast`, `vm` or `lvm`, found `jit`"),
             "{message}"
         );
     }
 
-    /// The two backends a header may name both read back as themselves.
+    /// Every backend a header may name reads back as itself.
     #[test]
     fn a_header_reads_back_the_backend_that_recorded_it() {
-        for (name, backend) in [("ast", RecordingBackend::Ast), ("vm", RecordingBackend::Vm)] {
+        for (name, backend) in [
+            ("ast", RecordingBackend::Ast),
+            ("vm", RecordingBackend::Vm),
+            ("lvm", RecordingBackend::Lvm),
+        ] {
             let header = format!(
                 r#"{{"event":"trace_header","version":3,"backend":"{name}","values":"full","entry":"a.b","args":[]}}"#
             );

@@ -455,6 +455,50 @@ mod tests {
         }
     }
 
+
+    #[test]
+    fn zz_probe() {
+        let src = r#"struct Box { items: Vector<Int> }
+
+fn take(v: Set<Int>) -> Int { v.length() }
+
+fn f() -> Set<Int> { Set.of() }
+
+fn g() -> Map<String, Int> { Map.of() }
+
+fn h() -> Int {
+  let v: Vector<Int> = Vector.of()
+  v.length()
+}
+
+fn p() -> Int { take(Set.of()) }
+
+fn s() -> Box { Box(items: Vector.of()) }
+
+fn m(n: Int) -> Vector<Int> {
+  match n {
+    0 => Vector.of()
+    _ => Vector.of(1)
+  }
+}
+
+fn keep() -> Int {
+  let v = Vector.of(1, 2)
+  v.length()
+}
+"#;
+        let checked = compile(&[("main", src)]);
+        for name in ["Set.of()", "Map.of()", "Vector.of()", "take(Set.of())", "Box(items: Vector.of())", "Vector.of(1, 2)", "Vector.of(1)"] {
+            let mut found = Vec::new();
+            for expr in collect(checked.unit("main")) {
+                if checked.text("main", &expr) == name {
+                    found.push(format!("{}", checked.facts.ty(checked.file("main"), expr.id).map(|t| t.to_string()).unwrap_or("<none>".into())));
+                }
+            }
+            eprintln!("{name} => {found:?}");
+        }
+    }
+
     /// Resolves and checks modules written inline, the way the pipeline
     /// does, so the facts under test are the ones a consumer receives.
     #[track_caller]

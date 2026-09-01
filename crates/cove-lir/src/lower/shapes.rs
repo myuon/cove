@@ -70,6 +70,7 @@
 use std::collections::{BTreeSet, HashMap};
 use std::sync::Arc;
 
+use cove_schema::builtins::MAP_ENTRY;
 use cove_sema::resolve::Program as Checked;
 use cove_sema::typeck::Ty;
 
@@ -324,6 +325,49 @@ impl Shapes {
                 self.store_of(elem);
                 Some(self.intern(Layout::object("Vector", Shape::Vector { elem })))
             }
+            // A `Set` and a `Map` are sorted runs rather than hash tables,
+            // because the language says they iterate in ascending order and
+            // render that way: the order is part of the value. One layout per
+            // element layout, and one per *pair* for a map — a
+            // `Map<String, Int>` traces half its words and a `Map<Int, Int>`
+            // none of them, and the collector is told which by the layout
+            // rather than by looking.
+            Ty::Set(elem) => {
+                let elem = self.element(checked, module, elem)?;
+                Some(self.intern(Layout::object("Set", Shape::Members { elem })))
+            }
+            Ty::Map(key, value) => {
+                let key = self.element(checked, module, key)?;
+                let value = self.element(checked, module, value)?;
+                Some(self.intern(Layout::object("Map", Shape::Entries { key, value })))
+            }
+            // The pair a `Map` is built from and iterated as, and it is an
+            // ordinary inline struct: the entry a `Map.of` literal writes is
+            // the run of words its two fields occupy, and one entry of a
+            // `Shape::Entries` run is the same words in the same order — the
+            // key's, then the value's. That correspondence is why a `for` over
+            // a `Map` is one [`crate::Inst::LoadElem`] at this layout's width
+            // and needs nothing built per turn.
+            //
+            // The name is the checker's, and `cove_schema::builtins::MAP_ENTRY`
+            // is what both ends read the two field names off, so a value built
+            // here is one `cove_runtime::lvm::builtins::keyed` recognises.
+            Ty::MapEntry(..) => {
+                let declared = struct_fields(checked, module, ty)?;
+                let mut placed = Vec::with_capacity(declared.len());
+                for (field, ty) in &declared {
+                    placed.push((field.clone(), self.of(checked, module, ty)?));
+                }
+                let (fields, words) = struct_layout(&placed, &self.layouts);
+                Some(self.intern(Layout::inline(
+                    MAP_ENTRY.name,
+                    Shape::Struct {
+                        fields,
+                        opaque: false,
+                    },
+                    words,
+                )))
+            }
             Ty::Option(some) => {
                 let some = self.of(checked, module, some)?;
                 self.enum_of(
@@ -565,7 +609,9 @@ pub(super) fn declaring(checked: &Checked, module: &str, name: &str) -> Option<(
 ///
 /// `Error` is a struct like any other here: the language declares it with
 /// one `message: String`, and the alternative — a shape of its own — would
-/// be a second description of the same object.
+/// be a second description of the same object. `MapEntry` is the second one
+/// the language declares rather than a module, and its two fields are the
+/// labels `MapEntry(key:, value:)` is written with.
 pub(super) fn struct_fields(
     checked: &Checked,
     module: &str,
@@ -573,6 +619,10 @@ pub(super) fn struct_fields(
 ) -> Option<Vec<(Arc<str>, Ty)>> {
     match ty {
         Ty::Error => Some(vec![(Arc::from("message"), Ty::Str)]),
+        Ty::MapEntry(key, value) => Some(vec![
+            (Arc::from(MAP_ENTRY.fields[0].name), (**key).clone()),
+            (Arc::from(MAP_ENTRY.fields[1].name), (**value).clone()),
+        ]),
         Ty::Struct(name, args) if args.is_empty() => {
             let (owner, short) = declaring(checked, module, name)?;
             let entry = checked.modules.get(&owner)?.structs.get(&short)?;

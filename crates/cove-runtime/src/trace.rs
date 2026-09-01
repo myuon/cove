@@ -111,23 +111,33 @@ use crate::value::{Repr, Value};
 /// the question a version 3 replay asks first.
 pub const TRACE_FORMAT_VERSION: u32 = 3;
 
-/// Which of ADR 0019's two backends produced a recording.
+/// Which backend produced a recording.
 ///
 /// A trace is written by `cove run --trace`, by a built binary, and by a
-/// benchmark, and all three run a program on one of two evaluators. The
-/// header names which, so that `cove replay` can run the recording on the
-/// backend that made it without inferring anything, and can say so when it
-/// was told to do otherwise. ADR 0026 is the decision and its reasoning.
+/// benchmark, and all of them run a program on one of the evaluators this
+/// toolchain has. The header names which, so that `cove replay` can run the
+/// recording on the backend that made it without inferring anything, and can
+/// say so when it was told to do otherwise. ADR 0026 is the decision and its
+/// reasoning.
 ///
-/// A closed set rather than free text, spelled with the two names
-/// `--backend` accepts, so a reader that meets a third name refuses the file
-/// rather than carrying a string it cannot act on.
+/// A closed set rather than free text, spelled with the names `--backend`
+/// accepts, so a reader that meets an unknown name refuses the file rather
+/// than carrying a string it cannot act on.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RecordingBackend {
     /// The tree-walking interpreter, which ADR 0012 keeps as the oracle.
     Ast,
     /// The dedicated VM of ADR 0019, which ADR 0022 made the default.
     Vm,
+    /// The linear-memory backend of ADR 0034, while it is being built.
+    ///
+    /// Transitional, and named as such: `docs/LINEAR_VM.md` says this
+    /// spelling is deleted at the cutover, when the replacement takes the
+    /// name `vm`. A file written in the window between then and now names a
+    /// backend that will not exist, which is a window measured in commits and
+    /// a trade issue #240 took deliberately — the alternative was renaming
+    /// the *predecessor* and invalidating every trace anyone already has.
+    Lvm,
 }
 
 impl RecordingBackend {
@@ -137,6 +147,7 @@ impl RecordingBackend {
         match self {
             RecordingBackend::Ast => "ast",
             RecordingBackend::Vm => "vm",
+            RecordingBackend::Lvm => "lvm",
         }
     }
 
@@ -145,6 +156,7 @@ impl RecordingBackend {
         match text {
             "ast" => Some(RecordingBackend::Ast),
             "vm" => Some(RecordingBackend::Vm),
+            "lvm" => Some(RecordingBackend::Lvm),
             _ => None,
         }
     }
@@ -990,11 +1002,15 @@ mod tests {
         );
     }
 
-    /// The two spellings a header writes are the two `--backend` accepts, and
-    /// each parses back to what wrote it.
+    /// Every spelling a header writes is one `--backend` accepts, and each
+    /// parses back to what wrote it.
     #[test]
     fn a_recording_backend_round_trips_through_its_name() {
-        for backend in [RecordingBackend::Ast, RecordingBackend::Vm] {
+        for backend in [
+            RecordingBackend::Ast,
+            RecordingBackend::Vm,
+            RecordingBackend::Lvm,
+        ] {
             assert_eq!(RecordingBackend::parse(backend.as_str()), Some(backend));
         }
         assert_eq!(RecordingBackend::parse("jit"), None);

@@ -221,3 +221,51 @@ fn a_program_declares_the_scalars_whether_or_not_it_names_them() {
         ]
     );
 }
+
+/// `docs/LINEAR_VM.md`'s table: a `Set<T>` is `Members { elem }`, one layout
+/// per element layout, and a `Map<K, V>` is `Entries { key, value }`, one per
+/// *pair*.
+///
+/// The pair is what a map needs and an element layout would not give: a
+/// `Map<String, Int>` traces half its words and a `Map<Int, Int>` none of
+/// them, and the collector is told which by the layout rather than by
+/// looking. Both are one `Repr::Ref` word where a value of them sits, because
+/// both live in the heap.
+#[test]
+fn a_set_is_one_layout_per_element_and_a_map_one_per_pair() {
+    let held = layouts(
+        "fn f(a: Set<Int>, b: Set<String>, c: Set<Int>, d: Map<String, Int>, e: Map<Int, Int>) \
+         -> Int { a.length() + d.length() }",
+    );
+    let sets: Vec<&Layout> = held.iter().filter(|it| &*it.name == "Set").collect();
+    assert_eq!(sets.len(), 2);
+    assert_eq!(sets[0].words, vec![Repr::Ref]);
+    let maps: Vec<&Layout> = held.iter().filter(|it| &*it.name == "Map").collect();
+    assert_eq!(maps.len(), 2);
+    assert!(matches!(sets[0].shape, Shape::Members { .. }));
+    assert!(matches!(maps[0].shape, Shape::Entries { .. }));
+    let Shape::Entries { key, value } = maps[0].shape else {
+        unreachable!("a `Map` is a run of entries")
+    };
+    assert_eq!(held[key.index()].words, vec![Repr::Ref]);
+    assert_eq!(held[value.index()].words, vec![Repr::Int]);
+}
+
+/// A `MapEntry` is an ordinary inline struct, and its two words are the
+/// key's then the value's — which is exactly one entry of the `Entries` run a
+/// `Map` is.
+///
+/// That correspondence is load-bearing rather than a coincidence: it is what
+/// lets a `for` over a `Map` bind a pair with one `load-elem` at this
+/// layout's width, and what lets `Map.of` hand the machine the words a
+/// literal already wrote.
+#[test]
+fn a_map_entry_is_the_key_s_words_then_the_value_s() {
+    assert_eq!(
+        words(
+            "fn f() -> Map<String, Int> { Map.of(MapEntry(key: \"a\", value: 1)) }",
+            "MapEntry"
+        ),
+        vec![Repr::Ref, Repr::Int]
+    );
+}

@@ -329,6 +329,7 @@ impl Body<'_> {
             code: Vec::new(),
             spans: Vec::new(),
             loops: Vec::new(),
+            held: Vec::new(),
             answer,
             returns: func.ret.clone(),
         };

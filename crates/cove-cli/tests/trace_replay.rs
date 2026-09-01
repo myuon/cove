@@ -378,7 +378,7 @@ fn the_backend_flag_is_spelled_as_it_is_everywhere_else() {
         "an unknown backend must be refused rather than defaulted"
     );
     assert!(
-        stderr(&nonsense).contains("`--backend` must be `ast` or `vm`, found `jit`"),
+        stderr(&nonsense).contains("`--backend` must be `ast`, `vm` or `lvm`, found `jit`"),
         "{}",
         stderr(&nonsense)
     );
@@ -386,7 +386,7 @@ fn the_backend_flag_is_spelled_as_it_is_everywhere_else() {
     let bare = cove(&["replay", &trace, "restricted", "--backend"]);
     assert!(!bare.status.success(), "`--backend` needs a value");
     assert!(
-        stderr(&bare).contains("`--backend` needs a value: `ast` or `vm`"),
+        stderr(&bare).contains("`--backend` needs a value: `ast`, `vm` or `lvm`"),
         "{}",
         stderr(&bare)
     );

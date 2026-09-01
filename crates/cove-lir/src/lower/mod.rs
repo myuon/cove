@@ -222,6 +222,13 @@ struct Boundary {
     /// Whether the first parameter is the receiver: `self`, or the address
     /// `var self` names.
     receiver: bool,
+    /// Whether the last parameter collects the arguments the ones before it
+    /// did not take.
+    ///
+    /// One flag rather than a position, because the checker has already
+    /// refused a variadic parameter anywhere but last — `cove::type::
+    /// variadic_position` — and refused one written with a default.
+    variadic: bool,
 }
 
 /// Every declaration the package will have a [`Function`] for, numbered.
@@ -387,6 +394,7 @@ impl<'a> Plan<'a> {
             types: boundary.types.clone(),
             returns: boundary.returns,
             receiver: boundary.receiver,
+            variadic: boundary.variadic,
         })
     }
 }
@@ -398,13 +406,31 @@ struct CallShape {
     types: Vec<Ty>,
     returns: LayoutId,
     receiver: bool,
+    variadic: bool,
 }
 
 impl CallShape {
-    /// How many arguments the call site writes, which is every parameter but
-    /// the receiver.
-    fn arity(&self) -> usize {
+    /// How many parameters the call site writes, which is every one but the
+    /// receiver.
+    ///
+    /// It is no longer the number of *arguments* a call passes: a variadic
+    /// parameter takes any number and a defaulted one takes none, so what
+    /// lines a call up with a frame is [`Body::assign`] rather than a count.
+    fn written(&self) -> usize {
         self.params.len() - usize::from(self.receiver)
+    }
+
+    /// The layout of written parameter `at`, past the receiver.
+    fn param(&self, at: usize) -> LayoutId {
+        self.params[usize::from(self.receiver) + at]
+    }
+
+    /// The type of written parameter `at`, past the receiver.
+    ///
+    /// For a variadic one this is the *element* type, because that is what
+    /// each collected argument is.
+    fn ty(&self, at: usize) -> &Ty {
+        &self.types[usize::from(self.receiver) + at]
     }
 }
 
@@ -430,18 +456,6 @@ fn boundary_of(
         errors.push(gap::gap("an `async fn`", decl.span));
         ok = false;
     }
-    for param in &decl.params {
-        let what = if param.variadic {
-            "a variadic parameter"
-        } else if param.default.is_some() {
-            "a parameter with a default"
-        } else {
-            continue;
-        };
-        errors.push(gap::gap(what, param.span));
-        ok = false;
-    }
-
     let Some(signature) = checked.facts.signature(decl.span.file, decl.span) else {
         errors.push(gap::gap(
             "a declaration the checker recorded no signature for",
@@ -472,16 +486,29 @@ fn boundary_of(
         types.push(receiver.clone());
     }
     for (param, ty) in decl.params.iter().zip(&signature.params) {
-        match pool.shapes.of(checked, module, ty) {
+        // A variadic parameter is an immutable `Array<T>` inside the body
+        // whatever stands in front of it, and the signature records the
+        // element type `T` rather than the array — so the location the callee
+        // reads is one layout wider out than the one a written argument fits
+        // into. `Boundary::types` keeps the element type, because that is
+        // what each collected argument is erased to.
+        let held = if param.variadic {
+            Ty::Array(Box::new(ty.clone()))
+        } else {
+            ty.clone()
+        };
+        match pool.shapes.of(checked, module, &held) {
             // A `var` parameter is an ordinary slot whose `Repr` is `Addr`:
             // it names the caller's storage, so the word is the address of
             // it rather than a copy of what is in it. The type is still
             // read, because a type with no layout is a gap whichever side of
-            // the alias it is on.
-            Some(_) if param.is_var => params.push(shapes::ADDR),
+            // the alias it is on. A variadic one is not an alias whatever the
+            // source wrote, which is the `is_var && !variadic` the checker's
+            // own `ParamSig` records.
+            Some(_) if param.is_var && !param.variadic => params.push(shapes::ADDR),
             Some(layout) => params.push(layout),
             None => {
-                errors.push(describe(&pool.shapes, ty, param.span));
+                errors.push(describe(&pool.shapes, &held, param.span));
                 ok = false;
             }
         }
@@ -499,6 +526,7 @@ fn boundary_of(
 
     ok.then_some(Boundary {
         receiver: signature.receiver.is_some(),
+        variadic: decl.params.last().is_some_and(|param| param.variadic),
         params,
         types,
         returns,
@@ -641,6 +669,15 @@ struct Loop {
     /// How many scopes were open outside the body, so an early exit knows
     /// which ones it is leaving.
     depth: usize,
+    /// How many temporaries were live outside the loop, so an early exit
+    /// knows which ones it made and which ones it merely found.
+    ///
+    /// A `break` clears the temporaries above this mark and none below it.
+    /// The ones below are the loop's own machinery and the enclosing
+    /// expression's — the array a `for` is walking is read again after the
+    /// `break` lands, and an enclosing loop's is read for the rest of *its*
+    /// run.
+    held: usize,
     /// Jumps emitted by `break` with nowhere to go yet.
     breaks: Vec<Pc>,
     /// The location a `for` binds each turn, when it holds a reference.
@@ -672,6 +709,21 @@ struct Body<'a> {
     code: Vec<Inst>,
     spans: Vec<Span>,
     loops: Vec<Loop>,
+    /// The temporaries this body is holding that a collection would trace,
+    /// innermost last.
+    ///
+    /// A scope answers which *bindings* it owns, and that is what
+    /// [`Frame::pop_scope`] and [`Frame::refs_within`] are for. A temporary
+    /// belongs to no scope: it is the expression's own, and the expression
+    /// that made it ends its live range with [`Body::release`]. That works
+    /// for every path that reaches the release — and an early exit does not.
+    ///
+    /// `f(a, if c { b } else { break })` evaluates `a` into a temporary, and
+    /// the `break` leaves before the call that would have consumed it. The
+    /// scopes hold nothing about `a`, so `leave_turn` cleared the bindings
+    /// and the loop's element and left the temporary holding a reference for
+    /// the rest of the frame. This is the list that answers it.
+    held: Vec<(Slot, LayoutId)>,
     /// The location the body's answer is assembled in, and the one the
     /// trailing [`Inst::Return`] names.
     answer: Dest,
@@ -720,6 +772,7 @@ fn lower_function(
         code: Vec::new(),
         spans: Vec::new(),
         loops: Vec::new(),
+        held: Vec::new(),
         answer,
         returns: boundary.ret.clone(),
     };
@@ -835,8 +888,34 @@ impl Body<'_> {
     }
 
     /// A temporary location of `layout`.
+    ///
+    /// A temporary that holds a reference is recorded in [`Body::held`] for
+    /// the length of its live range, so that an early exit from a loop can
+    /// clear the ones a scope knows nothing about.
     fn temp(&mut self, layout: LayoutId) -> Val {
-        Val::temp(self.alloc(layout), layout)
+        let slot = self.alloc(layout);
+        if self.holds_ref(layout) {
+            self.hold(slot, layout);
+        }
+        Val::temp(slot, layout)
+    }
+
+    /// Records that a temporary at `slot` is live.
+    ///
+    /// Any earlier entry for the same slot is dropped first. A run holds one
+    /// value at a time — the frame only hands one out again after it has been
+    /// freed — so a second entry for a slot supersedes the first rather than
+    /// standing beside it, and a stale one would be a `Clear` of a location
+    /// something else is now using.
+    fn hold(&mut self, slot: Slot, layout: LayoutId) {
+        self.forget(slot);
+        self.held.push((slot, layout));
+    }
+
+    /// Ends the record of the temporary at `slot`, whether or not there was
+    /// one.
+    fn forget(&mut self, slot: Slot) {
+        self.held.retain(|(held, _)| *held != slot);
     }
 
     /// Gives a location's run back without ending anything's live range.
@@ -845,6 +924,7 @@ impl Body<'_> {
     /// for a run the lowering allocated and knows holds nothing.
     fn give_back(&mut self, slot: Slot, layout: LayoutId) {
         let width = self.width(layout);
+        self.forget(slot);
         self.frame.free(slot, width);
     }
 
@@ -950,6 +1030,18 @@ impl Body<'_> {
             self.pool.shapes.layout(layout).shape,
             crate::layout::Shape::Boxed
         )
+    }
+
+    /// The layout of one element of a run-of-elements family.
+    ///
+    /// `None` for everything else, because everything else is not a run: the
+    /// question is asked where a lowering holds a sequence's own layout and
+    /// needs the stride, which is the element layout's width.
+    fn element_layout(&self, layout: LayoutId) -> Option<LayoutId> {
+        match self.pool.shapes.layout(layout).shape {
+            crate::layout::Shape::Elements { elem, .. } => Some(elem),
+            _ => None,
+        }
     }
 
     /// Whether a value of this layout is one word of scalar bits, which is

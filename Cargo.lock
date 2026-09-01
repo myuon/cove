@@ -18,6 +18,7 @@ version = "0.1.0"
 dependencies = [
  "cove-diag",
  "cove-ir",
+ "cove-lir",
  "cove-runtime",
  "cove-sema",
  "cove-syntax",

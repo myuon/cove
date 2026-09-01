@@ -1131,6 +1131,7 @@ impl Body<'_> {
         self.loops.push(Loop {
             head,
             depth: self.frame.depth(),
+            held: self.held.len(),
             breaks: Vec::new(),
             element: None,
         });
@@ -1181,11 +1182,13 @@ impl Body<'_> {
         if let Some(value) = value {
             self.discard(value);
         }
-        let Some((depth, element)) = self.loops.last().map(|it| (it.depth, it.element)) else {
+        let Some((depth, held, element)) =
+            self.loops.last().map(|it| (it.depth, it.held, it.element))
+        else {
             self.errors.push(gap::gap("a `break` outside a loop", span));
             return;
         };
-        self.leave_turn(depth, element, span);
+        self.leave_turn(depth, held, element, span);
         let at = self.emit(Inst::Jump { to: PENDING }, span);
         self.loops
             .last_mut()
@@ -1195,14 +1198,16 @@ impl Body<'_> {
     }
 
     fn continue_expr(&mut self, span: Span) {
-        let Some((head, depth, element)) =
-            self.loops.last().map(|it| (it.head, it.depth, it.element))
+        let Some((head, depth, held, element)) = self
+            .loops
+            .last()
+            .map(|it| (it.head, it.depth, it.held, it.element))
         else {
             self.errors
                 .push(gap::gap("a `continue` outside a loop", span));
             return;
         };
-        self.leave_turn(depth, element, span);
+        self.leave_turn(depth, held, element, span);
         self.emit(Inst::Jump { to: head }, span);
     }
 
@@ -1221,7 +1226,33 @@ impl Body<'_> {
     /// may be the one that continues: the rule is that a binding dies when
     /// the turn it belonged to does, and a lowering that relied on the next
     /// turn's overwrite would be relying on there being one.
-    fn leave_turn(&mut self, depth: usize, element: Option<Dest>, span: Span) {
+    ///
+    /// # A temporary belongs to no scope, and was the hole
+    ///
+    /// `f(a, if c { b } else { break })` evaluates `a` into a temporary and
+    /// then leaves the expression through the `break`, so nothing ever
+    /// reaches the [`Body::release`] that would have ended `a`'s live range.
+    /// The scopes hold nothing about it and the loop's element is not it, so
+    /// the object stayed reachable from a slot of a live frame for as long as
+    /// the frame lived — a leak rather than a crash, and one at every call
+    /// site rather than only in a walk.
+    ///
+    /// [`Body::held`] is what answers it, and `held` is the mark the loop
+    /// took when it began: everything above it is a temporary this turn made
+    /// and nothing above it is read once the jump lands. The ones below are
+    /// the loop's own machinery — the array a `for` walks is read again at
+    /// the end the `break` jumps to — and an enclosing expression's, which
+    /// the enclosing expression still owns.
+    ///
+    /// They are cleared before the bindings, which is the reverse of the
+    /// order they were made in.
+    fn leave_turn(&mut self, depth: usize, held: usize, element: Option<Dest>, span: Span) {
+        let temporaries: Vec<(Slot, LayoutId)> = self.held[held.min(self.held.len())..]
+            .iter()
+            .rev()
+            .copied()
+            .collect();
+        self.clear(&temporaries, span);
         let clears = self.frame.refs_within(depth);
         self.clear(&clears, span);
         if let Some(element) = element {
@@ -1310,10 +1341,10 @@ impl Body<'_> {
             if shapes::case_at(self.checked, self.module, &ty, name).is_some() {
                 return self.enum_case(expr, &ty, name, args);
             }
-            // `Point(x: 1, y: 2)`, and `Error("...")`, which is the same
-            // shape with the field declared by the language rather than by
-            // a module.
-            if matches!(ty, Ty::Struct(..) | Ty::Error) {
+            // `Point(x: 1, y: 2)`, and `Error("...")` and
+            // `MapEntry(key: k, value: v)`, which are the same shape with the
+            // fields declared by the language rather than by a module.
+            if matches!(ty, Ty::Struct(..) | Ty::Error | Ty::MapEntry(..)) {
                 return self.struct_literal(expr, &ty, args);
             }
         }
@@ -1339,11 +1370,11 @@ impl Body<'_> {
             if shapes::case_at(self.checked, self.module, &ty, name).is_some() {
                 return self.enum_case(expr, &ty, name, args);
             }
-            // `Vector.of(1, 2)`: an associated function of a builtin type,
-            // written through the type's own name rather than through a
-            // value.
+            // `Vector.of(1, 2)`, `Set.of(1, 2)`, `Map.of(...)`: an
+            // associated function of a builtin type, written through the
+            // type's own name rather than through a value.
             if name == "of" && collections::namespace_of(head, &ty) {
-                return self.vector_of(expr, args);
+                return self.collection_of(expr, head, args);
             }
             // `Int.parse(text)`, `Duration.millis(n)`: the rest of them,
             // which the machine performs rather than the instruction set.

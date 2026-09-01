@@ -13,4 +13,5 @@ cove-diag.workspace = true
 cove-syntax.workspace = true
 cove-sema.workspace = true
 cove-ir.workspace = true
+cove-lir.workspace = true
 cove-runtime.workspace = true

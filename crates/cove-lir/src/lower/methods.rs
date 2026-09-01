@@ -35,7 +35,7 @@
 //! `docs/LINEAR_VM.md` asks for — a walk in the IR rather than a builtin that
 //! calls back — is a branch and one [`Inst::CallClosure`] here, and that is
 //! work this lowering has not done. `cove_lir::lower::walks` is where the
-//! three that *are* walks live.
+//! four that *are* walks live.
 
 use cove_diag::Span;
 use cove_sema::typeck::Ty;
@@ -71,8 +71,14 @@ impl Body<'_> {
         // method call is meeting one. It matters for a vector: the machine
         // finds the store to grow into by looking the family up in this
         // table, and a program that only ever receives a vector from
-        // somewhere else would otherwise declare no store for it.
-        if matches!(ty, Ty::Array(_) | Ty::Vector(_)) && self.layout(&ty, base.span).is_none() {
+        // somewhere else would otherwise declare no store for it. A `Set` and
+        // a `Map` are the same case — `Set.inserted` answers a new object of
+        // the receiver's own family, and the machine reads that family out of
+        // the receiver's header rather than out of the table, but a program
+        // that only ever receives one still has to have declared it.
+        if matches!(ty, Ty::Array(_) | Ty::Vector(_) | Ty::Set(_) | Ty::Map(..))
+            && self.layout(&ty, base.span).is_none()
+        {
             return self.dead(expr);
         }
         match &ty {
@@ -84,6 +90,8 @@ impl Body<'_> {
                 let elem = (**elem).clone();
                 self.vector_method(expr, base, &elem, name, args)
             }
+            Ty::Set(_) => self.set_method(expr, base, name, args),
+            Ty::Map(..) => self.map_method(expr, base, name, args),
             Ty::Option(_) | Ty::Result(..) => self.answer_method(expr, base, &ty, name, args),
             _ => {
                 let Some(receiver) = receiver_name(&ty) else {
@@ -226,11 +234,26 @@ impl Body<'_> {
 
     /// The argument shapes a builtin method has no place for, named as the
     /// source writes them.
+    ///
+    /// # A label is not a permutation here either
+    ///
+    /// `items.sorted(by: fn(a, b) { a < b })` is written with the parameter
+    /// name the schema declares, and nothing here reorders anything. The
+    /// checker has already refused a label out of declaration order, a
+    /// positional argument after a labelled one, and a repeated label; and no
+    /// builtin method declares a parameter with a default, so a list that
+    /// arity-checks lines up with the parameters one for one. That is
+    /// [`Body::operands`]'s reasoning, said of the table
+    /// `cove_schema::builtins` writes rather than of a declaration.
+    ///
+    /// What is left is the two an operand list has no room for. A `var`
+    /// argument is an address and a builtin takes values; a spread expands
+    /// into a variadic, and the two builtins that declare one — `Set.of` and
+    /// `Map.of` — collect their operands from the call site, so the expansion
+    /// would have to happen here and has not been written.
     pub(super) fn plain_arguments(&self, args: &[Arg]) -> Option<&'static str> {
         args.iter().find_map(|arg| {
-            if arg.label.is_some() {
-                Some("a labelled argument to a builtin method")
-            } else if arg.is_var {
+            if arg.is_var {
                 Some("a `var` argument to a builtin method")
             } else if arg.spread {
                 Some("a spread argument to a builtin method")

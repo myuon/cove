@@ -130,6 +130,15 @@ reference. A dead reference slot holds null, the collector traces nothing
 from it, and the object is unreachable at the next collection rather than at
 the next return.
 
+**"At a temporary's last use" is the intent, and a diverging sub-expression
+is where it is hard.** In `f(a, if c { b } else { break })` the last use of
+`a` on the taken path is not where the release was written, because control
+left the expression. A temporary belongs to no scope, so clearing scope
+bindings does not reach it. The lowering therefore keeps a list of the
+temporaries currently holding a reference, and an early exit clears the ones
+above the mark the loop took — everything above it is this turn's and nothing
+above it is read after the jump lands.
+
 ## One slot is one word; one value may occupy several
 
 This is the rule the whole representation turns on, and it replaces an
@@ -261,6 +270,7 @@ and reference maps.
 | `Vector<T>` | `Vector`, `[len, store]` over an `Elements` store | element layout |
 | `Set<T>` | `Members`, sorted and distinct | element layout |
 | `Map<K, V>` | `Entries`, sorted by key | key/value layout pair |
+| `MapEntry<K, V>` | `Struct { key, value }`, inline | key/value layout pair |
 | `Range` | `Struct { start: Int, end: Int, inclusive: Bool }` | the program |
 | a function value | one `Ref` word, `Word(Ref)` | the program |
 | a closure environment | `Closure`, captures inline | lowered lambda |
@@ -280,6 +290,17 @@ to read, and `xs.map(double)` and `xs.map(fn(x) { ... })` are one lowering.
 A `Set` and a `Map` are sorted runs rather than hash tables, because the
 language says they iterate in ascending order and render that way: the order
 is part of the value, not an implementation's leftovers.
+
+**One entry of an `Entries` run is a `MapEntry`** — the key's words then the
+value's, in that order and at that width. That correspondence is load-bearing
+rather than incidental: it is what lets a `for` over a `Map` bind an entry
+with one element load, and what lets `Map.of` read the entries it is given
+without unpacking them.
+
+`Members` and `Entries` objects are element-addressable at their own width,
+exactly as `Elements` is. `LoadElem` and `Len` are about a run of equal-width
+things and not about arrays, so a `for` over a `Set` needs nothing an array
+does not.
 
 A `Vector` is the one collection with an indirection inside it, and it earns
 it: its identity is observable, so growing must not move the object a program
@@ -357,6 +378,19 @@ Two consequences are worth naming, because they are the reason to prefer it:
   machine copies the words `Function::returns` describes.
 - Captures follow the parameters, each occupying the words its own layout
   says, copied out of the closure environment before the body runs.
+
+Two things a call site has to answer that the frame layout does not:
+
+- **The caller builds a variadic's array.** The parameter is one ordinary
+  location holding one ordinary `Array<T>`, so the callee's frame has nothing
+  special in it and no instruction knows a variadic exists.
+- **The caller evaluates a default, in the callee's scope.** A default may
+  name an earlier parameter, so it is lowered at the call site with the
+  parameters before it bound to the locations the call already wrote — which
+  is where the tree-walking oracle evaluates it. That costs no extra frame,
+  no extra call and no change to the convention; the alternatives were a
+  hidden "was it supplied" parameter, a function per arity, or a thunk per
+  default.
 
 ## A place is a one-word address
 

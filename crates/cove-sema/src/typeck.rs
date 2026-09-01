@@ -5513,7 +5513,7 @@ impl<'a> Checker<'a> {
             return Some(Ty::recovery());
         }
         if cove_schema::is_builtin_type(head) {
-            return Some(self.builtin_associated(head, name, args, trailing, span));
+            return Some(self.builtin_associated(head, name, args, trailing, span, expected));
         }
         None
     }
@@ -5986,6 +5986,7 @@ impl<'a> Checker<'a> {
     /// The signatures come from [`cove_schema::builtins`], the same table the
     /// runtime's `call_associated` dispatches out of. A spread argument is
     /// left to the runtime, which rejects one in any of these calls.
+    #[allow(clippy::too_many_arguments)]
     fn builtin_associated(
         &mut self,
         type_name: &str,
@@ -5993,6 +5994,7 @@ impl<'a> Checker<'a> {
         args: &[Arg],
         trailing: Option<&Expr>,
         span: Span,
+        expected: Option<&Expected>,
     ) -> Ty {
         // An associated function is called on the type, so nothing binds the
         // receiver's parameters: the `T` of `Vector.of(items: T...)` is the
@@ -6020,7 +6022,89 @@ impl<'a> Checker<'a> {
         };
         let sig = builtin_sig(declared, &[], &[], None);
         let what = format!("`{type_name}.{}`", name.node);
-        self.call_builtin(&sig, &what, args, trailing, span)
+        let mut subst = self.builtin_arguments(&sig, &what, args, trailing, span);
+        self.settle_from_expectation(&sig, &mut subst, expected);
+        // `Vector.of()`, `Set.of()` and `Map.of()` are the empty collection
+        // literals, and an empty one has no argument to read its element
+        // type off. If the place that holds it did not say either, then
+        // nothing did, and every element-typed operation on the value after
+        // this point is unchecked — the same hole an empty array literal
+        // leaves, named the same way rather than left silent.
+        let unsettled = sig.generics.iter().any(|g| !subst.contains_key(g));
+        if unsettled
+            && args.is_empty()
+            && trailing.is_none()
+            && !Checker::accounted_for(expected)
+        {
+            let example = Checker::example_of(&sig, &subst);
+            self.diagnostics.push(unconstrained(
+                format!("nothing says what this empty `{type_name}` holds"),
+                format!(
+                    "write the type on the place that holds it, as in `let value: {example} = {type_name}.{}()`",
+                    name.node
+                ),
+                span,
+            ));
+        }
+        self.open(&sig.ret, &sig.generics, &subst)
+    }
+
+    /// The type parameters the place holding this value settles, for the
+    /// ones its arguments did not.
+    ///
+    /// `Vector.of()` has no argument to read its `T` off, and a declared
+    /// return type, a `let` annotation, a parameter, a field or an argument
+    /// position states it. Reading it back off the expected type is the step
+    /// [`FreeBindings::read_off`] takes for `Ok(1)`, and it is [`unify`]
+    /// here because a builtin's signature has already become a [`Ty`]: the
+    /// result type is matched against what the call site asked for, and the
+    /// parameters that meet a type there are bound to it.
+    ///
+    /// An argument is still what settles a parameter it mentions. This runs
+    /// after [`Checker::builtin_arguments`] and only ever adds bindings, so
+    /// `Vector.of(1, 2)` in a place expecting a `Vector<String>` is the same
+    /// mismatch it always was rather than an argument checked against the
+    /// place. And the whole match is discarded unless it succeeds, so a
+    /// half-read expectation cannot settle one parameter out of two.
+    fn settle_from_expectation(
+        &mut self,
+        sig: &BuiltinSig,
+        subst: &mut BTreeMap<Arc<str>, Ty>,
+        expected: Option<&Expected>,
+    ) {
+        if sig.generics.iter().all(|g| subst.contains_key(g)) {
+            return;
+        }
+        let Some(expected) = expected else {
+            return;
+        };
+        let generics: BTreeSet<Arc<str>> = sig.generics.iter().cloned().collect();
+        let mut found = subst.clone();
+        if unify(&sig.ret, &expected.ty, &generics, &mut found, &self.view()) {
+            *subst = found;
+        }
+    }
+
+    /// The type an unsettled empty literal's diagnostic suggests writing.
+    ///
+    /// It is this signature's own result with a type in each parameter it
+    /// still has no binding for, so the correction reads back as the thing
+    /// the program would have written: `Vector<Int>`, `Set<Int>`,
+    /// `Map<String, Int>`. A key is a `String` because that is what a map
+    /// keyed by anything else is the exception to.
+    fn example_of(sig: &BuiltinSig, subst: &BTreeMap<Arc<str>, Ty>) -> Ty {
+        let example: BTreeMap<Arc<str>, Ty> = sig
+            .generics
+            .iter()
+            .map(|g| {
+                let ty = subst.get(g).cloned().unwrap_or(match g.as_ref() {
+                    "K" => Ty::Str,
+                    _ => Ty::Int,
+                });
+                (g.clone(), ty)
+            })
+            .collect();
+        sig.ret.substitute(&example)
     }
 
     /// `MapEntry(key: ..., value: ...)`: a synthesized labeled call, exactly
@@ -7202,6 +7286,26 @@ impl<'a> Checker<'a> {
         trailing: Option<&Expr>,
         span: Span,
     ) -> Ty {
+        let subst = self.builtin_arguments(sig, what, args, trailing, span);
+        self.open(&sig.ret, &sig.generics, &subst)
+    }
+
+    /// The arguments of a builtin call, checked against the parameters, and
+    /// what they settled the signature's own type parameters to.
+    ///
+    /// Split out from [`Checker::call_builtin`] so that an associated
+    /// function can look at the bindings before its result is opened: an
+    /// empty `Vector.of()` settles nothing here and the place that holds it
+    /// is what says what it holds. See
+    /// [`Checker::settle_from_expectation`].
+    fn builtin_arguments(
+        &mut self,
+        sig: &BuiltinSig,
+        what: &str,
+        args: &[Arg],
+        trailing: Option<&Expr>,
+        span: Span,
+    ) -> BTreeMap<Arc<str>, Ty> {
         let last = sig.params.len().saturating_sub(1);
         let params: Vec<ParamSig> = sig
             .params
@@ -7216,7 +7320,7 @@ impl<'a> Checker<'a> {
                 span,
             })
             .collect();
-        let subst = self.match_arguments(
+        self.match_arguments(
             &params,
             &sig.generics,
             BTreeMap::new(),
@@ -7225,8 +7329,7 @@ impl<'a> Checker<'a> {
             span,
             what,
             "the parameter",
-        );
-        self.open(&sig.ret, &sig.generics, &subst)
+        )
     }
 
     /// Reports a method called as an associated function, or an associated

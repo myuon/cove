@@ -85,6 +85,11 @@ impl Body<'_> {
                 // to the name, and that has already been decided.
                 let layout = held.layout;
                 let slot = if held.temp {
+                    // The scope owns the run from here, so it is the scope
+                    // that clears it: the binding stops being a temporary
+                    // this body is holding at the moment the name is given
+                    // to it.
+                    self.forget(held.slot);
                     held.slot
                 } else {
                     let slot = self.alloc(layout);

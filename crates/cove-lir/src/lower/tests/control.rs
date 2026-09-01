@@ -140,3 +140,74 @@ fn0 m.early(Int) -> Int
 "
     );
 }
+
+/// A temporary held across a **diverging** sub-expression is cleared on the
+/// path that leaves, and that is a fix rather than a tidying.
+///
+/// `both("{x}", if total > 0 { x } else { break })` evaluates the
+/// interpolated string into `s9` and then leaves the call through the
+/// `break`. Nothing ever reaches the release that would have ended `s9`'s
+/// live range, and `s9` belongs to no scope and is not the loop's element —
+/// so before this the object stayed reachable from a slot of a live frame
+/// for the rest of the frame. A leak rather than a crash, and one at every
+/// call site rather than only in a walk.
+///
+/// Instructions 16–18 are the answer, in the order a turn ends in: the
+/// temporaries this turn made, innermost first, then the bindings its scopes
+/// own, then the element. `s8` is the element and is cleared by the loop
+/// because the loop owns it; `s9` and `s10` are cleared because
+/// [`Body::held`](super::super::Body) records every temporary that holds a
+/// reference and the loop took a mark of that list when it began.
+///
+/// What is *not* cleared is as much of the point: `s3`, the array being
+/// walked, is below the mark and is read again at 26, where the `break`'s
+/// jump lands.
+#[test]
+fn a_break_clears_the_temporaries_the_turn_was_holding() {
+    assert_eq!(
+        listing(
+            "fn both(a: String, b: String) -> Int { 0 }\n\
+             fn f(xs: Array<String>) -> Int {\n  \
+               var total = 0\n  \
+               for x in xs {\n    \
+                 total = both(\"{x}\", if total > 0 { x } else { break })\n  \
+               }\n  \
+               total\n\
+             }",
+            "f"
+        ),
+        "\
+fn1 m.f(Array) -> Int
+  frame 13: s0!:ref s1:int s2:int s3:ref s4:int s5:int s6:int s7:bool s8:ref s9:ref s10:ref s11:int s12:unit
+     0  int s2:int 0
+     1  copy s3:ref s0:ref Array
+     2  len s4:int s3:ref
+     3  int s5:int 0
+     4  int s6:int 1
+     5  jump 7
+     6  add.int s5:int s5:int s6:int
+     7  lt.int s7:bool s5:int s4:int
+     8  branch-false s7:bool 26
+     9  load-elem s8:ref s3:ref s5:int String
+    10  call-builtin s9:ref String.interpolate (s8:String)
+    11  int s11:int 0
+    12  gt.int s7:bool s2:int s11:int
+    13  branch-false s7:bool 16
+    14  copy s10:ref s8:ref String
+    15  jump 20
+    16  clear s10:ref String
+    17  clear s9:ref String
+    18  clear s8:ref String
+    19  jump 26
+    20  call s11:int m.both (s9:String s10:String)
+    21  clear s10:ref String
+    22  clear s9:ref String
+    23  copy s2:int s11:int Int
+    24  clear s8:ref String
+    25  jump 6
+    26  clear s3:ref Array
+    27  copy s1:int s2:int Int
+    28  return s1:int
+"
+    );
+}

@@ -95,6 +95,15 @@ fn generate_one(path: Option<&Path>, name: &str, flags: &RunFlags) -> Result<(),
                 sources: sources.clone(),
             })
         }
+        // The same moment, on the backend that has gaps rather than
+        // refusals: nothing is written, and what is shown is where the
+        // lowering stopped.
+        Err(ExecuteError::NotLowered(items)) => {
+            return Err(CliError::Diagnostics {
+                items,
+                sources: sources.clone(),
+            })
+        }
         Err(ExecuteError::Runtime(error)) => {
             return Err(CliError::Diagnostics {
                 items: vec![runtime_failure(&program, module, entry, &error)],
@@ -149,6 +158,12 @@ fn generate_check(path: Option<&Path>, flags: &RunFlags) -> Result<(), CliError>
             Err(ExecuteError::Unsupported(why)) => {
                 return Err(CliError::Diagnostics {
                     items: vec![crate::unsupported_by_backend(&why)],
+                    sources: sources.clone(),
+                })
+            }
+            Err(ExecuteError::NotLowered(items)) => {
+                return Err(CliError::Diagnostics {
+                    items,
                     sources: sources.clone(),
                 })
             }

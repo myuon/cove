@@ -49,10 +49,11 @@ use cove_runtime::process::{Process, ProcessLog};
 use cove_runtime::runtime::Runtime;
 use cove_runtime::value::Value;
 use cove_runtime::vm::Vm;
+use cove_runtime::Lvm;
 use cove_sema::capability::open_reasons;
 use cove_sema::resolve::DeclaredTest;
 
-use crate::{load, Backend, CliError};
+use crate::{load, Backend, CliError, Executable};
 
 /// The diagnostic a failing test is reported as.
 const FAILED: &str = "cove::test::failed";
@@ -60,7 +61,7 @@ const FAILED: &str = "cove::test::failed";
 /// reported as.
 const NO_HOST: &str = "cove::test::no_host";
 
-/// Runs `cove test [path] [--filter <substring>] [--backend <ast|vm>]`.
+/// Runs `cove test [path] [--filter <substring>] [--backend <ast|vm|lvm>]`.
 pub(crate) fn cmd_test(args: &[String]) -> Result<(), CliError> {
     let mut filter: Option<&str> = None;
     let mut path: Option<&Path> = None;
@@ -77,11 +78,12 @@ pub(crate) fn cmd_test(args: &[String]) -> Result<(), CliError> {
             }
             "--backend" => {
                 let value = args.get(i + 1).ok_or_else(|| {
-                    CliError::Message("`--backend` needs a value: `ast` or `vm`".to_string())
+                    CliError::Message(format!("`--backend` needs a value: {}", Backend::NAMES))
                 })?;
                 backend = Backend::parse(value).ok_or_else(|| {
                     CliError::Message(format!(
-                        "`--backend` must be `ast` or `vm`, found `{value}`"
+                        "`--backend` must be {}, found `{value}`",
+                        Backend::NAMES
                     ))
                 })?;
                 i += 1;
@@ -102,6 +104,25 @@ pub(crate) fn cmd_test(args: &[String]) -> Result<(), CliError> {
 
     let sources = Arc::new(sources);
     let program = Arc::new(program);
+
+    // The replacement lowers the package, not the entry, so the suite gets
+    // one lowering rather than one per test — and a gap in it stops the
+    // command rather than the test that reached it. That is the opposite of
+    // what `--backend vm` does below, and it is not a choice made here:
+    // `cove_lir::lower` has no reachable-set slice because its target is that
+    // every valid checked program lowers, so there is no per-test refusal for
+    // this command to report. Until that target is met, one test's gap is
+    // every test's.
+    let linear = match backend {
+        Backend::Lvm => Some(Arc::new(cove_lir::lower(&program).map_err(|items| {
+            CliError::Diagnostics {
+                items,
+                sources: Arc::clone(&sources),
+            }
+        })?)),
+        Backend::Ast | Backend::Vm => None,
+    };
+
     let all = program.tests();
     let selected = select(&all, filter);
 
@@ -115,6 +136,7 @@ pub(crate) fn cmd_test(args: &[String]) -> Result<(), CliError> {
             &sources,
             &program,
             backend,
+            linear.as_ref(),
         ) {
             None => println!("{}", result_line("ok", &name)),
             Some(diagnostic) => {
@@ -161,6 +183,7 @@ fn run_test(
     sources: &Arc<SourceMap>,
     program: &Arc<cove_sema::resolve::Program>,
     backend: Backend,
+    linear: Option<&Arc<cove_lir::Program>>,
 ) -> Option<Diagnostic> {
     let required: Vec<&str> = test
         .entry
@@ -208,9 +231,17 @@ fn run_test(
     // about them.
     let lowered = match backend {
         Backend::Ast => None,
+        // Lowered once for the whole suite, by `cmd_test`, for the reason it
+        // gives there. Missing it is this file's own bug and not a reason to
+        // run the test somewhere else: ADR 0019's no-silent-fallback rule
+        // covers a backend that was asked for and never arrived, so this
+        // fails loudly rather than reporting a pass the interpreter earned.
+        Backend::Lvm => Some(Executable::Linear(Arc::clone(
+            linear.expect("`cmd_test` lowers the package before any test runs on `lvm`"),
+        ))),
         Backend::Vm => match cove_ir::lower::lower_entry(program, test.module, test.name) {
             Ok(lowered) => match cove_ir::lower::validate(&lowered.program) {
-                Ok(()) => Some(Arc::new(lowered.program)),
+                Ok(()) => Some(Executable::Vm(Arc::new(lowered.program))),
                 Err(why) => {
                     return Some(
                         Diagnostic::error(
@@ -230,13 +261,24 @@ fn run_test(
 
     let runtime = Runtime::new(Arc::clone(program), Arc::clone(sources), Arc::new(hosts));
     let (outcome, assertion) = match &lowered {
-        Some(ir) => {
+        Some(Executable::Vm(ir)) => {
             let mut vm = Vm::new(&runtime, runtime.hosts(), ir);
             let outcome = vm.run_entry(test.module, test.name, Vec::new());
             let assertion = vm
                 .assertion_failure()
                 .map(|(span, message)| (span, message.to_string()));
             (outcome, assertion)
+        }
+        // No recorded assertion, and none is invented: the linear-memory
+        // machine does not keep the span of the last assertion that failed,
+        // so a failure on it is reported at the test's own name rather than
+        // at a position taken from somewhere else. What the test said is
+        // unaffected; where the report points is weaker, and saying so is
+        // better than pointing confidently at the wrong line.
+        Some(Executable::Linear(ir)) => {
+            let mut lvm = Lvm::new(&runtime, runtime.hosts(), ir);
+            let outcome = lvm.run_entry(test.module, test.name, Vec::new());
+            (outcome, None)
         }
         None => {
             let mut interpreter = Interpreter::new(&runtime);
@@ -463,7 +505,7 @@ mod tests {
             .tests()
             .iter()
             .map(|test| {
-                let outcome = run_test(test, root, &allow_real, &sources, &program, backend);
+                let outcome = run_test(test, root, &allow_real, &sources, &program, backend, None);
                 (
                     test.qualified_name(),
                     outcome.map(|diagnostic| diagnostic.message),
@@ -526,6 +568,7 @@ mod tests {
             &sources,
             &program,
             Backend::Vm,
+            None,
         )
         .expect("the test fails");
         let rendered = render(&sources, &diagnostic);
@@ -663,6 +706,7 @@ test fn describesThroughDynDispatch() -> Result<Unit, Error> {
             &sources,
             &program,
             Backend::Vm,
+            None,
         )
         .expect("the boundary refuses the call");
         assert!(

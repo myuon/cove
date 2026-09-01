@@ -15,7 +15,7 @@
 //!
 //! # Which backend a replay runs on
 //!
-//! Whichever `--backend <ast|vm>` names, and when nobody names one, the
+//! Whichever `--backend <ast|vm|lvm>` names, and when nobody names one, the
 //! backend the trace says recorded it. ADR 0023 gave this command the flag
 //! and ADR 0026 gave the file the answer; what follows is what the two mean
 //! together here.
@@ -85,12 +85,12 @@ use cove_runtime::schema::ModuleSchema;
 use cove_runtime::vm::Vm;
 use cove_runtime::Transfer;
 use cove_runtime::{
-    value_to_json, Budget, Cancellation, Grants, Limits, RecordingBackend, ResourceHandle,
+    value_to_json, Budget, Cancellation, Grants, Limits, Lvm, RecordingBackend, ResourceHandle,
     RunOutcome, RuntimeError, Value, ValueCapture,
 };
 
 use crate::trace::{self, Outcome, Trace};
-use crate::{Backend, CliError};
+use crate::{Backend, CliError, Executable};
 
 /// One recorded call a replay can answer.
 struct Step {
@@ -500,7 +500,7 @@ impl HostApi for ReplayHost {
     }
 }
 
-/// `cove replay <trace> <run-name> [--backend <ast|vm>]`.
+/// `cove replay <trace> <run-name> [--backend <ast|vm|lvm>]`.
 pub(crate) fn cmd_replay(args: &[String]) -> Result<(), CliError> {
     // `--backend` comes out first, by the one function `cove generate` reads
     // it with, so the flag means the same thing and refuses an unknown value
@@ -601,7 +601,18 @@ pub(crate) fn cmd_replay(args: &[String]) -> Result<(), CliError> {
             cove_ir::lower::validate(&ir).map_err(|why| {
                 CliError::Message(format!("the lowering of this program is not valid: {why}"))
             })?;
-            Some(Arc::new(ir))
+            Some(Executable::Vm(Arc::new(ir)))
+        }
+        // The same place, for the same reason. What arrives is a list of
+        // diagnostics rather than one refusal, because the replacement
+        // lowers the package and reports every gap in it; a replay that
+        // cannot be run is still a replay that reads no tape.
+        Backend::Lvm => {
+            let ir = cove_lir::lower(&program).map_err(|items| CliError::Diagnostics {
+                items,
+                sources: Arc::clone(&sources),
+            })?;
+            Some(Executable::Linear(Arc::new(ir)))
         }
     };
 
@@ -638,13 +649,19 @@ pub(crate) fn cmd_replay(args: &[String]) -> Result<(), CliError> {
     let ending = Arc::new(EndingSink::default());
     let runtime = Runtime::new(Arc::clone(&program), sources.clone(), Arc::new(hosts))
         .with_trace(ending.clone());
-    // One entry, one of two backends, and the same three arguments either
-    // way: `run_entry` is the seam ADR 0019 puts them behind, and a replay
-    // reaches it exactly as a run does. What differs between the two replays
-    // is which evaluator is built; the tape they read is the same object,
-    // reached through the one `HostApi` boundary both backends share.
+    // One entry, one backend of several, and the same three arguments
+    // whichever it is: `run_entry` is the seam ADR 0019 puts them behind, and
+    // a replay reaches it exactly as a run does. What differs between two
+    // replays is which evaluator is built; the tape they read is the same
+    // object, reached through the one `HostApi` boundary every backend
+    // shares.
     let outcome = match &lowered {
-        Some(ir) => Vm::new(&runtime, runtime.hosts(), ir).run_entry(module, entry, program_args),
+        Some(Executable::Vm(ir)) => {
+            Vm::new(&runtime, runtime.hosts(), ir).run_entry(module, entry, program_args)
+        }
+        Some(Executable::Linear(ir)) => {
+            Lvm::new(&runtime, runtime.hosts(), ir).run_entry(module, entry, program_args)
+        }
         None => Interpreter::new(&runtime).run_entry(module, entry, program_args),
     };
 

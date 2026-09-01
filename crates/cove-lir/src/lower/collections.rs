@@ -1,7 +1,7 @@
-//! Sequences, ranges, and the loop that walks them.
+//! Collections, ranges, and the loop that walks them.
 //!
-//! Three families of value and one form: an `Array`, a `Vector`, a `Range`,
-//! and the `for` that iterates any of them.
+//! Five families of value and one form: an `Array`, a `Vector`, a `Set`, a
+//! `Map`, a `Range`, and the `for` that iterates any of them.
 //!
 //! # A loop walks what the oracle walks
 //!
@@ -18,8 +18,10 @@
 //!   at the top and not the ones it has part way through.
 //!
 //! An `Array` is immutable, so holding the object *is* the snapshot and a
-//! walk over it costs nothing extra. A `Vector` can be pushed to from inside
-//! the body it is being walked by, so the loop takes a copy first — one
+//! walk over it costs nothing extra; a `Set` and a `Map` are immutable for
+//! the same reason — `inserted` and `removed` answer new objects — so neither
+//! is copied either. A `Vector` can be pushed to from inside the body it is
+//! being walked by, so the loop takes a copy first — one
 //! [`Inst::CallBuiltin`] of `Vector.toArray`, which is the same copy
 //! `items_of` makes when it clones the elements out.
 //!
@@ -157,6 +159,66 @@ impl Body<'_> {
         dst
     }
 
+    /// `Vector.of(...)`, `Set.of(...)`, `Map.of(...)`: the three collections
+    /// a program writes through the type's own name.
+    pub(super) fn collection_of(&mut self, expr: &Expr, head: &str, args: &[Arg]) -> Val {
+        match head {
+            "Vector" => self.vector_of(expr, args),
+            "Set" => self.keyed_of(expr, args, "Set"),
+            _ => self.keyed_of(expr, args, "Map"),
+        }
+    }
+
+    /// `Set.of(a, b, c)` and `Map.of(MapEntry(key: k, value: v), ...)`.
+    ///
+    /// The operands are the elements — for a `Map`, the `MapEntry` values the
+    /// literal built, which is the shape `cove_runtime::lvm::builtins::keyed`
+    /// reads a pair out of. The machine places each one where it belongs as it
+    /// arrives, so the run is sorted at every step and a duplicate is refused
+    /// rather than collapsed; none of that is something an instruction
+    /// expresses, so it is one [`Inst::CallBuiltin`].
+    ///
+    /// **A literal with nothing in it is allocated rather than called.** The
+    /// machine refuses `Set.of()` and `Map.of()` because a word says nothing
+    /// about its family and the element layout is what the collector traces
+    /// by — so the empty one has to be built where the layout is known, which
+    /// is here. That is the rule [`Body::vector_of`] already follows, said of
+    /// the two families whose emptiness a call could not describe.
+    fn keyed_of(&mut self, expr: &Expr, args: &[Arg], what: &str) -> Val {
+        let Some(ty) = self.owned_ty(expr) else {
+            return self.dead(expr);
+        };
+        let Some(layout) = self.layout(&ty, expr.span) else {
+            return self.dead(expr);
+        };
+        if let Some(bad) = self.plain_arguments(args) {
+            return self.gap(bad, expr);
+        }
+
+        let mut held = Vec::with_capacity(args.len());
+        for arg in args {
+            held.push(self.expr(&arg.value));
+        }
+        let dst = self.temp(layout);
+        if args.is_empty() {
+            self.emit(
+                Inst::Alloc {
+                    dst: dst.slot,
+                    layout,
+                    len: Len::Count(0),
+                },
+                expr.span,
+            );
+            return dst;
+        }
+        let passed: Vec<crate::program::Arg> = held.iter().map(Val::arg).collect();
+        self.emit_builtin(dst.slot, what, "of", &passed, layout, expr.span);
+        for value in held.into_iter().rev() {
+            self.release(value, expr.span);
+        }
+        dst
+    }
+
     /// `Vector.of(a, b, c)`: a store holding the elements, and a header
     /// naming it.
     ///
@@ -280,19 +342,7 @@ impl Body<'_> {
         args: &[Arg],
     ) -> Val {
         match (name, args.len()) {
-            ("length", 0) | ("isEmpty", 0) => {
-                let obj = self.expr(base);
-                let len = self.temp(shapes::INT);
-                self.emit(
-                    Inst::Len {
-                        dst: len.slot,
-                        obj: obj.slot,
-                    },
-                    expr.span,
-                );
-                self.release(obj, expr.span);
-                self.length_answer(expr, name, len)
-            }
+            ("length", 0) | ("isEmpty", 0) => self.header_length(expr, base, name),
             ("get", 1) => {
                 let Some(element) = self.layout(elem, expr.span) else {
                     return self.dead(expr);
@@ -313,7 +363,7 @@ impl Body<'_> {
                 self.release(obj, expr.span);
                 answer
             }
-            ("map", 1) | ("filter", 1) | ("fold", 2) => {
+            ("map", 1) | ("filter", 1) | ("sorted", 1) | ("fold", 2) => {
                 let elem = elem.clone();
                 let items = self.expr(base);
                 let obj = self.own_iterable(items, expr.span);
@@ -376,7 +426,7 @@ impl Body<'_> {
             // `Vector` shares its storage and the callback may reach the very
             // vector being walked. That is `Vector.toArray`, which is the
             // copy the oracle makes for the same reason at the same point.
-            ("map", 1) | ("filter", 1) | ("fold", 2) => {
+            ("map", 1) | ("filter", 1) | ("sorted", 1) | ("fold", 2) => {
                 let elem = elem.clone();
                 let items = self.expr(base);
                 let Some(snapshot) = self.vector_snapshot(&items, &elem, base.span) else {
@@ -391,6 +441,61 @@ impl Body<'_> {
             }
             _ => self.gap(&format!("`Vector.{name}`"), expr),
         }
+    }
+
+    /// `members.length()`, `members.isEmpty()`, and everything else a `Set`
+    /// answers.
+    ///
+    /// A `Set` is a run of members in the object, so its length is the
+    /// object's own header length and reading it is one [`Inst::Len`] — the
+    /// same split an `Array` is under. The machine's table has a
+    /// `Set.length` too and the two agree about the answer; what differs is
+    /// that the lowering already knows where to read it.
+    ///
+    /// The rest go to the machine, because each of them is a binary search
+    /// over the order [`cove_runtime::lvm::builtins::key`] defines or a run
+    /// built sorted in one pass, and neither is something an instruction
+    /// expresses.
+    pub(super) fn set_method(&mut self, expr: &Expr, base: &Expr, name: &str, args: &[Arg]) -> Val {
+        match (name, args.len()) {
+            ("length", 0) | ("isEmpty", 0) => self.header_length(expr, base, name),
+            _ if HANDED_OVER.contains(&("Set", name)) => {
+                self.machine_call(expr, Some(base), "Set", name, args)
+            }
+            _ => self.gap(&format!("`Set.{name}`"), expr),
+        }
+    }
+
+    /// `entries.length()`, `entries.isEmpty()`, and everything else a `Map`
+    /// answers.
+    ///
+    /// The header's length counts *entries* rather than words, so the same
+    /// [`Inst::Len`] a `Set` reads its member count with reads a map's entry
+    /// count. See [`Body::set_method`] for why the rest are the machine's.
+    pub(super) fn map_method(&mut self, expr: &Expr, base: &Expr, name: &str, args: &[Arg]) -> Val {
+        match (name, args.len()) {
+            ("length", 0) | ("isEmpty", 0) => self.header_length(expr, base, name),
+            _ if HANDED_OVER.contains(&("Map", name)) => {
+                self.machine_call(expr, Some(base), "Map", name, args)
+            }
+            _ => self.gap(&format!("`Map.{name}`"), expr),
+        }
+    }
+
+    /// How many elements the receiver's own header says it holds, or whether
+    /// that is zero.
+    fn header_length(&mut self, expr: &Expr, base: &Expr, name: &str) -> Val {
+        let obj = self.expr(base);
+        let len = self.temp(shapes::INT);
+        self.emit(
+            Inst::Len {
+                dst: len.slot,
+                obj: obj.slot,
+            },
+            expr.span,
+        );
+        self.release(obj, expr.span);
+        self.length_answer(expr, name, len)
     }
 
     /// The length itself, or whether it is zero.
@@ -563,7 +668,7 @@ impl Body<'_> {
     /// `items_of` clones the elements out before the first turn, so a body
     /// that pushes onto the vector it is walking sees the same elements it
     /// started with.
-    fn vector_snapshot(&mut self, vector: &Val, elem: &Ty, span: Span) -> Option<Val> {
+    pub(super) fn vector_snapshot(&mut self, vector: &Val, elem: &Ty, span: Span) -> Option<Val> {
         let array = Ty::Array(Box::new(elem.clone()));
         let layout = self.layout(&array, span)?;
         let dst = self.temp(layout);
@@ -575,26 +680,49 @@ impl Body<'_> {
 
     /// `for x in <iterable> { ... }`.
     ///
-    /// Which walk it is comes from the iterable's type, and the three the
-    /// oracle defines for a sequence and a range are two walks here: a range
-    /// counts, and both sequences read elements out of a run of words. A
-    /// `Map` and a `Set` iterate too, and are left as gaps rather than
-    /// approximated — `items_of` says a map yields a `MapEntry` per pair and
-    /// a set yields its elements in ascending order, and neither is an index
-    /// walk.
+    /// Which walk it is comes from the iterable's type, and the five the
+    /// oracle defines are two walks here: a range counts, and everything else
+    /// reads a run of words out of an object.
+    ///
+    /// A `Set` and a `Map` join the second because of what their layouts are.
+    /// `interp::items_of` says a set yields its elements in ascending order
+    /// and a map a `MapEntry` per pair in ascending key order — and a
+    /// `Shape::Members` object *is* that run of elements, while a
+    /// `Shape::Entries` object is that run of pairs, each of them the key's
+    /// words then the value's, which is exactly the `MapEntry` struct's own
+    /// layout. So both are the same [`Inst::LoadElem`] at the right width,
+    /// and nothing is built per turn.
+    ///
+    /// Neither needs a snapshot. An `Array` is immutable, so holding the
+    /// object *is* the snapshot; a `Set` and a `Map` are immutable for the
+    /// same reason — `inserted` and `removed` are past participles and answer
+    /// new objects. Only a `Vector` shares its storage, and only a `Vector`
+    /// is copied first.
     pub(super) fn for_expr(&mut self, binding: &Ident, iterable: &Expr, body: &Block, span: Span) {
         let Some(ty) = self.owned_ty(iterable) else {
             return;
         };
         match &ty {
             Ty::Range => self.for_range(binding, iterable, body, span),
-            Ty::Array(elem) => {
+            Ty::Array(elem) | Ty::Set(elem) => {
                 let elem = (**elem).clone();
                 let Some(element) = self.layout(&elem, iterable.span) else {
                     return;
                 };
                 let value = self.expr(iterable);
                 let obj = self.own_iterable(value, span);
+                self.for_elements(obj, element, binding, body, span);
+            }
+            // One entry is the key's words then the value's, which is what
+            // the `MapEntry` the checker settled for the binding is: one
+            // load at that layout's width answers the pair whole.
+            Ty::Map(key, value) => {
+                let entry = Ty::MapEntry(key.clone(), value.clone());
+                let Some(element) = self.layout(&entry, iterable.span) else {
+                    return;
+                };
+                let held = self.expr(iterable);
+                let obj = self.own_iterable(held, span);
                 self.for_elements(obj, element, binding, body, span);
             }
             // The copy is the snapshot, and it is taken before the first
@@ -880,6 +1008,7 @@ impl Body<'_> {
         self.loops.push(Loop {
             head: step,
             depth: self.frame.depth(),
+            held: self.held.len(),
             breaks: Vec::new(),
             element: holds.then_some(Dest {
                 slot: element,
@@ -1035,8 +1164,13 @@ impl Body<'_> {
 /// The four that take a closure are not here and never will be. A builtin
 /// that invoked the closure would re-enter the dispatch loop from inside a
 /// Rust function, which is the one thing `docs/LINEAR_VM.md` asks this
-/// backend not to do — so `map`, `filter` and `fold` are loops in the IR, in
-/// `cove_lir::lower::walks`, and `sorted` is a gap naming itself.
+/// backend not to do — so `map`, `filter`, `fold` and `sorted` are all loops
+/// in the IR, in `cove_lir::lower::walks`.
+///
+/// A `Set` and a `Map` are here for the whole of their tables but `length`
+/// and `isEmpty`: both are sorted runs, so every one of these is a binary
+/// search over the order `cove_runtime::lvm::builtins::key` defines or a run
+/// built sorted in one pass.
 ///
 /// It is a list rather than a fall-through, because what this lowering emits
 /// is a contract the machine is written against: a name that reached the
@@ -1056,13 +1190,27 @@ const HANDED_OVER: &[(&str, &str)] = &[
     ("Vector", "slice"),
     ("Vector", "freeze"),
     ("Vector", "toArray"),
+    ("Set", "contains"),
+    ("Set", "inserted"),
+    ("Set", "removed"),
+    ("Set", "toArray"),
+    ("Map", "get"),
+    ("Map", "contains"),
+    ("Map", "keys"),
+    ("Map", "values"),
+    ("Map", "inserted"),
+    ("Map", "removed"),
 ];
 
-/// Whether the checker knows `name` as a builtin type that is written as a
-/// namespace: `Vector.of(1, 2)`.
+/// Whether the checker knows `head` as a builtin type that is written as a
+/// namespace, and `ty` as what its `of` answers: `Vector.of(1, 2)`,
+/// `Set.of(1, 2)`, `Map.of(MapEntry(key: "a", value: 1))`.
 ///
-/// Only the one this lowering has been taught, because the answer is used to
-/// decide what to emit rather than to describe the language.
+/// Only the three this lowering has been taught, because the answer is used
+/// to decide what to emit rather than to describe the language.
 pub(super) fn namespace_of(head: &str, ty: &Ty) -> bool {
-    head == "Vector" && matches!(ty, Ty::Vector(_))
+    matches!(
+        (head, ty),
+        ("Vector", Ty::Vector(_)) | ("Set", Ty::Set(_)) | ("Map", Ty::Map(..))
+    )
 }

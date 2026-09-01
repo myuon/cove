@@ -15,7 +15,7 @@ use cove_runtime::host::HostRegistry;
 use cove_runtime::interp::Interpreter;
 use cove_runtime::vm::Vm;
 use cove_runtime::{
-    create_trace_file, Budget, Cancellation, HeapStats, JsonlSink, Limits, NullSink,
+    create_trace_file, Budget, Cancellation, HeapStats, JsonlSink, Limits, Lvm, NullSink,
     RecordingBackend, Runtime, TraceEvent, TraceHeader, TraceSink, ValueCapture,
 };
 use cove_sema::capability::open_reasons;
@@ -88,14 +88,25 @@ and how many instructions the run executed — the figure a change to the
 lowering is judged by, because wall time moves for many reasons and that
 moves for one.
 
+`cove run --backend lvm` runs the entry on the linear-memory backend ADR 0034
+decides, while it is being built. It is opt-in and nothing defaults to it. Two
+things about it differ from `vm` and both are temporary: it lowers the whole
+package rather than what the entry reaches, so a construct it has not been
+taught stops every entry of that package and not only the ones reaching it;
+and what stops it is a compile error naming the gap rather than a refusal,
+because it has no admission predicate to answer. `cove build` does not offer
+it: a built binary embeds its backend, and this one is not embeddable yet.
+
 `cove test` runs every `test fn` in the package, reports each one, and exits
 non-zero when any failed. `--filter` runs only the tests whose qualified name
-contains the given substring, and `--backend <ast|vm>` chooses which backend
-runs them, defaulting to the VM as `cove run` does. Each test is lowered on
-its own, so a construct the VM cannot run fails that test and not the suite. Each test is granted exactly the capabilities
-its call graph requires, with each host's fake implementation, so a suite is
-deterministic; `cove.toml`'s `[test] allow_real = [...]` names the
-capabilities to grant for real instead.
+contains the given substring, and `--backend <ast|vm|lvm>` chooses which
+backend runs them, defaulting to the VM as `cove run` does. Each test is
+lowered on its own, so a construct the VM cannot run fails that test and not
+the suite — except on `lvm`, which lowers the package once for the whole
+suite and so fails all of it or none. Each test is granted exactly the
+capabilities its call graph requires, with each host's fake implementation,
+so a suite is deterministic; `cove.toml`'s `[test] allow_real = [...]` names
+the capabilities to grant for real instead.
 
 `cove api snapshot` derives the package's public interface from source and
 writes it to `cove-api.txt` at the package root, or to `--out <file>`. Check
@@ -123,8 +134,8 @@ generate: `cove generate` is the only command that runs project code besides
 an explicit `run`. `cove generate --check` regenerates every run that sets
 `generates` into memory, compares it against what is on disk, and exits
 non-zero on the first file that differs, which is the form to run in CI.
-`--backend <ast|vm>` chooses the backend a generator runs on, defaulting to
-the VM; it is the only `cove run` flag `cove generate` takes, because every
+`--backend <ast|vm|lvm>` chooses the backend a generator runs on, defaulting
+to the VM; it is the only `cove run` flag `cove generate` takes, because every
 other budget is `[run.<name>]`'s.
 
 `cove trace` reads a JSONL trace written by `cove run --trace` and prints a
@@ -137,8 +148,8 @@ program's own computation runs for real; only the Host API boundary is canned,
 so no host is called and nothing outside the process changes. A replay exits
 non-zero when it diverges: the program asked for a call the trace does not
 have, asked for a different one, or stopped before using them all.
-`--backend <ast|vm>` chooses which backend replays it, defaulting since ADR
-0026 to the one the trace says recorded it rather than to `cove run`'s
+`--backend <ast|vm|lvm>` chooses which backend replays it, defaulting since
+ADR 0026 to the one the trace says recorded it rather than to `cove run`'s
 default, so an ordinary replay is a same-backend replay and is one by reading
 the file. Naming the flag replays across backends deliberately, which stays
 supported; the summary and every divergence report then say so, because a
@@ -153,7 +164,7 @@ literal `--` is a program argument, even if it looks like a flag):
   --trace <path>        write a JSONL trace to <path>, or `-` for stderr
   --trace-values <mode> `full` (the default) records each host call's arguments and result, which is what `cove replay` needs; `redacted` records only their types
   --max-tasks <n>       stop the run when it would hold more than <n> tasks at once
-  --backend <ast|vm>    which backend runs the entry: `vm`, the dedicated VM of ADR 0019 and the default, or `ast`, the tree-walking interpreter and the semantic oracle
+  --backend <ast|vm|lvm>  which backend runs the entry: `vm`, the dedicated VM of ADR 0019 and the default, `ast`, the tree-walking interpreter and the semantic oracle, or `lvm`, the linear-memory backend of ADR 0034 while it is being built
   --stats               print the backend's lowering and execution times and the instructions it executed, then fuel spent, host calls, irreversible writes, elapsed time, host-call wait, and the heap, to stderr
   --files-root <path>   the one directory the `files` host may reach; defaults to `files/` in the package
   --allow-exec <path>   an absolute path `process.run` may start; repeat to allow more, and omit to allow none
@@ -989,6 +1000,7 @@ fn cmd_run(args: &[String]) -> Result<(), CliError> {
             items: vec![unsupported_by_backend(&why)],
             sources,
         }),
+        Err(ExecuteError::NotLowered(items)) => Err(CliError::Diagnostics { items, sources }),
         Err(ExecuteError::Runtime(error)) => Err(CliError::Diagnostics {
             items: vec![runtime_failure(&program, module, entry, &error)],
             sources,
@@ -1092,6 +1104,19 @@ pub(crate) enum ExecuteError {
     /// makes it a failure at all rather than a reason to use the other
     /// backend.
     Unsupported(cove_ir::Unsupported),
+    /// `--backend lvm` met something its lowering could not emit code for.
+    ///
+    /// Diagnostics rather than a refusal, and that is the difference ADR
+    /// 0034 draws: `cove-lir` has no admission predicate to answer, so what
+    /// stops it is either a gap in the lowering or a type the checker never
+    /// settled, and both are already `cove_diag::Diagnostic`s pointing at
+    /// source. The CLI renders them exactly as it renders a compile error,
+    /// because that is what they are — including the ones whose text says
+    /// the fault is the backend's.
+    ///
+    /// A `Vec`, because a whole package is lowered at once and one run of it
+    /// finds every gap rather than the first.
+    NotLowered(Vec<Diagnostic>),
 }
 
 /// Runs `run`'s entry under the capabilities `[run.<name>] allow` grants and
@@ -1145,9 +1170,26 @@ pub(crate) fn execute_entry(
                 ExecuteError::Setup(format!("the lowering of this program is not valid: {why}"))
             })?;
             Some(Lowered {
-                ir: Arc::new(ir),
+                program: Executable::Vm(Arc::new(ir)),
                 lower,
-                validate: started.elapsed(),
+                validate: Some(started.elapsed()),
+            })
+        }
+        // The replacement lowers the *package*, not the entry: `cove_lir`
+        // has no reachable-set slice and needs none, since its target is
+        // that every valid checked program lowers rather than that every
+        // entry avoids what the backend cannot run. The consequence is
+        // visible here and nowhere else: a gap anywhere in the package stops
+        // every entry of it, where a refusal stops only the entries that
+        // reach one. That is the price of not having an admission predicate,
+        // and it is temporary in the way the gaps are.
+        Backend::Lvm => {
+            let started = Instant::now();
+            let ir = cove_lir::lower(program).map_err(ExecuteError::NotLowered)?;
+            Some(Lowered {
+                program: Executable::Linear(Arc::new(ir)),
+                lower: started.elapsed(),
+                validate: None,
             })
         }
     };
@@ -1244,28 +1286,44 @@ pub(crate) fn execute_entry(
     let runtime =
         Runtime::new(Arc::clone(program), Arc::clone(sources), Arc::new(hosts)).with_trace(sink);
 
-    // One entry, one of two backends, and the same three arguments either
-    // way: `run_entry` is the seam ADR 0019 puts them behind, so what differs
-    // between a `--backend ast` run and a `--backend vm` run is which one is
+    // One entry, one backend of three, and the same three arguments whichever
+    // it is: `run_entry` is the seam ADR 0019 puts them behind, so what
+    // differs between one `--backend` and another is which evaluator is
     // built and nothing else about how it is called.
     let started = Instant::now();
-    let (outcome, heap, instructions) = match &lowered {
-        Some(lowered) => {
-            let mut vm = Vm::new(&runtime, runtime.hosts(), &lowered.ir);
+    let (outcome, memory, instructions) = match lowered.as_ref().map(|l| &l.program) {
+        Some(Executable::Vm(ir)) => {
+            let mut vm = Vm::new(&runtime, runtime.hosts(), ir);
             let outcome = vm.run_entry(module, entry, program_args);
-            (outcome, vm.heap_stats(), Some(vm.instructions()))
+            (
+                outcome,
+                Memory::Objects(vm.heap_stats()),
+                Some(vm.instructions()),
+            )
+        }
+        Some(Executable::Linear(ir)) => {
+            let mut lvm = Lvm::new(&runtime, runtime.hosts(), ir);
+            let outcome = lvm.run_entry(module, entry, program_args);
+            (
+                outcome,
+                Memory::Words {
+                    held: lvm.heap_words(),
+                    handed_out: lvm.allocated_words(),
+                },
+                Some(lvm.instructions()),
+            )
         }
         None => {
             let mut interpreter = Interpreter::new(&runtime);
             let outcome = interpreter.run_entry(module, entry, program_args);
-            (outcome, interpreter.heap_stats(), None)
+            (outcome, Memory::Objects(interpreter.heap_stats()), None)
         }
     };
     let execution = started.elapsed();
 
     if flags.stats {
         print_backend_stats(flags.backend, lowered.as_ref(), execution, instructions);
-        print_stats(runtime.hosts(), &wait_total, &heap);
+        print_stats(runtime.hosts(), &wait_total, &memory);
     }
 
     outcome.map_err(ExecuteError::Runtime)
@@ -1281,9 +1339,47 @@ pub(crate) fn execute_entry(
 /// The program is what the entry reaches, so the figure measures what was
 /// lowered rather than what the package happened to hold beside it.
 struct Lowered {
-    ir: Arc<cove_ir::Program>,
+    program: Executable,
     lower: Duration,
-    validate: Duration,
+    /// What checking the lowering cost, for a backend that checks it as a
+    /// phase of its own.
+    ///
+    /// `None` for the linear-memory backend rather than zero, and for the
+    /// reason the interpreter reports no lowering time: `cove_lir::lower`
+    /// verifies what it emitted before it answers, so there is no second
+    /// phase to time, and a zero here would read as a measurement of one.
+    validate: Option<Duration>,
+}
+
+/// The program a backend was handed, in the IR that backend reads.
+///
+/// Two IRs rather than one behind a trait: they share no instruction, no
+/// storage region and no naming convention — `docs/LINEAR_VM.md` says so and
+/// means it — so an abstraction over the pair would have exactly two
+/// implementations and one user, and would outlive neither. At the cutover
+/// one arm is deleted and this enum goes with it.
+pub(crate) enum Executable {
+    Vm(Arc<cove_ir::Program>),
+    Linear(Arc<cove_lir::Program>),
+}
+
+/// What a run's memory did, in the figures its own backend counts.
+///
+/// The two backends do not count the same things, and neither one's figures
+/// can be derived from the other's: the predecessor's heap is a set of
+/// objects and reports how many were allocated, freed and live, while the
+/// linear memory is a run of words and reports how many it holds and how
+/// many it handed out. Reporting one in the other's shape would mean either
+/// inventing object counts the machine never kept or printing zeros that
+/// read as measurements.
+enum Memory {
+    Objects(HeapStats),
+    Words {
+        /// Words the heap region occupies, free blocks included.
+        held: u64,
+        /// Words handed out over the whole run, reuse counted each time.
+        handed_out: u64,
+    },
 }
 
 /// Prints which backend ran the entry, what each phase cost, and how many
@@ -1310,8 +1406,13 @@ fn print_backend_stats(
     };
     match lowered {
         Some(lowered) => eprintln!(
-            "backend: {backend} lower={:?} validate={:?} execute={:?} instructions={counted}",
-            lowered.lower, lowered.validate, execution
+            "backend: {backend} lower={:?} validate={} execute={:?} instructions={counted}",
+            lowered.lower,
+            match lowered.validate {
+                Some(validate) => format!("{validate:?}"),
+                None => "in-lower".to_string(),
+            },
+            execution
         ),
         None => {
             eprintln!("backend: {backend} lower=none execute={execution:?} instructions={counted}")
@@ -1394,17 +1495,30 @@ impl RunFlags {
     }
 }
 
-/// Which of the two backends ADR 0019 leaves in place runs the entry.
+/// Which backend runs the entry.
 ///
 /// The VM is the default since ADR 0022. The interpreter stays selectable,
 /// and stays the oracle: a backend checked against it is presumed wrong when
 /// the two disagree, whichever of them a run reached by default.
+///
+/// [`Backend::Lvm`] is a third for as long as the replacement ADR 0034
+/// decides is being built. It is opt-in and changes no default: what decides
+/// when it becomes the default is the corpus, measured by
+/// `crates/cove-cli/tests/lvm_coverage.rs`, and not the fact that the flag
+/// exists.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum Backend {
     /// The tree-walking interpreter.
     Ast,
     /// The dedicated VM, over the executable IR.
     Vm,
+    /// The linear-memory backend of ADR 0034, over `cove-lir`.
+    ///
+    /// `docs/LINEAR_VM.md` calls this name transitional: at the cutover the
+    /// predecessor is deleted and this takes the name `vm`. Nothing is built
+    /// here to make `lvm` permanent — no alias, no deprecation path, no
+    /// second spelling — because the spelling is scheduled to disappear.
+    Lvm,
 }
 
 impl Backend {
@@ -1427,9 +1541,19 @@ impl Backend {
         match value {
             "ast" => Some(Backend::Ast),
             "vm" => Some(Backend::Vm),
+            "lvm" => Some(Backend::Lvm),
             _ => None,
         }
     }
+
+    /// What `--backend` accepts, as a message names them.
+    ///
+    /// One string rather than a literal at each command, for the reason
+    /// [`Backend::default_for_a_run`] is one function: the set of names is
+    /// one fact, five commands refuse an unknown one, and a list written out
+    /// five times is a list that can be extended in four places. It is also
+    /// what makes removing `lvm` at the cutover a single edit.
+    pub(crate) const NAMES: &'static str = "`ast`, `vm` or `lvm`";
 
     /// This backend as a trace header names it.
     ///
@@ -1442,6 +1566,7 @@ impl Backend {
         match self {
             Backend::Ast => RecordingBackend::Ast,
             Backend::Vm => RecordingBackend::Vm,
+            Backend::Lvm => RecordingBackend::Lvm,
         }
     }
 
@@ -1454,12 +1579,13 @@ impl Backend {
         match backend {
             RecordingBackend::Ast => Backend::Ast,
             RecordingBackend::Vm => Backend::Vm,
+            RecordingBackend::Lvm => Backend::Lvm,
         }
     }
 }
 
-/// Splits `--backend <ast|vm>` out of a command's arguments, leaving the rest
-/// in the order they were written.
+/// Splits `--backend <ast|vm|lvm>` out of a command's arguments, leaving the
+/// rest in the order they were written.
 ///
 /// It may appear anywhere, exactly as it may on `cove run`: one flag spelled
 /// two ways depending on which command it is passed to would be a flag with
@@ -1492,11 +1618,12 @@ pub(crate) fn split_backend_if_named(
     while i < args.len() {
         if args[i] == "--backend" {
             let value = args.get(i + 1).ok_or_else(|| {
-                CliError::Message("`--backend` needs a value: `ast` or `vm`".to_string())
+                CliError::Message(format!("`--backend` needs a value: {}", Backend::NAMES))
             })?;
             backend = Some(Backend::parse(value).ok_or_else(|| {
                 CliError::Message(format!(
-                    "`--backend` must be `ast` or `vm`, found `{value}`"
+                    "`--backend` must be {}, found `{value}`",
+                    Backend::NAMES
                 ))
             })?);
             i += 2;
@@ -1513,6 +1640,7 @@ impl std::fmt::Display for Backend {
         f.write_str(match self {
             Backend::Ast => "ast",
             Backend::Vm => "vm",
+            Backend::Lvm => "lvm",
         })
     }
 }
@@ -1614,7 +1742,8 @@ fn parse_run_flags(args: &[String]) -> Result<RunFlags, CliError> {
                 let value = flag_value(args, &mut i, "--backend")?;
                 flags.backend = Backend::parse(&value).ok_or_else(|| {
                     CliError::Message(format!(
-                        "`--backend` must be `ast` or `vm`, found `{value}`"
+                        "`--backend` must be {}, found `{value}`",
+                        Backend::NAMES
                     ))
                 })?;
             }
@@ -1734,7 +1863,7 @@ impl TraceSink for CompositeSink {
 /// live, and how long tasks were stopped for. `pause` is summed over threads,
 /// so a run whose tasks collected at the same time can report more pause than
 /// it took wall-clock time.
-fn print_stats(hosts: &HostRegistry, wait_total: &WaitTotal, heap: &HeapStats) {
+fn print_stats(hosts: &HostRegistry, wait_total: &WaitTotal, memory: &Memory) {
     let counters =
         hosts.with_budget(|budget| (budget.fuel_spent(), budget.host_calls(), budget.elapsed()));
     if let Some((fuel_spent, host_calls, elapsed)) = counters {
@@ -1747,16 +1876,22 @@ fn print_stats(hosts: &HostRegistry, wait_total: &WaitTotal, heap: &HeapStats) {
             wait_total.get(),
         );
     }
-    eprintln!(
-        "heap: allocated={} allocated_bytes={} collections={} freed={} live_bytes={} peak_bytes={} pause={:?}",
-        heap.allocated_objects,
-        heap.allocated_bytes,
-        heap.collections,
-        heap.freed_objects,
-        heap.live_bytes,
-        heap.peak_bytes,
-        heap.pause,
-    );
+    match memory {
+        Memory::Objects(heap) => eprintln!(
+            "heap: allocated={} allocated_bytes={} collections={} freed={} live_bytes={} peak_bytes={} pause={:?}",
+            heap.allocated_objects,
+            heap.allocated_bytes,
+            heap.collections,
+            heap.freed_objects,
+            heap.live_bytes,
+            heap.peak_bytes,
+            heap.pause,
+        ),
+        Memory::Words { held, handed_out } => eprintln!(
+            "memory: heap_words={held} heap_bytes={} allocated_words={handed_out}",
+            held * 8
+        ),
+    }
 }
 
 /// An entry returning `Err(...)` fails the run and prints the error.
@@ -2266,7 +2401,10 @@ module auth
             .expect("an unknown backend should be refused");
         match error {
             CliError::Message(message) => {
-                assert_eq!(message, "`--backend` must be `ast` or `vm`, found `jit`")
+                assert_eq!(
+                    message,
+                    "`--backend` must be `ast`, `vm` or `lvm`, found `jit`"
+                )
             }
             _ => panic!("expected a message"),
         }
@@ -2300,11 +2438,11 @@ module auth
         for (given, expected) in [
             (
                 vec!["--backend", "jit"],
-                "`--backend` must be `ast` or `vm`, found `jit`",
+                "`--backend` must be `ast`, `vm` or `lvm`, found `jit`",
             ),
             (
                 vec!["--backend"],
-                "`--backend` needs a value: `ast` or `vm`",
+                "`--backend` needs a value: `ast`, `vm` or `lvm`",
             ),
         ] {
             let Err(CliError::Message(message)) = split_backend(&args(&given)) else {
@@ -2342,7 +2480,10 @@ module auth
         else {
             panic!("an unknown backend should be refused with a message");
         };
-        assert_eq!(message, "`--backend` must be `ast` or `vm`, found `jit`");
+        assert_eq!(
+            message,
+            "`--backend` must be `ast`, `vm` or `lvm`, found `jit`"
+        );
     }
 
     /// A backend and the name a trace header writes it under are the same two

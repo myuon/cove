@@ -9,13 +9,22 @@
 //! `cove-lir` and `lvm` take the names `cove-ir` and `vm`.
 //!
 //! The memory, the dispatch loop, the boundary and [`Lvm`] — the type an
-//! embedder eventually holds — all exist; what does not is the wiring that
-//! reaches them from outside the crate. That is why the whole module is still
-//! allowed to be dead code: every item below is reached from its own tests,
-//! from [`Lvm`], and from nothing else. The allowance comes out when the CLI
-//! is wired up, and it is deliberately one line in one place rather than an
-//! attribute per item, so that removing it is a single edit whose failure
-//! lists exactly what is still unused.
+//! embedder holds — all exist, and since `cove run --backend lvm` the last
+//! of those is reached from outside the crate: [`Lvm`] is re-exported from
+//! the crate root and nothing else here is, because what a caller can name
+//! is the whole of what this boundary decides. A word, a layout, a
+//! [`mem::Memory`] and a [`exec::Machine`] are the representation, and a
+//! representation that leaves the crate is one that cannot be changed
+//! without changing somebody else's code.
+//!
+//! The dead-code allowance stays, and what it now covers is narrower than
+//! what it covered before: not "nothing reaches this module" but "several
+//! items below it are reached only from their own `#[cfg(test)]` code" —
+//! `Machine::new`, the collection counters a test asserts over, and
+//! [`Lvm::collected`] and [`Lvm::host_wait`], the two figures this type can
+//! report that nothing outside asks for yet. It is one line in one place
+//! rather than an attribute per item, so that removing it is a single edit
+//! whose failure lists exactly what is still unused.
 #![allow(dead_code)]
 
 use std::rc::Rc;
@@ -61,7 +70,8 @@ const DEFAULT_HEAP_WORDS: usize = 1 << 22;
 /// This is the type above the machine: it holds the program, the memory the
 /// run executes over, and the two things that make a run a run rather than a
 /// dispatch loop — the boundary a `Value` crosses, and the accounting a
-/// safepoint charges. [`Machine`] knows nothing about any of them.
+/// safepoint charges. The dispatch loop underneath knows nothing about any
+/// of them.
 ///
 /// The two ways in are the two the language has, and they are the same two
 /// [`crate::interp::Interpreter`] offers. [`Lvm::run_entry`] is how a
@@ -69,7 +79,7 @@ const DEFAULT_HEAP_WORDS: usize = 1 << 22;
 /// are strings. [`Lvm::invoke`] is how an *application* does: the arguments
 /// are values the host built, held to the types the checker resolved before
 /// the first instruction runs. Everything below the two is one path.
-pub(crate) struct Lvm<'a> {
+pub struct Lvm<'a> {
     runtime: &'a Runtime,
     program: &'a Program,
     machine: Machine<'a>,
@@ -82,11 +92,13 @@ pub(crate) struct Lvm<'a> {
 }
 
 impl<'a> Lvm<'a> {
-    pub(crate) fn new(
-        runtime: &'a Runtime,
-        hosts: &'a HostRegistry,
-        program: &'a Program,
-    ) -> Lvm<'a> {
+    /// A run of `program`, over `runtime`'s checked program and `hosts`.
+    ///
+    /// The heap budget is this module's `DEFAULT_HEAP_WORDS` and is not a
+    /// parameter yet:
+    /// no caller has had a reason to name one, and a knob nobody turns is a
+    /// knob whose meaning nobody has had to decide.
+    pub fn new(runtime: &'a Runtime, hosts: &'a HostRegistry, program: &'a Program) -> Lvm<'a> {
         Lvm {
             runtime,
             program,
@@ -102,7 +114,7 @@ impl<'a> Lvm<'a> {
     /// An entry takes either no parameters or one `Array<String>`, and that
     /// rule is the language's rather than a backend's — the oracle refuses
     /// the third shape in these words, at this span.
-    pub(crate) fn run_entry(
+    pub fn run_entry(
         &mut self,
         module: &str,
         name: &str,
@@ -117,10 +129,10 @@ impl<'a> Lvm<'a> {
     /// The arguments are held to what the checker resolved about the
     /// declaration — the shape it has to be callable at all, the count, and
     /// each value's type followed as deeply as the type goes — before
-    /// anything runs. [`crate::invoke`] is that check, and it is shared with
-    /// the oracle so that a host that gets it wrong reads one answer and not
-    /// one per backend.
-    pub(crate) fn invoke(
+    /// anything runs. That check is the crate's own `invoke`, shared with the
+    /// oracle so that a host that gets it wrong reads one answer and not one
+    /// per backend.
+    pub fn invoke(
         &mut self,
         module: &str,
         name: &str,
@@ -131,7 +143,7 @@ impl<'a> Lvm<'a> {
     }
 
     /// How many instructions this run has executed.
-    pub(crate) fn instructions(&self) -> u64 {
+    pub fn instructions(&self) -> u64 {
         self.machine.instructions()
     }
 
@@ -141,12 +153,12 @@ impl<'a> Lvm<'a> {
     }
 
     /// Words the heap region occupies, free blocks included.
-    pub(crate) fn heap_words(&self) -> u64 {
+    pub fn heap_words(&self) -> u64 {
         self.machine.heap_words()
     }
 
     /// Words handed out over the whole run, reuse counted each time.
-    pub(crate) fn allocated_words(&self) -> u64 {
+    pub fn allocated_words(&self) -> u64 {
         self.machine.allocated_words()
     }
 
