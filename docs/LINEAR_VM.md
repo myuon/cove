@@ -11,7 +11,11 @@ and the predecessor agree, they agree by arriving at the same place, and
 where they differ this document is the one that is being built.
 
 The design was reviewed in [issue #240](https://github.com/myuon/cove/issues/240);
-its answers are folded in here rather than left in the thread.
+its answers are folded in here rather than left in the thread. One of them
+changed the representation after the first implementation was under way — a
+value is a run of words rather than a single word — and the reasoning for
+that is under "Why the one-word rule had to go", because it is the kind of
+decision a later reader will want the argument for rather than the outcome.
 
 ## What is kept and what is replaced
 
@@ -86,7 +90,7 @@ collection.
 A word is 64 bits with no tag. What it means comes from static metadata: the
 instruction that reads it, and the function's per-slot table.
 
-`Repr` is that table's entry. Every Cove value occupies exactly one word.
+`Repr` is that table's entry. **A `Repr` describes one word, not one value.**
 
 | `Repr`     | the word holds                                        | GC root |
 |------------|-------------------------------------------------------|---------|
@@ -96,7 +100,7 @@ instruction that reads it, and the function's per-slot table.
 | `Float`    | an IEEE-754 double, bit-cast                           | no  |
 | `Duration` | nanoseconds as `i64`                                   | no  |
 | `Ref`      | a heap address, or 0                                   | **yes** |
-| `Addr`     | a linear address of one mutable word                   | no  |
+| `Addr`     | a linear address                                       | no  |
 | `Host`     | an index into the run's host resource table            | no  |
 
 The collector derives a frame's roots from `Function::refs`, a static bitmap
@@ -119,12 +123,176 @@ the map is a fact about a function. If it were left there, every object a
 frame ever touched would be retained until the frame returned — which for a
 server loop or a long `for` is the whole run.
 
-The lowering answers liveness in the data instead. `Clear { slot }` writes
-zero, and the lowering emits one at the end of the scope a binding belonged
-to and at a temporary's last use, for every `Ref` and `Addr` slot that would
-otherwise retain something. A dead reference slot holds null, the collector
-traces nothing from it, and the object is unreachable at the next collection
-rather than at the next return.
+The lowering answers liveness in the data instead. `Clear` writes zero over a
+value location, and the lowering emits one at the end of the scope a binding
+belonged to and at a temporary's last use, wherever the location holds a
+reference. A dead reference slot holds null, the collector traces nothing
+from it, and the object is unreachable at the next collection rather than at
+the next return.
+
+## One slot is one word; one value may occupy several
+
+This is the rule the whole representation turns on, and it replaces an
+earlier one that said every value was a single word.
+
+> **One slot is one eight-byte word. One value may occupy one or more
+> consecutive slots.**
+
+A **value location** is a base slot plus a layout, and the layout decides the
+width, the offsets of the parts and the `Repr` of each word.
+
+### Why the one-word rule had to go
+
+Putting every struct behind one heap address makes an ordinary field-wise
+copy an alias, because copying the word copies the address. The language says
+assignment is a field-wise shallow copy and that structs have value
+semantics, so something then has to *conceal* the alias — a sharing bit, a
+copy-on-write protocol along every write path, and a rule for propagating
+sharing to children.
+
+All of that machinery exists only to undo a representation choice. Laying the
+fields out where the value is makes the copy a copy: two words in, two words
+out, and nothing to conceal. ADR 0001's semantics are represented directly
+rather than reconstructed.
+
+### What is inline and what is a reference
+
+| value | representation |
+|---|---|
+| `Unit`, `Bool`, `Int`, `Float`, `Duration` | one inline word |
+| a fixed-size `struct` | the consecutive words of its fields, inline |
+| a fixed-size `enum` | a discriminant word and a payload region, inline |
+| `String` | one word: a heap address |
+| `Array`, `Map`, `Set` | one word: a heap address, immutable storage |
+| `Vector`, `Shared` | one word: a heap address, **identity** storage |
+| a closure | one word: a heap address of its environment |
+| `dyn`, `Any` | one word: a heap address of a boxed value |
+| a recursive layout | one word: a heap address, decided statically |
+
+A `Vector` and a `Shared` are the two families whose storage is both shared
+and mutable, so ADR 0001 makes a copy of either an alias — and their rule
+must not leak into how a value-semantic struct is represented. That
+generalisation is exactly the mistake this model was rewritten to avoid.
+
+### A struct is its fields, in place
+
+`Point { x: Int, y: Int }` is two words. `Line { from: Point, to: Point }` is
+four: nesting is inline and recursive, so a `Line` has no indirection in it
+at all and `l.from.x` is a slot offset known at lowering time.
+
+A field access on an inline struct is therefore **not an instruction**. It is
+arithmetic on a slot number, done by the lowering. Only a field of a *heap
+object* needs a load.
+
+### An enum is a discriminant and a payload region
+
+Payload word 0 is the case index. The words after it are the payload of
+whichever case the value is in, and the region is wide enough for every case.
+
+Which raises the question the collector cannot be allowed to get wrong: a
+payload word cannot be a reference in one case and an integer in another,
+because one static bitmap has to be right whatever case the value holds.
+
+So the payload offsets are **assigned per case, under one constraint: every
+case that uses a given payload word agrees on its `Repr`.** The lowering
+walks the cases in order and, for each payload word, takes the lowest payload
+slot that is either unassigned or already assigned that same `Repr` and not
+yet used by this case. For
+
+~~~cove
+enum E { A(Int, String), B(Float) }
+~~~
+
+`A` takes word 1 for its `Int` and word 2 for its `String`; `B` cannot use
+either, so its `Float` takes word 3. The layout is
+`[Int, Int, Ref, Float]`, four words.
+
+Two things follow. Constructing a case **zeroes the payload region** it does
+not fill, so a reference word belonging to another case reads null. And the
+collector no longer reads the discriminant to decide what to trace: the
+region's reference map is static, which is one fewer thing that can be wrong.
+
+The cost is that a payload region can be wider than the widest case. That is
+the price of a static map, and it is paid in words rather than in a run-time
+question.
+
+### Recursion is where boxing is decided
+
+`struct Node { value: Int, next: Option<Node> }` has no finite inline width.
+A layout that would contain itself is boxed: the field becomes one `Ref` word
+and the object it names has the struct's own inline layout as its payload.
+
+**Boxing is a static layout decision, not a representation for structs.** A
+type is boxed because its layout demands it, and the lowering records which
+ones, so nothing about a `Point` changes because a `Node` exists.
+
+### A layout describes a family, and both regions use it
+
+A layout describes a *family*, not an instantiation: `Array<String>` and
+`Array<Point>` are one layout, because a reference is a reference. The
+lowering interns them, so one shape is one `LayoutId` however many times the
+source writes it.
+
+A heap object's payload is a word array described by a layout in the same
+way a frame's value location is. A struct inside a closure environment, an
+array element or a boxed value is **inline in that payload**, and the
+collector walks the payload's reference map exactly as it walks a frame's.
+
+This is not a second value store. The stack region and the heap region are
+regions of one linear memory, and both use one vocabulary of words, layouts
+and reference maps.
+
+| value | shape | one layout per |
+|---|---|---|
+| a scalar | `Word(Repr)` | `Repr` |
+| `struct T` | `Struct`, fields inline | declared struct |
+| `enum E` | `Enum`, discriminant then payload | declared enum |
+| `Option<T>` | `Enum`, cases `None`, `Some` | payload layout |
+| `Result<T, E>` | `Enum`, cases `Ok`, `Err` | payload layout pair |
+| `String` | `Str` | the program |
+| `Array<T>` | `Elements` | element layout |
+| `Vector<T>` | `Vector`, `[len, store]` over an `Elements` store | element layout |
+| `Set<T>` | `Members`, sorted and distinct | element layout |
+| `Map<K, V>` | `Entries`, sorted by key | key/value layout pair |
+| `Range` | `Struct { start: Int, end: Int, inclusive: Bool }` | the program |
+| a closure | `Closure`, captures inline | lowered lambda |
+| `dyn`, `Any` | `Boxed` | the program |
+
+A `Set` and a `Map` are sorted runs rather than hash tables, because the
+language says they iterate in ascending order and render that way: the order
+is part of the value, not an implementation's leftovers.
+
+A `Vector` is the one collection with an indirection inside it, and it earns
+it: its identity is observable, so growing must not move the object a program
+is holding. The header stays put and the store beneath it is replaced.
+
+## Copying is a word-range copy
+
+ADR 0001: *"Assignment and ordinary argument passing are field-wise shallow
+copies."* Here that is one operation — copy the words of the value location —
+and the layout says how many.
+
+~~~text
+Point   { x: Int, y: Int }         -> [x, y]                    2 words
+Wrapper { p: Point, v: Vector }    -> [p.x, p.y, vector_ref]    3 words
+~~~
+
+Copying a `Wrapper` copies three words. The `Point` becomes independent
+because its words were copied. The `Vector` stays shared because what was
+copied is its address, and a `Vector`'s storage is shared by the language's
+own rule. Both answers fall out of the same copy; neither needs a policy.
+
+There is no sharing bit, no copy-on-write, no unsharing of a write path and
+no propagation of sharing to children. A nested write updates the destination
+words in place.
+
+`let` and `var` are lowered the same way. ADR 0001 says they do not change
+expression semantics, and Cove has no move semantics.
+
+The IR may distinguish an unobservable transfer from a copy — a fresh
+temporary need not be copied twice — but that is an optimisation, and
+**correctness never depends on proving uniqueness.** A plain layout copy is
+always the fallback, and a lowering that cannot tell emits one.
 
 ## The IR is a register machine
 
@@ -142,51 +310,50 @@ Two consequences are worth naming, because they are the reason to prefer it:
   changes as operands are pushed and popped, so its map is a function of the
   program counter. Here it is a function of the function.
 - **The calling convention is direct.** A callee's frame begins where the
-  caller's ends, so the caller writes argument *i* to the callee's slot *i*
-  before transferring control. Nothing is pushed, permuted or copied
-  afterwards. This is ADR 0034's "the caller writes each result to the
-  callee's declared destination slot", implemented literally.
+  caller's ends, so the caller copies each argument's words into the callee's
+  frame before transferring control. Nothing is pushed, permuted or copied
+  afterwards.
 
 ## The calling convention
 
 - The callee's frame base is the caller's frame base plus the caller's frame
   size. Frames are contiguous and there is no per-call bookkeeping in the
   stack region beyond the frame itself.
-- Slots `0..arity` are the parameters, in declaration order. A mixed list is
-  not sorted into type groups; there are no type groups.
-- The caller evaluates each argument in source order into its own temporary
-  slot, then `Call` copies the listed argument slots into the callee's frame.
-  The list is static: an `ArgsId` into a program-wide pool of slot lists.
-- A `Call` names the destination slot in the *caller's* frame that the
-  return value is written to. `Return` names the slot in the callee's frame
-  that holds it.
-- Captures follow the parameters: a closure's slots `arity..arity+captures`
-  are filled from the closure object before the body runs.
+- Parameters occupy the frame from slot 0 in declaration order, each taking
+  the words its layout says. A mixed list is not sorted into type groups;
+  there are no type groups. `Function::params` is the list of parameter
+  layouts, and where each begins follows from the ones before it.
+- The caller evaluates each argument in source order into its own value
+  location, then `Call` copies each argument's words into the callee's frame.
+  The list is static: an `ArgsId` into a program-wide pool of base slots.
+- A `Call` names the base slot of the destination *location* in the caller's
+  frame; `Return` names the base slot of the answer in the callee's, and the
+  machine copies the words `Function::returns` describes.
+- Captures follow the parameters, each occupying the words its own layout
+  says, copied out of the closure environment before the body runs.
 
 ## A place is a one-word address
 
-An assignable expression lowers to a `Repr::Addr` word. There is no place
-object, no place stack and no table of places.
+An assignable expression lowers to a `Repr::Addr` word: the linear address of
+the **first word** of a value location. Its width is static, so the address
+alone is enough. There is no place object, no place stack and no table of
+places.
 
-- `AddrOfSlot { dst, slot }` — the address of a slot of the current frame.
-- `AddrOfField { dst, base, field }` — the address of a field of the heap
-  object in `base`.
-- `AddrOfElem { dst, base, index }` — the address of an element.
-- `Load { dst, addr }` and `Store { addr, src }` read and write through one.
+- `AddrOfSlot` — the address of a slot of the current frame.
+- `AddrOfField` — the address plus a statically known field-word offset.
+- `AddrOfElem` — an element's address, at a statically known stride.
+- A load and a store through one move the words the layout says.
 
-A `var` parameter is an ordinary slot whose `Repr` is `Addr`. `bump(var total)`
-passes the address of the caller's slot, and the callee's `Store` writes the
-caller's word — which is the aliasing the language specifies, with no copy
-back.
+A `var` parameter is an ordinary slot whose `Repr` is `Addr`, carrying the
+address of the caller's own location. `bump(var total)` writes the caller's
+words directly, which is the aliasing the language specifies, with no copy
+back — and a nested write through one updates the destination words in place,
+because there is nothing between the address and the words.
 
-Keeping an interior address alive is the lowering's job, not the collector's:
-the object an interior address points into is held in a `Ref` slot for exactly
-the address's live range, and that slot is cleared when the address dies. The
-base is retained for as long as the address can be used and no longer.
-
-Stack addresses do not escape their frame: the checker's rules on `var` are
-what make that true, and the lowering does not create an address it cannot
-show is frame-local.
+Keeping an interior address alive is the lowering's job: the object an
+interior address points into is held in a `Ref` slot for exactly the
+address's live range and cleared when the address dies. Stack addresses do
+not escape their frame; the checker's rules on `var` are what make that true.
 
 ## The public `Value` is a boundary, not a store
 
@@ -195,134 +362,83 @@ API call's arguments and result, an entry's answer, a trace capture. Cove
 calling Cove never builds one. There is no `Vec<Value>` operand area,
 argument buffer, spill area or fallback path anywhere in the machine.
 
-## The layout of each value family
+## Six cases, worked
 
-A layout describes a *family*, not an instantiation. `Array<String>` and
-`Array<Point>` are one layout, because a reference is a reference and what an
-element actually is is a question its own object answers. `Array<Int>` and
-`Array<Duration>` are two, because their `Repr`s differ and the boundary has
-to know which. The lowering interns layouts, so the same shape is the same
-`LayoutId` however many times the source writes it.
+### 1. Copying and mutating a flat struct
 
-| value | shape | one layout per |
-|---|---|---|
-| `String` | `Str` | the program (`Program::str_layout`) |
-| `struct T` | `Struct` | declared struct, fields in declaration order |
-| `enum E` | `Enum` | declared enum, cases in declaration order |
-| `Option<T>` | `Enum`, cases `None`, `Some` | payload `Repr` |
-| `Result<T, E>` | `Enum`, cases `Ok`, `Err` | payload `Repr` pair |
-| `Array<T>` | `Elements { growable: false }` | element `Repr` |
-| `Vector<T>` | `Vector`, payload `[len, store]`, over an `Elements { growable: true }` store | element `Repr` |
-| `Set<T>` | `Members`, sorted and distinct | element `Repr` |
-| `Map<K, V>` | `Entries`, two words each, sorted by key | key/value `Repr` pair |
-| `Range` | `Struct { start: Int, end: Int, inclusive: Bool }` | the program |
-| `MapEntry<K, V>` | `Struct { key, value }` | field `Repr` pair |
-| a lambda | `Closure` | lowered lambda |
-| `dyn`, `Any` | `Boxed` | the program |
+~~~cove
+struct Point { x: Int, y: Int }
+var a = Point(x: 1, y: 2)
+var b = a
+b.x = 7
+~~~
 
-A `Set` and a `Map` are sorted runs rather than hash tables, because the
-language says they iterate in ascending order and render that way: the order
-is part of the value, not an implementation's leftovers. Membership and lookup
-are a binary search, which is what a sorted run is for. Each is a shape of its
-own rather than an `Elements` with a name, because "these words are sorted and
-distinct" is an invariant a builtin may rely on and an array's words are
-neither.
+`Point` is `[Int, Int]`, two words. `a` is at slots 0–1 and `b` at 2–3.
 
-A `Vector` is the one family with an indirection, and it earns it: its
-identity is observable — `is` is defined for it, and mutation through one copy
-is visible through every other — so growing must not move the object a program
-is holding. The header stays put and the store beneath it is replaced. An
-`Array` cannot grow, so it needs none of that and pays none of it: its elements
-are in the object, one indirection nearer.
+~~~text
+int   s0 1
+int   s1 2
+copy  s2 s0 Point      ; two words: b is independent of a
+int   s4 7
+copy  s2 s4 Int        ; b.x is s2 + 0
+~~~
 
-An enum object is one word of case index followed by the payload of the case
-it is in, sized for the widest case. Which of those words are references
-therefore depends on the case, and the collector reads word 0 to find out.
-That is a fact about an object, answered by the object; it is not a static
-kind per case, and no case is added because a program was refused.
+`a.x` is slot 0 and nothing touched it. No bit was set and no protocol ran.
 
-## Value semantics: transfer, duplicate, and one bit
+### 2. Copying and mutating a nested struct
 
-ADR 0001 decides the language rule and [issue #240](https://github.com/myuon/cove/issues/240)
-decides the implementation. The rule: assignment and ordinary argument passing
-are field-wise shallow copies; primitives, strings, enums and structs have
-value semantics; `Array`, `Map` and `Set` share storage, which is unobservable
-because none can be mutated; `Vector` and `Shared` share storage that *can* be
-mutated, so a copy of either is an alias; a `var` parameter is the one
-inout-alias exception. Cove has no move semantics.
+~~~cove
+struct Line { from: Point, to: Point }
+var m = l
+m.from.x = 7
+~~~
 
-In a linear memory a slot holds an address, so copying the word aliases. The
-implementation therefore separates **language copy semantics** from
-**unobservable copy elision**, and the separation is in the instruction set so
-that a missed case is loud:
+`Line` is `[from.x, from.y, to.x, to.y]`, four words, no indirection.
+`copy s4 s0 Line` copies four; `m.from.x` is slot 4 + 0. `l.from.x` is slot 0.
 
-- `Duplicate { dst, src }` — the source stays observable. This is the
-  language's copy, and the machine applies the source object's copy policy.
-- `Move { dst, src }` — the source is a fresh temporary, or is cleared as part
-  of the same step. Nothing can observe that the address was not copied, so
-  nothing is done. **This is copy elision, not a move.**
+### 3. A struct containing a `Vector`
 
-`let` and `var` are lowered the same way, because ADR 0001 says they do not
-change expression semantics. What decides transfer against duplicate is where
-the value came from, never where it is going. The first lowering is
-conservative: a fresh temporary transfers; an existing binding, a field or a
-container element duplicates. Last-use elision for a binding can be added
-later as an optimisation that must stay observationally equivalent.
+~~~cove
+struct Wrapper { p: Point, v: Vector<Int> }
+~~~
 
-### The copy policy belongs to the layout
+`[p.x: Int, p.y: Int, v: Ref]`, three words. A copy copies all three: the
+`Point` words become independent and the `Vector` address is duplicated, so
+both wrappers name one vector and a `push` through either is seen by both.
+That is ADR 0001 verbatim, from one word-range copy.
 
-| policy | families | on duplicate |
-|---|---|---|
-| `Immutable` | `String`, `Array`, `Map`, `Set`, closure, box | copy the address |
-| `CopyOnWrite` | `struct`, `enum` | copy the address, mark possibly shared |
-| `Identity` | `Vector`, `Shared` | copy the address, keep the identity |
+### 4. A fixed-size enum payload
 
-An enum is copy-on-write although nothing writes to one today. The cost of
-being wrong runs one way: a family wrongly called immutable turns value
-semantics into alias semantics silently, and one wrongly called copy-on-write
-sets a bit nobody reads.
+~~~cove
+enum Shape { Dot, Line(Int), Box(Int, Int) }
+~~~
 
-One place applies the policy — a single machine helper that `Duplicate`,
-`GetWord` and `GetElem` all go through. Scattering "set the bit" across
-lowering sites would mean a forgotten call quietly aliases, and the program
-that noticed would be one that wrote through a copy, which is the program
-nobody writes a test for.
+`[disc: Int, Int, Int]`, three words. `Dot` writes the discriminant and zeroes
+the rest; `Box(3, 4)` writes all three. A copy copies three words.
 
-### The bit
+With a reference — `enum Msg { Ping, Text(String) }` — the layout is
+`[disc: Int, Ref]`, and `Ping` leaves the reference word null, so the
+collector reads null rather than a stale address.
 
-One sticky bit in the existing object header, taken from the layout-id field.
-A 31-bit layout space is more than a program will reach, and widening every
-header — a string's included — to carry a bit that only two families read
-would be the wrong trade. Encoding and masking live in one helper.
+### 5. Multiword parameters, returns, joins and captures
 
-What it records is the same fact under both policies: *this object's address
-was duplicated*. Under `CopyOnWrite` it means "copy before writing"; under
-`Identity` it means "this vector has been aliased, so `freeze()` cannot claim
-uniqueness". It is cleared only by making a new object.
+- A parameter takes the words its layout says, from slot 0 onward in
+  declaration order; a `(Int, Point, Int)` list occupies slots 0, 1–2, 3.
+- A return copies `Function::returns`'s words into the caller's destination
+  location.
+- A branch join is two copies into one destination location, one per arm.
+- A capture is stored inline in the closure environment and copied into the
+  callee's frame with the other captures.
 
-### Unsharing a write path
+### 6. GC maps for multiword values
 
-`b.p.x = 7` is one `Unshare` per level: unshare what `b` names, then what its
-`p` field names, then write `x`. Each step reads the reference at an address,
-copies the object if it is copy-on-write and possibly shared, marks the
-copy's own copy-on-write children possibly shared, and writes the copy back
-through the address it read from. The chain ends with a path no other name
-reaches, so `a.p.x` is untouched — which is what the shallow-copy rule
-requires once you notice that a shallow copy of a value-semantic field is
-itself value-semantic.
+A frame's map is `RefMap::of(&Function::reprs)`, and a multiword value
+contributes its flattened per-word `Repr`s — a `Wrapper` at slot 5
+contributes `Int, Int, Ref`, so slot 7 is a root and 5 and 6 are not.
 
-This is why a place is a one-word address rather than a root and a path: the
-write-back *is* a `Store` through the address that was already there.
-
-### `Vector.freeze` keeps its uniqueness check
-
-`freeze()` is O(1) because it consumes. The same duplicate/transfer
-information supports it without making `Vector` copy-on-write: duplication
-marks the vector aliased, transfer does not, and `freeze()` refuses when
-uniqueness cannot be established. `toArray()` is the O(n) fallback. That is
-conservative — it may refuse after an alias has died — and it keeps the
-language's decision rather than replacing it with what the representation
-found convenient.
+A heap object's payload map is the same function of the same kind of layout.
+An enum inline anywhere is static because of the payload-agreement rule, so
+nothing has to read a discriminant during a collection.
 
 ## A builtin never calls back into Cove
 
@@ -368,10 +484,16 @@ a place a Cove value may be put to avoid giving it a heap representation.
 ## Erasure: `dyn`, `Any`, and what the checker settled
 
 A value whose type is *intentionally* erased — `dyn Trait`, a Host result a
-schema declared `Any` — is a `Ref` to a `Boxed` object holding a `Repr` tag and
-the word. An ordinary `Int` is an unboxed word; an `Int` explicitly erased to
-`dyn` allocates. That is the right place to pay, and it buys one word per value
-everywhere else.
+schema declared `Any` — is one `Ref` word naming a `Boxed` object. The object
+records the layout of what it holds and holds that value's words inline, so a
+boxed `Point` is a two-word payload rather than a reference to somewhere else
+again.
+
+Erasure is where a value stops having a static width, and a heap object is
+where a value without a static width has to live. An `Int` written as an
+`Int` is one inline word; the same `Int` written as a `dyn` allocates. That
+is the right place to pay, and paying it there is what keeps every
+*un*-erased location's width a static fact.
 
 A `Ty::Unknown` is not that. It is the checker declining, and a program the
 checker declined about is a compile error. The target is *every valid checked
@@ -384,7 +506,9 @@ floor**. A construct the lowering has not been taught is a bug in the lowering.
 
 Everything ADR 0034 lists as undecided: when the two backing allocations
 become one block, how the block grows, the final allocator, a moving
-collector, enum layout, and whether dispatch is later threaded or compiled.
+collector, and whether dispatch is later threaded or compiled. Enum layout is
+decided here only as far as the payload-agreement rule requires; how tightly a
+payload region is packed within that rule is not.
 
 ## The stack limit is not a language fact
 
