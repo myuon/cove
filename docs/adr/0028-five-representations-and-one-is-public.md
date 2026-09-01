@@ -1,6 +1,10 @@
 # ADR 0028: Five representations, and one of them is public
 
-- Status: Accepted. Superseded in part by
+- Status: Superseded by [ADR 0034](0034-one-physical-word-stack.md). ADR 0034
+  restates the surviving boundary, layout and eight-byte-word requirements in
+  a simpler one-linear-memory model; this document is retained as rationale
+  and measurement history, not as a concurrently binding representation
+  taxonomy.
   [ADR 0034](0034-one-physical-word-stack.md), which closes decision 1's
   physical-arrangement question by requiring one contiguous word stack in the
   production VM. The eight-byte untagged slot, one logical numbering, heap,
