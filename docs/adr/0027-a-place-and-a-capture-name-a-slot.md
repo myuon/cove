@@ -1,10 +1,8 @@
 # ADR 0027: A place and a capture name a slot, not a stack
 
 - Status: Superseded by [ADR 0034](0034-one-physical-word-stack.md). Its
-  historical measurements remain useful, but its runtime Place representation
-  and parallel physical stacks are no longer architectural decisions.
-  [ADR 0034](0034-one-physical-word-stack.md); the place and capture decisions
-  remain in force
+  measurements remain historical evidence; its parallel stacks and runtime
+  Place representation are not binding.
 - Date: 2026-08-30
 - Supersedes: nothing. It completes
   [ADR 0019](0019-executable-ir-and-vm.md)'s "Slots, not names" rather than
