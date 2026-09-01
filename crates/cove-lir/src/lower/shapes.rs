@@ -131,7 +131,10 @@ impl Shapes {
                 }
                 Some(self.intern(Layout {
                     name,
-                    shape: Shape::Struct { fields },
+                    shape: Shape::Struct {
+                        fields,
+                        opaque: struct_is_opaque(checked, module, ty),
+                    },
                 }))
             }
             Ty::Option(_) | Ty::Result(..) | Ty::Enum(..) => {
@@ -225,6 +228,25 @@ pub(super) fn struct_fields(
         }
         _ => None,
     }
+}
+
+/// Whether `ty` was declared `export opaque struct`.
+///
+/// A type this cannot find an entry for is not opaque, which is the safe
+/// reading for the one thing that consults it: a rendering. `Error` is a
+/// builtin and never opaque, and a rendering of it has its own rule.
+fn struct_is_opaque(checked: &Checked, module: &str, ty: &Ty) -> bool {
+    let Ty::Struct(name, _) = ty else {
+        return false;
+    };
+    let Some((owner, short)) = declaring(checked, module, name) else {
+        return false;
+    };
+    checked
+        .modules
+        .get(&owner)
+        .and_then(|resolved| resolved.structs.get(&short))
+        .is_some_and(|entry| entry.opaque)
 }
 
 /// An enum-shaped type's cases, in the order the case index counts them.

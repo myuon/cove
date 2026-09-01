@@ -115,7 +115,7 @@ fn object_to_value(machine: &Machine, addr: u64, depth: usize) -> Result<Value, 
             })?;
             Ok(Value::string(text))
         }
-        Shape::Struct { fields } => {
+        Shape::Struct { fields, .. } => {
             let mut out_fields = Vec::with_capacity(fields.len());
             for (at, field) in fields.iter().enumerate() {
                 let word = machine.payload(addr, at as u32);
@@ -236,7 +236,7 @@ fn object_from_value(
         ValueView::Struct(view) => {
             let name = short(view.type_name());
             let id = layout_for_struct(program, name, &view)?;
-            let Shape::Struct { fields } = &program.layout(id).shape else {
+            let Shape::Struct { fields, .. } = &program.layout(id).shape else {
                 unreachable!("`layout_for_struct` answers a struct-shaped layout");
             };
             let addr = machine.new_object(id, 0)?;
@@ -331,7 +331,7 @@ fn layout_for_struct(
     view: &crate::value::StructView<'_>,
 ) -> Result<LayoutId, RuntimeError> {
     find(program, |layout| {
-        let Shape::Struct { fields } = &layout.shape else {
+        let Shape::Struct { fields, .. } = &layout.shape else {
             return false;
         };
         &*layout.name == name
@@ -513,6 +513,7 @@ mod tests {
             "Point",
             Shape::Struct {
                 fields: vec![field("x", Repr::Int), field("y", Repr::Ref)],
+                opaque: false,
             },
         );
         let program = build.bare();
@@ -652,6 +653,7 @@ mod tests {
             "Pair",
             Shape::Struct {
                 fields: vec![field("left", Repr::Ref), field("right", Repr::Ref)],
+                opaque: false,
             },
         );
         build.layout(
@@ -716,6 +718,7 @@ mod tests {
             "Loop",
             Shape::Struct {
                 fields: vec![field("self", Repr::Ref)],
+                opaque: false,
             },
         );
         let program = build.bare();

@@ -458,7 +458,7 @@ impl Memory {
         }
         match &layout.shape {
             Shape::Free | Shape::Str => {}
-            Shape::Struct { fields } => {
+            Shape::Struct { fields, .. } => {
                 for (at, field) in fields.iter().enumerate() {
                     if field.repr.is_ref() {
                         self.enqueue(self.payload(addr, at as u32), work);
@@ -649,6 +649,7 @@ mod tests {
     fn holder() -> Shape {
         Shape::Struct {
             fields: vec![field("it", Repr::Ref)],
+            opaque: false,
         }
     }
 

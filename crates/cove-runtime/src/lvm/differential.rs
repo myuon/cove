@@ -698,3 +698,21 @@ export fn f(n: Int) -> Int {
         Answer::Value("499".to_string())
     );
 }
+
+/// ADR 0014's rule, which is about a declaration rather than about a value:
+/// an opaque type renders as its name and nothing else, because a rendering
+/// is read by whoever the string reaches and its fields are the declaring
+/// module's own business.
+#[test]
+fn an_opaque_struct_renders_as_its_name() {
+    let source = r#"
+export opaque struct Token { id: Int, secret: String }
+export fn f() -> String {
+  "{Token(id: 1, secret: "hunter2")}"
+}
+"#;
+    assert_eq!(
+        agree(source, "f", vec![]),
+        Answer::Value("Token".to_string())
+    );
+}

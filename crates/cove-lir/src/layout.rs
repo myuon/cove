@@ -83,7 +83,23 @@ pub enum Shape {
     /// This is what a declared `struct` is. It is also what the machine uses
     /// for the few compound values that have a fixed shape and a name of
     /// their own, such as a range.
-    Struct { fields: Vec<Field> },
+    Struct {
+        fields: Vec<Field>,
+        /// Whether the declaration was `export opaque struct`.
+        ///
+        /// The one thing outside this crate that reads it is a rendering: an
+        /// opaque value shows its name and nothing else, because its fields
+        /// are the declaring module's own business and a rendering is read by
+        /// whoever the string reaches. Printing them would publish through
+        /// `println` what the checker refuses to let a caller name, which is
+        /// ADR 0014's whole point.
+        ///
+        /// It is a fact about a *declaration* on a table that otherwise
+        /// describes families, and it is here rather than derived because
+        /// nothing downstream can derive it: by the time a value is a word,
+        /// the declaration is gone.
+        opaque: bool,
+    },
     /// Payload word 0 is the case index; words `1..` are that case's
     /// payload.
     ///
@@ -148,7 +164,7 @@ impl Layout {
         match &self.shape {
             Shape::Free => len,
             Shape::Str => len.div_ceil(8),
-            Shape::Struct { fields } => fields.len() as u32,
+            Shape::Struct { fields, .. } => fields.len() as u32,
             Shape::Enum { cases } => 1 + Self::widest_case(cases),
             Shape::Elements { .. } => len,
             Shape::Closure { captures, .. } => 1 + captures.len() as u32,
@@ -172,7 +188,7 @@ impl Layout {
     pub fn may_hold_refs(&self) -> bool {
         match &self.shape {
             Shape::Free | Shape::Str => false,
-            Shape::Struct { fields } => fields.iter().any(|field| field.repr.is_ref()),
+            Shape::Struct { fields, .. } => fields.iter().any(|field| field.repr.is_ref()),
             Shape::Enum { cases } => cases
                 .iter()
                 .any(|case| case.payload.iter().any(|repr| repr.is_ref())),
@@ -187,7 +203,7 @@ impl Layout {
     /// The field index `name` is at, if this is a struct-shaped layout.
     pub fn field(&self, name: &str) -> Option<u32> {
         match &self.shape {
-            Shape::Struct { fields } => fields
+            Shape::Struct { fields, .. } => fields
                 .iter()
                 .position(|field| &*field.name == name)
                 .map(|at| at as u32),
@@ -263,6 +279,7 @@ mod tests {
             name: Arc::from("Point"),
             shape: Shape::Struct {
                 fields: vec![field("x", Repr::Int), field("y", Repr::Int)],
+                opaque: false,
             },
         };
         assert_eq!(layout.payload_words(0), 2);

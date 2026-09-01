@@ -27,11 +27,11 @@
 //! [`crate::lvm::exec`]'s arithmetic messages are under, and for the same
 //! reason.
 //!
-//! One rendering the oracle makes is not reproduced, because the layout table
-//! does not carry what it needs: an `export opaque struct` renders as its bare
-//! name rather than as its fields. That is a fact about a *declaration*, and a
-//! [`Layout`](cove_lir::Layout) describes a family. It arrives when the
-//! lowering has somewhere to put it.
+//! Two of the rules are facts about a *declaration* rather than about a
+//! family, and the layout table carries each of them for that reason: an
+//! `export opaque struct` renders as its bare name, and a builtin `Error`
+//! renders as its message. Neither can be derived here, because by the time a
+//! value is a word the declaration is gone.
 
 use std::fmt::Write as _;
 
@@ -139,14 +139,21 @@ fn render_object(machine: &Machine, addr: u64, depth: usize) -> Result<String, R
         // says the same thing twice. Recognising it by the layout's name is
         // sound because the name is the checker's, and `Error` is a builtin
         // type a module cannot redeclare.
-        Shape::Struct { fields }
+        Shape::Struct { fields, .. }
             if &*layout.name == ERROR.name
                 && fields.first().map(|field| &*field.name) == Some(MESSAGE_FIELD.name) =>
         {
             let word = machine.payload(addr, 0);
             out.push_str(&render(machine, fields[0].repr, word, deeper)?);
         }
-        Shape::Struct { fields } => {
+        // An opaque type renders as its name and nothing else. Its fields are
+        // the declaring module's own business, and a rendering is read by
+        // whoever the string reaches, so showing them here would publish
+        // through `println` what the checker refuses to let a caller name.
+        // That is ADR 0014's whole point, and it is why the layout carries
+        // the flag rather than this deriving it.
+        Shape::Struct { opaque: true, .. } => out.push_str(&layout.name),
+        Shape::Struct { fields, .. } => {
             write!(out, "{}(", layout.name).expect("a string never fails to be written to");
             for (at, field) in fields.iter().enumerate() {
                 if at > 0 {
@@ -407,6 +414,7 @@ mod tests {
             "Point",
             Shape::Struct {
                 fields: vec![field("x", Repr::Int), field("y", Repr::Int)],
+                opaque: false,
             },
         );
         let option = build.layout(

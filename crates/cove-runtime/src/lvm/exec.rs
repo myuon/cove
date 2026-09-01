@@ -1440,6 +1440,7 @@ pub(crate) mod tests {
                         repr: Repr::Int,
                     },
                 ],
+                opaque: false,
             },
         );
         let f = build.function(
@@ -1501,6 +1502,7 @@ pub(crate) mod tests {
                     name: Arc::from("x"),
                     repr: Repr::Int,
                 }],
+                opaque: false,
             },
         );
         let f = build.function(

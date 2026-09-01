@@ -156,9 +156,31 @@ fn a_declared_struct_is_one_layout_with_its_fields_in_declaration_order() {
                     repr: Repr::Int,
                 },
             ],
+            opaque: false,
         }
     );
     // A struct of scalars is a leaf, so a collection walking one reads no
     // word of it at all.
     assert!(!points[0].may_hold_refs());
+}
+
+/// An `export opaque struct` is the same shape as any other; what differs is
+/// the one thing a rendering is allowed to say about it. The layout carries
+/// that because nothing downstream can derive it: by the time a value is a
+/// word, the declaration is gone.
+#[test]
+fn an_opaque_declaration_is_recorded_in_its_layout() {
+    let source = "
+export opaque struct Token { id: Int }
+export fn make(n: Int) -> Token {
+  Token(id: n)
+}
+";
+    let program = lower(&checked(source)).expect("the program lowers");
+    let token = program
+        .layouts
+        .iter()
+        .find(|layout| &*layout.name == "Token")
+        .expect("the struct has a layout");
+    assert!(matches!(token.shape, Shape::Struct { opaque: true, .. }));
 }
