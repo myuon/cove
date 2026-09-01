@@ -31,7 +31,7 @@ use cove_diag::Span;
 use cove_sema::resolve::Program as Checked;
 use cove_syntax::ast::{Arg, Expr, ExprKind};
 
-use crate::{Const, ConstId, FunctionId, Inst, Program, SlotKind};
+use crate::{Const, ConstId, FunctionId, Inst, Program, SlotKind, ValueKind};
 
 use super::call::{arguments_in_order, Args};
 use super::validate::stack_shape;

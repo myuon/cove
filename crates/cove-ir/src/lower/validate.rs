@@ -81,7 +81,7 @@ fn validate_function(program: &Program, id: FunctionId) -> Result<(), String> {
     let value_params = function
         .params
         .iter()
-        .filter(|k| matches!(k, SlotKind::Value))
+        .filter(|k| matches!(k, SlotKind::Value(_)))
         .count() as u32;
     let scalar_params = function.params.iter().filter(|k| k.is_scalar()).count() as u32;
     let place_params = function.params.iter().filter(|k| k.is_place()).count() as u32;
@@ -205,7 +205,7 @@ fn validate_function(program: &Program, id: FunctionId) -> Result<(), String> {
     // answer, so a function that claimed to answer one is refused here
     // rather than left for a return instruction that does not exist.
     let (ends_in, other, stack) = match function.returns {
-        SlotKind::Value => (Inst::Return, Inst::ReturnScalar, "value"),
+        SlotKind::Value(_) => (Inst::Return, Inst::ReturnScalar, "value"),
         SlotKind::Scalar(_) => (Inst::ReturnScalar, Inst::Return, "scalar"),
         SlotKind::Place => return Err("answers a place, which no call reads".to_string()),
     };
@@ -368,7 +368,7 @@ fn validate_function(program: &Program, id: FunctionId) -> Result<(), String> {
                     .params
                     .iter()
                     .skip(1)
-                    .any(|kind| !matches!(kind, SlotKind::Value))
+                    .any(|kind| !matches!(kind, SlotKind::Value(_)))
                     || target.params.first().is_some_and(|kind| kind.is_scalar())
                 {
                     return Err(at(format!(
@@ -413,7 +413,7 @@ fn validate_function(program: &Program, id: FunctionId) -> Result<(), String> {
                     if target
                         .params
                         .iter()
-                        .any(|kind| !matches!(kind, SlotKind::Value))
+                        .any(|kind| !matches!(kind, SlotKind::Value(_)))
                     {
                         return Err(at(format!(
                             "dispatches to `{type_name}.{}`, which takes an argument off another stack",
@@ -473,7 +473,7 @@ fn validate_function(program: &Program, id: FunctionId) -> Result<(), String> {
                 let values = target
                     .params
                     .iter()
-                    .filter(|k| matches!(k, SlotKind::Value))
+                    .filter(|k| matches!(k, SlotKind::Value(_)))
                     .count() as u32;
                 let scalars = target.params.iter().filter(|k| k.is_scalar()).count() as u32;
                 let places = target.params.iter().filter(|k| k.is_place()).count() as u32;

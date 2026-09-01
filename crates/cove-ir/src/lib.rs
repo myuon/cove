@@ -316,9 +316,10 @@ pub struct Function {
     /// decision 1 means by "what a slot means comes from `cove_ir::Function`'s
     /// per-slot layout": the three frame sizes above say how wide each region
     /// is, and this says what each of the numbers inside the frame *is* — a
-    /// `Value`, an `Int`, a `Bool`, or a place — without a reader having to
-    /// already know which instruction touches it. [`Function::region_of`] is
-    /// this table read one level less specifically, for the reader — a
+    /// `Value` (and, where the checker settled enough to say, [`ValueKind`]'s
+    /// refinement of it), an `Int`, a `Bool`, or a place — without a reader
+    /// having to already know which instruction touches it. [`Function::region_of`]
+    /// is this table read one level less specifically, for the reader — a
     /// collector, or `crate::lower::validate` — that only needs to tell
     /// [`Region::Value`] from the other two.
     ///
@@ -685,8 +686,9 @@ pub enum Scalar {
 /// [`Region`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SlotKind {
-    /// A `Value` in the value region.
-    Value,
+    /// A `Value` in the value region, and what kind of heap value the
+    /// checker settled it as — see [`ValueKind`].
+    Value(ValueKind),
     /// An `i64` in the scalar region, meaning what [`Scalar`] says.
     Scalar(Scalar),
     /// A place in the place region: one slot number of the value or the
@@ -713,11 +715,59 @@ impl SlotKind {
     /// Which region of the one frame numbering a slot of this kind falls in.
     pub fn region(self) -> Region {
         match self {
-            SlotKind::Value => Region::Value,
+            SlotKind::Value(_) => Region::Value,
             SlotKind::Scalar(_) => Region::Scalar,
             SlotKind::Place => Region::Place,
         }
     }
+}
+
+/// What kind of heap value a [`SlotKind::Value`] slot holds, where the
+/// checker's settlement said enough to tell.
+///
+/// This is [ADR 0028](../../../docs/adr/0028-five-representations-and-one-is-public.md)
+/// decision 1's table — "a slot can hold a heap-backed value, a host
+/// resource, or a two-slot `Dynamic`" — read for the one case this crate
+/// lowers a plain reference to, as far as the rest of the pipeline can act
+/// on it today: a `String` told apart from everything else, because that is
+/// the one refinement `cove_runtime::frame` has a use for. A slot holding a
+/// declared struct or enum is [`ValueKind::Unknown`] rather than a further
+/// case naming its [`StructId`] or [`EnumId`] — nothing downstream reads
+/// that yet, and adding it would cost every one of `slot_kind_of`'s callers
+/// a module to resolve the name against for no consumer, so it waits for one.
+///
+/// # Why on `SlotKind::Value` and not a second table
+///
+/// [`Function::slots`] already argues against a second description of one
+/// fact, and `crate::lower::body::Body::allocate`'s skip rule is what a
+/// second table would have to reproduce: a slot number is handed out once
+/// per distinct kind a region has seen, so that [`Function::slots`] can name
+/// an exact kind for every number without a reader cross-checking it against
+/// the instruction that touches the slot. A `ValueKind` beside `slots`
+/// rather than inside it would be exactly the drift that rule exists to
+/// close off — two tables that could disagree about what slot `n` holds,
+/// where today there is one.
+///
+/// # What abstains
+///
+/// [`ValueKind::Unknown`] is not "not a `String`"; it is "the checker
+/// settled nothing this refinement acts on", which includes a struct, an
+/// enum, an array, a type parameter, and a binding the checker's own
+/// abstention left unsettled. A slot of this kind behaves exactly as
+/// `SlotKind::Value` did before this enum existed: nothing about it may be
+/// assumed beyond being a reference.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ValueKind {
+    /// The checker settled nothing this refinement acts on — the same
+    /// abstention `SlotKind::Value` stated on its own before this existed.
+    Unknown,
+    /// A `String`, settled from `Ty::Str`.
+    ///
+    /// `cove_runtime::frame`'s `pushed_kind` reads this off
+    /// [`Inst::LoadLocal`], a struct field read, and a payload read, to
+    /// answer `Kind::Str` for a slot the layout — rather than only the
+    /// instruction that last pushed a word — can show holds one.
+    Str,
 }
 
 /// Which run of the one frame numbering a slot number falls in, and so which
@@ -788,14 +838,19 @@ pub struct EnumId(pub u32);
 /// # What a kind means for a field
 ///
 /// [`SlotKind::Scalar`] is a word a collector must not follow and
-/// [`SlotKind::Value`] is one it must. [`SlotKind::Place`] never appears: a
-/// place is what a *parameter* can be, and a field is storage rather than an
-/// alias of it.
+/// [`SlotKind::Value`] is one it must, whichever [`ValueKind`] refines it —
+/// a field declared `String` names [`ValueKind::Str`] the same way a local
+/// or a parameter does, and `cove_runtime::frame`'s `pushed_kind` reads it
+/// off [`Inst::GetFieldAt`] the same way it reads a `String` local off
+/// [`Inst::LoadLocal`]. [`SlotKind::Place`] never appears: a place is what a
+/// *parameter* can be, and a field is storage rather than an alias of it.
 ///
 /// A generic field records the declaration's own `Ty::Param`, which is not a
 /// type the scalar stack holds, so it is a [`SlotKind::Value`] on every
-/// instantiation. One name, one layout — which is what makes a [`StructId`] a
-/// complete answer rather than a key into a per-instantiation table.
+/// instantiation — [`ValueKind::Unknown`], since a type parameter is not one
+/// `slot_kind_of` can tell is a `String` without knowing the instantiation.
+/// One name, one layout — which is what makes a [`StructId`] a complete
+/// answer rather than a key into a per-instantiation table.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct StructType {
     /// The qualified name a value of this type carries: `module.Name`.
@@ -1783,7 +1838,9 @@ pub fn render(program: &Program, id: FunctionId) -> String {
 }
 
 /// Which stack a slot lives in, as a listing names it: the scalar's by what
-/// it holds, and the value stack's by being the one that holds anything.
+/// it holds, the value stack's by what [`ValueKind`] refinement it has, if
+/// any, and "value" for [`ValueKind::Unknown`] — the same word the value
+/// stack rendered before that enum existed.
 ///
 /// `pub(crate)` rather than private, because `crate::lower::validate` names a
 /// mismatched [`SlotKind`] in its own diagnostics and a second rendering
@@ -1791,7 +1848,8 @@ pub fn render(program: &Program, id: FunctionId) -> String {
 /// doc comments keep arguing against.
 pub(crate) fn render_kind(kind: SlotKind) -> &'static str {
     match kind {
-        SlotKind::Value => "value",
+        SlotKind::Value(ValueKind::Unknown) => "value",
+        SlotKind::Value(ValueKind::Str) => "String",
         SlotKind::Scalar(Scalar::Int) => "Int",
         SlotKind::Scalar(Scalar::Bool) => "Bool",
         SlotKind::Place => "place",

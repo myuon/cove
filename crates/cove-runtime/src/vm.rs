@@ -1048,7 +1048,7 @@ impl<'a> Vm<'a> {
         self.fuel = 0;
         for (kind, value) in entry.params.iter().zip(args) {
             match kind {
-                SlotKind::Value => self.stack.push(value),
+                SlotKind::Value(_) => self.stack.push(value),
                 SlotKind::Scalar(_) => self.scalars.push(promised_scalar(&value)),
                 // There is no place for an embedder to hand over: a place
                 // names a slot of this VM's own stack, and an entry is
@@ -3759,7 +3759,7 @@ fn as_value(returns: SlotKind, scalar: i64) -> Value {
         SlotKind::Scalar(Scalar::Int) => Value(Repr::Int(scalar)),
         SlotKind::Scalar(Scalar::Bool) => Value(Repr::Bool(scalar != 0)),
         SlotKind::Place => unreachable!("no function answers a place; `validate` refuses one"),
-        SlotKind::Value => unreachable!(
+        SlotKind::Value(_) => unreachable!(
             "`return-scalar` was reached in a function that answers on the value stack"
         ),
     }

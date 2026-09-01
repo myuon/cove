@@ -193,7 +193,7 @@ fn a_map_entry_is_built_from_its_two_fields() {
             "fn f() -> String {\n  MapEntry(key: \"a\", value: 1).key\n}\n",
             "f"
         ),
-        "fn m.f arity=0 frame=0/0 -> value\n\
+        "fn m.f arity=0 frame=0/0 -> String\n\
          \x20  0  const Str(\"a\")\n\
          \x20  1  const Int(1)\n\
          \x20  2  make-builtin MapEntry argc=2\n\

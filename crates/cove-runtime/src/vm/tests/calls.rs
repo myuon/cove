@@ -143,7 +143,7 @@ fn a_parameter_left_to_its_default_is_computed_inside_the_callee() {
     assert_eq!(agree(source).value(), "Str(\"d: 3m\")");
     assert_eq!(
         main_of(source),
-        "fn m.main arity=0 frame=0/0 -> value\n\
+        "fn m.main arity=0 frame=0/0 -> String\n\
          \x20  0  scalar-const 3\n\
          \x20  1  const Str(\"d\")\n\
          \x20  2  call m.measure argc=1/1\n\

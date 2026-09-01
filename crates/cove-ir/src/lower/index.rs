@@ -31,7 +31,7 @@ use cove_syntax::ast::{Block, EnumDecl, ExprId, FnDecl, Param, StructDecl, Type,
 use super::convention::slot_kind_of;
 use crate::{
     Const, ConstId, Dispatch, DispatchId, EnumCase, EnumId, EnumType, Function, FunctionId,
-    Program, SlotKind, StructField, StructId, StructType, Unsupported,
+    Program, SlotKind, StructField, StructId, StructType, Unsupported, ValueKind,
 };
 
 /// Which modules each module of the package can reach, itself included.
@@ -546,7 +546,7 @@ impl<'a> Lowering<'a> {
                 name: field.name.node.as_str().into(),
                 kind: settled
                     .and_then(|signature| signature.params.get(at))
-                    .map_or(SlotKind::Value, slot_kind_of),
+                    .map_or(SlotKind::Value(ValueKind::Unknown), slot_kind_of),
             })
             .collect();
         let id = StructId(self.structs.len() as u32);
@@ -583,7 +583,7 @@ impl<'a> Lowering<'a> {
                 .iter()
                 .map(|name| StructField {
                     name: (*name).into(),
-                    kind: SlotKind::Value,
+                    kind: SlotKind::Value(ValueKind::Unknown),
                 })
                 .collect(),
         });
@@ -625,7 +625,7 @@ impl<'a> Lowering<'a> {
                             .facts
                             .signature(case.span.file, case.span)
                             .and_then(|signature| signature.params.get(at))
-                            .map_or(SlotKind::Value, slot_kind_of)
+                            .map_or(SlotKind::Value(ValueKind::Unknown), slot_kind_of)
                     })
                     .collect(),
             })

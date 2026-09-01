@@ -26,7 +26,7 @@ use cove_schema::hosts;
 use cove_schema::TypeSchema;
 use cove_syntax::ast::{Arg, EnumDecl, Expr, ExprId, ExprKind, StructDecl};
 
-use crate::{Inst, Scalar, SlotKind, Unsupported};
+use crate::{Inst, Scalar, SlotKind, Unsupported, ValueKind};
 
 use super::body::Body;
 use super::convention::{reject_parameter, scalar_of_ty, slot_kind_of};
@@ -294,7 +294,7 @@ impl<'a, 'l> Body<'a, 'l> {
         let mut scalar_argc: u16 = 0;
         let mut place_argc: u16 = 0;
         let mut into = |kind: SlotKind| match kind {
-            SlotKind::Value => value_argc += 1,
+            SlotKind::Value(_) => value_argc += 1,
             SlotKind::Scalar(_) => scalar_argc += 1,
             SlotKind::Place => place_argc += 1,
         };
@@ -311,11 +311,11 @@ impl<'a, 'l> Body<'a, 'l> {
                 } else {
                     let kind = signature
                         .and_then(|signature| signature.receiver.as_ref())
-                        .map_or(SlotKind::Value, slot_kind_of);
+                        .map_or(SlotKind::Value(ValueKind::Unknown), slot_kind_of);
                     into(kind);
                     match kind {
                         SlotKind::Scalar(_) => self.expr_scalar(expr)?,
-                        SlotKind::Value => self.expr(expr)?,
+                        SlotKind::Value(_) => self.expr(expr)?,
                         SlotKind::Place => {
                             unreachable!("only a `var self` receiver is a place")
                         }
@@ -377,11 +377,11 @@ impl<'a, 'l> Body<'a, 'l> {
             }
             let kind = signature
                 .and_then(|signature| signature.params.get(at))
-                .map_or(SlotKind::Value, slot_kind_of);
+                .map_or(SlotKind::Value(ValueKind::Unknown), slot_kind_of);
             into(kind);
             match kind {
                 SlotKind::Scalar(_) => self.expr_scalar(arg.value)?,
-                SlotKind::Value => self.expr(arg.value)?,
+                SlotKind::Value(_) => self.expr(arg.value)?,
                 SlotKind::Place => unreachable!("only a `var` parameter is a place"),
             }
         }
@@ -423,7 +423,7 @@ impl<'a, 'l> Body<'a, 'l> {
                 ));
             }
             self.variadic_array(&elements, span)?;
-            into(SlotKind::Value);
+            into(SlotKind::Value(ValueKind::Unknown));
         }
         // An `async fn` answers a settled task whatever its return type
         // says, and a task is a value: `async fn f() -> Int` leaves a

@@ -100,9 +100,14 @@ use support::{Case, ModuleIndex, Prepared, Unprepared};
 /// `fail_database_connect_denied`, `fn_recursion` and `backend_vm` — before
 /// that Host call existed. It was raised to 18 in the same change that added
 /// this file, once the Host call itself was built and the same nine entries
-/// it alone had blocked joined the nine that already ran: see this test's
-/// own printed report for the current accepted list.
-const ACCEPTED_FLOOR: usize = 18;
+/// it alone had blocked joined the nine that already ran, and to 19 once a
+/// value slot could say it holds a `String`: `tests/e2e:flow_bindings` was
+/// the one program every one of whose reachable refusals was "string
+/// interpolation over a heap object this backend cannot show is a
+/// `String`", so refining `cove_ir::SlotKind::Value` with
+/// `cove_ir::ValueKind` admitted it outright. See this test's own printed
+/// report for the current accepted list.
+const ACCEPTED_FLOOR: usize = 19;
 
 #[test]
 #[ignore = "compiles and lowers the whole corpus, which is slow; CLAUDE.md's \
