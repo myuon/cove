@@ -158,7 +158,7 @@ fn a_struct_returned_by_value_is_the_answer_location_s_words() {
 fn0 m.f() -> m.Point
   frame 5: s0:int s1:int s2:int s3:int s4:int
      0  int s2:int 3
-     1  call s3:int m.mk (s2:int)
+     1  call s3:int m.mk (s2:Int)
      2  copy s0:int s3:int m.Point
      3  return s0:int
 "

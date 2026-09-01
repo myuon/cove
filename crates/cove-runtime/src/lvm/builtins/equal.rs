@@ -17,13 +17,12 @@
 //! are the ones this walks objects for — a string's bytes, an array's
 //! elements at the element's own stride, a map's entries key before value.
 //!
-//! That is why there are two entry points rather than one. [`same_value`]
-//! compares two values of a layout, which is what everything *inside* a value
-//! is. [`same_word`] compares two operands, which is all a builtin's
-//! arguments ever are: [`cove_lir::Builtin`] carries no layout for an operand
-//! and a `CallBuiltin`'s arguments are base slots that need not be adjacent,
-//! so one word and the `Repr` of the slot it came out of is the whole of what
-//! a caller can hand over.
+//! There is one rule and one walk. A value is a layout and the words it
+//! occupies, and that is what an operand is as well as what a field, an
+//! element and a member are — so [`same`] compares two operands by asking
+//! [`same_value`]'s own question of them. An operand used to be one word and
+//! the `Repr` of the slot it came out of, which is why two structs compared
+//! as their first words unless something boxed them first.
 //!
 //! # This answers equality; it does not police types
 //!
@@ -46,7 +45,7 @@
 use cove_lir::{LayoutId, Program, Repr, Shape};
 
 use crate::error::RuntimeError;
-use crate::lvm::builtins::operand::{self, Operand};
+use crate::lvm::builtins::operand::{self, Operand, Word};
 use crate::lvm::exec::Machine;
 
 /// A value: the layout that describes it, and the words it occupies.
@@ -56,11 +55,11 @@ use crate::lvm::exec::Machine;
 type Held<'w> = (LayoutId, &'w [u64]);
 
 /// `a == b`, as the `Bool` word `0` or `1`.
-pub(super) fn equals(machine: &Machine, operands: &[Operand]) -> Result<u64, RuntimeError> {
+pub(super) fn equals(machine: &Machine, operands: &[Operand<'_>]) -> Result<u64, RuntimeError> {
     let [a, b] = operands else {
         return Err(operand::operands("Any.equals", 2, operands.len()));
     };
-    Ok(same_word(machine, *a, *b)? as u64)
+    Ok(same(machine, *a, *b)? as u64)
 }
 
 /// Whether two values of `layout` are equal, given their words.
@@ -76,12 +75,17 @@ pub(super) fn same_value(
     value(machine, (layout, a), (layout, b), 0)
 }
 
-/// Whether two one-word operands are equal.
+/// Whether two operands are equal, each read as the value location it names.
 ///
-/// What a builtin asks, because a builtin's operands are one word each. See
-/// the module docs for why that is not a restriction this file chose.
-pub(super) fn same_word(machine: &Machine, a: Operand, b: Operand) -> Result<bool, RuntimeError> {
-    word(machine, a, b, 0)
+/// What a builtin asks — of an argument, and of an element it read out of a
+/// receiver, which is the same question because the two are the same kind of
+/// thing.
+pub(super) fn same(
+    machine: &Machine,
+    a: Operand<'_>,
+    b: Operand<'_>,
+) -> Result<bool, RuntimeError> {
+    value(machine, (a.layout, a.words), (b.layout, b.words), 0)
 }
 
 /// Whether the two values are equal, each read as its own layout.
@@ -101,6 +105,19 @@ fn value(machine: &Machine, x: Held<'_>, y: Held<'_>, depth: usize) -> Result<bo
     let (left, right) = (program.layout(x.0), program.layout(y.0));
     if matches!(left.shape, Shape::Free) || matches!(right.shape, Shape::Free) {
         return Err(operand::reclaimed());
+    }
+    // Erasure is looked through on either side before the two shapes are
+    // compared at all, because a box is where the checker put it and not
+    // something a program can ask about: a `dyn Display` holding a `Point`
+    // and an inline `Point` are one value. It has to happen here rather than
+    // only where two words meet, because an inline value now arrives as
+    // itself — while everything wider than a word was boxed on its way into
+    // a comparison, a struct could only ever meet another struct.
+    if let Some(inside) = opened(machine, x)? {
+        return value(machine, (inside.0, &inside.1), y, deeper);
+    }
+    if let Some(inside) = opened(machine, y)? {
+        return value(machine, x, (inside.0, &inside.1), deeper);
     }
     Ok(match (&left.shape, &right.shape) {
         // One word each, compared as the operands they would be if they had
@@ -174,7 +191,7 @@ fn value(machine: &Machine, x: Held<'_>, y: Held<'_>, depth: usize) -> Result<bo
         (Shape::Struct { .. } | Shape::Enum { .. }, _)
         | (_, Shape::Struct { .. } | Shape::Enum { .. }) => false,
         // Everything left lives in the heap, so each side is one address.
-        _ if left.is_ref() && right.is_ref() => {
+        _ if left.is_one_address() && right.is_one_address() => {
             return word(
                 machine,
                 (Repr::Ref, super::at(x.1, 0)?),
@@ -203,8 +220,8 @@ fn part<'w>(
     Ok((layout, words))
 }
 
-/// Whether the two operands are the same value.
-fn word(machine: &Machine, a: Operand, b: Operand, depth: usize) -> Result<bool, RuntimeError> {
+/// Whether the two words are the same value.
+fn word(machine: &Machine, a: Word, b: Word, depth: usize) -> Result<bool, RuntimeError> {
     if depth >= super::MAX_DEPTH {
         return Err(too_deep());
     }
@@ -240,24 +257,23 @@ fn word(machine: &Machine, a: Operand, b: Operand, depth: usize) -> Result<bool,
     })
 }
 
-/// Whether the value a box holds is the operand `other`.
+/// Whether the value a box holds is the word `other`.
 ///
-/// A box on one side and a bare word on the other. What the box holds has a
-/// static width and `other` is one word, so the two can be equal only when
-/// the box holds a one-word value — a boxed `Point` is two words and an
-/// operand is never that. Equality is symmetric, so which side the box was on
-/// is not remembered.
+/// A box on one side and a bare word on the other, which is what is left once
+/// [`value`] has looked through erasure on both: a word is one word, so the
+/// two can be equal only when the box holds a one-word value. Equality is
+/// symmetric, so which side the box was on is not remembered.
 ///
 /// A struct and an enum are refused even when they are one word wide, because
-/// an operand's `Repr` names no declaration: a bare word cannot *be* an
-/// `Error`, whatever it is as wide as, so a boxed one is not equal to the
-/// `String` its message happens to be. An inline value reaches a comparison
-/// through a box or not at all — a `Point` could not be an operand if it
-/// wanted to be.
+/// a word's `Repr` names no declaration: a bare word cannot *be* an `Error`,
+/// whatever it is as wide as, so a boxed one is not equal to the `String` its
+/// message happens to be. A whole inline value on the other side is not this
+/// case at all — it goes through [`value`], where both sides have a layout
+/// and the declarations are compared.
 fn held(
     machine: &Machine,
     inside: (LayoutId, Vec<u64>),
-    other: Operand,
+    other: Word,
     depth: usize,
 ) -> Result<bool, RuntimeError> {
     let described = machine.program().layout(inside.0);
@@ -489,7 +505,7 @@ fn run(machine: &Machine, addr: u64) -> Option<Run> {
 /// orders the `Int` `1`, for the reason this compares them equal.
 pub(super) fn unboxed(
     machine: &Machine,
-    operand: Operand,
+    operand: Word,
 ) -> Result<Option<(LayoutId, Vec<u64>)>, RuntimeError> {
     if operand.0 != Repr::Ref || operand.1 == 0 {
         return Ok(None);
@@ -511,6 +527,20 @@ pub(super) fn unboxed(
     )))
 }
 
+/// The same, of a value location: what is inside the box a one-address
+/// location names, if it names one and the object is a box.
+///
+/// A location whose family is inline is never one, however wide it is. That
+/// is [`cove_lir::Layout::is_one_address`] again, and it is what keeps a
+/// one-field `struct Error { message: String }` from being opened as though
+/// its field's address were its own.
+fn opened(machine: &Machine, held: Held<'_>) -> Result<Option<(LayoutId, Vec<u64>)>, RuntimeError> {
+    if !machine.program().layout(held.0).is_one_address() {
+        return Ok(None);
+    }
+    unboxed(machine, (Repr::Ref, super::at(held.1, 0)?))
+}
+
 /// An enum value whose discriminant names a case its layout does not have.
 fn wrong_case(name: &str) -> RuntimeError {
     RuntimeError::new(format!("this `{name}` is in a case it does not have"))
@@ -530,7 +560,7 @@ mod tests {
     use crate::lvm::builtins::make;
     use crate::lvm::builtins::tests::{elements, named, run, scalar, two_case, vector, world};
 
-    fn equal(machine: &mut Machine, a: Operand, b: Operand) -> bool {
+    fn equal(machine: &mut Machine, a: (Repr, u64), b: (Repr, u64)) -> bool {
         let answer = run(machine, "Any", "equals", &[a, b]).unwrap();
         assert_eq!(answer.len(), 1, "`Any.equals` answers a `Bool`");
         answer[0] != 0

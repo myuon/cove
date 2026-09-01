@@ -16,7 +16,7 @@ fn a_builtin_method_is_one_call_over_its_operands() {
 fn0 m.parts(String) -> Array
   frame 4: s0!:ref s1:ref s2:ref s3:ref
      0  str s2:ref \",\"
-     1  call-builtin s3:ref String.split (s0:ref s2:ref)
+     1  call-builtin s3:ref String.split (s0:String s2:String)
      2  clear s2:ref String
      3  copy s1:ref s3:ref Array
      4  clear s3:ref Array
@@ -37,7 +37,7 @@ fn an_associated_function_has_no_receiver() {
 fn0 m.wait() -> Duration
   frame 3: s0:duration s1:int s2:duration
      0  int s1:int 1
-     1  call-builtin s2:duration Duration.seconds (s1:int)
+     1  call-builtin s2:duration Duration.seconds (s1:Int)
      2  copy s0:duration s2:duration Duration
      3  return s0:duration
 "
@@ -51,7 +51,7 @@ fn a_duration_reader_passes_its_receiver_as_operand_zero() {
         "\
 fn0 m.ms(Duration) -> Int
   frame 3: s0!:duration s1:int s2:int
-     0  call-builtin s2:int Duration.millis (s0:duration)
+     0  call-builtin s2:int Duration.millis (s0:Duration)
      1  copy s1:int s2:int Int
      2  return s1:int
 "
@@ -114,7 +114,7 @@ fn a_parser_answers_a_result_and_interns_the_error_it_may_carry() {
         "\
 fn0 m.parse(String) -> Int
   frame 9: s0!:ref s1:int s2:int s3:int s4:int s5:ref s6:int s7:int s8:bool
-     0  call-builtin s3:int Int.parse (s0:ref)
+     0  call-builtin s3:int Int.parse (s0:String)
      1  int s6:int 0
      2  int s7:int 0
      3  eq.int s8:bool s3:int s7:int
@@ -141,7 +141,7 @@ fn a_method_on_a_declared_type_is_an_ordinary_call() {
         "\
 fn0 m.f(m.Point) -> Int
   frame 4: s0!:int s1!:int s2:int s3:int
-     0  call s3:int m.Point.sum (s0:int)
+     0  call s3:int m.Point.sum (s0:m.Point)
      1  copy s2:int s3:int Int
      2  return s2:int
 "
@@ -161,17 +161,18 @@ fn a_var_self_receiver_is_an_address() {
         ),
         "\
 fn0 m.Point.bump(<addr>) -> Unit
-  frame 8: s0!:addr s1:unit s2:int s3:int s4:int s5:int s6:int s7:unit
-     0  load s2:int s0:addr m.Point
-     1  copy s4:int s3:int Int
-     2  int s5:int 1
-     3  add.int s6:int s4:int s5:int
-     4  load s2:int s0:addr m.Point
-     5  copy s3:int s6:int Int
-     6  store s0:addr s2:int m.Point
-     7  unit s7:unit
-     8  copy s1:unit s7:unit Unit
-     9  return s1:unit
+  frame 7: s0!:addr s1:unit s2:addr s3:int s4:int s5:int s6:unit
+     0  addr-of-part s2:addr s0:addr +1
+     1  load s3:int s2:addr Int
+     2  clear s2:addr <addr>
+     3  int s4:int 1
+     4  add.int s5:int s3:int s4:int
+     5  addr-of-part s2:addr s0:addr +1
+     6  store s2:addr s5:int Int
+     7  clear s2:addr <addr>
+     8  unit s6:unit
+     9  copy s1:unit s6:unit Unit
+    10  return s1:unit
 "
     );
 }

@@ -676,6 +676,72 @@ export fn f() -> Int {
     assert_eq!(agree(source, "f", vec![]), Answer::Value("11".to_string()));
 }
 
+/// A field of a `var` parameter is a place of its own: it is written in
+/// place, and it can be passed on as a `var` argument of its own.
+///
+/// Both of those needed an instruction that offsets an address. Without one a
+/// place could only ever be the *first* word of a value location, so
+/// `p.y = 7` through a `var p: Point` had to load both words, write one and
+/// store both back — the same answer on one thread, and not what the address
+/// was for — and `bump(var p.y)` could not be lowered at all, because there
+/// was no way to form the address to pass.
+#[test]
+fn a_field_of_a_var_parameter_is_written_and_passed_on_in_place() {
+    let source = "
+struct Point { x: Int, y: Int }
+
+fn bump(var n: Int) {
+  n = n + 1
+}
+
+fn shift(var p: Point) {
+  p.y = 7
+  bump(var p.y)
+}
+
+export fn f() -> Int {
+  var here = Point(x: 1, y: 2)
+  shift(var here)
+  here.x * 100 + here.y
+}
+";
+    assert_eq!(agree(source, "f", vec![]), Answer::Value("108".to_string()));
+}
+
+/// A whole struct crosses into a builtin as an argument: `contains` and
+/// `indexOf` compare it against elements of the same width, and `push` and
+/// `set` store both of its words.
+///
+/// All four refused until an argument carried its layout — a call said where
+/// the `Point` began and never that it was two words, and the honest answer
+/// was to refuse rather than to compare or store the first word of it.
+#[test]
+fn a_struct_crosses_into_a_sequence_builtin_whole() {
+    let source = "
+struct Point { x: Int, y: Int }
+
+export fn f() -> Int {
+  let items = [Point(x: 1, y: 2), Point(x: 3, y: 4)]
+  var found = 0
+  if items.contains(Point(x: 3, y: 4)) {
+    found = found + 1000
+  }
+  if items.contains(Point(x: 3, y: 9)) {
+    found = found + 2000
+  }
+  found = found + items.indexOf(Point(x: 3, y: 4)).unwrapOr(-1) * 100
+  var v = items.toVector()
+  v.push(Point(x: 5, y: 6))
+  v.set(0, Point(x: 7, y: 8))
+  found + v.length() * 10 + v.get(0).unwrapOr(Point(x: 0, y: 0)).y
+}
+";
+    assert_eq!(
+        agree(source, "f", vec![]),
+        Answer::Value("1138".to_string())
+    );
+}
+
 /// A loop that builds a string a turn, in a heap far too small to hold every
 /// one of them. It finishes only because the lowering clears the slot each
 /// turn, so a turn's string is unreachable by the next.
@@ -1118,4 +1184,3 @@ export fn f(pick: Bool) -> String {
 // construction, lookup, the immutable updates and the ordering — and nothing
 // emits the calls yet, so a case here would fail on the gap rather than on a
 // disagreement and would say nothing about either half.
-

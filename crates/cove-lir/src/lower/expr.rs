@@ -65,15 +65,15 @@ pub(super) enum Place {
     Here { slot: Slot, layout: LayoutId },
     /// Words at a linear address, and a field's offset into them.
     ///
-    /// This is what a `var` parameter names. There is no instruction that
-    /// adds an offset to an address — a place is the address of the *first*
-    /// word of a value location — so a field of one is reached by loading
-    /// the whole value, working on the words, and storing them back.
+    /// This is what a `var` parameter names. The offset is carried rather
+    /// than folded into the address as the place is built, because forming
+    /// an address is an instruction and finding a place must not emit one:
+    /// `p.y` is a place whether it is read, written or passed on, and only
+    /// the three of those know which. Where an offset is needed as an
+    /// address, [`Inst::AddrOfPart`] adds it.
     Through {
         addr: Slot,
-        /// The layout of the whole value the address names.
-        whole: LayoutId,
-        /// The field's word offset within it.
+        /// The field's word offset within the value the address names.
         at: u32,
         layout: LayoutId,
     },
@@ -369,14 +369,12 @@ impl Body<'_> {
                 }
                 StrPart::Interpolation(inner) => {
                     let value = self.expr(inner);
-                    let value = self.describe_itself(value, inner.span);
                     pieces.push(value);
                 }
             }
         }
 
-        let slots: Vec<Slot> = pieces.iter().map(|piece| piece.slot).collect();
-        let args = self.pool.args.intern(slots);
+        let args = self.pool.args.intern(pieces.iter().map(Val::arg).collect());
         let builtin = self.pool.builtin(Builtin {
             receiver: "String".into(),
             operation: "interpolate".into(),
@@ -394,36 +392,6 @@ impl Body<'_> {
         for piece in pieces.into_iter().rev() {
             self.release(piece, expr.span);
         }
-        dst
-    }
-
-    /// Boxes a value that is not one word, so that an operand list can carry
-    /// it.
-    ///
-    /// A builtin is handed slots and nothing else: [`Inst::CallBuiltin`] has
-    /// no place to say how wide each operand is or what its words mean. A
-    /// scalar and a reference are self-describing enough — the slot's own
-    /// `Repr` says which, and an object's header says what it is — but an
-    /// inline struct, enum or range is a run of words with nothing attached,
-    /// so it goes in a box that carries its layout.
-    ///
-    /// This is the one place the model costs an allocation where the
-    /// predecessor did not, and it is a finding rather than a design: the
-    /// alternative is a per-operand layout on the instruction.
-    pub(super) fn describe_itself(&mut self, value: Val, span: Span) -> Val {
-        if self.width(value.layout) == 1 {
-            return value;
-        }
-        let dst = self.temp(shapes::REF);
-        self.emit(
-            Inst::Box {
-                dst: dst.slot,
-                src: value.slot,
-                layout: value.layout,
-            },
-            span,
-        );
-        self.release(value, span);
         dst
     }
 
@@ -569,12 +537,10 @@ impl Body<'_> {
                 if layout == shapes::ADDR {
                     // A `var` parameter: the words are the caller's, and the
                     // slot holds where they are.
-                    let whole = self.layout_of(expr);
                     return Some(Place::Through {
                         addr: slot,
-                        whole,
                         at: 0,
-                        layout: whole,
+                        layout: self.layout_of(expr),
                     });
                 }
                 Some(Place::Here { slot, layout })
@@ -612,14 +578,8 @@ impl Body<'_> {
                         at: 1 + field.at,
                         layout: field.layout,
                     },
-                    (
-                        Place::Through {
-                            addr, whole, at, ..
-                        },
-                        0,
-                    ) => Place::Through {
+                    (Place::Through { addr, at, .. }, 0) => Place::Through {
                         addr,
-                        whole,
                         at: at + field.at,
                         layout: field.layout,
                     },
@@ -649,8 +609,8 @@ impl Body<'_> {
     ///
     /// A run of this frame is answered as it stands, borrowed: the words are
     /// already there and reading them is not an event. What is behind an
-    /// address has to be brought over, and the whole value comes with it
-    /// because an address cannot be offset.
+    /// address has to be brought over, and one load brings exactly the
+    /// field's words — the offset is in the address, not in what is read.
     fn read_place(&mut self, place: Place, span: Span) -> Val {
         match place {
             Place::Here { slot, layout } => Val::borrowed(slot, layout),
@@ -667,56 +627,55 @@ impl Body<'_> {
                 );
                 dst
             }
-            // An address names the *first* word of a value location, so a
-            // field at offset 0 is at the address itself however wide the
-            // whole value is: the load reads the field's words and stops.
-            Place::Through {
-                addr,
-                at: 0,
-                layout,
-                ..
-            } => {
+            Place::Through { addr, at, layout } => {
+                let addr = self.part_address(addr, at, span);
                 let dst = self.temp(layout);
                 self.emit(
                     Inst::Load {
                         dst: dst.slot,
-                        addr,
+                        addr: addr.slot,
                         layout,
                     },
                     span,
                 );
-                dst
-            }
-            Place::Through {
-                addr,
-                whole,
-                at,
-                layout,
-            } => {
-                let held = self.temp(whole);
-                self.emit(
-                    Inst::Load {
-                        dst: held.slot,
-                        addr,
-                        layout: whole,
-                    },
-                    span,
-                );
-                let dst = self.temp(layout);
-                self.copy(dst.slot, held.slot + at, layout, span);
-                self.release(held, span);
+                self.release(addr, span);
                 dst
             }
         }
+    }
+
+    /// The address of the part of the value at `addr` that begins `at` words
+    /// into it.
+    ///
+    /// Offset zero is the address itself, borrowed: a place is the address of
+    /// the *first* word of a value location, so the whole of a value and its
+    /// first field are the same address and adding nothing to it would be an
+    /// instruction that answers its own operand.
+    fn part_address(&mut self, addr: Slot, at: u32, span: Span) -> Val {
+        if at == 0 {
+            return Val::borrowed(addr, shapes::ADDR);
+        }
+        let dst = self.temp(shapes::ADDR);
+        self.emit(
+            Inst::AddrOfPart {
+                dst: dst.slot,
+                addr,
+                at,
+            },
+            span,
+        );
+        dst
     }
 
     /// Writes a value into a place.
     ///
     /// A write through an address updates the caller's own words, which is
     /// the aliasing `var` specifies and needs no copy back. A write to a
-    /// *field* through one is a load, a write into the words and a store —
-    /// because a place is the address of the first word of a value location
-    /// and no instruction offsets one.
+    /// *field* through one is the same store at an offset address: nothing is
+    /// loaded, nothing is written back, and nothing else in the value is
+    /// touched. It was a load of the whole value, a write into the words and
+    /// a store of the whole value back, which is the same answer on one
+    /// thread and not what an address was for.
     fn write_place(&mut self, place: Place, value: &Val, span: Span) {
         match place {
             Place::Here { slot, layout } => self.copy(slot, value.slot, layout, span),
@@ -731,46 +690,17 @@ impl Body<'_> {
                     span,
                 );
             }
-            Place::Through {
-                addr,
-                at: 0,
-                layout,
-                ..
-            } => {
+            Place::Through { addr, at, layout } => {
+                let addr = self.part_address(addr, at, span);
                 self.emit(
                     Inst::Store {
-                        addr,
+                        addr: addr.slot,
                         src: value.slot,
                         layout,
                     },
                     span,
                 );
-            }
-            Place::Through {
-                addr,
-                whole,
-                at,
-                layout,
-            } => {
-                let held = self.temp(whole);
-                self.emit(
-                    Inst::Load {
-                        dst: held.slot,
-                        addr,
-                        layout: whole,
-                    },
-                    span,
-                );
-                self.copy(held.slot + at, value.slot, layout, span);
-                self.emit(
-                    Inst::Store {
-                        addr,
-                        src: held.slot,
-                        layout: whole,
-                    },
-                    span,
-                );
-                self.release(held, span);
+                self.release(addr, span);
             }
         }
     }
@@ -1553,12 +1483,9 @@ impl Body<'_> {
 
         let mut held = Vec::with_capacity(args.len());
         for arg in args {
-            let value = self.expr(&arg.value);
-            let value = self.describe_itself(value, arg.value.span);
-            held.push(value);
+            held.push(self.expr(&arg.value));
         }
-        let slots: Vec<Slot> = held.iter().map(|value| value.slot).collect();
-        let list = self.pool.args.intern(slots);
+        let list = self.pool.args.intern(held.iter().map(Val::arg).collect());
         let dst = self.temp(result);
         self.emit(
             Inst::CallHost {
@@ -1633,13 +1560,9 @@ impl Body<'_> {
             // A `var` parameter passed straight on is the same address: the
             // callee writes the storage the original caller named, which is
             // what makes the alias reach through however many frames pass it
-            // along.
-            Place::Through { addr, at: 0, .. } => Val::borrowed(addr, shapes::ADDR),
-            Place::Through { .. } => self.gap(
-                "a `var` argument naming a field of another `var` parameter, \
-                 which would need an address an instruction can offset",
-                place,
-            ),
+            // along. A field of one is that address plus the field's offset,
+            // which is the same statement one word further in.
+            Place::Through { addr, at, .. } => self.part_address(addr, at, place.span),
         }
     }
 

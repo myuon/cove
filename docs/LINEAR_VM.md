@@ -325,7 +325,14 @@ Two consequences are worth naming, because they are the reason to prefer it:
   layouts, and where each begins follows from the ones before it.
 - The caller evaluates each argument in source order into its own value
   location, then `Call` copies each argument's words into the callee's frame.
-  The list is static: an `ArgsId` into a program-wide pool of base slots.
+  The list is static: an `ArgsId` into a program-wide pool of arguments, each
+  of which is a base slot **and the layout of the location it names**. A slot
+  says where a value begins and never how wide it is — a scalar is described
+  by its slot's `Repr` and a reference by its object's header, and an inline
+  struct or enum by neither — so a callee that is polymorphic over the values
+  it is handed reads the layout rather than guessing. `Call` and `CallClosure`
+  still take each parameter's width from the callee's `params`, because the
+  frame being written is the callee's.
 - A `Call` names the base slot of the destination *location* in the caller's
   frame; `Return` names the base slot of the answer in the callee's, and the
   machine copies the words `Function::returns` describes.
@@ -342,6 +349,10 @@ places.
 - `AddrOfSlot` — the address of a slot of the current frame.
 - `AddrOfField` — the address plus a statically known field-word offset.
 - `AddrOfElem` — an element's address, at a statically known stride.
+- `AddrOfPart` — a statically known word offset added to an address, which is
+  what makes a place composable: the answer is again the address of the first
+  word of a value location, so a field of a `var` parameter goes back through
+  a load, a store or another of these with no second rule.
 - A load and a store through one move the words the layout says.
 
 A `var` parameter is an ordinary slot whose `Repr` is `Addr`, carrying the

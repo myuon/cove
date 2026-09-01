@@ -22,9 +22,13 @@
 //! `Point` is, and materialising one is reading its two words rather than
 //! following an address to somewhere else.
 //!
-//! [`word_to_value`] is the narrow case, for the one caller that has a `Repr`
-//! and not a layout: a Host call's arguments are named by slot, and a slot
-//! declares a `Repr`. See the note on it.
+//! There is no narrow entry point beside them. There used to be one, for a
+//! Host call's arguments: those were named by slot, and a slot declares a
+//! `Repr` rather than a layout — which is enough for every one-word family
+//! and is not enough for an inline struct or enum, so a multiword value
+//! reached a host by having been boxed first. An argument carries the layout
+//! of the location it names now, so a `Point` crosses as the `Point` the
+//! schema declared.
 //!
 //! # The way in is told the family, except where the family is the question
 //!
@@ -75,24 +79,6 @@ pub(crate) fn to_value(
     words: &[u64],
 ) -> Result<Value, RuntimeError> {
     out(machine, layout, words, 0)
-}
-
-/// The public value of one word, read as `repr`.
-///
-/// The one entry point that takes a `Repr` rather than a layout, and it is
-/// here because one caller has nothing else: a `CallHost`'s arguments are
-/// named by slot, and a slot declares a `Repr`. That is enough for every
-/// one-word family — every scalar, and every value that lives in the heap —
-/// and it is *not* enough for an inline struct or enum, whose width a `Repr`
-/// does not carry. See the note in [`crate::lvm::exec::Machine::call_host`]:
-/// the IR does not give a host operation's parameters layouts, so a multiword
-/// value reaches a host by being boxed, which is one `Repr::Ref` word.
-pub(crate) fn word_to_value(
-    machine: &Machine,
-    repr: Repr,
-    word: u64,
-) -> Result<Value, RuntimeError> {
-    word_out(machine, repr, word, 0)
 }
 
 /// The value at a location of `layout` holding `words`.
@@ -364,20 +350,6 @@ pub(crate) fn from_value(
     let words = into(machine, layout, value, 0);
     machine.release_temps(mark);
     words
-}
-
-/// The one word of `value` in a slot of `repr`.
-///
-/// The narrow counterpart to [`word_to_value`], for the same reason.
-pub(crate) fn word_from_value(
-    machine: &mut Machine,
-    repr: Repr,
-    value: &Value,
-) -> Result<u64, RuntimeError> {
-    let mark = machine.temps();
-    let word = word_into(machine, repr, value, 0);
-    machine.release_temps(mark);
-    word
 }
 
 fn into(
@@ -1555,31 +1527,32 @@ mod tests {
         assert_eq!(to_value(&machine, any, &words).unwrap().to_string(), "41");
     }
 
-    /// A `Repr::Ref` argument slot is all a Host call declares, so the family
-    /// comes from the value and a scalar is boxed.
+    /// A destination that is one `Repr::Ref` word and says nothing more is
+    /// the erasure path: the family comes from the value, and a scalar is
+    /// boxed to get a description to go with it.
     #[test]
-    fn a_scalar_arriving_at_a_reference_slot_is_boxed() {
+    fn a_scalar_arriving_at_a_reference_location_is_boxed() {
         let world = World::new(|build, _, _, _| {
             build.layout("Any", Shape::Boxed);
+            build.word("<ref>", Repr::Ref);
         });
         let mut machine = world.machine();
+        let reference = world.named("<ref>");
 
-        let word = word_from_value(&mut machine, Repr::Ref, &Value::int(41)).unwrap();
+        let words = from_value(&mut machine, reference, &Value::int(41)).unwrap();
         assert!(matches!(
-            world.program.layout(machine.object_layout(word)).shape,
+            world.program.layout(machine.object_layout(words[0])).shape,
             Shape::Boxed
         ));
         assert_eq!(
-            word_to_value(&machine, Repr::Ref, word)
-                .unwrap()
-                .to_string(),
+            to_value(&machine, reference, &words).unwrap().to_string(),
             "41"
         );
         // A string is already one reference, so it crosses as itself rather
         // than through a box.
-        let word = word_from_value(&mut machine, Repr::Ref, &Value::string("hi")).unwrap();
+        let words = from_value(&mut machine, reference, &Value::string("hi")).unwrap();
         assert!(matches!(
-            world.program.layout(machine.object_layout(word)).shape,
+            world.program.layout(machine.object_layout(words[0])).shape,
             Shape::Str
         ));
     }

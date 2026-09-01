@@ -53,8 +53,8 @@ pub use inst::{ArithOp, CmpOp, Compare, Convert, Inst, Len, Num, Pc, Slot};
 pub use layout::{enum_layout, struct_layout, Case, Field, Layout, LayoutId, Part, Shape};
 pub use lower::lower;
 pub use program::{
-    ArgsId, Builtin, BuiltinId, Capture, Function, FunctionId, HostOp, HostOpId, Program, StrId,
-    Table, TableId,
+    Arg, ArgsId, Builtin, BuiltinId, Capture, Function, FunctionId, HostOp, HostOpId, Program,
+    StrId, Table, TableId,
 };
 pub use repr::{RefMap, Repr};
 pub use verify::{verify, Invalid};

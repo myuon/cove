@@ -1,11 +1,11 @@
 //! How a builtin reads the words it was handed, and what it refuses when it
 //! cannot.
 //!
-//! An operand is a `Repr` and a word, because a word is untagged and the slot
-//! it came out of is the only thing that says what it means. Reading one as
-//! an `Int`, as text, or as a receiver of a particular family is therefore a
-//! question with two answers — the value, or a refusal — and both halves are
-//! here so that the refusal is written once.
+//! An operand is a layout and a run of words, because a word is untagged and
+//! the location it came out of is the only thing that says what it means.
+//! Reading one as an `Int`, as text, or as a receiver of a particular family
+//! is therefore a question with two answers — the value, or a refusal — and
+//! both halves are here so that the refusal is written once.
 //!
 //! # The messages are the oracle's
 //!
@@ -29,23 +29,100 @@ use cove_lir::{LayoutId, Repr, Shape};
 use crate::error::RuntimeError;
 use crate::lvm::exec::Machine;
 
-/// One operand: the word of a slot, and the `Repr` that slot declares.
+/// One operand: the layout of the value location an argument names, and the
+/// words at it.
 ///
 /// The pair travels together everywhere, because neither half means anything
-/// without the other — a word is untagged, and a `Repr` describes nothing on
+/// without the other — a word is untagged, and a layout describes nothing on
 /// its own.
-pub(super) type Operand = (Repr, u64);
+///
+/// It used to be a `Repr` and one word, and that was the shape of a call
+/// rather than a choice this file made: a `CallBuiltin`'s argument list was
+/// base slots, so nothing said how wide an operand was. A scalar described
+/// itself from its slot and a reference from its object's header, and an
+/// inline struct or enum described itself from neither — so `"{p}"` rendered
+/// a `Point`'s first word, `a == b` compared it, and the six operations that
+/// put a whole value into a collection refused rather than store half of one.
+/// [`cove_lir::Arg`] carries the layout now and all of those read the value.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct Operand<'w> {
+    pub layout: LayoutId,
+    pub words: &'w [u64],
+}
+
+/// One word, and the `Repr` that says what it means.
+///
+/// What is left of the old operand, and it is still the right currency for
+/// the two things that genuinely are one word: a scalar comparison, and the
+/// address a value of a family that lives in the heap consists of.
+pub(super) type Word = (Repr, u64);
+
+impl Operand<'_> {
+    /// The first word of the location.
+    ///
+    /// Every layout a program can name is at least one word wide — `Unit`
+    /// takes a slot — so the fallback is unreachable, and it is zero rather
+    /// than a panic because a builtin is not a place to discover a lowering
+    /// bug by unwinding.
+    pub(super) fn word(self) -> u64 {
+        self.words.first().copied().unwrap_or(0)
+    }
+}
+
+/// The one word an operand is, where it is one.
+///
+/// A scalar answers its `Repr`, and so does a family that lives in the heap,
+/// because a value of one *is* the address of its object. An inline struct or
+/// an enum answers nothing however wide it happens to be: a
+/// `struct Error { message: String }` is one `Repr::Ref` word and is not a
+/// reference to an `Error`, so reading its word as one reads the declaration
+/// away. That is [`cove_lir::Layout::is_one_address`], asked here.
+pub(super) fn as_word(machine: &Machine, operand: Operand<'_>) -> Option<Word> {
+    let described = machine.program().layout(operand.layout);
+    match &described.shape {
+        Shape::Word(repr) => Some((*repr, operand.word())),
+        _ if described.is_one_address() => Some((Repr::Ref, operand.word())),
+        _ => None,
+    }
+}
+
+/// The words of `operand`, refused when it is not a value of `want`.
+///
+/// What every operation that puts a whole value *into* a collection asks: a
+/// member of a `Set<Point>` is two words and a store written one word at a
+/// time at a stride of two is a silently wrong set. The layouts are compared
+/// rather than only the widths, because two families of one width are still
+/// two families and a run is traced by the element layout's map.
+pub(super) fn run_of<'w>(
+    machine: &Machine,
+    method: &str,
+    want: LayoutId,
+    operand: Operand<'w>,
+) -> Result<&'w [u64], RuntimeError> {
+    let described = machine.program().layout(want);
+    if operand.layout == want && operand.words.len() == described.width() as usize {
+        return Ok(operand.words);
+    }
+    Err(RuntimeError::new(format!(
+        "`{method}` expects `{}` here, but found `{}`",
+        described.name,
+        machine.program().layout(operand.layout).name
+    ))
+    .with_rule(
+        "A value is a run of words its layout describes, and a collection holds values of one family.",
+    ))
+}
 
 /// The receiver and the arguments of a method call.
 ///
 /// A method's operands are its receiver followed by its arguments, so the
 /// count this holds them to is the *argument* count — which is the count the
 /// schema declares and the count the oracle's message names.
-pub(super) fn method<'o>(
+pub(super) fn method<'w, 'o>(
     shown: &str,
-    operands: &'o [Operand],
+    operands: &'o [Operand<'w>],
     arguments: usize,
-) -> Result<(Operand, &'o [Operand]), RuntimeError> {
+) -> Result<(Operand<'w>, &'o [Operand<'w>]), RuntimeError> {
     match operands.split_first() {
         Some((receiver, rest)) if rest.len() == arguments => Ok((*receiver, rest)),
         Some((_, rest)) => Err(arity(shown, arguments, rest.len())),
@@ -58,11 +135,11 @@ pub(super) fn method<'o>(
 
 /// The arguments of an associated function, which is called on a name rather
 /// than on a value and therefore has no receiver.
-pub(super) fn free<'o>(
+pub(super) fn free<'w, 'o>(
     shown: &str,
-    operands: &'o [Operand],
+    operands: &'o [Operand<'w>],
     arguments: usize,
-) -> Result<&'o [Operand], RuntimeError> {
+) -> Result<&'o [Operand<'w>], RuntimeError> {
     if operands.len() != arguments {
         return Err(arity(shown, arguments, operands.len()));
     }
@@ -74,10 +151,10 @@ pub(super) fn int(
     machine: &Machine,
     method: &str,
     parameter: &str,
-    operand: Operand,
+    operand: Operand<'_>,
 ) -> Result<i64, RuntimeError> {
-    match operand.0 {
-        Repr::Int => Ok(operand.1 as i64),
+    match as_word(machine, operand) {
+        Some((Repr::Int, word)) => Ok(word as i64),
         _ => Err(type_error(machine, method, parameter, "Int", operand)),
     }
 }
@@ -87,10 +164,10 @@ pub(super) fn float(
     machine: &Machine,
     method: &str,
     parameter: &str,
-    operand: Operand,
+    operand: Operand<'_>,
 ) -> Result<f64, RuntimeError> {
-    match operand.0 {
-        Repr::Float => Ok(f64::from_bits(operand.1)),
+    match as_word(machine, operand) {
+        Some((Repr::Float, word)) => Ok(f64::from_bits(word)),
         _ => Err(type_error(machine, method, parameter, "Float", operand)),
     }
 }
@@ -100,12 +177,14 @@ pub(super) fn text(
     machine: &Machine,
     method: &str,
     parameter: &str,
-    operand: Operand,
+    operand: Operand<'_>,
 ) -> Result<String, RuntimeError> {
-    if operand.0 != Repr::Ref || !super::is_string(machine, operand.1) {
-        return Err(type_error(machine, method, parameter, "String", operand));
+    match as_word(machine, operand) {
+        Some((Repr::Ref, addr)) if super::is_string(machine, addr) => {
+            super::string_of(machine, addr)
+        }
+        _ => Err(type_error(machine, method, parameter, "String", operand)),
     }
-    super::string_of(machine, operand.1)
 }
 
 /// `` `{method}` takes {expected} argument(s), but {found} were given ``.
@@ -130,11 +209,11 @@ pub(super) fn type_error(
     method: &str,
     parameter: &str,
     expected: &str,
-    found: Operand,
+    found: Operand<'_>,
 ) -> RuntimeError {
     RuntimeError::new(format!(
         "`{method}` expects `{expected}` for `{parameter}`, but found `{}`",
-        type_name(machine, found.0, found.1)
+        name(machine, found)
     ))
 }
 
@@ -144,11 +223,21 @@ pub(super) fn type_error(
 /// this by falling off the end of its `match` on the receiver's
 /// representation; this reaches it by finding a shape the operation is not
 /// for, which is the same question asked of a header instead of an `enum`.
-pub(super) fn no_method(machine: &Machine, receiver: Operand, method: &str) -> RuntimeError {
+pub(super) fn no_method(machine: &Machine, receiver: Operand<'_>, method: &str) -> RuntimeError {
     RuntimeError::new(format!(
         "`{}` has no method `{method}`",
-        type_name(machine, receiver.0, receiver.1)
+        name(machine, receiver)
     ))
+}
+
+/// What the language calls the value in `operand`.
+///
+/// Asked of the layout rather than of a `Repr`, which is what the operand
+/// carries now and what makes the answer right for an inline value: a
+/// `Point` that a refusal used to call an `Int` — its first word — is called
+/// a `Point`.
+pub(super) fn name(machine: &Machine, operand: Operand<'_>) -> String {
+    layout_name(machine, operand.layout, operand.word(), 0)
 }
 
 /// What the language calls the value in `word`, read as `repr`.

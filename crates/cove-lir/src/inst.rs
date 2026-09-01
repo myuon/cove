@@ -18,9 +18,9 @@
 //!   between a function's first instruction and its last, and
 //!   [`crate::RefMap`] is one bit per slot.
 //! - **A call needs no argument buffer.** The callee's frame begins where
-//!   the caller's ends, so [`Inst::Call`] copies argument slot *i* to callee
-//!   slot *i* and transfers control. Nothing is pushed, permuted, or copied
-//!   back.
+//!   the caller's ends, so [`Inst::Call`] copies the words of argument *i*
+//!   into the run parameter *i* occupies and transfers control. Nothing is
+//!   pushed, permuted, or copied back.
 //!
 //! # The instruction set describes families, not cases
 //!
@@ -349,6 +349,30 @@ pub enum Inst {
         index: Slot,
         layout: LayoutId,
     },
+    /// `dst = addr + at`, a static word offset into the value at `addr`.
+    ///
+    /// The one place instruction whose operand is itself a place, and what
+    /// makes a place composable. A place is the address of the *first* word
+    /// of a value location, so without this a `var` parameter could only name
+    /// the whole of what it was given: `p.y = 1` through a `var p: Point` had
+    /// to load both words, write one and store both back — observationally
+    /// the same on one thread, but not what the address was for — and
+    /// `f(var p.y)` could not be lowered at all, because there was no way to
+    /// form the address to pass.
+    ///
+    /// `at` is a word offset within the value the address names, computed by
+    /// the lowering from the layout the checker settled. It is the same
+    /// arithmetic a field of an inline struct is, done to an address instead
+    /// of to a slot number, and the answer is again the address of the first
+    /// word of a value location — so it goes back through [`Inst::Load`],
+    /// [`Inst::Store`] or another of these with no second rule about what an
+    /// address is.
+    ///
+    /// Nothing checks `at` against the value's extent, because a frame does
+    /// not record one: what an address names is a fact about the instruction
+    /// that formed it, and [`mod@crate::verify`] says the same of
+    /// [`Inst::Switch`]'s operand for the same reason.
+    AddrOfPart { dst: Slot, addr: Slot, at: u32 },
     /// `dst = *addr`, for the words `layout` describes.
     Load {
         dst: Slot,

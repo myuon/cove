@@ -15,7 +15,7 @@ fn a_host_call_names_the_module_and_the_operation_as_the_source_writes_them() {
 fn0 m.f() -> Result
   frame 7: s0:int s1:unit s2:ref s3:ref s4:int s5:unit s6:ref
      0  str s3:ref \"hi\"
-     1  call-host s4:int console.println (s3:ref)
+     1  call-host s4:int console.println (s3:String)
      2  clear s3:ref String
      3  copy s0:int s4:int Result
      4  clear s4:int Result
@@ -39,7 +39,7 @@ fn the_answer_is_written_into_the_layout_the_schema_declared() {
         "\
 fn0 m.f(String) -> String
   frame 8: s0!:ref s1:ref s2:ref s3:int s4:ref s5:ref s6:int s7:bool
-     0  call-host s3:int env.get (s0:ref)
+     0  call-host s3:int env.get (s0:String)
      1  str s5:ref \"\"
      2  int s6:int 1
      3  eq.int s7:bool s3:int s6:int
@@ -67,7 +67,7 @@ fn a_host_call_written_through_the_module_reaches_the_same_operation() {
 fn0 m.f() -> Result
   frame 7: s0:int s1:unit s2:ref s3:ref s4:int s5:unit s6:ref
      0  str s3:ref \"hi\"
-     1  call-host s4:int console.println (s3:ref)
+     1  call-host s4:int console.println (s3:String)
      2  clear s3:ref String
      3  copy s0:int s4:int Result
      4  clear s4:int Result

@@ -34,7 +34,7 @@ fn0 m.greet(String) -> String
   frame 5: s0!:ref s1:ref s2:ref s3:ref s4:ref
      0  str s2:ref \"hi \"
      1  str s3:ref \"!\"
-     2  call-builtin s4:ref String.interpolate (s2:ref s0:ref s3:ref)
+     2  call-builtin s4:ref String.interpolate (s2:String s0:String s3:String)
      3  clear s3:ref String
      4  clear s2:ref String
      5  copy s1:ref s4:ref String
@@ -44,12 +44,16 @@ fn0 m.greet(String) -> String
     );
 }
 
-/// A builtin is handed slot numbers and nothing else, so an operand that
-/// is not one word carries its own layout in a box. That is a consequence
-/// of the instruction's shape rather than of the representation, and it is
-/// the one place the model costs an allocation the predecessor did not.
+/// An argument carries the layout of the location it names, so a `Point`
+/// crosses into an interpolation as the two words it already is.
+///
+/// It used to be boxed: a builtin was handed slot numbers and nothing else,
+/// so an operand wider than a word had to carry its own description. That
+/// cost an allocation per interpolated struct on a path the predecessor did
+/// not allocate on, and the answer was `1` rather than `Point(x: 1, y: 2)`
+/// wherever the box was skipped.
 #[test]
-fn an_inline_value_is_boxed_on_the_way_into_an_interpolation() {
+fn an_inline_value_crosses_into_an_interpolation_where_it_sits() {
     assert_eq!(
         listing(
             "struct Point { x: Int, y: Int }\nfn show(p: Point) -> String { \"p={p}\" }",
@@ -57,15 +61,13 @@ fn an_inline_value_is_boxed_on_the_way_into_an_interpolation() {
         ),
         "\
 fn0 m.show(m.Point) -> String
-  frame 6: s0!:int s1!:int s2:ref s3:ref s4:ref s5:ref
+  frame 5: s0!:int s1!:int s2:ref s3:ref s4:ref
      0  str s3:ref \"p=\"
-     1  box s4:ref s0:int m.Point
-     2  call-builtin s5:ref String.interpolate (s3:ref s4:ref)
-     3  clear s4:ref <ref>
-     4  clear s3:ref String
-     5  copy s2:ref s5:ref String
-     6  clear s5:ref String
-     7  return s2:ref
+     1  call-builtin s4:ref String.interpolate (s3:String s0:m.Point)
+     2  clear s3:ref String
+     3  copy s2:ref s4:ref String
+     4  clear s4:ref String
+     5  return s2:ref
 "
     );
 }

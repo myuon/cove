@@ -99,15 +99,15 @@ pub(super) const SET_ELEMENT: &str = "set element";
 
 /// A value on its way through the order.
 ///
-/// The two halves are the two ways a builtin ever meets one. A member of a
-/// set, a key of a map, a field of a struct and an element of an array all
-/// arrive as [`Key::Held`]: a layout that says the width and the parts, and
-/// the run of words the value occupies. An argument arrives as [`Key::Word`],
-/// because that is all an operand can be.
+/// A member of a set, a key of a map, a field of a struct, an element of an
+/// array and an argument all arrive as [`Key::Held`]: a layout that says the
+/// width and the parts, and the run of words the value occupies. An argument
+/// used to be a [`Key::Word`] because that was all an operand could be, and
+/// now it is not — what is left of that half is what a *reduction* answers,
+/// the address a value of a heap family consists of and the bits a scalar is.
 #[derive(Clone, Copy)]
 enum Key<'w> {
-    /// One operand word, described only by the `Repr` of the slot it came out
-    /// of.
+    /// One word, described only by its `Repr`.
     Word(Repr, u64),
     /// A value of a known layout, as the run of words it occupies.
     Held(LayoutId, &'w [u64]),
@@ -142,14 +142,14 @@ pub(super) fn check(
     machine: &Machine,
     method: &str,
     role: &str,
-    operand: Operand,
+    operand: Operand<'_>,
 ) -> Result<(), RuntimeError> {
     admits(
         machine,
         method,
         role,
         None,
-        Key::Word(operand.0, operand.1),
+        Key::Held(operand.layout, operand.words),
         0,
     )
 }
@@ -186,22 +186,22 @@ pub(super) fn cmp_value(
 /// `wanted`.
 ///
 /// The shape a binary search over a run has: what is in the run is a value of
-/// the run's element layout and what is being looked for is one operand word,
-/// and the two are compared without either being made into the other. Reading
-/// the operand *as* the element layout would be the wrong answer wherever the
-/// two disagree — a boxed `Int` looked for in a `Set<Int>` is one address and
-/// one integer, and comparing them as integers would compare a heap address
-/// with a number.
+/// the run's element layout and what is being looked for is the operand's
+/// own, and the two are compared without either being read as the other.
+/// Reading the operand *as* the element layout would be the wrong answer
+/// wherever the two disagree — a boxed `Int` looked for in a `Set<Int>` is
+/// one address and one integer, and comparing them as integers would compare
+/// a heap address with a number.
 pub(super) fn cmp_held(
     machine: &Machine,
     layout: LayoutId,
     held: &[u64],
-    wanted: Operand,
+    wanted: Operand<'_>,
 ) -> Result<Ordering, RuntimeError> {
     order(
         machine,
         Key::Held(layout, held),
-        Key::Word(wanted.0, wanted.1),
+        Key::Held(wanted.layout, wanted.words),
         0,
     )
 }
@@ -236,7 +236,7 @@ fn inward(machine: &Machine, key: Key) -> Result<Option<Step>, RuntimeError> {
             };
             match described.shape {
                 Shape::Word(repr) => Some(Step::Word(repr, first)),
-                _ if described.is_ref() => Some(Step::Word(Repr::Ref, first)),
+                _ if described.is_one_address() => Some(Step::Word(Repr::Ref, first)),
                 _ => None,
             }
         }
@@ -854,7 +854,9 @@ fn not_a_key() -> RuntimeError {
 mod tests {
     use super::*;
     use crate::lvm::builtins::make;
-    use crate::lvm::builtins::tests::{elements as array_layout, named, scalar, two_case, world};
+    use crate::lvm::builtins::tests::{
+        at, elements as array_layout, named, scalar, two_case, world,
+    };
     use crate::lvm::exec::tests::Build;
 
     fn machine(program: &cove_lir::Program) -> Machine<'_> {
@@ -909,7 +911,13 @@ mod tests {
     }
 
     /// Two operands, which is what an argument and an argument are.
-    fn cmp(machine: &Machine, a: Operand, b: Operand) -> Ordering {
+    /// An operand naming the object at `addr`, whose layout its own header
+    /// states — which is what a lowering would have put in the argument.
+    fn object<'w>(machine: &Machine, addr: &'w u64) -> Operand<'w> {
+        at(machine.object_layout(*addr), std::slice::from_ref(addr))
+    }
+
+    fn cmp(machine: &Machine, a: (Repr, u64), b: (Repr, u64)) -> Ordering {
         order(machine, Key::Word(a.0, a.1), Key::Word(b.0, b.1), 0).expect("both are keys")
     }
 
@@ -1160,6 +1168,7 @@ mod tests {
         let mut machine = machine(&program);
         let int = scalar(&program, Repr::Int);
         let point = named(&program, "Point");
+        let boxes = named(&program, "Boxed");
         let held = boxed(&mut machine, int, &[3]);
         assert_eq!(
             cmp(&machine, (Repr::Ref, held), (Repr::Int, 4)),
@@ -1169,17 +1178,17 @@ mod tests {
             cmp(&machine, (Repr::Int, 3), (Repr::Ref, held)),
             Ordering::Equal
         );
-        check(&machine, "Set.of", SET_ELEMENT, (Repr::Ref, held)).unwrap();
+        check(&machine, "Set.of", SET_ELEMENT, at(boxes, &[held])).unwrap();
 
         // A boxed `Point` is a `Point`, so it sorts among the structs and a
         // member of a `Set<Point>` finds it.
         let structure = boxed(&mut machine, point, &[1, 2]);
         assert_eq!(
-            cmp_held(&machine, point, &[1, 2], (Repr::Ref, structure)).unwrap(),
+            cmp_held(&machine, point, &[1, 2], at(boxes, &[structure])).unwrap(),
             Ordering::Equal
         );
         assert_eq!(
-            cmp_held(&machine, point, &[1, 1], (Repr::Ref, structure)).unwrap(),
+            cmp_held(&machine, point, &[1, 1], at(boxes, &[structure])).unwrap(),
             Ordering::Less
         );
     }
@@ -1191,11 +1200,12 @@ mod tests {
         let program = world();
         let mut machine = machine(&program);
         let int = scalar(&program, Repr::Int);
+        let floats = scalar(&program, Repr::Float);
         let error = check(
             &machine,
             "Set.of",
             SET_ELEMENT,
-            (Repr::Float, 1.5f64.to_bits()),
+            at(floats, &[1.5f64.to_bits()]),
         )
         .unwrap_err();
         assert_eq!(
@@ -1208,7 +1218,7 @@ mod tests {
         );
 
         let items = make::vector_of(&mut machine, int, &[1]).unwrap();
-        let error = check(&machine, "Map.get", MAP_KEY, (Repr::Ref, items)).unwrap_err();
+        let error = check(&machine, "Map.get", MAP_KEY, object(&machine, &items)).unwrap_err();
         assert_eq!(
             error.message,
             "`Map.get` cannot use a `Vector` as a map key"
@@ -1266,7 +1276,7 @@ mod tests {
         // alone — and a struct inside it extends that. The elements are
         // inline, at the `Held` layout's width.
         let items = array(&mut machine, held, &[1, 1.5f64.to_bits()]);
-        let error = check(&machine, "Set.of", SET_ELEMENT, (Repr::Ref, items)).unwrap_err();
+        let error = check(&machine, "Set.of", SET_ELEMENT, object(&machine, &items)).unwrap_err();
         assert_eq!(
             error.message,
             "`Set.of` cannot use a `Float` inside `[0].weight` as a set element"
@@ -1288,7 +1298,7 @@ mod tests {
         // A map's *values* are what nesting one as a key still asks about,
         // and the entry is named by the key as it renders.
         let entries = map(&mut machine, int, float, &[7, 1.5f64.to_bits()]);
-        let error = check(&machine, "Set.of", SET_ELEMENT, (Repr::Ref, entries)).unwrap_err();
+        let error = check(&machine, "Set.of", SET_ELEMENT, object(&machine, &entries)).unwrap_err();
         assert_eq!(
             error.message,
             "`Set.of` cannot use a `Float` inside `[7]` as a set element"
@@ -1303,9 +1313,9 @@ mod tests {
         let mut machine = machine(&program);
         let int = scalar(&program, Repr::Int);
         let members = set(&mut machine, int, &[1, 2]);
-        check(&machine, "Set.of", SET_ELEMENT, (Repr::Ref, members)).unwrap();
+        check(&machine, "Set.of", SET_ELEMENT, object(&machine, &members)).unwrap();
         let entries = map(&mut machine, int, int, &[1, 2]);
-        check(&machine, "Set.of", SET_ELEMENT, (Repr::Ref, entries)).unwrap();
+        check(&machine, "Set.of", SET_ELEMENT, object(&machine, &entries)).unwrap();
     }
 
     /// An object that holds itself is a legal heap graph and not a legal
@@ -1319,7 +1329,7 @@ mod tests {
         machine.set_payload(a, 0, a);
         let b = array(&mut machine, text, &[0]);
         machine.set_payload(b, 0, b);
-        let error = check(&machine, "Set.of", SET_ELEMENT, (Repr::Ref, a)).unwrap_err();
+        let error = check(&machine, "Set.of", SET_ELEMENT, object(&machine, &a)).unwrap_err();
         assert_eq!(error.message, "this value nests too deeply to compare");
         let error = order(
             &machine,
@@ -1337,12 +1347,17 @@ mod tests {
         let program = world();
         let mut machine = machine(&program);
         let int = scalar(&program, Repr::Int);
-        let error = check(&machine, "Set.of", SET_ELEMENT, (Repr::Ref, 0)).unwrap_err();
+        // The layout is the one a lowering would have passed — the static
+        // type of the argument — and the word is what went wrong: a null
+        // reference, and then an address the sweeper reclaimed underneath it.
+        let arrays = array_layout(&program, int, false);
+        let null = 0;
+        let error = check(&machine, "Set.of", SET_ELEMENT, at(arrays, &[null])).unwrap_err();
         assert_eq!(error.message, "this value was read before it was given one");
 
         let dead = array(&mut machine, int, &[]);
         machine.relabel(dead, LayoutId::FREE, 0, 0);
-        let error = check(&machine, "Set.of", SET_ELEMENT, (Repr::Ref, dead)).unwrap_err();
+        let error = check(&machine, "Set.of", SET_ELEMENT, at(arrays, &[dead])).unwrap_err();
         assert_eq!(error.message, "this value was read after it was reclaimed");
         let error = order(
             &machine,

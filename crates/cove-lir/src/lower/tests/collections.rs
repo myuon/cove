@@ -181,7 +181,7 @@ fn0 m.count(Array) -> Int
      7  lt.int s7:bool s5:int s4:int
      8  branch-false s7:bool 15
      9  load-elem s8:ref s3:ref s5:int String
-    10  call-builtin s9:int String.length (s8:ref)
+    10  call-builtin s9:int String.length (s8:String)
     11  add.int s10:int s2:int s9:int
     12  copy s2:int s10:int Int
     13  clear s8:ref String
@@ -207,7 +207,7 @@ fn a_for_over_a_vector_walks_a_snapshot() {
 fn0 m.count(Vector) -> Int
   frame 10: s0!:ref s1:int s2:int s3:ref s4:int s5:int s6:int s7:bool s8:int s9:int
      0  int s2:int 0
-     1  call-builtin s3:ref Vector.toArray (s0:ref)
+     1  call-builtin s3:ref Vector.toArray (s0:Vector)
      2  len s4:int s3:ref
      3  int s5:int 0
      4  int s6:int 1
@@ -334,10 +334,14 @@ fn0 m.head(Vector) -> Option
 }
 
 /// What `==` means for a struct is a rule of the language rather than an
-/// instruction, so it is a call — and a call over slots has no channel for
-/// the layout of each operand, so an inline value carries its own.
+/// instruction, so it is a call — and an argument carries the layout of the
+/// location it names, so the call hands over both `Point`s where they are.
+///
+/// This used to box each of them, because an argument was a slot and a slot
+/// says where a value begins and not how wide it is. That was one allocation
+/// per comparison, on a path the predecessor did not allocate on.
 #[test]
-fn two_inline_values_are_boxed_to_be_compared() {
+fn two_inline_values_are_compared_where_they_sit() {
     assert_eq!(
         listing(
             "struct Point { x: Int, y: Int }\nfn same(a: Point, b: Point) -> Bool { a == b }",
@@ -345,14 +349,10 @@ fn two_inline_values_are_boxed_to_be_compared() {
         ),
         "\
 fn0 m.same(m.Point m.Point) -> Bool
-  frame 8: s0!:int s1!:int s2!:int s3!:int s4:bool s5:bool s6:ref s7:ref
-     0  box s6:ref s0:int m.Point
-     1  box s7:ref s2:int m.Point
-     2  call-builtin s5:bool Any.equals (s6:ref s7:ref)
-     3  clear s7:ref <ref>
-     4  clear s6:ref <ref>
-     5  copy s4:bool s5:bool Bool
-     6  return s4:bool
+  frame 6: s0!:int s1!:int s2!:int s3!:int s4:bool s5:bool
+     0  call-builtin s5:bool Any.equals (s0:m.Point s2:m.Point)
+     1  copy s4:bool s5:bool Bool
+     2  return s4:bool
 "
     );
 }
@@ -369,7 +369,7 @@ fn two_arrays_compare_without_being_boxed() {
         "\
 fn0 m.same(Array Array) -> Bool
   frame 4: s0!:ref s1!:ref s2:bool s3:bool
-     0  call-builtin s3:bool Any.equals (s0:ref s1:ref)
+     0  call-builtin s3:bool Any.equals (s0:Array s1:Array)
      1  copy s2:bool s3:bool Bool
      2  return s2:bool
 "

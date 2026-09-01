@@ -100,8 +100,8 @@ fn a_temporary_holding_a_reference_is_cleared_at_its_last_use() {
         "\
 fn0 m.shout(String String) -> Int
   frame 5: s0!:ref s1!:ref s2:int s3:ref s4:int
-     0  call-builtin s3:ref String.interpolate (s0:ref s1:ref)
-     1  call-builtin s4:int String.length (s3:ref)
+     0  call-builtin s3:ref String.interpolate (s0:String s1:String)
+     1  call-builtin s4:int String.length (s3:String)
      2  clear s3:ref String
      3  copy s2:int s4:int Int
      4  return s2:int
@@ -123,7 +123,7 @@ fn0 m.f() -> Int
   frame 4: s0:int s1:int s2:ref s3:int
      0  int s1:int 0
      1  str s2:ref \"held\"
-     2  call-builtin s3:int String.length (s2:ref)
+     2  call-builtin s3:int String.length (s2:String)
      3  copy s1:int s3:int Int
      4  clear s2:ref String
      5  copy s0:int s1:int Int

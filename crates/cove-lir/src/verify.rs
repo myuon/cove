@@ -17,6 +17,18 @@
 //! `Copy` of a three-word `Wrapper` into a location whose second word is a
 //! `Float` is a fault here rather than a `Float` traced as a pointer later.
 //!
+//! # A width is checked, not assumed
+//!
+//! Two of those checks are about how far a run of words reaches, and they are
+//! here because nothing downstream can make them. A value location has to fit
+//! the frame it is in — `slot + width <= frame_size` — or a `Copy` near the
+//! top of a frame reads or writes the frame above it, which was the shape of
+//! five separate failures while this backend was being built and which
+//! `Memory::copy_words` was left asserting about in a debug build. And a
+//! field access has to fit the object it names, which this can say wherever
+//! the object's layout is a static fact; where it is not, the machine's own
+//! bounds check is what answers, from the header.
+//!
 //! This is where those assumptions are checked, once, before anything runs.
 //! It is not a type checker: `cove-sema` already did that, and a failure here
 //! is a bug in the lowering rather than a fault in the program. It exists so
@@ -24,7 +36,7 @@
 //! at collection time.
 
 use crate::inst::{Compare, Inst, Len, Num, Slot};
-use crate::layout::LayoutId;
+use crate::layout::{LayoutId, Shape};
 use crate::program::{Function, FunctionId, Program};
 use crate::repr::{RefMap, Repr};
 
@@ -58,6 +70,7 @@ pub fn verify(program: &Program) -> Result<(), Vec<Invalid>> {
             program,
             function,
             id: FunctionId(index as u32),
+            objects: Vec::new(),
             faults: &mut faults,
         }
         .run();
@@ -73,16 +86,133 @@ struct Check<'a> {
     program: &'a Program,
     function: &'a Function,
     id: FunctionId,
+    /// The layout of the object each reference slot holds, where the whole
+    /// function agrees on one. See [`Check::objects`].
+    objects: Vec<Option<LayoutId>>,
     faults: &'a mut Vec<Invalid>,
 }
 
 impl Check<'_> {
     fn run(&mut self) {
+        self.objects = self.objects();
         self.check_frame();
         for pc in 0..self.function.code.len() {
             self.check_inst(pc);
         }
         self.check_falls_off_the_end();
+    }
+
+    /// Which slots hold an object whose layout is a static fact.
+    ///
+    /// A `Repr::Ref` slot carries no layout — that is the point of the header
+    /// — so in general only the machine can bound a field access. But a slot
+    /// that is written by allocations alone, all naming one layout, holds
+    /// either null or an object of that layout at every program counter: a
+    /// slot's `Repr` is fixed for the whole function and a run is only ever
+    /// reused by a location of the same words, so the *set* of layouts ever
+    /// written into a slot bounds what it can hold without a walk of the
+    /// control flow. One layout and no other writer is the case this can
+    /// answer, and it is the common one — a lowering allocates an object and
+    /// reads its fields in the same breath.
+    ///
+    /// Anything else is `None`, which means the check is skipped rather than
+    /// failed. A slot written by a call, a load or a copy holds whatever the
+    /// callee or the source held, and this declines to guess.
+    fn objects(&self) -> Vec<Option<LayoutId>> {
+        // `Some(None)` is "written, by something that says no layout"; `None`
+        // is "not written yet". The parameters and the captures are written
+        // by the caller, so they start as the first.
+        let mut seen: Vec<Option<Option<LayoutId>>> = vec![None; self.function.reprs.len()];
+        let unknown = |seen: &mut Vec<Option<Option<LayoutId>>>, slot: Slot, width: u32| {
+            for at in slot..slot.saturating_add(width) {
+                if let Some(place) = seen.get_mut(at as usize) {
+                    *place = Some(None);
+                }
+            }
+        };
+        let allocates = |seen: &mut Vec<Option<Option<LayoutId>>>, slot: Slot, id: LayoutId| {
+            if let Some(place) = seen.get_mut(slot as usize) {
+                *place = match *place {
+                    None => Some(Some(id)),
+                    Some(Some(held)) if held == id => Some(Some(id)),
+                    _ => Some(None),
+                };
+            }
+        };
+        let words = |id: LayoutId| {
+            self.program
+                .layouts
+                .get(id.index())
+                .map_or(1, |layout| layout.width())
+        };
+        for at in 0..self.function.param_words(&self.program.layouts) {
+            unknown(&mut seen, at, 1);
+        }
+        for capture in &self.function.captures {
+            unknown(&mut seen, capture.slot, words(capture.layout));
+        }
+        for inst in &self.function.code {
+            match *inst {
+                // The three that say what they allocate. A `Clear` is not
+                // among them and is not a writer either: it stores null, and
+                // null is refused by the machine before a layout is asked
+                // about.
+                Inst::Alloc { dst, layout, .. } => allocates(&mut seen, dst, layout),
+                Inst::Str { dst, .. } => allocates(&mut seen, dst, self.program.str_layout),
+                Inst::Box { dst, .. } => allocates(&mut seen, dst, self.program.boxed_layout),
+                Inst::Clear { .. } | Inst::Jump { .. } | Inst::BranchFalse { .. } => {}
+                Inst::Switch { .. } | Inst::Return { .. } | Inst::Trap { .. } => {}
+                Inst::Store { .. } | Inst::StoreField { .. } | Inst::StoreElem { .. } => {}
+                Inst::Unit { dst } | Inst::Bool { dst, .. } => unknown(&mut seen, dst, 1),
+                Inst::Int { dst, .. } | Inst::Float { dst, .. } => unknown(&mut seen, dst, 1),
+                Inst::Neg { dst, .. } | Inst::Not { dst, .. } => unknown(&mut seen, dst, 1),
+                Inst::Arith { dst, .. } | Inst::Cmp { dst, .. } => unknown(&mut seen, dst, 1),
+                Inst::Convert { dst, .. } => unknown(&mut seen, dst, 1),
+                Inst::Len { dst, .. } | Inst::LayoutOf { dst, .. } => unknown(&mut seen, dst, 1),
+                // Forming the address of a slot is also a write to it, as
+                // far as this is concerned: a `var` argument is that address
+                // handed to a callee, and what the callee stores through it
+                // lands in this frame. The checker holds the two to one type
+                // and so to one layout, but a static claim about a slot
+                // should not rest on an argument made somewhere else.
+                Inst::AddrOfSlot { dst, slot } => {
+                    unknown(&mut seen, dst, 1);
+                    unknown(&mut seen, slot, 1);
+                }
+                Inst::AddrOfField { dst, .. } => unknown(&mut seen, dst, 1),
+                Inst::AddrOfElem { dst, .. } | Inst::AddrOfPart { dst, .. } => {
+                    unknown(&mut seen, dst, 1)
+                }
+                Inst::Copy { dst, layout, .. }
+                | Inst::Load { dst, layout, .. }
+                | Inst::LoadField { dst, layout, .. }
+                | Inst::LoadElem { dst, layout, .. }
+                | Inst::Unbox { dst, layout, .. } => unknown(&mut seen, dst, words(layout)),
+                Inst::Call { dst, callee, .. } => {
+                    let width = match self.program.functions.get(callee.index()) {
+                        Some(target) => words(target.returns),
+                        None => 1,
+                    };
+                    unknown(&mut seen, dst, width);
+                }
+                Inst::CallClosure { dst, .. } => unknown(&mut seen, dst, 1),
+                Inst::CallHost { dst, op, .. } => {
+                    let width = match self.program.host_ops.get(op.index()) {
+                        Some(op) => words(op.result),
+                        None => 1,
+                    };
+                    unknown(&mut seen, dst, width);
+                }
+                Inst::CallBuiltin { dst, builtin, .. } => {
+                    let width = match self.program.builtins.get(builtin.index()) {
+                        Some(builtin) => words(builtin.result),
+                        None => 1,
+                    };
+                    unknown(&mut seen, dst, width);
+                }
+            }
+        }
+        seen.into_iter().map(Option::flatten).collect()
     }
 
     fn fault(&mut self, pc: Option<usize>, what: impl Into<String>) {
@@ -285,25 +415,55 @@ impl Check<'_> {
             }
             Inst::Alloc { dst, layout, len } => {
                 self.expect(at, dst, &[Repr::Ref]);
-                self.layout_exists(at, layout);
+                if self.layout_exists(at, layout) {
+                    let described = self.program.layout(layout);
+                    // A box's payload is one word of `LayoutId` and then the
+                    // value that layout describes, so its width is in the
+                    // header rather than in the shape — and `Alloc` sizes an
+                    // object by its shape. Allocating one here would make a
+                    // box of a two-word value one word short and the copy
+                    // into it would run off the end of the object.
+                    // `Inst::Box` is the only correct allocator for one,
+                    // because it is the only one that is told what is going
+                    // in.
+                    if matches!(described.shape, Shape::Boxed) {
+                        let name = described.name.clone();
+                        self.fault(
+                            at,
+                            format!(
+                                "allocates a `{name}`, whose width the header carries and \
+                                 the shape does not; a box is allocated by `box`, which \
+                                 knows what is going into it"
+                            ),
+                        );
+                    }
+                }
                 if let Len::Slot(slot) = len {
                     self.expect(at, slot, &[Repr::Int]);
                 }
             }
             Inst::LoadField {
-                dst, obj, layout, ..
+                dst,
+                obj,
+                at: word,
+                layout,
             } => {
                 self.expect(at, obj, &[Repr::Ref]);
                 if self.layout_exists(at, layout) {
                     self.fits(at, dst, layout, "what a field is read into");
+                    self.reaches(at, obj, word, layout, "read");
                 }
             }
             Inst::StoreField {
-                obj, src, layout, ..
+                obj,
+                at: word,
+                src,
+                layout,
             } => {
                 self.expect(at, obj, &[Repr::Ref]);
                 if self.layout_exists(at, layout) {
                     self.fits(at, src, layout, "what a field is written from");
+                    self.reaches(at, obj, word, layout, "written");
                 }
             }
             Inst::LoadElem {
@@ -342,9 +502,10 @@ impl Check<'_> {
                 self.expect(at, dst, &[Repr::Addr]);
                 self.repr(at, slot);
             }
-            Inst::AddrOfField { dst, obj, .. } => {
+            Inst::AddrOfField { dst, obj, at: word } => {
                 self.expect(at, dst, &[Repr::Addr]);
                 self.expect(at, obj, &[Repr::Ref]);
+                self.reaches_word(at, obj, word, 1, "addressed");
             }
             Inst::AddrOfElem {
                 dst,
@@ -356,6 +517,15 @@ impl Check<'_> {
                 self.expect(at, obj, &[Repr::Ref]);
                 self.expect(at, index, &[Repr::Int]);
                 self.layout_exists(at, layout);
+            }
+            // Nothing bounds `at` against the value the address names. A
+            // frame records what each slot *holds* and not how far the value
+            // an address points into reaches, so the extent is a fact about
+            // the instruction that formed the address rather than about this
+            // function — the same limit `Inst::Switch`'s operand is under.
+            Inst::AddrOfPart { dst, addr, .. } => {
+                self.expect(at, dst, &[Repr::Addr]);
+                self.expect(at, addr, &[Repr::Addr]);
             }
             Inst::Load { dst, addr, layout } => {
                 self.expect(at, addr, &[Repr::Addr]);
@@ -484,18 +654,70 @@ impl Check<'_> {
         }
     }
 
-    /// Every argument location is in the frame, whatever it holds.
+    /// Whether a field access at word `word` of `obj` stays inside the
+    /// object, where what `obj` holds is a static fact.
+    ///
+    /// The width is the layout being moved, so this is the whole run and not
+    /// only its first word: reading a two-word `Point` out of the last word
+    /// of an object reads one word of whatever the allocator put after it.
+    fn reaches(&mut self, at: Option<usize>, obj: Slot, word: u32, layout: LayoutId, what: &str) {
+        let width = self.program.layout(layout).width();
+        self.reaches_word(at, obj, word, width, what);
+    }
+
+    /// The same, for a run of a width the caller already knows.
+    ///
+    /// Silent where the object's layout is not static, or where it is but the
+    /// header's `len` is what decides how many payload words it has: a
+    /// `Shape::Str` or a `Shape::Elements` object is as long as it was
+    /// allocated, and only the machine has the header to ask. Those are the
+    /// accesses the machine's own bounds check answers.
+    fn reaches_word(&mut self, at: Option<usize>, obj: Slot, word: u32, width: u32, what: &str) {
+        let Some(Some(id)) = self.objects.get(obj as usize).copied() else {
+            return;
+        };
+        let described = self.program.layout(id);
+        let Some(words) = described.fixed_payload_words(&self.program.layouts) else {
+            return;
+        };
+        if word as u64 + width as u64 > words as u64 {
+            let name = described.name.clone();
+            self.fault(
+                at,
+                format!("{what} {width} word(s) at word {word} of a `{name}`, which has {words}"),
+            );
+        }
+    }
+
+    /// Every argument is a value location of the layout it names, and that
+    /// location is inside the frame.
+    ///
+    /// This is what an argument carrying its layout buys the verifier. It
+    /// used to check only that the slot existed, because a slot was the whole
+    /// of what an argument was — so a call passing the last slot of a frame
+    /// as a two-word `Point` was checked by nothing, and the machine read the
+    /// frame above it.
     fn each_arg(&mut self, at: Option<usize>, args: crate::ArgsId) {
         if !self.in_range(at, args.index(), self.program.args.len(), "argument list") {
             return;
         }
-        for slot in self.program.arg_list(args).to_vec() {
-            self.repr(at, slot);
+        for (index, arg) in self.program.arg_list(args).to_vec().into_iter().enumerate() {
+            if self.layout_exists(at, arg.layout) {
+                self.fits(at, arg.slot, arg.layout, &format!("argument {index}"));
+            }
         }
     }
 
-    /// Every argument is a location of the layout the callee's parameter
-    /// declares, word for word.
+    /// The same, where the callee declares what it takes: each argument's
+    /// layout is the parameter's, and its location is a value of it.
+    ///
+    /// The layouts are compared rather than only the locations' words,
+    /// because two layouts can have the same words and not be the same
+    /// family — an `Error` and a `String` are both one `Repr::Ref` — and it
+    /// is the argument's layout that the machine hands a builtin and a host.
+    /// The copy into the callee's frame is made at the *parameter's* width:
+    /// the frame being written is the callee's, and only `Function::params`
+    /// is a fact about the callee. This is what makes the two agree.
     fn check_args(
         &mut self,
         at: Option<usize>,
@@ -518,10 +740,36 @@ impl Check<'_> {
             );
             return;
         }
-        for (index, (slot, layout)) in passed.into_iter().zip(want).enumerate() {
-            if self.layout_exists(at, *layout) {
-                self.fits(at, slot, *layout, &format!("argument {index} of `{name}`"));
+        for (index, (arg, layout)) in passed.into_iter().zip(want).enumerate() {
+            if !self.layout_exists(at, *layout) {
+                continue;
             }
+            if arg.layout != *layout {
+                let passed = self.name_of(arg.layout);
+                let declared = self.program.layout(*layout).name.clone();
+                self.fault(
+                    at,
+                    format!(
+                        "argument {index} of `{name}` is passed as a `{passed}`, and the \
+                         parameter is a `{declared}`"
+                    ),
+                );
+                continue;
+            }
+            self.fits(
+                at,
+                arg.slot,
+                *layout,
+                &format!("argument {index} of `{name}`"),
+            );
+        }
+    }
+
+    /// What a layout is called, or its id where the table is too short.
+    fn name_of(&self, layout: LayoutId) -> String {
+        match self.program.layouts.get(layout.index()) {
+            Some(held) => held.name.to_string(),
+            None => layout.to_string(),
         }
     }
 }
@@ -544,13 +792,17 @@ mod tests {
     use super::*;
     use crate::inst::Inst;
     use crate::layout::{Layout, Shape};
-    use crate::program::{Function, Table, TableId};
+    use crate::program::{Arg, Function, Table, TableId};
 
     const INT: LayoutId = LayoutId(0);
     const STR: LayoutId = LayoutId(1);
     const POINT: LayoutId = LayoutId(2);
     /// `[disc: Int, Ref]`, the shape an `Option<String>` has.
     const ANSWER: LayoutId = LayoutId(3);
+    /// A second two-`Int` struct: the same words as [`POINT`] and a different
+    /// family, which is what an argument's layout is checked against.
+    const PAIR: LayoutId = LayoutId(4);
+    const BOXED: LayoutId = LayoutId(5);
 
     fn layouts() -> Vec<Layout> {
         vec![
@@ -572,6 +824,15 @@ mod tests {
                 },
                 vec![Repr::Int, Repr::Ref],
             ),
+            Layout::inline(
+                "Pair",
+                Shape::Struct {
+                    fields: Vec::new(),
+                    opaque: false,
+                },
+                vec![Repr::Int, Repr::Int],
+            ),
+            Layout::object("Any", Shape::Boxed),
         ]
     }
 
@@ -600,6 +861,7 @@ mod tests {
             functions,
             layouts: layouts(),
             str_layout: STR,
+            boxed_layout: BOXED,
             ..Program::default()
         }
     }
@@ -706,7 +968,10 @@ mod tests {
             ],
         );
         let mut held = program(vec![callee, caller]);
-        held.args = vec![vec![1]];
+        held.args = vec![vec![Arg {
+            slot: 1,
+            layout: POINT,
+        }]];
         assert_eq!(
             faults(&held),
             vec![
@@ -809,6 +1074,180 @@ mod tests {
             faults(&program(vec![f])),
             vec!["the last instruction can fall through, and there is nothing after it"]
         );
+    }
+
+    /// An argument used to be checked only for existing, because it was a
+    /// slot and a slot cannot run off the end of anything. It carries the
+    /// layout of the location it names now, so a two-word argument at the
+    /// last slot of a frame is a fault here rather than a read of the frame
+    /// above at run time.
+    #[test]
+    fn an_argument_that_runs_off_the_end_of_the_frame_is_a_fault() {
+        let f = function(
+            vec![Repr::Int, Repr::Int, Repr::Bool],
+            INT,
+            vec![
+                Inst::CallBuiltin {
+                    dst: 0,
+                    builtin: crate::BuiltinId(0),
+                    args: crate::ArgsId(0),
+                },
+                Inst::Return { src: 0 },
+            ],
+        );
+        let mut held = program(vec![f]);
+        held.builtins = vec![crate::Builtin {
+            receiver: Arc::from("Any"),
+            operation: Arc::from("equals"),
+            result: INT,
+        }];
+        held.args = vec![vec![Arg {
+            slot: 2,
+            layout: POINT,
+        }]];
+        assert_eq!(
+            faults(&held),
+            vec!["argument 0 is `Point`, 2 words at slot 2, and the frame has 3"]
+        );
+    }
+
+    /// Two layouts can have the same words and not be the same family, and it
+    /// is the argument's layout the machine hands a builtin and a host — so
+    /// the layouts are compared and not only the locations' reprs.
+    #[test]
+    fn an_argument_passed_as_another_family_than_the_parameter_is_a_fault() {
+        let mut callee = function(
+            vec![Repr::Int, Repr::Int],
+            INT,
+            vec![Inst::Return { src: 0 }],
+        );
+        callee.params = vec![POINT];
+        callee.name = Arc::from("g");
+        let caller = function(
+            vec![Repr::Int, Repr::Int],
+            INT,
+            vec![
+                Inst::Call {
+                    dst: 0,
+                    callee: FunctionId(0),
+                    args: crate::ArgsId(0),
+                },
+                Inst::Return { src: 0 },
+            ],
+        );
+        let mut held = program(vec![callee, caller]);
+        held.args = vec![vec![Arg {
+            slot: 0,
+            layout: PAIR,
+        }]];
+        assert_eq!(
+            faults(&held),
+            vec!["argument 0 of `m.g` is passed as a `Pair`, and the parameter is a `Point`"]
+        );
+    }
+
+    /// A box's width is in the header its allocator writes and not in its
+    /// shape, so `Alloc` would size one by the wrong thing: a box of a
+    /// two-word value would be a word short and the copy into it would run
+    /// off the end of the object. `Inst::Box` is the only correct allocator
+    /// for one, because it is the only one that is told what is going in.
+    #[test]
+    fn allocating_a_box_by_its_shape_is_a_fault() {
+        let f = function(
+            vec![Repr::Ref],
+            STR,
+            vec![
+                Inst::Alloc {
+                    dst: 0,
+                    layout: BOXED,
+                    len: Len::Fixed,
+                },
+                Inst::Return { src: 0 },
+            ],
+        );
+        assert_eq!(
+            faults(&program(vec![f])),
+            vec![
+                "allocates a `Any`, whose width the header carries and the shape does not; a box \
+                 is allocated by `box`, which knows what is going into it"
+            ]
+        );
+    }
+
+    /// A field access is bounded against the object wherever the slot holding
+    /// it is written by allocations alone, all naming one layout — which is
+    /// what a lowering that allocates an object and reads its fields does.
+    /// Without it a `Copy` at the top of a frame reads the frame above and
+    /// the machine's own header check is the only thing left.
+    #[test]
+    fn a_field_past_an_object_of_a_known_layout_is_a_fault() {
+        let f = function(
+            vec![Repr::Ref, Repr::Int, Repr::Int],
+            INT,
+            vec![
+                Inst::Alloc {
+                    dst: 0,
+                    layout: POINT,
+                    len: Len::Fixed,
+                },
+                Inst::LoadField {
+                    dst: 1,
+                    obj: 0,
+                    at: 1,
+                    layout: PAIR,
+                },
+                Inst::Return { src: 1 },
+            ],
+        );
+        assert_eq!(
+            faults(&program(vec![f])),
+            vec!["read 2 word(s) at word 1 of a `Point`, which has 2"]
+        );
+    }
+
+    /// And it says nothing where it cannot: a slot a copy wrote holds
+    /// whatever the source held, and a `Shape::Str` object is as long as it
+    /// was allocated. Both are the machine's to answer, from the header.
+    #[test]
+    fn a_field_of_an_object_whose_layout_is_not_static_is_left_to_the_machine() {
+        let f = function(
+            vec![Repr::Ref, Repr::Ref, Repr::Int],
+            INT,
+            vec![
+                Inst::Alloc {
+                    dst: 0,
+                    layout: POINT,
+                    len: Len::Fixed,
+                },
+                Inst::Copy {
+                    dst: 1,
+                    src: 0,
+                    layout: STR,
+                },
+                Inst::LoadField {
+                    dst: 2,
+                    obj: 1,
+                    at: 9,
+                    layout: INT,
+                },
+                Inst::Str {
+                    dst: 0,
+                    text: crate::StrId(0),
+                },
+                Inst::LoadField {
+                    dst: 2,
+                    obj: 0,
+                    at: 9,
+                    layout: INT,
+                },
+                Inst::Return { src: 2 },
+            ],
+        );
+        let mut held = program(vec![f]);
+        held.strings = vec![Arc::from("x")];
+        // The first `LoadField` names a slot two allocations disagree about
+        // and the second an object whose payload the header decides.
+        assert_eq!(faults(&held), Vec::<String>::new());
     }
 
     #[test]

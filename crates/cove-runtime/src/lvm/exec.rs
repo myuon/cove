@@ -31,6 +31,7 @@ use cove_lir::{
 use crate::budget::{Cancellation, Meter};
 use crate::error::RuntimeError;
 use crate::host::{HostRegistry, Reentry};
+use crate::lvm::builtins::operand::Operand;
 use crate::lvm::mem::{Collected, Memory, Overflow, Roots};
 use crate::lvm::{boundary, builtins};
 use crate::runtime::ENTRY_TASK;
@@ -425,11 +426,20 @@ impl<'a> Machine<'a> {
                     // says. There is no argument buffer and no permutation
                     // into type groups: the callee's frame begins where this
                     // one ends, and the words are copied straight into it.
+                    // The width is the *parameter's*, not the argument's,
+                    // although an argument now carries a layout of its own
+                    // and the verifier holds the two to be the same one. The
+                    // frame being written is the callee's, and
+                    // `Function::params` is the only fact about the callee
+                    // here: a `CallClosure` does not know which function it
+                    // is entering until it has read the object, so nothing
+                    // static could be authoritative there, and one rule for
+                    // both is worth more than the symmetry.
                     let mut at = 0;
-                    for (src, layout) in list.iter().zip(&target.params) {
+                    for (arg, layout) in list.iter().zip(&target.params) {
                         let width = self.width(*layout);
                         self.mem
-                            .copy_words(callee_base + at as u64, base + *src as u64, width);
+                            .copy_words(callee_base + at as u64, base + arg.slot as u64, width);
                         at += width;
                     }
                     self.sync(pc);
@@ -473,10 +483,10 @@ impl<'a> Machine<'a> {
                         Err(Overflow) => fail!(self.too_deep_error()),
                     };
                     let mut at = 0;
-                    for (src, layout) in list.iter().zip(&target.params) {
+                    for (arg, layout) in list.iter().zip(&target.params) {
                         let width = self.width(*layout);
                         self.mem
-                            .copy_words(callee_base + at as u64, base + *src as u64, width);
+                            .copy_words(callee_base + at as u64, base + arg.slot as u64, width);
                         at += width;
                     }
                     // The object has to stay reachable across every one of
@@ -528,7 +538,7 @@ impl<'a> Machine<'a> {
                 Inst::CallHost { dst, op, args } => {
                     self.sync(pc - 1);
                     let span = self.span(id, pc - 1);
-                    match self.call_host(id, base, op, args, budget, span) {
+                    match self.call_host(base, op, args, budget, span) {
                         Ok(words) => {
                             for (at, word) in words.iter().enumerate() {
                                 self.mem.set_slot(base, dst + at as u32, *word);
@@ -542,7 +552,7 @@ impl<'a> Machine<'a> {
                 // here is materialised into a `Value` on the way.
                 Inst::CallBuiltin { dst, builtin, args } => {
                     self.sync(pc - 1);
-                    match self.call_builtin(id, base, builtin, args) {
+                    match self.call_builtin(base, builtin, args) {
                         Ok(words) => {
                             // The answer is a value location like any other:
                             // `Builtin::result` names its layout, and an
@@ -702,6 +712,16 @@ impl<'a> Machine<'a> {
                 // through one move the words the layout says, and a nested
                 // write through a `var` parameter updates the destination
                 // words in place with nothing in between.
+                // The one place instruction whose operand is a place. It
+                // is arithmetic and nothing else: what an address names is a
+                // value location, and a value location's parts are at static
+                // offsets from its first word, so a field of a `var`
+                // parameter is an addition rather than a load of the whole
+                // value and a store of it back.
+                Inst::AddrOfPart { dst, addr, at } => {
+                    let word = self.mem.slot(base, addr);
+                    self.mem.set_slot(base, dst, word + at as u64);
+                }
                 Inst::Load { dst, addr, layout } => {
                     let addr = self.mem.slot(base, addr);
                     let width = self.width(layout);
@@ -881,7 +901,6 @@ impl<'a> Machine<'a> {
     /// backend.
     fn call_host(
         &mut self,
-        id: FunctionId,
         base: u64,
         op: HostOpId,
         args: ArgsId,
@@ -890,19 +909,22 @@ impl<'a> Machine<'a> {
     ) -> Result<Vec<u64>, RuntimeError> {
         let program = self.program;
         let op = program.host_op(op);
-        let function = program.function(id);
         let list = program.arg_list(args);
 
-        // A host operation's *parameters* carry no layout in the IR — only
-        // its result does — so an argument is read as the one word its slot's
-        // `Repr` describes. Every one-word family crosses that way; a
-        // multiword value reaches a host by having been boxed, which is one
-        // `Repr::Ref`. See the module note on `boundary::word_to_value`.
+        // An argument names a value location, so each one materialises as
+        // the whole of what is at it. That is why a struct or an enum
+        // reaches a host as itself: it used to be boxed on the way in — a
+        // slot said where an operand began and never how wide it was — and
+        // the host was handed an erased value where the schema declared a
+        // concrete one.
         let mut values = Vec::with_capacity(list.len());
-        for slot in list {
-            let repr = function.repr(*slot).ok_or_else(|| undeclared_slot(*slot))?;
-            let word = self.mem.slot(base, *slot);
-            values.push(boundary::word_to_value(self, repr, word).map_err(|error| error.at(span))?);
+        for arg in list {
+            let words = self
+                .mem
+                .read_words(base + arg.slot as u64, self.width(arg.layout));
+            values.push(
+                boundary::to_value(self, arg.layout, &words).map_err(|error| error.at(span))?,
+            );
         }
 
         let hosts = self.hosts.ok_or_else(|| {
@@ -920,37 +942,45 @@ impl<'a> Machine<'a> {
         boundary::from_value(self, result, &answer).map_err(|error| error.at(span))
     }
 
-    /// Reads the operand words and their `Repr`s and hands them to the
+    /// Reads the operand words out of the frame and hands them to the
     /// builtin.
     ///
-    /// The `Repr`s are read here rather than in [`crate::lvm::builtins`] for
-    /// the same reason the boundary takes one: a word is untagged, and what
-    /// says what it means is the slot it came out of. That is a fact about
-    /// this frame, which the builtin has no business knowing about.
+    /// An operand is a value location: the layout the argument names and the
+    /// words at its slot. Both halves are read here rather than in
+    /// [`crate::lvm::builtins`] for the reason the boundary takes them here
+    /// too — a word is untagged and where it came from is a fact about this
+    /// frame, which a builtin has no business knowing about.
     ///
-    /// An operand is *one* word. `Builtin` names an operation by its receiver
-    /// and its name and carries a layout only for its result, so nothing here
-    /// can say how wide an operand is — the argument list is base slots and
-    /// consecutive ones need not be adjacent. Every family a builtin declares
-    /// a receiver or a parameter of is one word, and a value that is not
-    /// reaches one by having been boxed. The answer is not so restricted:
-    /// `Builtin::result` is a layout, so an `Array.get` answering an inline
-    /// `Option<Point>` writes three words into its destination.
+    /// The words are copied into one buffer and the operands point into it,
+    /// so a builtin reads a whole `Point` without holding a frame and
+    /// without the argument list having to promise that consecutive operands
+    /// are adjacent, which it never could: the lowering places each argument
+    /// where a run of the right shape was free.
     fn call_builtin(
         &mut self,
-        id: FunctionId,
         base: u64,
         builtin: BuiltinId,
         args: ArgsId,
     ) -> Result<Vec<u64>, RuntimeError> {
         let program = self.program;
-        let function = program.function(id);
         let list = program.arg_list(args);
-        let mut operands = Vec::with_capacity(list.len());
-        for slot in list {
-            let repr = function.repr(*slot).ok_or_else(|| undeclared_slot(*slot))?;
-            operands.push((repr, self.mem.slot(base, *slot)));
+        let mut words: Vec<u64> = Vec::with_capacity(list.len());
+        let mut runs = Vec::with_capacity(list.len());
+        for arg in list {
+            let from = words.len();
+            let width = self.width(arg.layout);
+            for at in 0..width {
+                words.push(self.mem.slot(base, arg.slot + at));
+            }
+            runs.push((arg.layout, from, words.len()));
         }
+        let operands: Vec<Operand> = runs
+            .iter()
+            .map(|(layout, from, to)| Operand {
+                layout: *layout,
+                words: &words[*from..*to],
+            })
+            .collect();
         builtins::call(self, program.builtin(builtin), &operands)
     }
 
@@ -1335,18 +1365,6 @@ fn wrong_arity(callee: String, declared: usize, given: usize) -> RuntimeError {
     ))
 }
 
-/// A call named a slot the function it is in does not have.
-///
-/// The verifier checks every slot an instruction names against the frame it
-/// names it in, so this is a lowering bug that got past it rather than
-/// anything a program can do. It is reported instead of assumed because the
-/// alternative is reading a word that belongs to the next frame.
-fn undeclared_slot(slot: Slot) -> RuntimeError {
-    RuntimeError::new(format!(
-        "this call names slot {slot}, which this frame has not"
-    ))
-}
-
 /// A reference slot held null where an object was needed.
 ///
 /// This is not a language-level `nil`: Cove has none. It is a lowering bug
@@ -1358,7 +1376,7 @@ fn null_object() -> RuntimeError {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
-    use cove_lir::{ArgsId, Capture, Function, Layout, RefMap, Table, TableId};
+    use cove_lir::{Arg, ArgsId, Capture, Function, Layout, RefMap, Table, TableId};
     use std::sync::Arc;
 
     /// Builds a program by hand.
@@ -1454,7 +1472,9 @@ pub(crate) mod tests {
         fn seed(&mut self) {
             if self.program.layouts.is_empty() {
                 self.program.layouts.push(Layout::free());
-                self.program.layouts.push(Layout::object("Any", Shape::Boxed));
+                self.program
+                    .layouts
+                    .push(Layout::object("Any", Shape::Boxed));
                 self.program.boxed_layout = LayoutId(1);
             }
         }
@@ -1465,8 +1485,17 @@ pub(crate) mod tests {
             LayoutId(self.program.layouts.len() as u32 - 1)
         }
 
-        pub(crate) fn args(&mut self, slots: &[Slot]) -> ArgsId {
-            self.program.args.push(slots.to_vec());
+        /// An argument list: where each value is, and the layout that says
+        /// how wide it is.
+        pub(crate) fn args(&mut self, args: &[(Slot, LayoutId)]) -> ArgsId {
+            self.program.args.push(
+                args.iter()
+                    .map(|(slot, layout)| Arg {
+                        slot: *slot,
+                        layout: *layout,
+                    })
+                    .collect(),
+            );
             ArgsId(self.program.args.len() as u32 - 1)
         }
 
@@ -1795,7 +1824,7 @@ pub(crate) mod tests {
     fn recursion_nests_frames_and_unwinds_them() {
         let mut build = Build::default();
         let int = build.scalar(Repr::Int);
-        let args = build.args(&[3]);
+        let args = build.args(&[(3, int)]);
         // fn fact(n) { if n <= 1 { 1 } else { n * fact(n - 1) } }
         let f = build.function(
             "fact",
@@ -1846,7 +1875,7 @@ pub(crate) mod tests {
     fn an_unbounded_recursion_is_stopped() {
         let mut build = Build::default();
         let int = build.scalar(Repr::Int);
-        let args = build.args(&[0]);
+        let args = build.args(&[(0, int)]);
         let f = build.function(
             "forever",
             &[int],
@@ -2030,7 +2059,7 @@ pub(crate) mod tests {
                 Inst::Return { src: 4 },
             ],
         );
-        let args = build.args(&[0, 1, 3]);
+        let args = build.args(&[(0, int), (1, point), (3, int)]);
         let main = build.function(
             "main",
             &[],
@@ -2459,7 +2488,7 @@ pub(crate) mod tests {
             ],
         );
         let layout = closure_layout(&mut build, add, &[int]);
-        let args = build.args(&[3]);
+        let args = build.args(&[(3, int)]);
         let main = build.function(
             "main",
             &[],
@@ -2911,7 +2940,7 @@ pub(crate) mod tests {
         let int = build.scalar(Repr::Int);
         let unit = build.scalar(Repr::Unit);
         let place = build.scalar(Repr::Addr);
-        let args = build.args(&[1]);
+        let args = build.args(&[(1, place)]);
         let bump = build.function(
             "bump",
             &[place],
@@ -3021,15 +3050,23 @@ pub(crate) mod tests {
 
     /// Reading past an object is a lowering bug, and the machine reports it
     /// rather than reading whatever follows the object in the heap.
+    ///
+    /// The object reaches the slot it is read out of through a `Copy`, which
+    /// is what leaves the machine to answer: `cove_lir::verify` refuses this
+    /// statically wherever it can prove which layout a reference slot holds,
+    /// and a slot written by a copy holds whatever the source held. Both
+    /// checks are wanted — the static one catches the bug at lowering time,
+    /// and this one catches it where the layout is not a static fact.
     #[test]
     fn a_field_past_the_object_is_refused() {
         let mut build = Build::default();
         let int = build.scalar(Repr::Int);
         let one = build.structure("One", &[("x", int)]);
+        let held = build.layout("Held", Shape::Word(Repr::Ref));
         let f = build.function(
             "past",
             &[],
-            &[Repr::Ref, Repr::Int],
+            &[Repr::Ref, Repr::Int, Repr::Ref],
             int,
             vec![
                 Inst::Alloc {
@@ -3037,9 +3074,14 @@ pub(crate) mod tests {
                     layout: one,
                     len: Len::Fixed,
                 },
+                Inst::Copy {
+                    dst: 2,
+                    src: 0,
+                    layout: held,
+                },
                 Inst::LoadField {
                     dst: 1,
-                    obj: 0,
+                    obj: 2,
                     at: 3,
                     layout: int,
                 },
@@ -3431,7 +3473,7 @@ pub(crate) mod tests {
             result: int,
         });
         let op = cove_lir::HostOpId(build.program.host_ops.len() as u32 - 1);
-        let args = build.args(&[0]);
+        let args = build.args(&[(0, int)]);
         build.function(
             "f",
             &[int],
@@ -3464,7 +3506,7 @@ pub(crate) mod tests {
             result: str_layout,
         });
         let op = cove_lir::HostOpId(0);
-        let args = build.args(&[0]);
+        let args = build.args(&[(0, str_layout)]);
         let f = build.function(
             "f",
             &[],
@@ -3522,7 +3564,7 @@ pub(crate) mod tests {
             result: int,
         });
         let op = cove_lir::HostOpId(0);
-        let args = build.args(&[0]);
+        let args = build.args(&[(0, int)]);
         let f = build.function(
             "f",
             &[int],

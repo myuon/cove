@@ -252,10 +252,32 @@ impl Layout {
         self.words.len() as u32
     }
 
-    /// Whether a value of this family is one reference rather than inline
-    /// words.
-    pub fn is_ref(&self) -> bool {
-        self.words.len() == 1 && self.words[0].is_ref()
+    /// Whether a value of this family is the address of an object rather than
+    /// inline words.
+    ///
+    /// The question is asked of the *shape*, because the width cannot answer
+    /// it and the earlier version of this — "one word wide, and that word is a
+    /// [`Repr::Ref`]" — got it wrong in a way nothing caught.
+    /// `struct Error { message: String }` is one `Repr::Ref` word wide and is
+    /// an **inline struct**, not a reference to an `Error` somewhere; the one
+    /// word it occupies is its field, and reading it as the value's own
+    /// address reads the declaration away. A one-field struct is not a rare
+    /// shape, and the language ships one.
+    ///
+    /// So: a struct and an enum are inline at every width, a scalar is one
+    /// address exactly when its `Repr` is [`Repr::Ref`], and every remaining
+    /// family lives in the heap and is one. [`Shape::Free`] is not a value and
+    /// answers no.
+    ///
+    /// What turns on it is every place a walk has to choose between reading
+    /// the words in front of it and following them: the boundary's erasure
+    /// path, the ordering a `Set` and a `Map` are sorted by, and equality.
+    pub fn is_one_address(&self) -> bool {
+        match &self.shape {
+            Shape::Word(repr) => repr.is_ref(),
+            Shape::Struct { .. } | Shape::Enum { .. } | Shape::Free => false,
+            _ => true,
+        }
     }
 
     /// How many payload words an object of this layout with header length
@@ -268,25 +290,54 @@ impl Layout {
     /// A `Struct` or an `Enum` answers its own inline words, because a boxed
     /// value's payload *is* the value.
     pub fn payload_words(&self, len: u32, layouts: &[Layout]) -> u32 {
+        if let Some(fixed) = self.fixed_payload_words(layouts) {
+            return fixed;
+        }
         match &self.shape {
             Shape::Free => len,
             Shape::Str => len.div_ceil(8),
-            Shape::Word(_) | Shape::Struct { .. } | Shape::Enum { .. } => self.width(),
-            Shape::Elements { elem, .. } => len * layouts[elem.index()].width(),
-            Shape::Vector { .. } => 2,
-            Shape::Members { elem } => len * layouts[elem.index()].width(),
+            Shape::Elements { elem, .. } | Shape::Members { elem } => {
+                len * layouts[elem.index()].width()
+            }
             Shape::Entries { key, value } => {
                 len * (layouts[key.index()].width() + layouts[value.index()].width())
-            }
-            Shape::Closure { captures, .. } => {
-                1 + captures
-                    .iter()
-                    .map(|id| layouts[id.index()].width())
-                    .sum::<u32>()
             }
             // One word of `LayoutId` and then whatever it named, whose width
             // this layout cannot know: the header's `len` carries it.
             Shape::Boxed => 1 + len,
+            // Every shape whose payload the header does not decide answered
+            // above.
+            _ => self.width(),
+        }
+    }
+
+    /// The same, where the answer is a fact about the layout alone.
+    ///
+    /// `None` for a shape whose payload the header's `len` decides: a
+    /// string's bytes, a run of elements, the value inside a box. The two are
+    /// separate questions because a *static* reader has no header to consult.
+    /// [`mod@crate::verify`] bounds a field access against the object whose
+    /// layout it can prove, and it can only do so where proving the layout is
+    /// enough — for a `Shape::Str` or a `Shape::Elements` it would still be
+    /// guessing at the length.
+    pub fn fixed_payload_words(&self, layouts: &[Layout]) -> Option<u32> {
+        match &self.shape {
+            // A struct or an enum stored as an object is that value's own
+            // inline words, because a boxed value's payload *is* the value.
+            Shape::Word(_) | Shape::Struct { .. } | Shape::Enum { .. } => Some(self.width()),
+            Shape::Vector { .. } => Some(2),
+            Shape::Closure { captures, .. } => Some(
+                1 + captures
+                    .iter()
+                    .map(|id| layouts[id.index()].width())
+                    .sum::<u32>(),
+            ),
+            Shape::Free
+            | Shape::Str
+            | Shape::Elements { .. }
+            | Shape::Members { .. }
+            | Shape::Entries { .. }
+            | Shape::Boxed => None,
         }
     }
 
@@ -541,8 +592,30 @@ mod tests {
     fn a_family_that_lives_in_the_heap_is_one_reference() {
         let layouts = table();
         assert_eq!(layouts[STR.index()].words, vec![Repr::Ref]);
-        assert!(layouts[STR.index()].is_ref());
-        assert!(!layouts[INT.index()].is_ref());
+        assert!(layouts[STR.index()].is_one_address());
+        assert!(!layouts[INT.index()].is_one_address());
+    }
+
+    /// The case the width cannot tell apart from a reference, and the reason
+    /// the question is asked of the shape: a struct of one `String` field is
+    /// one `Repr::Ref` word and is still the struct, not its field.
+    #[test]
+    fn a_one_field_struct_is_inline_however_wide_its_field_is() {
+        let layouts = table();
+        let error = Layout::inline(
+            "Error",
+            Shape::Struct {
+                fields: vec![Field {
+                    name: Arc::from("message"),
+                    layout: STR,
+                    at: 0,
+                }],
+                opaque: false,
+            },
+            vec![Repr::Ref],
+        );
+        assert_eq!(error.words, layouts[STR.index()].words);
+        assert!(!error.is_one_address());
     }
 
     #[test]

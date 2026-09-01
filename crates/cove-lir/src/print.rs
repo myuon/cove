@@ -128,13 +128,13 @@ pub fn one(program: &Program, f: &Function, inst: &Inst) -> String {
             "call {} {} ({})",
             s(*dst),
             program.function(*callee).qualified(),
-            args_of(program, f, *args)
+            args_of(program, *args)
         ),
         Inst::CallClosure { dst, closure, args } => format!(
             "call-closure {} {} ({})",
             s(*dst),
             s(*closure),
-            args_of(program, f, *args)
+            args_of(program, *args)
         ),
         Inst::CallHost { dst, op, args } => {
             let op = program.host_op(*op);
@@ -143,7 +143,7 @@ pub fn one(program: &Program, f: &Function, inst: &Inst) -> String {
                 s(*dst),
                 op.module,
                 op.operation,
-                args_of(program, f, *args)
+                args_of(program, *args)
             )
         }
         Inst::CallBuiltin { dst, builtin, args } => {
@@ -153,7 +153,7 @@ pub fn one(program: &Program, f: &Function, inst: &Inst) -> String {
                 s(*dst),
                 builtin.receiver,
                 builtin.operation,
-                args_of(program, f, *args)
+                args_of(program, *args)
             )
         }
         Inst::Alloc { dst, layout, len } => {
@@ -224,6 +224,9 @@ pub fn one(program: &Program, f: &Function, inst: &Inst) -> String {
             s(*index),
             l(*layout)
         ),
+        Inst::AddrOfPart { dst, addr, at } => {
+            format!("addr-of-part {} {} +{at}", s(*dst), s(*addr))
+        }
         Inst::Load { dst, addr, layout } => {
             format!("load {} {} {}", s(*dst), s(*addr), l(*layout))
         }
@@ -247,14 +250,15 @@ fn name_of(program: &Program, layout: LayoutId) -> String {
     }
 }
 
-fn args_of(program: &Program, f: &Function, args: crate::ArgsId) -> String {
+/// An argument prints as its slot and the *layout* it names, not the `Repr` of
+/// its first word: a listing that showed `s3:int` for a `Point` would show the
+/// same thing for its `x`, and which of the two a call passes is the question
+/// the argument list exists to answer.
+fn args_of(program: &Program, args: crate::ArgsId) -> String {
     match program.args.get(args.index()) {
         Some(list) => list
             .iter()
-            .map(|slot| match f.repr(*slot) {
-                Some(repr) => format!("s{slot}:{repr}"),
-                None => format!("s{slot}:?"),
-            })
+            .map(|arg| format!("s{}:{}", arg.slot, name_of(program, arg.layout)))
             .collect::<Vec<_>>()
             .join(" "),
         None => args.to_string(),

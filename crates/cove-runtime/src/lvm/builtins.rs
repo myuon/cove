@@ -10,7 +10,7 @@
 //! # A builtin is not a boundary
 //!
 //! It reads the words and the heap objects the machine already holds and
-//! answers one word. Nothing here materialises a public `Value`, and this
+//! answers the words of a value location. Nothing here materialises a public `Value`, and this
 //! file does not import one — which is the same check `boundary` makes of the
 //! rest of the backend, made of this file. ADR 0034 puts `Value` at the Host
 //! boundary and nowhere else, and a builtin is not at it: `"n is {n}"` is
@@ -39,6 +39,7 @@ use cove_lir::{Builtin, LayoutId, Repr, Shape};
 use cove_schema::builtins::{ERROR, MESSAGE_FIELD};
 
 use crate::lvm::boundary::{is_range, short};
+use crate::lvm::builtins::operand::Operand;
 
 use crate::error::RuntimeError;
 use crate::lvm::exec::Machine;
@@ -47,7 +48,7 @@ mod equal;
 mod key;
 mod keyed;
 mod make;
-mod operand;
+pub(crate) mod operand;
 mod scalar;
 mod seq;
 mod text;
@@ -59,43 +60,50 @@ mod text;
 /// stack ran out.
 const MAX_DEPTH: usize = 128;
 
-/// Runs `builtin` over `operands`, answering the word it produces.
+/// Runs `builtin` over `operands`, answering the words it produces.
 ///
-/// Each operand is the word of a slot and the `Repr` that slot declares.
-/// A word is untagged, so the pair is the whole of what a builtin has to work
-/// from, and reading the `Repr` out of the frame is the caller's job because
-/// only the caller has a frame.
+/// Each operand is a value location: the layout the call's argument names and
+/// the words at it. A word is untagged, so the pair is the whole of what a
+/// builtin has to work from, and reading it out of the frame is the caller's
+/// job because only the caller has a frame.
 pub(crate) fn call(
     machine: &mut Machine,
     builtin: &Builtin,
-    operands: &[(Repr, u64)],
+    operands: &[Operand<'_>],
 ) -> Result<Vec<u64>, RuntimeError> {
     // One match over the pair the IR names, so that teaching the machine an
     // operation is adding an arm and nothing else.
     match (&*builtin.receiver, &*builtin.operation) {
         ("String", "text") => {
-            let [(repr, word)] = operands else {
+            let [operand] = operands else {
                 return Err(operand::operands("String.text", 1, operands.len()));
             };
-            let text = render(machine, *repr, *word, 0)?;
+            let text = render_value(machine, operand.layout, operand.words, 0)?;
             machine.new_string(&text).map(one)
         }
         ("String", "concat") => {
             let mut text = String::new();
-            for (repr, word) in operands {
-                if *repr != Repr::Ref || !is_string(machine, *word) {
-                    return Err(RuntimeError::new(
-                        "`String.concat` joins strings, and this operand is not one",
-                    ));
+            for operand in operands {
+                match operand::as_word(machine, *operand) {
+                    Some((Repr::Ref, word)) if is_string(machine, word) => {
+                        text.push_str(&string_of(machine, word)?)
+                    }
+                    _ => {
+                        return Err(RuntimeError::new(
+                            "`String.concat` joins strings, and this operand is not one",
+                        ))
+                    }
                 }
-                text.push_str(&string_of(machine, *word)?);
             }
             machine.new_string(&text).map(one)
         }
+        // What `"{p}"` puts in the string. An operand is a value location, so
+        // an inline struct or enum renders as the value it is rather than as
+        // its first word — which is what `"{Point(x: 1)}"` answering `1` was.
         ("String", "interpolate") => {
             let mut text = String::new();
-            for (repr, word) in operands {
-                text.push_str(&render(machine, *repr, *word, 0)?);
+            for operand in operands {
+                text.push_str(&render_value(machine, operand.layout, operand.words, 0)?);
             }
             machine.new_string(&text).map(one)
         }
@@ -221,10 +229,8 @@ pub(crate) fn call(
 
 /// The text of `word`, read as `repr`.
 ///
-/// What `"{x}"` puts in the string, for every one-word `x` the language
-/// admits there. A builtin's operands are one word each — see [`call`] — so
-/// this is the entry point; everything below it is layout-driven, because
-/// inside a value the layouts are known.
+/// The width-one case of [`render_value`], and what every walk below reaches
+/// when it gets down to one word of scalar bits or one address.
 fn render(machine: &Machine, repr: Repr, word: u64, depth: usize) -> Result<String, RuntimeError> {
     Ok(match repr {
         Repr::Unit => "()".to_string(),
@@ -687,6 +693,53 @@ mod tests {
         operation: &str,
         operands: &[(Repr, u64)],
     ) -> Result<Vec<u64>, RuntimeError> {
+        let held: Vec<(LayoutId, u64)> = operands
+            .iter()
+            .map(|(repr, word)| (described(machine, *repr, *word), *word))
+            .collect();
+        let passed: Vec<(LayoutId, &[u64])> = held
+            .iter()
+            .map(|(layout, word)| (*layout, std::slice::from_ref(word)))
+            .collect();
+        values(machine, receiver, operation, &passed)
+    }
+
+    /// The layout of the value a one-word operand is, as a test hands one
+    /// over.
+    ///
+    /// A scalar's is the fixture's one-word layout for its `Repr`. A
+    /// reference's is the layout of the object it names, which is where that
+    /// answer has always lived — a `Repr::Ref` says a word is an address and
+    /// nothing about what is at the end of it. A null one is a `String`,
+    /// which is only a stand-in for "some family that lives in the heap":
+    /// what a builtin does with a null reference is refuse it, and every
+    /// family refuses it in the same words.
+    fn described(machine: &Machine, repr: Repr, word: u64) -> LayoutId {
+        match repr {
+            Repr::Ref if word == 0 => machine.program().str_layout,
+            Repr::Ref => machine.object_layout(word),
+            _ => scalar(machine.program(), repr),
+        }
+    }
+
+    /// Calls `receiver.operation` over operands that are value locations.
+    ///
+    /// What [`run`] is in terms of, and what a test of a value wider than one
+    /// word uses directly: an operand is a layout and the words at a
+    /// location, so a `Point` argument is the layout and both of its words.
+    pub(super) fn values(
+        machine: &mut Machine,
+        receiver: &str,
+        operation: &str,
+        operands: &[(LayoutId, &[u64])],
+    ) -> Result<Vec<u64>, RuntimeError> {
+        let passed: Vec<Operand<'_>> = operands
+            .iter()
+            .map(|(layout, words)| Operand {
+                layout: *layout,
+                words,
+            })
+            .collect();
         call(
             machine,
             &Builtin {
@@ -694,8 +747,17 @@ mod tests {
                 operation: Arc::from(operation),
                 result: LayoutId::FREE,
             },
-            operands,
+            &passed,
         )
+    }
+
+    /// An operand naming the value location `words` of `layout`.
+    ///
+    /// What a test writes where it means a value rather than a word: a
+    /// `Point` argument is `at(point, &[1, 2])`, and the borrow lives as long
+    /// as the call it is an argument of.
+    pub(super) fn at(layout: LayoutId, words: &[u64]) -> Operand<'_> {
+        Operand { layout, words }
     }
 
     /// The same, for an operation whose answer is one word.
@@ -842,7 +904,13 @@ mod tests {
         build.program.str_layout = str_layout;
         let (mut reprs, mut code) = build_value(&mut build);
         // The value is in slot 0 by construction; the next slot takes the text.
-        let operand = build.args(&[0]);
+        // An operand carries the layout of the location it names, and every
+        // value this fixture builds is one word of it.
+        let held = match reprs[0] {
+            Repr::Ref => str_layout,
+            repr => build.scalar(repr),
+        };
+        let operand = build.args(&[(0, held)]);
         let dst = reprs.len() as u32;
         reprs.push(Repr::Ref);
         let builtin = builtin(&mut build.program, "String", "text", str_layout);
@@ -922,7 +990,7 @@ mod tests {
         let mut build = Build::default().strings(&["ha"]);
         let str_layout = build.layout("String", Shape::Str);
         build.program.str_layout = str_layout;
-        let operand = build.args(&[0]);
+        let operand = build.args(&[(0, str_layout)]);
         let builtin = builtin(&mut build.program, "String", "text", str_layout);
         let f = build.function(
             "f",
@@ -994,7 +1062,8 @@ mod tests {
         let mut build = Build::default().strings(&["n is ", "!"]);
         let str_layout = build.layout("String", Shape::Str);
         build.program.str_layout = str_layout;
-        let parts = build.args(&[0, 1, 2]);
+        let ints = build.scalar(Repr::Int);
+        let parts = build.args(&[(0, str_layout), (1, ints), (2, str_layout)]);
         let builtin = builtin(&mut build.program, "String", "interpolate", str_layout);
         let f = build.function(
             "f",
@@ -1033,7 +1102,7 @@ mod tests {
         let mut build = Build::default().strings(&["ab", "cd"]);
         let str_layout = build.layout("String", Shape::Str);
         build.program.str_layout = str_layout;
-        let both = build.args(&[0, 1]);
+        let both = build.args(&[(0, str_layout), (1, str_layout)]);
         let joined = builtin(&mut build.program, "String", "concat", str_layout);
         let f = build.function(
             "f",
@@ -1070,7 +1139,8 @@ mod tests {
         let mut build = Build::default();
         let str_layout = build.layout("String", Shape::Str);
         build.program.str_layout = str_layout;
-        let both = build.args(&[0]);
+        let ints = build.scalar(Repr::Int);
+        let both = build.args(&[(0, ints)]);
         let joined = builtin(&mut build.program, "String", "concat", str_layout);
         let f = build.function(
             "f",

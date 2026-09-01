@@ -39,6 +39,7 @@
 use std::collections::HashMap;
 
 use crate::layout::LayoutId;
+use crate::program::Arg;
 use crate::{Repr, Slot};
 
 /// Where an expression left its answer: a base slot and the layout that says
@@ -72,6 +73,19 @@ impl Val {
             slot,
             layout,
             temp: false,
+        }
+    }
+
+    /// This location as an argument of a call.
+    ///
+    /// The two halves a [`Arg`] wants are the two a [`Val`] already is, which
+    /// is why an argument can carry its layout at no cost to the lowering:
+    /// every expression answers where its value is *and* what it is, and
+    /// until now the call sites threw the second half away.
+    pub fn arg(&self) -> Arg {
+        Arg {
+            slot: self.slot,
+            layout: self.layout,
         }
     }
 }

@@ -68,7 +68,7 @@ use cove_syntax::ast::{Expr, FnDecl};
 use crate::inst::{Inst, Pc, Slot};
 use crate::layout::LayoutId;
 use crate::program::{
-    ArgsId, Builtin, BuiltinId, Function, FunctionId, HostOp, HostOpId, Program, StrId, Table,
+    Arg, ArgsId, Builtin, BuiltinId, Function, FunctionId, HostOp, HostOpId, Program, StrId, Table,
     TableId,
 };
 use crate::repr::{RefMap, Repr};
@@ -512,18 +512,18 @@ fn describe(ty: &Ty, span: Span) -> Diagnostic {
 /// [`Inst::Call`] names an [`ArgsId`] instead of carrying the list inline.
 #[derive(Default)]
 struct Args {
-    lists: Vec<Vec<Slot>>,
-    index: HashMap<Vec<Slot>, ArgsId>,
+    lists: Vec<Vec<Arg>>,
+    index: HashMap<Vec<Arg>, ArgsId>,
 }
 
 impl Args {
-    fn intern(&mut self, slots: Vec<Slot>) -> ArgsId {
-        if let Some(id) = self.index.get(&slots) {
+    fn intern(&mut self, args: Vec<Arg>) -> ArgsId {
+        if let Some(id) = self.index.get(&args) {
             return *id;
         }
         let id = ArgsId(self.lists.len() as u32);
-        self.index.insert(slots.clone(), id);
-        self.lists.push(slots);
+        self.index.insert(args.clone(), id);
+        self.lists.push(args);
         id
     }
 }

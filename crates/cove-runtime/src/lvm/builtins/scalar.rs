@@ -35,17 +35,25 @@ use crate::lvm::builtins::{make, operand};
 use crate::lvm::exec::Machine;
 
 /// The `Int` a method was called on.
-fn int_receiver(machine: &Machine, method: &str, receiver: Operand) -> Result<i64, RuntimeError> {
-    match receiver.0 {
-        Repr::Int => Ok(receiver.1 as i64),
+fn int_receiver(
+    machine: &Machine,
+    method: &str,
+    receiver: Operand<'_>,
+) -> Result<i64, RuntimeError> {
+    match operand::as_word(machine, receiver) {
+        Some((Repr::Int, word)) => Ok(word as i64),
         _ => Err(operand::no_method(machine, receiver, method)),
     }
 }
 
 /// The `Float` a method was called on.
-fn float_receiver(machine: &Machine, method: &str, receiver: Operand) -> Result<f64, RuntimeError> {
-    match receiver.0 {
-        Repr::Float => Ok(f64::from_bits(receiver.1)),
+fn float_receiver(
+    machine: &Machine,
+    method: &str,
+    receiver: Operand<'_>,
+) -> Result<f64, RuntimeError> {
+    match operand::as_word(machine, receiver) {
+        Some((Repr::Float, word)) => Ok(f64::from_bits(word)),
         _ => Err(operand::no_method(machine, receiver, method)),
     }
 }
@@ -74,14 +82,17 @@ pub(super) fn word_layout(program: &Program, repr: Repr) -> Result<LayoutId, Run
 /// `Int.toFloat() -> Float`.
 pub(super) fn int_to_float(
     machine: &mut Machine,
-    operands: &[Operand],
+    operands: &[Operand<'_>],
 ) -> Result<u64, RuntimeError> {
     let (self_, _) = operand::method("toFloat", operands, 0)?;
     Ok((int_receiver(machine, "toFloat", self_)? as f64).to_bits())
 }
 
 /// `Int.abs() -> Int`, which `Int.MIN` has none of.
-pub(super) fn int_abs(machine: &mut Machine, operands: &[Operand]) -> Result<u64, RuntimeError> {
+pub(super) fn int_abs(
+    machine: &mut Machine,
+    operands: &[Operand<'_>],
+) -> Result<u64, RuntimeError> {
     let (self_, _) = operand::method("abs", operands, 0)?;
     let n = int_receiver(machine, "abs", self_)?;
     n.checked_abs()
@@ -90,7 +101,10 @@ pub(super) fn int_abs(machine: &mut Machine, operands: &[Operand]) -> Result<u64
 }
 
 /// `Int.min(other) -> Int`.
-pub(super) fn int_min(machine: &mut Machine, operands: &[Operand]) -> Result<u64, RuntimeError> {
+pub(super) fn int_min(
+    machine: &mut Machine,
+    operands: &[Operand<'_>],
+) -> Result<u64, RuntimeError> {
     let (self_, args) = operand::method("Int.min", operands, 1)?;
     let n = int_receiver(machine, "min", self_)?;
     let other = operand::int(machine, "Int.min", "other", args[0])?;
@@ -98,7 +112,10 @@ pub(super) fn int_min(machine: &mut Machine, operands: &[Operand]) -> Result<u64
 }
 
 /// `Int.max(other) -> Int`.
-pub(super) fn int_max(machine: &mut Machine, operands: &[Operand]) -> Result<u64, RuntimeError> {
+pub(super) fn int_max(
+    machine: &mut Machine,
+    operands: &[Operand<'_>],
+) -> Result<u64, RuntimeError> {
     let (self_, args) = operand::method("Int.max", operands, 1)?;
     let n = int_receiver(machine, "max", self_)?;
     let other = operand::int(machine, "Int.max", "other", args[0])?;
@@ -112,7 +129,7 @@ pub(super) fn int_max(machine: &mut Machine, operands: &[Operand]) -> Result<u64
 /// an `Err` here.
 pub(super) fn int_parse(
     machine: &mut Machine,
-    operands: &[Operand],
+    operands: &[Operand<'_>],
 ) -> Result<Vec<u64>, RuntimeError> {
     let args = operand::free("Int.parse", operands, 1)?;
     let text = operand::text(machine, "Int.parse", "text", args[0])?;
@@ -130,7 +147,7 @@ pub(super) fn int_parse(
 /// radix that does exist is the data's failure and answers `Err`.
 pub(super) fn int_parse_radix(
     machine: &mut Machine,
-    operands: &[Operand],
+    operands: &[Operand<'_>],
 ) -> Result<Vec<u64>, RuntimeError> {
     let args = operand::free("Int.parseRadix", operands, 2)?;
     let text = operand::text(machine, "Int.parseRadix", "text", args[0])?;
@@ -153,7 +170,7 @@ pub(super) fn int_parse_radix(
 /// `Float.toInt() -> Result<Int, Error>`, truncating toward zero.
 pub(super) fn float_to_int(
     machine: &mut Machine,
-    operands: &[Operand],
+    operands: &[Operand<'_>],
 ) -> Result<Vec<u64>, RuntimeError> {
     let (self_, _) = operand::method("toInt", operands, 0)?;
     let x = float_receiver(machine, "toInt", self_)?;
@@ -180,20 +197,26 @@ pub(super) fn float_to_int(
 /// `Float.round() -> Float`.
 pub(super) fn float_round(
     machine: &mut Machine,
-    operands: &[Operand],
+    operands: &[Operand<'_>],
 ) -> Result<u64, RuntimeError> {
     let (self_, _) = operand::method("round", operands, 0)?;
     Ok(float_receiver(machine, "round", self_)?.round().to_bits())
 }
 
 /// `Float.abs() -> Float`.
-pub(super) fn float_abs(machine: &mut Machine, operands: &[Operand]) -> Result<u64, RuntimeError> {
+pub(super) fn float_abs(
+    machine: &mut Machine,
+    operands: &[Operand<'_>],
+) -> Result<u64, RuntimeError> {
     let (self_, _) = operand::method("abs", operands, 0)?;
     Ok(float_receiver(machine, "abs", self_)?.abs().to_bits())
 }
 
 /// `Float.min(other) -> Float`.
-pub(super) fn float_min(machine: &mut Machine, operands: &[Operand]) -> Result<u64, RuntimeError> {
+pub(super) fn float_min(
+    machine: &mut Machine,
+    operands: &[Operand<'_>],
+) -> Result<u64, RuntimeError> {
     let (self_, args) = operand::method("Float.min", operands, 1)?;
     let x = float_receiver(machine, "min", self_)?;
     let other = operand::float(machine, "Float.min", "other", args[0])?;
@@ -201,7 +224,10 @@ pub(super) fn float_min(machine: &mut Machine, operands: &[Operand]) -> Result<u
 }
 
 /// `Float.max(other) -> Float`.
-pub(super) fn float_max(machine: &mut Machine, operands: &[Operand]) -> Result<u64, RuntimeError> {
+pub(super) fn float_max(
+    machine: &mut Machine,
+    operands: &[Operand<'_>],
+) -> Result<u64, RuntimeError> {
     let (self_, args) = operand::method("Float.max", operands, 1)?;
     let x = float_receiver(machine, "max", self_)?;
     let other = operand::float(machine, "Float.max", "other", args[0])?;
@@ -211,7 +237,7 @@ pub(super) fn float_max(machine: &mut Machine, operands: &[Operand]) -> Result<u
 /// `Float.format(digits) -> String`, fixed-point.
 pub(super) fn float_format(
     machine: &mut Machine,
-    operands: &[Operand],
+    operands: &[Operand<'_>],
 ) -> Result<u64, RuntimeError> {
     let (self_, args) = operand::method("Float.format", operands, 1)?;
     let x = float_receiver(machine, "format", self_)?;
@@ -230,7 +256,7 @@ pub(super) fn float_format(
 /// the same thing `Int.parse` does.
 pub(super) fn float_parse(
     machine: &mut Machine,
-    operands: &[Operand],
+    operands: &[Operand<'_>],
 ) -> Result<Vec<u64>, RuntimeError> {
     let args = operand::free("Float.parse", operands, 1)?;
     let text = operand::text(machine, "Float.parse", "text", args[0])?;
@@ -267,15 +293,18 @@ pub(super) fn unit(name: &str) -> Option<i64> {
 pub(super) fn duration(
     machine: &mut Machine,
     name: &str,
-    operands: &[Operand],
+    operands: &[Operand<'_>],
 ) -> Result<u64, RuntimeError> {
     let factor = unit(name).expect("the dispatch matched one of the six units");
-    if operands.first().map(|(repr, _)| *repr) == Some(Repr::Duration) {
-        let (self_, _) = operand::method(name, operands, 0)?;
+    let first = operands
+        .first()
+        .and_then(|operand| operand::as_word(machine, *operand));
+    if let Some((Repr::Duration, nanos)) = first {
+        operand::method(name, operands, 0)?;
         // Truncating toward zero, which is what `Int` division does. None of
         // the six can fail: every unit divides into a count that fits where
         // the nanoseconds already did.
-        return Ok(((self_.1 as i64) / factor) as u64);
+        return Ok(((nanos as i64) / factor) as u64);
     }
     let shown = format!("Duration.{name}");
     let args = operand::free(&shown, operands, 1)?;
@@ -295,11 +324,11 @@ mod tests {
     use super::*;
     use crate::lvm::builtins::tests::{message_of, read, result_of, run, scalar, word, world};
 
-    fn int_of(machine: &mut Machine, operation: &str, operands: &[Operand]) -> i64 {
+    fn int_of(machine: &mut Machine, operation: &str, operands: &[(Repr, u64)]) -> i64 {
         word(machine, "Int", operation, operands).unwrap() as i64
     }
 
-    fn float_of(machine: &mut Machine, operation: &str, operands: &[Operand]) -> f64 {
+    fn float_of(machine: &mut Machine, operation: &str, operands: &[(Repr, u64)]) -> f64 {
         f64::from_bits(word(machine, "Float", operation, operands).unwrap())
     }
 

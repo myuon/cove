@@ -67,7 +67,7 @@ use super::frame::Val;
 use super::pattern::UNPLACED;
 use super::shapes;
 use super::{Body, CallShape, PENDING};
-use crate::inst::{Inst, Slot};
+use crate::inst::Inst;
 use crate::layout::LayoutId;
 use crate::program::{FunctionId, Table};
 
@@ -108,8 +108,7 @@ impl Body<'_> {
         }
 
         let held = self.operands(&shape, base, args);
-        let slots: Vec<Slot> = held.iter().map(|value| value.slot).collect();
-        let list = self.pool.args.intern(slots);
+        let list = self.pool.args.intern(held.iter().map(Val::arg).collect());
         let dst = self.temp(shape.returns);
         self.emit(
             Inst::Call {
@@ -289,10 +288,10 @@ impl Body<'_> {
                 },
                 expr.span,
             );
-            let mut slots: Vec<Slot> = Vec::with_capacity(held.len() + 1);
-            slots.push(concrete.slot);
-            slots.extend(held.iter().map(|value| value.slot));
-            let list = self.pool.args.intern(slots);
+            let mut passed = Vec::with_capacity(held.len() + 1);
+            passed.push(concrete.arg());
+            passed.extend(held.iter().map(Val::arg));
+            let list = self.pool.args.intern(passed);
             self.emit(
                 Inst::Call {
                     dst: dst.slot,

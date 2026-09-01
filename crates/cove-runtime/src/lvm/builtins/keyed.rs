@@ -16,15 +16,19 @@
 //! times a stride while every length stays a count. Getting those two the same
 //! way round is the whole of what changed when a value stopped being one word.
 //!
-//! # An argument is one word, and a member need not be
+//! # An argument is a member, at whatever width one is
 //!
-//! [`cove_lir::Builtin`] carries no layout for its operands and a call's
-//! argument list is base slots that need not be adjacent, so the machine
-//! cannot know how wide an operand is and an operand stays one word. Reading a
-//! member is unaffected — the receiver's own layout says how wide one is — but
-//! *putting one in* is not: `Set.inserted` on a `Set<Point>` would be handed
-//! the first word of a `Point` and no way to ask for the rest. Those are
-//! refused by [`one_word`] rather than truncated.
+//! An argument names a value location and carries its layout, so a whole
+//! member arrives as a whole member and `Set.inserted` on a `Set<Point>` is
+//! handed both words. Reading one was never in doubt — the receiver's own
+//! layout says how wide one is — and *putting one in* used to be: an operand
+//! was one word, so those were refused rather than truncated.
+//!
+//! What is left is [`operand::run_of`], which holds an incoming member or
+//! value to the receiver's own layout. A sorted run is traced by that
+//! layout's reference map and searched at its width, so a value of another
+//! family written into one would be both a collection following the wrong
+//! words and a search comparing the wrong ones.
 //!
 //! # Both are immutable, so an update is a new object
 //!
@@ -61,7 +65,7 @@ use cove_schema::builtins::MAP_ENTRY;
 
 use crate::error::RuntimeError;
 use crate::lvm::builtins::operand::{self, Operand};
-use crate::lvm::builtins::{key, make, render, render_value};
+use crate::lvm::builtins::{key, make, render_value};
 use crate::lvm::exec::Machine;
 
 // --- reading a receiver ----------------------------------------------------
@@ -77,11 +81,10 @@ struct Members {
     addr: u64,
 }
 
-fn set(machine: &Machine, method: &str, receiver: Operand) -> Result<Members, RuntimeError> {
-    let (repr, addr) = receiver;
-    if repr != Repr::Ref {
+fn set(machine: &Machine, method: &str, receiver: Operand<'_>) -> Result<Members, RuntimeError> {
+    let Some((Repr::Ref, addr)) = operand::as_word(machine, receiver) else {
         return Err(operand::no_method(machine, receiver, method));
-    }
+    };
     if addr == 0 {
         return Err(operand::null_value());
     }
@@ -125,11 +128,10 @@ impl Entries {
     }
 }
 
-fn map(machine: &Machine, method: &str, receiver: Operand) -> Result<Entries, RuntimeError> {
-    let (repr, addr) = receiver;
-    if repr != Repr::Ref {
+fn map(machine: &Machine, method: &str, receiver: Operand<'_>) -> Result<Entries, RuntimeError> {
+    let Some((Repr::Ref, addr)) = operand::as_word(machine, receiver) else {
         return Err(operand::no_method(machine, receiver, method));
-    }
+    };
     if addr == 0 {
         return Err(operand::null_value());
     }
@@ -146,54 +148,17 @@ fn map(machine: &Machine, method: &str, receiver: Operand) -> Result<Entries, Ru
     }
 }
 
-/// The layout of the family an operand's word belongs to.
+/// The layout of the family an operand belongs to.
 ///
-/// [`cove_lir::Builtin`] carries no layout for its operands — it names an
-/// operation by its receiver and its name rather than by the types the checker
-/// resolved for it — so the family is read out of the word itself: an object
-/// says what it is in its own header, and a scalar's `Repr` names the one-word
-/// layout the program declares for it. The same search
-/// [`super::make`] makes for a builtin's *result*, made of an argument.
-fn family_of(machine: &Machine, operand: Operand) -> Result<LayoutId, RuntimeError> {
-    let (repr, word) = operand;
-    if repr == Repr::Ref {
-        if word == 0 {
-            return Err(operand::null_value());
-        }
-        return Ok(machine.object_layout(word));
+/// The argument's own, which is what a call carries now. It used to be read
+/// back out of the word — an object's header for a reference, a search of the
+/// one-word layouts for a scalar — because that was the only place the answer
+/// existed, and that reading could not describe an inline value at all.
+fn family_of(machine: &Machine, operand: Operand<'_>) -> Result<LayoutId, RuntimeError> {
+    if matches!(operand::as_word(machine, operand), Some((Repr::Ref, 0))) {
+        return Err(operand::null_value());
     }
-    machine
-        .program()
-        .layouts
-        .iter()
-        .position(|layout| layout.shape == Shape::Word(repr))
-        .map(|at| LayoutId(at as u32))
-        .ok_or_else(|| operand::unknown_family(&operand::type_name(machine, repr, word)))
-}
-
-/// Refuses a family whose values are wider than the one word an operand
-/// carries.
-///
-/// Not the oracle's: it materialises a `Value` per argument and has no
-/// representation to be narrow about. Here an operand is one word, so a
-/// two-word member cannot arrive as one — and writing the word that did
-/// arrive into a run whose stride is two would be a silently wrong set rather
-/// than a refused operation. Only the operations that put a value *in* ask;
-/// reading one out is answered by the receiver's layout and works at any
-/// width.
-fn one_word(machine: &Machine, method: &str, layout: LayoutId) -> Result<(), RuntimeError> {
-    let width = machine.words_of(layout);
-    if width == 1 {
-        return Ok(());
-    }
-    Err(RuntimeError::new(format!(
-        "`{method}` cannot be given a `{}`, which is {width} words wide",
-        machine.program().layout(layout).name
-    ))
-    .with_rule(
-        "A builtin names its operands by slot and carries no layout for them, so an operand is one word.",
-    )
-    .with_help("build the value where its layout is known"))
+    Ok(operand.layout)
 }
 
 // --- searching and building a sorted run -----------------------------------
@@ -274,7 +239,7 @@ fn copy(machine: &mut Machine, from: u64, at: u32, into: u64, to: u32, count: u3
 /// because a literal with the same element twice is a mistake and not an
 /// intent — which also makes the length known before the first write: exactly
 /// one member per operand.
-pub(super) fn set_of(machine: &mut Machine, operands: &[Operand]) -> Result<u64, RuntimeError> {
+pub(super) fn set_of(machine: &mut Machine, operands: &[Operand<'_>]) -> Result<u64, RuntimeError> {
     let Some(first) = operands.first().copied() else {
         return Err(RuntimeError::new(
             "`Set.of()` with no elements does not say what it is a set of",
@@ -285,26 +250,27 @@ pub(super) fn set_of(machine: &mut Machine, operands: &[Operand]) -> Result<u64,
         .with_help("allocate the empty set where the element type is known"));
     };
     let elem = family_of(machine, first)?;
-    one_word(machine, "Set.of", elem)?;
+    let width = machine.words_of(elem);
     let layout = make::members(machine.program(), elem)?;
     let addr = machine.new_object(layout, operands.len() as u32)?;
     let mut len = 0;
     for element in operands {
+        let words = operand::run_of(machine, "Set.of", elem, *element)?;
         key::check(machine, "Set.of", key::SET_ELEMENT, *element)?;
-        let found = seek(machine, addr, 1, 1, len, |held| {
-            key::cmp_held(machine, elem, held, *element)
+        let found = seek(machine, addr, width, width, len, |held| {
+            key::cmp_value(machine, elem, held, words)
         })?;
         match found {
             Ok(_) => {
                 return Err(duplicate(
                     "Set.of",
                     "element",
-                    render(machine, element.0, element.1, 0),
+                    render_value(machine, elem, words, 0),
                 ))
             }
             Err(at) => {
-                open(machine, addr, 1, at, len);
-                machine.set_payload(addr, at, element.1);
+                open(machine, addr, width, at, len);
+                machine.set_payload_run(addr, at * width, words);
                 len += 1;
             }
         }
@@ -313,7 +279,10 @@ pub(super) fn set_of(machine: &mut Machine, operands: &[Operand]) -> Result<u64,
 }
 
 /// `Set.length() -> Int`.
-pub(super) fn set_length(machine: &mut Machine, operands: &[Operand]) -> Result<u64, RuntimeError> {
+pub(super) fn set_length(
+    machine: &mut Machine,
+    operands: &[Operand<'_>],
+) -> Result<u64, RuntimeError> {
     let (receiver, _) = operand::method("length", operands, 0)?;
     Ok(set(machine, "length", receiver)?.len as u64)
 }
@@ -321,7 +290,7 @@ pub(super) fn set_length(machine: &mut Machine, operands: &[Operand]) -> Result<
 /// `Set.isEmpty() -> Bool`.
 pub(super) fn set_is_empty(
     machine: &mut Machine,
-    operands: &[Operand],
+    operands: &[Operand<'_>],
 ) -> Result<u64, RuntimeError> {
     let (receiver, _) = operand::method("isEmpty", operands, 0)?;
     Ok((set(machine, "isEmpty", receiver)?.len == 0) as u64)
@@ -330,7 +299,7 @@ pub(super) fn set_is_empty(
 /// `Set.contains(element) -> Bool`.
 pub(super) fn set_contains(
     machine: &mut Machine,
-    operands: &[Operand],
+    operands: &[Operand<'_>],
 ) -> Result<u64, RuntimeError> {
     let (receiver, args) = operand::method("Set.contains", operands, 1)?;
     let items = set(machine, "contains", receiver)?;
@@ -355,7 +324,7 @@ pub(super) fn set_contains(
 /// them exactly as the set did.
 pub(super) fn set_to_array(
     machine: &mut Machine,
-    operands: &[Operand],
+    operands: &[Operand<'_>],
 ) -> Result<u64, RuntimeError> {
     let (receiver, _) = operand::method("toArray", operands, 0)?;
     let items = set(machine, "toArray", receiver)?;
@@ -371,13 +340,12 @@ pub(super) fn set_to_array(
 /// which object the set holds afterwards is not something a program can ask.
 pub(super) fn set_inserted(
     machine: &mut Machine,
-    operands: &[Operand],
+    operands: &[Operand<'_>],
 ) -> Result<u64, RuntimeError> {
     let (receiver, args) = operand::method("Set.inserted", operands, 1)?;
     let items = set(machine, "inserted", receiver)?;
     key::check(machine, "Set.inserted", key::SET_ELEMENT, args[0])?;
-    // The element arrives as one word, so a wider member cannot be built.
-    one_word(machine, "Set.inserted", items.elem)?;
+    let element = operand::run_of(machine, "Set.inserted", items.elem, args[0])?.to_vec();
     let found = seek(
         machine,
         items.addr,
@@ -397,7 +365,7 @@ pub(super) fn set_inserted(
         Ok(_) => copy(machine, items.addr, 0, addr, 0, items.len * stride),
         Err(at) => {
             copy(machine, items.addr, 0, addr, 0, at * stride);
-            machine.set_payload(addr, at * stride, args[0].1);
+            machine.set_payload_run(addr, at * stride, &element);
             copy(
                 machine,
                 items.addr,
@@ -419,7 +387,7 @@ pub(super) fn set_inserted(
 /// search answers what it can.
 pub(super) fn set_removed(
     machine: &mut Machine,
-    operands: &[Operand],
+    operands: &[Operand<'_>],
 ) -> Result<u64, RuntimeError> {
     let (receiver, args) = operand::method("Set.removed", operands, 1)?;
     let items = set(machine, "removed", receiver)?;
@@ -466,15 +434,11 @@ pub(super) fn set_removed(
 /// the checker has already settled that a map literal has one key type and one
 /// value type.
 ///
-/// An entry is where a key wider than one word can still arrive: it is read
-/// out of the entry as the run of words its field says it is, rather than
-/// handed over as an operand. So a `Map<Point, Int>` literal builds, where a
-/// `Set<Point>` literal cannot.
 ///
 /// A duplicate key is refused for the reason a duplicate element is: keeping
 /// the first or the last silently would be resolving a mistake rather than
 /// reporting it.
-pub(super) fn map_of(machine: &mut Machine, operands: &[Operand]) -> Result<u64, RuntimeError> {
+pub(super) fn map_of(machine: &mut Machine, operands: &[Operand<'_>]) -> Result<u64, RuntimeError> {
     let Some(operand) = operands.first().copied() else {
         return Err(RuntimeError::new(
             "`Map.of()` with no entries does not say what it is a map of",
@@ -495,8 +459,8 @@ pub(super) fn map_of(machine: &mut Machine, operands: &[Operand]) -> Result<u64,
         if entry.key != first.key || entry.value != first.value {
             return Err(mixed(machine, &entry));
         }
-        let held = machine.payload_run(entry.addr, 0, keys);
-        let value = machine.payload_run(entry.addr, entry.at, stride - keys);
+        let held = operand.words[..keys as usize].to_vec();
+        let value = operand.words[entry.at as usize..][..(stride - keys) as usize].to_vec();
         key::check_value(machine, "Map.of", key::MAP_KEY, first.key, &held)?;
         let found = seek(machine, addr, stride, keys, len, |stored| {
             key::cmp_value(machine, first.key, stored, &held)
@@ -520,15 +484,14 @@ pub(super) fn map_of(machine: &mut Machine, operands: &[Operand]) -> Result<u64,
     Ok(addr)
 }
 
-/// One `MapEntry` operand: the layouts of its two fields, where the value's
-/// words begin in it, and the object holding them.
+/// One `MapEntry` operand: the layouts of its two fields and where the
+/// value's words begin in it.
 struct Entry {
     key: LayoutId,
     value: LayoutId,
     /// Where the value's words begin, which the struct's own layout says
     /// rather than this deriving it from the key's width.
     at: u32,
-    addr: u64,
 }
 
 /// The key and value families of one `MapEntry` operand.
@@ -537,28 +500,29 @@ struct Entry {
 /// its layout's name and its two fields — the same reading
 /// [`crate::lvm::boundary::is_range`] makes of a `Range`, and sound for the
 /// same reason: the name is the checker's and a module cannot redeclare it.
-fn entry_of(machine: &Machine, operand: Operand) -> Result<Entry, RuntimeError> {
-    let (repr, addr) = operand;
-    if repr == Repr::Ref && addr != 0 {
-        let layout = machine.program().layout(machine.object_layout(addr));
-        if let Shape::Struct { fields, .. } = &layout.shape {
-            if &*layout.name == MAP_ENTRY.name
-                && fields.len() == 2
-                && &*fields[0].name == MAP_ENTRY.fields[0].name
-                && &*fields[1].name == MAP_ENTRY.fields[1].name
-            {
-                return Ok(Entry {
-                    key: fields[0].layout,
-                    value: fields[1].layout,
-                    at: fields[1].at,
-                    addr,
-                });
-            }
+///
+/// It is read out of the operand's own layout, because a struct is inline:
+/// the entry a literal built *is* the words the argument names, and the pair
+/// arrives whole for the same reason a `Point` member does.
+fn entry_of(machine: &Machine, operand: Operand<'_>) -> Result<Entry, RuntimeError> {
+    let layout = machine.program().layout(operand.layout);
+    if let Shape::Struct { fields, .. } = &layout.shape {
+        if &*layout.name == MAP_ENTRY.name
+            && fields.len() == 2
+            && &*fields[0].name == MAP_ENTRY.fields[0].name
+            && &*fields[1].name == MAP_ENTRY.fields[1].name
+            && operand.words.len() == layout.width() as usize
+        {
+            return Ok(Entry {
+                key: fields[0].layout,
+                value: fields[1].layout,
+                at: fields[1].at,
+            });
         }
     }
     Err(RuntimeError::new(format!(
         "`Map.of` expects `MapEntry` values, but found `{}`",
-        operand::type_name(machine, repr, addr)
+        operand::name(machine, operand)
     ))
     .with_rule(
         "`Map.of(entries: MapEntry<K, V>...)` takes values built with `MapEntry(key:, value:)`.",
@@ -587,7 +551,7 @@ fn mixed(machine: &Machine, entry: &Entry) -> RuntimeError {
 /// destination location the way a copy writes one.
 pub(super) fn map_get(
     machine: &mut Machine,
-    operands: &[Operand],
+    operands: &[Operand<'_>],
 ) -> Result<Vec<u64>, RuntimeError> {
     let (receiver, args) = operand::method("Map.get", operands, 1)?;
     let entries = map(machine, "get", receiver)?;
@@ -612,7 +576,7 @@ pub(super) fn map_get(
 /// `Map.contains(key) -> Bool`.
 pub(super) fn map_contains(
     machine: &mut Machine,
-    operands: &[Operand],
+    operands: &[Operand<'_>],
 ) -> Result<u64, RuntimeError> {
     let (receiver, args) = operand::method("Map.contains", operands, 1)?;
     let entries = map(machine, "contains", receiver)?;
@@ -629,7 +593,10 @@ pub(super) fn map_contains(
 }
 
 /// `Map.length() -> Int`.
-pub(super) fn map_length(machine: &mut Machine, operands: &[Operand]) -> Result<u64, RuntimeError> {
+pub(super) fn map_length(
+    machine: &mut Machine,
+    operands: &[Operand<'_>],
+) -> Result<u64, RuntimeError> {
     let (receiver, _) = operand::method("length", operands, 0)?;
     Ok(map(machine, "length", receiver)?.len as u64)
 }
@@ -637,14 +604,17 @@ pub(super) fn map_length(machine: &mut Machine, operands: &[Operand]) -> Result<
 /// `Map.isEmpty() -> Bool`.
 pub(super) fn map_is_empty(
     machine: &mut Machine,
-    operands: &[Operand],
+    operands: &[Operand<'_>],
 ) -> Result<u64, RuntimeError> {
     let (receiver, _) = operand::method("isEmpty", operands, 0)?;
     Ok((map(machine, "isEmpty", receiver)?.len == 0) as u64)
 }
 
 /// `Map.keys() -> Array<K>`, in ascending order.
-pub(super) fn map_keys(machine: &mut Machine, operands: &[Operand]) -> Result<u64, RuntimeError> {
+pub(super) fn map_keys(
+    machine: &mut Machine,
+    operands: &[Operand<'_>],
+) -> Result<u64, RuntimeError> {
     let (receiver, _) = operand::method("keys", operands, 0)?;
     let entries = map(machine, "keys", receiver)?;
     let mut words = Vec::with_capacity((entries.len * entries.keys) as usize);
@@ -655,7 +625,10 @@ pub(super) fn map_keys(machine: &mut Machine, operands: &[Operand]) -> Result<u6
 }
 
 /// `Map.values() -> Array<V>`, in ascending order of their keys.
-pub(super) fn map_values(machine: &mut Machine, operands: &[Operand]) -> Result<u64, RuntimeError> {
+pub(super) fn map_values(
+    machine: &mut Machine,
+    operands: &[Operand<'_>],
+) -> Result<u64, RuntimeError> {
     let (receiver, _) = operand::method("values", operands, 0)?;
     let entries = map(machine, "values", receiver)?;
     let mut words = Vec::with_capacity((entries.len * entries.values) as usize);
@@ -672,14 +645,13 @@ pub(super) fn map_values(machine: &mut Machine, operands: &[Operand]) -> Result<
 /// the entry a program reads back is the same entry either way.
 pub(super) fn map_inserted(
     machine: &mut Machine,
-    operands: &[Operand],
+    operands: &[Operand<'_>],
 ) -> Result<u64, RuntimeError> {
     let (receiver, args) = operand::method("Map.inserted", operands, 2)?;
     let entries = map(machine, "inserted", receiver)?;
     key::check(machine, "Map.inserted", key::MAP_KEY, args[0])?;
-    // Both halves arrive as one word each, so neither can be wider.
-    one_word(machine, "Map.inserted", entries.key)?;
-    one_word(machine, "Map.inserted", entries.value)?;
+    let key = operand::run_of(machine, "Map.inserted", entries.key, args[0])?.to_vec();
+    let value = operand::run_of(machine, "Map.inserted", entries.value, args[1])?.to_vec();
     let found = seek(
         machine,
         entries.addr,
@@ -698,12 +670,12 @@ pub(super) fn map_inserted(
     match found {
         Ok(at) => {
             copy(machine, entries.addr, 0, addr, 0, entries.len * stride);
-            machine.set_payload(addr, at * stride + entries.keys, args[1].1);
+            machine.set_payload_run(addr, at * stride + entries.keys, &value);
         }
         Err(at) => {
             copy(machine, entries.addr, 0, addr, 0, at * stride);
-            machine.set_payload(addr, at * stride, args[0].1);
-            machine.set_payload(addr, at * stride + entries.keys, args[1].1);
+            machine.set_payload_run(addr, at * stride, &key);
+            machine.set_payload_run(addr, at * stride + entries.keys, &value);
             copy(
                 machine,
                 entries.addr,
@@ -720,7 +692,7 @@ pub(super) fn map_inserted(
 /// `Map.removed(key) -> Map<K, V>`.
 pub(super) fn map_removed(
     machine: &mut Machine,
-    operands: &[Operand],
+    operands: &[Operand<'_>],
 ) -> Result<u64, RuntimeError> {
     let (receiver, args) = operand::method("Map.removed", operands, 1)?;
     let entries = map(machine, "removed", receiver)?;
@@ -784,7 +756,9 @@ fn duplicate(method: &str, role: &str, shown: Result<String, RuntimeError>) -> R
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::lvm::builtins::tests::{named, option_of, read, run, scalar, word, words_of, world};
+    use crate::lvm::builtins::tests::{
+        named, option_of, read, run, scalar, values, word, words_of, world,
+    };
     use crate::lvm::exec::tests::Build;
     use cove_lir::Program;
 
@@ -819,16 +793,13 @@ mod tests {
         addr
     }
 
-    /// A `MapEntry(key:, value:)` of two `Int`s.
+    /// A `MapEntry(key:, value:)` of two `Int`s, as the operand one is.
     ///
-    /// A struct-shaped object: its payload is the struct's own words, which is
-    /// what `payload_words` answers for a struct and what lets a `MapEntry`
-    /// carry a key of any width to `Map.of`.
-    fn entry(machine: &mut Machine, key: u64, value: u64) -> u64 {
-        let layout = named(machine.program(), "MapEntry");
-        let addr = machine.new_object(layout, 0).unwrap();
-        machine.set_payload_run(addr, 0, &[key, value]);
-        addr
+    /// A struct is inline, so an entry is the run of words its two fields
+    /// occupy — the same thing a `Map.of` literal's lowering would leave in
+    /// the caller's frame.
+    fn entry(program: &Program, key: u64, value: u64) -> (LayoutId, [u64; 2]) {
+        (named(program, "MapEntry"), [key, value])
     }
 
     /// The words of a run, at the stride its elements are kept at.
@@ -1061,17 +1032,18 @@ mod tests {
         let program = world();
         let mut machine = machine(&program);
         let (a, b, c) = (
-            entry(&mut machine, 3, 30),
-            entry(&mut machine, 1, 10),
-            entry(&mut machine, 2, 20),
+            entry(&program, 3, 30),
+            entry(&program, 1, 10),
+            entry(&program, 2, 20),
         );
-        let addr = word(
+        let built = values(
             &mut machine,
             "Map",
             "of",
-            &[(Repr::Ref, a), (Repr::Ref, b), (Repr::Ref, c)],
+            &[(a.0, &a.1), (b.0, &b.1), (c.0, &c.1)],
         )
         .unwrap();
+        let addr = built[0];
         assert_eq!(held(&machine, addr, 2), vec![1, 10, 2, 20, 3, 30]);
         assert_eq!(machine.object_len(addr), 3);
     }
@@ -1080,8 +1052,8 @@ mod tests {
     fn a_map_refuses_the_same_key_twice_and_anything_that_is_not_an_entry() {
         let program = world();
         let mut machine = machine(&program);
-        let (a, b) = (entry(&mut machine, 1, 10), entry(&mut machine, 1, 20));
-        let error = run(&mut machine, "Map", "of", &[(Repr::Ref, a), (Repr::Ref, b)]).unwrap_err();
+        let (a, b) = (entry(&program, 1, 10), entry(&program, 1, 20));
+        let error = values(&mut machine, "Map", "of", &[(a.0, &a.1), (b.0, &b.1)]).unwrap_err();
         assert_eq!(
             error.message,
             "`Map.of` was given the key `1` more than once"
@@ -1263,30 +1235,57 @@ mod tests {
         );
     }
 
-    /// An operand is one word, so putting a two-word member into a set is
-    /// refused rather than done with the first word of it.
+    /// A two-word member goes into a set as both of its words, because an
+    /// operand is a value location. This refused until an argument carried
+    /// its layout: a call said where the `Point` began and never that it was
+    /// two words, and writing the one word that arrived into a run whose
+    /// stride is two would have been a silently wrong set.
     #[test]
-    fn a_member_wider_than_an_operand_is_refused_rather_than_truncated() {
+    fn a_member_wider_than_a_word_is_inserted_whole() {
         let program = wide();
         let mut machine = machine(&program);
         let point = named(&program, "Point");
-        let items = members(&mut machine, point, &[1, 2]);
-        let error = run(
+        let items = members(&mut machine, point, &[3, 4]);
+        let sets = machine.object_layout(items);
+        let grown = values(
             &mut machine,
             "Set",
             "inserted",
-            &[(Repr::Ref, items), (Repr::Int, 5)],
+            &[(sets, &[items]), (point, &[1, 2])],
+        )
+        .unwrap();
+        // Sorted because it was built sorted: the new member is smaller, so
+        // it goes in front of the one the set already held.
+        assert_eq!(words_of(&machine, grown[0]), vec![1u64, 2, 3, 4]);
+        assert_eq!(machine.object_len(grown[0]), 2);
+        // And the set that was handed over is untouched: `inserted` is a past
+        // participle, and neither of them writes through the receiver.
+        assert_eq!(
+            word(&mut machine, "Set", "length", &[(Repr::Ref, items)]).unwrap(),
+            1
+        );
+    }
+
+    /// A sorted run is traced by its element layout's map and searched at its
+    /// width, so a member of another family is refused rather than written.
+    #[test]
+    fn a_member_of_another_family_is_refused_rather_than_stored() {
+        let program = wide();
+        let mut machine = machine(&program);
+        let point = named(&program, "Point");
+        let int = scalar(&program, Repr::Int);
+        let items = members(&mut machine, point, &[1, 2]);
+        let sets = machine.object_layout(items);
+        let error = values(
+            &mut machine,
+            "Set",
+            "inserted",
+            &[(sets, &[items]), (int, &[5])],
         )
         .unwrap_err();
         assert_eq!(
             error.message,
-            "`Set.inserted` cannot be given a `Point`, which is 2 words wide"
-        );
-        // Reading is unaffected: the receiver's layout says how wide a member
-        // is, and nothing about that came from an operand.
-        assert_eq!(
-            word(&mut machine, "Set", "length", &[(Repr::Ref, items)]).unwrap(),
-            1
+            "`Set.inserted` expects `Point` here, but found `Int`"
         );
     }
 

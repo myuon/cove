@@ -123,7 +123,7 @@ fn error(program: &Program) -> Result<LayoutId, RuntimeError> {
         &*layout.name == ERROR.name
             && fields.len() == 1
             && &*fields[0].name == MESSAGE_FIELD.name
-            && program.layout(fields[0].layout).is_ref()
+            && program.layout(fields[0].layout).is_one_address()
     })
     .ok_or_else(|| operand::unknown_family(ERROR.name))
 }

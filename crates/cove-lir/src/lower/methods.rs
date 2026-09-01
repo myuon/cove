@@ -156,21 +156,17 @@ impl Body<'_> {
             return self.dead(expr);
         }
 
-        let held_receiver = base.map(|base| {
-            let value = self.expr(base);
-            self.describe_itself(value, base.span)
-        });
+        let held_receiver = base.map(|base| self.expr(base));
         let mut held = Vec::with_capacity(args.len());
         for arg in args {
-            let value = self.expr(&arg.value);
-            held.push(self.describe_itself(value, arg.value.span));
+            held.push(self.expr(&arg.value));
         }
-        let mut slots = Vec::with_capacity(args.len() + 1);
-        slots.extend(held_receiver.iter().map(|value| value.slot));
-        slots.extend(held.iter().map(|value| value.slot));
+        let mut passed = Vec::with_capacity(args.len() + 1);
+        passed.extend(held_receiver.iter().map(Val::arg));
+        passed.extend(held.iter().map(Val::arg));
 
         let dst = self.temp(result);
-        self.emit_builtin(dst.slot, receiver, operation, &slots, result, expr.span);
+        self.emit_builtin(dst.slot, receiver, operation, &passed, result, expr.span);
         for value in held.into_iter().rev() {
             self.release(value, expr.span);
         }
@@ -212,7 +208,7 @@ impl Body<'_> {
         dst: Slot,
         receiver: &str,
         operation: &str,
-        args: &[Slot],
+        args: &[crate::program::Arg],
         result: LayoutId,
         span: Span,
     ) {

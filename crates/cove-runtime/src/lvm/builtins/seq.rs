@@ -25,20 +25,21 @@
 //! is elements. Keeping the two apart is the whole of the arithmetic here:
 //! lengths and positions in elements, offsets in words.
 //!
-//! # An operand is one word, and not every element fits in one
+//! # An operand is an element, at whatever width one is
 //!
-//! [`cove_lir::Builtin`] carries the layout of its *result* and of nothing
-//! else, and a `CallBuiltin`'s arguments are base slots that need not be
-//! adjacent — so a call says where an operand begins and never how wide it
-//! is. One word is therefore all an operand can carry.
+//! An argument names a value location and carries its layout, so a whole
+//! element arrives as a whole element. `contains`, `indexOf`, `push` and
+//! `set` therefore work at any stride, as the operations that only *read*
+//! elements always did — those read them out of the receiver, where the
+//! width was never in doubt.
 //!
-//! Every operation that only *reads* elements is unaffected, because it reads
-//! them out of the receiver where their width is known: `get`, `pop`,
-//! `remove`, `slice`, `toArray`, `toVector`, `length` and `isEmpty` all work
-//! at any stride. The four that need a whole element to arrive *as an
-//! argument* — `contains`, `indexOf`, `push` and `set` — cannot be given one
-//! wider than a word, and [`wide_element`] refuses rather than comparing or
-//! storing a `Point`'s first word and calling that the value.
+//! Until an argument carried a layout those four refused. A call said where
+//! an operand began and never how wide it was, so a `Vector<Point>.push(p)`
+//! would have written `p.x` into the store and called it a `Point`, and
+//! refusing was the honest answer. What remains is [`operand::run_of`],
+//! which holds an incoming element to the receiver's element layout: a store
+//! is traced by that layout's reference map, so a value of another family
+//! written into one would be a collection following the wrong words.
 //!
 //! # The receiver is the vector, not a place that holds one
 //!
@@ -102,11 +103,10 @@ struct Fixed {
     addr: u64,
 }
 
-fn array(machine: &Machine, method: &str, receiver: Operand) -> Result<Fixed, RuntimeError> {
-    let (repr, addr) = receiver;
-    if repr != Repr::Ref {
+fn array(machine: &Machine, method: &str, receiver: Operand<'_>) -> Result<Fixed, RuntimeError> {
+    let Some((Repr::Ref, addr)) = operand::as_word(machine, receiver) else {
         return Err(operand::no_method(machine, receiver, method));
-    }
+    };
     if addr == 0 {
         return Err(operand::null_value());
     }
@@ -148,11 +148,14 @@ struct Growable {
 /// Nothing in this backend consumes a vector any more — see
 /// [`vector_freeze`] — but a header whose store word is null is still a state
 /// the machine can be handed, and reading one has to have an answer.
-fn vector(machine: &Machine, method: &str, receiver: Operand) -> Result<Growable, RuntimeError> {
-    let (repr, addr) = receiver;
-    if repr != Repr::Ref {
+fn vector(
+    machine: &Machine,
+    method: &str,
+    receiver: Operand<'_>,
+) -> Result<Growable, RuntimeError> {
+    let Some((Repr::Ref, addr)) = operand::as_word(machine, receiver) else {
         return Err(operand::no_method(machine, receiver, method));
-    }
+    };
     if addr == 0 {
         return Err(operand::null_value());
     }
@@ -187,38 +190,17 @@ fn ints(program: &Program) -> Result<LayoutId, RuntimeError> {
     word_layout(program, Repr::Int).ok_or_else(|| operand::unknown_family("Int"))
 }
 
-/// The family of the value in `operand`, which is one word.
+/// The family of the value in `operand`.
 ///
-/// A scalar's family is the one-word layout of its `Repr`; a reference's is
-/// the layout its own object header states, which is the one place the answer
-/// exists — a `Repr::Ref` says a word is an address and nothing about what is
-/// at the end of it.
-fn family(machine: &Machine, operand: Operand) -> Result<LayoutId, RuntimeError> {
-    match operand.0 {
-        Repr::Ref if operand.1 != 0 => Ok(machine.object_layout(operand.1)),
-        Repr::Ref => Err(operand::null_value()),
-        repr => word_layout(machine.program(), repr)
-            .ok_or_else(|| operand::unknown_family(&operand::type_name(machine, repr, operand.1))),
+/// The argument's own layout, which is what a call carries now. It used to be
+/// read back out of the word — a `Repr` for a scalar, the object's header for
+/// a reference — because that was the only place the answer existed, and that
+/// reading could not describe an inline value at all.
+fn family(machine: &Machine, operand: Operand<'_>) -> Result<LayoutId, RuntimeError> {
+    if matches!(operand::as_word(machine, operand), Some((Repr::Ref, 0))) {
+        return Err(operand::null_value());
     }
-}
-
-/// A whole element cannot arrive as an argument when it is wider than a word.
-///
-/// Not the oracle's refusal: the oracle's values carry their own width and it
-/// has nothing to refuse here. What this names is the operand ABI, which is
-/// this backend's — a call hands over a base slot per argument and no width —
-/// and the fix is to widen that rather than to widen anything below. Until
-/// then a `Vector<Point>.push(p)` is refused, which is the honest answer: the
-/// alternative is to write `p.x` into the store and call it a `Point`.
-fn wide_element(machine: &Machine, shown: &str, elem: LayoutId) -> RuntimeError {
-    let described = machine.program().layout(elem);
-    RuntimeError::new(format!(
-        "`{shown}` was given one word for a `{}`, which is {} words wide",
-        described.name,
-        described.width()
-    ))
-    .with_rule("An operand is one word: a call names where an argument begins, not how wide it is.")
-    .with_help("give a builtin's operands their layouts, so that a call can hand over a value of more than one word")
+    Ok(operand.layout)
 }
 
 /// A non-negative `Int` names a position, a negative one names none.
@@ -229,7 +211,7 @@ fn wide_element(machine: &Machine, shown: &str, elem: LayoutId) -> RuntimeError 
 fn index(
     machine: &Machine,
     method: &str,
-    argument: Operand,
+    argument: Operand<'_>,
 ) -> Result<Option<usize>, RuntimeError> {
     let at = operand::int(machine, method, "index", argument)?;
     Ok((at >= 0).then_some(at as usize))
@@ -247,7 +229,7 @@ fn sliced(
     store: u64,
     stride: u32,
     len: u32,
-    args: &[Operand],
+    args: &[Operand<'_>],
 ) -> Result<Vec<u64>, RuntimeError> {
     if args.len() != 2 {
         return Err(operand::arity(shown, 2, args.len()));
@@ -265,26 +247,27 @@ fn sliced(
 
 /// The position of the first element equal to `wanted`, if there is one.
 ///
-/// [`equal::same_word`] rather than [`equal::same_value`], because what is
-/// being compared is two *operands* and an operand is a word: the element's
-/// own `Repr` on one side and the argument's on the other. That is also why
-/// a stride wider than one is refused here rather than compared — the
-/// argument would be the first word of a value and nothing would say so.
+/// The element is read out of the store as the value location it is — the
+/// element layout and the run of words at its position — and compared with
+/// the argument as the value location *it* is. Neither side is read as the
+/// other's layout, which is what lets a boxed `Int` be found in a
+/// `Set<Int>`, and neither is narrowed to a word, which is what lets a
+/// `Point` be found in an `Array<Point>` at all.
 fn position(
     machine: &Machine,
-    shown: &str,
     elem: LayoutId,
     stride: u32,
     store: u64,
     len: u32,
-    wanted: Operand,
+    wanted: Operand<'_>,
 ) -> Result<Option<u32>, RuntimeError> {
-    if stride != 1 {
-        return Err(wide_element(machine, shown, elem));
-    }
-    let repr = machine.program().layout(elem).words[0];
     for at in 0..len {
-        if equal::same_word(machine, (repr, machine.payload(store, at)), wanted)? {
+        let words = machine.payload_run(store, at * stride, stride);
+        let held = Operand {
+            layout: elem,
+            words: &words,
+        };
+        if equal::same(machine, held, wanted)? {
             return Ok(Some(at));
         }
     }
@@ -299,7 +282,7 @@ fn position(
 /// payload region: an `Option<Point>` is `[disc, x, y]` and not an address.
 pub(super) fn array_get(
     machine: &mut Machine,
-    operands: &[Operand],
+    operands: &[Operand<'_>],
 ) -> Result<Vec<u64>, RuntimeError> {
     let (receiver, args) = operand::method("Array.get", operands, 1)?;
     let items = array(machine, "get", receiver)?;
@@ -318,7 +301,7 @@ pub(super) fn array_get(
 /// about, whatever an element of this array is made of.
 pub(super) fn array_length(
     machine: &mut Machine,
-    operands: &[Operand],
+    operands: &[Operand<'_>],
 ) -> Result<u64, RuntimeError> {
     let (receiver, _) = operand::method("length", operands, 0)?;
     Ok(array(machine, "length", receiver)?.len as u64)
@@ -327,7 +310,7 @@ pub(super) fn array_length(
 /// `Array.isEmpty() -> Bool`.
 pub(super) fn array_is_empty(
     machine: &mut Machine,
-    operands: &[Operand],
+    operands: &[Operand<'_>],
 ) -> Result<u64, RuntimeError> {
     let (receiver, _) = operand::method("isEmpty", operands, 0)?;
     Ok((array(machine, "isEmpty", receiver)?.len == 0) as u64)
@@ -336,13 +319,12 @@ pub(super) fn array_is_empty(
 /// `Array.contains(element) -> Bool`.
 pub(super) fn array_contains(
     machine: &mut Machine,
-    operands: &[Operand],
+    operands: &[Operand<'_>],
 ) -> Result<u64, RuntimeError> {
     let (receiver, args) = operand::method("Array.contains", operands, 1)?;
     let items = array(machine, "contains", receiver)?;
     let at = position(
         machine,
-        "Array.contains",
         items.elem,
         items.stride,
         items.addr,
@@ -355,14 +337,13 @@ pub(super) fn array_contains(
 /// `Array.indexOf(element) -> Option<Int>`.
 pub(super) fn array_index_of(
     machine: &mut Machine,
-    operands: &[Operand],
+    operands: &[Operand<'_>],
 ) -> Result<Vec<u64>, RuntimeError> {
     let (receiver, args) = operand::method("Array.indexOf", operands, 1)?;
     let items = array(machine, "indexOf", receiver)?;
     let ints = ints(machine.program())?;
     match position(
         machine,
-        "Array.indexOf",
         items.elem,
         items.stride,
         items.addr,
@@ -377,7 +358,7 @@ pub(super) fn array_index_of(
 /// `Array.slice(from, to) -> Array<T>`.
 pub(super) fn array_slice(
     machine: &mut Machine,
-    operands: &[Operand],
+    operands: &[Operand<'_>],
 ) -> Result<u64, RuntimeError> {
     let (receiver, args) = operand::method("Array.slice", operands, 2)?;
     let items = array(machine, "slice", receiver)?;
@@ -400,7 +381,7 @@ pub(super) fn array_slice(
 /// separates the sequence and nothing inside it.
 pub(super) fn array_to_vector(
     machine: &mut Machine,
-    operands: &[Operand],
+    operands: &[Operand<'_>],
 ) -> Result<u64, RuntimeError> {
     let (receiver, _) = operand::method("toVector", operands, 0)?;
     let items = array(machine, "toVector", receiver)?;
@@ -421,10 +402,12 @@ pub(super) fn array_to_vector(
 /// collection. The lowering knows the layout the checker resolved and can
 /// allocate an empty vector itself, which is the one place the answer exists.
 ///
-/// Only a one-word element can arrive this way, because only a one-word value
-/// can be an operand at all. A `Vector.of(Point(1, 2))` is the case the
-/// lowering has to build itself for the same reason `Vector.of()` is.
-pub(super) fn vector_of(machine: &mut Machine, operands: &[Operand]) -> Result<u64, RuntimeError> {
+/// An element of any width arrives as itself, because an argument carries the
+/// layout of the location it names.
+pub(super) fn vector_of(
+    machine: &mut Machine,
+    operands: &[Operand<'_>],
+) -> Result<u64, RuntimeError> {
     let Some(first) = operands.first() else {
         return Err(RuntimeError::new(
             "`Vector.of()` with no elements does not say what it is a vector of",
@@ -435,26 +418,27 @@ pub(super) fn vector_of(machine: &mut Machine, operands: &[Operand]) -> Result<u
         .with_help("allocate the empty vector where the element type is known"));
     };
     let elem = family(machine, *first)?;
-    let words: Vec<u64> = operands.iter().map(|(_, word)| *word).collect();
+    let mut words = Vec::with_capacity(operands.len());
+    for operand in operands {
+        words.extend_from_slice(operand::run_of(machine, "Vector.of", elem, *operand)?);
+    }
     make::vector_of(machine, elem, &words)
 }
 
 /// `Vector.push(value)`.
 pub(super) fn vector_push(
     machine: &mut Machine,
-    operands: &[Operand],
+    operands: &[Operand<'_>],
 ) -> Result<u64, RuntimeError> {
     let (receiver, args) = operand::method("push", operands, 1)?;
     let items = vector(machine, "push", receiver)?;
-    if items.stride != 1 {
-        return Err(wide_element(machine, "Vector.push", items.elem));
-    }
+    let element = operand::run_of(machine, "Vector.push", items.elem, args[0])?.to_vec();
     let store = if items.len < items.capacity {
         items.store
     } else {
         grow(machine, &items)?
     };
-    machine.set_payload_run(store, items.len * items.stride, &[args[0].1]);
+    machine.set_payload_run(store, items.len * items.stride, &element);
     machine.set_payload(items.header, 0, items.len as u64 + 1);
     Ok(0)
 }
@@ -494,13 +478,11 @@ fn grow(machine: &mut Machine, items: &Growable) -> Result<u64, RuntimeError> {
 /// make the length depend on the index.
 pub(super) fn vector_set(
     machine: &mut Machine,
-    operands: &[Operand],
+    operands: &[Operand<'_>],
 ) -> Result<Vec<u64>, RuntimeError> {
     let (receiver, args) = operand::method("Vector.set", operands, 2)?;
     let items = vector(machine, "set", receiver)?;
-    if items.stride != 1 {
-        return Err(wide_element(machine, "Vector.set", items.elem));
-    }
+    let element = operand::run_of(machine, "Vector.set", items.elem, args[1])?.to_vec();
     let Some(at) = index(machine, "Vector.set", args[0])? else {
         return make::none(machine, items.elem);
     };
@@ -511,7 +493,7 @@ pub(super) fn vector_set(
     // What the index held before, read out before it is overwritten:
     // `v.set(i, x)` answers what `v.get(i)` would have.
     let was = machine.payload_run(items.store, at, items.stride);
-    machine.set_payload_run(items.store, at, &[args[1].1]);
+    machine.set_payload_run(items.store, at, &element);
     make::some(machine, items.elem, &was)
 }
 
@@ -523,7 +505,7 @@ pub(super) fn vector_set(
 /// emptiness.
 pub(super) fn vector_pop(
     machine: &mut Machine,
-    operands: &[Operand],
+    operands: &[Operand<'_>],
 ) -> Result<Vec<u64>, RuntimeError> {
     let (receiver, _) = operand::method("Vector.pop", operands, 0)?;
     let items = vector(machine, "pop", receiver)?;
@@ -548,7 +530,7 @@ pub(super) fn vector_pop(
 /// vector no longer holds is zeroed out of the room it kept.
 pub(super) fn vector_remove(
     machine: &mut Machine,
-    operands: &[Operand],
+    operands: &[Operand<'_>],
 ) -> Result<Vec<u64>, RuntimeError> {
     let (receiver, args) = operand::method("Vector.remove", operands, 1)?;
     let items = vector(machine, "remove", receiver)?;
@@ -579,7 +561,7 @@ pub(super) fn vector_remove(
 /// `Vector.get(index) -> Option<T>`.
 pub(super) fn vector_get(
     machine: &mut Machine,
-    operands: &[Operand],
+    operands: &[Operand<'_>],
 ) -> Result<Vec<u64>, RuntimeError> {
     let (receiver, args) = operand::method("Vector.get", operands, 1)?;
     let items = vector(machine, "get", receiver)?;
@@ -595,13 +577,12 @@ pub(super) fn vector_get(
 /// `Vector.contains(element) -> Bool`.
 pub(super) fn vector_contains(
     machine: &mut Machine,
-    operands: &[Operand],
+    operands: &[Operand<'_>],
 ) -> Result<u64, RuntimeError> {
     let (receiver, args) = operand::method("Vector.contains", operands, 1)?;
     let items = vector(machine, "contains", receiver)?;
     let at = position(
         machine,
-        "Vector.contains",
         items.elem,
         items.stride,
         items.store,
@@ -614,14 +595,13 @@ pub(super) fn vector_contains(
 /// `Vector.indexOf(element) -> Option<Int>`.
 pub(super) fn vector_index_of(
     machine: &mut Machine,
-    operands: &[Operand],
+    operands: &[Operand<'_>],
 ) -> Result<Vec<u64>, RuntimeError> {
     let (receiver, args) = operand::method("Vector.indexOf", operands, 1)?;
     let items = vector(machine, "indexOf", receiver)?;
     let ints = ints(machine.program())?;
     match position(
         machine,
-        "Vector.indexOf",
         items.elem,
         items.stride,
         items.store,
@@ -640,7 +620,7 @@ pub(super) fn vector_index_of(
 /// asks to be grown.
 pub(super) fn vector_slice(
     machine: &mut Machine,
-    operands: &[Operand],
+    operands: &[Operand<'_>],
 ) -> Result<u64, RuntimeError> {
     let (receiver, args) = operand::method("Vector.slice", operands, 2)?;
     let items = vector(machine, "slice", receiver)?;
@@ -658,7 +638,7 @@ pub(super) fn vector_slice(
 /// `Vector.length() -> Int`.
 pub(super) fn vector_length(
     machine: &mut Machine,
-    operands: &[Operand],
+    operands: &[Operand<'_>],
 ) -> Result<u64, RuntimeError> {
     let (receiver, _) = operand::method("length", operands, 0)?;
     Ok(vector(machine, "length", receiver)?.len as u64)
@@ -667,7 +647,7 @@ pub(super) fn vector_length(
 /// `Vector.isEmpty() -> Bool`.
 pub(super) fn vector_is_empty(
     machine: &mut Machine,
-    operands: &[Operand],
+    operands: &[Operand<'_>],
 ) -> Result<u64, RuntimeError> {
     let (receiver, _) = operand::method("isEmpty", operands, 0)?;
     Ok((vector(machine, "isEmpty", receiver)?.len == 0) as u64)
@@ -676,7 +656,7 @@ pub(super) fn vector_is_empty(
 /// `Vector.toArray() -> Array<T>`, copying the elements.
 pub(super) fn vector_to_array(
     machine: &mut Machine,
-    operands: &[Operand],
+    operands: &[Operand<'_>],
 ) -> Result<u64, RuntimeError> {
     let (receiver, _) = operand::method("toArray", operands, 0)?;
     let items = vector(machine, "toArray", receiver)?;
@@ -719,7 +699,7 @@ pub(super) fn vector_to_array(
 /// [`operand::frozen`] for it — the same thing it answers `length()`.
 pub(super) fn vector_freeze(
     machine: &mut Machine,
-    operands: &[Operand],
+    operands: &[Operand<'_>],
 ) -> Result<u64, RuntimeError> {
     let (receiver, _) = operand::method("freeze", operands, 0)?;
     vector(machine, "freeze", receiver)?;
@@ -736,7 +716,7 @@ pub(super) fn vector_freeze(
 mod tests {
     use super::*;
     use crate::lvm::builtins::tests::{
-        elements, named, option_of, read, run, scalar, vector, word, words_of, world,
+        elements, named, option_of, read, run, scalar, values, vector, word, words_of, world,
     };
 
     /// An `Array<Int>` holding `values`.
@@ -964,54 +944,114 @@ mod tests {
         assert_eq!(words_of(&machine, store), vec![3, 4, 0, 0, 0, 0]);
     }
 
-    /// The other side of the stride: an operand is one word, so an element
-    /// wider than one cannot arrive as an argument at all.
+    /// The other side of the stride: an operand is a value location, so an
+    /// element of any width arrives as an argument.
     ///
-    /// Reading an element is unaffected — the receiver says how wide one is —
-    /// but comparing against one or storing one means being handed a whole
-    /// value, and a call hands over a base slot and no width. Refusing says
-    /// so; the alternative is to compare a `Point`'s `x` and call that the
-    /// `Point`.
+    /// All four of these refused until an argument carried its layout —
+    /// reading an element was never in doubt, because the receiver says how
+    /// wide one is, and comparing against one or storing one meant being
+    /// handed a whole value that a base slot could not describe.
     #[test]
-    fn an_element_wider_than_a_word_cannot_arrive_as_an_operand() {
+    fn an_element_wider_than_a_word_arrives_whole() {
         let program = world();
         let mut machine = Machine::new(&program, 1 << 14);
         let point = named(&program, "Point");
         let layout = elements(&program, point, false);
-        let items = machine.new_object(layout, 1).unwrap();
-        machine.set_payload_run(items, 0, &[1, 2]);
+        let items = machine.new_object(layout, 2).unwrap();
+        machine.set_payload_run(items, 0, &[1, 2, 3, 4]);
+        let arrays = machine.object_layout(items);
         let grown = word(&mut machine, "Array", "toVector", &[(Repr::Ref, items)]).unwrap();
+        let vectors = machine.object_layout(grown);
 
-        for (receiver, operation, operands) in [
-            (
+        assert_eq!(
+            values(
+                &mut machine,
                 "Array",
                 "contains",
-                vec![(Repr::Ref, items), (Repr::Int, 1)],
-            ),
-            ("Array", "indexOf", vec![(Repr::Ref, items), (Repr::Int, 1)]),
-            ("Vector", "push", vec![(Repr::Ref, grown), (Repr::Int, 1)]),
-            (
-                "Vector",
-                "set",
-                vec![(Repr::Ref, grown), (Repr::Int, 0), (Repr::Int, 1)],
-            ),
-        ] {
-            let error = run(&mut machine, receiver, operation, &operands).unwrap_err();
-            assert_eq!(
-                error.message,
-                format!(
-                    "`{receiver}.{operation}` was given one word for a `Point`, which is 2 words wide"
-                )
-            );
-            assert_eq!(
-                error.rule.as_deref(),
-                Some(
-                    "An operand is one word: a call names where an argument begins, not how wide it is."
-                )
-            );
-        }
-        // And nothing was written: the vector is what it was.
-        assert_eq!(words_of(&machine, machine.payload(grown, 1)), vec![1u64, 2]);
+                &[(arrays, &[items]), (point, &[3, 4])]
+            )
+            .unwrap(),
+            vec![1]
+        );
+        assert_eq!(
+            values(
+                &mut machine,
+                "Array",
+                "contains",
+                &[(arrays, &[items]), (point, &[3, 9])]
+            )
+            .unwrap(),
+            vec![0]
+        );
+        let found = values(
+            &mut machine,
+            "Array",
+            "indexOf",
+            &[(arrays, &[items]), (point, &[3, 4])],
+        )
+        .unwrap();
+        let int = scalar(&program, Repr::Int);
+        assert_eq!(
+            option_of(&program, int, &found),
+            ("Some".to_string(), vec![1])
+        );
+
+        // A `push` writes both words at the element's own stride, and a `set`
+        // answers the two words the position held before it.
+        values(
+            &mut machine,
+            "Vector",
+            "push",
+            &[(vectors, &[grown]), (point, &[5, 6])],
+        )
+        .unwrap();
+        // The store grew, so its spare room is zeroed room past the length —
+        // the three elements are the first six words of it.
+        let store = machine.payload(grown, 1);
+        assert_eq!(machine.payload_run(store, 0, 6), vec![1u64, 2, 3, 4, 5, 6]);
+        let was = values(
+            &mut machine,
+            "Vector",
+            "set",
+            &[(vectors, &[grown]), (int, &[0]), (point, &[7, 8])],
+        )
+        .unwrap();
+        assert_eq!(
+            option_of(&program, point, &was),
+            ("Some".to_string(), vec![1, 2])
+        );
+        assert_eq!(
+            machine.payload_run(machine.payload(grown, 1), 0, 6),
+            vec![7u64, 8, 3, 4, 5, 6]
+        );
+    }
+
+    /// A store is traced by its element layout's reference map and searched
+    /// at its width, so a value of another family put into one would be both
+    /// a collection following the wrong words and a search comparing them.
+    /// That is the one thing an operand's layout still has to be held to.
+    #[test]
+    fn an_element_of_another_family_is_refused_rather_than_stored() {
+        let program = world();
+        let mut machine = Machine::new(&program, 1 << 14);
+        let point = named(&program, "Point");
+        let int = scalar(&program, Repr::Int);
+        let layout = elements(&program, point, true);
+        let store = machine.new_object(layout, 1).unwrap();
+        let grown = machine.new_object(vector(&program, point), 0).unwrap();
+        machine.set_payload(grown, 1, store);
+        let vectors = machine.object_layout(grown);
+        let error = values(
+            &mut machine,
+            "Vector",
+            "push",
+            &[(vectors, &[grown]), (int, &[1])],
+        )
+        .unwrap_err();
+        assert_eq!(
+            error.message,
+            "`Vector.push` expects `Point` here, but found `Int`"
+        );
     }
 
     #[test]

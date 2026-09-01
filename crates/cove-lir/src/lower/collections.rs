@@ -543,11 +543,11 @@ impl Body<'_> {
     /// `items_of` clones the elements out before the first turn, so a body
     /// that pushes onto the vector it is walking sees the same elements it
     /// started with.
-    fn vector_snapshot(&mut self, obj: Slot, elem: &Ty, span: Span) -> Option<Val> {
+    fn vector_snapshot(&mut self, vector: &Val, elem: &Ty, span: Span) -> Option<Val> {
         let array = Ty::Array(Box::new(elem.clone()));
         let layout = self.layout(&array, span)?;
         let dst = self.temp(layout);
-        self.emit_builtin(dst.slot, "Vector", "toArray", &[obj], layout, span);
+        self.emit_builtin(dst.slot, "Vector", "toArray", &[vector.arg()], layout, span);
         Some(dst)
     }
 
@@ -587,7 +587,7 @@ impl Body<'_> {
                     return;
                 };
                 let value = self.expr(iterable);
-                let Some(snapshot) = self.vector_snapshot(value.slot, &elem, iterable.span) else {
+                let Some(snapshot) = self.vector_snapshot(&value, &elem, iterable.span) else {
                     self.release(value, iterable.span);
                     return;
                 };
@@ -960,45 +960,16 @@ impl Body<'_> {
             );
             return;
         }
-        let left = self.described(a, expr.span);
-        let right = self.described(b, expr.span);
         let builtin = self.pool.builtin(Builtin {
             receiver: "Any".into(),
             operation: "equals".into(),
             result: shapes::BOOL,
         });
-        let args = self.pool.args.intern(vec![left.slot, right.slot]);
+        let args = self.pool.args.intern(vec![a.arg(), b.arg()]);
         self.emit(Inst::CallBuiltin { dst, builtin, args }, expr.span);
         if !equal {
             self.emit(Inst::Not { dst, a: dst }, expr.span);
         }
-        if right.temp {
-            self.release(right, expr.span);
-        }
-        if left.temp {
-            self.release(left, expr.span);
-        }
-    }
-
-    /// The same value, in a form an operand list can carry.
-    ///
-    /// One word is enough on its own; anything wider goes in a box that
-    /// names its layout. The source is left alone, because the caller is
-    /// still holding it.
-    fn described(&mut self, value: &Val, span: Span) -> Val {
-        if self.width(value.layout) == 1 {
-            return Val::borrowed(value.slot, value.layout);
-        }
-        let dst = self.temp(shapes::REF);
-        self.emit(
-            Inst::Box {
-                dst: dst.slot,
-                src: value.slot,
-                layout: value.layout,
-            },
-            span,
-        );
-        dst
     }
 
     /// `a is b`: whether two handles are the same storage.

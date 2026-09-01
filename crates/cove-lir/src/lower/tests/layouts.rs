@@ -183,7 +183,7 @@ fn a_program_declares_the_scalars_whether_or_not_it_names_them() {
         names,
         vec![
             "<free>", "String", "Unit", "Bool", "Int", "Float", "Duration", "<ref>", "<addr>",
-            "<host>",
+            "<host>", "Any",
         ]
     );
 }

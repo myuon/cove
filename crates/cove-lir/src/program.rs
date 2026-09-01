@@ -47,7 +47,7 @@ id!(
 id!(
     /// Names an argument list in [`Program::args`].
     ///
-    /// A call's arguments are a static list of source slots, held once in the
+    /// A call's arguments are a static list of [`Arg`]s, held once in the
     /// program rather than inline in the instruction, so that [`Inst`] stays
     /// small enough to be worth copying and a repeated call shape costs one
     /// list rather than one per site.
@@ -65,6 +65,31 @@ id!(
     /// Names a builtin in [`Program::builtins`].
     BuiltinId, "builtin"
 );
+
+/// One argument of a call: where the value is, and what it is.
+///
+/// A slot alone says where an operand *begins* and never how wide it is. A
+/// scalar is described by the `Repr` of the slot it sits in and a reference
+/// by the header of the object it names, but an inline struct or enum is a
+/// run of words with nothing attached to it at all — a `Point` in a frame is
+/// described by neither. So a callee that is polymorphic over the values it
+/// is handed had no way to read one: `"{Point(x: 1)}"` rendered the first
+/// word, `a == b` on two structs compared the first word, and the operations
+/// that put a whole value into a collection refused rather than store half of
+/// one.
+///
+/// Carrying the layout beside the slot answers all of them at once, and it is
+/// carried for *every* argument rather than for the calls that turned out to
+/// need it. A layout is what an argument is; which callee reads it is not the
+/// argument's business, and one rule the verifier checks everywhere is worth
+/// more than the word this costs at the sites that could have done without.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct Arg {
+    /// The first slot of the value location in the caller's frame.
+    pub slot: Slot,
+    /// The layout of that location, which is what says how wide it is.
+    pub layout: LayoutId,
+}
 
 /// One host operation a program calls: `console.log`, `files.read`.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -217,7 +242,7 @@ pub struct Program {
     pub functions: Vec<Function>,
     pub layouts: Vec<Layout>,
     pub strings: Vec<Arc<str>>,
-    pub args: Vec<Vec<Slot>>,
+    pub args: Vec<Vec<Arg>>,
     pub tables: Vec<Table>,
     pub host_ops: Vec<HostOp>,
     pub builtins: Vec<Builtin>,
@@ -255,7 +280,7 @@ impl Program {
         &self.strings[id.index()]
     }
 
-    pub fn arg_list(&self, id: ArgsId) -> &[Slot] {
+    pub fn arg_list(&self, id: ArgsId) -> &[Arg] {
         &self.args[id.index()]
     }
 

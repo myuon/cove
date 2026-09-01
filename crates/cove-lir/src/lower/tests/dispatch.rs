@@ -20,8 +20,8 @@ fn0 m.f() -> String
      2  copy s3:int s1:int Int
      3  copy s4:int s2:int Int
      4  box s5:ref s3:int m.Point
-     5  call s6:ref m.take (s5:ref)
-     6  clear s5:ref Dyn
+     5  call s6:ref m.take (s5:Any)
+     6  clear s5:ref Any
      7  copy s0:ref s6:ref String
      8  clear s6:ref String
      9  return s0:ref
@@ -46,16 +46,16 @@ fn a_dyn_call_switches_on_the_layout_the_box_records() {
             "take"
         ),
         "\
-fn0 m.take(Dyn) -> String
+fn0 m.take(Any) -> String
   frame 7: s0!:ref s1:ref s2:int s3:ref s4:ref s5:int s6:int
      0  load-field s2:int s0:ref +0 Int
      1  switch s2:int [9 9 9 9 9 9 9 9 9 9 9 2 6] else 9
      2  unbox s4:ref s0:ref m.Name
-     3  call s3:ref m.Name.show (s4:ref)
+     3  call s3:ref m.Name.show (s4:m.Name)
      4  clear s4:ref m.Name
      5  jump 10
      6  unbox s5:int s0:ref m.Point
-     7  call s3:ref m.Point.show (s5:int)
+     7  call s3:ref m.Point.show (s5:m.Point)
      8  jump 10
      9  trap \"no implementation of `Show.show` for this value\"
     10  copy s1:ref s3:ref String
@@ -75,15 +75,15 @@ fn a_body_declared_dyn_erases_its_tail() {
             "mk"
         ),
         "\
-fn0 m.mk() -> Dyn
+fn0 m.mk() -> Any
   frame 6: s0:ref s1:int s2:int s3:int s4:int s5:ref
      0  int s1:int 1
      1  int s2:int 2
      2  copy s3:int s1:int Int
      3  copy s4:int s2:int Int
      4  box s5:ref s3:int m.Point
-     5  copy s0:ref s5:ref Dyn
-     6  clear s5:ref Dyn
+     5  copy s0:ref s5:ref Any
+     6  clear s5:ref Any
      7  return s0:ref
 "
     );
@@ -104,16 +104,16 @@ fn0 m.f() -> String
      2  clear s1:ref String
      3  box s1:ref s2:ref m.Name
      4  clear s2:ref m.Name
-     5  copy s2:ref s1:ref Dyn
-     6  clear s1:ref Dyn
+     5  copy s2:ref s1:ref Any
+     6  clear s1:ref Any
      7  load-field s3:int s2:ref +0 Int
-     8  switch s3:int [16 16 16 16 16 16 16 16 16 16 9 13] else 16
+     8  switch s3:int [16 16 16 16 16 16 16 16 16 16 16 9 13] else 16
      9  unbox s4:ref s2:ref m.Name
-    10  call s1:ref m.Name.show (s4:ref)
+    10  call s1:ref m.Name.show (s4:m.Name)
     11  clear s4:ref m.Name
     12  jump 17
     13  unbox s5:int s2:ref m.Point
-    14  call s1:ref m.Point.show (s5:int)
+    14  call s1:ref m.Point.show (s5:m.Point)
     15  jump 17
     16  trap \"no implementation of `Show.show` for this value\"
     17  copy s0:ref s1:ref String
