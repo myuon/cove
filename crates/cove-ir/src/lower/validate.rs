@@ -749,7 +749,7 @@ pub fn stack_shape(structs: &[StructType], inst: Inst) -> Shape {
         Inst::Unary(_)
         | Inst::GetField(_)
         | Inst::GetFieldAt { .. }
-        | Inst::Try
+        | Inst::Try { .. }
         | Inst::Snapshot => Shape::on_values(1, 1),
         // The fusion of `Inst::GetFieldAt` with `Inst::ValueToScalar`: the
         // struct it reads is the same one value in, and the field it reads

@@ -1717,7 +1717,7 @@ fn a_question_mark_opens_what_it_is_given() {
         ),
         "fn m.f arity=1 frame=0/1 params=[value] -> value\n\
          \x20  0  load 0\n\
-         \x20  1  try\n\
+         \x20  1  try Int\n\
          \x20  2  value-to-scalar\n\
          \x20  3  scalar-const 1\n\
          \x20  4  int Add\n\

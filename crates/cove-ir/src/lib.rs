@@ -1319,7 +1319,27 @@ pub enum Inst {
     NoMatch,
     /// `expr?`: pops a `Result` or `Option`, pushes its payload, or returns
     /// the failure from this call.
-    Try,
+    ///
+    /// `payload` is the settled [`SlotKind`] of what the success path
+    /// leaves — the checker's answer for the *whole* `try` expression,
+    /// which is the same fact that decides where a `let` binding built from
+    /// it would live: [`SlotKind::Scalar`] where `?` unwraps to a bare
+    /// `Int` or `Bool`, [`SlotKind::Value`] everywhere else, and never
+    /// [`SlotKind::Place`] — a payload is a value and is never a place.
+    ///
+    /// It has to be named rather than left for a backend to read off
+    /// whatever pushed the operand `Try` consumed, for the reason
+    /// [`Inst::GetFieldAt`] names its type instead of leaving a field read
+    /// to ask the object: the two shapes a success can leave — an untagged
+    /// word or a boxed value — are chosen by a fact fixed at the `?`'s own
+    /// site, not by which instruction happened to run before it. `Ok`,
+    /// `Err`, `Some`, `None` and a Host call's answer each settle which of
+    /// the two *they* leave from a fact about the call or the site alone,
+    /// so a backend can read it off the instruction that pushed them; a `?`
+    /// has no such instruction of its own to ask, because what it leaves is
+    /// a property of the type it unwraps to, and that is knowable only from
+    /// [`SlotKind`] carried here.
+    Try { payload: SlotKind },
     /// Pushes the place that names one of this frame's *value* slots, with
     /// no path: the whole of what stands in that slot.
     ///
@@ -1921,7 +1941,14 @@ fn render_inst(program: &Program, inst: Inst) -> String {
         Inst::GetPayload { of: None, at } => format!("get-payload {at}"),
         Inst::IterItems => "iter-items".to_string(),
         Inst::NoMatch => "no-match".to_string(),
-        Inst::Try => "try".to_string(),
+        // Written out only where it is a scalar, the way `Inst::MakeDyn`
+        // writes its depth only where there is one: the value case is what
+        // every other `try` in every existing listing already reads as, and
+        // this is the one new fact a reader could not previously see.
+        Inst::Try {
+            payload: SlotKind::Scalar(what),
+        } => format!("try {what:?}"),
+        Inst::Try { .. } => "try".to_string(),
         Inst::Return => "return".to_string(),
         Inst::ReturnScalar => "return-scalar".to_string(),
     }
