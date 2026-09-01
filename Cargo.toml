@@ -6,6 +6,7 @@ members = [
   "crates/cove-syntax",
   "crates/cove-sema",
   "crates/cove-ir",
+  "crates/cove-lir",
   "crates/cove-runtime",
   "crates/cove-cli",
   "crates/cove-bench",
@@ -29,6 +30,7 @@ cove-schema = { path = "crates/cove-schema" }
 cove-syntax = { path = "crates/cove-syntax" }
 cove-sema = { path = "crates/cove-sema" }
 cove-ir = { path = "crates/cove-ir" }
+cove-lir = { path = "crates/cove-lir" }
 cove-runtime = { path = "crates/cove-runtime" }
 
 # A bench-only profile, kept for reproducing the measurement below and NOT

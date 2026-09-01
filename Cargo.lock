@@ -38,6 +38,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "cove-lir"
+version = "0.1.0"
+dependencies = [
+ "cove-diag",
+ "cove-schema",
+ "cove-sema",
+ "cove-syntax",
+]
+
+[[package]]
 name = "cove-rules"
 version = "0.1.0"
 dependencies = [
