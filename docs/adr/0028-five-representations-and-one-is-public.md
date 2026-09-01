@@ -1,41 +1,8 @@
 # ADR 0028: Five representations, and one of them is public
 
-- Status: Superseded by [ADR 0034](0034-one-physical-word-stack.md). ADR 0034
-  restates the surviving boundary, layout and eight-byte-word requirements in
-  a simpler one-linear-memory model; this document is retained as rationale
-  and measurement history, not as a concurrently binding representation
-  taxonomy.
-  [ADR 0034](0034-one-physical-word-stack.md), which closes decision 1's
-  physical-arrangement question by requiring one contiguous word stack in the
-  production VM. The eight-byte untagged slot, one logical numbering, heap,
-  Dynamic, boundary and sealing decisions remain in force.
-- [Issue #197](https://github.com/myuon/cove/issues/197)
-  made acceptance the gate — "the first deliverable is an ADR; do not
-  implement or migrate the runtime representation before the ADR is reviewed
-  and accepted" — so this ADR was written and merged as `Proposed`, which no
-  other ADR in `docs/adr/` has been, and accepted separately once reviewed.
-  The gate is now passed and the work below may be built
-- Superseded in part by
-  [ADR 0031](0031-a-host-handle-is-not-a-vm-handle.md), which replaces the
-  **visibility rule** under decision 0 — the sentence beginning "No public
-  signature in this workspace mentions", and the claim that it "is checkable
-  — it is a `grep` over `pub fn`", repeated below under Consequences. Nothing
-  else here is superseded: the five representations, all eight decisions, the
-  seal, `ValueView`, and the Costs stand as written
-- Superseded in part by
-  [ADR 0033](0033-an-identity-is-not-a-vm-heap-object.md), which replaces the
-  **answer to which store an identity-bearing value's handle names** —
-  decision 7's closing sentence "The values whose identity is observable —
-  `Vector`, `Shared`, `Task`, `TaskScope`, `Resource` — are materialized as
-  handles rather than as copies, which is what they already are", together
-  with decision 1's slot table row placing `vector` among the heap-backed
-  values whose eight bytes hold "a VM heap handle". Those five are three
-  ownership classes rather than one storage class, they stay outside the
-  VM-owned traced object heap, and the eight-byte slot permits several
-  compact handle kinds. Nothing else there is superseded: the one-way seam of
-  decision 5, decision 7's refusal of a copying constructor, decision 8's
-  three multiplicities, the seal, `ValueView`, and the resolution of #195's
-  tension all stand
+- Status: Superseded by [ADR 0034](0034-one-physical-word-stack.md). Its
+  measurements and alternatives remain historical evidence; its five-part
+  runtime representation taxonomy is not binding.
 - Date: 2026-08-30
 - Supersedes: nothing. It **decides what
   [ADR 0027](0027-a-place-and-a-capture-name-a-slot.md) left open** under
