@@ -2,27 +2,20 @@
 
 - Status: Accepted
 - Date: 2026-09-01
-- Supersedes in part:
-  [ADR 0027](0027-a-place-and-a-capture-name-a-slot.md), only its runtime
-  representation of a place as a stack-discriminated root plus a stored path.
-  Assignable-expression semantics and mutable-reference aliasing remain;
-  lowering represents them as one-word logical addresses
-- Supersedes in part:
-  [ADR 0028](0028-five-representations-and-one-is-public.md), only where
-  decision 1 leaves the physical arrangement open and permits physically split
-  regions. All other decisions in ADR 0028 remain in force
-- Supersedes in part:
-  [ADR 0033](0033-an-identity-is-not-a-vm-heap-object.md), decisions 2 through
-  4 only for Vector and Shared. Cove-owned identity does not create another
-  value store: those objects live in the VM heap. Task and TaskScope remain
-  scheduler control state and Resource remains Host-owned
-- Decides:
-  [ADR 0027](0027-a-place-and-a-capture-name-a-slot.md)'s open item
-  "A single physical frame" and issue #162's physical realization
-- Implementation status: the experimental FrameVm demonstrates the chosen
-  representation, but the production Vm has not yet migrated. This ADR is
-  the authority to perform that migration and remove the transitional
-  backends and stacks
+- Supersedes:
+  [ADR 0027](0027-a-place-and-a-capture-name-a-slot.md),
+  [ADR 0028](0028-five-representations-and-one-is-public.md), and
+  [ADR 0033](0033-an-identity-is-not-a-vm-heap-object.md). Their surviving
+  requirements are restated here; implementations must not reconstruct their
+  parallel stacks, runtime Place objects, representation taxonomy or identity
+  stores by treating the older texts as concurrently binding
+- Decides: issue #162's physical realization and replaces the representation
+  decisions previously spread across issues #197 and #218
+- Implementation status: the current FrameVm is evidence and migration code,
+  not the final architecture. The first migration may keep stack and heap in
+  separate Rust allocations. The final target places both regions in one VM
+  linear-memory block; no public or IR contract may depend on the temporary
+  separation
 
 ## Context
 
@@ -67,14 +60,28 @@ physical representation permanently undecided.
 
 ## Decision
 
-### Exactly two stores hold Cove-owned runtime values
+### One linear memory owns Cove runtime values
 
-The production runtime has exactly two stores for Cove-owned values:
+The final production runtime has one VM-owned linear-memory block. Within that
+one address space it manages two regions:
 
-1. one contiguous stack of eight-byte words;
-2. one VM-owned object heap.
+1. a stack region of eight-byte words;
+2. a heap region containing variable-sized, escaping, shared or otherwise
+   indirect objects.
 
-A new Cove value kind must use one of these stores. Identity, mutability,
+These are allocation disciplines inside one memory, not independent value
+stores or handle universes. Scalars live directly in stack or object words.
+Strings, closures and other compound values occupy the heap region and words
+hold addresses or offsets into that same linear memory.
+
+The first production migration may keep the stack and heap regions in separate
+Rust allocations where combining them immediately would add risk. That is a
+temporary implementation state, not an architecture choice. Address encoding,
+lowered layouts, GC maps and public APIs must not expose which backing
+allocation currently contains a region, so the regions can later be placed in
+one block without another representation migration.
+
+A new Cove value kind must use one of these regions. Identity, mutability,
 variable size, boundary crossing, rooting convenience or an incomplete
 migration do not justify an identity store, boundary value store, side heap or
 other third value store.
@@ -89,13 +96,13 @@ live in the VM object heap when represented by the production VM. Observable
 identity changes whether materialisation may copy an object; it does not
 change which heap owns the object.
 
-Adding another runtime value store requires a later ADR that explicitly
-supersedes this rule and demonstrates why stack plus heap cannot implement the
-required semantics.
+Adding another runtime value store or handle universe requires a later ADR
+that explicitly supersedes this rule and demonstrates why the one linear
+memory cannot implement the required semantics.
 
-### One physical stack
+### One stack region
 
-The production VM stores frames and operands in one contiguous stack of
+The production VM stores frames and operands in one contiguous stack region of
 eight-byte words.
 
 A running task has one physical word stack. Every call frame has one
@@ -150,9 +157,10 @@ that address in an ordinary eight-byte slot. Stack-address escape and
 invalidation by growable collections are rejected or constrained by the type
 and borrowing rules; they are not repaired by allocating a Place object.
 
-The concrete address encoding is private runtime detail. It may distinguish
-stack and heap in its bits or use one VM word-address namespace, but it must
-not require another value store.
+The concrete address encoding is private runtime detail. It must be compatible
+with one VM linear address space. During the temporary two-allocation phase an
+internal decoder may distinguish the regions, but no Cove value, IR layout or
+public API may preserve that distinction.
 
 ### Heap-backed values and the boundary
 
@@ -180,7 +188,8 @@ production Vm, not by completing two dispatch loops independently.
 
 The migration is complete only when:
 
-1. production execution uses the one word stack for frames and operands;
+1. production execution uses the one word stack region for frames and
+   operands;
 2. the old independent value/scalar/place stacks and their bases are removed;
 3. runtime Place root/path objects and place storage are removed; compiler
    place analysis lowers to one-word addresses;
@@ -194,7 +203,10 @@ The migration is complete only when:
    places, tasks, cancellation, host reentry, tracing and runtime errors pass
    on the production path;
 8. the existing representative performance gates show no order-of-magnitude
-   or repeated multi-fold regression.
+   or repeated multi-fold regression;
+9. the temporary separation between the stack and heap backing allocations is
+   recorded as unfinished migration work, and nothing in IR or public APIs
+   depends on it.
 
 Coverage measurements may identify missing lowering or layout facts. They do
 not justify an indefinite sequence of refusal-specific experimental backends:
@@ -223,6 +235,9 @@ metadata.
 
 ## What this does not decide
 
+- when the stack and heap regions move from temporary separate backing
+  allocations into the final single memory block;
+- how the one block grows and whether stack and heap grow toward one another;
 - the concrete heap allocator or garbage-collection algorithm;
 - the exact Host API for passing or borrowing mutable Vector and Shared values;
 - a moving collector;
